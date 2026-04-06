@@ -1,0 +1,46 @@
+{
+  "name": "tallei-ai",
+  "version": "0.1.0",
+  "description": "Cross-AI persistent memory SaaS",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0",
+    "@azure/identity": "^4.13.1",
+    "@azure/search-documents": "^12.2.0",
+    "@google/genai": "^1.48.0",
+    "@langchain/core": "^1.1.39",
+    "@mistralai/mistralai": "^2.1.2",
+    "@qdrant/js-client-rest": "^1.17.0",
+    "@supabase/supabase-js": "^2.101.1",
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^12.8.0",
+    "cloudflare": "^5.2.0",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "groq-sdk": "^1.1.2",
+    "jsonwebtoken": "^9.0.3",
+    "mem0ai": "^2.4.6",
+    "neo4j-driver": "^6.0.1",
+    "ollama": "^0.6.3",
+    "openai": "^6.33.0",
+    "pg": "^8.20.0",
+    "redis": "^5.11.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/express": "^5.0.2",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.13.14",
+    "@types/pg": "^8.20.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
