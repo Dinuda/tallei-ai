@@ -4,9 +4,13 @@ import { config } from "./config.js";
 import memoriesRouter from "./routes/memories.js";
 import authRouter from "./routes/auth.js";
 import keysRouter from "./routes/keys.js";
+import { createMcpRouter } from "./mcp/server.js";
 import { initDb } from "./db/index.js";
 
+import cors from "cors";
+
 const app = express();
+app.use(cors());
 
 // Body parsing
 app.use(express.json({ limit: "1mb" }));
@@ -20,6 +24,7 @@ app.get("/health", (_req, res) => {
 app.use("/api/auth", authRouter);
 app.use("/api/keys", keysRouter);
 app.use("/api/memories", memoriesRouter);
+app.use("/mcp", createMcpRouter());
 
 // Start
 initDb().then(() => {
