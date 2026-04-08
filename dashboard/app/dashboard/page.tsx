@@ -1,6 +1,6 @@
-'use client';
+"use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from "react";
 
 interface MemoryItem {
   id: string;
@@ -9,66 +9,90 @@ interface MemoryItem {
   createdAt: string;
 }
 
+const PLATFORM_COLORS: Record<string, { bg: string; color: string; border: string }> = {
+  claude: { bg: "rgba(251, 146, 60, 0.14)", color: "#ffca97", border: "rgba(251, 146, 60, 0.34)" },
+  chatgpt: { bg: "rgba(96, 165, 250, 0.14)", color: "#b8d9ff", border: "rgba(96, 165, 250, 0.34)" },
+  gemini: { bg: "rgba(168, 85, 247, 0.14)", color: "#dcc4ff", border: "rgba(168, 85, 247, 0.34)" },
+  api: { bg: "#171c24", color: "#d0d5dd", border: "#2f3640" },
+};
+
+function platformStyle(platform: string) {
+  const key = (platform || "api").toLowerCase();
+  return PLATFORM_COLORS[key] || PLATFORM_COLORS.api;
+}
+
 export default function DashboardPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const fetchMemories = async () => {
-      try {
-        const token = localStorage.getItem('tallei_token');
-        const res = await fetch('http://localhost:3000/api/memories', {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setMemories(data.memories || []);
-        }
-      } catch (err) {
-        console.error("Failed to fetch memories:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchMemories();
+    fetch("/api/memories")
+      .then((res) => res.json())
+      .then((data) => setMemories(data.memories || []))
+      .catch((error) => console.error("Failed to fetch memories:", error))
+      .finally(() => setLoading(false));
   }, []);
 
+  const recentMemories = useMemo(
+    () => [...memories].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(0, 8),
+    [memories],
+  );
+
   return (
-    <div className="glass-panel">
-      <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        Memory Feed
-        <span className="badge badge-primary">{memories.length}</span>
-      </h2>
-      
-      {loading ? (
-        <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-secondary)' }}>Loading your timeline...</div>
-      ) : memories.length === 0 ? (
-        <div style={{ padding: '4rem 2rem', textAlign: 'center', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px dashed var(--border-color)' }}>
-          <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>No memories have been captured yet.</p>
-          <p style={{ fontSize: '0.9rem' }}>Use Claude Desktop or our API to save your first context block.</p>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          {memories.map((m) => (
-            <div key={m.id} style={{ 
-              padding: '1.5rem', 
-              background: 'rgba(255,255,255,0.03)', 
-              borderRadius: '12px', 
-              border: '1px solid var(--border-color)'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.75rem', alignItems: 'center' }}>
-                <span className="badge" style={{ background: '#374151', color: '#d1d5db' }}>
-                  {m.metadata?.platform || 'API'}
-                </span>
-                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                  {m.createdAt ? new Date(m.createdAt).toLocaleDateString() : 'Unknown date'}
-                </span>
-              </div>
-              <p style={{ whiteSpace: 'pre-wrap', color: 'var(--text-primary)', fontSize: '0.95rem' }}>{m.text}</p>
-            </div>
-          ))}
-        </div>
-      )}
+    <div className="page-stack" style={{ gap: "0.9rem" }}>
+      <header>
+        <h2 className="page-title">Container Tags</h2>
+        <p className="page-subtitle">
+          Container tags organize your documents and memories
+        </p>
+      </header>
+
+      <section className="container-tags-panel">
+        {loading ? (
+          <div className="container-tags-center">
+            <p className="page-subtitle">Loading memories...</p>
+          </div>
+        ) : recentMemories.length === 0 ? (
+          <div className="container-tags-center">
+            <svg width="32" height="32" viewBox="0 0 15 15" fill="none" aria-hidden>
+              <path d="M8.8 1.7H13.3V6.2L7.4 12.1L2.9 7.6L8.8 1.7Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+              <circle cx="10.9" cy="4.1" r="0.8" fill="currentColor" />
+            </svg>
+            <h3 className="container-tags-empty-title">No container tags yet</h3>
+            <p className="container-tags-empty-subtitle">
+              Import data or add documents via the API to get started.
+            </p>
+          </div>
+        ) : (
+          <div className="list-stack" style={{ gap: "0.6rem" }}>
+            {recentMemories.map((memory) => {
+              const style = platformStyle(memory.metadata?.platform);
+              return (
+                <article key={memory.id} className="memory-card" style={{ padding: "0.85rem 0.95rem" }}>
+                  <div className="memory-card-head" style={{ marginBottom: "0.45rem" }}>
+                    <span
+                      className="platform-chip"
+                      style={{ background: style.bg, color: style.color, border: `1px solid ${style.border}` }}
+                    >
+                      {memory.metadata?.platform || "API"}
+                    </span>
+                    <span className="memory-date">
+                      {memory.createdAt
+                        ? new Date(memory.createdAt).toLocaleDateString("en-US", {
+                            month: "short",
+                            day: "numeric",
+                            year: "numeric",
+                          })
+                        : "-"}
+                    </span>
+                  </div>
+                  <p className="memory-text">{memory.text}</p>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

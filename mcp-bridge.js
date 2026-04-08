@@ -1,17 +1,21 @@
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 async function run() {
-    const apiKey = process.env.AUTHORIZATION || "Bearer gm_048f3dc053ed20a897227268d347db1d18078fc63625838baf03834f7e56e973";
-    const mcpUrl = "http://localhost:3000/mcp";
-    // Connect to our express Stateless HTTP Endpoint
+    const apiKey = process.env.AUTHORIZATION;
+    if (!apiKey) {
+        console.error("Missing AUTHORIZATION environment variable. Expected: Bearer <API_KEY>");
+        process.exit(1);
+    }
+    // MCP_URL can be set to any public endpoint, e.g. https://<ngrok>/mcp
+    // Defaults to the local backend for backwards compatibility.
+    const mcpUrl = process.env.MCP_URL ?? "http://localhost:3000/mcp";
     const httpTransport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
         requestInit: {
-            headers: { Authorization: apiKey }
-        }
+            headers: { Authorization: apiKey },
+        },
     });
-    // Stdio transport for Claude Desktop to communicate with this script
     const stdioTransport = new StdioServerTransport();
-    // Route messages between Claude (stdio) and our HTTP Server
+    // Route messages between Claude (stdio) and the HTTP MCP endpoint
     httpTransport.onmessage = (message) => {
         stdioTransport.send(message).catch(console.error);
     };
@@ -24,7 +28,6 @@ async function run() {
     stdioTransport.onerror = (err) => {
         console.error("Stdio Error:", err);
     };
-    // Handle exits
     process.on("SIGINT", () => {
         httpTransport.close();
         stdioTransport.close();

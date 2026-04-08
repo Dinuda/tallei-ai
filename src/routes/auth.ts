@@ -1,39 +1,90 @@
-import { Router } from "express";
-import { register, login } from "../services/auth.js";
+import { Response, Router } from "express";
+import {
+  getUserById,
+  upsertGoogleUser,
+  verifySessionToken,
+} from "../services/auth.js";
+import { internalSecretMiddleware } from "../middleware/auth.js";
 
 const router = Router();
 
-router.post("/register", async (req, res) => {
+const SESSION_COOKIE_NAME = "tallei_session";
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  if (!header) return {};
+  const out: Record<string, string> = {};
+  for (const part of header.split(";")) {
+    const [rawName, ...rest] = part.trim().split("=");
+    if (!rawName || rest.length === 0) continue;
+    out[rawName] = decodeURIComponent(rest.join("="));
+  }
+  return out;
+}
+
+function clearSessionCookie(res: Response): void {
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    path: "/",
+  });
+}
+
+/**
+ * POST /api/auth/sync  (internal — called by Next.js on NextAuth signIn)
+ * Upserts the Google user in the database and returns our internal userId.
+ */
+router.post("/sync", internalSecretMiddleware, async (req, res) => {
+  const { sub, email } = req.body as { sub?: string; email?: string };
+  if (!sub || !email) {
+    res.status(400).json({ error: "Missing sub or email" });
+    return;
+  }
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      res.status(400).json({ error: "Missing email or password" });
-      return;
-    }
-    const user = await register(email, password);
-    res.json({ success: true, user });
-  } catch (error: any) {
-    if (error.code === '23505') { // Postgres unique violation
-      res.status(409).json({ error: "Email already exists" });
-    } else {
-      console.error(error);
-      res.status(500).json({ error: "Internal server error" });
-    }
+    const user = await upsertGoogleUser({ sub, email });
+    res.json({ userId: user.id });
+  } catch (error) {
+    console.error("User sync failed:", error);
+    res.status(500).json({ error: "Failed to sync user" });
   }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/register", async (_req, res) => {
+  res.status(410).json({ error: "Google login required" });
+});
+
+router.post("/login", async (_req, res) => {
+  res.status(410).json({ error: "Google login required" });
+});
+
+router.get("/exchange-cookie", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const result = await login(email, password);
-    if (!result) {
-      res.status(401).json({ error: "Invalid credentials" });
+    const token = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME];
+    if (!token) {
+      res.status(401).json({ error: "Missing session cookie" });
       return;
     }
-    res.json({ success: true, ...result });
+
+    const payload = verifySessionToken(token);
+    const user = await getUserById(payload.id);
+    if (!user) {
+      res.status(401).json({ error: "Invalid session" });
+      return;
+    }
+
+    res.json({ token, user });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Internal server error" });
+    res.status(401).json({ error: "Invalid or expired session" });
+  }
+});
+
+router.post("/logout", async (_req, res) => {
+  try {
+    clearSessionCookie(res);
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Logout failed:", error);
+    res.status(500).json({ error: "Logout failed" });
   }
 });
 

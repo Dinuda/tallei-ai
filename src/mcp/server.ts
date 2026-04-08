@@ -1,9 +1,38 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Router } from "express";
+import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import { z } from "zod";
-import { saveMemory, recallMemories, listMemories, deleteMemory } from "../services/memory.js";
+import { saveMemory, recallMemories, listMemories, deleteMemory, prewarmRecallCache } from "../services/memory.js";
 import { validateApiKey } from "../services/auth.js";
+
+// ── Recall classifier ────────────────────────────────────────────────────────
+// Avoids an MCP round-trip for self-contained questions that don't need
+// historical context. Returns false → skip recall, true → do recall.
+const SELF_CONTAINED = [
+  /^(what|how|explain|define|describe)\s+(is|are|does|the|a)\s+/i,
+  /^(show|give|list|count|generate|write|create)\s+(me\s+)?(a|an|some|example)/i,
+  /^(what'?s|whats)\s+(the\s+)?(difference|meaning|definition)/i,
+];
+
+const CONTEXT_DEPENDENT = [
+  /\b(my|our|i'?ve|i\s+said|remember|previously|last\s+time|before|again)\b/i,
+  /\b(project|codebase|repo|stack|prefer|usually|always|style|design|theme)\b/i,
+  /\b(continue|resume|pick\s+up|where\s+we|from\s+before)\b/i,
+];
+
+function needsRecall(query: string): boolean {
+  if (CONTEXT_DEPENDENT.some(p => p.test(query))) return true;
+  if (SELF_CONTAINED.some(p => p.test(query))) return false;
+  return true; // default: do recall — better to search than miss a relevant memory
+}
+
+// ── OAuth token cache ─────────────────────────────────────────────────────────
+// verifyAccessToken() may do a DB lookup or crypto verify on every request.
+// Cache the userId per token for the life of the token (up to 10 min).
+const OAUTH_CACHE_TTL_MS = 10 * 60_000;
+interface OAuthCacheEntry { userId: string; exp: number }
+const oauthTokenCache = new Map<string, OAuthCacheEntry>();
 
 function buildMcpServer(userId: string): McpServer {
   const server = new McpServer({
@@ -23,11 +52,13 @@ function buildMcpServer(userId: string): McpServer {
       },
     },
     async ({ content, platform }) => {
-      const result = await saveMemory(content, userId, platform ?? "claude");
+      // save_memory is fire-and-forget: the heavy work (summarise + embed + store)
+      // runs in the background. Claude is not blocked waiting for OpenAI.
+      void saveMemory(content, userId, platform ?? "claude");
       return {
         content: [{
           type: "text",
-          text: `✅ Memory saved!\nTitle: ${result.title}\nKey Points: ${result.summary.keyPoints.join(", ")}`,
+          text: "✅ Memory captured and queuing for storage.",
         }],
       };
     }
@@ -45,13 +76,11 @@ function buildMcpServer(userId: string): McpServer {
       },
     },
     async ({ query, limit }) => {
+      if (!needsRecall(query)) {
+        return { content: [{ type: "text", text: "--- No context needed ---" }] };
+      }
       const result = await recallMemories(query, userId, limit ?? 5);
-      return {
-        content: [{
-          type: "text",
-          text: result.contextBlock,
-        }],
-      };
+      return { content: [{ type: "text", text: result.contextBlock }] };
     }
   );
 
@@ -94,14 +123,22 @@ function buildMcpServer(userId: string): McpServer {
   return server;
 }
 
-export function createMcpRouter(): Router {
+function sendUnauthorized(res: any, resourceMetadataUrl: string, message: string): void {
+  res.setHeader(
+    "WWW-Authenticate",
+    `Bearer resource_metadata="${resourceMetadataUrl}", error="invalid_token", error_description="${message}"`
+  );
+  res.status(401).json({ error: message });
+}
+
+export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetadataUrl: string): Router {
   const router = Router();
 
   const handleMcp = async (req: any, res: any, next: any) => {
     const authHeader = req.headers.authorization;
 
     if (!authHeader?.startsWith("Bearer ")) {
-      res.status(401).json({ error: "Missing or invalid Authorization header" });
+      sendUnauthorized(res, resourceMetadataUrl, "Missing or invalid Authorization header");
       return;
     }
 
@@ -110,12 +147,32 @@ export function createMcpRouter(): Router {
 
     if (token.startsWith("gm_")) {
       userId = await validateApiKey(token);
+    } else {
+      // Check OAuth cache before calling verifyAccessToken
+      const oauthCached = oauthTokenCache.get(token);
+      if (oauthCached && oauthCached.exp > Date.now()) {
+        userId = oauthCached.userId;
+      } else {
+        try {
+          const authInfo = await oauthVerifier.verifyAccessToken(token);
+          const userIdValue = authInfo.extra?.userId;
+          if (typeof userIdValue === "string" && userIdValue.length > 0) {
+            userId = userIdValue;
+            oauthTokenCache.set(token, { userId, exp: Date.now() + OAUTH_CACHE_TTL_MS });
+          }
+        } catch {
+          userId = null;
+        }
+      }
     }
 
     if (!userId) {
-      res.status(401).json({ error: "Invalid API key" });
+      sendUnauthorized(res, resourceMetadataUrl, "Invalid or expired token");
       return;
     }
+
+    // Pre-warm recall cache in background on first request per user
+    prewarmRecallCache(userId);
 
     const server = buildMcpServer(userId);
     const transport = new StreamableHTTPServerTransport({

@@ -1,6 +1,6 @@
-'use client';
+"use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 
 interface ApiKey {
   id: string;
@@ -12,20 +12,18 @@ interface ApiKey {
 export default function KeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
-  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyName, setNewKeyName] = useState("");
   const [generating, setGenerating] = useState(false);
   const [newlyGeneratedKey, setNewlyGeneratedKey] = useState<string | null>(null);
+  const [copiedNew, setCopiedNew] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const fetchKeys = async () => {
     try {
-      const token = localStorage.getItem('tallei_token');
-      const res = await fetch('http://localhost:3000/api/keys', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setKeys(data.keys || []);
-      }
+      const res = await fetch("/api/keys");
+      if (!res.ok) return;
+      const data = await res.json();
+      setKeys(data.keys || []);
     } catch (err) {
       console.error(err);
     } finally {
@@ -37,120 +35,147 @@ export default function KeysPage() {
     fetchKeys();
   }, []);
 
-  const handleGenerate = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGenerate = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (!newKeyName.trim()) return;
-    
+
     setGenerating(true);
     setNewlyGeneratedKey(null);
-    
     try {
-      const token = localStorage.getItem('tallei_token');
-      const res = await fetch('http://localhost:3000/api/keys', {
-        method: 'POST',
-        headers: { 
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ name: newKeyName })
+      const res = await fetch("/api/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newKeyName }),
       });
-      
-      if (res.ok) {
-        const data = await res.json();
-        setNewlyGeneratedKey(data.key);
-        setNewKeyName('');
-        await fetchKeys();
-      }
+
+      if (!res.ok) return;
+
+      const data = await res.json();
+      setNewlyGeneratedKey(data.key);
+      setNewKeyName("");
+      await fetchKeys();
     } finally {
       setGenerating(false);
     }
   };
 
   const handleDelete = async (id: string) => {
+    setDeletingId(id);
     try {
-      const token = localStorage.getItem('tallei_token');
-      const res = await fetch(`http://localhost:3000/api/keys/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        await fetchKeys();
-      }
+      const res = await fetch(`/api/keys/${id}`, { method: "DELETE" });
+      if (res.ok) await fetchKeys();
     } catch (err) {
       console.error(err);
+    } finally {
+      setDeletingId(null);
     }
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    alert('API Key copied to clipboard!');
+  const copyNewKey = () => {
+    if (!newlyGeneratedKey) return;
+    navigator.clipboard.writeText(newlyGeneratedKey);
+    setCopiedNew(true);
+    setTimeout(() => setCopiedNew(false), 2000);
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-      <div className="glass-panel">
-        <h2 style={{ marginBottom: '0.5rem' }}>Generate New Key</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
-          Create an API key to securely connect Claude Desktop or other clients to your memory index.
-        </p>
-        
-        <form onSubmit={handleGenerate} style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end' }}>
-          <div className="form-group" style={{ marginBottom: 0, flex: 1 }}>
-            <label className="form-label">Key Label / Name</label>
-            <input 
-              type="text" 
-              className="form-input" 
-              placeholder="e.g. Claude Desktop Mac" 
-              value={newKeyName}
-              onChange={e => setNewKeyName(e.target.value)}
-            />
+    <div className="page-stack">
+      <header>
+        <h2 className="page-title">API Keys</h2>
+        <p className="page-subtitle">Secret keys to connect Claude Desktop or other clients to your memory index.</p>
+      </header>
+
+      <section className="panel">
+        <h4 className="panel-title">Create new key</h4>
+
+        <form onSubmit={handleGenerate}>
+          <div className="inline-form-row">
+            <div className="form-group">
+              <label className="form-label">Key name</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. Claude Desktop Mac"
+                value={newKeyName}
+                onChange={(event) => setNewKeyName(event.target.value)}
+              />
+            </div>
+
+            <button type="submit" className="btn btn-primary" disabled={generating || !newKeyName.trim()}>
+              {generating ? "Creating..." : "Generate key"}
+            </button>
           </div>
-          <button type="submit" className="btn btn-primary" disabled={generating || !newKeyName.trim()}>
-            {generating ? 'Creating...' : 'Create Secret Key'}
-          </button>
         </form>
 
         {newlyGeneratedKey && (
-          <div className="animate-fade-in" style={{ marginTop: '1.5rem', padding: '1.5rem', background: 'rgba(14, 165, 233, 0.1)', border: '1px solid rgba(14, 165, 233, 0.3)', borderRadius: '12px' }}>
-            <div style={{ fontWeight: 600, color: 'var(--accent-secondary)', marginBottom: '0.5rem' }}>Save this key now!</div>
-            <p style={{ fontSize: '0.9rem', marginBottom: '1rem', color: 'var(--text-secondary)' }}>For security reasons, you will <strong>never</strong> see this key again after securely closing this prompt. It has been irreversible hashed in our database.</p>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <code style={{ flex: 1, padding: '0.75rem', background: 'rgba(0,0,0,0.5)', borderRadius: '8px', wordBreak: 'break-all', fontFamily: 'monospace' }}>
-                {newlyGeneratedKey}
-              </code>
-              <button type="button" className="btn btn-secondary" onClick={() => copyToClipboard(newlyGeneratedKey)}>
-                Copy
+          <div className="generated-key-notice animate-fade-up">
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <path d="M7 1v1M7 12v1M1 7h1M12 7h1M2.8 2.8l.7.7M10.5 10.5l.7.7M2.8 11.2l.7-.7M10.5 3.5l.7-.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                <circle cx="7" cy="7" r="2.5" stroke="currentColor" strokeWidth="1.4" />
+              </svg>
+              <span style={{ fontWeight: 700, fontSize: "0.87rem", color: "var(--accent-dark)" }}>
+                Save this key, it will not be shown again
+              </span>
+            </div>
+
+            <p style={{ fontSize: "0.82rem", color: "var(--text-2)", marginBottom: "0.8rem" }}>
+              For security, this key is hashed in our database and cannot be recovered.
+            </p>
+
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              <div className="code-block" style={{ flex: 1 }}>{newlyGeneratedKey}</div>
+              <button type="button" className="btn btn-primary btn-sm" onClick={copyNewKey}>
+                {copiedNew ? "Copied" : "Copy"}
               </button>
             </div>
           </div>
         )}
-      </div>
+      </section>
 
-      <div className="glass-panel">
-        <h2 style={{ marginBottom: '1.5rem' }}>Active Keys</h2>
-        
+      <section className="panel">
+        <h4 className="panel-title">Active keys</h4>
+
         {loading ? (
-          <div style={{ color: 'var(--text-secondary)' }}>Loading...</div>
+          <p className="page-subtitle">Loading...</p>
         ) : keys.length === 0 ? (
-          <div style={{ color: 'var(--text-secondary)' }}>You don't have any active API keys.</div>
+          <div className="empty-state-panel" style={{ minHeight: "170px" }}>
+            <p className="page-subtitle">No keys yet. Create your first key above.</p>
+          </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {keys.map(k => (
-              <div key={k.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1.25rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-                <div>
-                  <div style={{ fontWeight: 500, marginBottom: '0.25rem' }}>{k.name}</div>
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', gap: '1rem' }}>
-                    <span>Created: {new Date(k.createdAt).toLocaleDateString()}</span>
-                  </div>
+          <div className="list-stack">
+            {keys.map((key) => (
+              <div key={key.id} className="key-list-row">
+                <div className="key-list-meta">
+                  <span className="key-icon-wrap" aria-hidden>
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <circle cx="5.5" cy="8" r="3.5" stroke="currentColor" strokeWidth="1.3" />
+                      <path d="M8.5 4.5L12.5 0.5M12.5 0.5H9.5M12.5 0.5V3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </span>
+
+                  <span style={{ minWidth: 0 }}>
+                    <span className="key-name">{key.name}</span>
+                    <p className="key-date">
+                      Created {new Date(key.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                    </p>
+                  </span>
                 </div>
-                <button type="button" onClick={() => handleDelete(k.id)} className="btn-ghost" style={{ color: '#ef4444' }}>
-                  Revoke
+
+                <button
+                  type="button"
+                  className="danger-btn"
+                  onClick={() => handleDelete(key.id)}
+                  disabled={deletingId === key.id}
+                  style={{ opacity: deletingId === key.id ? 0.55 : 1 }}
+                >
+                  {deletingId === key.id ? "Revoking..." : "Revoke"}
                 </button>
               </div>
             ))}
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }
