@@ -190,19 +190,24 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     <div className="dashboard-shell">
       <header className="dashboard-topbar">
         <div className="dashboard-topbar-inner">
-          <div style={{ display: "inline-flex", alignItems: "center", gap: "0.72rem", paddingLeft: "0.25rem" }}>
-            <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "24px", width: "auto" }} />
+          <div style={{ display: "inline-flex", alignItems: "center", gap: "0.92rem", paddingLeft: "0.25rem" }}>
+            <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "44px", width: "auto" }} />
           </div>
 
           <div style={{ display: "inline-flex", alignItems: "center", gap: "1rem" }}>
-            <div className="dashboard-topbar-links">
-              <a href="https://docs.tallei.ai" target="_blank" rel="noreferrer" className="topbar-link">
-                DOCS {ICONS.externalLink}
-              </a>
-              <a href="mailto:support@tallei.ai" className="topbar-link">SUPPORT</a>
-            </div>
-            <div className="dashboard-avatar-wrap" style={{ borderLeft: "1px solid #27272a", paddingLeft: "1rem", height: "30px", display: "flex", alignItems: "center" }}>
+            <div className="dashboard-avatar-wrap" style={{ borderLeft: "1px solid #27272a", paddingLeft: "1rem", height: "30px", display: "flex", alignItems: "center", gap: "0.8rem" }}>
               <span className="dashboard-avatar" aria-hidden>DY</span>
+              <button
+                type="button"
+                onClick={() => signOut({ callbackUrl: "/login" })}
+                className="btn btn-ghost"
+                style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "0.3rem" }}
+              >
+                <svg width="12" height="12" viewBox="0 0 15 15" fill="none" aria-hidden>
+                  <path d="M6 13H2.5A1.5 1.5 0 0 1 1 11.5v-8A1.5 1.5 0 0 1 2.5 2H6M10 10.5l3.5-3-3.5-3M13.5 7.5H6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                Sign out
+              </button>
             </div>
           </div>
         </div>
@@ -262,19 +267,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
           ))}
         </nav>
-
-        <div className="sidebar-footer">
-          <button
-            type="button"
-            className="btn btn-ghost sidebar-logout"
-            onClick={() => signOut({ callbackUrl: "/login" })}
-          >
-            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-              <path d="M6 13H2.5A1.5 1.5 0 0 1 1 11.5v-8A1.5 1.5 0 0 1 2.5 2H6M10 10.5l3.5-3-3.5-3M13.5 7.5H6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Sign out
-          </button>
-        </div>
       </aside>
 
       <main className="dashboard-main">

@@ -1,29 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useState } from "react";
+import {
+  Check,
+  Copy,
+  ExternalLink,
+  ArrowRight,
+  Plug,
+  Terminal,
+} from "lucide-react";
 
 const CLAUDE_CONNECTORS_URL = "https://claude.ai/settings/connectors";
 
 type StepStatus = "done" | "active" | "upcoming";
 
-interface Step {
-  id: number;
-  title: string;
-  subtitle: string;
-}
-
-const STEPS: Step[] = [
-  { id: 1, title: "Copy MCP URL", subtitle: "Keep your connector endpoint ready" },
-  { id: 2, title: "Go to Claude", subtitle: "Open connector settings and continue" },
-  { id: 3, title: "Add Custom Connector", subtitle: "Paste URL and save connector" },
-  { id: 4, title: "Authorize and Connect", subtitle: "Approve access to complete setup" },
-];
-
 export default function SetupPage() {
-  const appUrl = typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_API_BASE_URL || window.location.origin)
-    : (process.env.NEXT_PUBLIC_API_BASE_URL || "");
+  const appUrl =
+    typeof window !== "undefined"
+      ? process.env.NEXT_PUBLIC_API_BASE_URL || window.location.origin
+      : process.env.NEXT_PUBLIC_API_BASE_URL || "";
   const connectorUrl = `${appUrl}/mcp`;
 
   const [activeStep, setActiveStep] = useState<number>(1);
@@ -32,261 +28,278 @@ export default function SetupPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
 
-  const progress = useMemo(() => {
-    const completed = Math.max(0, Math.min(4, activeStep - 1));
-    return (completed / 4) * 100;
-  }, [activeStep]);
-
-  const stepStatus = (stepId: number): StepStatus => {
-    if (stepId < activeStep) return "done";
-    if (stepId === activeStep) return "active";
+  const stepStatus = (id: number): StepStatus => {
+    if (id < activeStep) return "done";
+    if (id === activeStep) return "active";
     return "upcoming";
   };
 
-  const copyConnectorUrl = async (): Promise<boolean> => {
+  const copyUrl = async (): Promise<boolean> => {
     setCopyWarning(null);
     try {
       await navigator.clipboard.writeText(connectorUrl);
       setCopied(true);
-      setToast("MCP URL copied to clipboard");
-      window.setTimeout(() => setToast(null), 1800);
+      setToast("Copied to clipboard");
+      setTimeout(() => {
+        setToast(null);
+        setCopied(false);
+      }, 2000);
       return true;
     } catch {
-      setCopied(false);
-      setCopyWarning("Clipboard access was blocked. Copy the MCP URL manually from the field below.");
+      setCopyWarning(
+        "Clipboard blocked — copy the URL manually from the field below."
+      );
       setToast("Could not copy automatically");
-      window.setTimeout(() => setToast(null), 2000);
+      setTimeout(() => setToast(null), 2000);
       return false;
     }
   };
 
-  const openClaude = (): void => {
+  const onCopy = async () => {
+    const ok = await copyUrl();
+    if (ok) setActiveStep((p) => Math.max(p, 2));
+  };
+
+  const onOpenClaude = async () => {
+    await copyUrl();
     window.open(CLAUDE_CONNECTORS_URL, "_blank", "noopener,noreferrer");
+    setActiveStep((p) => Math.max(p, 3));
   };
 
-  const onCopyOnly = async () => {
-    const ok = await copyConnectorUrl();
-    if (ok) setActiveStep((prev) => Math.max(prev, 2));
-  };
+  const onConnectorAdded = () => setActiveStep((p) => Math.max(p, 4));
 
-  const onGoToClaudeAndCopy = async () => {
-    await copyConnectorUrl();
-    openClaude();
-    setActiveStep((prev) => Math.max(prev, 3));
-  };
-
-  const onConnectorAdded = () => {
-    setActiveStep((prev) => Math.max(prev, 4));
-  };
-
-  const onAuthorized = () => {
+  const onFinish = () => {
     setIsComplete(true);
     setActiveStep(5);
   };
 
   return (
-    <div className="page-stack" style={{ maxWidth: "920px", width: "100%" }}>
-      <section className="setup-hero animate-fade-up">
-        <div className="page-header" style={{ alignItems: "center" }}>
-          <div>
-            <div className="badge badge-accent" style={{ marginBottom: "0.55rem" }}>Setup Guide</div>
-            <h2 className="page-title">Connect Claude to Tallei</h2>
-            <p className="page-subtitle">4-step guided setup for Claude connectors. No local config required.</p>
-          </div>
-          <button type="button" className="btn btn-primary btn-lg" onClick={onGoToClaudeAndCopy}>
-            Go to Claude + Copy URL
+    <div className="su-root">
+      {/* Header */}
+      <div className="su-header">
+        <div className="su-header-left">
+          <span className="su-eyebrow">
+            <Plug size={11} />
+            Claude Connector
+          </span>
+          <h1 className="su-title">Connect Claude to Tallei</h1>
+          <p className="su-desc">
+            4-step setup — no local config required.
+          </p>
+        </div>
+        <button type="button" className="su-cta" onClick={onOpenClaude}>
+          Open Claude Settings
+          <ExternalLink size={14} />
+        </button>
+      </div>
+
+      {/* MCP URL block */}
+      <div className="su-url-card">
+        <div className="su-url-label">
+          <Terminal size={12} />
+          MCP endpoint
+        </div>
+        <div className="su-url-row">
+          <code className="su-url-text">{connectorUrl}</code>
+          <button
+            type="button"
+            className={`su-copy-btn${copied ? " copied" : ""}`}
+            onClick={onCopy}
+            title="Copy MCP URL"
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "Copied" : "Copy"}
           </button>
         </div>
+        {copyWarning && <p className="su-url-warning">{copyWarning}</p>}
+      </div>
 
-        <div className="setup-url-box">
-          <div style={{ fontSize: "0.74rem", letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-muted)", marginBottom: "0.4rem" }}>
-            MCP URL
-          </div>
-          <div className="code-block" style={{ userSelect: "all" }}>{connectorUrl}</div>
-          {copyWarning && (
-            <p style={{ marginTop: "0.55rem", color: "#f8cc95", fontSize: "0.83rem" }}>{copyWarning}</p>
-          )}
-        </div>
-      </section>
-
-      <section className="progress-shell animate-fade-up delay-1">
-        <div className="progress-bar-track">
-          <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-        </div>
-
-        <div className="progress-steps-grid">
-          {STEPS.map((step) => {
-            const status = stepStatus(step.id);
-            const badgeBg = status === "done"
-              ? "var(--accent)"
-              : status === "active"
-                ? "#2f3d55"
-                : "#3a4659";
-
-            return (
-              <button
-                key={step.id}
-                type="button"
-                className={`progress-step ${status === "active" ? "active" : ""} ${status === "upcoming" ? "upcoming" : ""}`}
-                onClick={() => status !== "upcoming" && setActiveStep(step.id)}
-                disabled={status === "upcoming"}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", marginBottom: "0.2rem" }}>
-                  <span className="progress-step-badge" style={{ background: badgeBg }}>
-                    {status === "done" ? "OK" : step.id}
-                  </span>
-                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Step {step.id}</span>
-                </div>
-                <div style={{ fontSize: "0.88rem", fontWeight: 700, lineHeight: 1.2 }}>{step.title}</div>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="step-cards">
-        <StepCard
-          step={1}
+      {/* Steps timeline */}
+      <div className="su-steps">
+        <Step
+          number={1}
           status={stepStatus(1)}
           title="Copy MCP URL"
-          subtitle="Copy your endpoint so it is ready before opening Claude settings."
           onActivate={() => setActiveStep(1)}
         >
-          <div className="step-actions">
-            <button type="button" className="btn btn-primary" onClick={onCopyOnly}>
-              {copied ? "Copied URL" : "Copy MCP URL"}
+          <p className="su-step-body">
+            Copy your endpoint above so it&apos;s ready before opening Claude.
+          </p>
+          <div className="su-step-actions">
+            <button type="button" className="su-btn-primary" onClick={onCopy}>
+              {copied ? (
+                <>
+                  <Check size={14} /> URL copied
+                </>
+              ) : (
+                <>
+                  <Copy size={14} /> Copy URL
+                </>
+              )}
             </button>
-            <button type="button" className="btn btn-secondary" onClick={() => setActiveStep((prev) => Math.max(prev, 2))}>
-              Continue
+            <button
+              type="button"
+              className="su-btn-ghost"
+              onClick={() => setActiveStep((p) => Math.max(p, 2))}
+            >
+              Skip
+              <ArrowRight size={13} />
             </button>
           </div>
-        </StepCard>
+        </Step>
 
-        <StepCard
-          step={2}
+        <Step
+          number={2}
           status={stepStatus(2)}
-          title="Go to Claude"
-          subtitle="Open Claude connector settings and bring the copied URL with you."
+          title="Open Claude Settings"
           onActivate={() => setActiveStep(2)}
         >
-          <div className="step-actions">
-            <button type="button" className="btn btn-primary" onClick={onGoToClaudeAndCopy}>
-              Go to Claude + Copy URL
+          <p className="su-step-body">
+            Navigate to Claude&apos;s connector settings. The URL will be copied automatically.
+          </p>
+          <div className="su-step-actions">
+            <button type="button" className="su-btn-primary" onClick={onOpenClaude}>
+              Open Claude + Copy URL
+              <ExternalLink size={13} />
             </button>
-            <a href={CLAUDE_CONNECTORS_URL} target="_blank" rel="noreferrer" className="btn btn-secondary">
-              Open Claude only
+            <a
+              href={CLAUDE_CONNECTORS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="su-btn-ghost"
+            >
+              Open only
+              <ExternalLink size={13} />
             </a>
           </div>
-          <p style={{ marginTop: "0.6rem", fontSize: "0.83rem", color: "var(--text-muted)" }}>
-            If copy is blocked, Claude still opens and you can copy manually from the MCP URL field above.
+          <p className="su-step-hint">
+            If copy is blocked, Claude still opens and you can paste manually.
           </p>
-        </StepCard>
+        </Step>
 
-        <StepCard
-          step={3}
+        <Step
+          number={3}
           status={stepStatus(3)}
           title="Add Custom Connector"
-          subtitle="In Claude, add a custom connector, paste the MCP URL, and save."
           onActivate={() => setActiveStep(3)}
         >
-          <ul className="step-card-list">
-            <li>Open Claude connector settings.</li>
-            <li>Click <strong>Add custom connector</strong>.</li>
-            <li>Paste MCP URL and save.</li>
-          </ul>
-          <button type="button" className="btn btn-primary" onClick={onConnectorAdded}>
-            I added the connector
+          <ol className="su-checklist">
+            <li>In Claude settings, click <strong>Add custom connector</strong></li>
+            <li>Paste your MCP URL and save</li>
+          </ol>
+          <button type="button" className="su-btn-primary" onClick={onConnectorAdded}>
+            Done — connector added
+            <Check size={14} />
           </button>
-        </StepCard>
+        </Step>
 
-        <StepCard
-          step={4}
+        <Step
+          number={4}
           status={stepStatus(4)}
           title="Authorize and Connect"
-          subtitle="Finish authorization in Claude to activate memory sync."
           onActivate={() => setActiveStep(4)}
         >
-          <ul className="step-card-list">
-            <li>Find <strong>Tallei</strong> in Claude connectors.</li>
-            <li>Click <strong>Connect</strong>.</li>
-            <li>Approve access and return to Claude.</li>
-          </ul>
-          <div className="step-actions">
-            <a href={CLAUDE_CONNECTORS_URL} target="_blank" rel="noreferrer" className="btn btn-secondary">
+          <ol className="su-checklist">
+            <li>Find <strong>Tallei</strong> in the connectors list</li>
+            <li>Click <strong>Connect</strong> and approve access</li>
+          </ol>
+          <div className="su-step-actions">
+            <a
+              href={CLAUDE_CONNECTORS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="su-btn-ghost"
+            >
               Go to Claude
+              <ExternalLink size={13} />
             </a>
-            <button type="button" className="btn btn-primary" onClick={onAuthorized}>
+            <button type="button" className="su-btn-primary" onClick={onFinish}>
               Finish setup
+              <Check size={14} />
             </button>
           </div>
-        </StepCard>
-      </section>
+        </Step>
+      </div>
 
       {isComplete && (
-        <section className="setup-success animate-fade-up">
-          <h3 style={{ marginBottom: "0.3rem" }}>Setup complete</h3>
-          <p style={{ fontSize: "0.9rem", marginBottom: "0.55rem" }}>
-            Claude is now connected to Tallei. Memory syncing is ready.
-          </p>
-          <Link href="/dashboard/memory" className="btn btn-secondary btn-sm">Go to Memories</Link>
-        </section>
+        <div className="su-success animate-fade-up">
+          <div className="su-success-icon">
+            <Check size={18} />
+          </div>
+          <div>
+            <p className="su-success-title">You&apos;re connected</p>
+            <p className="su-success-desc">
+              Claude is now linked to Tallei. Memory syncing is active.
+            </p>
+          </div>
+          <Link href="/dashboard/memory" className="su-btn-ghost su-success-link">
+            View memories
+            <ArrowRight size={13} />
+          </Link>
+        </div>
       )}
 
-      {toast && <div role="status" className="toast">{toast}</div>}
+      <p className="su-footnote">
+        <strong>Using Claude Desktop locally?</strong> You can also configure via{" "}
+        <code>claude_desktop_config.json</code>. Claude.ai connectors require a
+        publicly reachable HTTPS URL.
+      </p>
 
-      <section className="setup-footer-note">
-        <p>
-          <strong style={{ color: "var(--text-2)" }}>Local Claude Desktop?</strong>{" "}
-          Local setup via <code>claude_desktop_config.json</code> remains available. Claude.ai connectors require a publicly reachable HTTPS MCP URL.
-        </p>
-      </section>
+      {toast && (
+        <div role="status" className="toast">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
 
-function StepCard({
-  step,
+function Step({
+  number,
   status,
   title,
-  subtitle,
   onActivate,
   children,
 }: {
-  step: number;
+  number: number;
   status: StepStatus;
   title: string;
-  subtitle: string;
   onActivate: () => void;
-  children?: React.ReactNode;
+  children: React.ReactNode;
 }) {
   const isActive = status === "active";
   const isDone = status === "done";
   const isUpcoming = status === "upcoming";
 
-  const badgeBg = isDone ? "var(--accent)" : isActive ? "#2f3d55" : "#3a4659";
-
   return (
-    <article
-      className={`step-card ${isActive ? "active" : ""} ${isUpcoming ? "upcoming" : ""}`}
-      onClick={isUpcoming ? undefined : onActivate}
-      style={{ cursor: isUpcoming ? "default" : "pointer" }}
+    <div
+      className={`su-step${isActive ? " active" : ""}${isDone ? " done" : ""}${isUpcoming ? " upcoming" : ""}`}
     >
-      <div className="step-card-head">
-        <span className="step-card-dot" style={{ background: badgeBg }}>
-          {isDone ? "OK" : step}
-        </span>
-
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h3 style={{ fontSize: "1rem", marginBottom: "0.2rem" }}>{title}</h3>
-          <p style={{ fontSize: "0.87rem", color: "var(--text-muted)" }}>{subtitle}</p>
-
-          {isActive && children && (
-            <div className="step-card-content" onClick={(event) => event.stopPropagation()}>
-              {children}
-            </div>
-          )}
-        </div>
+      <div className="su-step-aside">
+        <button
+          type="button"
+          className="su-step-num"
+          onClick={isUpcoming ? undefined : onActivate}
+          disabled={isUpcoming}
+          aria-label={`Step ${number}`}
+        >
+          {isDone ? <Check size={13} /> : number}
+        </button>
+        {number < 4 && <div className="su-step-line" />}
       </div>
-    </article>
+      <div className="su-step-main">
+        <button
+          type="button"
+          className="su-step-title"
+          onClick={isUpcoming ? undefined : onActivate}
+          disabled={isUpcoming}
+        >
+          {title}
+        </button>
+        {isActive && (
+          <div className="su-step-content animate-fade-up">{children}</div>
+        )}
+      </div>
+    </div>
   );
 }
