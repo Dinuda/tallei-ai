@@ -8,6 +8,7 @@ import { InvalidGrantError, InvalidRequestError, InvalidTokenError } from "@mode
 import { config } from "../config.js";
 import { pool } from "../db/index.js";
 import { sanitizeNextPath } from "../services/auth.js";
+import { ensurePrimaryTenantForUser, getPrimaryTenantId } from "../services/tenancy.js";
 
 const AUTH_CODE_TTL_SECONDS = 10 * 60;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
@@ -74,6 +75,7 @@ function renderAuthorizeLoginPage(res: Response, nextPath: string): void {
 type AuthorizationCodeRow = {
   code: string;
   client_id: string;
+  tenant_id: string | null;
   user_id: string;
   code_challenge: string;
   redirect_uri: string;
@@ -87,6 +89,7 @@ type OAuthTokenRow = {
   access_token: string;
   refresh_token: string;
   client_id: string;
+  tenant_id: string | null;
   user_id: string;
   scope: string | null;
   resource: string | null;
@@ -144,15 +147,27 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
       throw new InvalidRequestError("Unregistered redirect_uri");
     }
 
+    const tenantId = (await getPrimaryTenantId(userId)) ?? (await ensurePrimaryTenantForUser(userId));
+
     const code = createOpaqueToken("tla_code");
     const scope = params.scopes && params.scopes.length > 0 ? params.scopes.join(" ") : null;
     const resource = params.resource?.toString() ?? this.expectedResourceUrl.toString();
 
     await pool.query(
       `INSERT INTO oauth_authorization_codes
-       (code, client_id, user_id, code_challenge, redirect_uri, scope, resource, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'))`,
-      [code, client.client_id, userId, params.codeChallenge, params.redirectUri, scope, resource, AUTH_CODE_TTL_SECONDS]
+       (code, client_id, tenant_id, user_id, code_challenge, redirect_uri, scope, resource, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW() + ($9::int * INTERVAL '1 second'))`,
+      [
+        code,
+        client.client_id,
+        tenantId,
+        userId,
+        params.codeChallenge,
+        params.redirectUri,
+        scope,
+        resource,
+        AUTH_CODE_TTL_SECONDS,
+      ]
     );
 
     const redirectTarget = new URL(params.redirectUri);
@@ -186,7 +201,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
     resource?: URL
   ): Promise<OAuthTokens> {
     const result = await pool.query<AuthorizationCodeRow>(
-      `SELECT code, client_id, user_id, redirect_uri, scope, resource, consumed_at, expires_at
+      `SELECT code, client_id, tenant_id, user_id, redirect_uri, scope, resource, consumed_at, expires_at
        FROM oauth_authorization_codes
        WHERE code = $1`,
       [authorizationCode]
@@ -212,12 +227,13 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
 
     await pool.query(
       `INSERT INTO oauth_tokens
-       (access_token, refresh_token, client_id, user_id, scope, resource, access_expires_at, refresh_expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7::int * INTERVAL '1 second'), NOW() + ($8::int * INTERVAL '1 second'))`,
+       (access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'), NOW() + ($9::int * INTERVAL '1 second'))`,
       [
         accessToken,
         refreshToken,
         code.client_id,
+        code.tenant_id,
         code.user_id,
         code.scope,
         resourceValue,
@@ -242,7 +258,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
     resource?: URL
   ): Promise<OAuthTokens> {
     const result = await pool.query<OAuthTokenRow>(
-      `SELECT access_token, refresh_token, client_id, user_id, scope, resource, access_expires_at, refresh_expires_at, revoked_at
+      `SELECT access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at, revoked_at
        FROM oauth_tokens
        WHERE refresh_token = $1`,
       [refreshToken]
@@ -296,7 +312,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const result = await pool.query<OAuthTokenRow>(
-      `SELECT access_token, refresh_token, client_id, user_id, scope, resource, access_expires_at, refresh_expires_at, revoked_at
+      `SELECT access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at, revoked_at
        FROM oauth_tokens
        WHERE access_token = $1`,
       [token]
@@ -319,6 +335,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
       resource: access.resource ? new URL(access.resource) : undefined,
       extra: {
         userId: access.user_id,
+        tenantId: access.tenant_id ?? undefined,
       },
     };
   }

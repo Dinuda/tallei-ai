@@ -16,9 +16,8 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     <main className="auth-screen">
       <div className="auth-card animate-fade-up">
         <div className="auth-logo-wrap">
-          <div className="auth-logo-stack">
-            <span className="auth-logo-mark">T</span>
-            <span className="site-logo" style={{ fontSize: "1.3rem" }}>Tallei</span>
+          <div className="auth-logo-stack" style={{ alignItems: "center" }}>
+            <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "40px", width: "auto" }} />
           </div>
         </div>
 

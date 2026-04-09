@@ -42,7 +42,7 @@ router.post("/sync", internalSecretMiddleware, async (req, res) => {
   }
   try {
     const user = await upsertGoogleUser({ sub, email });
-    res.json({ userId: user.id });
+    res.json({ userId: user.id, tenantId: user.tenantId });
   } catch (error) {
     console.error("User sync failed:", error);
     res.status(500).json({ error: "Failed to sync user" });

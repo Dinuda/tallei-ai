@@ -11,6 +11,7 @@ type SidebarItem = {
   href?: string;
   activePaths?: string[];
   icon: React.ReactNode;
+  rightIcon?: React.ReactNode;
 };
 
 type SidebarSection = {
@@ -107,49 +108,62 @@ const ICONS = {
       <path d="M7.5 1.9V3.1M7.5 11.9V13.1M1.9 7.5H3.1M11.9 7.5H13.1M3.5 3.5L4.4 4.4M10.6 10.6L11.5 11.5M3.5 11.5L4.4 10.6M10.6 4.4L11.5 3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
+  lock: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <rect x="4.5" y="6.5" width="6" height="5" rx="1" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.5 6.5V4.5C5.5 3.4 6.4 2.5 7.5 2.5C8.6 2.5 9.5 3.4 9.5 4.5V6.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
+  chevronRight: (
+    <svg width="12" height="12" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M5.5 3L10.5 7.5L5.5 12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  chevronUpDown: (
+    <svg width="12" height="12" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M4 6L7.5 2.5L11 6M4 9L7.5 12.5L11 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  externalLink: (
+    <svg width="12" height="12" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M5 2.5H12.5V10M12.5 2.5L2.5 12.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  building: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M3 13.5V3C3 2.4 3.4 2 4 2H11C11.6 2 12 2.4 12 3V13.5M3 13.5H12M3 13.5H1M12 13.5H14" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M6.5 5H8.5M6.5 8H8.5M6.5 11H8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
 };
 
 const NAV_SECTIONS: SidebarSection[] = [
   {
     items: [
-      { id: "overview", label: "Overview", icon: ICONS.home },
-      { id: "documents", label: "Documents", icon: ICONS.file },
-      { id: "memory", label: "Memory", href: "/dashboard/memory", activePaths: ["/dashboard/memory"], icon: ICONS.file },
-      { id: "containers", label: "Container Tags", href: "/dashboard", activePaths: ["/dashboard"], icon: ICONS.tag },
-      { id: "graph", label: "Memory Graph", href: "/dashboard/memory-graph", activePaths: ["/dashboard/memory-graph"], icon: ICONS.graph },
-      { id: "requests", label: "Requests", icon: ICONS.pulse },
-      { id: "insights", label: "User Insights", icon: ICONS.users },
+      { id: "overview", label: "Overview", href: "/dashboard", icon: ICONS.home },
+      { id: "memory", label: "Memory", href: "/dashboard/memory", icon: ICONS.file },
+      { id: "graph", label: "Memory Graph", href: "/dashboard/memory-graph", icon: ICONS.graph },
     ],
   },
   {
-    label: "Data",
+    label: "DATA",
     items: [
-      { id: "connectors", label: "Connectors", href: "/dashboard/setup", activePaths: ["/dashboard/setup"], icon: ICONS.plug },
-      { id: "import", label: "Import", icon: ICONS.arrow },
+      { id: "connectors", label: "Connectors", href: "/dashboard/setup", icon: ICONS.plug },
     ],
   },
   {
-    label: "Developer",
+    label: "DEVELOPER",
     items: [
-      { id: "api-keys", label: "API Keys", href: "/dashboard/keys", activePaths: ["/dashboard/keys"], icon: ICONS.key },
-      { id: "agents", label: "Agents", icon: ICONS.cpu },
-      { id: "plugins", label: "Plugins", icon: ICONS.cube },
-    ],
-  },
-  {
-    label: "Organization",
-    items: [
-      { id: "team", label: "Team", icon: ICONS.team },
-      { id: "billing", label: "Billing", icon: ICONS.card },
-      { id: "settings", label: "Settings", icon: ICONS.gear },
+      { id: "api-keys", label: "API Keys", href: "/dashboard/keys", icon: ICONS.key },
+      { id: "mcp-events", label: "MCP Events", href: "/dashboard/mcp-events", icon: ICONS.pulse },
     ],
   },
 ];
 
 function isRouteActive(pathname: string, item: SidebarItem) {
   if (!item.href) return false;
-  if (!item.activePaths || item.activePaths.length === 0) return pathname.startsWith(item.href);
-  return item.activePaths.some((path) => pathname === path || pathname.startsWith(`${path}/`));
+  if (item.href === "/dashboard") return pathname === "/dashboard";
+  return pathname.startsWith(item.href);
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -176,31 +190,20 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     <div className="dashboard-shell">
       <header className="dashboard-topbar">
         <div className="dashboard-topbar-inner">
-          <div style={{ display: "inline-flex", alignItems: "center", gap: "0.72rem" }}>
-            <button
-              type="button"
-              className="dashboard-mobile-menu-btn"
-              onClick={() => setMobileNavOpen((open) => !open)}
-              aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"}
-              aria-expanded={mobileNavOpen}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-              </svg>
-            </button>
-
-            <div className="dashboard-org">
-              TALLEI WORKSPACE
-              <span className="dashboard-org-pill" suppressHydrationWarning>{ORG_PLAN_LABEL}</span>
-            </div>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: "0.72rem", paddingLeft: "0.25rem" }}>
+            <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "24px", width: "auto" }} />
           </div>
 
-          <div style={{ display: "inline-flex", alignItems: "center", gap: "0.55rem" }}>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: "1rem" }}>
             <div className="dashboard-topbar-links">
-              <a href="https://docs.tallei.ai" target="_blank" rel="noreferrer" className="topbar-link">Docs</a>
-              <a href="mailto:support@tallei.ai" className="topbar-link">Support</a>
+              <a href="https://docs.tallei.ai" target="_blank" rel="noreferrer" className="topbar-link">
+                DOCS {ICONS.externalLink}
+              </a>
+              <a href="mailto:support@tallei.ai" className="topbar-link">SUPPORT</a>
             </div>
-            <span className="dashboard-avatar" aria-hidden>TY</span>
+            <div className="dashboard-avatar-wrap" style={{ borderLeft: "1px solid #27272a", paddingLeft: "1rem", height: "30px", display: "flex", alignItems: "center" }}>
+              <span className="dashboard-avatar" aria-hidden>DY</span>
+            </div>
           </div>
         </div>
       </header>
@@ -213,10 +216,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       />
 
       <aside className={`dashboard-sidebar ${mobileNavOpen ? "open" : ""}`} aria-label="Dashboard navigation">
-        <div className="sidebar-brand">
-          <span className="sidebar-brand-mark">T</span>
-          tallei memory
-        </div>
+       
 
         <div className="sidebar-search-wrap">
           <svg width="14" height="14" viewBox="0 0 15 15" fill="none" aria-hidden>
@@ -246,6 +246,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       {item.icon}
                       <span>{item.label}</span>
                       {active && <span className="sidebar-link-dot" />}
+                      {item.rightIcon && <span className="sidebar-link-right-icon">{item.rightIcon}</span>}
                     </Link>
                   );
                 }
@@ -254,6 +255,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   <span key={item.id} className={className} role="link" aria-disabled>
                     {item.icon}
                     <span>{item.label}</span>
+                    {item.rightIcon && <span className="sidebar-link-right-icon">{item.rightIcon}</span>}
                   </span>
                 );
               })}

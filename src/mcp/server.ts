@@ -1,90 +1,159 @@
+import { createHash } from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Router } from "express";
 import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import { z } from "zod";
-import { saveMemory, recallMemories, listMemories, deleteMemory, prewarmRecallCache } from "../services/memory.js";
-import { validateApiKey } from "../services/auth.js";
+import {
+  saveMemory,
+  recallMemories,
+  listMemories,
+  deleteMemory,
+  prewarmRecallCache,
+} from "../services/memory.js";
+import { authContextFromApiKey, authContextFromUserId } from "../services/auth.js";
+import { config } from "../config.js";
+import { pool } from "../db/index.js";
+import { getCacheJson, setCacheJson } from "../services/cache.js";
+import type { AuthContext } from "../types/auth.js";
 
-// ── Recall classifier ────────────────────────────────────────────────────────
-// Avoids an MCP round-trip for self-contained questions that don't need
-// historical context. Returns false → skip recall, true → do recall.
-const SELF_CONTAINED = [
-  /^(what|how|explain|define|describe)\s+(is|are|does|the|a)\s+/i,
-  /^(show|give|list|count|generate|write|create)\s+(me\s+)?(a|an|some|example)/i,
-  /^(what'?s|whats)\s+(the\s+)?(difference|meaning|definition)/i,
-];
+const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
 
-const CONTEXT_DEPENDENT = [
-  /\b(my|our|i'?ve|i\s+said|remember|previously|last\s+time|before|again)\b/i,
-  /\b(project|codebase|repo|stack|prefer|usually|always|style|design|theme)\b/i,
-  /\b(continue|resume|pick\s+up|where\s+we|from\s+before)\b/i,
-];
-
-function needsRecall(query: string): boolean {
-  if (CONTEXT_DEPENDENT.some(p => p.test(query))) return true;
-  if (SELF_CONTAINED.some(p => p.test(query))) return false;
-  return true; // default: do recall — better to search than miss a relevant memory
+interface OAuthCacheEntry {
+  userId: string;
+  tenantId: string;
 }
 
-// ── OAuth token cache ─────────────────────────────────────────────────────────
-// verifyAccessToken() may do a DB lookup or crypto verify on every request.
-// Cache the userId per token for the life of the token (up to 10 min).
-const OAUTH_CACHE_TTL_MS = 10 * 60_000;
-interface OAuthCacheEntry { userId: string; exp: number }
-const oauthTokenCache = new Map<string, OAuthCacheEntry>();
+function tokenCacheKey(token: string): string {
+  const hash = createHash("sha256").update(token).digest("hex");
+  return `auth:oauth:${hash}`;
+}
 
-function buildMcpServer(userId: string): McpServer {
+function requesterIp(req: any): string | undefined {
+  const forwardedFor = req.headers["x-forwarded-for"];
+  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
+    return forwardedFor.split(",")[0].trim();
+  }
+  if (Array.isArray(forwardedFor) && forwardedFor[0]) {
+    return forwardedFor[0].split(",")[0].trim();
+  }
+  return req.ip || undefined;
+}
+
+async function logMcpCallEvent(input: {
+  userId?: string | null;
+  tenantId?: string | null;
+  keyId?: string | null;
+  authMode?: "api_key" | "oauth" | "unknown";
+  method: string;
+  toolName?: string | null;
+  ok: boolean;
+  error?: string | null;
+}): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        input.tenantId ?? null,
+        input.userId ?? null,
+        input.keyId ?? null,
+        input.authMode ?? "unknown",
+        input.method,
+        input.toolName ?? null,
+        input.ok,
+        input.error ?? null,
+      ]
+    );
+  } catch (error) {
+    if (config.nodeEnv !== "production") {
+      console.error("[mcp] failed to persist call event:", error);
+    }
+  }
+}
+
+function buildMcpServer(auth: AuthContext): McpServer {
   const server = new McpServer({
     name: "tallei",
     version: "1.0.0",
   });
 
-  // Tool: save_memory
   server.registerTool(
     "save_memory",
     {
       title: "Save Memory",
-      description: "Saves a conversation or piece of information as a persistent memory in Tallei.",
+      description: "Saves information to Tallei persistent memory.",
       inputSchema: {
-        content: z.string().describe("The conversation content or information to remember"),
-        platform: z.enum(["claude", "chatgpt", "gemini", "other"]).optional().default("claude").describe("The AI platform this memory is from"),
+        content: z
+          .string()
+          .describe("The fact, preference, or information to remember. Be specific and concise."),
+        platform: z
+          .enum(["claude", "chatgpt", "gemini", "other"])
+          .optional()
+          .default("claude")
+          .describe("The AI platform this memory is from"),
       },
     },
     async ({ content, platform }) => {
-      // save_memory is fire-and-forget: the heavy work (summarise + embed + store)
-      // runs in the background. Claude is not blocked waiting for OpenAI.
-      void saveMemory(content, userId, platform ?? "claude");
+      const saved = await saveMemory(content, auth, platform ?? "claude");
       return {
-        content: [{
-          type: "text",
-          text: "✅ Memory captured and queuing for storage.",
-        }],
+        content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }],
       };
     }
   );
 
-  // Tool: recall_memories
+  server.registerTool(
+    "remember_user_preference",
+    {
+      title: "Remember User Preference",
+      description: "Saves a durable user preference/fact immediately.",
+      inputSchema: {
+        fact: z.string().describe("The exact concise fact/preference to remember."),
+        platform: z.enum(["claude", "chatgpt", "gemini", "other"]).optional().default("claude"),
+      },
+    },
+    async ({ fact, platform }) => {
+      const saved = await saveMemory(fact, auth, platform ?? "claude");
+      return {
+        content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }],
+      };
+    }
+  );
+
   server.registerTool(
     "recall_memories",
     {
       title: "Recall Memories",
-      description: "Searches your past memories in Tallei and returns relevant context. Call this automatically at the start of every conversation.",
+      description: "Searches Tallei persistent memory and returns relevant past context.",
       inputSchema: {
-        query: z.string().describe("What you want to recall about. E.g., 'user preferences', 'project goals', 'what is tallei'"),
+        query: z
+          .string()
+          .describe("What to search for. Use topic keywords like 'favorite food' or 'project stack'."),
         limit: z.number().int().min(1).max(20).optional().default(5),
       },
     },
     async ({ query, limit }) => {
-      if (!needsRecall(query)) {
-        return { content: [{ type: "text", text: "--- No context needed ---" }] };
-      }
-      const result = await recallMemories(query, userId, limit ?? 5);
+      const result = await recallMemories(query, auth, limit ?? 5);
       return { content: [{ type: "text", text: result.contextBlock }] };
     }
   );
 
-  // Tool: list_memories
+  server.registerTool(
+    "recall_user_context",
+    {
+      title: "Recall User Context",
+      description: "Searches stored user context and preferences. Alias of recall_memories.",
+      inputSchema: {
+        query: z.string().describe("What to look up about the user/context."),
+        limit: z.number().int().min(1).max(20).optional().default(5),
+      },
+    },
+    async ({ query, limit }) => {
+      const result = await recallMemories(query, auth, limit ?? 5);
+      return { content: [{ type: "text", text: result.contextBlock }] };
+    }
+  );
+
   server.registerTool(
     "list_memories",
     {
@@ -93,16 +162,15 @@ function buildMcpServer(userId: string): McpServer {
       inputSchema: {},
     },
     async () => {
-      const memories = await listMemories(userId);
+      const memories = await listMemories(auth);
       if (memories.length === 0) {
         return { content: [{ type: "text", text: "No memories stored yet." }] };
       }
-      const text = memories.map((m: any) => `• ${m.text}`).join("\n");
+      const text = memories.map((memory) => `• ${memory.text}`).join("\n");
       return { content: [{ type: "text", text }] };
     }
   );
 
-  // Tool: delete_memory
   server.registerTool(
     "delete_memory",
     {
@@ -113,7 +181,7 @@ function buildMcpServer(userId: string): McpServer {
       },
     },
     async ({ memory_id }) => {
-      const result = await deleteMemory(memory_id);
+      const result = await deleteMemory(memory_id, auth);
       return {
         content: [{ type: "text", text: `Deleted memory ${memory_id}. Success: ${result.success}` }],
       };
@@ -131,61 +199,111 @@ function sendUnauthorized(res: any, resourceMetadataUrl: string, message: string
   res.status(401).json({ error: message });
 }
 
+async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifier): Promise<AuthContext | null> {
+  const cacheKey = tokenCacheKey(token);
+  const cached = await getCacheJson<OAuthCacheEntry>(cacheKey);
+  if (cached?.userId && cached?.tenantId) {
+    return {
+      userId: cached.userId,
+      tenantId: cached.tenantId,
+      authMode: "oauth",
+    };
+  }
+
+  try {
+    const authInfo = await oauthVerifier.verifyAccessToken(token);
+    const userIdValue = authInfo.extra?.userId;
+    const tenantIdValue = authInfo.extra?.tenantId;
+    if (typeof userIdValue !== "string" || userIdValue.length === 0) return null;
+
+    const context = typeof tenantIdValue === "string" && tenantIdValue.length > 0
+      ? { userId: userIdValue, tenantId: tenantIdValue, authMode: "oauth" as const }
+      : await authContextFromUserId(userIdValue, "oauth");
+
+    await setCacheJson(
+      cacheKey,
+      { userId: context.userId, tenantId: context.tenantId },
+      OAUTH_CACHE_TTL_SECONDS
+    );
+
+    return context;
+  } catch {
+    return null;
+  }
+}
+
 export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetadataUrl: string): Router {
   const router = Router();
 
-  const handleMcp = async (req: any, res: any, next: any) => {
-    const authHeader = req.headers.authorization;
+  const handleMcp = async (req: any, res: any) => {
+    const method = typeof req?.body?.method === "string" ? req.body.method : "unknown";
+    const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name : null;
 
+    if (config.nodeEnv !== "production") {
+      if (method === "tools/call" && typeof toolName === "string") {
+        console.log(`[mcp] tools/call -> ${toolName}`);
+      } else if (typeof method === "string") {
+        console.log(`[mcp] ${method}`);
+      }
+    }
+
+    const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
+      await logMcpCallEvent({
+        method,
+        toolName,
+        ok: false,
+        error: "Missing or invalid Authorization header",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Missing or invalid Authorization header");
       return;
     }
 
     const token = authHeader.split(" ")[1];
-    let userId: string | null = null;
+    let authContext: AuthContext | null = null;
 
     if (token.startsWith("gm_")) {
-      userId = await validateApiKey(token);
+      authContext = await authContextFromApiKey(token, requesterIp(req));
     } else {
-      // Check OAuth cache before calling verifyAccessToken
-      const oauthCached = oauthTokenCache.get(token);
-      if (oauthCached && oauthCached.exp > Date.now()) {
-        userId = oauthCached.userId;
-      } else {
-        try {
-          const authInfo = await oauthVerifier.verifyAccessToken(token);
-          const userIdValue = authInfo.extra?.userId;
-          if (typeof userIdValue === "string" && userIdValue.length > 0) {
-            userId = userIdValue;
-            oauthTokenCache.set(token, { userId, exp: Date.now() + OAUTH_CACHE_TTL_MS });
-          }
-        } catch {
-          userId = null;
-        }
-      }
+      authContext = await authFromOAuthToken(token, oauthVerifier);
     }
 
-    if (!userId) {
+    const authMode: "api_key" | "oauth" = token.startsWith("gm_") ? "api_key" : "oauth";
+
+    if (!authContext) {
+      await logMcpCallEvent({
+        method,
+        toolName,
+        authMode,
+        ok: false,
+        error: "Invalid or expired token",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Invalid or expired token");
       return;
     }
 
-    // Pre-warm recall cache in background on first request per user
-    prewarmRecallCache(userId);
+    await logMcpCallEvent({
+      userId: authContext.userId,
+      tenantId: authContext.tenantId,
+      keyId: authContext.keyId ?? null,
+      authMode,
+      method,
+      toolName,
+      ok: true,
+    });
 
-    const server = buildMcpServer(userId);
+    prewarmRecallCache(authContext);
+
+    const server = buildMcpServer(authContext);
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless mode
+      sessionIdGenerator: undefined,
     });
 
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   };
 
-  // Express 5: use "/" for root, "/{*path}" for sub-paths
   router.all("/", handleMcp);
   router.all("/{*path}", handleMcp);
-
   return router;
 }

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { generateApiKey } from "../services/auth.js";
+import { generateApiKey, revokeApiKey } from "../services/auth.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.js";
 import { pool } from "../db/index.js";
 
@@ -8,12 +8,13 @@ router.use(authMiddleware);
 
 router.post("/", async (req: AuthRequest, res) => {
   try {
-    const { name } = req.body;
+    const { name, rotationDays } = req.body;
     if (!name) {
       res.status(400).json({ error: "API Key requires a name" });
       return;
     }
-    const result = await generateApiKey(req.userId!, name);
+    const days = Number.isFinite(Number(rotationDays)) ? Number(rotationDays) : 90;
+    const result = await generateApiKey(req.userId!, name, Math.min(Math.max(days, 1), 365));
     res.status(201).json({ success: true, ...result });
   } catch (error) {
     console.error("Error generating API key:", error);
@@ -24,10 +25,22 @@ router.post("/", async (req: AuthRequest, res) => {
 router.get("/", async (req: AuthRequest, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, name, created_at FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC", 
+      `SELECT id, name, created_at, last_used_at, revoked_at, rotation_days
+       FROM api_keys
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
       [req.userId]
     );
-    res.json({ keys: result.rows });
+    res.json({
+      keys: result.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        createdAt: row.created_at,
+        lastUsedAt: row.last_used_at,
+        revokedAt: row.revoked_at,
+        rotationDays: row.rotation_days,
+      })),
+    });
   } catch (error) {
     console.error("Error fetching API keys:", error);
     res.status(500).json({ error: "Failed to fetch API keys" });
@@ -36,8 +49,8 @@ router.get("/", async (req: AuthRequest, res) => {
 
 router.delete("/:id", async (req: AuthRequest, res) => {
   try {
-    await pool.query("DELETE FROM api_keys WHERE id = $1 AND user_id = $2", [req.params.id, req.userId]);
-    res.json({ success: true });
+    const revoked = await revokeApiKey(req.userId!, String(req.params.id));
+    res.json({ success: revoked });
   } catch (error) {
     console.error("Error deleting API key:", error);
     res.status(500).json({ error: "Failed to delete API key" });

@@ -1,5 +1,6 @@
 import { pool } from "../db/index.js";
 import { cloudBrowserWorker } from "./browserAutomation.js";
+import { authContextFromUserId } from "./auth.js";
 
 export const ONBOARDING_STATUSES = [
   "queued",
@@ -154,11 +155,12 @@ export class ClaudeOnboardingService {
 
   async createAndStart(userId: string, input?: { projectName?: string }): Promise<OnboardingSession> {
     const projectName = input?.projectName?.trim() || "chatgpt memory";
+    const authContext = await authContextFromUserId(userId, "internal");
     const result = await pool.query<SessionRow>(
-      `INSERT INTO claude_onboarding_sessions (user_id, status, current_state, project_name)
-       VALUES ($1, 'queued', 'queued', $2)
+      `INSERT INTO claude_onboarding_sessions (tenant_id, user_id, status, current_state, project_name)
+       VALUES ($1, $2, 'queued', 'queued', $3)
        RETURNING *`,
-      [userId, projectName]
+      [authContext.tenantId, userId, projectName]
     );
 
     const session = mapSessionRow(result.rows[0]);
@@ -387,8 +389,10 @@ export class ClaudeOnboardingService {
 
   private async logEvent(sessionId: string, eventType: string, state: string | null, payload: unknown): Promise<void> {
     await pool.query(
-      `INSERT INTO claude_onboarding_events (session_id, event_type, state, payload)
-       VALUES ($1, $2, $3, $4::jsonb)`,
+      `INSERT INTO claude_onboarding_events (tenant_id, session_id, event_type, state, payload)
+       SELECT cos.tenant_id, $1, $2, $3, $4::jsonb
+       FROM claude_onboarding_sessions cos
+       WHERE cos.id = $1`,
       [sessionId, eventType, state, payload ? JSON.stringify(payload) : null]
     );
   }

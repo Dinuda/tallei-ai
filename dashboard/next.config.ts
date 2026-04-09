@@ -3,19 +3,29 @@ import type { NextConfig } from "next";
 // Backend is always local — never exposed to the internet directly.
 const BACKEND = (process.env.API_PROXY_TARGET ?? "http://127.0.0.1:3000").replace(/\/$/, "");
 
-// The ngrok URL is loaded from NEXTAUTH_URL (set at runtime).
-// allowedDevOrigins is derived at build-time, so we read it from an explicit env var.
-const NGROK_URL =
+const NGROK_ORIGIN =
   process.env.NEXT_PUBLIC_APP_URL ??
   process.env.NEXTAUTH_URL ??
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "";
 
+function toAllowedDevOrigin(value: string): string {
+  try {
+    // Next dev host allow-list expects host[:port], not full URL.
+    return new URL(value).host;
+  } catch {
+    return value.replace(/^https?:\/\//, "");
+  }
+}
+
+const allowedDevOrigins = Array.from(new Set([
+  "localhost:3001",
+  "127.0.0.1:3001",
+  NGROK_ORIGIN ? toAllowedDevOrigin(NGROK_ORIGIN) : "",
+].filter(Boolean)));
+
 const nextConfig: NextConfig = {
-  // Allow the ngrok host as a trusted dev origin (needed for HMR over ngrok)
-  ...(NGROK_URL
-    ? { allowedDevOrigins: [NGROK_URL.replace(/^https?:\/\//, "")] }
-    : {}),
+  allowedDevOrigins,
 
   async rewrites() {
     return {

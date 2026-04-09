@@ -263,7 +263,7 @@ class CloudBrowserWorkerClient {
         state: input.state,
         projectName: input.session.projectName,
         expectedInstructionsHash: getExpectedInstructionsHash(),
-        expectedInstructionSnippet: "recall_memories",
+        expectedInstructionSnippet: "recall_memories|save_memory",
         instruction: input.instruction,
         attempt: input.attempt,
       }),

@@ -6,7 +6,7 @@ import {
   listMemories,
   deleteMemory,
 } from "../services/memory.js";
-import { authMiddleware } from "../middleware/auth.js";
+import { authMiddleware, AuthRequest } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -25,12 +25,15 @@ const recallSchema = z.object({
 });
 
 // --- POST /api/memories ---
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", async (req: AuthRequest, res: Response) => {
   try {
     const body = saveSchema.parse(req.body);
-    const userId = (req as any).userId as string;
+    if (!req.authContext) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
 
-    const result = await saveMemory(body.content, userId, body.platform);
+    const result = await saveMemory(body.content, req.authContext, body.platform, req.ip);
 
     res.status(201).json({
       success: true,
@@ -49,12 +52,15 @@ router.post("/", async (req: Request, res: Response) => {
 });
 
 // --- GET /api/memories/recall ---
-router.get("/recall", async (req: Request, res: Response) => {
+router.get("/recall", async (req: AuthRequest, res: Response) => {
   try {
     const query = recallSchema.parse(req.query);
-    const userId = (req as any).userId as string;
+    if (!req.authContext) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
 
-    const result = await recallMemories(query.q, userId, query.limit);
+    const result = await recallMemories(query.q, req.authContext, query.limit, req.ip);
 
     res.json(result);
   } catch (error) {
@@ -68,10 +74,13 @@ router.get("/recall", async (req: Request, res: Response) => {
 });
 
 // --- GET /api/memories ---
-router.get("/", async (req: Request, res: Response) => {
+router.get("/", async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).userId as string;
-    const memories = await listMemories(userId);
+    if (!req.authContext) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const memories = await listMemories(req.authContext);
     res.json({ memories });
   } catch (error) {
     console.error("Error listing memories:", error);
@@ -80,11 +89,19 @@ router.get("/", async (req: Request, res: Response) => {
 });
 
 // --- DELETE /api/memories/:id ---
-router.delete("/:id", async (req: Request, res: Response) => {
+router.delete("/:id", async (req: AuthRequest, res: Response) => {
   try {
-    const result = await deleteMemory(String(req.params.id));
+    if (!req.authContext) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const result = await deleteMemory(String(req.params.id), req.authContext, req.ip);
     res.json(result);
   } catch (error) {
+    if (error instanceof Error && /not found|not owned/i.test(error.message)) {
+      res.status(404).json({ error: "Memory not found" });
+      return;
+    }
     console.error("Error deleting memory:", error);
     res.status(500).json({ error: "Failed to delete memory" });
   }

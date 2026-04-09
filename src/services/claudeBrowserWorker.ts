@@ -422,9 +422,13 @@ class ClaudeBrowserWorkerService {
     const normalizedInstruction = instructionText?.replace(/\r\n/g, "\n").trim() ?? "";
     const instructionHash = normalizedInstruction ? sha256(normalizedInstruction) : null;
     const expectedHash = input.expectedInstructionsHash?.trim() || "";
-    const expectedSnippet = input.expectedInstructionSnippet?.toLowerCase().trim() || "";
-    const snippetMatched = expectedSnippet
-      ? normalizedInstruction.toLowerCase().includes(expectedSnippet)
+    const expectedSnippetRaw = input.expectedInstructionSnippet?.toLowerCase().trim() || "";
+    const expectedSnippets = expectedSnippetRaw
+      ? expectedSnippetRaw.split("|").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const normalizedInstructionLower = normalizedInstruction.toLowerCase();
+    const snippetMatched = expectedSnippets.length > 0
+      ? expectedSnippets.every((snippet) => normalizedInstructionLower.includes(snippet))
       : true;
     const hashMatched = expectedHash ? instructionHash === expectedHash : true;
     const instructionsMatched = snippetMatched && hashMatched;
@@ -517,7 +521,7 @@ class ClaudeBrowserWorkerService {
   private async getLiveSessionUrl(page: Page): Promise<string | null> {
     try {
       const cdp = await page.context().newCDPSession(page);
-      const live = await cdp.send("Browserless.liveURL");
+      const live = await (cdp as any).send("Browserless.liveURL");
       const value = (
         (live as { liveURL?: unknown }).liveURL ??
         (live as { url?: unknown }).url

@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { pool } from "../db/index.js";
 import { internalMiddleware, AuthRequest } from "../middleware/auth.js";
 import { config } from "../config.js";
+import { authContextFromUserId } from "../services/auth.js";
 
 const router = Router();
 
@@ -19,6 +20,7 @@ const AUTH_CODE_TTL_SECONDS = 10 * 60;
  */
 router.post("/code", internalMiddleware, async (req: AuthRequest, res) => {
   const userId = req.userId!;
+  const authContext = req.authContext ?? (await authContextFromUserId(userId, "internal"));
   const { clientId, codeChallenge, redirectUri, scope, state, resource } = req.body as {
     clientId?: string;
     codeChallenge?: string;
@@ -56,9 +58,19 @@ router.post("/code", internalMiddleware, async (req: AuthRequest, res) => {
 
     await pool.query(
       `INSERT INTO oauth_authorization_codes
-       (code, client_id, user_id, code_challenge, redirect_uri, scope, resource, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'))`,
-      [code, clientId, userId, codeChallenge, redirectUri, scopeValue, resourceValue, AUTH_CODE_TTL_SECONDS]
+       (code, client_id, tenant_id, user_id, code_challenge, redirect_uri, scope, resource, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW() + ($9::int * INTERVAL '1 second'))`,
+      [
+        code,
+        clientId,
+        authContext.tenantId,
+        userId,
+        codeChallenge,
+        redirectUri,
+        scopeValue,
+        resourceValue,
+        AUTH_CODE_TTL_SECONDS,
+      ]
     );
 
     res.json({ code, redirectUri, state: state || null });

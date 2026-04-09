@@ -1,5 +1,11 @@
 node_modules/
 dist/
+.next/
+dashboard/.next/
+dashboard/node_modules/
 .env
 .DS_Store
 *.log
+*.bak
+memory.db
+login-ngrok.png

@@ -1,74 +1,85 @@
-import { Memory } from "mem0ai/oss";
+import { randomUUID, createHash } from "crypto";
 import { config } from "../config.js";
-import { summarizeConversation } from "./summarizer.js";
+import type { AuthContext } from "../types/auth.js";
 import type { ConversationSummary } from "./summarizer.js";
+import { summarizeConversation } from "./summarizer.js";
+import { decryptMemoryContent, encryptMemoryContent, hashMemoryContent } from "./crypto.js";
+import { embedText } from "./embeddings.js";
+import { MemoryRepository } from "../repositories/memoryRepository.js";
+import { VectorRepository } from "../repositories/vectorRepository.js";
+import {
+  legacyDeleteMemory,
+  legacyListMemories,
+  legacyRecallMemories,
+  legacySaveMemory,
+} from "./legacyMemory.js";
 
-// ── Singleton Memory instance ────────────────────────────────────────────────
-// Creating a new Memory() on every call re-initialises DB connections and
-// provider clients from scratch. One shared instance eliminates that overhead.
-let _memory: InstanceType<typeof Memory> | null = null;
+const memoryRepository = new MemoryRepository();
+const vectorRepository = new VectorRepository();
 
-function getMemory(): InstanceType<typeof Memory> {
-  if (!_memory) {
-    _memory = new Memory({
-      llm: {
-        provider: "openai",
-        config: {
-          model: "gpt-4o-mini",
-          apiKey: config.openaiApiKey,
-        },
-      },
-      embedder: {
-        provider: "openai",
-        config: {
-          model: "text-embedding-3-small",
-          apiKey: config.openaiApiKey,
-        },
-      },
-      vectorStore: {
-        provider: "pgvector",
-        config: {
-          user: "tallei",
-          password: "tallei",
-          host: "localhost",
-          port: 5432,
-          dbname: "tallei",
-          collectionName: "tallei_memories",
-          embeddingModelDims: 1536,
-        },
-      },
-    });
-  }
-  return _memory;
-}
-
-// ── Recall cache ─────────────────────────────────────────────────────────────
-// Memories don't change second-to-second. Cache aggressively:
-// - 10 min TTL for normal results (user prefs/context barely changes mid-session)
-// - Cache is invalidated immediately when a new save completes
 const RECALL_TTL_MS = 10 * 60_000;
+
 interface CachedRecall {
   result: RecallResult;
   exp: number;
 }
+
 const recallCache = new Map<string, CachedRecall>();
-
-function recallCacheKey(userId: string, query: string, limit: number): string {
-  return `${userId}:${limit}:${query}`;
-}
-
-// ── Cache pre-warm ────────────────────────────────────────────────────────────
-// Call this as soon as a user is authenticated. Kicks off a background embed
-// for the most common query so the first real recall is a cache hit (~5ms).
 const prewarmedUsers = new Set<string>();
 
-export function prewarmRecallCache(userId: string): void {
-  if (prewarmedUsers.has(userId)) return;
-  prewarmedUsers.add(userId);
-  void recallMemories("user projects preferences and tech stack", userId, 5).catch(() => {});
+function cacheScopeKey(auth: AuthContext): string {
+  return `${auth.tenantId}:${auth.userId}`;
 }
 
-// ── Types ────────────────────────────────────────────────────────────────────
+function recallCacheKey(auth: AuthContext, query: string, limit: number): string {
+  return `${cacheScopeKey(auth)}:${limit}:${query}`;
+}
+
+function invalidateRecallCache(auth: AuthContext): void {
+  const prefix = `${cacheScopeKey(auth)}:`;
+  for (const key of recallCache.keys()) {
+    if (key.startsWith(prefix)) {
+      recallCache.delete(key);
+    }
+  }
+}
+
+function buildFallbackSummary(rawContent: string): ConversationSummary {
+  const cleaned = rawContent.trim().replace(/\s+/g, " ");
+  const snippet = cleaned.slice(0, 180);
+  return {
+    title: snippet.length > 0 ? snippet : "Untitled Memory",
+    keyPoints: snippet.length > 0 ? [snippet] : [],
+    decisions: [],
+    summary: snippet.length > 0 ? snippet : "No summary available.",
+  };
+}
+
+function buildMemoryText(platform: string, summary: ConversationSummary, rawContent: string): string {
+  return [
+    `[${platform.toUpperCase()}] ${summary.title}`,
+    summary.keyPoints.length > 0 ? `Key Points: ${summary.keyPoints.join("; ")}` : "",
+    summary.decisions.length > 0 ? `Decisions: ${summary.decisions.join("; ")}` : "",
+    `Summary: ${summary.summary}`,
+    `Raw: ${rawContent.trim()}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function ipHash(ip?: string): string | null {
+  if (!ip) return null;
+  return createHash("sha256").update(ip).digest("hex");
+}
+
+function compareShadowResults(primary: RecallResult, legacy: { memories: Array<{ id: string }> }): boolean {
+  if (primary.memories.length !== legacy.memories.length) return false;
+  const left = primary.memories.map((m) => m.id).sort();
+  const right = legacy.memories.map((m) => m.id).sort();
+  if (left.length !== right.length) return false;
+  return left.every((value, idx) => value === right[idx]);
+}
+
 export interface SaveMemoryResult {
   memoryId: string;
   title: string;
@@ -85,90 +96,126 @@ export interface RecallResult {
   }>;
 }
 
-// ── save_memory ──────────────────────────────────────────────────────────────
-// The heavy work (summarise → embed → store) runs in the background.
-// The caller receives a placeholder result immediately so Claude is not blocked.
+export function prewarmRecallCache(auth: AuthContext): void {
+  const key = cacheScopeKey(auth);
+  if (prewarmedUsers.has(key)) return;
+  prewarmedUsers.add(key);
+  void recallMemories("user projects preferences and tech stack", auth, 5).catch(() => {});
+}
+
 export async function saveMemory(
   content: string,
-  userId: string,
-  platform: string
+  auth: AuthContext,
+  platform: string,
+  requesterIp?: string
 ): Promise<SaveMemoryResult> {
-  // Return a stub immediately; persist in the background.
-  const placeholder: SaveMemoryResult = {
-    memoryId: crypto.randomUUID(),
-    title: "Processing…",
-    summary: {
-      title: "Processing…",
-      keyPoints: [],
-      decisions: [],
-      summary: "",
-    },
-  };
-
-  // Fire-and-forget — errors are logged but don't block the response.
-  void persistMemoryInBackground(content, userId, platform).catch((err) => {
-    console.error("[memory] background save failed:", err);
+  const summary = await summarizeConversation(content).catch((err) => {
+    console.error("[memory] summarize failed, using fallback:", err);
+    return buildFallbackSummary(content);
   });
 
-  return placeholder;
-}
+  const memoryText = buildMemoryText(platform, summary, content);
+  const encrypted = encryptMemoryContent(memoryText);
+  const contentHash = hashMemoryContent(memoryText);
+  const createdAt = new Date().toISOString();
+  const memoryId = randomUUID();
 
-async function persistMemoryInBackground(
-  content: string,
-  userId: string,
-  platform: string
-): Promise<void> {
-  // Run summariser and start building the store text.
-  const summary = await summarizeConversation(content);
-
-  const memoryText = [
-    `[${platform.toUpperCase()}] ${summary.title}`,
-    `Key Points: ${summary.keyPoints.join("; ")}`,
-    summary.decisions.length > 0
-      ? `Decisions: ${summary.decisions.join("; ")}`
-      : "",
-    `Summary: ${summary.summary}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const memory = getMemory();
-  await memory.add(memoryText, {
-    userId,
-    metadata: { platform, title: summary.title },
+  const vector = await embedText(memoryText);
+  const { pointId } = await vectorRepository.upsertMemoryVector({
+    auth,
+    memoryId,
+    vector,
+    platform,
+    createdAt,
   });
 
-  // Invalidate cached recalls for this user so the next recall is fresh.
-  for (const key of recallCache.keys()) {
-    if (key.startsWith(`${userId}:`)) recallCache.delete(key);
+  await memoryRepository.create(auth, {
+    id: memoryId,
+    contentCiphertext: encrypted,
+    contentHash,
+    platform,
+    summaryJson: summary,
+    qdrantPointId: pointId,
+  });
+
+  await memoryRepository.logEvent({
+    auth,
+    action: "save",
+    memoryId,
+    ipHash: ipHash(requesterIp),
+    metadata: { platform },
+  });
+
+  invalidateRecallCache(auth);
+
+  if (config.memoryDualWriteEnabled) {
+    void legacySaveMemory(content, auth.userId, platform).catch((error) => {
+      console.error("[memory] legacy dual-write failed", error);
+    });
   }
+
+  return {
+    memoryId,
+    title: summary.title,
+    summary,
+  };
 }
 
-// ── recall_memories ──────────────────────────────────────────────────────────
 export async function recallMemories(
   query: string,
-  userId: string,
-  limit: number = 5
+  auth: AuthContext,
+  limit = 5,
+  requesterIp?: string
 ): Promise<RecallResult> {
-  const cacheKey = recallCacheKey(userId, query, limit);
+  const cacheKey = recallCacheKey(auth, query, limit);
   const cached = recallCache.get(cacheKey);
   if (cached && cached.exp > Date.now()) {
     return cached.result;
   }
 
-  const memory = getMemory();
-  const results = await memory.search(query, { userId, limit });
+  const queryVector = await embedText(query);
+  const vectorResults = await vectorRepository.searchVectors(auth, queryVector, limit);
+  const memoryIds = vectorResults.map((v) => v.memoryId);
+  const rows = await memoryRepository.getByIds(auth, memoryIds);
 
-  const memories = (results?.results ?? []).map((r: any) => ({
-    id: r.id ?? "",
-    text: r.memory ?? "",
-    score: r.score ?? 0,
-    metadata: r.metadata ?? {},
-  }));
+  const rowMap = new Map(rows.map((row) => [row.id, row]));
+  const memories = vectorResults
+    .map((vectorHit) => {
+      const row = rowMap.get(vectorHit.memoryId);
+      if (!row) return null;
 
-  const lines = memories.map((m) => {
-    const platform = (m.metadata?.platform as string) ?? "unknown";
-    return `[${platform.toUpperCase()}] ${m.text}`;
+      let text = "";
+      try {
+        text = decryptMemoryContent(row.content_ciphertext);
+      } catch (error) {
+        console.error("[memory] decrypt failed for memory", row.id, error);
+        text = "[Encrypted memory unavailable]";
+      }
+
+      const metadata = (row.summary_json && typeof row.summary_json === "object"
+        ? (row.summary_json as Record<string, unknown>)
+        : {}) as Record<string, unknown>;
+
+      return {
+        id: row.id,
+        text,
+        score: vectorHit.score,
+        metadata: {
+          ...metadata,
+          platform: row.platform,
+          createdAt: row.created_at,
+        },
+      };
+    })
+    .filter((memory): memory is NonNullable<typeof memory> => Boolean(memory));
+
+  const lines = memories.map((memory) => {
+    const platformValue = memory.metadata.platform;
+    const platform =
+      typeof platformValue === "string" && platformValue.length > 0
+        ? platformValue
+        : "unknown";
+    return `[${platform.toUpperCase()}] ${memory.text}`;
   });
 
   const contextBlock =
@@ -178,24 +225,113 @@ export async function recallMemories(
 
   const result: RecallResult = { contextBlock, memories };
   recallCache.set(cacheKey, { result, exp: Date.now() + RECALL_TTL_MS });
+
+  await memoryRepository.logEvent({
+    auth,
+    action: "recall",
+    ipHash: ipHash(requesterIp),
+    metadata: { query, limit, hits: memories.length },
+  });
+
+  if (config.memoryShadowReadEnabled && config.memoryDualWriteEnabled) {
+    void legacyRecallMemories(query, auth.userId, limit)
+      .then(async (legacyResult) => {
+        if (!compareShadowResults(result, legacyResult)) {
+          await memoryRepository.logEvent({
+            auth,
+            action: "shadow_divergence",
+            metadata: {
+              query,
+              limit,
+              primaryCount: result.memories.length,
+              legacyCount: legacyResult.memories.length,
+            },
+          });
+        }
+      })
+      .catch((error) => {
+        console.error("[memory] shadow-read failed", error);
+      });
+  }
+
   return result;
 }
 
-// ── list_memories ─────────────────────────────────────────────────────────────
-export async function listMemories(userId: string) {
-  const memory = getMemory();
-  const results = await memory.getAll({ userId });
-  return (results?.results ?? []).map((r: any) => ({
-    id: r.id ?? "",
-    text: r.memory ?? "",
-    metadata: r.metadata ?? {},
-    createdAt: r.created_at ?? null,
-  }));
+export async function listMemories(auth: AuthContext) {
+  const rows = await memoryRepository.list(auth, 200);
+
+  const memories = rows.map((row) => {
+    let text = "";
+    try {
+      text = decryptMemoryContent(row.content_ciphertext);
+    } catch {
+      text = "[Encrypted memory unavailable]";
+    }
+
+    const metadata = (row.summary_json && typeof row.summary_json === "object"
+      ? (row.summary_json as Record<string, unknown>)
+      : {}) as Record<string, unknown>;
+
+    return {
+      id: row.id,
+      text,
+      metadata: {
+        ...metadata,
+        platform: row.platform,
+      },
+      createdAt: row.created_at,
+    };
+  });
+
+  await memoryRepository.logEvent({
+    auth,
+    action: "list",
+    metadata: { count: memories.length },
+  });
+
+  if (config.memoryShadowReadEnabled && config.memoryDualWriteEnabled) {
+    void legacyListMemories(auth.userId)
+      .then(async (legacy) => {
+        if (legacy.length !== memories.length) {
+          await memoryRepository.logEvent({
+            auth,
+            action: "shadow_divergence",
+            metadata: {
+              operation: "list",
+              primaryCount: memories.length,
+              legacyCount: legacy.length,
+            },
+          });
+        }
+      })
+      .catch((error) => {
+        console.error("[memory] legacy list shadow-read failed", error);
+      });
+  }
+
+  return memories;
 }
 
-// ── delete_memory ─────────────────────────────────────────────────────────────
-export async function deleteMemory(memoryId: string) {
-  const memory = getMemory();
-  await memory.delete(memoryId);
+export async function deleteMemory(memoryId: string, auth: AuthContext, requesterIp?: string) {
+  const deleted = await memoryRepository.softDeleteScoped(auth, memoryId);
+  if (!deleted) {
+    throw new Error("Memory not found or not owned by user");
+  }
+
+  await vectorRepository.deleteMemoryVector(auth, memoryId);
+  await memoryRepository.logEvent({
+    auth,
+    action: "delete",
+    memoryId,
+    ipHash: ipHash(requesterIp),
+  });
+
+  if (config.memoryDualWriteEnabled) {
+    void legacyDeleteMemory(memoryId).catch((error) => {
+      console.error("[memory] legacy delete failed", error);
+    });
+  }
+
+  invalidateRecallCache(auth);
   return { success: true };
 }

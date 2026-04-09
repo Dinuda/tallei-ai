@@ -15,8 +15,7 @@ export function TopNav() {
     <nav className="site-navbar" aria-label="Primary">
       <div className="container site-nav-inner">
         <Link href="/" className="site-logo">
-          <span className="logo-mark">T</span>
-          Tallei
+          <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "24px", width: "auto" }} />
         </Link>
 
         <div className="site-nav-actions">
