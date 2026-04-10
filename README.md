@@ -63,8 +63,7 @@ Optional local desktop helper:
 npm run setup:claude
 ```
 
-### ChatGPT (Custom GPT Actions)
-
+### ChatGPT 
 1. Open `/dashboard/setup` and select `ChatGPT`.
 2. Generate an API key inline (shown once).
 3. Copy the OpenAPI URL: `https://<your-public-domain>/api/chatgpt/openapi.json`.
