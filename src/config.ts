@@ -31,19 +31,41 @@ function readStringEnv(name: string, fallback = ""): string {
   return raw;
 }
 
+function normalizeBaseUrl(raw: string): string {
+  const value = raw.trim();
+  if (!value) return value;
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.pathname === "/mcp" || parsed.pathname.endsWith("/mcp/")) {
+      parsed.pathname = "/";
+    }
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return value.replace(/\/mcp\/?$/, "").replace(/\/$/, "");
+  }
+}
+
 const port = readIntEnv("PORT", 3000);
 const localBaseUrl = `http://localhost:${port}`;
+const configuredPublicBaseUrl = process.env.PUBLIC_BASE_URL || localBaseUrl;
+const publicBaseUrl = normalizeBaseUrl(configuredPublicBaseUrl);
 
 export const config = {
   port,
   nodeEnv: process.env.NODE_ENV || "development",
-  publicBaseUrl: process.env.PUBLIC_BASE_URL || localBaseUrl,
-  dashboardBaseUrl: process.env.DASHBOARD_BASE_URL || process.env.PUBLIC_BASE_URL || localBaseUrl,
-  frontendUrl: process.env.FRONTEND_URL || process.env.PUBLIC_BASE_URL || "http://localhost:3001",
+  publicBaseUrl,
+  dashboardBaseUrl: normalizeBaseUrl(
+    process.env.DASHBOARD_BASE_URL || process.env.PUBLIC_BASE_URL || localBaseUrl
+  ),
+  frontendUrl: normalizeBaseUrl(
+    process.env.FRONTEND_URL || process.env.PUBLIC_BASE_URL || "http://localhost:3001"
+  ),
   internalApiSecret: requireEnv("INTERNAL_API_SECRET"),
   // Public URL for the MCP endpoint used in OAuth metadata.
   mcpPublicUrl: process.env.MCP_URL || "",
   databaseUrl: requireEnv("DATABASE_URL"),
+  databaseUrlFallback: readStringEnv("DATABASE_URL_FALLBACK", "postgresql://tallei:tallei@localhost:5432/tallei"),
   openaiApiKey: requireEnv("OPENAI_API_KEY"),
   jwtSecret: requireEnv("JWT_SECRET"),
   supabaseUrl: readStringEnv("SUPABASE_URL"),

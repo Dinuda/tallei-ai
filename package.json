@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "setup:claude": "node scripts/setup-claude-mcp.mjs"
+    "setup:claude": "node scripts/setup-claude-mcp.mjs",
+    "setup:chatgpt": "node scripts/setup-chatgpt-actions.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

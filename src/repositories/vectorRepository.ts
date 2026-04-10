@@ -22,7 +22,7 @@ function getQdrantClient(): QdrantClient {
     _qdrant = new QdrantClient({
       url: config.qdrantUrl,
       apiKey: config.qdrantApiKey || undefined,
-      timeout: 30,
+      timeout: config.nodeEnv === "production" ? 30 : 4,
     });
   }
   return _qdrant;

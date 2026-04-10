@@ -18,6 +18,9 @@ const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
 
 const RECALL_TTL_MS = 10 * 60_000;
+const VECTOR_BYPASS_TTL_MS = config.nodeEnv === "production" ? 0 : 60_000;
+const VECTOR_WARN_INTERVAL_MS = 30_000;
+const MEMORY_DB_TIMEOUT_MS = config.nodeEnv === "production" ? 10_000 : 2_500;
 
 interface CachedRecall {
   result: RecallResult;
@@ -26,6 +29,9 @@ interface CachedRecall {
 
 const recallCache = new Map<string, CachedRecall>();
 const prewarmedUsers = new Set<string>();
+let vectorBypassUntil = 0;
+let lastVectorWarnAt = 0;
+let lastMemoryDbWarnAt = 0;
 
 function cacheScopeKey(auth: AuthContext): string {
   return `${auth.tenantId}:${auth.userId}`;
@@ -42,6 +48,80 @@ function invalidateRecallCache(auth: AuthContext): void {
       recallCache.delete(key);
     }
   }
+}
+
+function isVectorInfraError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /Qdrant|timeout|aborted|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|No route to host/i.test(error.message);
+}
+
+function shouldBypassVector(): boolean {
+  return VECTOR_BYPASS_TTL_MS > 0 && Date.now() < vectorBypassUntil;
+}
+
+function noteVectorFailure(error: unknown, context: string): void {
+  if (VECTOR_BYPASS_TTL_MS > 0 && isVectorInfraError(error)) {
+    vectorBypassUntil = Date.now() + VECTOR_BYPASS_TTL_MS;
+  }
+
+  if (config.nodeEnv !== "production") {
+    const now = Date.now();
+    if (now - lastVectorWarnAt >= VECTOR_WARN_INTERVAL_MS) {
+      lastVectorWarnAt = now;
+      console.warn(`[memory] vector pipeline degraded (${context})`, error);
+    }
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+function noteMemoryDbFailure(error: unknown, context: string): void {
+  if (config.nodeEnv === "production") return;
+  const now = Date.now();
+  if (now - lastMemoryDbWarnAt < VECTOR_WARN_INTERVAL_MS) return;
+  lastMemoryDbWarnAt = now;
+  console.warn(`[memory] db pipeline degraded (${context})`, error);
+}
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+}
+
+function fallbackScore(query: string, text: string, createdAt: string): number {
+  const queryTokens = new Set(tokenize(query));
+  const textTokens = tokenize(text);
+  let overlap = 0;
+  for (const token of textTokens) {
+    if (queryTokens.has(token)) overlap += 1;
+  }
+
+  const recencyDays = Math.max(
+    0,
+    (Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24)
+  );
+  const recencyScore = Math.max(0, 1 - recencyDays / 30);
+  const lexicalScore = queryTokens.size === 0 ? 0 : overlap / queryTokens.size;
+
+  return Number((lexicalScore * 0.75 + recencyScore * 0.25).toFixed(4));
 }
 
 function buildFallbackSummary(rawContent: string): ConversationSummary {
@@ -120,14 +200,22 @@ export async function saveMemory(
   const createdAt = new Date().toISOString();
   const memoryId = randomUUID();
 
-  const vector = await embedText(memoryText);
-  const { pointId } = await vectorRepository.upsertMemoryVector({
-    auth,
-    memoryId,
-    vector,
-    platform,
-    createdAt,
-  });
+  let pointId: string = memoryId;
+  if (!shouldBypassVector()) {
+    try {
+      const vector = await embedText(memoryText);
+      const upserted = await vectorRepository.upsertMemoryVector({
+        auth,
+        memoryId,
+        vector,
+        platform,
+        createdAt,
+      });
+      pointId = upserted.pointId;
+    } catch (error) {
+      noteVectorFailure(error, "save");
+    }
+  }
 
   await memoryRepository.create(auth, {
     id: memoryId,
@@ -138,12 +226,14 @@ export async function saveMemory(
     qdrantPointId: pointId,
   });
 
-  await memoryRepository.logEvent({
+  void memoryRepository.logEvent({
     auth,
     action: "save",
     memoryId,
     ipHash: ipHash(requesterIp),
     metadata: { platform },
+  }).catch((error) => {
+    noteMemoryDbFailure(error, "save-log");
   });
 
   invalidateRecallCache(auth);
@@ -173,13 +263,26 @@ export async function recallMemories(
     return cached.result;
   }
 
-  const queryVector = await embedText(query);
-  const vectorResults = await vectorRepository.searchVectors(auth, queryVector, limit);
-  const memoryIds = vectorResults.map((v) => v.memoryId);
-  const rows = await memoryRepository.getByIds(auth, memoryIds);
+  let vectorResults: Array<{ pointId: string; memoryId: string; score: number }> = [];
+  let rows = [] as Awaited<ReturnType<typeof memoryRepository.getByIds>>;
+
+  if (!shouldBypassVector()) {
+    try {
+      const queryVector = await embedText(query);
+      vectorResults = await vectorRepository.searchVectors(auth, queryVector, limit);
+      const memoryIds = vectorResults.map((v) => v.memoryId);
+      rows = await withTimeout(
+        memoryRepository.getByIds(auth, memoryIds),
+        MEMORY_DB_TIMEOUT_MS,
+        "recall.getByIds"
+      );
+    } catch (error) {
+      noteVectorFailure(error, "recall");
+    }
+  }
 
   const rowMap = new Map(rows.map((row) => [row.id, row]));
-  const memories = vectorResults
+  let memories = vectorResults
     .map((vectorHit) => {
       const row = rowMap.get(vectorHit.memoryId);
       if (!row) return null;
@@ -209,6 +312,47 @@ export async function recallMemories(
     })
     .filter((memory): memory is NonNullable<typeof memory> => Boolean(memory));
 
+  if (memories.length === 0) {
+    let fallbackRows = [] as Awaited<ReturnType<typeof memoryRepository.list>>;
+    try {
+      fallbackRows = await withTimeout(
+        memoryRepository.list(auth, Math.max(limit * 6, 30)),
+        MEMORY_DB_TIMEOUT_MS,
+        "recall.listFallback"
+      );
+    } catch (error) {
+      noteMemoryDbFailure(error, "recall-list-fallback");
+      fallbackRows = [];
+    }
+    memories = fallbackRows
+      .map((row) => {
+        let text = "";
+        try {
+          text = decryptMemoryContent(row.content_ciphertext);
+        } catch {
+          text = "[Encrypted memory unavailable]";
+        }
+
+        const metadata = (row.summary_json && typeof row.summary_json === "object"
+          ? (row.summary_json as Record<string, unknown>)
+          : {}) as Record<string, unknown>;
+
+        return {
+          id: row.id,
+          text,
+          score: fallbackScore(query, text, row.created_at),
+          metadata: {
+            ...metadata,
+            platform: row.platform,
+            createdAt: row.created_at,
+            retrieval: "fallback",
+          },
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+
   const lines = memories.map((memory) => {
     const platformValue = memory.metadata.platform;
     const platform =
@@ -226,11 +370,13 @@ export async function recallMemories(
   const result: RecallResult = { contextBlock, memories };
   recallCache.set(cacheKey, { result, exp: Date.now() + RECALL_TTL_MS });
 
-  await memoryRepository.logEvent({
+  void memoryRepository.logEvent({
     auth,
     action: "recall",
     ipHash: ipHash(requesterIp),
     metadata: { query, limit, hits: memories.length },
+  }).catch((error) => {
+    noteMemoryDbFailure(error, "recall-log");
   });
 
   if (config.memoryShadowReadEnabled && config.memoryDualWriteEnabled) {
@@ -283,10 +429,12 @@ export async function listMemories(auth: AuthContext) {
     };
   });
 
-  await memoryRepository.logEvent({
+  void memoryRepository.logEvent({
     auth,
     action: "list",
     metadata: { count: memories.length },
+  }).catch((error) => {
+    noteMemoryDbFailure(error, "list-log");
   });
 
   if (config.memoryShadowReadEnabled && config.memoryDualWriteEnabled) {
@@ -318,12 +466,18 @@ export async function deleteMemory(memoryId: string, auth: AuthContext, requeste
     throw new Error("Memory not found or not owned by user");
   }
 
-  await vectorRepository.deleteMemoryVector(auth, memoryId);
-  await memoryRepository.logEvent({
+  try {
+    await vectorRepository.deleteMemoryVector(auth, memoryId);
+  } catch (error) {
+    noteVectorFailure(error, "delete");
+  }
+  void memoryRepository.logEvent({
     auth,
     action: "delete",
     memoryId,
     ipHash: ipHash(requesterIp),
+  }).catch((error) => {
+    noteMemoryDbFailure(error, "delete-log");
   });
 
   if (config.memoryDualWriteEnabled) {

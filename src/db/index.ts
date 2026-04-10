@@ -3,11 +3,55 @@ import { config } from "../config.js";
 
 const { Pool } = pg;
 
-export const pool = new Pool({
-  connectionString: config.databaseUrl,
-});
+function createPool(connectionString: string): pg.Pool {
+  return new Pool({
+    connectionString,
+    connectionTimeoutMillis: 5000,
+    query_timeout: 45000,
+  });
+}
+
+function shouldFallback(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const anyError = error as Error & { code?: string };
+  const code = anyError.code || "";
+  return (
+    code === "ENOTFOUND" ||
+    code === "ECONNREFUSED" ||
+    code === "ETIMEDOUT" ||
+    /getaddrinfo|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(anyError.message)
+  );
+}
+
+export let pool = createPool(config.databaseUrl);
+let fallbackAttempted = false;
 
 type DbClient = pg.PoolClient;
+
+async function connectWithFallback(): Promise<DbClient> {
+  try {
+    return await pool.connect();
+  } catch (error) {
+    const fallbackUrl = config.databaseUrlFallback;
+    const canFallback =
+      !fallbackAttempted &&
+      config.nodeEnv !== "production" &&
+      Boolean(fallbackUrl) &&
+      fallbackUrl !== config.databaseUrl &&
+      shouldFallback(error);
+
+    if (!canFallback) {
+      throw error;
+    }
+
+    fallbackAttempted = true;
+    console.warn(
+      `[db] primary DATABASE_URL unreachable; retrying with DATABASE_URL_FALLBACK (${fallbackUrl})`
+    );
+    pool = createPool(fallbackUrl);
+    return await pool.connect();
+  }
+}
 
 async function ensurePrimaryTenantMembership(client: DbClient, userId: string, email: string | null): Promise<void> {
   const existing = await client.query<{ tenant_id: string }>(
@@ -161,7 +205,7 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
 }
 
 export async function initDb() {
-  const client = await pool.connect();
+  const client = await connectWithFallback();
   try {
     await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 

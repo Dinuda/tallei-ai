@@ -11,6 +11,7 @@ import keysRouter from "./routes/keys.js";
 import memoriesRouter from "./routes/memories.js";
 import mcpEventsRouter from "./routes/mcpEvents.js";
 import mcpCodeRouter from "./routes/mcp.js";
+import chatgptRouter from "./routes/chatgpt.js";
 import { createMcpRouter } from "./mcp/server.js";
 import { TalleiOAuthProvider } from "./mcp/oauth.js";
 import { createRateLimitMiddleware } from "./middleware/rateLimit.js";
@@ -68,6 +69,7 @@ function createApp() {
   app.use("/api/auth", authRouter);
   app.use("/api/keys", keysRouter);
   app.use("/api/memories", memoryRateLimit, memoriesRouter);
+  app.use("/api/chatgpt", memoryRateLimit, chatgptRouter);
   app.use("/api/mcp/events", mcpEventsRouter);
   app.use("/api/mcp", mcpCodeRouter);
   app.use("/api/claude-onboarding", claudeOnboardingRouter);

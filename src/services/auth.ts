@@ -1,6 +1,6 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { randomBytes, createHash } from "crypto";
+import { randomBytes, createHash, randomUUID } from "crypto";
 import { pool } from "../db/index.js";
 import { config } from "../config.js";
 import { ensurePrimaryTenantForUser, resolveAuthContext } from "./tenancy.js";
@@ -27,6 +27,117 @@ interface ApiKeyValidation {
 
 const DEFAULT_NEXT_PATH = "/dashboard/setup";
 const API_KEY_CACHE_TTL_SECONDS = 5 * 60;
+const apiKeyDbTimeoutRaw =
+  process.env.API_KEY_DB_TIMEOUT_MS || (config.nodeEnv === "production" ? "15000" : "2500");
+const apiKeyDbTimeoutParsed = Number.parseInt(apiKeyDbTimeoutRaw, 10);
+const API_KEY_DB_TIMEOUT_MS = Number.isFinite(apiKeyDbTimeoutParsed)
+  ? apiKeyDbTimeoutParsed
+  : (config.nodeEnv === "production" ? 15_000 : 2_500);
+const API_KEY_DB_COOLDOWN_MS = config.nodeEnv === "production" ? 0 : 60_000;
+const API_KEY_DB_WARN_INTERVAL_MS = 30_000;
+
+interface EphemeralApiKey {
+  id: string;
+  userId: string;
+  tenantId: string;
+  keyHash: string;
+  name: string;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+const ephemeralApiKeysByHash = new Map<string, EphemeralApiKey>();
+const ephemeralApiKeysByUser = new Map<string, EphemeralApiKey[]>();
+let apiKeyDbBypassUntil = 0;
+let lastApiKeyDbWarnAt = 0;
+
+function isDbConnectivityError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    /timed out/i.test(error.message) ||
+    /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|getaddrinfo|No route to host/i.test(error.message)
+  );
+}
+
+function logApiKeyDbWarning(message: string, error: unknown): void {
+  if (config.nodeEnv === "production") return;
+  const now = Date.now();
+  if (now - lastApiKeyDbWarnAt < API_KEY_DB_WARN_INTERVAL_MS) return;
+  lastApiKeyDbWarnAt = now;
+  console.warn(message, error);
+}
+
+function shouldBypassApiKeyDbPath(): boolean {
+  return API_KEY_DB_COOLDOWN_MS > 0 && Date.now() < apiKeyDbBypassUntil;
+}
+
+function noteApiKeyDbFailure(error: unknown, message: string): void {
+  if (API_KEY_DB_COOLDOWN_MS > 0 && isDbConnectivityError(error)) {
+    apiKeyDbBypassUntil = Date.now() + API_KEY_DB_COOLDOWN_MS;
+  }
+  logApiKeyDbWarning(message, error);
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+function storeEphemeralApiKey(input: {
+  id: string;
+  userId: string;
+  tenantId: string;
+  keyHash: string;
+  name: string;
+}): void {
+  const record: EphemeralApiKey = {
+    id: input.id,
+    userId: input.userId,
+    tenantId: input.tenantId,
+    keyHash: input.keyHash,
+    name: input.name,
+    createdAt: new Date().toISOString(),
+    revokedAt: null,
+  };
+
+  ephemeralApiKeysByHash.set(record.keyHash, record);
+  const existing = ephemeralApiKeysByUser.get(record.userId) ?? [];
+  existing.unshift(record);
+  ephemeralApiKeysByUser.set(record.userId, existing);
+}
+
+export function listEphemeralApiKeys(userId: string): Array<{
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: null;
+  revokedAt: string | null;
+  rotationDays: number;
+}> {
+  const rows = ephemeralApiKeysByUser.get(userId) ?? [];
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    createdAt: row.createdAt,
+    lastUsedAt: null,
+    revokedAt: row.revokedAt,
+    rotationDays: 90,
+  }));
+}
 
 function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
@@ -176,35 +287,114 @@ export async function login(email: string, passwordRaw: string): Promise<{ token
 export async function generateApiKey(
   userId: string,
   name: string,
-  rotationDays = 90
+  rotationDays = 90,
+  tenantIdInput?: string | null
 ): Promise<{ key: string; id: string }> {
-  const auth = await resolveAuthContext(userId, "internal");
+  const tenantId =
+    tenantIdInput === undefined
+      ? (await resolveAuthContext(userId, "internal")).tenantId
+      : tenantIdInput;
 
   const rawKey = "gm_" + randomBytes(32).toString("hex");
   const hash = createHash("sha256").update(rawKey).digest("hex");
 
-  const result = await pool.query<{ id: string }>(
-    `INSERT INTO api_keys (tenant_id, user_id, key_hash, name, rotation_days)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id`,
-    [auth.tenantId, userId, hash, name, rotationDays]
-  );
+  if (config.nodeEnv !== "production" && shouldBypassApiKeyDbPath()) {
+    const fallbackId = randomUUID();
+    storeEphemeralApiKey({
+      id: fallbackId,
+      userId,
+      tenantId: tenantId || userId,
+      keyHash: hash,
+      name,
+    });
+    return { key: rawKey, id: fallbackId };
+  }
 
-  return { key: rawKey, id: result.rows[0].id };
+  try {
+    const result = await withTimeout(
+      pool.query<{ id: string }>(
+        `INSERT INTO api_keys (tenant_id, user_id, key_hash, name, rotation_days)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id`,
+        [tenantId, userId, hash, name, rotationDays]
+      ),
+      API_KEY_DB_TIMEOUT_MS,
+      "generateApiKey"
+    );
+
+    const id = result.rows[0]?.id;
+    if (!id) {
+      throw new Error("api_keys insert returned no id");
+    }
+
+    return { key: rawKey, id };
+  } catch (error) {
+    if (config.nodeEnv === "production") {
+      throw error;
+    }
+
+    const fallbackId = randomUUID();
+    storeEphemeralApiKey({
+      id: fallbackId,
+      userId,
+      tenantId: tenantId || userId,
+      keyHash: hash,
+      name,
+    });
+    noteApiKeyDbFailure(error, "[auth] generateApiKey falling back to ephemeral key store:");
+    return { key: rawKey, id: fallbackId };
+  }
 }
 
-export async function revokeApiKey(userId: string, keyId: string): Promise<boolean> {
-  const auth = await resolveAuthContext(userId, "internal");
-  const result = await pool.query<{ key_hash: string }>(
-    `UPDATE api_keys
-     SET revoked_at = NOW()
-     WHERE id = $1
-       AND user_id = $2
-       AND tenant_id = $3
-       AND revoked_at IS NULL
-     RETURNING key_hash`,
-    [keyId, userId, auth.tenantId]
-  );
+export async function revokeApiKey(
+  userId: string,
+  keyId: string,
+  tenantIdInput?: string | null
+): Promise<boolean> {
+  const tenantId =
+    tenantIdInput === undefined
+      ? (await resolveAuthContext(userId, "internal")).tenantId
+      : tenantIdInput;
+
+  if (config.nodeEnv !== "production" && shouldBypassApiKeyDbPath()) {
+    const userKeys = ephemeralApiKeysByUser.get(userId) ?? [];
+    const key = userKeys.find((entry) => entry.id === keyId && entry.revokedAt === null);
+    if (key) {
+      key.revokedAt = new Date().toISOString();
+      return true;
+    }
+    return false;
+  }
+
+  let result;
+  try {
+    result = await withTimeout(
+      pool.query<{ key_hash: string }>(
+        `UPDATE api_keys
+         SET revoked_at = NOW()
+         WHERE id = $1
+           AND user_id = $2
+           AND ($3::uuid IS NULL OR tenant_id = $3::uuid)
+           AND revoked_at IS NULL
+         RETURNING key_hash`,
+        [keyId, userId, tenantId]
+      ),
+      API_KEY_DB_TIMEOUT_MS,
+      "revokeApiKey"
+    );
+  } catch (error) {
+    const userKeys = ephemeralApiKeysByUser.get(userId) ?? [];
+    const key = userKeys.find((entry) => entry.id === keyId && entry.revokedAt === null);
+    if (key) {
+      key.revokedAt = new Date().toISOString();
+      return true;
+    }
+    if (config.nodeEnv === "production") {
+      throw error;
+    }
+    noteApiKeyDbFailure(error, "[auth] revokeApiKey DB path failed:");
+    return false;
+  }
 
   if (result.rows.length > 0) {
     const cacheKey = apiKeyCacheKey(result.rows[0].key_hash);
@@ -221,30 +411,57 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
   const cached = await getCacheJson<ApiKeyValidation>(cacheKey);
 
   if (cached) {
-    await pool.query(
-      `UPDATE api_keys
-       SET last_used_at = NOW(),
-           last_ip_hash = $2
-       WHERE id = $1`,
-      [cached.keyId, requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null]
-    );
+    try {
+      await pool.query(
+        `UPDATE api_keys
+         SET last_used_at = NOW(),
+             last_ip_hash = $2
+         WHERE id = $1`,
+        [cached.keyId, requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null]
+      );
+    } catch (error) {
+      noteApiKeyDbFailure(error, "[auth] validateApiKeyContext cached usage update failed:");
+    }
     return cached;
   }
 
-  const result = await pool.query<{
-    key_id: string;
-    user_id: string;
-    tenant_id: string;
-  }>(
-    `SELECT ak.id AS key_id, ak.user_id, tm.tenant_id
-     FROM api_keys ak
-     JOIN tenant_memberships tm ON tm.user_id = ak.user_id
-     WHERE ak.key_hash = $1
-       AND ak.revoked_at IS NULL
-       AND (ak.created_at + (ak.rotation_days || ' days')::interval) > NOW()
-     LIMIT 1`,
-    [hash]
-  );
+  const ephemeral = ephemeralApiKeysByHash.get(hash);
+  if (ephemeral && ephemeral.revokedAt === null) {
+    return {
+      keyId: ephemeral.id,
+      userId: ephemeral.userId,
+      tenantId: ephemeral.tenantId,
+    };
+  }
+
+  if (shouldBypassApiKeyDbPath()) {
+    return null;
+  }
+
+  let result;
+  try {
+    result = await withTimeout(
+      pool.query<{
+        key_id: string;
+        user_id: string;
+        tenant_id: string;
+      }>(
+        `SELECT ak.id AS key_id, ak.user_id, tm.tenant_id
+         FROM api_keys ak
+         JOIN tenant_memberships tm ON tm.user_id = ak.user_id
+         WHERE ak.key_hash = $1
+           AND ak.revoked_at IS NULL
+           AND (ak.created_at + (ak.rotation_days || ' days')::interval) > NOW()
+         LIMIT 1`,
+        [hash]
+      ),
+      API_KEY_DB_TIMEOUT_MS,
+      "validateApiKeyContext"
+    );
+  } catch (error) {
+    noteApiKeyDbFailure(error, "[auth] validateApiKeyContext DB path failed:");
+    return null;
+  }
   if (result.rows.length === 0) return null;
 
   const row = result.rows[0];
@@ -256,13 +473,17 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
 
   await setCacheJson(cacheKey, value, API_KEY_CACHE_TTL_SECONDS);
 
-  await pool.query(
-    `UPDATE api_keys
-     SET last_used_at = NOW(),
-         last_ip_hash = $2
-     WHERE id = $1`,
-    [row.key_id, requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null]
-  );
+  try {
+    await pool.query(
+      `UPDATE api_keys
+       SET last_used_at = NOW(),
+           last_ip_hash = $2
+       WHERE id = $1`,
+      [row.key_id, requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null]
+    );
+  } catch (error) {
+    noteApiKeyDbFailure(error, "[auth] validateApiKeyContext usage update failed:");
+  }
 
   return value;
 }

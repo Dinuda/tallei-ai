@@ -1,151 +1,300 @@
-'use client';
+"use client";
 
-import Link from 'next/link';
+import Link from "next/link";
+import { useEffect, useRef } from "react";
+import { ArrowRight, RefreshCw, Globe, ShieldCheck } from "lucide-react";
+import { gsap } from "gsap";
+import { ScrollTrigger } from "gsap/ScrollTrigger";
+
+/* ─── Memory card data ─── */
+const MEMORIES = [
+  {
+    emoji: "🎯",
+    tag: "Goal",
+    text: "Preparing a presentation for Friday's all-hands",
+    rotation: -4,
+    top: "0%",
+    left: "0%",
+    depth: 1,
+  },
+  {
+    emoji: "🌿",
+    tag: "Preference",
+    text: "Trying to eat more plant-based this year",
+    rotation: 3,
+    top: "8%",
+    left: "52%",
+    depth: 0.75,
+  },
+  {
+    emoji: "📍",
+    tag: "Location",
+    text: "Based in Austin — prefer US-based suggestions",
+    rotation: 1.5,
+    top: "56%",
+    left: "6%",
+    depth: 0.82,
+  },
+  {
+    emoji: "💬",
+    tag: "Style",
+    text: "Keep answers brief. No long introductions.",
+    rotation: -2,
+    top: "52%",
+    left: "54%",
+    depth: 1,
+  },
+];
+
+const FEATURES = [
+  {
+    icon: <RefreshCw size={20} strokeWidth={1.6} />,
+    title: "No more repeating yourself",
+    desc: "You say something once and every AI you use already knows it — today, next week, whenever you switch.",
+  },
+  {
+    icon: <Globe size={20} strokeWidth={1.6} />,
+    title: "Works with the AIs you already use",
+    desc: "Claude, ChatGPT, and Gemini all connect to the same memory. Your context travels with you, not the app.",
+  },
+  {
+    icon: <ShieldCheck size={20} strokeWidth={1.6} />,
+    title: "Completely private",
+    desc: "Your memories are yours alone. Nothing is shared, sold, or used to train any model. You're in full control.",
+  },
+];
 
 export default function Home() {
-  return (
-    <main style={{ minHeight: '100vh', overflow: 'hidden' }}>
+  const cardsRef = useRef<HTMLDivElement>(null);
 
-      {/* Decorative background */}
-      <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0 }}>
-        <div style={{
-          position: 'absolute',
-          top: '8%', right: '-8%',
-          width: '560px', height: '560px', borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(126,183,27,.18) 0%, transparent 70%)',
-        }}/>
-        <div style={{
-          position: 'absolute',
-          bottom: '15%', left: '-6%',
-          width: '420px', height: '420px', borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(126,183,27,.12) 0%, transparent 70%)',
-        }}/>
-        <div style={{
-          position: 'absolute',
-          top: '45%', left: '40%',
-          width: '300px', height: '300px', borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(200,230,80,.08) 0%, transparent 70%)',
-        }}/>
+  useEffect(() => {
+    gsap.registerPlugin(ScrollTrigger);
+
+    /* ── Hero cards entry + float ── */
+    const cardEls = gsap.utils.toArray<HTMLElement>(".lp-mem-card");
+
+    gsap.set(cardEls, { opacity: 0, y: 28, scale: 0.96 });
+    gsap.to(cardEls, {
+      opacity: (i) => MEMORIES[i].depth,
+      y: 0,
+      scale: 1,
+      duration: 0.75,
+      stagger: 0.14,
+      ease: "power3.out",
+      delay: 0.35,
+      onComplete() {
+        const amplitudes = [13, 9, 11, 15];
+        const durations  = [3.4, 2.9, 3.7, 3.1];
+        const rotates    = [2.2, 1.6, 2.0, 1.4];
+        cardEls.forEach((card, i) => {
+          gsap.to(card, {
+            y: `-=${amplitudes[i]}`,
+            rotation: `+=${rotates[i]}`,
+            duration: durations[i],
+            repeat: -1,
+            yoyo: true,
+            ease: "sine.inOut",
+          });
+        });
+      },
+    });
+
+    /* ── Hero copy ── */
+    gsap.fromTo(
+      ".lp-hero-copy > *",
+      { y: 22, opacity: 0 },
+      { y: 0, opacity: 1, stagger: 0.1, duration: 0.7, ease: "power3.out", delay: 0.1 }
+    );
+
+    /* ── How it works ── */
+    gsap.fromTo(
+      ".lp-how-step",
+      { y: 36, opacity: 0 },
+      {
+        y: 0, opacity: 1, stagger: 0.16, duration: 0.7, ease: "power3.out",
+        scrollTrigger: { trigger: ".lp-how", start: "top 76%" },
+      }
+    );
+
+    /* ── Features ── */
+    gsap.fromTo(
+      ".lp-feat-card",
+      { y: 28, opacity: 0 },
+      {
+        y: 0, opacity: 1, stagger: 0.13, duration: 0.65, ease: "power3.out",
+        scrollTrigger: { trigger: ".lp-feats", start: "top 78%" },
+      }
+    );
+
+    /* ── CTA ── */
+    gsap.fromTo(
+      ".lp-end-inner > *",
+      { y: 20, opacity: 0 },
+      {
+        y: 0, opacity: 1, stagger: 0.1, duration: 0.65, ease: "power3.out",
+        scrollTrigger: { trigger: ".lp-end", start: "top 80%" },
+      }
+    );
+
+    return () => ScrollTrigger.getAll().forEach((t) => t.kill());
+  }, []);
+
+  return (
+    <main className="lp-wrap">
+
+      {/* ── Ambient background ── */}
+      <div className="lp-bg" aria-hidden="true">
+        <div className="lp-glow lp-glow-a" />
+        <div className="lp-glow lp-glow-b" />
+        <div className="lp-glow lp-glow-c" />
       </div>
 
-      <div style={{ position: 'relative', zIndex: 1 }}>
-        <div className="container">
+      {/* ══ HERO ══════════════════════════════════════ */}
+      <section className="lp-hero">
+        <div className="lp-hero-inner container">
 
-          {/* ── Hero ── */}
-          <div style={{ paddingTop: 'calc(var(--nav-h) + 5rem)', paddingBottom: '6rem', maxWidth: '720px' }}>
+          {/* Copy */}
+          <div className="lp-hero-copy">
 
-            <div className="badge badge-accent animate-fade-up" style={{ marginBottom: '1.5rem' }}>
-              Cross-AI Ghost Memory
+            <div className="lp-eyebrow">
+              <span className="lp-live-dot" aria-hidden="true" />
+              Synced across Claude · ChatGPT · Gemini
             </div>
 
-            <h1 className="animate-fade-up delay-1" style={{ marginBottom: '1.25rem', lineHeight: 1.08 }}>
-              Your AI finally<br/>
-              <span style={{ color: 'var(--accent)' }}>remembers you.</span>
+            <h1 className="lp-h1">
+              Your AI finally<br />
+              <span className="lp-h1-accent">remembers you.</span>
             </h1>
 
-            <p className="animate-fade-up delay-2" style={{
-              fontSize: '1.1rem',
-              color: 'var(--text-2)',
-              maxWidth: '540px',
-              lineHeight: 1.7,
-              marginBottom: '2.5rem',
-            }}>
-              Tallei is the persistent memory layer that bridges Claude, ChatGPT, and Gemini.
-              Stop re-explaining who you are — your context travels with you.
+            <p className="lp-hero-sub">
+              You shouldn&apos;t have to re-explain your preferences,
+              your work, or your life every time you start a new chat.
+              Tallei saves what matters and shares it with every AI you use.
             </p>
 
-            <div className="animate-fade-up delay-3" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <Link href="/login" className="btn btn-primary btn-lg">
-                Get started free
+            <div className="lp-actions">
+              <Link href="/login" className="lp-cta-btn">
+                Get started — it&apos;s free
               </Link>
-              <Link href="/dashboard/setup" className="btn btn-secondary btn-lg">
-                View setup guide
+              <Link href="/dashboard/setup" className="lp-text-btn">
+                See how it works <ArrowRight size={14} />
               </Link>
             </div>
 
-            {/* Social proof pill */}
-            <div className="animate-fade-up delay-4" style={{
-              marginTop: '2.5rem',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '0.6rem',
-              padding: '0.5rem 1rem',
-              background: 'var(--surface)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-pill)',
-              fontSize: '0.82rem',
-              color: 'var(--text-2)',
-            }}>
-              <span style={{
-                width: 8, height: 8, borderRadius: '50%',
-                background: 'var(--accent)',
-                animation: 'pulse-dot 2s ease infinite',
-                flexShrink: 0,
-              }}/>
-              Works with Claude · ChatGPT · Gemini
-            </div>
           </div>
 
-          {/* ── Feature grid ── */}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-            gap: '1.25rem',
-            paddingBottom: '6rem',
-          }}>
-            {[
-              {
-                icon: '🔄',
-                title: 'Automatic sync',
-                desc: 'Memories are quietly parsed and stored at the end of every interaction via our high-speed vector pipeline.',
-                delay: 'delay-1',
-              },
-              {
-                icon: '⚡',
-                title: 'Instant context injection',
-                desc: 'Start a new chat, call the Tallei MCP endpoint, and load relevant context right into your system prompt.',
-                delay: 'delay-2',
-              },
-              {
-                icon: '🔒',
-                title: 'Private by design',
-                desc: 'Each user generates hashed API tokens, ensuring complete privacy across every platform integration.',
-                delay: 'delay-3',
-              },
-            ].map(f => (
+          {/* Memory cards visual */}
+          <div className="lp-cards-stage" ref={cardsRef} aria-hidden="true">
+            {MEMORIES.map((m, i) => (
               <div
-                key={f.title}
-                className={`animate-fade-up ${f.delay}`}
+                key={i}
+                className="lp-mem-card"
                 style={{
-                  background: 'var(--surface)',
-                  border: '1px solid var(--border-light)',
-                  borderRadius: 'var(--radius-lg)',
-                  padding: '1.75rem',
-                  boxShadow: 'var(--shadow-sm)',
-                  transition: 'box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease',
-                }}
-                onMouseEnter={e => {
-                  const el = e.currentTarget as HTMLDivElement;
-                  el.style.boxShadow = 'var(--shadow-md)';
-                  el.style.borderColor = 'var(--border)';
-                  el.style.transform = 'translateY(-2px)';
-                }}
-                onMouseLeave={e => {
-                  const el = e.currentTarget as HTMLDivElement;
-                  el.style.boxShadow = 'var(--shadow-sm)';
-                  el.style.borderColor = 'var(--border-light)';
-                  el.style.transform = 'none';
+                  top: m.top,
+                  left: m.left,
+                  transform: `rotate(${m.rotation}deg)`,
                 }}
               >
-                <div style={{ fontSize: '1.75rem', marginBottom: '1rem' }}>{f.icon}</div>
-                <h3 style={{ marginBottom: '0.6rem', fontSize: '1rem' }}>{f.title}</h3>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', lineHeight: 1.65, margin: 0 }}>{f.desc}</p>
+                <div className="lp-mc-head">
+                  <span className="lp-mc-emoji">{m.emoji}</span>
+                  <span className="lp-mc-tag">{m.tag}</span>
+                </div>
+                <p className="lp-mc-text">{m.text}</p>
+                <div className="lp-mc-platforms">
+                  <span>Claude</span>
+                  <span>ChatGPT</span>
+                  <span>Gemini</span>
+                </div>
+              </div>
+            ))}
+
+            {/* Faint connector lines */}
+            <svg className="lp-cards-svg" aria-hidden="true">
+              <line x1="36%" y1="22%" x2="52%" y2="20%" strokeDasharray="4 4" />
+              <line x1="20%" y1="30%" x2="14%" y2="58%" strokeDasharray="4 4" />
+              <line x1="72%" y1="30%" x2="68%" y2="54%" strokeDasharray="4 4" />
+            </svg>
+          </div>
+        </div>
+      </section>
+
+      {/* ══ HOW IT WORKS ══════════════════════════════ */}
+      <section className="lp-how">
+        <div className="container">
+          <p className="lp-section-tag">How Tallei works</p>
+          <h2 className="lp-section-h2">Three steps. Zero effort.</h2>
+
+          <div className="lp-how-grid">
+            <div className="lp-how-step">
+              <div className="lp-how-num">01</div>
+              <div className="lp-how-icon-wrap">💬</div>
+              <h3 className="lp-how-title">Have a conversation</h3>
+              <p className="lp-how-desc">
+                Just talk to Claude, ChatGPT, or Gemini like you normally
+                would. Mention your job, your diet, your goals — anything.
+              </p>
+            </div>
+
+            <div className="lp-how-step lp-how-step-mid">
+              <div className="lp-how-num accent">02</div>
+              <div className="lp-how-icon-wrap accent">🧠</div>
+              <h3 className="lp-how-title">Tallei quietly captures it</h3>
+              <p className="lp-how-desc">
+                Important details are automatically saved to your private
+                memory. No extra steps, no copy-pasting, no checklists.
+              </p>
+            </div>
+
+            <div className="lp-how-step">
+              <div className="lp-how-num">03</div>
+              <div className="lp-how-icon-wrap">✨</div>
+              <h3 className="lp-how-title">Every AI is already caught up</h3>
+              <p className="lp-how-desc">
+                Open any AI assistant and it already knows your context.
+                Switch freely — the memory moves with you, not the app.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ══ FEATURES ══════════════════════════════════ */}
+      <section className="lp-feats">
+        <div className="container">
+          <div className="lp-feats-grid">
+            {FEATURES.map((f) => (
+              <div key={f.title} className="lp-feat-card">
+                <div className="lp-feat-icon">{f.icon}</div>
+                <h3 className="lp-feat-title">{f.title}</h3>
+                <p className="lp-feat-desc">{f.desc}</p>
               </div>
             ))}
           </div>
-
         </div>
-      </div>
+      </section>
+
+      {/* ══ END CTA ═══════════════════════════════════ */}
+      <section className="lp-end">
+        <div className="container">
+          <div className="lp-end-inner">
+            <div className="lp-end-glow" aria-hidden="true" />
+            <p className="lp-end-overline">Get started today</p>
+            <h2 className="lp-end-h2">
+              Stop repeating yourself.<br />
+              <span className="lp-end-accent">Start once. Remember forever.</span>
+            </h2>
+            <p className="lp-end-sub">
+              Connect in 4 steps. No downloads, no configuration files, no
+              technical setup required.
+            </p>
+            <Link href="/login" className="lp-cta-btn lp-cta-btn-lg">
+              Create your free account
+              <ArrowRight size={16} />
+            </Link>
+          </div>
+        </div>
+      </section>
+
     </main>
   );
 }
