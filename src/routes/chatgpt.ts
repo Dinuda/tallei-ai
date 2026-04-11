@@ -6,6 +6,14 @@ import { recallMemories, saveMemory } from "../services/memory.js";
 
 const router = Router();
 
+function requireChatGptKey(req: AuthRequest, res: Response): boolean {
+  if (req.authContext?.authMode !== "api_key" || req.authContext?.connectorType !== "chatgpt") {
+    res.status(403).json({ error: "This endpoint requires a ChatGPT-scoped API key" });
+    return false;
+  }
+  return true;
+}
+
 const recallSchema = z.object({
   query: z.string().min(1, "query is required"),
   limit: z.coerce.number().int().min(1).max(20).optional().default(5),
@@ -243,6 +251,7 @@ router.post("/actions/recall", authMiddleware, async (req: AuthRequest, res: Res
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    if (!requireChatGptKey(req, res)) return;
 
     const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
     res.json(result);
@@ -267,6 +276,7 @@ router.post("/actions/run", authMiddleware, async (req: AuthRequest, res: Respon
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    if (!requireChatGptKey(req, res)) return;
 
     const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
     res.json(result);
@@ -291,6 +301,7 @@ router.post("/actions/save", authMiddleware, async (req: AuthRequest, res: Respo
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    if (!requireChatGptKey(req, res)) return;
 
     const saved = await saveMemory(body.content, req.authContext, "chatgpt", req.ip);
     res.json({

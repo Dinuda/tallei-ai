@@ -7,7 +7,10 @@ type PgClientLike = Client & {
   connectionParameters?: { database?: string };
 };
 
+const placeholderBypassEnabled = process.env.PG_PLACEHOLDER_MODE === "true";
+
 function isPlaceholderDatabase(client: PgClientLike): boolean {
+  if (!placeholderBypassEnabled) return false;
   return client.connectionParameters?.database === "postgres";
 }
 
@@ -40,6 +43,12 @@ try {
   const originalConnect = Client.prototype.connect;
   const originalQuery = Client.prototype.query;
   const originalEnd = Client.prototype.end;
+
+  if (placeholderBypassEnabled) {
+    console.warn(
+      "[db] PG_PLACEHOLDER_MODE=true: pg client is running in placeholder bypass mode for database=postgres"
+    );
+  }
 
   Client.prototype.connect = function patchedConnect(this: PgClientLike, callback?: any) {
     if (isAlreadyConnected(this)) {

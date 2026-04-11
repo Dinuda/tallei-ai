@@ -291,6 +291,18 @@ export async function initDb() {
     `);
 
     await client.query(`
+      ALTER TABLE api_keys
+      ADD COLUMN IF NOT EXISTS connector_type TEXT
+        CHECK (connector_type IN ('claude', 'chatgpt', 'gemini', 'other'));
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS api_keys_user_connector_unique
+        ON api_keys (user_id, connector_type)
+        WHERE revoked_at IS NULL AND connector_type IS NOT NULL;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS memory_records (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

@@ -264,6 +264,20 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
 
     if (token.startsWith("gm_")) {
       authContext = await authContextFromApiKey(token, requesterIp(req));
+      if (authContext && authContext.connectorType === "chatgpt") {
+        await logMcpCallEvent({
+          userId: authContext.userId,
+          tenantId: authContext.tenantId,
+          keyId: authContext.keyId ?? null,
+          authMode: "api_key",
+          method,
+          toolName,
+          ok: false,
+          error: "ChatGPT-scoped key cannot be used on MCP endpoint",
+        });
+        res.status(403).json({ error: "ChatGPT-scoped API keys cannot be used on the MCP endpoint" });
+        return;
+      }
     } else {
       authContext = await authFromOAuthToken(token, oauthVerifier);
     }

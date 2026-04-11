@@ -64,9 +64,14 @@ router.use((req: AuthRequest, res, next) => {
 
 router.post("/", async (req: AuthRequest, res) => {
   try {
-    const { name, rotationDays } = req.body;
+    const { name, rotationDays, connectorType } = req.body;
     if (!name) {
       res.status(400).json({ error: "API Key requires a name" });
+      return;
+    }
+    const validConnectorTypes = ["claude", "chatgpt", "gemini", "other"];
+    if (connectorType !== undefined && connectorType !== null && !validConnectorTypes.includes(connectorType)) {
+      res.status(400).json({ error: "Invalid connectorType" });
       return;
     }
     const days = Number.isFinite(Number(rotationDays)) ? Number(rotationDays) : 90;
@@ -74,10 +79,16 @@ router.post("/", async (req: AuthRequest, res) => {
       req.userId!,
       name,
       Math.min(Math.max(days, 1), 365),
-      req.authContext?.tenantId ?? null
+      req.authContext?.tenantId ?? null,
+      connectorType ?? null
     );
     res.status(201).json({ success: true, ...result });
   } catch (error) {
+    const pgError = error as { code?: string };
+    if (pgError.code === "23505") {
+      res.status(409).json({ error: "An active key with this connector type already exists" });
+      return;
+    }
     console.error("Error generating API key:", error);
     res.status(500).json({ error: "Failed to generate API key" });
   }
@@ -93,7 +104,7 @@ router.get("/", async (req: AuthRequest, res) => {
   try {
     const result = await Promise.race([
       pool.query(
-        `SELECT id, name, created_at, last_used_at, revoked_at, rotation_days
+        `SELECT id, name, created_at, last_used_at, revoked_at, rotation_days, connector_type
          FROM api_keys
          WHERE user_id = $1
          ORDER BY created_at DESC`,
@@ -111,6 +122,7 @@ router.get("/", async (req: AuthRequest, res) => {
         lastUsedAt: row.last_used_at,
         revokedAt: row.revoked_at,
         rotationDays: row.rotation_days,
+        connectorType: row.connector_type ?? null,
       })),
     });
   } catch (error) {

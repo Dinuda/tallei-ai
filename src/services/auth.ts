@@ -23,6 +23,7 @@ interface ApiKeyValidation {
   keyId: string;
   userId: string;
   tenantId: string;
+  connectorType: string | null;
 }
 
 const DEFAULT_NEXT_PATH = "/dashboard/setup";
@@ -42,6 +43,7 @@ interface EphemeralApiKey {
   tenantId: string;
   keyHash: string;
   name: string;
+  connectorType: string | null;
   createdAt: string;
   revokedAt: string | null;
 }
@@ -103,6 +105,7 @@ function storeEphemeralApiKey(input: {
   tenantId: string;
   keyHash: string;
   name: string;
+  connectorType?: string | null;
 }): void {
   const record: EphemeralApiKey = {
     id: input.id,
@@ -110,6 +113,7 @@ function storeEphemeralApiKey(input: {
     tenantId: input.tenantId,
     keyHash: input.keyHash,
     name: input.name,
+    connectorType: input.connectorType ?? null,
     createdAt: new Date().toISOString(),
     revokedAt: null,
   };
@@ -127,6 +131,7 @@ export function listEphemeralApiKeys(userId: string): Array<{
   lastUsedAt: null;
   revokedAt: string | null;
   rotationDays: number;
+  connectorType: string | null;
 }> {
   const rows = ephemeralApiKeysByUser.get(userId) ?? [];
   return rows.map((row) => ({
@@ -136,6 +141,7 @@ export function listEphemeralApiKeys(userId: string): Array<{
     lastUsedAt: null,
     revokedAt: row.revokedAt,
     rotationDays: 90,
+    connectorType: row.connectorType,
   }));
 }
 
@@ -144,7 +150,7 @@ function normalizeEmail(value: string): string {
 }
 
 function apiKeyCacheKey(hash: string): string {
-  return `auth:api_key:${hash}`;
+  return `auth:api_key_v2:${hash}`;
 }
 
 export function sanitizeNextPath(input: unknown): string {
@@ -194,8 +200,7 @@ export async function getUserById(id: string): Promise<User | null> {
 
 export async function upsertGoogleUser(profile: { sub: string; email: string }): Promise<User> {
   const client = await pool.connect();
-  let userId: string;
-  let email: string;
+  const normalizedEmail = normalizeEmail(profile.email);
 
   try {
     await client.query("BEGIN");
@@ -211,38 +216,57 @@ export async function upsertGoogleUser(profile: { sub: string; email: string }):
 
     const byEmail = await client.query<{ id: string; email: string }>(
       "SELECT id, email FROM users WHERE lower(email) = lower($1) LIMIT 1",
-      [profile.email]
+      [normalizedEmail]
     );
     if (byEmail.rows.length > 0) {
       const existing = byEmail.rows[0];
-      const updated = await client.query<{ id: string; email: string }>(
+      const updated = await client.query(
         `UPDATE users
          SET google_sub = $2,
              auth_provider = 'google'
-         WHERE id = $1
-         RETURNING id, email`,
+         WHERE id = $1`,
         [existing.id, profile.sub]
       );
+      if ((updated.rowCount ?? 0) < 1) throw new Error("Failed to update Google user link");
       await client.query("COMMIT");
-      return hydrateUser(updated.rows[0].id, updated.rows[0].email);
+      return hydrateUser(existing.id, existing.email);
     }
 
-    const inserted = await client.query<{ id: string; email: string }>(
-      `INSERT INTO users (email, password_hash, auth_provider, google_sub)
-       VALUES ($1, NULL, 'google', $2)
-       RETURNING id, email`,
-      [profile.email, profile.sub]
+    const newUserId = randomUUID();
+    const inserted = await client.query(
+      `INSERT INTO users (id, email, password_hash, auth_provider, google_sub)
+       VALUES ($1, $2, NULL, 'google', $3)`,
+      [newUserId, normalizedEmail, profile.sub]
     );
-    userId = inserted.rows[0].id;
-    email = inserted.rows[0].email;
+    if ((inserted.rowCount ?? 0) >= 1) {
+      await client.query("COMMIT");
+      return hydrateUser(newUserId, normalizedEmail);
+    }
+
+    const fallback = await client.query<{ id: string; email: string }>(
+      `SELECT id, email
+       FROM users
+       WHERE google_sub = $1 OR lower(email) = lower($2)
+       ORDER BY (google_sub = $1) DESC
+       LIMIT 1`,
+      [profile.sub, normalizedEmail]
+    );
+    const fallbackRow = fallback.rows[0];
+    if (!fallbackRow) throw new Error("Failed to resolve Google user after insert");
+
     await client.query("COMMIT");
+    return hydrateUser(fallbackRow.id, fallbackRow.email);
   } catch (error: unknown) {
     await client.query("ROLLBACK");
     const pgError = error as { code?: string };
     if (pgError.code === "23505") {
       const result = await pool.query<{ id: string; email: string }>(
-        "SELECT id, email FROM users WHERE google_sub = $1 LIMIT 1",
-        [profile.sub]
+        `SELECT id, email
+         FROM users
+         WHERE google_sub = $1 OR lower(email) = lower($2)
+         ORDER BY (google_sub = $1) DESC
+         LIMIT 1`,
+        [profile.sub, normalizedEmail]
       );
       const row = result.rows[0];
       if (row) return hydrateUser(row.id, row.email);
@@ -251,8 +275,6 @@ export async function upsertGoogleUser(profile: { sub: string; email: string }):
   } finally {
     client.release();
   }
-
-  return hydrateUser(userId, email);
 }
 
 export async function register(email: string, passwordRaw: string): Promise<User> {
@@ -288,7 +310,8 @@ export async function generateApiKey(
   userId: string,
   name: string,
   rotationDays = 90,
-  tenantIdInput?: string | null
+  tenantIdInput?: string | null,
+  connectorType?: string | null
 ): Promise<{ key: string; id: string }> {
   const tenantId =
     tenantIdInput === undefined
@@ -306,6 +329,7 @@ export async function generateApiKey(
       tenantId: tenantId || userId,
       keyHash: hash,
       name,
+      connectorType: connectorType ?? null,
     });
     return { key: rawKey, id: fallbackId };
   }
@@ -313,10 +337,10 @@ export async function generateApiKey(
   try {
     const result = await withTimeout(
       pool.query<{ id: string }>(
-        `INSERT INTO api_keys (tenant_id, user_id, key_hash, name, rotation_days)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO api_keys (tenant_id, user_id, key_hash, name, rotation_days, connector_type)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id`,
-        [tenantId, userId, hash, name, rotationDays]
+        [tenantId, userId, hash, name, rotationDays, connectorType ?? null]
       ),
       API_KEY_DB_TIMEOUT_MS,
       "generateApiKey"
@@ -340,6 +364,7 @@ export async function generateApiKey(
       tenantId: tenantId || userId,
       keyHash: hash,
       name,
+      connectorType: connectorType ?? null,
     });
     noteApiKeyDbFailure(error, "[auth] generateApiKey falling back to ephemeral key store:");
     return { key: rawKey, id: fallbackId };
@@ -431,6 +456,7 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
       keyId: ephemeral.id,
       userId: ephemeral.userId,
       tenantId: ephemeral.tenantId,
+      connectorType: ephemeral.connectorType,
     };
   }
 
@@ -445,8 +471,9 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
         key_id: string;
         user_id: string;
         tenant_id: string;
+        connector_type: string | null;
       }>(
-        `SELECT ak.id AS key_id, ak.user_id, tm.tenant_id
+        `SELECT ak.id AS key_id, ak.user_id, tm.tenant_id, ak.connector_type
          FROM api_keys ak
          JOIN tenant_memberships tm ON tm.user_id = ak.user_id
          WHERE ak.key_hash = $1
@@ -469,6 +496,7 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
     keyId: row.key_id,
     userId: row.user_id,
     tenantId: row.tenant_id,
+    connectorType: row.connector_type ?? null,
   };
 
   await setCacheJson(cacheKey, value, API_KEY_CACHE_TTL_SECONDS);
@@ -501,6 +529,7 @@ export async function authContextFromApiKey(rawKey: string, requesterIp?: string
     tenantId: validation.tenantId,
     authMode: "api_key",
     keyId: validation.keyId,
+    connectorType: validation.connectorType,
   };
 }
 

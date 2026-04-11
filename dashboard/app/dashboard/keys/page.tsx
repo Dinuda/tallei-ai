@@ -7,6 +7,7 @@ interface ApiKey {
   name: string;
   lastUsed: string | null;
   createdAt: string;
+  connectorType: string | null;
 }
 
 export default function KeysPage() {
@@ -82,7 +83,7 @@ export default function KeysPage() {
     <div className="page-stack">
       <header>
         <h2 className="page-title">API Keys</h2>
-        <p className="page-subtitle">Secret keys to connect Claude Desktop or other clients to your memory index.</p>
+        <p className="page-subtitle">Manage API keys for connecting AI platforms to your memory graph.</p>
       </header>
 
       <section className="panel">
@@ -155,7 +156,24 @@ export default function KeysPage() {
                   </span>
 
                   <span style={{ minWidth: 0 }}>
-                    <span className="key-name">{key.name}</span>
+                    <span style={{ display: "flex", alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
+                      <span className="key-name">{key.name}</span>
+                      {key.connectorType && (
+                        <span style={{
+                          fontSize: "0.72rem",
+                          fontWeight: 600,
+                          padding: "1px 7px",
+                          borderRadius: "999px",
+                          background: "var(--accent-light)",
+                          color: "var(--accent-dark, var(--text-2))",
+                          border: "1px solid var(--border)",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.04em",
+                        }}>
+                          {key.connectorType}
+                        </span>
+                      )}
+                    </span>
                     <p className="key-date">
                       Created {new Date(key.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
                     </p>

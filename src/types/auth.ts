@@ -5,4 +5,5 @@ export interface AuthContext {
   tenantId: string;
   authMode: AuthMode;
   keyId?: string;
+  connectorType?: string | null;
 }

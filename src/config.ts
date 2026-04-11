@@ -19,6 +19,16 @@ function readIntEnv(name: string, fallback: number): number {
   return value;
 }
 
+function readOptionalIntEnv(name: string): number | null {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return null;
+  const value = Number.parseInt(raw, 10);
+  if (Number.isNaN(value)) {
+    throw new Error(`Invalid integer env var: ${name}`);
+  }
+  return value;
+}
+
 function readBooleanEnv(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
@@ -50,6 +60,8 @@ const port = readIntEnv("PORT", 3000);
 const localBaseUrl = `http://localhost:${port}`;
 const configuredPublicBaseUrl = process.env.PUBLIC_BASE_URL || localBaseUrl;
 const publicBaseUrl = normalizeBaseUrl(configuredPublicBaseUrl);
+const qdrantTimeoutMsOverride = readOptionalIntEnv("QDRANT_TIMEOUT_MS");
+const qdrantTimeoutSecondsLegacy = readOptionalIntEnv("QDRANT_TIMEOUT_SECONDS");
 
 export const config = {
   port,
@@ -74,6 +86,14 @@ export const config = {
   qdrantUrl: readStringEnv("QDRANT_URL"),
   qdrantApiKey: readStringEnv("QDRANT_API_KEY"),
   qdrantCollectionName: readStringEnv("QDRANT_COLLECTION_NAME", "memories_v1"),
+  // Qdrant JS client expects timeout in milliseconds.
+  qdrantTimeoutMs:
+    qdrantTimeoutMsOverride ??
+    (qdrantTimeoutSecondsLegacy !== null
+      ? qdrantTimeoutSecondsLegacy * 1000
+      : process.env.NODE_ENV === "production"
+        ? 30_000
+        : 10_000),
   embeddingModel: readStringEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
   memoryMasterKey: readStringEnv("MEMORY_MASTER_KEY"),
   kmsKeyId: readStringEnv("KMS_KEY_ID", "local-dev"),

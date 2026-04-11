@@ -27,8 +27,8 @@ export default function McpEventsPage() {
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
       <section>
-        <h2 className="page-title">MCP Events</h2>
-        <p className="page-subtitle">Use this to confirm whether Claude is actually calling memory tools.</p>
+        <h2 className="page-title">Activity</h2>
+        <p className="page-subtitle">Live log of MCP tool calls — use this to confirm Claude is saving and recalling memory.</p>
       </section>
 
       {loading ? (
