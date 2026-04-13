@@ -15,6 +15,7 @@ import chatgptRouter from "./routes/chatgpt.js";
 import { createMcpRouter } from "./mcp/server.js";
 import { TalleiOAuthProvider } from "./mcp/oauth.js";
 import { createRateLimitMiddleware } from "./middleware/rateLimit.js";
+import { createOauthExtensionsRouter } from "./routes/oauth.js";
 
 const allowedOrigins = [
   config.frontendUrl,
@@ -59,7 +60,7 @@ function createApp() {
     issuerUrl,
     resourceServerUrl: mcpPublicUrl,
     resourceName: "Tallei",
-    scopesSupported: ["mcp:tools"],
+    scopesSupported: ["mcp:tools", "memory:read", "memory:write", "automation:run"],
   }));
 
   app.get("/health", (_req, res) => {
@@ -67,6 +68,7 @@ function createApp() {
   });
 
   app.use("/api/auth", authRouter);
+  app.use("/api/oauth", createOauthExtensionsRouter());
   app.use("/api/keys", keysRouter);
   app.use("/api/memories", memoryRateLimit, memoriesRouter);
   app.use("/api/chatgpt", memoryRateLimit, chatgptRouter);

@@ -1,18 +1,10 @@
 import { Router, Response } from "express";
 import { z } from "zod";
-import { authMiddleware, AuthRequest } from "../middleware/auth.js";
+import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.js";
 import { config } from "../config.js";
 import { recallMemories, saveMemory } from "../services/memory.js";
 
 const router = Router();
-
-function requireChatGptKey(req: AuthRequest, res: Response): boolean {
-  if (req.authContext?.authMode !== "api_key" || req.authContext?.connectorType !== "chatgpt") {
-    res.status(403).json({ error: "This endpoint requires a ChatGPT-scoped API key" });
-    return false;
-  }
-  return true;
-}
 
 const recallSchema = z.object({
   query: z.string().min(1, "query is required"),
@@ -40,8 +32,8 @@ function buildOpenApiSpec(serverUrl: string) {
     openapi: "3.1.0",
     info: {
       title: "Tallei ChatGPT Actions API",
-      version: "1.0.0",
-      description: "Shared-memory Actions API for ChatGPT Custom GPTs.",
+      version: "2.0.0",
+      description: "Shared-memory Actions API for ChatGPT Custom GPTs (OAuth only).",
     },
     servers: [
       {
@@ -51,11 +43,27 @@ function buildOpenApiSpec(serverUrl: string) {
     components: {
       schemas: {},
       securitySchemes: {
-        bearerAuth: {
-          type: "http",
-          scheme: "bearer",
-          bearerFormat: "API Key",
-          description: "Use your Tallei API key (gm_...).",
+        oauth2: {
+          type: "oauth2",
+          description: "Use OAuth 2.0. Legacy API keys are no longer supported.",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: `${serverUrl}/authorize`,
+              tokenUrl: `${serverUrl}/token`,
+              scopes: {
+                "memory:read": "Read memory graph content",
+                "memory:write": "Write/update memory graph content",
+              },
+            },
+            clientCredentials: {
+              tokenUrl: `${serverUrl}/api/oauth/token`,
+              scopes: {
+                "memory:read": "Read memory graph content",
+                "memory:write": "Write/update memory graph content",
+                "automation:run": "Run non-interactive automation jobs",
+              },
+            },
+          },
         },
       },
     },
@@ -64,7 +72,7 @@ function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "run",
           summary: "Compatibility alias for memory recall",
-          security: [{ bearerAuth: [] }],
+          security: [{ oauth2: ["memory:read"] }],
           requestBody: {
             required: true,
             content: {
@@ -112,6 +120,7 @@ function buildOpenApiSpec(serverUrl: string) {
               },
             },
             "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
           },
         },
       },
@@ -119,7 +128,7 @@ function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "recallMemories",
           summary: "Recall relevant memories",
-          security: [{ bearerAuth: [] }],
+          security: [{ oauth2: ["memory:read"] }],
           requestBody: {
             required: true,
             content: {
@@ -167,6 +176,7 @@ function buildOpenApiSpec(serverUrl: string) {
               },
             },
             "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
           },
         },
       },
@@ -174,7 +184,7 @@ function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "saveMemory",
           summary: "Save durable memory",
-          security: [{ bearerAuth: [] }],
+          security: [{ oauth2: ["memory:write"] }],
           requestBody: {
             required: true,
             content: {
@@ -208,6 +218,7 @@ function buildOpenApiSpec(serverUrl: string) {
               },
             },
             "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
           },
         },
       },
@@ -244,14 +255,13 @@ router.get("/openapi.json", (_req, res: Response) => {
   res.json(buildOpenApiSpec(serverUrl));
 });
 
-router.post("/actions/recall", authMiddleware, async (req: AuthRequest, res: Response) => {
+router.post("/actions/recall", authMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallSchema.parse(req.body);
     if (!req.authContext) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    if (!requireChatGptKey(req, res)) return;
 
     const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
     res.json(result);
@@ -269,14 +279,13 @@ router.post("/actions/recall", authMiddleware, async (req: AuthRequest, res: Res
   }
 });
 
-router.post("/actions/run", authMiddleware, async (req: AuthRequest, res: Response) => {
+router.post("/actions/run", authMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallSchema.parse(req.body);
     if (!req.authContext) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    if (!requireChatGptKey(req, res)) return;
 
     const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
     res.json(result);
@@ -294,14 +303,13 @@ router.post("/actions/run", authMiddleware, async (req: AuthRequest, res: Respon
   }
 });
 
-router.post("/actions/save", authMiddleware, async (req: AuthRequest, res: Response) => {
+router.post("/actions/save", authMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = saveSchema.parse(req.body);
     if (!req.authContext) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    if (!requireChatGptKey(req, res)) return;
 
     const saved = await saveMemory(body.content, req.authContext, "chatgpt", req.ip);
     res.json({

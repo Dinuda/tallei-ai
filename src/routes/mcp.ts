@@ -8,6 +8,7 @@ import { authContextFromUserId } from "../services/auth.js";
 const router = Router();
 
 const AUTH_CODE_TTL_SECONDS = 10 * 60;
+const DEFAULT_SCOPE = "mcp:tools memory:read memory:write";
 
 /**
  * POST /api/mcp/code  (internal only)
@@ -53,7 +54,7 @@ router.post("/code", internalMiddleware, async (req: AuthRequest, res) => {
     }
 
     const code = `tla_code_${randomBytes(32).toString("hex")}`;
-    const scopeValue = scope || null;
+    const scopeValue = scope || DEFAULT_SCOPE;
     const resourceValue = resource || config.mcpPublicUrl || new URL("/mcp", config.publicBaseUrl).toString();
 
     await pool.query(

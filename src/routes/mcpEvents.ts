@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { authMiddleware } from "../middleware/auth.js";
+import { authMiddleware, requireScopes } from "../middleware/auth.js";
 import { pool } from "../db/index.js";
 
 const router = Router();
@@ -11,7 +11,7 @@ const querySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
-router.get("/", async (req, res) => {
+router.get("/", requireScopes(["memory:read"]), async (req, res) => {
   try {
     const { limit } = querySchema.parse(req.query);
     const userId = (req as any).userId as string;

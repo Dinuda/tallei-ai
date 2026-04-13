@@ -11,10 +11,11 @@ import {
   deleteMemory,
   prewarmRecallCache,
 } from "../services/memory.js";
-import { authContextFromApiKey, authContextFromUserId } from "../services/auth.js";
+import { authContextFromUserId } from "../services/auth.js";
 import { config } from "../config.js";
 import { pool } from "../db/index.js";
 import { getCacheJson, setCacheJson } from "../services/cache.js";
+import { hasRequiredScopes } from "../services/oauthTokens.js";
 import type { AuthContext } from "../types/auth.js";
 
 const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
@@ -22,22 +23,13 @@ const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
 interface OAuthCacheEntry {
   userId: string;
   tenantId: string;
+  scopes: string[];
+  clientId: string;
 }
 
 function tokenCacheKey(token: string): string {
   const hash = createHash("sha256").update(token).digest("hex");
   return `auth:oauth:${hash}`;
-}
-
-function requesterIp(req: any): string | undefined {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  if (Array.isArray(forwardedFor) && forwardedFor[0]) {
-    return forwardedFor[0].split(",")[0].trim();
-  }
-  return req.ip || undefined;
 }
 
 async function logMcpCallEvent(input: {
@@ -202,11 +194,13 @@ function sendUnauthorized(res: any, resourceMetadataUrl: string, message: string
 async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifier): Promise<AuthContext | null> {
   const cacheKey = tokenCacheKey(token);
   const cached = await getCacheJson<OAuthCacheEntry>(cacheKey);
-  if (cached?.userId && cached?.tenantId) {
+  if (cached?.userId && cached?.tenantId && cached?.clientId) {
     return {
       userId: cached.userId,
       tenantId: cached.tenantId,
       authMode: "oauth",
+      clientId: cached.clientId,
+      scopes: cached.scopes ?? [],
     };
   }
 
@@ -219,14 +213,26 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
     const context = typeof tenantIdValue === "string" && tenantIdValue.length > 0
       ? { userId: userIdValue, tenantId: tenantIdValue, authMode: "oauth" as const }
       : await authContextFromUserId(userIdValue, "oauth");
+    const scopes = Array.isArray(authInfo.scopes)
+      ? authInfo.scopes.map((scope) => String(scope))
+      : [];
 
     await setCacheJson(
       cacheKey,
-      { userId: context.userId, tenantId: context.tenantId },
+      {
+        userId: context.userId,
+        tenantId: context.tenantId,
+        clientId: authInfo.clientId,
+        scopes,
+      },
       OAUTH_CACHE_TTL_SECONDS
     );
 
-    return context;
+    return {
+      ...context,
+      clientId: authInfo.clientId,
+      scopes,
+    };
   } catch {
     return null;
   }
@@ -260,29 +266,20 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     }
 
     const token = authHeader.split(" ")[1];
-    let authContext: AuthContext | null = null;
-
     if (token.startsWith("gm_")) {
-      authContext = await authContextFromApiKey(token, requesterIp(req));
-      if (authContext && authContext.connectorType === "chatgpt") {
-        await logMcpCallEvent({
-          userId: authContext.userId,
-          tenantId: authContext.tenantId,
-          keyId: authContext.keyId ?? null,
-          authMode: "api_key",
-          method,
-          toolName,
-          ok: false,
-          error: "ChatGPT-scoped key cannot be used on MCP endpoint",
-        });
-        res.status(403).json({ error: "ChatGPT-scoped API keys cannot be used on the MCP endpoint" });
-        return;
-      }
-    } else {
-      authContext = await authFromOAuthToken(token, oauthVerifier);
+      await logMcpCallEvent({
+        method,
+        toolName,
+        authMode: "unknown",
+        ok: false,
+        error: "Legacy API keys are no longer supported on /mcp",
+      });
+      sendUnauthorized(res, resourceMetadataUrl, "Legacy API keys are no longer supported. Reconnect via OAuth.");
+      return;
     }
 
-    const authMode: "api_key" | "oauth" = token.startsWith("gm_") ? "api_key" : "oauth";
+    const authContext = await authFromOAuthToken(token, oauthVerifier);
+    const authMode: "oauth" = "oauth";
 
     if (!authContext) {
       await logMcpCallEvent({
@@ -295,11 +292,27 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
       sendUnauthorized(res, resourceMetadataUrl, "Invalid or expired token");
       return;
     }
+    if (!hasRequiredScopes(authContext.scopes ?? [], ["mcp:tools"])) {
+      await logMcpCallEvent({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        method,
+        toolName,
+        authMode,
+        ok: false,
+        error: "Missing mcp:tools scope",
+      });
+      res.status(403).json({
+        error: "Insufficient OAuth scopes",
+        requiredScopes: ["mcp:tools"],
+      });
+      return;
+    }
 
     await logMcpCallEvent({
       userId: authContext.userId,
       tenantId: authContext.tenantId,
-      keyId: authContext.keyId ?? null,
+      keyId: null,
       authMode,
       method,
       toolName,

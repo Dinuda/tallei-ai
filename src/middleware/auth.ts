@@ -1,10 +1,9 @@
 import type { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
 import { config } from "../config.js";
 import {
-  authContextFromApiKey,
   authContextFromUserId,
 } from "../services/auth.js";
+import { hasRequiredScopes, validateOAuthAccessToken } from "../services/oauthTokens.js";
 import type { AuthContext } from "../types/auth.js";
 
 export interface AuthRequest extends Request {
@@ -12,15 +11,11 @@ export interface AuthRequest extends Request {
   authContext?: AuthContext;
 }
 
-function requesterIp(req: Request): string | undefined {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  if (Array.isArray(forwardedFor) && forwardedFor[0]) {
-    return forwardedFor[0].split(",")[0].trim();
-  }
-  return req.ip || undefined;
+function sendLegacyApiKeyMigrationError(res: Response): void {
+  res.status(401).json({
+    error: "Legacy API keys are no longer supported",
+    message: "Reconnect your connector via OAuth at /dashboard/setup and retry.",
+  });
 }
 
 /**
@@ -63,7 +58,7 @@ export async function internalMiddleware(req: AuthRequest, res: Response, next: 
 }
 
 /**
- * Public middleware: accepts Bearer API keys (gm_*), JWTs, or internal secret.
+ * Public middleware: accepts OAuth bearer tokens or internal secret.
  */
 export async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const internalSecret = req.headers["x-internal-secret"];
@@ -95,45 +90,65 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
   }
 
   const token = authHeader.split(" ")[1];
+  if (!token) {
+    res.status(401).json({ error: "Missing bearer token" });
+    return;
+  }
 
   if (token.startsWith("gm_")) {
-    try {
-      const context = await authContextFromApiKey(token, requesterIp(req));
-      if (!context) {
-        res.status(401).json({ error: "Invalid API key" });
-        return;
-      }
-      req.userId = context.userId;
-      req.authContext = context;
-      next();
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Server error validating API key" });
-    }
+    sendLegacyApiKeyMigrationError(res);
     return;
   }
 
   try {
-    const decoded = jwt.verify(token, config.jwtSecret) as Record<string, unknown>;
-    const userId =
-      typeof decoded.id === "string"
-        ? decoded.id
-        : typeof decoded.sub === "string"
-          ? decoded.sub
-          : "";
-    if (!userId) {
-      res.status(401).json({ error: "Invalid JWT payload" });
+    const tokenContext = await validateOAuthAccessToken(token);
+    if (!tokenContext) {
+      res.status(401).json({ error: "Invalid or expired OAuth token" });
       return;
     }
 
-    const tenantId = typeof decoded.tenant_id === "string" ? decoded.tenant_id : undefined;
-    req.userId = userId;
-    req.authContext = tenantId
-      ? { userId, tenantId, authMode: "jwt" }
-      : await authContextFromUserId(userId, "jwt");
+    req.userId = tokenContext.userId;
+    req.authContext = {
+      userId: tokenContext.userId,
+      tenantId: tokenContext.tenantId,
+      authMode: "oauth",
+      clientId: tokenContext.clientId,
+      scopes: tokenContext.scopes,
+    };
+    next();
+  } catch (error) {
+    console.error("OAuth token validation failed:", error);
+    res.status(500).json({ error: "Server error validating OAuth token" });
+  }
+}
+
+export function requireScopes(requiredScopes: string[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction): void => {
+    if (requiredScopes.length === 0) {
+      next();
+      return;
+    }
+
+    const auth = req.authContext;
+    if (!auth) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    if (auth.authMode === "internal") {
+      next();
+      return;
+    }
+
+    const scopes = auth.scopes ?? [];
+    if (!hasRequiredScopes(scopes, requiredScopes)) {
+      res.status(403).json({
+        error: "Insufficient OAuth scopes",
+        requiredScopes,
+      });
+      return;
+    }
 
     next();
-  } catch {
-    res.status(401).json({ error: "Invalid or expired JWT token" });
   }
 }

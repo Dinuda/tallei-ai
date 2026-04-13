@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { authMiddleware, AuthRequest } from "../middleware/auth.js";
+import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.js";
 import { claudeOnboardingService } from "../services/claudeOnboarding.js";
 
 const createSessionSchema = z.object({
@@ -19,7 +19,7 @@ function normalizeId(param: string | string[] | undefined): string | null {
   return null;
 }
 
-router.post("/sessions", async (req: AuthRequest, res) => {
+router.post("/sessions", requireScopes(["memory:write"]), async (req: AuthRequest, res) => {
   try {
     const parsed = createSessionSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -35,7 +35,7 @@ router.post("/sessions", async (req: AuthRequest, res) => {
   }
 });
 
-router.get("/sessions/:id", async (req: AuthRequest, res) => {
+router.get("/sessions/:id", requireScopes(["memory:read"]), async (req: AuthRequest, res) => {
   try {
     const sessionId = normalizeId(req.params.id);
     if (!sessionId) {
@@ -54,7 +54,7 @@ router.get("/sessions/:id", async (req: AuthRequest, res) => {
   }
 });
 
-router.get("/sessions/:id/events", async (req: AuthRequest, res) => {
+router.get("/sessions/:id/events", requireScopes(["memory:read"]), async (req: AuthRequest, res) => {
   try {
     const sessionId = normalizeId(req.params.id);
     if (!sessionId) {
@@ -73,7 +73,7 @@ router.get("/sessions/:id/events", async (req: AuthRequest, res) => {
   }
 });
 
-router.post("/sessions/:id/resume", async (req: AuthRequest, res) => {
+router.post("/sessions/:id/resume", requireScopes(["memory:write"]), async (req: AuthRequest, res) => {
   try {
     const sessionId = normalizeId(req.params.id);
     if (!sessionId) {
@@ -99,7 +99,7 @@ router.post("/sessions/:id/resume", async (req: AuthRequest, res) => {
   }
 });
 
-router.post("/sessions/:id/cancel", async (req: AuthRequest, res) => {
+router.post("/sessions/:id/cancel", requireScopes(["memory:write"]), async (req: AuthRequest, res) => {
   try {
     const sessionId = normalizeId(req.params.id);
     if (!sessionId) {

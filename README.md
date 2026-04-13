@@ -61,25 +61,28 @@ Optional local desktop helper:
 
 ```bash
 npm run setup:claude
+node mcp-bridge.js login
 ```
 
 ### ChatGPT (Custom GPT Actions)
 
 1. Open `/dashboard/setup` and select `ChatGPT`.
-2. Generate an API key inline (shown once).
-3. Copy the OpenAPI URL: `https://<your-public-domain>/api/chatgpt/openapi.json`.
+2. Copy the OpenAPI URL: `https://<your-public-domain>/api/chatgpt/openapi.json`.
+3. Copy OAuth endpoints:
+   - Authorization URL: `https://<your-public-domain>/authorize`
+   - Token URL: `https://<your-public-domain>/token`
 4. In ChatGPT GPT Builder, switch from `Create` to `Configure`.
 5. Under `Actions`, create a new action and import from that OpenAPI URL.
-6. Set auth as API key header `Authorization` with value `Bearer gm_...`.
-7. Paste the provided GPT instruction template in `Configure` and publish.
+6. Set Action auth to OAuth and request scopes `memory:read memory:write`.
+7. Paste the provided GPT instruction template in `Configure`, then publish.
 
 CLI helper:
 
 ```bash
 npm run setup:chatgpt
-npm run setup:chatgpt -- --check --base-url https://<your-public-domain> --api-key gm_<key>
+npm run setup:chatgpt -- --check --base-url https://<your-public-domain> --access-token <oauth_access_token>
 ```
 
 ## Shared Memory Identity Model
 
-Claude and ChatGPT share the same memory graph only when both are configured against the same Tallei user context (same account and corresponding API key scope).
+Claude and ChatGPT share the same memory graph only when both are configured against the same Tallei user context (same account and OAuth principal).

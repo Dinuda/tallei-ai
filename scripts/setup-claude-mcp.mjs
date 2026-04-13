@@ -47,15 +47,7 @@ function backupIfExists(filePath) {
 }
 
 function main() {
-  const fromArg = getArgValue("--api-key");
-  const apiKey = fromArg || process.env.TALLEI_API_KEY || process.env.AUTHORIZATION;
-
-  if (!apiKey) {
-    console.error("Missing API key. Provide --api-key <KEY> or set TALLEI_API_KEY.");
-    process.exit(1);
-  }
-
-  const authorization = apiKey.startsWith("Bearer ") ? apiKey : `Bearer ${apiKey}`;
+  const mcpUrl = getArgValue("--mcp-url") || process.env.MCP_URL || "http://localhost:3000/mcp";
   const configPath = resolveClaudeConfigPath();
   const repoRoot = process.cwd();
   const bridgePath = path.resolve(getArgValue("--bridge") || path.join(repoRoot, "mcp-bridge.js"));
@@ -86,9 +78,9 @@ function main() {
       ...(config.mcpServers && typeof config.mcpServers === "object" ? config.mcpServers : {}),
       [serverName]: {
         command: "node",
-        args: [bridgePath],
+        args: [bridgePath, "connect"],
         env: {
-          AUTHORIZATION: authorization
+          MCP_URL: mcpUrl
         }
       }
     }
@@ -100,6 +92,8 @@ function main() {
 
   console.log(`Claude MCP server '${serverName}' configured.`);
   console.log(`Config path: ${configPath}`);
+  console.log(`MCP URL: ${mcpUrl}`);
+  console.log("Run `node mcp-bridge.js login` once to complete OAuth sign-in.");
   console.log("Restart Claude Desktop to load the updated MCP config.");
 }
 

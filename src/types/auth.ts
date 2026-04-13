@@ -6,4 +6,6 @@ export interface AuthContext {
   authMode: AuthMode;
   keyId?: string;
   connectorType?: string | null;
+  clientId?: string;
+  scopes?: string[];
 }

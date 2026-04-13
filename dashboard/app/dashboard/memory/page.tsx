@@ -162,7 +162,9 @@ export default function MemoryPage() {
             <article key={memory.id} className="memory-card">
               <div className="memory-card-head">
                 <div style={{ display: "inline-flex", gap: "0.45rem", alignItems: "center", flexWrap: "wrap" }}>
-                  <span className="platform-chip" style={{ border: "1px solid #343b46", background: "#181e27", color: "#dbe2ec", textTransform: "uppercase" }}>
+                  <span className="platform-chip" style={{ border: "1px solid #343b46", background: "#181e27", color: "#dbe2ec", textTransform: "uppercase", display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                    {memory.platform === "claude" && <img src="/claude.svg" alt="" width={12} height={12} />}
+                    {memory.platform === "chatgpt" && <img src="/chatgpt.svg" alt="" width={12} height={12} />}
                     {memory.platform}
                   </span>
                   <span className="platform-chip" style={{ border: "1px solid #3b422f", background: "rgba(143,196,67,0.16)", color: "#d8efb6", textTransform: "uppercase" }}>

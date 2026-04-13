@@ -13,9 +13,19 @@ import { ensurePrimaryTenantForUser, getPrimaryTenantId } from "../services/tena
 const AUTH_CODE_TTL_SECONDS = 10 * 60;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DEFAULT_SCOPES = ["mcp:tools", "memory:read", "memory:write"];
+const SUPPORTED_SCOPES = new Set([...DEFAULT_SCOPES, "automation:run"]);
 
 function createOpaqueToken(prefix: string): string {
   return `${prefix}_${randomBytes(32).toString("hex")}`;
+}
+
+function normalizeScopes(scopes?: string[]): string[] {
+  const requested = (scopes ?? []).map((scope) => scope.trim()).filter(Boolean);
+  const deduped = Array.from(new Set(requested));
+  const filtered = deduped.filter((scope) => SUPPORTED_SCOPES.has(scope));
+  if (filtered.length > 0) return filtered;
+  return [...DEFAULT_SCOPES];
 }
 
 async function getSessionUserId(req: Request): Promise<string | null> {
@@ -150,7 +160,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
     const tenantId = (await getPrimaryTenantId(userId)) ?? (await ensurePrimaryTenantForUser(userId));
 
     const code = createOpaqueToken("tla_code");
-    const scope = params.scopes && params.scopes.length > 0 ? params.scopes.join(" ") : null;
+    const scope = normalizeScopes(params.scopes).join(" ");
     const resource = params.resource?.toString() ?? this.expectedResourceUrl.toString();
 
     await pool.query(
@@ -270,8 +280,8 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
     if (token.revoked_at) throw new InvalidGrantError("Refresh token revoked");
     if (token.refresh_expires_at.getTime() <= Date.now()) throw new InvalidGrantError("Refresh token expired");
 
-    const existingScopes = (token.scope ?? "").split(" ").filter(Boolean);
-    const nextScopes = scopes && scopes.length > 0 ? scopes : existingScopes;
+    const existingScopes = normalizeScopes((token.scope ?? "").split(" ").filter(Boolean));
+    const nextScopes = normalizeScopes(scopes && scopes.length > 0 ? scopes : existingScopes);
 
     const invalidScope = nextScopes.some(scope => !existingScopes.includes(scope));
     if (invalidScope) throw new InvalidRequestError("Requested scope was not granted");

@@ -61,14 +61,10 @@ async function main() {
       `http://localhost:${port}`
   );
   const checkEnabled = hasFlag("--check");
-  const rawApiKey =
-    getArgValue("--api-key") ||
-    process.env.TALLEI_API_KEY ||
-    process.env.AUTHORIZATION ||
-    "";
-  const apiKey = rawApiKey.startsWith("Bearer ")
-    ? rawApiKey.slice("Bearer ".length)
-    : rawApiKey;
+  const rawAccessToken = getArgValue("--access-token") || process.env.TALLEI_OAUTH_ACCESS_TOKEN || "";
+  const accessToken = rawAccessToken.startsWith("Bearer ")
+    ? rawAccessToken.slice("Bearer ".length)
+    : rawAccessToken;
 
   const healthUrl = `${baseUrl}/health`;
   const openApiUrl = `${baseUrl}/api/chatgpt/openapi.json`;
@@ -81,16 +77,18 @@ async function main() {
   console.log(`Base URL: ${baseUrl}`);
   console.log(`OpenAPI URL: ${openApiUrl}`);
   console.log(`Health URL: ${healthUrl}`);
+  console.log(`OAuth Authorization URL: ${baseUrl}/authorize`);
+  console.log(`OAuth Token URL: ${baseUrl}/token`);
   console.log("");
-  console.log("Bearer auth value format:");
-  console.log("Bearer gm_<your_tallei_api_key>");
+  console.log("OAuth scopes for ChatGPT actions:");
+  console.log("memory:read memory:write");
   console.log("");
   console.log("Suggested GPT Instructions:");
   console.log("---------------------------");
   console.log(CHATGPT_INSTRUCTIONS_TEMPLATE);
   console.log("");
   console.log("Usage:");
-  console.log("node scripts/setup-chatgpt-actions.mjs --check [--api-key gm_...] [--base-url https://your-domain]");
+  console.log("node scripts/setup-chatgpt-actions.mjs --check [--access-token <oauth_access_token>] [--base-url https://your-domain]");
   console.log("");
 
   if (!checkEnabled) {
@@ -127,11 +125,11 @@ async function main() {
     })
   );
 
-  if (!apiKey) {
-    console.log("[INFO] API key not provided; skipping authenticated recall/save smoke checks.");
+  if (!accessToken) {
+    console.log("[INFO] OAuth access token not provided; skipping authenticated recall/save smoke checks.");
   } else {
     const authHeaders = {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
     };
 

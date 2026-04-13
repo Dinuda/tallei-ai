@@ -111,6 +111,14 @@ async function backfillTenants(client: DbClient): Promise<void> {
   `);
 
   await client.query(`
+    UPDATE oauth_device_codes odc
+    SET tenant_id = tm.tenant_id
+    FROM tenant_memberships tm
+    WHERE odc.user_id = tm.user_id
+      AND odc.tenant_id IS NULL
+  `);
+
+  await client.query(`
     UPDATE mcp_call_events mce
     SET tenant_id = tm.tenant_id
     FROM tenant_memberships tm
@@ -393,7 +401,8 @@ export async function initDb() {
       );
 
       ALTER TABLE oauth_tokens
-      ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE;
+      ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
+      ADD COLUMN IF NOT EXISTS grant_type TEXT NOT NULL DEFAULT 'authorization_code';
 
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh ON oauth_tokens(refresh_token);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client ON oauth_tokens(client_id);
@@ -401,6 +410,34 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access_expiry ON oauth_tokens(access_expires_at);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh_expiry ON oauth_tokens(refresh_expires_at);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS oauth_device_codes (
+        device_code TEXT PRIMARY KEY,
+        user_code TEXT UNIQUE NOT NULL,
+        client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+        code_challenge TEXT NOT NULL,
+        scope TEXT,
+        resource TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'approved', 'denied', 'consumed')),
+        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
+        interval_seconds INTEGER NOT NULL DEFAULT 5,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        approved_at TIMESTAMP WITH TIME ZONE,
+        consumed_at TIMESTAMP WITH TIME ZONE,
+        last_polled_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_oauth_device_codes_user_code
+        ON oauth_device_codes(user_code);
+      CREATE INDEX IF NOT EXISTS idx_oauth_device_codes_status
+        ON oauth_device_codes(status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_oauth_device_codes_client
+        ON oauth_device_codes(client_id, created_at DESC);
     `);
 
     await client.query(`
@@ -491,6 +528,11 @@ export async function initDb() {
     `);
 
     await backfillTenants(client);
+    await client.query(`
+      UPDATE api_keys
+      SET revoked_at = NOW()
+      WHERE revoked_at IS NULL
+    `);
     await applySupabaseRlsPolicies(client);
 
     console.log("Database schema initialized successfully.");

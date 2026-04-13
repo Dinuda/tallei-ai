@@ -203,7 +203,6 @@ export default function Home() {
                 <div className="lp-mc-platforms">
                   <span>Claude</span>
                   <span>ChatGPT</span>
-                  <span>Gemini</span>
                 </div>
               </div>
             ))}

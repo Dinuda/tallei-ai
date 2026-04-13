@@ -6,7 +6,7 @@ import {
   listMemories,
   deleteMemory,
 } from "../services/memory.js";
-import { authMiddleware, AuthRequest } from "../middleware/auth.js";
+import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -25,7 +25,7 @@ const recallSchema = z.object({
 });
 
 // --- POST /api/memories ---
-router.post("/", async (req: AuthRequest, res: Response) => {
+router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = saveSchema.parse(req.body);
     if (!req.authContext) {
@@ -52,7 +52,7 @@ router.post("/", async (req: AuthRequest, res: Response) => {
 });
 
 // --- GET /api/memories/recall ---
-router.get("/recall", async (req: AuthRequest, res: Response) => {
+router.get("/recall", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const query = recallSchema.parse(req.query);
     if (!req.authContext) {
@@ -74,7 +74,7 @@ router.get("/recall", async (req: AuthRequest, res: Response) => {
 });
 
 // --- GET /api/memories ---
-router.get("/", async (req: AuthRequest, res: Response) => {
+router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     if (!req.authContext) {
       res.status(401).json({ error: "Unauthorized" });
@@ -89,7 +89,7 @@ router.get("/", async (req: AuthRequest, res: Response) => {
 });
 
 // --- DELETE /api/memories/:id ---
-router.delete("/:id", async (req: AuthRequest, res: Response) => {
+router.delete("/:id", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     if (!req.authContext) {
       res.status(401).json({ error: "Unauthorized" });

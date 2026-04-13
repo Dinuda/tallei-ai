@@ -3,7 +3,7 @@
 ## Overview
 Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemini via:
 - **MCP server** (Node.js/Express backend) — handles memory save/recall via vector search
-- **Next.js dashboard** — UI for managing memories, API keys, and setup
+- **Next.js dashboard** — UI for managing memories and OAuth connector setup
 - **PostgreSQL + pgvector** — persistent vector store with mem0ai SDK
 - **OpenAI** — embeddings (text-embedding-3-small) and summarization (gpt-4o-mini)
 
@@ -17,23 +17,23 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 | Path | Purpose |
 |------|---------|
 | `src/index.ts` | Express server entry point |
-| `src/mcp/server.ts` | MCP tool definitions + auth; houses OAuth/API key token caching |
+| `src/mcp/server.ts` | MCP tool definitions + OAuth auth; token caching + scope checks |
 | `src/services/memory.ts` | Singleton Memory instance, fire-and-forget saves, recall cache |
 | `src/services/summarizer.ts` | OpenAI gpt-4o-mini summarization (title, key points, decisions) |
-| `src/services/auth.ts` | Google OAuth, JWT tokens, API key validation (w/ cache) |
+| `src/services/auth.ts` | Google OAuth + session JWT for dashboard auth |
 | `src/routes/*.ts` | HTTP route handlers |
 | `src/db/index.ts` | PostgreSQL connection pool & schema init |
 
 ### Frontend (`dashboard/`)
 | Path | Purpose |
 |------|---------|
-| `dashboard/app/globals.css` | **NEW THEME**: light greenish-yellow, lime accent (#7eb71b), Syne + Plus Jakarta Sans fonts |
+| `dashboard/app/globals.css` | **NEW THEME**: light greenish-yellow, lime accent (#7eb71b), DM Sans + Plus Jakarta Sans fonts |
 | `dashboard/app/layout.tsx` | Root layout (with Providers, TopNav from linter) |
 | `dashboard/app/page.tsx` | Landing page — hero, feature grid, decorative radial blobs |
 | `dashboard/app/(auth)/login/page.tsx` | Google OAuth login card |
 | `dashboard/app/dashboard/setup/page.tsx` | **Step-by-step connector wizard** — 4-step flow with progress dots, auto-advance on copy |
 | `dashboard/app/dashboard/page.tsx` | Memory feed with search, platform color badges, shimmer skeleton |
-| `dashboard/app/dashboard/keys/page.tsx` | API key generation & revocation |
+| `dashboard/app/dashboard/keys/page.tsx` | API key deprecation notice (OAuth migration) |
 | `dashboard/app/dashboard/layout.tsx` | Sidebar nav + topbar, uses next-auth signOut |
 | `dashboard/lib/api.ts` | API URL builder, `mcpServerUrl()` helper |
 
@@ -47,10 +47,6 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
   - **Result**: `save_memory` MCP tool now ~10ms latency (was 2–4s)
 - **Recall result cache (60s TTL)**: Vector search results cached per `(userId, query, limit)`; invalidates on new saves
   - **Result**: `recall_memories` ~5ms on warm cache (was 300–500ms on every call)
-
-### Auth Service (`src/services/auth.ts`)
-- **API key validation cache (5min TTL)**: `validateApiKey()` caches `hash → userId` lookups to avoid repeated DB queries
-  - **Result**: Eliminates DB round-trip on every MCP request with `gm_*` tokens
 
 ### MCP Server (`src/mcp/server.ts`)
 - **OAuth token cache (10min TTL)**: `oauthVerifier.verifyAccessToken()` results cached per token
@@ -73,7 +69,7 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 - **Border**: `#cce89e` (pale lime)
 
 ### Fonts
-- **Display/Headlines** (`h1`–`h3`): `Syne` 700–800 wt
+- **Display/Headlines** (`h1`–`h3`): `DM Sans` 700–800 wt
 - **Body/UI**: `Plus Jakarta Sans` 400–600 wt
 
 ### Common CSS Variables
@@ -113,7 +109,7 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 1. Create a new route file in `src/routes/` (e.g., `src/routes/custom.ts`)
 2. Export a Router instance
 3. Wire it into `src/index.ts` with `app.use("/api/custom", customRouter)`
-4. For auth: use `verifySessionToken()` or `validateApiKey()` in middleware
+4. For auth: use `authMiddleware` + `requireScopes([...])` in route handlers
 
 ### Updating the dashboard theme
 - Edit `dashboard/app/globals.css` CSS variables at the top
@@ -177,7 +173,7 @@ Test directly via curl:
 ```bash
 curl -X POST http://localhost:3000/mcp \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer gm_<your-api-key>" \
+  -H "Authorization: Bearer <oauth_access_token>" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"recall_memories","arguments":{"query":"user preferences","limit":5}}}'
 ```
 
