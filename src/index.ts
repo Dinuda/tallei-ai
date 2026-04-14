@@ -88,8 +88,8 @@ const app = createApp();
 async function main() {
   await initDb();
 
-  app.listen(config.port, "127.0.0.1", () => {
-    console.log(`Tallei backend listening on http://127.0.0.1:${config.port}`);
+  app.listen(config.port, config.host, () => {
+    console.log(`Tallei backend listening on http://${config.host}:${config.port}`);
     console.log(`Public base URL: ${config.publicBaseUrl}`);
     console.log(`MCP public URL: ${mcpPublicUrl.toString()}`);
     console.log(`Environment: ${config.nodeEnv}`);

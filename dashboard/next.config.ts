@@ -25,6 +25,7 @@ const allowedDevOrigins = Array.from(new Set([
 ].filter(Boolean)));
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   allowedDevOrigins,
 
   async rewrites() {

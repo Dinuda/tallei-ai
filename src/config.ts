@@ -66,6 +66,10 @@ const qdrantTimeoutSecondsLegacy = readOptionalIntEnv("QDRANT_TIMEOUT_SECONDS");
 export const config = {
   port,
   nodeEnv: process.env.NODE_ENV || "development",
+  host: readStringEnv(
+    "HOST",
+    (process.env.NODE_ENV || "development") === "production" ? "0.0.0.0" : "127.0.0.1"
+  ),
   publicBaseUrl,
   dashboardBaseUrl: normalizeBaseUrl(
     process.env.DASHBOARD_BASE_URL || process.env.PUBLIC_BASE_URL || localBaseUrl

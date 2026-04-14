@@ -86,3 +86,9 @@ npm run setup:chatgpt -- --check --base-url https://<your-public-domain> --acces
 ## Shared Memory Identity Model
 
 Claude and ChatGPT share the same memory graph only when both are configured against the same Tallei user context (same account and OAuth principal).
+
+## Production Deployment (Google Cloud Run)
+
+For a secure, domain-ready deployment with separate backend and dashboard containers, see:
+
+- [deploy/cloudrun/README.md](/Users/dinudayaggahavita/Documents/work/tallei-ai/deploy/cloudrun/README.md)
