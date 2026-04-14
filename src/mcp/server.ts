@@ -242,13 +242,19 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
   const router = Router();
 
   const handleMcp = async (req: any, res: any) => {
-    const method = typeof req?.body?.method === "string" ? req.body.method : "unknown";
+    const rpcMethod = typeof req?.body?.method === "string" ? req.body.method : null;
     const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name : null;
+    const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
 
     if (config.nodeEnv !== "production") {
-      if (method === "tools/call" && typeof toolName === "string") {
+      if (rpcMethod === "tools/call" && typeof toolName === "string") {
         console.log(`[mcp] tools/call -> ${toolName}`);
-      } else if (typeof method === "string") {
+      } else if (rpcMethod === "initialize") {
+        console.log("[mcp] initialize");
+      } else if (typeof rpcMethod === "string") {
+        console.log(`[mcp] ${rpcMethod}`);
+      } else {
+        // Transport-level handshake/stream requests often have no JSON-RPC method.
         console.log(`[mcp] ${method}`);
       }
     }

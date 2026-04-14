@@ -1,7 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Copy, ExternalLink } from "lucide-react";
 import { Button } from "../../../components/ui/button";
 
@@ -18,6 +17,108 @@ Rules:
 5) Do not mention tool calls in the final user-facing response.`;
 
 type Provider = "claude" | "chatgpt";
+type IntegrationState = "checking" | "connecting" | "connected" | "error" | "not_connected";
+
+type IntegrationStatus = {
+  state: IntegrationState;
+  connected: boolean;
+  lastConnectedAt: string | null;
+  lastEventAt: string | null;
+  lastError: string | null;
+};
+
+type IntegrationStatusMap = {
+  claude: IntegrationStatus;
+  chatgpt: IntegrationStatus;
+};
+
+const DEFAULT_STATUS: IntegrationStatus = {
+  state: "not_connected",
+  connected: false,
+  lastConnectedAt: null,
+  lastEventAt: null,
+  lastError: null,
+};
+
+const DEFAULT_STATUS_MAP: IntegrationStatusMap = {
+  claude: { ...DEFAULT_STATUS },
+  chatgpt: { ...DEFAULT_STATUS },
+};
+
+function normalizeState(value: unknown): IntegrationState {
+  if (
+    value === "checking" ||
+    value === "connecting" ||
+    value === "connected" ||
+    value === "error" ||
+    value === "not_connected"
+  ) {
+    return value;
+  }
+  return "not_connected";
+}
+
+function normalizeIntegrationStatus(input: unknown): IntegrationStatus {
+  if (!input || typeof input !== "object") return { ...DEFAULT_STATUS };
+  const value = input as Partial<IntegrationStatus>;
+  return {
+    state: normalizeState(value.state),
+    connected: Boolean(value.connected),
+    lastConnectedAt: typeof value.lastConnectedAt === "string" ? value.lastConnectedAt : null,
+    lastEventAt: typeof value.lastEventAt === "string" ? value.lastEventAt : null,
+    lastError: typeof value.lastError === "string" ? value.lastError : null,
+  };
+}
+
+function statusUiState(state: IntegrationState, statusLoading: boolean): {
+  label: string;
+  border: string;
+  color: string;
+  background: string;
+} {
+  if (statusLoading || state === "checking") {
+    return {
+      label: "Checking...",
+      border: "1px solid rgba(148,163,184,.35)",
+      color: "#94a3b8",
+      background: "rgba(148,163,184,.08)",
+    };
+  }
+
+  if (state === "connecting") {
+    return {
+      label: "Connecting...",
+      border: "1px solid rgba(245,158,11,.35)",
+      color: "#f59e0b",
+      background: "rgba(245,158,11,.08)",
+    };
+  }
+
+  if (state === "connected") {
+    return {
+      label: "Connected",
+      border: "1px solid rgba(34,197,94,.35)",
+      color: "#22c55e",
+      background: "rgba(34,197,94,.08)",
+    };
+  }
+
+  if (state === "error") {
+    return {
+      label: "Error",
+      border: "1px solid rgba(239,68,68,.35)",
+      color: "#ef4444",
+      background: "rgba(239,68,68,.08)",
+    };
+  }
+
+  return {
+    label: "Not connected",
+    border: "1px solid rgba(148,163,184,.35)",
+    color: "#94a3b8",
+    background: "rgba(148,163,184,.08)",
+  };
+}
 
 /* ── Provider icons ────────────────────────────────────────── */
 function ClaudeIcon() {
@@ -94,11 +195,14 @@ function ClaudeSetup() {
           <div className="su-step-left">
             <div className="su-step-num">1</div>
             <div className="su-step-text">
-              <div className="su-step-title">Copy MCP URL</div>
-              <p className="su-step-body">Copy your Tallei MCP endpoint URL to use in Claude.</p>
+              <div className="su-step-title">Copy Configuration</div>
+              <p className="su-step-body">Copy the Name and URL below to use in your Claude config.</p>
             </div>
           </div>
           <div className="su-step-right">
+            <div style={{ marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Name</strong></div>
+            <CodeBlock value="Tallei Memory" language="txt" />
+            <div style={{ marginTop: "1rem", marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Remote MCP server URL</strong></div>
             <CodeBlock value={mcpUrl} language="url" />
           </div>
         </div>
@@ -123,7 +227,7 @@ function ClaudeSetup() {
             <div className="su-step-num">3</div>
             <div className="su-step-text">
               <div className="su-step-title">Add Connector</div>
-              <p className="su-step-body">In Claude, click <strong>Add custom connector</strong>, paste your MCP URL, and save.</p>
+              <p className="su-step-body">In Claude, click <strong>Add custom connector</strong>, paste the Name and URL, and keep Advanced settings empty.</p>
             </div>
           </div>
           <div className="su-step-right">
@@ -266,20 +370,76 @@ function ChatGptSetup() {
 /* ── Page ───────────────────────────────────────────────────── */
 export default function ConnectorsPage() {
   const [selected, setSelected] = useState<Provider>("claude");
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [statusByProvider, setStatusByProvider] = useState<IntegrationStatusMap>(DEFAULT_STATUS_MAP);
 
-  const providers: { id: Provider; name: string; sub: string; icon: React.FC }[] = [
-    { id: "claude", name: "Claude MCP", sub: "Memory across every session", icon: ClaudeIcon },
-    { id: "chatgpt", name: "ChatGPT Action", sub: "Drop into your Custom GPT", icon: ChatGPTIcon },
+  useEffect(() => {
+    let isMounted = true;
+    let inFlight = false;
+
+    const loadStatus = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch("/api/integrations/status");
+        if (!res.ok) return;
+        const data = await res.json();
+        const integrations = data?.integrations ?? {};
+        const nextStatus: IntegrationStatusMap = {
+          claude: normalizeIntegrationStatus(integrations?.claude),
+          chatgpt: normalizeIntegrationStatus(integrations?.chatgpt),
+        };
+        if (isMounted) {
+          setStatusByProvider(nextStatus);
+        }
+      } catch {
+        // Best effort only.
+      } finally {
+        inFlight = false;
+        if (isMounted) {
+          setStatusLoading(false);
+        }
+      }
+    };
+
+    void loadStatus();
+    const interval = window.setInterval(() => {
+      void loadStatus();
+    }, 4000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const providers: { id: Provider; name: string; sub: string; icon: React.FC; status: IntegrationStatus }[] = [
+    {
+      id: "claude",
+      name: "Claude MCP",
+      sub: "Memory across every session",
+      icon: ClaudeIcon,
+      status: statusByProvider.claude,
+    },
+    {
+      id: "chatgpt",
+      name: "ChatGPT Action",
+      sub: "Drop into your Custom GPT",
+      icon: ChatGPTIcon,
+      status: statusByProvider.chatgpt,
+    },
   ];
 
   return (
     <div className="cnn-wrap" style={{maxWidth: '1000px'}}>
       <div className="cnn-hero" style={{textAlign: 'left', paddingBottom: '1.5rem', paddingTop: '1rem'}}>
-        <h1 className="cnn-title" style={{fontSize: '2rem'}}>Connect Tallei</h1>
+        <h1 className="cnn-title" style={{fontSize: '2rem'}}>Connect Tallei Memory</h1>
       </div>
 
       <div className="cnn-provider-row-container" style={{justifyContent: 'flex-start', marginBottom: '2rem'}}>
-        {providers.map((p) => (
+        {providers.map((p) => {
+          const badge = statusUiState(p.status.state, statusLoading);
+          return (
           <div
             key={p.id}
             className={`cnn-provider-card ${selected === p.id ? "active" : ""}`}
@@ -289,13 +449,31 @@ export default function ConnectorsPage() {
                <div className="cnn-provider-icon" style={{border: 'none', background: 'transparent', width: '28px', height: '28px'}}>
                  <p.icon />
                </div>
-               <div className="cnn-provider-text">
-                 <div className="cnn-provider-name">{p.name}</div>
-                 <div className="cnn-provider-sub">{p.sub}</div>
-               </div>
+              <div className="cnn-provider-text">
+                <div className="cnn-provider-name">{p.name}</div>
+                <div className="cnn-provider-sub">{p.sub}</div>
+                <div
+                  style={{
+                    marginTop: "0.4rem",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.35rem",
+                    fontSize: "0.72rem",
+                    fontWeight: 600,
+                    padding: "0.18rem 0.55rem",
+                    borderRadius: "999px",
+                    border: badge.border,
+                    color: badge.color,
+                    background: badge.background,
+                  }}
+                >
+                  {badge.label}
+                </div>
+              </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {selected === "claude" && <ClaudeSetup />}

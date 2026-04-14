@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.js";
 import { config } from "../config.js";
 import { recallMemories, saveMemory } from "../services/memory.js";
+import { pool } from "../db/index.js";
 
 const router = Router();
 
@@ -25,6 +26,35 @@ function degradedRecallResponse() {
     contextBlock: "--- No relevant memories found ---",
     memories: [],
   };
+}
+
+async function logChatGptAction(input: {
+  auth: AuthRequest["authContext"];
+  method: "chatgpt/actions/recall" | "chatgpt/actions/run" | "chatgpt/actions/save";
+  ok: boolean;
+  error?: string | null;
+}): Promise<void> {
+  const auth = input.auth;
+  if (!auth) return;
+
+  try {
+    await pool.query(
+      `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
+       VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6)`,
+      [
+        auth.tenantId,
+        auth.userId,
+        auth.authMode,
+        input.method,
+        input.ok,
+        input.error ?? null,
+      ]
+    );
+  } catch (error) {
+    if (config.nodeEnv !== "production") {
+      console.error("[chatgpt] failed to persist action event:", error);
+    }
+  }
 }
 
 function buildOpenApiSpec(serverUrl: string) {
@@ -264,6 +294,11 @@ router.post("/actions/recall", authMiddleware, requireScopes(["memory:read"]), a
     }
 
     const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
+    await logChatGptAction({
+      auth: req.authContext,
+      method: "chatgpt/actions/recall",
+      ok: true,
+    });
     res.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -271,9 +306,21 @@ router.post("/actions/recall", authMiddleware, requireScopes(["memory:read"]), a
       return;
     }
     if (isTransientMemoryInfraError(error)) {
+      await logChatGptAction({
+        auth: req.authContext,
+        method: "chatgpt/actions/recall",
+        ok: false,
+        error: error instanceof Error ? error.message : "Transient memory infra error",
+      });
       res.json(degradedRecallResponse());
       return;
     }
+    await logChatGptAction({
+      auth: req.authContext,
+      method: "chatgpt/actions/recall",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to recall memories",
+    });
     console.error("Error recalling ChatGPT memories:", error);
     res.status(500).json({ error: "Failed to recall memories" });
   }
@@ -288,6 +335,11 @@ router.post("/actions/run", authMiddleware, requireScopes(["memory:read"]), asyn
     }
 
     const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
+    await logChatGptAction({
+      auth: req.authContext,
+      method: "chatgpt/actions/run",
+      ok: true,
+    });
     res.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -295,9 +347,21 @@ router.post("/actions/run", authMiddleware, requireScopes(["memory:read"]), asyn
       return;
     }
     if (isTransientMemoryInfraError(error)) {
+      await logChatGptAction({
+        auth: req.authContext,
+        method: "chatgpt/actions/run",
+        ok: false,
+        error: error instanceof Error ? error.message : "Transient memory infra error",
+      });
       res.json(degradedRecallResponse());
       return;
     }
+    await logChatGptAction({
+      auth: req.authContext,
+      method: "chatgpt/actions/run",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to run memory action",
+    });
     console.error("Error running ChatGPT memory action:", error);
     res.status(500).json({ error: "Failed to run memory action" });
   }
@@ -312,6 +376,11 @@ router.post("/actions/save", authMiddleware, requireScopes(["memory:write"]), as
     }
 
     const saved = await saveMemory(body.content, req.authContext, "chatgpt", req.ip);
+    await logChatGptAction({
+      auth: req.authContext,
+      method: "chatgpt/actions/save",
+      ok: true,
+    });
     res.json({
       success: true,
       memoryId: saved.memoryId,
@@ -323,6 +392,12 @@ router.post("/actions/save", authMiddleware, requireScopes(["memory:write"]), as
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    await logChatGptAction({
+      auth: req.authContext,
+      method: "chatgpt/actions/save",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to save memory",
+    });
     console.error("Error saving ChatGPT memory:", error);
     res.status(500).json({ error: "Failed to save memory" });
   }

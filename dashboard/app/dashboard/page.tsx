@@ -34,7 +34,7 @@ function platformStyle(p: string) {
 
 /* ── Memory text parsing ────────────────────────────────────────── */
 function parseMemoryText(text: string): { title: string; body: string } {
-  const stripped = text.replace(/^\[[^\]]+\]\s*/, "").trim();
+const stripped = text.replace(/^\[[^\]]+\]\s*/, "").trim();
 
   const keyIdx   = stripped.search(/key\s*points?:/i);
   const sumIdx   = stripped.search(/summary:/i);
