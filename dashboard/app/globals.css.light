@@ -1,0 +1,67 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg: #f8fdf2;
+  --surface: #ffffff;
+  --accent: #7eb71b;
+  --accent-hover: #6aa015;
+  --accent-light: #e6f5c8;
+  --accent-dim: #cde99a;
+  --text: #182506;
+  --text-2: #3d5c18;
+  --text-muted: #7a9a4a;
+  --border: #cce89e;
+  --border-light: #e4f5c6;
+  --border-focus: var(--accent);
+
+  --shadow-sm: 0 4px 20px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 12px 36px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 22px 70px rgba(0, 0, 0, 0.12);
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 24px;
+  --radius-pill: 999px;
+
+  --max-width: 1180px;
+  --sidebar-w: 244px;
+  --nav-h: 56px;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 0.14s var(--ease-out);
+  --t-smooth: 0.24s var(--ease-out);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: 'DM Sans', sans-serif;
+  color: var(--text);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}

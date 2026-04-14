@@ -153,9 +153,39 @@ export default function MemoryPage() {
         {loading ? (
           <article className="memory-card">Loading memory intelligence...</article>
         ) : filtered.length === 0 ? (
-          <article className="empty-state-panel" style={{ minHeight: "220px" }}>
-            <h3 className="container-tags-empty-title" style={{ fontSize: "1.3rem" }}>No memory matches found</h3>
-            <p className="container-tags-empty-subtitle">Try a broader query or add new conversations to your memory index.</p>
+          <article className="empty-state-panel" style={{ padding: "4rem 2rem", textAlign: "center", background: "var(--surface)", borderRadius: "var(--radius-lg)", border: "1px solid var(--border-light)" }}>
+            <div style={{
+              width: "48px", height: "48px", margin: "0 auto 1.25rem",
+              borderRadius: "12px", background: "#f3f4f6",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+                <line x1="9" x2="15" y1="15" y2="9" />
+              </svg>
+            </div>
+            <h3 style={{ fontSize: "1.1rem", fontWeight: 600, color: "var(--text)", marginBottom: "0.5rem" }}>
+              No memories found
+            </h3>
+            <p style={{ fontSize: "0.9rem", color: "var(--text-muted)", maxWidth: "320px", margin: "0 auto 1.5rem", lineHeight: 1.6 }}>
+              Install Mem0 in production to monitor memories here.
+            </p>
+            <div style={{ display: "flex", gap: "0.65rem", justifyContent: "center", flexWrap: "wrap" }}>
+              <a
+                href="https://mem0.ai/"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: "0.4rem",
+                  padding: "0.55rem 1.1rem",
+                  background: "#000",
+                  color: "#fff", fontWeight: 500, fontSize: "0.85rem",
+                  borderRadius: "6px", textDecoration: "none",
+                }}
+              >
+                Install Mem0
+              </a>
+            </div>
           </article>
         ) : (
           filtered.map((memory) => (

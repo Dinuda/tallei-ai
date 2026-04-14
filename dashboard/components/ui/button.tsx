@@ -5,20 +5,20 @@ import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "../../lib/utils";
 
-const buttonVariants = cva("ui-btn", {
+const buttonVariants = cva("btn", {
   variants: {
     variant: {
-      default: "ui-btn-default",
-      secondary: "ui-btn-secondary",
-      ghost: "ui-btn-ghost",
-      outline: "ui-btn-outline",
-      destructive: "ui-btn-destructive",
+      default: "btn-primary",
+      secondary: "btn-secondary",
+      ghost: "btn-ghost",
+      outline: "btn-outline",
+      destructive: "btn-destructive",
     },
     size: {
-      default: "ui-btn-md",
-      sm: "ui-btn-sm",
-      lg: "ui-btn-lg",
-      icon: "ui-btn-icon",
+      default: "",
+      sm: "btn-sm",
+      lg: "btn-lg",
+      icon: "btn-icon",
     },
   },
   defaultVariants: {

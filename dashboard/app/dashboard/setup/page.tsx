@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { Check, Copy, ExternalLink } from "lucide-react";
+import { Button } from "../../../components/ui/button";
 
 const CLAUDE_CONNECTORS_URL = "https://claude.ai/settings/connectors";
 const CHATGPT_BUILDER_URL = "https://chatgpt.com/gpts/editor";
@@ -16,39 +17,27 @@ Rules:
 4) If the user corrects a prior fact, call saveMemory with the corrected fact.
 5) Do not mention tool calls in the final user-facing response.`;
 
-type Provider = "claude" | "chatgpt" | "gemini" | "cursor";
+type Provider = "claude" | "chatgpt";
 
 /* ── Provider icons ────────────────────────────────────────── */
 function ClaudeIcon() {
   return (
-    <img src="/claude.svg" alt="Claude" width={24} height={24} aria-hidden="true" />
+    <div style={{ backgroundColor: 'rgba(217, 119, 87, 0.1)', width: '36px', height: '36px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <img src="/claude.svg" alt="Claude" width={20} height={20} aria-hidden="true" />
+    </div>
   );
 }
 
 function ChatGPTIcon() {
   return (
-    <img src="/chatgpt.svg" alt="ChatGPT" width={24} height={24} aria-hidden="true" />
-  );
-}
-
-function CursorIcon() {
-  return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M16.5 12l-7.5 7.5v-15l7.5 7.5z" stroke="#fff" strokeWidth="2" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function GeminiIcon() {
-  return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 2C12 7.52 7.52 12 2 12C7.52 12 12 16.48 12 22C12 16.48 16.48 12 22 12C16.48 12 12 7.52 12 2Z" fill="#4B90FF" />
-    </svg>
+    <div style={{ backgroundColor: 'rgba(116, 170, 156, 0.1)', width: '36px', height: '36px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <img src="/chatgpt.svg" alt="ChatGPT" width={20} height={20} aria-hidden="true" />
+    </div>
   );
 }
 
 /* ── Code block ────────────────────────────────────────────── */
-function CodeBlock({ value, onCopy }: { value: string; onCopy?: () => void }) {
+function CodeBlock({ value, language = "txt", onCopy }: { value: string; language?: string; onCopy?: () => void }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -60,156 +49,112 @@ function CodeBlock({ value, onCopy }: { value: string; onCopy?: () => void }) {
     } catch {/* ignore */}
   };
 
+  const getLanguageIcon = (lang: string) => {
+    if (lang === 'python') return '🐍';
+    if (lang === 'url') return '🔗';
+    if (lang === 'json') return 'JSON';
+    return null;
+  };
+
   return (
-    <div className="cnn-code-block">
-      <code className="cnn-code-text">{value}</code>
-      <button
-        type="button"
-        className={`cnn-copy-corner ${copied ? "copied" : ""}`}
-        onClick={handleCopy}
-        title={copied ? "Copied!" : "Copy"}
-        aria-label="Copy to clipboard"
-      >
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-      </button>
+    <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', overflow: 'hidden' }}>
+      <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
+        <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
+          {getLanguageIcon(language) && <span style={{ fontSize: '1rem' }}>{getLanguageIcon(language)}</span>}
+          <span style={{ textTransform: 'lowercase' }}>{language}</span>
+        </div>
+        <button
+          type="button"
+          className={`cnn-copy-btn ${copied ? "copied" : ""}`}
+          onClick={handleCopy}
+          title={copied ? "Copied!" : "Copy"}
+          aria-label="Copy to clipboard"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'transparent', cursor: 'pointer', color: copied ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
+        >
+          {copied ? <Check size={16} /> : <Copy size={16} />}
+        </button>
+      </div>
+      <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto' }}>
+        <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace', color: '#1f2937' }}>{value}</code>
+      </div>
     </div>
   );
 }
 
 /* ── Claude setup ──────────────────────────────────────────── */
-function ClaudeSetup({ onBack }: { onBack: () => void }) {
-  const [installedBridge, setInstalledBridge] = useState(false);
-  const [signedIn, setSignedIn] = useState(false);
-  const [restartedClaude, setRestartedClaude] = useState(false);
-  const isComplete = installedBridge && signedIn && restartedClaude;
-
-  const claudeDesktopConfig = `{
-  "mcpServers": {
-    "tallei": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-bridge.js", "connect"],
-      "env": {
-        "MCP_URL": "https://your-domain.example/mcp"
-      }
-    }
-  }
-}`;
-
-  const stepOneClass = installedBridge ? "done" : "active";
-  const stepTwoClass = signedIn ? "done" : installedBridge ? "active" : "upcoming";
-  const stepThreeClass = restartedClaude ? "done" : signedIn ? "active" : "upcoming";
+function ClaudeSetup() {
+  const mcpUrl = typeof window !== "undefined"
+    ? `${window.location.origin}/mcp`
+    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/mcp`;
 
   return (
-    <div className="su-root">
-      <button type="button" className="cnn-back" onClick={onBack}>
-        ← Back to integrations
-      </button>
-
-      <div className="su-header">
-        <div className="su-header-left">
-          <div className="su-eyebrow">
-            <span className="lp-live-dot" style={{ width: 6, height: 6 }}></span>
-            Claude Desktop
-          </div>
-          <h1 className="su-title">Connect Claude</h1>
-          <p className="su-desc">Enable persistent memory across all your Claude conversations.</p>
-        </div>
-      </div>
-
-      <div className="su-steps">
-        <div className={`su-step ${stepOneClass}`}>
-          <div className="su-step-aside">
+    <div className="su-root animate-fade-in">
+      <div className="su-steps-grid">
+        <div className="su-step-row">
+          <div className="su-step-left">
             <div className="su-step-num">1</div>
-            <div className="su-step-line" />
-          </div>
-          <div className="su-step-main">
-            <div className="su-step-title">Install Claude MCP Bridge</div>
-            <div className="su-step-content">
-              <p className="su-step-body">Run the helper to register the local MCP bridge in Claude Desktop.</p>
-              <CodeBlock value="npm run setup:claude" />
-              <div className="su-step-actions">
-                <button className="su-btn-primary" onClick={() => setInstalledBridge(true)}>
-                  Mark step done
-                </button>
-              </div>
+            <div className="su-step-text">
+              <div className="su-step-title">Copy MCP URL</div>
+              <p className="su-step-body">Copy your Tallei MCP endpoint URL to use in Claude.</p>
             </div>
+          </div>
+          <div className="su-step-right">
+            <CodeBlock value={mcpUrl} language="url" />
           </div>
         </div>
 
-        <div className={`su-step ${stepTwoClass}`}>
-          <div className="su-step-aside">
+        <div className="su-step-row">
+          <div className="su-step-left">
             <div className="su-step-num">2</div>
-            <div className="su-step-line" />
-          </div>
-          <div className="su-step-main">
-            <div className="su-step-title">Sign In with OAuth</div>
-            <div className="su-step-content">
-              <p className="su-step-body">
-                Run OAuth login once. This opens your browser and stores a refreshable local bridge session.
-              </p>
-              <CodeBlock value="node mcp-bridge.js login" />
-              <p className="su-step-body" style={{ marginTop: "0.8rem" }}>
-                If needed, your Claude Desktop config should look like this:
-              </p>
-              <CodeBlock value={claudeDesktopConfig} />
-              <div className="su-step-actions">
-                <button className="su-btn-primary" disabled={!installedBridge} onClick={() => setSignedIn(true)}>
-                  Mark step done
-                </button>
-              </div>
+            <div className="su-step-text">
+              <div className="su-step-title">Open Connectors</div>
+              <p className="su-step-body">Open Claude connector settings in your browser.</p>
             </div>
+          </div>
+          <div className="su-step-right" style={{ display: 'flex', alignItems: 'flex-start', paddingTop: '0.15rem' }}>
+             <Button variant="outline" onClick={() => window.open(CLAUDE_CONNECTORS_URL, "_blank", "noopener,noreferrer")} style={{ background: '#ffffff', border: '1px solid #e5e7eb', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', color: '#1f2937' }}>
+               Open Claude Connectors <ExternalLink size={14} className="ml-2" style={{ marginLeft: "6px" }} />
+             </Button>
           </div>
         </div>
 
-        <div className={`su-step ${stepThreeClass}`}>
-          <div className="su-step-aside">
+        <div className="su-step-row">
+          <div className="su-step-left">
             <div className="su-step-num">3</div>
-          </div>
-          <div className="su-step-main">
-            <div className="su-step-title">Restart Claude</div>
-            <div className="su-step-content">
-              <p className="su-step-body">
-                Restart Claude Desktop and verify Tallei appears in MCP tools.
-              </p>
-              <div className="su-step-actions">
-                <button className="su-btn-primary" disabled={!signedIn} onClick={() => setRestartedClaude(true)}>
-                  Mark step done
-                </button>
-              </div>
+            <div className="su-step-text">
+              <div className="su-step-title">Add Connector</div>
+              <p className="su-step-body">In Claude, click <strong>Add custom connector</strong>, paste your MCP URL, and save.</p>
             </div>
+          </div>
+          <div className="su-step-right">
+             <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
+               Navigate to Claude's Settings &gt; Connectors &gt; Add custom connector.
+             </div>
+          </div>
+        </div>
+
+        <div className="su-step-row su-step-row-last">
+          <div className="su-step-left">
+            <div className="su-step-num">4</div>
+            <div className="su-step-text">
+              <div className="su-step-title">Authorize</div>
+              <p className="su-step-body">Click <strong>Connect</strong> and approve OAuth access to finish setup.</p>
+            </div>
+          </div>
+          <div className="su-step-right">
+             <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
+               Approve the connection and start using Tallei in Claude!
+             </div>
           </div>
         </div>
       </div>
-
-      {/* Success */}
-      {isComplete && (
-        <div className="su-success animate-fade-up">
-          <div className="su-success-icon">
-            <Check size={18} strokeWidth={3} />
-          </div>
-          <div>
-            <h3 className="su-success-title">Connection successful</h3>
-            <p className="su-success-desc">Claude is now connected using OAuth-secured MCP access.</p>
-          </div>
-          <div className="su-success-link">
-            <Link href="/dashboard" className="su-btn-ghost">View Memories</Link>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
 /* ── ChatGPT setup ─────────────────────────────────────────── */
-function ChatGptSetup({ onBack }: { onBack: () => void }) {
-  const [openApiImported, setOpenApiImported] = useState(false);
-  const [authUrlCopied, setAuthUrlCopied] = useState(false);
-  const [tokenUrlCopied, setTokenUrlCopied] = useState(false);
-  const [builderConfigured, setBuilderConfigured] = useState(false);
-  const [published, setPublished] = useState(false);
+function ChatGptSetup() {
   const [copiedInstructions, setCopiedInstructions] = useState(false);
-  const oauthConfigured = authUrlCopied && tokenUrlCopied;
-  const isComplete = openApiImported && oauthConfigured && builderConfigured && published;
 
   const openApiUrl = typeof window !== "undefined"
     ? `${window.location.origin}/api/chatgpt/openapi.json`
@@ -227,257 +172,92 @@ function ChatGptSetup({ onBack }: { onBack: () => void }) {
     setTimeout(() => setCopiedInstructions(false), 2000);
   };
 
-  const stepOneClass = openApiImported ? "done" : "active";
-  const stepTwoClass = oauthConfigured ? "done" : openApiImported ? "active" : "upcoming";
-  const stepThreeClass = builderConfigured ? "done" : oauthConfigured ? "active" : "upcoming";
-  const stepFourClass = published ? "done" : builderConfigured ? "active" : "upcoming";
-
   return (
-    <div className="su-root">
-      <button type="button" className="cnn-back" onClick={onBack}>
-        ← Back to integrations
-      </button>
-
-      <div className="su-header">
-        <div className="su-header-left">
-          <div className="su-eyebrow">
-            <span className="lp-live-dot" style={{ width: 6, height: 6 }}></span>
-            Custom GPTs
-          </div>
-          <h1 className="su-title">Connect ChatGPT</h1>
-          <p className="su-desc">Set up a Custom GPT Action using OAuth. Legacy API keys are disabled.</p>
-        </div>
-      </div>
-
-      <div className="su-steps">
-        <div className={`su-step ${stepOneClass}`}>
-          <div className="su-step-aside">
+    <div className="su-root animate-fade-in">
+      <div className="su-steps-grid">
+        <div className="su-step-row">
+          <div className="su-step-left">
             <div className="su-step-num">1</div>
-            <div className="su-step-line" />
-          </div>
-          <div className="su-step-main">
-            <div className="su-step-title">Copy OpenAPI Schema</div>
-            <div className="su-step-content">
+            <div className="su-step-text">
+              <div className="su-step-title">Copy OpenAPI Schema</div>
               <p className="su-step-body">Copy your OpenAPI schema URL and import it in GPT Actions.</p>
-              <CodeBlock value={openApiUrl} onCopy={() => setOpenApiImported(true)} />
-              <div className="su-step-actions">
-                <button className="su-btn-primary" onClick={() => setOpenApiImported(true)}>
-                  Mark step done
-                </button>
-              </div>
             </div>
+          </div>
+          <div className="su-step-right">
+            <CodeBlock value={openApiUrl} language="url" />
           </div>
         </div>
 
-        <div className={`su-step ${stepTwoClass}`}>
-          <div className="su-step-aside">
+        <div className="su-step-row">
+          <div className="su-step-left">
             <div className="su-step-num">2</div>
-            <div className="su-step-line" />
-          </div>
-          <div className="su-step-main">
-            <div className="su-step-title">Copy OAuth Endpoints</div>
-            <div className="su-step-content">
+            <div className="su-step-text">
+              <div className="su-step-title">Copy Endpoints</div>
               <p className="su-step-body">Configure OAuth for the Action using these two endpoints.</p>
-              <p className="cnn-provider-sub" style={{ marginBottom: "0.35rem" }}>Authorization URL</p>
-              <CodeBlock value={authorizationUrl} onCopy={() => setAuthUrlCopied(true)} />
-              <p className="cnn-provider-sub" style={{ marginTop: "0.8rem", marginBottom: "0.35rem" }}>Token URL</p>
-              <CodeBlock value={tokenUrl} onCopy={() => setTokenUrlCopied(true)} />
-              <div className="su-step-actions">
-                <button
-                  className="su-btn-primary"
-                  disabled={!authUrlCopied || !tokenUrlCopied}
-                  onClick={() => {
-                    setAuthUrlCopied(true);
-                    setTokenUrlCopied(true);
-                  }}
-                >
-                  Mark step done
-                </button>
-              </div>
             </div>
+          </div>
+          <div className="su-step-right">
+            <div style={{ marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Authorization URL</strong></div>
+            <CodeBlock value={authorizationUrl} language="url" />
+            <div style={{ marginTop: "1rem", marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Token URL</strong></div>
+            <CodeBlock value={tokenUrl} language="url" />
           </div>
         </div>
 
-        <div className={`su-step ${stepThreeClass}`}>
-          <div className="su-step-aside">
+        <div className="su-step-row">
+          <div className="su-step-left">
             <div className="su-step-num">3</div>
-            <div className="su-step-line" />
-          </div>
-          <div className="su-step-main">
-            <div className="su-step-title">Configure GPT Builder</div>
-            <div className="su-step-content">
+            <div className="su-step-text">
+              <div className="su-step-title">Configure Builder</div>
               <p className="su-step-body">Create the Action and configure OAuth in GPT Builder.</p>
-              <ol className="cnn-list">
-                <li>Open GPT Builder and switch to <strong>Configure</strong></li>
-                <li>Create a new action and import your OpenAPI URL</li>
-                <li>Set auth to <strong>OAuth</strong>, then paste Authorization URL + Token URL</li>
-                <li>Requested scopes: <code>memory:read memory:write</code></li>
-              </ol>
-              <div className="su-step-actions">
-                <button
-                  type="button"
-                  className="su-btn-ghost"
-                  onClick={() => window.open(CHATGPT_BUILDER_URL, "_blank", "noopener,noreferrer")}
-                >
-                  Open GPT Builder <ExternalLink size={14} />
-                </button>
-                <button className="su-btn-primary" disabled={!oauthConfigured} onClick={() => setBuilderConfigured(true)}>
-                  Mark step done
-                </button>
-              </div>
             </div>
+          </div>
+          <div className="su-step-right">
+            <ol className="cnn-list" style={{marginBottom: '1rem'}}>
+              <li>Open GPT Builder and switch to <strong>Configure</strong></li>
+              <li>Create a new action and import your OpenAPI URL</li>
+              <li>Set auth to <strong>OAuth</strong>, then paste Authorization URL + Token URL</li>
+              <li>Requested scopes: <code>memory:read memory:write</code></li>
+            </ol>
+            <Button
+              variant="outline"
+              onClick={() => window.open(CHATGPT_BUILDER_URL, "_blank", "noopener,noreferrer")}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              Open GPT Builder <ExternalLink size={14} style={{ marginLeft: "6px" }} />
+            </Button>
           </div>
         </div>
 
-        <div className={`su-step ${stepFourClass}`}>
-          <div className="su-step-aside">
+        <div className="su-step-row su-step-row-last">
+          <div className="su-step-left">
             <div className="su-step-num">4</div>
-          </div>
-          <div className="su-step-main">
-            <div className="su-step-title">Add Instructions & Publish</div>
-            <div className="su-step-content">
+            <div className="su-step-text">
+              <div className="su-step-title">Publish</div>
               <p className="su-step-body">Paste these instructions into the <strong>Instructions</strong> field, then publish.</p>
-              <textarea
-                readOnly
-                className="su-instruction-box"
-                value={CHATGPT_INSTRUCTIONS_TEMPLATE}
-              />
-              <div className="su-step-actions">
-                <button type="button" className="su-btn-ghost" onClick={copyInstructions}>
-                  {copiedInstructions ? "Copied!" : "Copy instructions"}
-                </button>
-                <button className="su-btn-primary" disabled={!builderConfigured} onClick={() => setPublished(true)}>
-                  Mark step done
-                </button>
-              </div>
             </div>
           </div>
-        </div>
-      </div>
-
-      {isComplete && (
-        <div className="su-success animate-fade-up">
-          <div className="su-success-icon">
-            <Check size={18} strokeWidth={3} />
-          </div>
-          <div>
-            <h3 className="su-success-title">Connection successful</h3>
-            <p className="su-success-desc">ChatGPT is now connected with OAuth-based access.</p>
-          </div>
-          <div className="su-success-link">
-            <Link href="/dashboard" className="su-btn-ghost">View Memories</Link>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ── Generic setup (Gemini/Cursor) ─────────────────────────── */
-function GenericSetup({ provider, name, icon: Icon, onBack }: { provider: Provider; name: string; icon: React.FC; onBack: () => void }) {
-  const [step, setStep] = useState(0);
-  const [isComplete, setIsComplete] = useState(false);
-
-  return (
-    <div className="su-root">
-      <button type="button" className="cnn-back" onClick={onBack}>
-        ← Back to integrations
-      </button>
-
-      <div className="su-header">
-        <div className="su-header-left">
-          <div className="su-eyebrow">
-            <span className="lp-live-dot" style={{ width: 6, height: 6 }}></span>
-            {name} Integration
-          </div>
-          <h1 className="su-title">Connect {name}</h1>
-          <p className="su-desc">Connect Tallei to {name} using standard MCP/OAuth configurations.</p>
-        </div>
-      </div>
-
-      <div className="su-steps">
-        <div className={`su-step ${isComplete ? "done" : "active"}`}>
-          <div className="su-step-aside">
-            <div className="su-step-num" onClick={() => setStep(0)}>1</div>
-          </div>
-          <div className="su-step-main">
-            <button className="su-step-title" onClick={() => setStep(0)}>Configure {name}</button>
-            {step === 0 && !isComplete && (
-              <div className="su-step-content animate-fade-in">
-                <p className="su-step-body">Add the required configurations into your {name} settings. You can find detailed instructions in the Tallei docs.</p>
-                <div className="su-step-actions">
-                  <button className="su-btn-primary" onClick={() => { setStep(1); setIsComplete(true); }}>
-                    Complete Setup
+          <div className="su-step-right">
+            <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', marginBottom: '0.5rem', overflow: 'hidden' }}>
+               <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
+                 <span>instructions</span>
+                 <button
+                    type="button"
+                    className={`cnn-copy-btn ${copiedInstructions ? "copied" : ""}`}
+                    onClick={copyInstructions}
+                    title={copiedInstructions ? "Copied!" : "Copy"}
+                    aria-label="Copy to clipboard"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'transparent', cursor: 'pointer', color: copiedInstructions ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
+                  >
+                    {copiedInstructions ? <Check size={16} /> : <Copy size={16} />}
                   </button>
-                </div>
-              </div>
-            )}
+               </div>
+               <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto' }}>
+                 <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace', color: '#1f2937' }}>{CHATGPT_INSTRUCTIONS_TEMPLATE}</code>
+               </div>
+            </div>
           </div>
         </div>
-      </div>
-
-      {isComplete && (
-        <div className="su-success animate-fade-up">
-          <div className="su-success-icon">
-            <Check size={18} strokeWidth={3} />
-          </div>
-          <div>
-            <h3 className="su-success-title">Connection successful</h3>
-            <p className="su-success-desc">Your AI is now connected to Tallei.</p>
-          </div>
-          <div className="su-success-link">
-            <Link href="/dashboard" className="su-btn-ghost">View Memories</Link>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ── Selector ──────────────────────────────────────────────── */
-function ProviderSelector({
-  onSelect,
-}: {
-  onSelect: (p: Provider) => void;
-}) {
-  const providers: { id: Provider; name: string; sub: string; icon: React.FC }[] = [
-    { id: "claude", name: "Claude", sub: "Desktop & Web via MCP", icon: ClaudeIcon },
-    { id: "chatgpt", name: "ChatGPT", sub: "Custom GPT with Actions", icon: ChatGPTIcon },
-  ];
-
-  return (
-    <div className="cnn-wrap">
-      <div className="cnn-hero">
-        <h1 className="cnn-title">Choose your AI</h1>
-        <p className="cnn-subtitle">Connect Tallei to your favorite platforms to enable infinite memory.</p>
-      </div>
-
-      <div style={{
-        background: "#0d1219",
-        border: "1px solid #1e2a38",
-        borderRadius: "16px",
-        overflow: "hidden"
-      }}>
-        {providers.map((p) => (
-          <button
-            key={p.id}
-            className="cnn-provider-row"
-            onClick={() => onSelect(p.id)}
-          >
-            <div className="cnn-provider-icon" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}>
-              <p.icon />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div className="cnn-provider-name">{p.name}</div>
-              <div className="cnn-provider-sub">{p.sub}</div>
-            </div>
-            <div style={{ color: "#3f4654" }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 18l6-6-6-6"/>
-              </svg>
-            </div>
-          </button>
-        ))}
       </div>
     </div>
   );
@@ -485,12 +265,41 @@ function ProviderSelector({
 
 /* ── Page ───────────────────────────────────────────────────── */
 export default function ConnectorsPage() {
-  const [selected, setSelected] = useState<Provider | null>(null);
+  const [selected, setSelected] = useState<Provider>("claude");
 
-  if (selected === "claude") return <ClaudeSetup onBack={() => setSelected(null)} />;
-  if (selected === "chatgpt") return <ChatGptSetup onBack={() => setSelected(null)} />;
+  const providers: { id: Provider; name: string; sub: string; icon: React.FC }[] = [
+    { id: "claude", name: "Claude MCP", sub: "Memory across every session", icon: ClaudeIcon },
+    { id: "chatgpt", name: "ChatGPT Action", sub: "Drop into your Custom GPT", icon: ChatGPTIcon },
+  ];
 
   return (
-    <ProviderSelector onSelect={setSelected} />
+    <div className="cnn-wrap" style={{maxWidth: '1000px'}}>
+      <div className="cnn-hero" style={{textAlign: 'left', paddingBottom: '1.5rem', paddingTop: '1rem'}}>
+        <h1 className="cnn-title" style={{fontSize: '2rem'}}>Connect Tallei</h1>
+      </div>
+
+      <div className="cnn-provider-row-container" style={{justifyContent: 'flex-start', marginBottom: '2rem'}}>
+        {providers.map((p) => (
+          <div
+            key={p.id}
+            className={`cnn-provider-card ${selected === p.id ? "active" : ""}`}
+            onClick={() => setSelected(p.id)}
+          >
+            <div className="cnn-provider-icon-title-wrap">
+               <div className="cnn-provider-icon" style={{border: 'none', background: 'transparent', width: '28px', height: '28px'}}>
+                 <p.icon />
+               </div>
+               <div className="cnn-provider-text">
+                 <div className="cnn-provider-name">{p.name}</div>
+                 <div className="cnn-provider-sub">{p.sub}</div>
+               </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {selected === "claude" && <ClaudeSetup />}
+      {selected === "chatgpt" && <ChatGptSetup />}
+    </div>
   );
 }

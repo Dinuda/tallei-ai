@@ -58,7 +58,6 @@ const NAV: NavSection[] = [
   {
     label: "DEVELOPER",
     items: [
-      { id: "api-keys", label: "API Keys", href: "/dashboard/keys", icon: ICONS.key },
       { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
     ],
   },
@@ -83,6 +82,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const pathname = usePathname();
   const { data: session } = useSession();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMobileOpen(false); };
@@ -109,7 +109,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               className="dashboard-mobile-menu-btn"
               aria-label={mobileOpen ? "Close menu" : "Open menu"}
               onClick={() => setMobileOpen((v) => !v)}
-              style={{ display: "flex" }}
             >
               {mobileOpen ? (
                 <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
@@ -124,23 +123,57 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <img src="/tallei.svg" alt="Tallei" style={{ height: "36px", width: "auto" }} />
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", borderLeft: "1px solid #1f1f22", paddingLeft: "1rem" }}>
-            <div
-              className="dashboard-avatar"
-              title={session?.user?.email ?? "User"}
-              style={{ background: "linear-gradient(145deg, #2d3a1e 0%, #1e2a10 100%)", color: "#9fda56", border: "1px solid #3a5020" }}
-            >
-              {initials}
-            </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", borderLeft: "1px solid var(--border)", paddingLeft: "1rem", position: "relative" }}>
             <button
               type="button"
-              onClick={() => signOut({ callbackUrl: "/login" })}
-              className="btn btn-ghost"
-              style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "0.3rem" }}
+              onClick={() => setProfileOpen((v) => !v)}
+              style={{ background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
+              aria-label="Toggle profile menu"
             >
-              {ICONS.signOut}
-              Sign out
+              <div
+                className="dashboard-avatar"
+                title={session?.user?.email ?? "User"}
+                style={{ background: "linear-gradient(145deg, #1f2225 0%, #0a0b0d 100%)", color: "#fff" }}
+              >
+                {initials}
+              </div>
             </button>
+
+            {profileOpen && (
+              <>
+                <div 
+                  style={{ position: "fixed", inset: 0, zIndex: 290 }} 
+                  onClick={() => setProfileOpen(false)} 
+                />
+                <div style={{
+                  position: "absolute",
+                  top: "calc(100% + 10px)",
+                  right: 0,
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "12px",
+                  boxShadow: "var(--shadow-md)",
+                  minWidth: "220px",
+                  zIndex: 300,
+                  padding: "0.4rem",
+                  animation: "fadeIn 0.15s ease-out"
+                }}>
+                  <div style={{ padding: "0.6rem 0.8rem", borderBottom: "1px solid var(--border-light)", marginBottom: "0.4rem" }}>
+                    <p style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", margin: 0, marginBottom: "0.2rem" }}>Signed in as</p>
+                    <p style={{ fontSize: "0.85rem", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", margin: 0, fontWeight: 500 }}>{session?.user?.email}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => signOut({ callbackUrl: "/login" })}
+                    className="btn btn-ghost"
+                    style={{ width: "100%", justifyContent: "flex-start", color: "var(--text-2)", padding: "0.5rem 0.8rem" }}
+                  >
+                    {ICONS.signOut}
+                    <span style={{ marginLeft: "0.3rem" }}>Sign out</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </header>
@@ -177,16 +210,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
           ))}
         </nav>
-
-        {/* ── Sidebar footer ── */}
-        <div style={{ marginTop: "auto", padding: "0.6rem 0.4rem", borderTop: "1px solid #1a1a1a" }}>
-          <div style={{ padding: "0.6rem 0.7rem", borderRadius: "8px", background: "#111416" }}>
-            <p style={{ fontSize: "0.72rem", color: "#52525b", marginBottom: "0.2rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>Account</p>
-            <p style={{ fontSize: "0.8rem", color: "#a1a1aa", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {session?.user?.email ?? "—"}
-            </p>
-          </div>
-        </div>
       </aside>
 
       {/* ── Main ── */}
