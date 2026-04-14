@@ -1,6 +1,10 @@
+import { createHash } from "node:crypto";
 import { Router } from "express";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.js";
 import { pool } from "../db/index.js";
+import { parseScopes } from "../services/oauthTokens.js";
+import { deleteCacheKey } from "../services/cache.js";
+import { generateApiKey } from "../services/auth.js";
 
 const router = Router();
 
@@ -8,6 +12,7 @@ router.use(authMiddleware);
 
 const CONNECTING_WINDOW_MS = 2 * 60 * 1000;
 
+type Provider = "claude" | "chatgpt";
 type IntegrationState = "not_connected" | "connecting" | "connected" | "error";
 
 type IntegrationEventRow = {
@@ -23,6 +28,22 @@ type IntegrationStatus = {
   lastConnectedAt: Date | null;
   lastEventAt: Date | null;
   lastError: string | null;
+  canDisconnect: boolean;
+};
+
+type OAuthTokenRow = {
+  access_token: string;
+  scope: string | null;
+  resource: string | null;
+  grant_type: string | null;
+  client_info: Record<string, unknown> | null;
+};
+
+type ActiveChatGptApiKeyRow = {
+  id: string;
+  key_hash: string;
+  created_at: Date;
+  last_used_at: Date | null;
 };
 
 function toMillis(value: Date): number {
@@ -37,20 +58,129 @@ function isNewer(a: Date, b: Date): boolean {
   return toMillis(a) > toMillis(b);
 }
 
-function deriveClaudeStatus(events: IntegrationEventRow[]): IntegrationStatus {
+function oauthValidationCacheKey(token: string): string {
+  const hash = createHash("sha256").update(token).digest("hex");
+  return `auth:oauth:v2:${hash}`;
+}
+
+function mcpOauthCacheKey(token: string): string {
+  const hash = createHash("sha256").update(token).digest("hex");
+  return `auth:oauth:${hash}`;
+}
+
+function apiKeyValidationCacheKey(hash: string): string {
+  return `auth:api_key_v2:${hash}`;
+}
+
+async function invalidateOAuthTokenCaches(accessTokens: string[]): Promise<void> {
+  const unique = Array.from(new Set(accessTokens.filter((token) => token.length > 0)));
+  await Promise.all(
+    unique.flatMap((token) => [
+      deleteCacheKey(oauthValidationCacheKey(token)),
+      deleteCacheKey(mcpOauthCacheKey(token)),
+    ])
+  );
+}
+
+async function invalidateApiKeyValidationCaches(keyHashes: string[]): Promise<void> {
+  const unique = Array.from(new Set(keyHashes.filter((hash) => hash.length > 0)));
+  await Promise.all(unique.map((hash) => deleteCacheKey(apiKeyValidationCacheKey(hash))));
+}
+
+function extractRedirectUris(clientInfo: Record<string, unknown> | null): string[] {
+  if (!clientInfo || !Array.isArray(clientInfo.redirect_uris)) return [];
+  return clientInfo.redirect_uris.filter((value): value is string => typeof value === "string");
+}
+
+function isServicePrincipalClient(clientInfo: Record<string, unknown> | null): boolean {
+  if (!clientInfo) return false;
+  return Boolean(clientInfo.tallei_service_principal && typeof clientInfo.tallei_service_principal === "object");
+}
+
+function isTokenForProvider(token: OAuthTokenRow, provider: Provider): boolean {
+  if (token.grant_type === "client_credentials") return false;
+  if (isServicePrincipalClient(token.client_info)) return false;
+
+  const scopes = parseScopes(token.scope);
+  const hasMcpToolsScope = scopes.includes("mcp:tools");
+  const resource = (token.resource ?? "").toLowerCase();
+  const hasMcpResource = resource.includes("/mcp");
+  const redirectUris = extractRedirectUris(token.client_info).map((value) => value.toLowerCase());
+  const hasClaudeRedirect = redirectUris.some((value) => value.includes("claude.ai") || value.includes("anthropic.com"));
+  const hasChatGptRedirect = redirectUris.some(
+    (value) => value.includes("chatgpt.com") || value.includes("chat.openai.com") || value.includes("openai.com")
+  );
+
+  if (provider === "claude") {
+    return hasMcpToolsScope || hasMcpResource || hasClaudeRedirect;
+  }
+
+  if (hasChatGptRedirect) return true;
+  if (hasMcpToolsScope || hasMcpResource || hasClaudeRedirect) return false;
+
+  // Default any remaining end-user OAuth token to ChatGPT actions flow.
+  return true;
+}
+
+async function getActiveUserOAuthTokens(userId: string): Promise<OAuthTokenRow[]> {
+  const result = await pool.query<OAuthTokenRow>(
+    `SELECT ot.access_token, ot.scope, ot.resource, ot.grant_type, oc.client_info
+     FROM oauth_tokens ot
+     LEFT JOIN oauth_clients oc ON oc.client_id = ot.client_id
+     WHERE ot.user_id = $1
+       AND ot.revoked_at IS NULL
+       AND ot.refresh_expires_at > NOW()
+       AND COALESCE(ot.grant_type, 'authorization_code') <> 'client_credentials'
+     ORDER BY ot.created_at DESC
+     LIMIT 300`,
+    [userId]
+  );
+  return result.rows;
+}
+
+async function getActiveChatGptApiKeys(userId: string): Promise<ActiveChatGptApiKeyRow[]> {
+  const result = await pool.query<ActiveChatGptApiKeyRow>(
+    `SELECT id, key_hash, created_at, last_used_at
+     FROM api_keys
+     WHERE user_id = $1
+       AND connector_type = 'chatgpt'
+       AND revoked_at IS NULL
+       AND (created_at + (rotation_days || ' days')::interval) > NOW()
+     ORDER BY created_at DESC
+     LIMIT 20`,
+    [userId]
+  );
+  return result.rows;
+}
+
+function deriveClaudeStatus(events: IntegrationEventRow[], hasActiveToken: boolean): IntegrationStatus {
   const latest = events[0] ?? null;
   const latestError = events.find((event) => !event.ok) ?? null;
   const lastSuccess = events.find((event) => event.ok) ?? null;
   const lastToolSuccess = events.find((event) => event.ok && event.method === "tools/call") ?? null;
   const lastInitializeSuccess = events.find((event) => event.ok && event.method === "initialize") ?? null;
+  const fallbackConnectedAt =
+    lastToolSuccess?.created_at ?? lastInitializeSuccess?.created_at ?? lastSuccess?.created_at ?? null;
 
-  if (!latest) {
+  if (!hasActiveToken) {
     return {
       state: "not_connected",
       connected: false,
       lastConnectedAt: null,
+      lastEventAt: latest?.created_at ?? null,
+      lastError: null,
+      canDisconnect: false,
+    };
+  }
+
+  if (!latest) {
+    return {
+      state: "connecting",
+      connected: false,
+      lastConnectedAt: null,
       lastEventAt: null,
       lastError: null,
+      canDisconnect: true,
     };
   }
 
@@ -58,9 +188,10 @@ function deriveClaudeStatus(events: IntegrationEventRow[]): IntegrationStatus {
     return {
       state: "error",
       connected: false,
-      lastConnectedAt: lastToolSuccess?.created_at ?? lastInitializeSuccess?.created_at ?? null,
+      lastConnectedAt: fallbackConnectedAt,
       lastEventAt: latest.created_at,
       lastError: latestError.error ?? "Connection attempt failed",
+      canDisconnect: true,
     };
   }
 
@@ -71,6 +202,7 @@ function deriveClaudeStatus(events: IntegrationEventRow[]): IntegrationStatus {
       lastConnectedAt: lastToolSuccess.created_at,
       lastEventAt: latest.created_at,
       lastError: null,
+      canDisconnect: true,
     };
   }
 
@@ -82,6 +214,7 @@ function deriveClaudeStatus(events: IntegrationEventRow[]): IntegrationStatus {
       lastConnectedAt: initializing ? null : lastInitializeSuccess.created_at,
       lastEventAt: latest.created_at,
       lastError: null,
+      canDisconnect: true,
     };
   }
 
@@ -92,30 +225,44 @@ function deriveClaudeStatus(events: IntegrationEventRow[]): IntegrationStatus {
       lastConnectedAt: null,
       lastEventAt: latest.created_at,
       lastError: null,
+      canDisconnect: true,
     };
   }
 
   return {
-    state: "not_connected",
-    connected: false,
-    lastConnectedAt: null,
+    state: "connected",
+    connected: true,
+    lastConnectedAt: fallbackConnectedAt,
     lastEventAt: latest.created_at,
-    lastError: latestError?.error ?? null,
+    lastError: null,
+    canDisconnect: true,
   };
 }
 
-function deriveChatGptStatus(events: IntegrationEventRow[]): IntegrationStatus {
+function deriveChatGptStatus(events: IntegrationEventRow[], hasCredential: boolean): IntegrationStatus {
   const latest = events[0] ?? null;
   const latestError = events.find((event) => !event.ok) ?? null;
   const lastSuccess = events.find((event) => event.ok) ?? null;
 
-  if (!latest) {
+  if (!hasCredential) {
     return {
       state: "not_connected",
       connected: false,
       lastConnectedAt: null,
+      lastEventAt: latest?.created_at ?? null,
+      lastError: null,
+      canDisconnect: false,
+    };
+  }
+
+  if (!latest) {
+    return {
+      state: "connecting",
+      connected: false,
+      lastConnectedAt: null,
       lastEventAt: null,
       lastError: null,
+      canDisconnect: true,
     };
   }
 
@@ -126,6 +273,7 @@ function deriveChatGptStatus(events: IntegrationEventRow[]): IntegrationStatus {
       lastConnectedAt: lastSuccess?.created_at ?? null,
       lastEventAt: latest.created_at,
       lastError: latestError.error ?? "Action call failed",
+      canDisconnect: true,
     };
   }
 
@@ -136,15 +284,17 @@ function deriveChatGptStatus(events: IntegrationEventRow[]): IntegrationStatus {
       lastConnectedAt: lastSuccess.created_at,
       lastEventAt: latest.created_at,
       lastError: null,
+      canDisconnect: true,
     };
   }
 
   return {
-    state: "not_connected",
+    state: "connecting",
     connected: false,
     lastConnectedAt: null,
     lastEventAt: latest.created_at,
     lastError: latestError?.error ?? null,
+    canDisconnect: true,
   };
 }
 
@@ -170,22 +320,169 @@ router.get("/status", requireScopes(["memory:read"]), async (req: AuthRequest, r
     );
 
     const rows = result.rows;
+    const [activeTokens, activeChatgptApiKeys] = await Promise.all([
+      getActiveUserOAuthTokens(userId),
+      getActiveChatGptApiKeys(userId),
+    ]);
     const claudeEvents = rows.filter((row) => !row.method.startsWith("chatgpt/actions/"));
     const chatgptEvents = rows.filter((row) => row.method.startsWith("chatgpt/actions/"));
+    const activeClaudeTokens = activeTokens.filter((token) => isTokenForProvider(token, "claude"));
+    const activeChatgptTokens = activeTokens.filter((token) => isTokenForProvider(token, "chatgpt"));
 
-    const claude = deriveClaudeStatus(claudeEvents);
-    const chatgpt = deriveChatGptStatus(chatgptEvents);
+    const claude = deriveClaudeStatus(claudeEvents, activeClaudeTokens.length > 0);
+    const chatgpt = deriveChatGptStatus(
+      chatgptEvents,
+      activeChatgptTokens.length > 0 || activeChatgptApiKeys.length > 0
+    );
 
     res.json({
       integrations: {
         claude,
-        chatgpt,
+        chatgpt: {
+          ...chatgpt,
+          hasBearerToken: activeChatgptApiKeys.length > 0,
+          lastTokenUsedAt: activeChatgptApiKeys[0]?.last_used_at ?? null,
+          lastTokenCreatedAt: activeChatgptApiKeys[0]?.created_at ?? null,
+        },
       },
       polledAt: new Date().toISOString(),
     });
   } catch (error) {
     console.error("Error fetching integration status:", error);
     res.status(500).json({ error: "Failed to fetch integration status" });
+  }
+});
+
+router.get("/chatgpt/token", requireScopes(["memory:read"]), async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const keys = await getActiveChatGptApiKeys(userId);
+    const newest = keys[0] ?? null;
+    res.json({
+      hasActiveToken: keys.length > 0,
+      activeTokenCount: keys.length,
+      lastTokenCreatedAt: newest?.created_at ?? null,
+      lastTokenUsedAt: newest?.last_used_at ?? null,
+    });
+  } catch (error) {
+    console.error("Error fetching ChatGPT token status:", error);
+    res.status(500).json({ error: "Failed to fetch ChatGPT token status" });
+  }
+});
+
+router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const revokeExisting = await pool.query<{ key_hash: string }>(
+      `UPDATE api_keys
+       SET revoked_at = NOW()
+       WHERE user_id = $1
+         AND connector_type = 'chatgpt'
+         AND revoked_at IS NULL
+       RETURNING key_hash`,
+      [userId]
+    );
+    await invalidateApiKeyValidationCaches(revokeExisting.rows.map((row) => row.key_hash));
+
+    const generated = await generateApiKey(
+      userId,
+      "ChatGPT Action Bearer",
+      365,
+      req.authContext?.tenantId ?? null,
+      "chatgpt",
+      "tly"
+    );
+    const key = generated.key;
+    const tokenPreview = `${key.slice(0, 10)}...${key.slice(-6)}`;
+
+    res.status(201).json({
+      success: true,
+      token: key,
+      tokenPreview,
+      keyId: generated.id,
+      createdAt: new Date().toISOString(),
+      message: "ChatGPT bearer token created. Store it now; this is the only time it is shown.",
+    });
+  } catch (error) {
+    console.error("Error creating ChatGPT bearer token:", error);
+    res.status(500).json({ error: "Failed to create ChatGPT bearer token" });
+  }
+});
+
+router.post("/disconnect/:provider", requireScopes(["memory:write"]), async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const provider = req.params.provider;
+    if (provider !== "claude" && provider !== "chatgpt") {
+      res.status(400).json({ error: "Unsupported provider", supportedProviders: ["claude", "chatgpt"] });
+      return;
+    }
+
+    const activeTokens = await getActiveUserOAuthTokens(userId);
+    const targetTokens = activeTokens.filter((token) => isTokenForProvider(token, provider));
+    const targetAccessTokens = targetTokens.map((token) => token.access_token);
+
+    let revokedApiKeys = 0;
+
+    if (provider === "chatgpt") {
+      const revokeChatGptApiKeys = await pool.query<{ key_hash: string }>(
+        `UPDATE api_keys
+         SET revoked_at = NOW()
+         WHERE user_id = $1
+           AND connector_type = 'chatgpt'
+           AND revoked_at IS NULL
+         RETURNING key_hash`,
+        [userId]
+      );
+      revokedApiKeys = revokeChatGptApiKeys.rowCount ?? 0;
+      await invalidateApiKeyValidationCaches(revokeChatGptApiKeys.rows.map((row) => row.key_hash));
+    }
+
+    if (targetAccessTokens.length === 0 && revokedApiKeys === 0) {
+      res.json({
+        success: true,
+        provider,
+        revoked: 0,
+        message: `No active ${provider} connector sessions found.`,
+      });
+      return;
+    }
+
+    const revokeResult = await pool.query(
+      `UPDATE oauth_tokens
+       SET revoked_at = NOW()
+       WHERE user_id = $1
+         AND revoked_at IS NULL
+         AND access_token = ANY($2::text[])`,
+      [userId, targetAccessTokens]
+    );
+
+    await invalidateOAuthTokenCaches(targetAccessTokens);
+
+    res.json({
+      success: true,
+      provider,
+      revoked: (revokeResult.rowCount ?? 0) + revokedApiKeys,
+      message: `${provider} connector disconnected.`,
+    });
+  } catch (error) {
+    console.error("Error disconnecting integration:", error);
+    res.status(500).json({ error: "Failed to disconnect integration" });
   }
 });
 

@@ -1,9 +1,11 @@
-import { Router, Response } from "express";
+import { Router, Response, NextFunction } from "express";
 import { z } from "zod";
-import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.js";
+import { AuthRequest } from "../middleware/auth.js";
 import { config } from "../config.js";
 import { recallMemories, saveMemory } from "../services/memory.js";
 import { pool } from "../db/index.js";
+import { authContextFromApiKey, authContextFromUserId } from "../services/auth.js";
+import { hasRequiredScopes, validateOAuthAccessToken } from "../services/oauthTokens.js";
 
 const router = Router();
 
@@ -40,10 +42,11 @@ async function logChatGptAction(input: {
   try {
     await pool.query(
       `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
-       VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, NULL, $6, $7)`,
       [
         auth.tenantId,
         auth.userId,
+        auth.keyId ?? null,
         auth.authMode,
         input.method,
         input.ok,
@@ -57,13 +60,113 @@ async function logChatGptAction(input: {
   }
 }
 
+async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  const internalSecret = req.headers["x-internal-secret"];
+  if (internalSecret) {
+    if (internalSecret !== config.internalApiSecret) {
+      res.status(401).json({ error: "Invalid internal secret" });
+      return;
+    }
+
+    const userId = req.headers["x-user-id"] as string | undefined;
+    if (!userId) {
+      res.status(400).json({ error: "Missing X-User-Id header" });
+      return;
+    }
+
+    const tenantId = req.headers["x-tenant-id"] as string | undefined;
+    req.userId = userId;
+    req.authContext = tenantId
+      ? { userId, tenantId, authMode: "internal" }
+      : await authContextFromUserId(userId, "internal");
+    next();
+    return;
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    res.status(401).json({ error: "Missing or invalid Authorization header" });
+    return;
+  }
+
+  const token = authHeader.slice("Bearer ".length).trim();
+  if (!token) {
+    res.status(401).json({ error: "Missing bearer token" });
+    return;
+  }
+
+  const apiKeyContext = await authContextFromApiKey(token, req.ip);
+  if (apiKeyContext) {
+    if (apiKeyContext.connectorType && apiKeyContext.connectorType !== "chatgpt") {
+      res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
+      return;
+    }
+    req.userId = apiKeyContext.userId;
+    req.authContext = apiKeyContext;
+    next();
+    return;
+  }
+
+  try {
+    const tokenContext = await validateOAuthAccessToken(token);
+    if (!tokenContext) {
+      res.status(401).json({ error: "Invalid bearer token" });
+      return;
+    }
+
+    req.userId = tokenContext.userId;
+    req.authContext = {
+      userId: tokenContext.userId,
+      tenantId: tokenContext.tenantId,
+      authMode: "oauth",
+      clientId: tokenContext.clientId,
+      scopes: tokenContext.scopes,
+    };
+    next();
+  } catch (error) {
+    console.error("ChatGPT action auth failed:", error);
+    res.status(500).json({ error: "Server error validating bearer token" });
+  }
+}
+
+function requireChatGptScopes(requiredScopes: string[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction): void => {
+    if (requiredScopes.length === 0) {
+      next();
+      return;
+    }
+
+    const auth = req.authContext;
+    if (!auth) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    if (auth.authMode === "internal" || auth.authMode === "api_key") {
+      next();
+      return;
+    }
+
+    const scopes = auth.scopes ?? [];
+    if (!hasRequiredScopes(scopes, requiredScopes)) {
+      res.status(403).json({
+        error: "Insufficient OAuth scopes",
+        requiredScopes,
+      });
+      return;
+    }
+
+    next();
+  };
+}
+
 function buildOpenApiSpec(serverUrl: string) {
   return {
     openapi: "3.1.0",
     info: {
       title: "Tallei ChatGPT Actions API",
       version: "2.0.0",
-      description: "Shared-memory Actions API for ChatGPT Custom GPTs (OAuth only).",
+      description: "Shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key).",
     },
     servers: [
       {
@@ -73,27 +176,11 @@ function buildOpenApiSpec(serverUrl: string) {
     components: {
       schemas: {},
       securitySchemes: {
-        oauth2: {
-          type: "oauth2",
-          description: "Use OAuth 2.0. Legacy API keys are no longer supported.",
-          flows: {
-            authorizationCode: {
-              authorizationUrl: `${serverUrl}/authorize`,
-              tokenUrl: `${serverUrl}/token`,
-              scopes: {
-                "memory:read": "Read memory graph content",
-                "memory:write": "Write/update memory graph content",
-              },
-            },
-            clientCredentials: {
-              tokenUrl: `${serverUrl}/api/oauth/token`,
-              scopes: {
-                "memory:read": "Read memory graph content",
-                "memory:write": "Write/update memory graph content",
-                "automation:run": "Run non-interactive automation jobs",
-              },
-            },
-          },
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "API key",
+          description: "Use your ChatGPT Action bearer key from /dashboard/setup.",
         },
       },
     },
@@ -102,7 +189,7 @@ function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "run",
           summary: "Compatibility alias for memory recall",
-          security: [{ oauth2: ["memory:read"] }],
+          security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
             content: {
@@ -158,7 +245,7 @@ function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "recallMemories",
           summary: "Recall relevant memories",
-          security: [{ oauth2: ["memory:read"] }],
+          security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
             content: {
@@ -214,7 +301,7 @@ function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "saveMemory",
           summary: "Save durable memory",
-          security: [{ oauth2: ["memory:write"] }],
+          security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
             content: {
@@ -285,7 +372,7 @@ router.get("/openapi.json", (_req, res: Response) => {
   res.json(buildOpenApiSpec(serverUrl));
 });
 
-router.post("/actions/recall", authMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/recall", chatGptActionAuthMiddleware, requireChatGptScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallSchema.parse(req.body);
     if (!req.authContext) {
@@ -326,7 +413,7 @@ router.post("/actions/recall", authMiddleware, requireScopes(["memory:read"]), a
   }
 });
 
-router.post("/actions/run", authMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallSchema.parse(req.body);
     if (!req.authContext) {
@@ -367,7 +454,7 @@ router.post("/actions/run", authMiddleware, requireScopes(["memory:read"]), asyn
   }
 });
 
-router.post("/actions/save", authMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/save", chatGptActionAuthMiddleware, requireChatGptScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = saveSchema.parse(req.body);
     if (!req.authContext) {

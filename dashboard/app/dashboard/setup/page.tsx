@@ -25,6 +25,18 @@ type IntegrationStatus = {
   lastConnectedAt: string | null;
   lastEventAt: string | null;
   lastError: string | null;
+  canDisconnect: boolean;
+  hasBearerToken?: boolean;
+  lastTokenUsedAt?: string | null;
+  lastTokenCreatedAt?: string | null;
+};
+
+type ChatGptTokenStatus = {
+  loading: boolean;
+  hasActiveToken: boolean;
+  activeTokenCount: number;
+  lastTokenCreatedAt: string | null;
+  lastTokenUsedAt: string | null;
 };
 
 type IntegrationStatusMap = {
@@ -38,6 +50,18 @@ const DEFAULT_STATUS: IntegrationStatus = {
   lastConnectedAt: null,
   lastEventAt: null,
   lastError: null,
+  canDisconnect: false,
+  hasBearerToken: false,
+  lastTokenUsedAt: null,
+  lastTokenCreatedAt: null,
+};
+
+const DEFAULT_CHATGPT_TOKEN_STATUS: ChatGptTokenStatus = {
+  loading: true,
+  hasActiveToken: false,
+  activeTokenCount: 0,
+  lastTokenCreatedAt: null,
+  lastTokenUsedAt: null,
 };
 
 const DEFAULT_STATUS_MAP: IntegrationStatusMap = {
@@ -67,6 +91,24 @@ function normalizeIntegrationStatus(input: unknown): IntegrationStatus {
     lastConnectedAt: typeof value.lastConnectedAt === "string" ? value.lastConnectedAt : null,
     lastEventAt: typeof value.lastEventAt === "string" ? value.lastEventAt : null,
     lastError: typeof value.lastError === "string" ? value.lastError : null,
+    canDisconnect: Boolean(value.canDisconnect),
+    hasBearerToken: Boolean(value.hasBearerToken),
+    lastTokenUsedAt: typeof value.lastTokenUsedAt === "string" ? value.lastTokenUsedAt : null,
+    lastTokenCreatedAt: typeof value.lastTokenCreatedAt === "string" ? value.lastTokenCreatedAt : null,
+  };
+}
+
+function normalizeChatGptTokenStatus(input: unknown): ChatGptTokenStatus {
+  if (!input || typeof input !== "object") {
+    return { ...DEFAULT_CHATGPT_TOKEN_STATUS, loading: false };
+  }
+  const value = input as Partial<ChatGptTokenStatus>;
+  return {
+    loading: false,
+    hasActiveToken: Boolean(value.hasActiveToken),
+    activeTokenCount: Number.isFinite(value.activeTokenCount as number) ? Number(value.activeTokenCount) : 0,
+    lastTokenCreatedAt: typeof value.lastTokenCreatedAt === "string" ? value.lastTokenCreatedAt : null,
+    lastTokenUsedAt: typeof value.lastTokenUsedAt === "string" ? value.lastTokenUsedAt : null,
   };
 }
 
@@ -118,6 +160,13 @@ function statusUiState(state: IntegrationState, statusLoading: boolean): {
     color: "#94a3b8",
     background: "rgba(148,163,184,.08)",
   };
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return "Never";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Never";
+  return parsed.toLocaleString();
 }
 
 /* ── Provider icons ────────────────────────────────────────── */
@@ -257,23 +306,31 @@ function ClaudeSetup() {
 }
 
 /* ── ChatGPT setup ─────────────────────────────────────────── */
-function ChatGptSetup() {
+function ChatGptSetup(props: {
+  tokenStatus: ChatGptTokenStatus;
+  issuedToken: string | null;
+  generatingToken: boolean;
+  onGenerateToken: () => Promise<void>;
+}) {
+  const { tokenStatus, issuedToken, generatingToken, onGenerateToken } = props;
   const [copiedInstructions, setCopiedInstructions] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
 
   const openApiUrl = typeof window !== "undefined"
     ? `${window.location.origin}/api/chatgpt/openapi.json`
     : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/api/chatgpt/openapi.json`;
-  const authorizationUrl = typeof window !== "undefined"
-    ? `${window.location.origin}/authorize`
-    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/authorize`;
-  const tokenUrl = typeof window !== "undefined"
-    ? `${window.location.origin}/token`
-    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/token`;
 
   const copyInstructions = async () => {
     await navigator.clipboard.writeText(CHATGPT_INSTRUCTIONS_TEMPLATE).catch(() => {});
     setCopiedInstructions(true);
     setTimeout(() => setCopiedInstructions(false), 2000);
+  };
+
+  const copyToken = async () => {
+    if (!issuedToken) return;
+    await navigator.clipboard.writeText(issuedToken).catch(() => {});
+    setCopiedToken(true);
+    setTimeout(() => setCopiedToken(false), 2000);
   };
 
   return (
@@ -283,8 +340,57 @@ function ChatGptSetup() {
           <div className="su-step-left">
             <div className="su-step-num">1</div>
             <div className="su-step-text">
-              <div className="su-step-title">Copy OpenAPI Schema</div>
-              <p className="su-step-body">Copy your OpenAPI schema URL and import it in GPT Actions.</p>
+              <div className="su-step-title">Create Bearer Token</div>
+              <p className="su-step-body">Generate a ChatGPT Actions bearer token on this page. This token is shown only once after generation.</p>
+            </div>
+          </div>
+          <div className="su-step-right">
+            <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", marginBottom: "0.8rem" }}>
+              <Button
+                variant="default"
+                onClick={() => void onGenerateToken()}
+                disabled={generatingToken}
+              >
+                {generatingToken ? "Generating..." : tokenStatus.hasActiveToken ? "Rotate Token" : "Generate Token"}
+              </Button>
+              <span style={{ fontSize: "0.8rem", color: "#6b7280" }}>
+                Active tokens: {tokenStatus.activeTokenCount}
+              </span>
+            </div>
+            {issuedToken ? (
+              <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', overflow: 'hidden' }}>
+                <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
+                  <span>chatgpt_bearer_token</span>
+                  <button
+                    type="button"
+                    className={`cnn-copy-btn ${copiedToken ? "copied" : ""}`}
+                    onClick={copyToken}
+                    title={copiedToken ? "Copied!" : "Copy"}
+                    aria-label="Copy token"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'transparent', cursor: 'pointer', color: copiedToken ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
+                  >
+                    {copiedToken ? <Check size={16} /> : <Copy size={16} />}
+                  </button>
+                </div>
+                <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto' }}>
+                  <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace', color: '#1f2937' }}>{issuedToken}</code>
+                </div>
+              </div>
+            ) : (
+              <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
+                Last created: {formatDateTime(tokenStatus.lastTokenCreatedAt)}<br />
+                Last used: {formatDateTime(tokenStatus.lastTokenUsedAt)}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="su-step-row">
+          <div className="su-step-left">
+            <div className="su-step-num">2</div>
+            <div className="su-step-text">
+              <div className="su-step-title">Import OpenAPI URL</div>
+              <p className="su-step-body">In GPT Builder → Actions, click <strong>Import from URL</strong> and paste this schema URL.</p>
             </div>
           </div>
           <div className="su-step-right">
@@ -294,34 +400,18 @@ function ChatGptSetup() {
 
         <div className="su-step-row">
           <div className="su-step-left">
-            <div className="su-step-num">2</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Copy Endpoints</div>
-              <p className="su-step-body">Configure OAuth for the Action using these two endpoints.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-            <div style={{ marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Authorization URL</strong></div>
-            <CodeBlock value={authorizationUrl} language="url" />
-            <div style={{ marginTop: "1rem", marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Token URL</strong></div>
-            <CodeBlock value={tokenUrl} language="url" />
-          </div>
-        </div>
-
-        <div className="su-step-row">
-          <div className="su-step-left">
             <div className="su-step-num">3</div>
             <div className="su-step-text">
-              <div className="su-step-title">Configure Builder</div>
-              <p className="su-step-body">Create the Action and configure OAuth in GPT Builder.</p>
+              <div className="su-step-title">Set Action Auth</div>
+              <p className="su-step-body">Use API key bearer auth in the Actions auth modal.</p>
             </div>
           </div>
           <div className="su-step-right">
             <ol className="cnn-list" style={{marginBottom: '1rem'}}>
-              <li>Open GPT Builder and switch to <strong>Configure</strong></li>
-              <li>Create a new action and import your OpenAPI URL</li>
-              <li>Set auth to <strong>OAuth</strong>, then paste Authorization URL + Token URL</li>
-              <li>Requested scopes: <code>memory:read memory:write</code></li>
+              <li>Authentication Type: <strong>API Key</strong></li>
+              <li>Auth Type: <strong>Bearer</strong></li>
+              <li>API Key: paste the token from Step 1</li>
+              <li>Save, then keep this action attached to your GPT</li>
             </ol>
             <Button
               variant="outline"
@@ -337,8 +427,8 @@ function ChatGptSetup() {
           <div className="su-step-left">
             <div className="su-step-num">4</div>
             <div className="su-step-text">
-              <div className="su-step-title">Publish</div>
-              <p className="su-step-body">Paste these instructions into the <strong>Instructions</strong> field, then publish.</p>
+              <div className="su-step-title">Publish & Test</div>
+              <p className="su-step-body">Paste these instructions into your GPT, publish, then test memory recall in Preview.</p>
             </div>
           </div>
           <div className="su-step-right">
@@ -372,6 +462,13 @@ export default function ConnectorsPage() {
   const [selected, setSelected] = useState<Provider>("claude");
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusByProvider, setStatusByProvider] = useState<IntegrationStatusMap>(DEFAULT_STATUS_MAP);
+  const [chatgptTokenStatus, setChatgptTokenStatus] = useState<ChatGptTokenStatus>(DEFAULT_CHATGPT_TOKEN_STATUS);
+  const [issuedChatgptToken, setIssuedChatgptToken] = useState<string | null>(null);
+  const [generatingChatgptToken, setGeneratingChatgptToken] = useState(false);
+  const [statusPollTick, setStatusPollTick] = useState(0);
+  const [disconnectingProvider, setDisconnectingProvider] = useState<Provider | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -381,16 +478,28 @@ export default function ConnectorsPage() {
       if (inFlight) return;
       inFlight = true;
       try {
-        const res = await fetch("/api/integrations/status");
-        if (!res.ok) return;
-        const data = await res.json();
-        const integrations = data?.integrations ?? {};
-        const nextStatus: IntegrationStatusMap = {
-          claude: normalizeIntegrationStatus(integrations?.claude),
-          chatgpt: normalizeIntegrationStatus(integrations?.chatgpt),
-        };
-        if (isMounted) {
-          setStatusByProvider(nextStatus);
+        const [integrationRes, tokenRes] = await Promise.all([
+          fetch("/api/integrations/status"),
+          fetch("/api/integrations/chatgpt/token"),
+        ]);
+
+        if (integrationRes.ok) {
+          const data = await integrationRes.json();
+          const integrations = data?.integrations ?? {};
+          const nextStatus: IntegrationStatusMap = {
+            claude: normalizeIntegrationStatus(integrations?.claude),
+            chatgpt: normalizeIntegrationStatus(integrations?.chatgpt),
+          };
+          if (isMounted) {
+            setStatusByProvider(nextStatus);
+          }
+        }
+
+        if (tokenRes.ok) {
+          const tokenData = await tokenRes.json();
+          if (isMounted) {
+            setChatgptTokenStatus(normalizeChatGptTokenStatus(tokenData));
+          }
         }
       } catch {
         // Best effort only.
@@ -411,7 +520,85 @@ export default function ConnectorsPage() {
       isMounted = false;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [statusPollTick]);
+
+  const selectedStatus = statusByProvider[selected];
+  const selectedProviderLabel = selected === "claude" ? "Claude" : "ChatGPT";
+
+  async function refreshStatus() {
+    setStatusLoading(true);
+    setChatgptTokenStatus((prev) => ({ ...prev, loading: true }));
+    setStatusPollTick((value) => value + 1);
+  }
+
+  async function rotateChatGptToken() {
+    setGeneratingChatgptToken(true);
+    setActionMessage(null);
+    setActionError(null);
+
+    try {
+      const res = await fetch("/api/integrations/chatgpt/token", {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = typeof data?.error === "string" ? data.error : "Failed to generate ChatGPT bearer token.";
+        throw new Error(message);
+      }
+
+      if (typeof data?.token === "string") {
+        setIssuedChatgptToken(data.token);
+      } else {
+        setIssuedChatgptToken(null);
+      }
+      const message = typeof data?.message === "string"
+        ? data.message
+        : "ChatGPT bearer token created. Copy it now and paste it into GPT Actions.";
+      setActionMessage(message);
+      await refreshStatus();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to generate ChatGPT bearer token.");
+    } finally {
+      setGeneratingChatgptToken(false);
+    }
+  }
+
+  async function disconnectSelectedProvider() {
+    const provider = selected;
+    const label = provider === "claude" ? "Claude" : "ChatGPT";
+    if (!window.confirm(`Disconnect ${label}? This revokes active connector credentials for this integration.`)) {
+      return;
+    }
+
+    setDisconnectingProvider(provider);
+    setActionMessage(null);
+    setActionError(null);
+
+    try {
+      const res = await fetch("/api/integrations/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = typeof data?.error === "string" ? data.error : `Failed to disconnect ${label}.`;
+        throw new Error(message);
+      }
+
+      const message = typeof data?.message === "string" ? data.message : `${label} disconnected.`;
+      setActionMessage(message);
+      if (provider === "chatgpt") {
+        setIssuedChatgptToken(null);
+      }
+      await refreshStatus();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Failed to disconnect ${label}.`;
+      setActionError(message);
+    } finally {
+      setDisconnectingProvider(null);
+    }
+  }
 
   const providers: { id: Provider; name: string; sub: string; icon: React.FC; status: IntegrationStatus }[] = [
     {
@@ -424,7 +611,7 @@ export default function ConnectorsPage() {
     {
       id: "chatgpt",
       name: "ChatGPT Action",
-      sub: "Drop into your Custom GPT",
+      sub: "Import URL + Bearer token",
       icon: ChatGPTIcon,
       status: statusByProvider.chatgpt,
     },
@@ -476,8 +663,58 @@ export default function ConnectorsPage() {
         })}
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.8rem", marginBottom: "1.2rem" }}>
+        <div style={{ fontSize: "0.85rem", color: selectedStatus.state === "error" ? "#ef4444" : "#6b7280" }}>
+          {selectedStatus.state === "error" && selectedStatus.lastError
+            ? selectedStatus.lastError
+            : "Connection state is scoped to your account only."}
+        </div>
+        <div style={{ display: "flex", gap: "0.55rem" }}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void refreshStatus()}
+            disabled={statusLoading || disconnectingProvider !== null}
+          >
+            Refresh status
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => void disconnectSelectedProvider()}
+            disabled={
+              statusLoading ||
+              disconnectingProvider !== null ||
+              !selectedStatus.canDisconnect
+            }
+          >
+            {disconnectingProvider === selected
+              ? "Disconnecting..."
+              : `Disconnect ${selectedProviderLabel}`}
+          </Button>
+        </div>
+      </div>
+
+      {actionMessage && (
+        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#22c55e" }}>
+          {actionMessage}
+        </div>
+      )}
+      {actionError && (
+        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#ef4444" }}>
+          {actionError}
+        </div>
+      )}
+
       {selected === "claude" && <ClaudeSetup />}
-      {selected === "chatgpt" && <ChatGptSetup />}
+      {selected === "chatgpt" && (
+        <ChatGptSetup
+          tokenStatus={chatgptTokenStatus}
+          issuedToken={issuedChatgptToken}
+          generatingToken={generatingChatgptToken}
+          onGenerateToken={rotateChatGptToken}
+        />
+      )}
     </div>
   );
 }

@@ -311,14 +311,16 @@ export async function generateApiKey(
   name: string,
   rotationDays = 90,
   tenantIdInput?: string | null,
-  connectorType?: string | null
+  connectorType?: string | null,
+  keyPrefix = "tly"
 ): Promise<{ key: string; id: string }> {
   const tenantId =
     tenantIdInput === undefined
       ? (await resolveAuthContext(userId, "internal")).tenantId
       : tenantIdInput;
 
-  const rawKey = "gm_" + randomBytes(32).toString("hex");
+  const normalizedPrefix = keyPrefix.trim().length > 0 ? keyPrefix.trim() : "tly";
+  const rawKey = `${normalizedPrefix}_` + randomBytes(32).toString("hex");
   const hash = createHash("sha256").update(rawKey).digest("hex");
 
   if (config.nodeEnv !== "production" && shouldBypassApiKeyDbPath()) {
