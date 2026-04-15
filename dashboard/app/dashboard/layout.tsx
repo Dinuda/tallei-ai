@@ -41,6 +41,15 @@ const ICONS = {
       <path d="M1.8 7.7H4.7L6.1 4.2L8.2 10.3L10 7.1H13.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  graph: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <circle cx="3.2" cy="7.5" r="1.2" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="7.5" cy="3.2" r="1.2" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="11.8" cy="7.5" r="1.2" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="7.5" cy="11.8" r="1.2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M4.1 6.7 6.6 4.1M8.4 4.1 10.9 6.7M4.1 8.3 6.6 10.9M8.4 10.9 10.9 8.3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
   signOut: (
     <svg width="12" height="12" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M6 13H2.5A1.5 1.5 0 0 1 1 11.5v-8A1.5 1.5 0 0 1 2.5 2H6M10 10.5l3.5-3-3.5-3M13.5 7.5H6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -52,6 +61,7 @@ const NAV: NavSection[] = [
   {
     items: [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
+      { id: "memory-graph", label: "Memory Graph", href: "/dashboard/memory-graph", icon: ICONS.graph },
       { id: "connectors", label: "Connectors", href: "/dashboard/setup", icon: ICONS.connectors },
     ],
   },

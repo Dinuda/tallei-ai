@@ -4,13 +4,14 @@ import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.j
 import { pool } from "../db/index.js";
 import { parseScopes } from "../services/oauthTokens.js";
 import { deleteCacheKey } from "../services/cache.js";
-import { generateApiKey } from "../services/auth.js";
+import { generateApiKey, listEphemeralApiKeys } from "../services/auth.js";
 
 const router = Router();
 
 router.use(authMiddleware);
 
 const CONNECTING_WINDOW_MS = 2 * 60 * 1000;
+const CHATGPT_RECENT_SUCCESS_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type Provider = "claude" | "chatgpt";
 type IntegrationState = "not_connected" | "connecting" | "connected" | "error";
@@ -37,6 +38,7 @@ type OAuthTokenRow = {
   resource: string | null;
   grant_type: string | null;
   client_info: Record<string, unknown> | null;
+  created_at: Date;
 };
 
 type ActiveChatGptApiKeyRow = {
@@ -124,7 +126,7 @@ function isTokenForProvider(token: OAuthTokenRow, provider: Provider): boolean {
 
 async function getActiveUserOAuthTokens(userId: string): Promise<OAuthTokenRow[]> {
   const result = await pool.query<OAuthTokenRow>(
-    `SELECT ot.access_token, ot.scope, ot.resource, ot.grant_type, oc.client_info
+    `SELECT ot.access_token, ot.scope, ot.resource, ot.grant_type, oc.client_info, ot.created_at
      FROM oauth_tokens ot
      LEFT JOIN oauth_clients oc ON oc.client_id = ot.client_id
      WHERE ot.user_id = $1
@@ -150,7 +152,33 @@ async function getActiveChatGptApiKeys(userId: string): Promise<ActiveChatGptApi
      LIMIT 20`,
     [userId]
   );
-  return result.rows;
+
+  const ephemeralRows = listEphemeralApiKeys(userId)
+    .filter((key) => key.connectorType === "chatgpt")
+    .filter((key) => key.revokedAt === null)
+    .filter((key) => {
+      const createdAtMs = Date.parse(key.createdAt);
+      if (!Number.isFinite(createdAtMs)) return false;
+      const expiresAtMs = createdAtMs + key.rotationDays * 24 * 60 * 60 * 1000;
+      return expiresAtMs > Date.now();
+    })
+    .map((key) => ({
+      id: key.id,
+      key_hash: "",
+      created_at: new Date(key.createdAt),
+      last_used_at: key.lastUsedAt ? new Date(key.lastUsedAt) : null,
+    }));
+
+  const merged = [...result.rows];
+  const seenIds = new Set(merged.map((row) => row.id));
+  for (const row of ephemeralRows) {
+    if (!seenIds.has(row.id)) {
+      merged.push(row);
+    }
+  }
+
+  merged.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+  return merged.slice(0, 20);
 }
 
 function deriveClaudeStatus(events: IntegrationEventRow[], hasActiveToken: boolean): IntegrationStatus {
@@ -239,12 +267,39 @@ function deriveClaudeStatus(events: IntegrationEventRow[], hasActiveToken: boole
   };
 }
 
-function deriveChatGptStatus(events: IntegrationEventRow[], hasCredential: boolean): IntegrationStatus {
+function newestCreatedAt(items: Array<{ created_at: Date }>): Date | null {
+  if (items.length === 0) return null;
+  return items.reduce((latest, item) => (isNewer(item.created_at, latest) ? item.created_at : latest), items[0].created_at);
+}
+
+function isFreshSuccessSince(lastSuccess: IntegrationEventRow | null, credentialCreatedAt: Date | null): boolean {
+  if (!lastSuccess) return false;
+  if (!credentialCreatedAt) return true;
+  return toMillis(lastSuccess.created_at) >= toMillis(credentialCreatedAt);
+}
+
+function deriveChatGptStatus(
+  events: IntegrationEventRow[],
+  hasCredential: boolean,
+  credentialCreatedAt: Date | null
+): IntegrationStatus {
   const latest = events[0] ?? null;
   const latestError = events.find((event) => !event.ok) ?? null;
   const lastSuccess = events.find((event) => event.ok) ?? null;
+  const hasFreshSuccess = isFreshSuccessSince(lastSuccess, credentialCreatedAt);
+  const hasRecentSuccess = Boolean(lastSuccess && isRecent(lastSuccess.created_at, CHATGPT_RECENT_SUCCESS_WINDOW_MS));
 
   if (!hasCredential) {
+    if (hasRecentSuccess && lastSuccess) {
+      return {
+        state: "connected",
+        connected: true,
+        lastConnectedAt: lastSuccess.created_at,
+        lastEventAt: latest?.created_at ?? lastSuccess.created_at,
+        lastError: null,
+        canDisconnect: false,
+      };
+    }
     return {
       state: "not_connected",
       connected: false,
@@ -277,7 +332,7 @@ function deriveChatGptStatus(events: IntegrationEventRow[], hasCredential: boole
     };
   }
 
-  if (lastSuccess) {
+  if (hasFreshSuccess && lastSuccess) {
     return {
       state: "connected",
       connected: true,
@@ -328,11 +383,28 @@ router.get("/status", requireScopes(["memory:read"]), async (req: AuthRequest, r
     const chatgptEvents = rows.filter((row) => row.method.startsWith("chatgpt/actions/"));
     const activeClaudeTokens = activeTokens.filter((token) => isTokenForProvider(token, "claude"));
     const activeChatgptTokens = activeTokens.filter((token) => isTokenForProvider(token, "chatgpt"));
+    const claudeCredentialCreatedAt = newestCreatedAt(activeClaudeTokens);
+    const chatgptCredentialCreatedAt = newestCreatedAt([
+      ...activeChatgptTokens,
+      ...activeChatgptApiKeys,
+    ]);
 
-    const claude = deriveClaudeStatus(claudeEvents, activeClaudeTokens.length > 0);
+    const claudeBase = deriveClaudeStatus(claudeEvents, activeClaudeTokens.length > 0);
+    const claudeLastSuccess = claudeEvents.find((event) => event.ok) ?? null;
+    const claudeHasFreshSuccess = isFreshSuccessSince(claudeLastSuccess, claudeCredentialCreatedAt);
+    const claude =
+      claudeBase.state === "connected" && !claudeHasFreshSuccess
+        ? {
+            ...claudeBase,
+            state: "connecting" as const,
+            connected: false,
+            lastConnectedAt: null,
+          }
+        : claudeBase;
     const chatgpt = deriveChatGptStatus(
       chatgptEvents,
-      activeChatgptTokens.length > 0 || activeChatgptApiKeys.length > 0
+      activeChatgptTokens.length > 0 || activeChatgptApiKeys.length > 0,
+      chatgptCredentialCreatedAt
     );
 
     res.json({

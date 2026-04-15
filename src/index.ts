@@ -17,6 +17,7 @@ import { createMcpRouter } from "./mcp/server.js";
 import { TalleiOAuthProvider } from "./mcp/oauth.js";
 import { createRateLimitMiddleware } from "./middleware/rateLimit.js";
 import { createOauthExtensionsRouter } from "./routes/oauth.js";
+import { startMemoryGraphWorker } from "./services/memoryGraphWorker.js";
 
 const allowedOrigins = [
   config.frontendUrl,
@@ -87,6 +88,7 @@ const app = createApp();
 
 async function main() {
   await initDb();
+  startMemoryGraphWorker();
 
   app.listen(config.port, config.host, () => {
     console.log(`Tallei backend listening on http://${config.host}:${config.port}`);
