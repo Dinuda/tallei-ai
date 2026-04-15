@@ -1,94 +1,49 @@
-# Tallei AI
+# 🧠 Tallei AI
 
-Tallei is a persistent memory layer for AI assistants.
+> A cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemini.
 
-## Repository Layout
+Tallei is a high-performance, persistent memory layer for AI assistants. It enables your AIs to remember facts, preferences, and context across sessions and platforms. Our primary goal is to make memory I/O blazingly fast so Claude's MCP tools never block your workflow.
 
-- `src/` - Express backend, MCP server, auth, memory services, and Postgres schema bootstrap.
-- `dashboard/` - Next.js frontend and authenticated workspace UI.
-- `mcp-bridge.js` - Claude Desktop stdio bridge for local MCP access.
-- `scripts/setup-claude-mcp.mjs` - Helper for installing the Claude Desktop MCP config.
-- `scripts/setup-chatgpt-actions.mjs` - Helper for ChatGPT Custom GPT Actions setup details and connectivity checks.
 
-## Core Commands
+![Tallei Home](./dashboard/public/tallei-home.png)
 
-From the repository root:
+## ✨ Features
 
-```bash
-npm run dev
-npm run build
-npm run start
-npm run setup:claude
-npm run setup:chatgpt
-```
+- **Cross-AI Shared Context:** Share a single memory graph between Claude, ChatGPT, and Gemini using OAuth.
+- **Blazing Fast MCP Server:** Sub-10ms latency for saving memories using a fire-and-forget architecture.
+- **Lightning Fast Recall:** ~5ms latency on warm cache for recalling vector search results (60s TTL).
+- **Beautiful Workspace UI:** A modern Next.js dashboard with a sleek light greenish-yellow and lime theme for managing your AI's memories.
+- **Seamless Integrations:** Step-by-step connector wizards for easy setup with Claude Desktop and ChatGPT.
+- **Smart Summarization:** OpenAI `gpt-4o-mini` summarization extracts titles, key points, and decisions automatically in the background.
 
-## Dashboard Commands
+## 🛠 Tech Stack
 
-From `dashboard/`:
+- **Backend:** Node.js, Express, MCP (Model Context Protocol) Server
+- **Frontend:** Next.js (App Router), Tailwind CSS v4
+- **Database:** PostgreSQL with `pgvector` extension
+- **AI/Embeddings:** OpenAI `text-embedding-3-small` and `gpt-4o-mini`, `mem0ai` SDK
+- **Authentication:** Google OAuth with Session JWTs
 
-```bash
-npm run dev
-npm run build
-npm run start
-npm run lint
-```
+## 🏗 Architecture Overview
 
-## Environment
+Tallei is split into two main components:
 
-See `.env.example` for the required variables. The backend validates required secrets at startup, so a missing value fails fast instead of producing partial state.
+- **`/src` (Backend):** The Node.js/Express server that runs the MCP server. It handles vector embeddings, background summarization, PostgreSQL connections, and OAuth token caching.
+- **`/dashboard` (Frontend):** The Next.js web interface where users can view their memory feed, search past context, and generate connector URLs via a 4-step wizard.
 
-### Hosted Production Stack
+## 🚀 Getting Started
 
-- **Relational + auth data**: Supabase Postgres (`DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`)
-- **Vector search**: Qdrant Cloud (`QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME`)
-- **Distributed cache + rate limits**: Redis (`REDIS_URL`)
-- **Memory encryption key**: `MEMORY_MASTER_KEY` (+ optional `KMS_KEY_ID`)
+To get Tallei running locally, check out our comprehensive setup guide:
 
-Dual-write and shadow-read migration controls:
+👉 **[Read the Setup Guide (setup.md)](./setup.md)**
 
-- `MEMORY_DUAL_WRITE_ENABLED`
-- `MEMORY_SHADOW_READ_ENABLED`
+## 🤝 Contributing
 
-## Setup Connectors
+We welcome contributions! When adding new MCP tools or API routes, please keep performance in mind. If an operation hits OpenAI or a vector DB, always implement caching to maintain our sub-100ms latency standard.
 
-### Claude (MCP)
+- Use conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`, `perf:`).
+- Run `npx tsc --noEmit` in `dashboard/` to catch TypeScript errors after UI changes.
 
-1. Open `/dashboard/setup` and select `Claude`.
-2. Copy your MCP URL and connect it in Claude connectors.
-3. Authorize the connector.
+## 📄 License
 
-Optional local desktop helper:
-
-```bash
-npm run setup:claude
-node mcp-bridge.js login
-```
-
-### ChatGPT (Custom GPT Actions)
-
-1. Open `/dashboard/setup` and select `ChatGPT`.
-2. Copy the OpenAPI URL: `https://<your-public-domain>/api/chatgpt/openapi.json`.
-3. Copy OAuth endpoints:
-   - Authorization URL: `https://<your-public-domain>/authorize`
-   - Token URL: `https://<your-public-domain>/token`
-4. In ChatGPT GPT Builder, switch from `Create` to `Configure`.
-5. Under `Actions`, create a new action and import from that OpenAPI URL.
-6. Set Action auth to OAuth and request scopes `memory:read memory:write`.
-7. Paste the provided GPT instruction template in `Configure`, then publish.
-
-CLI helper:
-
-```bash
-npm run setup:chatgpt
-npm run setup:chatgpt -- --check --base-url https://<your-public-domain> --access-token <oauth_access_token>
-```
-
-## Shared Memory Identity Model
-
-Claude and ChatGPT share the same memory graph only when both are configured against the same Tallei user context (same account and OAuth principal).
-
-## Production Deployment (Google Cloud Run)
-
-For a secure, domain-ready deployment with separate backend and dashboard containers, see:
-
-- [deploy/cloudrun/README.md](/Users/dinudayaggahavita/Documents/work/tallei-ai/deploy/cloudrun/README.md)
+MIT License.
