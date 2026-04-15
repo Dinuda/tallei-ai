@@ -8,6 +8,11 @@ import { embedText } from "./embeddings.js";
 import { MemoryRepository } from "../repositories/memoryRepository.js";
 import { VectorRepository } from "../repositories/vectorRepository.js";
 import {
+  enqueueGraphExtractionJob,
+  invalidateRecallV2Cache,
+  recallMemoriesV2,
+} from "./memoryGraph.js";
+import {
   legacyDeleteMemory,
   legacyListMemories,
   legacyRecallMemories,
@@ -226,6 +231,12 @@ export async function saveMemory(
     qdrantPointId: pointId,
   });
 
+  void enqueueGraphExtractionJob(auth, memoryId).catch((error) => {
+    if (config.nodeEnv !== "production") {
+      console.warn("[graph] failed to enqueue extraction job", error);
+    }
+  });
+
   void memoryRepository.logEvent({
     auth,
     action: "save",
@@ -237,6 +248,7 @@ export async function saveMemory(
   });
 
   invalidateRecallCache(auth);
+  invalidateRecallV2Cache(auth);
 
   if (config.memoryDualWriteEnabled) {
     void legacySaveMemory(content, auth.userId, platform).catch((error) => {
@@ -400,6 +412,36 @@ export async function recallMemories(
       });
   }
 
+  if (config.recallV2ShadowMode) {
+    void recallMemoriesV2(query, auth, limit, 1)
+      .then(async (v2) => {
+        const left = result.memories.map((m) => m.id).sort();
+        const right = v2.memories.map((m) => m.id).sort();
+        const same =
+          left.length === right.length && left.every((value, idx) => value === right[idx]);
+        if (!same) {
+          await memoryRepository.logEvent({
+            auth,
+            action: "shadow_divergence",
+            metadata: {
+              operation: "recall_v2_shadow",
+              query,
+              limit,
+              baselineCount: left.length,
+              v2Count: right.length,
+              baselineTop: left.slice(0, 5),
+              v2Top: right.slice(0, 5),
+            },
+          });
+        }
+      })
+      .catch((error) => {
+        if (config.nodeEnv !== "production") {
+          console.warn("[memory] recall_v2 shadow check failed", error);
+        }
+      });
+  }
+
   return result;
 }
 
@@ -487,5 +529,6 @@ export async function deleteMemory(memoryId: string, auth: AuthContext, requeste
   }
 
   invalidateRecallCache(auth);
+  invalidateRecallV2Cache(auth);
   return { success: true };
 }

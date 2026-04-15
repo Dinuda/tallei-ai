@@ -69,6 +69,19 @@ export MEMORY_MASTER_KEY="MEMORY_MASTER_KEY"
 PROJECT_ID="actionlog-487112" ./deploy/cloudrun/verify-secrets.sh MEMORY_MASTER_KEY
 ```
 
+## `Missing required env var: GOOGLE_CLIENT_SECRET`
+
+Cause:
+
+- Dashboard deploy requires Google OAuth client secret as a Secret Manager ID.
+
+Fix:
+
+```bash
+export GOOGLE_CLIENT_SECRET="GOOGLE_CLIENT_SECRET"
+PROJECT_ID="actionlog-487112" ./deploy/cloudrun/verify-secrets.sh GOOGLE_CLIENT_SECRET
+```
+
 ## Backend deploy unexpectedly uses dashboard service account
 
 Cause:

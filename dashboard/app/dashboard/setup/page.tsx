@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { ClaudeWizard, ChatGPTWizard, Provider } from "./SetupWizards";
 
@@ -135,7 +135,6 @@ export default function ConnectorsPage() {
   const [chatgptTokenStatus, setChatgptTokenStatus] = useState<ChatGptTokenStatus>(DEFAULT_CHATGPT_TOKEN_STATUS);
   const [issuedChatgptToken, setIssuedChatgptToken] = useState<string | null>(null);
   const [generatingChatgptToken, setGeneratingChatgptToken] = useState(false);
-  const [statusPollTick, setStatusPollTick] = useState(0);
   const [disconnectingProvider, setDisconnectingProvider] = useState<Provider | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -148,57 +147,37 @@ export default function ConnectorsPage() {
     ? `${window.location.origin}/api/chatgpt/openapi.json`
     : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/api/chatgpt/openapi.json`;
 
-  useEffect(() => {
-    let isMounted = true;
-    let inFlight = false;
+  const loadStatus = useCallback(async () => {
+    try {
+      const [integrationRes, tokenRes] = await Promise.all([
+        fetch("/api/integrations/status"),
+        fetch("/api/integrations/chatgpt/token"),
+      ]);
 
-    const loadStatus = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const [integrationRes, tokenRes] = await Promise.all([
-          fetch("/api/integrations/status"),
-          fetch("/api/integrations/chatgpt/token"),
-        ]);
-
-        if (integrationRes.ok) {
-          const data = await integrationRes.json();
-          const integrations = data?.integrations ?? {};
-          const nextStatus: IntegrationStatusMap = {
-            claude: normalizeIntegrationStatus(integrations?.claude),
-            chatgpt: normalizeIntegrationStatus(integrations?.chatgpt),
-          };
-          if (isMounted) {
-            setStatusByProvider(nextStatus);
-          }
-        }
-
-        if (tokenRes.ok) {
-          const tokenData = await tokenRes.json();
-          if (isMounted) {
-            setChatgptTokenStatus(normalizeChatGptTokenStatus(tokenData));
-          }
-        }
-      } catch {
-        // Best effort only.
-      } finally {
-        inFlight = false;
-        if (isMounted) {
-          setStatusLoading(false);
-        }
+      if (integrationRes.ok) {
+        const data = await integrationRes.json();
+        const integrations = data?.integrations ?? {};
+        const nextStatus: IntegrationStatusMap = {
+          claude: normalizeIntegrationStatus(integrations?.claude),
+          chatgpt: normalizeIntegrationStatus(integrations?.chatgpt),
+        };
+        setStatusByProvider(nextStatus);
       }
-    };
 
+      if (tokenRes.ok) {
+        const tokenData = await tokenRes.json();
+        setChatgptTokenStatus(normalizeChatGptTokenStatus(tokenData));
+      }
+    } catch {
+      // Best effort only.
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
     void loadStatus();
-    const interval = window.setInterval(() => {
-      void loadStatus();
-    }, 4000);
-
-    return () => {
-      isMounted = false;
-      window.clearInterval(interval);
-    };
-  }, [statusPollTick]);
+  }, [loadStatus]);
 
   const selectedStatus = statusByProvider[selected];
   const selectedProviderLabel = selected === "claude" ? "Claude" : "ChatGPT";
@@ -206,7 +185,7 @@ export default function ConnectorsPage() {
   async function refreshStatus() {
     setStatusLoading(true);
     setChatgptTokenStatus((prev) => ({ ...prev, loading: true }));
-    setStatusPollTick((value) => value + 1);
+    await loadStatus();
   }
 
   async function rotateChatGptToken() {

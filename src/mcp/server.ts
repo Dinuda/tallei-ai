@@ -11,6 +11,12 @@ import {
   deleteMemory,
   prewarmRecallCache,
 } from "../services/memory.js";
+import {
+  explainMemoryConnection,
+  listMemoryEntities,
+  recallMemoriesV2,
+} from "../services/memoryGraph.js";
+import { getMemoryGraphInsights } from "../services/memoryInsights.js";
 import { authContextFromUserId } from "../services/auth.js";
 import { config } from "../config.js";
 import { pool } from "../db/index.js";
@@ -127,6 +133,98 @@ function buildMcpServer(auth: AuthContext): McpServer {
     async ({ query, limit }) => {
       const result = await recallMemories(query, auth, limit ?? 5);
       return { content: [{ type: "text", text: result.contextBlock }] };
+    }
+  );
+
+  server.registerTool(
+    "recall_memories_v2",
+    {
+      title: "Recall Memories v2",
+      description: "Graph-enhanced recall with compact reasoning paths.",
+      inputSchema: {
+        query: z.string().describe("What to search for."),
+        limit: z.number().int().min(1).max(20).optional().default(5),
+        graph_depth: z.number().int().min(1).max(2).optional().default(1),
+      },
+    },
+    async ({ query, limit, graph_depth }) => {
+      if (!config.recallV2Enabled) {
+        return { content: [{ type: "text", text: "recall_memories_v2 is disabled." }] };
+      }
+
+      const result = await recallMemoriesV2(query, auth, limit ?? 5, graph_depth ?? 1);
+      return {
+        content: [{ type: "text", text: result.contextBlock }],
+      };
+    }
+  );
+
+  server.registerTool(
+    "list_memory_entities",
+    {
+      title: "List Memory Entities",
+      description: "Lists graph entities extracted from user memories.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).optional().default(30),
+        query: z.string().optional(),
+      },
+    },
+    async ({ limit, query }) => {
+      const entities = await listMemoryEntities(auth, limit ?? 30, query);
+      if (entities.length === 0) {
+        return { content: [{ type: "text", text: "No memory entities found yet." }] };
+      }
+      const text = entities
+        .map((entity) => `• ${entity.label} [${entity.entityType}] conf=${entity.confidence.toFixed(2)}`)
+        .join("\n");
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  server.registerTool(
+    "explain_memory_connection",
+    {
+      title: "Explain Memory Connection",
+      description: "Finds graph connection path between two entity queries.",
+      inputSchema: {
+        source: z.string().describe("Source entity query"),
+        target: z.string().describe("Target entity query"),
+      },
+    },
+    async ({ source, target }) => {
+      const result = await explainMemoryConnection(auth, source, target);
+      if (!result.found) {
+        return { content: [{ type: "text", text: result.explanation }] };
+      }
+      return {
+        content: [{ type: "text", text: `${result.explanation}\nPath: ${result.path.join(" -> ")}` }],
+      };
+    }
+  );
+
+  server.registerTool(
+    "memory_graph_insights",
+    {
+      title: "Memory Graph Insights",
+      description: "Returns contradictions, stale decisions, and high-impact relationships.",
+      inputSchema: {},
+    },
+    async () => {
+      if (!config.graphExtractionEnabled) {
+        return { content: [{ type: "text", text: "memory_graph_insights is disabled." }] };
+      }
+      const insights = await getMemoryGraphInsights(auth);
+      const lines = [
+        `Generated: ${insights.generatedAt}`,
+        `Contradictions: ${insights.summary.contradictionCount}`,
+        `Stale decisions: ${insights.summary.staleDecisionCount}`,
+        `High-impact relations: ${insights.summary.highImpactCount}`,
+        "",
+      ];
+      for (const recommendation of insights.recommendations.slice(0, 4)) {
+        lines.push(`• ${recommendation}`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 

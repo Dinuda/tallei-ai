@@ -47,7 +47,7 @@ cp .env.example .env
 Create dashboard env file:
 
 ```bash
-cp dashboard/.env.local.example dashboard/.env.local
+cp dashboard/.env.example dashboard/.env.local
 ```
 
 Minimum required backend values in `.env`:
@@ -84,6 +84,12 @@ Minimum dashboard values in `dashboard/.env.local`:
 - `API_PROXY_TARGET=http://127.0.0.1:3000`
 - `INTERNAL_API_SECRET=<must match backend>`
 - `NEXT_PUBLIC_APP_URL=http://localhost:3001`
+
+If you want graph features locally, you can also enable:
+
+- `GRAPH_EXTRACTION_ENABLED=true`
+- `DASHBOARD_GRAPH_V2_ENABLED=true`
+- `RECALL_V2_ENABLED=true`
 
 ## 5) Run Backend
 

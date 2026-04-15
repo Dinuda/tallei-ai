@@ -72,6 +72,20 @@ export class MemoryRepository {
     return result.rows;
   }
 
+  async getByIdScoped(auth: AuthContext, id: string): Promise<MemoryRecordRow | null> {
+    const result = await pool.query<MemoryRecordRow>(
+      `SELECT *
+       FROM memory_records
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND id = $3
+       LIMIT 1`,
+      [auth.tenantId, auth.userId, id]
+    );
+    return result.rows[0] ?? null;
+  }
+
   async softDeleteScoped(auth: AuthContext, memoryId: string): Promise<MemoryRecordRow | null> {
     const result = await pool.query<MemoryRecordRow>(
       `UPDATE memory_records

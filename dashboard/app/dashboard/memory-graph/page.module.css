@@ -1,0 +1,364 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-bottom: 2.2rem;
+}
+
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.kpiCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem 1rem;
+}
+
+.kpiLabel {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kpiValue {
+  margin: 0.25rem 0 0;
+  font-family: "DM Sans", sans-serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.graphGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.85fr) minmax(300px, 1fr);
+  gap: 0.8rem;
+  align-items: start;
+}
+
+.graphCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0.8rem;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+  margin-bottom: 0.7rem;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.sectionSubtle {
+  margin: 0.2rem 0 0;
+  font-size: 0.79rem;
+  color: var(--text-muted);
+}
+
+.ghostButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  border-radius: 9px;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+
+.ghostButton:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ghostButton:not(:disabled):hover {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+.graphCanvasWrap {
+  border: 1px solid var(--border-light);
+  background: linear-gradient(145deg, #fcfdff 0%, #f8fafc 100%);
+  border-radius: 12px;
+  min-height: 520px;
+  overflow: hidden;
+}
+
+.graphCanvas {
+  width: 100%;
+  height: 520px;
+  display: block;
+}
+
+.centerState {
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  text-align: center;
+  padding: 1.2rem;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 1.15rem;
+  color: var(--text);
+}
+
+.emptySubtitle {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  max-width: 42ch;
+}
+
+.errorText {
+  margin: 0.3rem 0 0;
+  color: #b91c1c;
+  font-size: 0.78rem;
+}
+
+.nodeGroup {
+  cursor: pointer;
+}
+
+.legend {
+  margin-top: 0.7rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--border-light);
+  background: var(--bg);
+  border-radius: 999px;
+  padding: 0.2rem 0.5rem;
+  color: var(--text-2);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.legend i {
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.sideRail {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.sideCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.82rem 0.9rem;
+}
+
+.cardKicker {
+  margin: 0 0 0.42rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.focusTitle {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.focusMeta {
+  margin: 0.2rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-2);
+}
+
+.pillRow {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.pill {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.17rem 0.45rem;
+  font-size: 0.7rem;
+  color: var(--text-2);
+  background: var(--bg);
+}
+
+.metricList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.metricRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.79rem;
+  color: var(--text-2);
+}
+
+.metricRow strong {
+  font-size: 0.84rem;
+  color: var(--text);
+}
+
+.generatedAt {
+  margin: 0.6rem 0 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.listGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.listCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem 0.95rem;
+}
+
+.listTitle {
+  margin: 0 0 0.55rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.listBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+}
+
+.listLine {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+  color: var(--text-2);
+}
+
+.listLine strong {
+  color: var(--text);
+  font-size: 0.77rem;
+}
+
+.listLineDense {
+  margin: 0;
+  font-size: 0.81rem;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.linkType {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  color: var(--text);
+  padding: 0.06rem 0.36rem;
+  margin: 0 0.1rem;
+}
+
+.daysOld {
+  font-size: 0.73rem;
+  color: #b45309;
+}
+
+.recoCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem 0.95rem;
+}
+
+.mutedText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.79rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 1180px) {
+  .graphGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 980px) {
+  .kpiGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .listGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .page {
+    gap: 0.75rem;
+  }
+
+  .kpiGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .graphCard,
+  .sideCard,
+  .listCard,
+  .recoCard {
+    padding: 0.72rem 0.78rem;
+  }
+
+  .graphCanvasWrap,
+  .graphCanvas,
+  .centerState {
+    min-height: 420px;
+    height: 420px;
+  }
+}

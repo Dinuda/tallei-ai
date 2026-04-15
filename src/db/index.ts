@@ -172,6 +172,26 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
     },
     {
+      table: "memory_entities",
+      policy: "memory_entities_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "memory_entity_mentions",
+      policy: "memory_entity_mentions_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "memory_relations",
+      policy: "memory_relations_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "memory_graph_jobs",
+      policy: "memory_graph_jobs_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
       table: "api_keys",
       policy: "api_keys_tenant_user_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
@@ -351,6 +371,106 @@ export async function initDb() {
         ON memory_events(tenant_id, user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id
         ON memory_events(memory_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_entities (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        canonical_label TEXT NOT NULL,
+        entity_type TEXT NOT NULL DEFAULT 'topic',
+        normalized_label TEXT NOT NULL,
+        first_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        source_confidence REAL NOT NULL DEFAULT 0.75,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entities_unique_label
+        ON memory_entities(tenant_id, user_id, normalized_label);
+      CREATE INDEX IF NOT EXISTS idx_memory_entities_tenant_user_type
+        ON memory_entities(tenant_id, user_id, entity_type, last_seen_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_entities_tenant_user_seen
+        ON memory_entities(tenant_id, user_id, last_seen_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_entity_mentions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        memory_id UUID NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+        entity_id UUID NOT NULL REFERENCES memory_entities(id) ON DELETE CASCADE,
+        mention_text TEXT NOT NULL,
+        start_offset INTEGER NOT NULL DEFAULT 0,
+        end_offset INTEGER NOT NULL DEFAULT 0,
+        confidence REAL NOT NULL DEFAULT 0.7,
+        extraction_source TEXT NOT NULL DEFAULT 'deterministic',
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entity_mentions_unique
+        ON memory_entity_mentions(tenant_id, user_id, memory_id, entity_id, mention_text);
+      CREATE INDEX IF NOT EXISTS idx_memory_entity_mentions_memory
+        ON memory_entity_mentions(tenant_id, user_id, memory_id);
+      CREATE INDEX IF NOT EXISTS idx_memory_entity_mentions_entity
+        ON memory_entity_mentions(tenant_id, user_id, entity_id);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_relations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        source_entity_id UUID NOT NULL REFERENCES memory_entities(id) ON DELETE CASCADE,
+        target_entity_id UUID NOT NULL REFERENCES memory_entities(id) ON DELETE CASCADE,
+        relation_type TEXT NOT NULL,
+        confidence_label TEXT NOT NULL DEFAULT 'inferred'
+          CHECK (confidence_label IN ('explicit', 'inferred', 'uncertain')),
+        confidence_score REAL NOT NULL DEFAULT 0.7,
+        evidence_memory_id UUID REFERENCES memory_records(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        active BOOLEAN NOT NULL DEFAULT true
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_relations_unique
+        ON memory_relations(tenant_id, user_id, source_entity_id, target_entity_id, relation_type);
+      CREATE INDEX IF NOT EXISTS idx_memory_relations_source
+        ON memory_relations(tenant_id, user_id, source_entity_id, last_seen_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_relations_target
+        ON memory_relations(tenant_id, user_id, target_entity_id, last_seen_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_relations_confidence
+        ON memory_relations(tenant_id, user_id, confidence_label, confidence_score DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_graph_jobs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        memory_id UUID REFERENCES memory_records(id) ON DELETE CASCADE,
+        job_type TEXT NOT NULL
+          CHECK (job_type IN ('extract', 'backfill')),
+        status TEXT NOT NULL DEFAULT 'queued'
+          CHECK (status IN ('queued', 'running', 'retry', 'failed', 'done')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_run_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        error_code TEXT,
+        error_message TEXT,
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_graph_jobs_extract_unique
+        ON memory_graph_jobs(tenant_id, user_id, memory_id, job_type)
+        WHERE status IN ('queued', 'running', 'retry');
+      CREATE INDEX IF NOT EXISTS idx_memory_graph_jobs_poll
+        ON memory_graph_jobs(status, next_run_at, created_at);
+      CREATE INDEX IF NOT EXISTS idx_memory_graph_jobs_user_created
+        ON memory_graph_jobs(tenant_id, user_id, created_at DESC);
     `);
 
     await client.query(`
