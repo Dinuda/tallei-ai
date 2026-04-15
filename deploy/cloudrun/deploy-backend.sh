@@ -50,10 +50,12 @@ require_env DATABASE_URL
 require_env INTERNAL_API_SECRET
 require_env OPENAI_API_KEY
 require_env JWT_SECRET
+require_env MEMORY_MASTER_KEY
 
 validate_secret_id INTERNAL_API_SECRET
 validate_secret_id OPENAI_API_KEY
 validate_secret_id JWT_SECRET
+validate_secret_id MEMORY_MASTER_KEY
 
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${IMAGE_TAG}"
 
@@ -105,6 +107,7 @@ secret_vars=(
   "INTERNAL_API_SECRET=${INTERNAL_API_SECRET}:latest"
   "OPENAI_API_KEY=${OPENAI_API_KEY}:latest"
   "JWT_SECRET=${JWT_SECRET}:latest"
+  "MEMORY_MASTER_KEY=${MEMORY_MASTER_KEY}:latest"
 )
 
 if [[ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
@@ -114,10 +117,6 @@ fi
 if [[ -n "${QDRANT_API_KEY:-}" ]]; then
   validate_secret_id QDRANT_API_KEY
   secret_vars+=("QDRANT_API_KEY=${QDRANT_API_KEY}:latest")
-fi
-if [[ -n "${MEMORY_MASTER_KEY:-}" ]]; then
-  validate_secret_id MEMORY_MASTER_KEY
-  secret_vars+=("MEMORY_MASTER_KEY=${MEMORY_MASTER_KEY}:latest")
 fi
 if [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]]; then
   validate_secret_id GOOGLE_CLIENT_SECRET

@@ -855,27 +855,42 @@ pre {
   align-items: center;
   gap: 1rem;
   padding: 1.25rem 1.5rem;
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: none;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.02);
   cursor: pointer;
   min-width: 280px;
-  transition: transform var(--t-fast), box-shadow var(--t-fast), border-color var(--t-fast), background-color var(--t-fast);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   text-align: left;
+  position: relative;
+  overflow: hidden;
+}
+
+.cnn-provider-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 2px transparent;
+  transition: box-shadow 0.3s ease;
+  pointer-events: none;
 }
 
 .cnn-provider-card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-sm);
-  border-color: var(--border);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 24px rgba(0,0,0,0.06), 0 4px 8px rgba(0,0,0,0.04);
+  border-color: #d1d5db;
 }
 
 .cnn-provider-card.active {
-  border: 2px solid var(--text);
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
-  padding: calc(1.25rem - 1px) calc(1.5rem - 1px); /* offset the border */
+  border-color: transparent;
+  background: #f8fafc;
+  box-shadow: 0 8px 16px rgba(59, 130, 246, 0.08);
+}
+
+.cnn-provider-card.active::after {
+  box-shadow: inset 0 0 0 2px #3b82f6;
 }
 
 .cnn-provider-icon-title-wrap {
@@ -968,11 +983,11 @@ pre {
 .su-step-row::before {
   content: '';
   position: absolute;
-  top: 32px;
-  left: 15px; /* Half of 30px width */
-  bottom: 0;
-  width: 1px;
-  background-color: var(--border-light);
+  top: 36px;
+  left: 15px; /* Half of 32px width minus 1 */
+  bottom: -20px;
+  width: 2px;
+  background: linear-gradient(to bottom, var(--border), rgba(229, 231, 235, 0.4));
   z-index: 0;
 }
 
@@ -1001,6 +1016,13 @@ pre {
   color: #ffffff;
   flex-shrink: 0;
   margin-top: 0.15rem;
+  box-shadow: 0 0 0 6px var(--background), 0 4px 10px rgba(0,0,0,0.06);
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+}
+
+.su-step-row:hover .su-step-num {
+  transform: scale(1.1);
+  box-shadow: 0 0 0 6px var(--background), 0 6px 14px rgba(0,0,0,0.1);
 }
 
 .su-step-text {

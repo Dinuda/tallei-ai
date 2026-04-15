@@ -56,6 +56,19 @@ Add actual values with:
 PROJECT_ID="actionlog-487112" ./deploy/cloudrun/add-secret-versions.sh OPENAI_API_KEY
 ```
 
+## `Missing required env var: MEMORY_MASTER_KEY`
+
+Cause:
+
+- Backend deploy now requires `MEMORY_MASTER_KEY` as a Secret Manager ID.
+
+Fix:
+
+```bash
+export MEMORY_MASTER_KEY="MEMORY_MASTER_KEY"
+PROJECT_ID="actionlog-487112" ./deploy/cloudrun/verify-secrets.sh MEMORY_MASTER_KEY
+```
+
 ## Backend deploy unexpectedly uses dashboard service account
 
 Cause:

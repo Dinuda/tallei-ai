@@ -1,22 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Check, Copy, ExternalLink } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
 import { Button } from "../../../components/ui/button";
+import { ClaudeWizard, ChatGPTWizard, Provider } from "./SetupWizards";
 
-const CLAUDE_CONNECTORS_URL = "https://claude.ai/settings/connectors";
-const CHATGPT_BUILDER_URL = "https://chatgpt.com/gpts/editor";
-
-const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory tools.
-
-Rules:
-1) On the first user message in each new chat, call recallMemories with a broad query before replying.
-2) Before answering personal/contextual questions, call recallMemories first.
-3) When the user shares a durable fact or preference, call saveMemory in the same turn.
-4) If the user corrects a prior fact, call saveMemory with the corrected fact.
-5) Do not mention tool calls in the final user-facing response.`;
-
-type Provider = "claude" | "chatgpt";
 type IntegrationState = "checking" | "connecting" | "connected" | "error" | "not_connected";
 
 type IntegrationStatus = {
@@ -70,13 +57,7 @@ const DEFAULT_STATUS_MAP: IntegrationStatusMap = {
 };
 
 function normalizeState(value: unknown): IntegrationState {
-  if (
-    value === "checking" ||
-    value === "connecting" ||
-    value === "connected" ||
-    value === "error" ||
-    value === "not_connected"
-  ) {
+  if (value === "checking" || value === "connecting" || value === "connected" || value === "error" || value === "not_connected") {
     return value;
   }
   return "not_connected";
@@ -112,61 +93,20 @@ function normalizeChatGptTokenStatus(input: unknown): ChatGptTokenStatus {
   };
 }
 
-function statusUiState(state: IntegrationState, statusLoading: boolean): {
-  label: string;
-  border: string;
-  color: string;
-  background: string;
-} {
+function statusUiState(state: IntegrationState, statusLoading: boolean): { label: string; border: string; color: string; background: string; } {
   if (statusLoading || state === "checking") {
-    return {
-      label: "Checking...",
-      border: "1px solid rgba(148,163,184,.35)",
-      color: "#94a3b8",
-      background: "rgba(148,163,184,.08)",
-    };
+    return { label: "Checking...", border: "1px solid rgba(148,163,184,.35)", color: "#94a3b8", background: "rgba(148,163,184,.08)" };
   }
-
   if (state === "connecting") {
-    return {
-      label: "Connecting...",
-      border: "1px solid rgba(245,158,11,.35)",
-      color: "#f59e0b",
-      background: "rgba(245,158,11,.08)",
-    };
+    return { label: "Connecting...", border: "1px solid rgba(245,158,11,.35)", color: "#f59e0b", background: "rgba(245,158,11,.08)" };
   }
-
   if (state === "connected") {
-    return {
-      label: "Connected",
-      border: "1px solid rgba(34,197,94,.35)",
-      color: "#22c55e",
-      background: "rgba(34,197,94,.08)",
-    };
+    return { label: "Connected", border: "1px solid rgba(34,197,94,.35)", color: "#22c55e", background: "rgba(34,197,94,.08)" };
   }
-
   if (state === "error") {
-    return {
-      label: "Error",
-      border: "1px solid rgba(239,68,68,.35)",
-      color: "#ef4444",
-      background: "rgba(239,68,68,.08)",
-    };
+    return { label: "Error", border: "1px solid rgba(239,68,68,.35)", color: "#ef4444", background: "rgba(239,68,68,.08)" };
   }
-
-  return {
-    label: "Not connected",
-    border: "1px solid rgba(148,163,184,.35)",
-    color: "#94a3b8",
-    background: "rgba(148,163,184,.08)",
-  };
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return "Never";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "Never";
-  return parsed.toLocaleString();
+  return { label: "Not connected", border: "1px solid rgba(148,163,184,.35)", color: "#94a3b8", background: "rgba(148,163,184,.08)" };
 }
 
 /* ── Provider icons ────────────────────────────────────────── */
@@ -186,280 +126,10 @@ function ChatGPTIcon() {
   );
 }
 
-/* ── Code block ────────────────────────────────────────────── */
-function CodeBlock({ value, language = "txt", onCopy }: { value: string; language?: string; onCopy?: () => void }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-      if (onCopy) onCopy();
-    } catch {/* ignore */}
-  };
-
-  const getLanguageIcon = (lang: string) => {
-    if (lang === 'python') return '🐍';
-    if (lang === 'url') return '🔗';
-    if (lang === 'json') return 'JSON';
-    return null;
-  };
-
-  return (
-    <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', overflow: 'hidden' }}>
-      <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
-        <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
-          {getLanguageIcon(language) && <span style={{ fontSize: '1rem' }}>{getLanguageIcon(language)}</span>}
-          <span style={{ textTransform: 'lowercase' }}>{language}</span>
-        </div>
-        <button
-          type="button"
-          className={`cnn-copy-btn ${copied ? "copied" : ""}`}
-          onClick={handleCopy}
-          title={copied ? "Copied!" : "Copy"}
-          aria-label="Copy to clipboard"
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'transparent', cursor: 'pointer', color: copied ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
-        >
-          {copied ? <Check size={16} /> : <Copy size={16} />}
-        </button>
-      </div>
-      <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto' }}>
-        <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace', color: '#1f2937' }}>{value}</code>
-      </div>
-    </div>
-  );
-}
-
-/* ── Claude setup ──────────────────────────────────────────── */
-function ClaudeSetup() {
-  const mcpUrl = typeof window !== "undefined"
-    ? `${window.location.origin}/mcp`
-    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/mcp`;
-
-  return (
-    <div className="su-root animate-fade-in">
-      <div className="su-steps-grid">
-        <div className="su-step-row">
-          <div className="su-step-left">
-            <div className="su-step-num">1</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Copy Configuration</div>
-              <p className="su-step-body">Copy the Name and URL below to use in your Claude config.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-            <div style={{ marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Name</strong></div>
-            <CodeBlock value="Tallei Memory" language="txt" />
-            <div style={{ marginTop: "1rem", marginBottom: "0.5rem" }}><strong style={{ fontSize: "0.85rem", color: "var(--text)" }}>Remote MCP server URL</strong></div>
-            <CodeBlock value={mcpUrl} language="url" />
-          </div>
-        </div>
-
-        <div className="su-step-row">
-          <div className="su-step-left">
-            <div className="su-step-num">2</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Open Connectors</div>
-              <p className="su-step-body">Open Claude connector settings in your browser.</p>
-            </div>
-          </div>
-          <div className="su-step-right" style={{ display: 'flex', alignItems: 'flex-start', paddingTop: '0.15rem' }}>
-             <Button variant="outline" onClick={() => window.open(CLAUDE_CONNECTORS_URL, "_blank", "noopener,noreferrer")} style={{ background: '#ffffff', border: '1px solid #e5e7eb', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', color: '#1f2937' }}>
-               Open Claude Connectors <ExternalLink size={14} className="ml-2" style={{ marginLeft: "6px" }} />
-             </Button>
-          </div>
-        </div>
-
-        <div className="su-step-row">
-          <div className="su-step-left">
-            <div className="su-step-num">3</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Add Connector</div>
-              <p className="su-step-body">In Claude, click <strong>Add custom connector</strong>, paste the Name and URL, and keep Advanced settings empty.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-             <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
-               Navigate to Claude's Settings &gt; Connectors &gt; Add custom connector.
-             </div>
-          </div>
-        </div>
-
-        <div className="su-step-row su-step-row-last">
-          <div className="su-step-left">
-            <div className="su-step-num">4</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Authorize</div>
-              <p className="su-step-body">Click <strong>Connect</strong> and approve OAuth access to finish setup.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-             <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
-               Approve the connection and start using Tallei in Claude!
-             </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── ChatGPT setup ─────────────────────────────────────────── */
-function ChatGptSetup(props: {
-  tokenStatus: ChatGptTokenStatus;
-  issuedToken: string | null;
-  generatingToken: boolean;
-  onGenerateToken: () => Promise<void>;
-}) {
-  const { tokenStatus, issuedToken, generatingToken, onGenerateToken } = props;
-  const [copiedInstructions, setCopiedInstructions] = useState(false);
-  const [copiedToken, setCopiedToken] = useState(false);
-
-  const openApiUrl = typeof window !== "undefined"
-    ? `${window.location.origin}/api/chatgpt/openapi.json`
-    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/api/chatgpt/openapi.json`;
-
-  const copyInstructions = async () => {
-    await navigator.clipboard.writeText(CHATGPT_INSTRUCTIONS_TEMPLATE).catch(() => {});
-    setCopiedInstructions(true);
-    setTimeout(() => setCopiedInstructions(false), 2000);
-  };
-
-  const copyToken = async () => {
-    if (!issuedToken) return;
-    await navigator.clipboard.writeText(issuedToken).catch(() => {});
-    setCopiedToken(true);
-    setTimeout(() => setCopiedToken(false), 2000);
-  };
-
-  return (
-    <div className="su-root animate-fade-in">
-      <div className="su-steps-grid">
-        <div className="su-step-row">
-          <div className="su-step-left">
-            <div className="su-step-num">1</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Create Bearer Token</div>
-              <p className="su-step-body">Generate a ChatGPT Actions bearer token on this page. This token is shown only once after generation.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-            <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", marginBottom: "0.8rem" }}>
-              <Button
-                variant="default"
-                onClick={() => void onGenerateToken()}
-                disabled={generatingToken}
-              >
-                {generatingToken ? "Generating..." : tokenStatus.hasActiveToken ? "Rotate Token" : "Generate Token"}
-              </Button>
-              <span style={{ fontSize: "0.8rem", color: "#6b7280" }}>
-                Active tokens: {tokenStatus.activeTokenCount}
-              </span>
-            </div>
-            {issuedToken ? (
-              <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', overflow: 'hidden' }}>
-                <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
-                  <span>chatgpt_bearer_token</span>
-                  <button
-                    type="button"
-                    className={`cnn-copy-btn ${copiedToken ? "copied" : ""}`}
-                    onClick={copyToken}
-                    title={copiedToken ? "Copied!" : "Copy"}
-                    aria-label="Copy token"
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'transparent', cursor: 'pointer', color: copiedToken ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
-                  >
-                    {copiedToken ? <Check size={16} /> : <Copy size={16} />}
-                  </button>
-                </div>
-                <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto' }}>
-                  <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace', color: '#1f2937' }}>{issuedToken}</code>
-                </div>
-              </div>
-            ) : (
-              <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
-                Last created: {formatDateTime(tokenStatus.lastTokenCreatedAt)}<br />
-                Last used: {formatDateTime(tokenStatus.lastTokenUsedAt)}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="su-step-row">
-          <div className="su-step-left">
-            <div className="su-step-num">2</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Import OpenAPI URL</div>
-              <p className="su-step-body">In GPT Builder → Actions, click <strong>Import from URL</strong> and paste this schema URL.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-            <CodeBlock value={openApiUrl} language="url" />
-          </div>
-        </div>
-
-        <div className="su-step-row">
-          <div className="su-step-left">
-            <div className="su-step-num">3</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Set Action Auth</div>
-              <p className="su-step-body">Use API key bearer auth in the Actions auth modal.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-            <ol className="cnn-list" style={{marginBottom: '1rem'}}>
-              <li>Authentication Type: <strong>API Key</strong></li>
-              <li>Auth Type: <strong>Bearer</strong></li>
-              <li>API Key: paste the token from Step 1</li>
-              <li>Save, then keep this action attached to your GPT</li>
-            </ol>
-            <Button
-              variant="outline"
-              onClick={() => window.open(CHATGPT_BUILDER_URL, "_blank", "noopener,noreferrer")}
-              style={{ alignSelf: 'flex-start' }}
-            >
-              Open GPT Builder <ExternalLink size={14} style={{ marginLeft: "6px" }} />
-            </Button>
-          </div>
-        </div>
-
-        <div className="su-step-row su-step-row-last">
-          <div className="su-step-left">
-            <div className="su-step-num">4</div>
-            <div className="su-step-text">
-              <div className="su-step-title">Publish & Test</div>
-              <p className="su-step-body">Paste these instructions into your GPT, publish, then test memory recall in Preview.</p>
-            </div>
-          </div>
-          <div className="su-step-right">
-            <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', marginBottom: '0.5rem', overflow: 'hidden' }}>
-               <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
-                 <span>instructions</span>
-                 <button
-                    type="button"
-                    className={`cnn-copy-btn ${copiedInstructions ? "copied" : ""}`}
-                    onClick={copyInstructions}
-                    title={copiedInstructions ? "Copied!" : "Copy"}
-                    aria-label="Copy to clipboard"
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'transparent', cursor: 'pointer', color: copiedInstructions ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
-                  >
-                    {copiedInstructions ? <Check size={16} /> : <Copy size={16} />}
-                  </button>
-               </div>
-               <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto' }}>
-                 <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace', color: '#1f2937' }}>{CHATGPT_INSTRUCTIONS_TEMPLATE}</code>
-               </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* ── Page ───────────────────────────────────────────────────── */
 export default function ConnectorsPage() {
   const [selected, setSelected] = useState<Provider>("claude");
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusByProvider, setStatusByProvider] = useState<IntegrationStatusMap>(DEFAULT_STATUS_MAP);
   const [chatgptTokenStatus, setChatgptTokenStatus] = useState<ChatGptTokenStatus>(DEFAULT_CHATGPT_TOKEN_STATUS);
@@ -469,6 +139,14 @@ export default function ConnectorsPage() {
   const [disconnectingProvider, setDisconnectingProvider] = useState<Provider | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const mcpUrl = typeof window !== "undefined"
+    ? `${window.location.origin}/mcp`
+    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/mcp`;
+
+  const openApiUrl = typeof window !== "undefined"
+    ? `${window.location.origin}/api/chatgpt/openapi.json`
+    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/api/chatgpt/openapi.json`;
 
   useEffect(() => {
     let isMounted = true;
@@ -603,59 +281,88 @@ export default function ConnectorsPage() {
   const providers: { id: Provider; name: string; sub: string; icon: React.FC; status: IntegrationStatus }[] = [
     {
       id: "claude",
-      name: "Claude MCP",
+      name: "Claude Desktop",
       sub: "Memory across every session",
       icon: ClaudeIcon,
       status: statusByProvider.claude,
     },
     {
       id: "chatgpt",
-      name: "ChatGPT Action",
-      sub: "Import URL + Bearer token",
+      name: "ChatGPT Projects",
+      sub: "Import schema + Bearer token",
       icon: ChatGPTIcon,
       status: statusByProvider.chatgpt,
     },
   ];
 
   return (
-    <div className="cnn-wrap" style={{maxWidth: '1000px'}}>
-      <div className="cnn-hero" style={{textAlign: 'left', paddingBottom: '1.5rem', paddingTop: '1rem'}}>
+    <div className="cnn-wrap" style={{maxWidth: '1000px', minHeight: 'calc(100vh - 80px)'}}>
+      <div className="cnn-hero" style={{textAlign: 'left', paddingBottom: '2.5rem', paddingTop: '1rem'}}>
         <h1 className="cnn-title" style={{fontSize: '2rem'}}>Connect Tallei Memory</h1>
+        <p style={{ fontSize: '0.9rem', color: '#6b7280', marginTop: '0.35rem' }}>Select a provider below to launch the automated setup wizard.</p>
       </div>
 
-      <div className="cnn-provider-row-container" style={{justifyContent: 'flex-start', marginBottom: '2rem'}}>
-        {providers.map((p) => {
+      <div className="cnn-provider-row-container" style={{
+        display: 'grid',
+        gridTemplateColumns: '1.3fr 1fr',
+        gap: '2rem',
+        marginBottom: '3rem',
+        alignItems: 'start'
+      }}>
+        {providers.map((p, idx) => {
           const badge = statusUiState(p.status.state, statusLoading);
+          const isFirst = idx === 0;
           return (
           <div
             key={p.id}
             className={`cnn-provider-card ${selected === p.id ? "active" : ""}`}
             onClick={() => setSelected(p.id)}
+            style={{
+              position: 'relative',
+              padding: isFirst ? '2rem' : '1.75rem',
+              transform: isFirst ? 'translateY(0)' : 'translateY(2rem)',
+              transition: 'all 0.24s cubic-bezier(0.16, 1, 0.3, 1)',
+              boxShadow: isFirst ? '0 8px 24px rgba(0,0,0,0.08)' : '0 4px 16px rgba(0,0,0,0.05)',
+              border: `1px solid ${isFirst ? '#e5e7eb' : '#f3f4f6'}`,
+              cursor: 'pointer',
+              borderRadius: '16px',
+              background: '#ffffff',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.boxShadow = isFirst ? '0 16px 48px rgba(0,0,0,0.12)' : '0 8px 32px rgba(0,0,0,0.08)';
+              e.currentTarget.style.transform = isFirst ? 'translateY(-2px)' : 'translateY(calc(2rem - 2px))';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.boxShadow = isFirst ? '0 8px 24px rgba(0,0,0,0.08)' : '0 4px 16px rgba(0,0,0,0.05)';
+              e.currentTarget.style.transform = isFirst ? 'translateY(0)' : 'translateY(2rem)';
+            }}
           >
-            <div className="cnn-provider-icon-title-wrap">
-               <div className="cnn-provider-icon" style={{border: 'none', background: 'transparent', width: '28px', height: '28px'}}>
-                 <p.icon />
+            <div className="cnn-provider-icon-title-wrap" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', minHeight: isFirst ? '320px' : '280px' }}>
+               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+                 <div className="cnn-provider-icon" style={{border: 'none', background: 'transparent', width: '52px', height: '52px', flexShrink: 0}}>
+                   <p.icon />
+                 </div>
+                 <div style={{
+                   fontSize: "0.75rem",
+                   fontWeight: 600,
+                   padding: "0.35rem 0.85rem",
+                   borderRadius: "999px",
+                   border: badge.border,
+                   color: badge.color,
+                   background: badge.background,
+                   whiteSpace: 'nowrap'
+                 }}>
+                   {badge.label}
+                 </div>
                </div>
-              <div className="cnn-provider-text">
-                <div className="cnn-provider-name">{p.name}</div>
-                <div className="cnn-provider-sub">{p.sub}</div>
-                <div
-                  style={{
-                    marginTop: "0.4rem",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.35rem",
-                    fontSize: "0.72rem",
-                    fontWeight: 600,
-                    padding: "0.18rem 0.55rem",
-                    borderRadius: "999px",
-                    border: badge.border,
-                    color: badge.color,
-                    background: badge.background,
-                  }}
-                >
-                  {badge.label}
-                </div>
+              <div className="cnn-provider-text" style={{ flex: 1 }}>
+                <div className="cnn-provider-name" style={{ fontSize: isFirst ? '1.35rem' : '1.2rem', marginBottom: '0.35rem', fontWeight: 600 }}>{p.name}</div>
+                <div className="cnn-provider-sub" style={{ fontSize: '0.9rem', lineHeight: 1.5 }}>{p.sub}</div>
+              </div>
+              <div style={{ marginTop: 'auto', paddingTop: isFirst ? '2rem' : '1.5rem' }}>
+                <Button variant={selected === p.id ? "default" : "outline"} style={{ width: '100%', borderRadius: '8px' }} onClick={() => setWizardOpen(true)}>
+                  {p.status.state === "connected" ? "Manage Configuration" : "Start Setup"}
+                </Button>
               </div>
             </div>
           </div>
@@ -663,58 +370,59 @@ export default function ConnectorsPage() {
         })}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.8rem", marginBottom: "1.2rem" }}>
-        <div style={{ fontSize: "0.85rem", color: selectedStatus.state === "error" ? "#ef4444" : "#6b7280" }}>
+      {actionMessage && (
+        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#22c55e", padding: '1rem', background: '#f0fdf4', borderRadius: '8px', border: '1px solid #bbf7d0' }}>
+          {actionMessage}
+        </div>
+      )}
+      {actionError && (
+        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#ef4444", padding: '1rem', background: '#fef2f2', borderRadius: '8px', border: '1px solid #fecaca' }}>
+          {actionError}
+        </div>
+      )}
+
+      {selected === "claude" && (
+        <ClaudeWizard 
+          isOpen={wizardOpen && selected === "claude"} 
+          onClose={() => setWizardOpen(false)} 
+          mcpUrl={mcpUrl} 
+        />
+      )}
+      
+      {selected === "chatgpt" && (
+        <ChatGPTWizard 
+          isOpen={wizardOpen && selected === "chatgpt"} 
+          onClose={() => setWizardOpen(false)}
+          tokenStatus={chatgptTokenStatus}
+          issuedToken={issuedChatgptToken}
+          generatingToken={generatingChatgptToken}
+          onGenerateToken={rotateChatGptToken}
+          openApiUrl={openApiUrl}
+        />
+      )}
+
+      {/* Debug/Management controls below */}
+      <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: '1.5rem', marginTop: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', opacity: 0.7 }}>
+        <div style={{ fontSize: "0.8rem", color: selectedStatus.state === "error" ? "#ef4444" : "#6b7280" }}>
           {selectedStatus.state === "error" && selectedStatus.lastError
             ? selectedStatus.lastError
-            : "Connection state is scoped to your account only."}
+            : "Troubleshooting & Management"}
         </div>
         <div style={{ display: "flex", gap: "0.55rem" }}>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void refreshStatus()}
-            disabled={statusLoading || disconnectingProvider !== null}
-          >
+          <Button variant="outline" size="sm" onClick={() => void refreshStatus()} disabled={statusLoading || disconnectingProvider !== null}>
             Refresh status
           </Button>
           <Button
             variant="destructive"
             size="sm"
             onClick={() => void disconnectSelectedProvider()}
-            disabled={
-              statusLoading ||
-              disconnectingProvider !== null ||
-              !selectedStatus.canDisconnect
-            }
+            disabled={statusLoading || disconnectingProvider !== null || !selectedStatus.canDisconnect}
           >
-            {disconnectingProvider === selected
-              ? "Disconnecting..."
-              : `Disconnect ${selectedProviderLabel}`}
+            {disconnectingProvider === selected ? "Disconnecting..." : `Disconnect ${selectedProviderLabel}`}
           </Button>
         </div>
       </div>
 
-      {actionMessage && (
-        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#22c55e" }}>
-          {actionMessage}
-        </div>
-      )}
-      {actionError && (
-        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#ef4444" }}>
-          {actionError}
-        </div>
-      )}
-
-      {selected === "claude" && <ClaudeSetup />}
-      {selected === "chatgpt" && (
-        <ChatGptSetup
-          tokenStatus={chatgptTokenStatus}
-          issuedToken={issuedChatgptToken}
-          generatingToken={generatingChatgptToken}
-          onGenerateToken={rotateChatGptToken}
-        />
-      )}
     </div>
   );
 }

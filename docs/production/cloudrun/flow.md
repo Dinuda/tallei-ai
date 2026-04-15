@@ -40,7 +40,7 @@ Add/update versions interactively:
 
 ```bash
 PROJECT_ID="actionlog-487112" ./deploy/cloudrun/add-secret-versions.sh \
-  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET NEXTAUTH_SECRET GOOGLE_CLIENT_SECRET
+  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET MEMORY_MASTER_KEY NEXTAUTH_SECRET GOOGLE_CLIENT_SECRET
 ```
 
 Grant IAM:
@@ -49,7 +49,7 @@ Grant IAM:
 BACKEND_SA="tallei-backend-sa@actionlog-487112.iam.gserviceaccount.com"
 DASHBOARD_SA="tallei-dashboard-sa@actionlog-487112.iam.gserviceaccount.com"
 
-for s in INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET GOOGLE_CLIENT_SECRET; do
+for s in INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET MEMORY_MASTER_KEY GOOGLE_CLIENT_SECRET; do
   gcloud secrets add-iam-policy-binding "$s" \
     --project actionlog-487112 \
     --member "serviceAccount:${BACKEND_SA}" \
@@ -69,7 +69,7 @@ Verify before deploy:
 ```bash
 PROJECT_ID="actionlog-487112" \
 SERVICE_ACCOUNT="$BACKEND_SA" \
-./deploy/cloudrun/verify-secrets.sh INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET
+./deploy/cloudrun/verify-secrets.sh INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET MEMORY_MASTER_KEY
 
 PROJECT_ID="actionlog-487112" \
 SERVICE_ACCOUNT="$DASHBOARD_SA" \
@@ -131,6 +131,8 @@ export GOOGLE_CLIENT_SECRET="GOOGLE_CLIENT_SECRET"
 
 ./deploy/cloudrun/deploy-dashboard.sh
 ```
+
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are required for dashboard auth.
 
 ## 6) Domain Mappings
 

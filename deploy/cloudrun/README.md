@@ -76,11 +76,11 @@ Recommended secret names for scripts:
 - `INTERNAL_API_SECRET`
 - `OPENAI_API_KEY`
 - `JWT_SECRET`
+- `MEMORY_MASTER_KEY`
 - `NEXTAUTH_SECRET`
 - `GOOGLE_CLIENT_SECRET`
 - `SUPABASE_SERVICE_ROLE_KEY` (optional)
 - `QDRANT_API_KEY` (optional)
-- `MEMORY_MASTER_KEY` (recommended in production)
 - `BROWSER_WORKER_API_KEY` (optional)
 
 ## 4) Add secret versions interactively (hidden input)
@@ -89,8 +89,8 @@ From repo root:
 
 ```bash
 PROJECT_ID="your-project-id" ./deploy/cloudrun/add-secret-versions.sh \
-  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET NEXTAUTH_SECRET \
-  GOOGLE_CLIENT_SECRET SUPABASE_SERVICE_ROLE_KEY QDRANT_API_KEY MEMORY_MASTER_KEY
+  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET MEMORY_MASTER_KEY NEXTAUTH_SECRET \
+  GOOGLE_CLIENT_SECRET SUPABASE_SERVICE_ROLE_KEY QDRANT_API_KEY
 ```
 
 The script prompts for each value using hidden input and refuses empty values.
@@ -103,8 +103,8 @@ Backend verification:
 PROJECT_ID="your-project-id" \
 SERVICE_ACCOUNT="tallei-backend-sa@your-project-id.iam.gserviceaccount.com" \
 ./deploy/cloudrun/verify-secrets.sh \
-  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET \
-  SUPABASE_SERVICE_ROLE_KEY QDRANT_API_KEY MEMORY_MASTER_KEY GOOGLE_CLIENT_SECRET
+  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET MEMORY_MASTER_KEY \
+  SUPABASE_SERVICE_ROLE_KEY QDRANT_API_KEY GOOGLE_CLIENT_SECRET
 ```
 
 Dashboard verification:
@@ -139,10 +139,10 @@ export GOOGLE_REDIRECT_URI="https://api.example.com/api/auth/google/callback"
 export INTERNAL_API_SECRET="INTERNAL_API_SECRET"
 export OPENAI_API_KEY="OPENAI_API_KEY"
 export JWT_SECRET="JWT_SECRET"
+export MEMORY_MASTER_KEY="MEMORY_MASTER_KEY"
 
 export SUPABASE_SERVICE_ROLE_KEY="SUPABASE_SERVICE_ROLE_KEY"
 export QDRANT_API_KEY="QDRANT_API_KEY"
-export MEMORY_MASTER_KEY="MEMORY_MASTER_KEY"
 export GOOGLE_CLIENT_SECRET="GOOGLE_CLIENT_SECRET"
 
 ./deploy/cloudrun/deploy-backend.sh
@@ -171,6 +171,8 @@ export GOOGLE_CLIENT_SECRET="GOOGLE_CLIENT_SECRET"
 
 ./deploy/cloudrun/deploy-dashboard.sh
 ```
+
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are required for dashboard auth in production.
 
 ## 8) Map custom domains
 
