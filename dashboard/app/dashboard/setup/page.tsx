@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { ClaudeWizard, ChatGPTWizard, Provider } from "./SetupWizards";
 
@@ -278,13 +278,18 @@ export default function ConnectorsPage() {
     }
   }
 
-  const providers: { id: Provider; name: string; sub: string; icon: React.FC; status: IntegrationStatus }[] = [
+  const providers: { id: Provider; name: string; sub: string; icon: React.FC; status: IntegrationStatus; tone: "warm" | "cool"; highlights: string[] }[] = [
     {
       id: "claude",
       name: "Claude Desktop",
       sub: "Memory across every session",
       icon: ClaudeIcon,
       status: statusByProvider.claude,
+      tone: "warm",
+      highlights: [
+        "One-click desktop flow",
+        "Session continuity without manual sync",
+      ],
     },
     {
       id: "chatgpt",
@@ -292,75 +297,61 @@ export default function ConnectorsPage() {
       sub: "Import schema + Bearer token",
       icon: ChatGPTIcon,
       status: statusByProvider.chatgpt,
+      tone: "cool",
+      highlights: [
+        "OpenAPI import for Actions",
+        "Rotating bearer token controls",
+      ],
     },
   ];
 
   return (
-    <div className="cnn-wrap" style={{maxWidth: '1000px', minHeight: 'calc(100vh - 80px)'}}>
-      <div className="cnn-hero" style={{textAlign: 'left', paddingBottom: '2.5rem', paddingTop: '1rem'}}>
-        <h1 className="cnn-title" style={{fontSize: '2rem'}}>Connect Tallei Memory</h1>
-        <p style={{ fontSize: '0.9rem', color: '#6b7280', marginTop: '0.35rem' }}>Select a provider below to launch the automated setup wizard.</p>
+    <div className="cnn-wrap cnn-wrap-unique">
+      <div className="cnn-hero">
+        <h1 className="cnn-title">Connect Tallei Memory</h1>
+        <p className="cnn-subtitle">Select a provider below to launch the automated setup wizard.</p>
       </div>
 
-      <div className="cnn-provider-row-container" style={{
-        display: 'grid',
-        gridTemplateColumns: '1.3fr 1fr',
-        gap: '2rem',
-        marginBottom: '3rem',
-        alignItems: 'start'
-      }}>
-        {providers.map((p, idx) => {
+      <div className="cnn-provider-row-container">
+        {providers.map((p) => {
           const badge = statusUiState(p.status.state, statusLoading);
-          const isFirst = idx === 0;
           return (
           <div
             key={p.id}
-            className={`cnn-provider-card ${selected === p.id ? "active" : ""}`}
+            className={`cnn-provider-card cnn-provider-card-${p.tone} ${selected === p.id ? "active" : ""}`}
             onClick={() => setSelected(p.id)}
-            style={{
-              position: 'relative',
-              padding: isFirst ? '2rem' : '1.75rem',
-              transform: isFirst ? 'translateY(0)' : 'translateY(2rem)',
-              transition: 'all 0.24s cubic-bezier(0.16, 1, 0.3, 1)',
-              boxShadow: isFirst ? '0 8px 24px rgba(0,0,0,0.08)' : '0 4px 16px rgba(0,0,0,0.05)',
-              border: `1px solid ${isFirst ? '#e5e7eb' : '#f3f4f6'}`,
-              cursor: 'pointer',
-              borderRadius: '16px',
-              background: '#ffffff',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.boxShadow = isFirst ? '0 16px 48px rgba(0,0,0,0.12)' : '0 8px 32px rgba(0,0,0,0.08)';
-              e.currentTarget.style.transform = isFirst ? 'translateY(-2px)' : 'translateY(calc(2rem - 2px))';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.boxShadow = isFirst ? '0 8px 24px rgba(0,0,0,0.08)' : '0 4px 16px rgba(0,0,0,0.05)';
-              e.currentTarget.style.transform = isFirst ? 'translateY(0)' : 'translateY(2rem)';
-            }}
           >
-            <div className="cnn-provider-icon-title-wrap" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', minHeight: isFirst ? '320px' : '280px' }}>
-               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
-                 <div className="cnn-provider-icon" style={{border: 'none', background: 'transparent', width: '52px', height: '52px', flexShrink: 0}}>
-                   <p.icon />
-                 </div>
-                 <div style={{
-                   fontSize: "0.75rem",
-                   fontWeight: 600,
-                   padding: "0.35rem 0.85rem",
-                   borderRadius: "999px",
-                   border: badge.border,
-                   color: badge.color,
-                   background: badge.background,
-                   whiteSpace: 'nowrap'
-                 }}>
-                   {badge.label}
-                 </div>
-               </div>
-              <div className="cnn-provider-text" style={{ flex: 1 }}>
-                <div className="cnn-provider-name" style={{ fontSize: isFirst ? '1.35rem' : '1.2rem', marginBottom: '0.35rem', fontWeight: 600 }}>{p.name}</div>
-                <div className="cnn-provider-sub" style={{ fontSize: '0.9rem', lineHeight: 1.5 }}>{p.sub}</div>
+            <div className="cnn-provider-icon-title-wrap">
+              <div className="cnn-provider-head">
+                <div className="cnn-provider-icon">
+                  <p.icon />
+                </div>
+                <div className="cnn-provider-head-meta">
+                  <div
+                    className="cnn-provider-badge"
+                    style={{
+                      border: badge.border,
+                      color: badge.color,
+                      background: badge.background,
+                    }}
+                  >
+                    {badge.label}
+                  </div>
+                </div>
               </div>
-              <div style={{ marginTop: 'auto', paddingTop: isFirst ? '2rem' : '1.5rem' }}>
-                <Button variant={selected === p.id ? "default" : "outline"} style={{ width: '100%', borderRadius: '8px' }} onClick={() => setWizardOpen(true)}>
+
+              <div className="cnn-provider-text">
+                <div className="cnn-provider-name">{p.name}</div>
+                <div className="cnn-provider-sub">{p.sub}</div>
+                <ul className="cnn-provider-list">
+                  {p.highlights.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="cnn-provider-footer">
+                <Button className="cnn-setup-btn" variant={selected === p.id ? "default" : "outline"} onClick={() => setWizardOpen(true)}>
                   {p.status.state === "connected" ? "Manage Configuration" : "Start Setup"}
                 </Button>
               </div>
@@ -371,12 +362,12 @@ export default function ConnectorsPage() {
       </div>
 
       {actionMessage && (
-        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#22c55e", padding: '1rem', background: '#f0fdf4', borderRadius: '8px', border: '1px solid #bbf7d0' }}>
+        <div className="cnn-feedback cnn-feedback-success">
           {actionMessage}
         </div>
       )}
       {actionError && (
-        <div style={{ marginBottom: "1rem", fontSize: "0.85rem", color: "#ef4444", padding: '1rem', background: '#fef2f2', borderRadius: '8px', border: '1px solid #fecaca' }}>
+        <div className="cnn-feedback cnn-feedback-error">
           {actionError}
         </div>
       )}
@@ -402,17 +393,18 @@ export default function ConnectorsPage() {
       )}
 
       {/* Debug/Management controls below */}
-      <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: '1.5rem', marginTop: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', opacity: 0.7 }}>
-        <div style={{ fontSize: "0.8rem", color: selectedStatus.state === "error" ? "#ef4444" : "#6b7280" }}>
+      <div className="cnn-manage-row">
+        <div className={`cnn-manage-text ${selectedStatus.state === "error" ? "is-error" : ""}`}>
           {selectedStatus.state === "error" && selectedStatus.lastError
             ? selectedStatus.lastError
             : "Troubleshooting & Management"}
         </div>
-        <div style={{ display: "flex", gap: "0.55rem" }}>
-          <Button variant="outline" size="sm" onClick={() => void refreshStatus()} disabled={statusLoading || disconnectingProvider !== null}>
+        <div className="cnn-manage-actions">
+          <Button className="cnn-manage-btn" variant="outline" size="sm" onClick={() => void refreshStatus()} disabled={statusLoading || disconnectingProvider !== null}>
             Refresh status
           </Button>
           <Button
+            className="cnn-manage-btn"
             variant="destructive"
             size="sm"
             onClick={() => void disconnectSelectedProvider()}
