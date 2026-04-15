@@ -13,6 +13,9 @@ declare module "next-auth" {
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
+  trustHost:
+    process.env.AUTH_TRUST_HOST === "true" || process.env.NODE_ENV === "production",
+
   providers: [
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID!,

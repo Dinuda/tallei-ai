@@ -184,7 +184,7 @@ function escapeHtml(value: string): string {
 
 function loginRedirectUrl(nextPath: string): string {
   const safeNextPath = nextPath.startsWith("/") ? nextPath : "/api/oauth/device/activate";
-  const url = new URL("/login", config.publicBaseUrl);
+  const url = new URL("/login", config.dashboardBaseUrl || config.frontendUrl || config.publicBaseUrl);
   url.searchParams.set("callbackUrl", safeNextPath);
   return url.toString();
 }

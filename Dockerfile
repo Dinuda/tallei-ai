@@ -2,7 +2,7 @@ FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
@@ -20,7 +20,7 @@ ENV PORT=8080
 ENV HOST=0.0.0.0
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 COPY --from=build /app/dist ./dist
 
 EXPOSE 8080

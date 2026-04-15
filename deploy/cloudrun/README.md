@@ -77,20 +77,53 @@ Recommended secret names for scripts:
 - `OPENAI_API_KEY`
 - `JWT_SECRET`
 - `NEXTAUTH_SECRET`
-- `GOOGLE_CLIENT_SECRET` (optional)
+- `GOOGLE_CLIENT_SECRET`
 - `SUPABASE_SERVICE_ROLE_KEY` (optional)
 - `QDRANT_API_KEY` (optional)
 - `MEMORY_MASTER_KEY` (recommended in production)
 - `BROWSER_WORKER_API_KEY` (optional)
 
-## 4) Deploy backend
+## 4) Add secret versions interactively (hidden input)
+
+From repo root:
+
+```bash
+PROJECT_ID="your-project-id" ./deploy/cloudrun/add-secret-versions.sh \
+  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET NEXTAUTH_SECRET \
+  GOOGLE_CLIENT_SECRET SUPABASE_SERVICE_ROLE_KEY QDRANT_API_KEY MEMORY_MASTER_KEY
+```
+
+The script prompts for each value using hidden input and refuses empty values.
+
+## 5) Verify secrets before deploy (so deploy does not fail)
+
+Backend verification:
+
+```bash
+PROJECT_ID="your-project-id" \
+SERVICE_ACCOUNT="tallei-backend-sa@your-project-id.iam.gserviceaccount.com" \
+./deploy/cloudrun/verify-secrets.sh \
+  INTERNAL_API_SECRET OPENAI_API_KEY JWT_SECRET \
+  SUPABASE_SERVICE_ROLE_KEY QDRANT_API_KEY MEMORY_MASTER_KEY GOOGLE_CLIENT_SECRET
+```
+
+Dashboard verification:
+
+```bash
+PROJECT_ID="your-project-id" \
+SERVICE_ACCOUNT="tallei-dashboard-sa@your-project-id.iam.gserviceaccount.com" \
+./deploy/cloudrun/verify-secrets.sh \
+  INTERNAL_API_SECRET NEXTAUTH_SECRET GOOGLE_CLIENT_SECRET
+```
+
+## 6) Deploy backend
 
 From repo root:
 
 ```bash
 export PROJECT_ID="your-project-id"
 export REGION="us-central1"
-export SERVICE_ACCOUNT="tallei-backend-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+export BACKEND_SERVICE_ACCOUNT="tallei-backend-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 
 export PUBLIC_BASE_URL="https://api.example.com"
 export FRONTEND_URL="https://app.example.com"
@@ -103,41 +136,43 @@ export SUPABASE_URL="https://<project>.supabase.co"
 export GOOGLE_CLIENT_ID="..."
 export GOOGLE_REDIRECT_URI="https://api.example.com/api/auth/google/callback"
 
-export INTERNAL_API_SECRET_SECRET="INTERNAL_API_SECRET"
-export OPENAI_API_KEY_SECRET="OPENAI_API_KEY"
-export JWT_SECRET_SECRET="JWT_SECRET"
+export INTERNAL_API_SECRET="INTERNAL_API_SECRET"
+export OPENAI_API_KEY="OPENAI_API_KEY"
+export JWT_SECRET="JWT_SECRET"
 
-export SUPABASE_SERVICE_ROLE_KEY_SECRET="SUPABASE_SERVICE_ROLE_KEY"
-export QDRANT_API_KEY_SECRET="QDRANT_API_KEY"
-export MEMORY_MASTER_KEY_SECRET="MEMORY_MASTER_KEY"
-export GOOGLE_CLIENT_SECRET_SECRET="GOOGLE_CLIENT_SECRET"
+export SUPABASE_SERVICE_ROLE_KEY="SUPABASE_SERVICE_ROLE_KEY"
+export QDRANT_API_KEY="QDRANT_API_KEY"
+export MEMORY_MASTER_KEY="MEMORY_MASTER_KEY"
+export GOOGLE_CLIENT_SECRET="GOOGLE_CLIENT_SECRET"
 
 ./deploy/cloudrun/deploy-backend.sh
 ```
 
-## 5) Deploy dashboard
+## 7) Deploy dashboard
 
 From repo root:
 
 ```bash
 export PROJECT_ID="your-project-id"
 export REGION="us-central1"
-export SERVICE_ACCOUNT="tallei-dashboard-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+export DASHBOARD_SERVICE_ACCOUNT="tallei-dashboard-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 
 export NEXTAUTH_URL="https://app.example.com"
+export AUTH_URL="https://app.example.com"
+export AUTH_TRUST_HOST="true"
 export NEXT_PUBLIC_APP_URL="https://app.example.com"
 export BACKEND_URL="https://api.example.com"
 export API_PROXY_TARGET="https://api.example.com"
 export GOOGLE_CLIENT_ID="..."
 
-export INTERNAL_API_SECRET_SECRET="INTERNAL_API_SECRET"
-export NEXTAUTH_SECRET_SECRET="NEXTAUTH_SECRET"
-export GOOGLE_CLIENT_SECRET_SECRET="GOOGLE_CLIENT_SECRET"
+export INTERNAL_API_SECRET="INTERNAL_API_SECRET"
+export NEXTAUTH_SECRET="NEXTAUTH_SECRET"
+export GOOGLE_CLIENT_SECRET="GOOGLE_CLIENT_SECRET"
 
 ./deploy/cloudrun/deploy-dashboard.sh
 ```
 
-## 6) Map custom domains
+## 8) Map custom domains
 
 Map each service to its subdomain:
 
@@ -166,7 +201,7 @@ gcloud beta run domain-mappings describe \
 
 Repeat for `api.example.com`.
 
-## 7) Security checklist
+## 9) Security checklist
 
 - Use strong random values for `INTERNAL_API_SECRET`, `JWT_SECRET`, and `NEXTAUTH_SECRET`.
 - Store all sensitive values in Secret Manager, not `.env` files in production.

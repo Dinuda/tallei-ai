@@ -17,11 +17,28 @@ require_env() {
   fi
 }
 
+validate_secret_id() {
+  local var_name="$1"
+  local secret_id="${!var_name:-}"
+  [[ -z "$secret_id" ]] && return 0
+
+  if [[ ! "$secret_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "Invalid ${var_name}: expected Secret Manager secret name, got something else." >&2
+    echo "Use a secret ID like INTERNAL_API_SECRET, not the raw secret value." >&2
+    exit 1
+  fi
+
+  if ! gcloud secrets describe "$secret_id" --project "$PROJECT_ID" >/dev/null 2>&1; then
+    echo "Secret not found in project ${PROJECT_ID}: ${secret_id} (from ${var_name})" >&2
+    exit 1
+  fi
+}
+
 PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-us-central1}"
 AR_REPO="${AR_REPO:-tallei}"
-SERVICE_NAME="${SERVICE_NAME:-tallei-backend}"
-SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-}"
+SERVICE_NAME="${BACKEND_SERVICE_NAME:-tallei-backend}"
+SERVICE_ACCOUNT="${BACKEND_SERVICE_ACCOUNT:-tallei-backend-sa@${PROJECT_ID}.iam.gserviceaccount.com}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 
 require_env PROJECT_ID
@@ -30,9 +47,13 @@ require_env PUBLIC_BASE_URL
 require_env FRONTEND_URL
 require_env MCP_URL
 require_env DATABASE_URL
-require_env INTERNAL_API_SECRET_SECRET
-require_env OPENAI_API_KEY_SECRET
-require_env JWT_SECRET_SECRET
+require_env INTERNAL_API_SECRET
+require_env OPENAI_API_KEY
+require_env JWT_SECRET
+
+validate_secret_id INTERNAL_API_SECRET
+validate_secret_id OPENAI_API_KEY
+validate_secret_id JWT_SECRET
 
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${IMAGE_TAG}"
 
@@ -51,7 +72,6 @@ gcloud builds submit \
 
 env_vars=(
   "NODE_ENV=production"
-  "PORT=8080"
   "HOST=0.0.0.0"
   "PUBLIC_BASE_URL=${PUBLIC_BASE_URL}"
   "FRONTEND_URL=${FRONTEND_URL}"
@@ -82,28 +102,34 @@ env_vars=(
 )
 
 secret_vars=(
-  "INTERNAL_API_SECRET=${INTERNAL_API_SECRET_SECRET}:latest"
-  "OPENAI_API_KEY=${OPENAI_API_KEY_SECRET}:latest"
-  "JWT_SECRET=${JWT_SECRET_SECRET}:latest"
+  "INTERNAL_API_SECRET=${INTERNAL_API_SECRET}:latest"
+  "OPENAI_API_KEY=${OPENAI_API_KEY}:latest"
+  "JWT_SECRET=${JWT_SECRET}:latest"
 )
 
-if [[ -n "${SUPABASE_SERVICE_ROLE_KEY_SECRET:-}" ]]; then
-  secret_vars+=("SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY_SECRET}:latest")
+if [[ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+  validate_secret_id SUPABASE_SERVICE_ROLE_KEY
+  secret_vars+=("SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}:latest")
 fi
-if [[ -n "${QDRANT_API_KEY_SECRET:-}" ]]; then
-  secret_vars+=("QDRANT_API_KEY=${QDRANT_API_KEY_SECRET}:latest")
+if [[ -n "${QDRANT_API_KEY:-}" ]]; then
+  validate_secret_id QDRANT_API_KEY
+  secret_vars+=("QDRANT_API_KEY=${QDRANT_API_KEY}:latest")
 fi
-if [[ -n "${MEMORY_MASTER_KEY_SECRET:-}" ]]; then
-  secret_vars+=("MEMORY_MASTER_KEY=${MEMORY_MASTER_KEY_SECRET}:latest")
+if [[ -n "${MEMORY_MASTER_KEY:-}" ]]; then
+  validate_secret_id MEMORY_MASTER_KEY
+  secret_vars+=("MEMORY_MASTER_KEY=${MEMORY_MASTER_KEY}:latest")
 fi
-if [[ -n "${GOOGLE_CLIENT_SECRET_SECRET:-}" ]]; then
-  secret_vars+=("GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET_SECRET}:latest")
+if [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]]; then
+  validate_secret_id GOOGLE_CLIENT_SECRET
+  secret_vars+=("GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}:latest")
 fi
-if [[ -n "${BROWSER_WORKER_API_KEY_SECRET:-}" ]]; then
-  secret_vars+=("BROWSER_WORKER_API_KEY=${BROWSER_WORKER_API_KEY_SECRET}:latest")
+if [[ -n "${BROWSER_WORKER_API_KEY:-}" ]]; then
+  validate_secret_id BROWSER_WORKER_API_KEY
+  secret_vars+=("BROWSER_WORKER_API_KEY=${BROWSER_WORKER_API_KEY}:latest")
 fi
-if [[ -n "${KMS_KEY_ID_SECRET:-}" ]]; then
-  secret_vars+=("KMS_KEY_ID=${KMS_KEY_ID_SECRET}:latest")
+if [[ -n "${KMS_KEY_ID:-}" ]]; then
+  validate_secret_id KMS_KEY_ID
+  secret_vars+=("KMS_KEY_ID=${KMS_KEY_ID}:latest")
 fi
 
 env_csv="$(IFS=,; echo "${env_vars[*]}")"

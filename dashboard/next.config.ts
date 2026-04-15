@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 
-// Backend is always local — never exposed to the internet directly.
-const BACKEND = (process.env.API_PROXY_TARGET ?? "http://127.0.0.1:3000").replace(/\/$/, "");
+const defaultBackend =
+  process.env.NODE_ENV === "production" ? "https://api.tallei.com" : "http://127.0.0.1:3000";
+const BACKEND = (
+  process.env.API_PROXY_TARGET ??
+  process.env.BACKEND_URL ??
+  defaultBackend
+).replace(/\/$/, "");
 
 const NGROK_ORIGIN =
   process.env.NEXT_PUBLIC_APP_URL ??

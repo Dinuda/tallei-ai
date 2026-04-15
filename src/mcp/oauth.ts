@@ -55,7 +55,7 @@ function escapeHtml(value: string): string {
 }
 
 function buildLoginUrl(nextPath: string): string {
-  const url = new URL("/login", config.publicBaseUrl);
+  const url = new URL("/login", config.dashboardBaseUrl || config.frontendUrl || config.publicBaseUrl);
   url.searchParams.set("callbackUrl", sanitizeNextPath(nextPath));
   return url.toString();
 }
@@ -68,16 +68,163 @@ function renderAuthorizeLoginPage(res: Response, nextPath: string): void {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Authorize Tallei for Claude</title>
+    <title>Tallei Login</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .auth-screen {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: #fdfbf7;
+        background-image: radial-gradient(#d4cfc6 1px, transparent 1px);
+        background-size: 24px 24px;
+        padding: 2rem;
+      }
+
+      .auth-card {
+        width: 100%;
+        max-width: 440px;
+        padding: 3rem 2.5rem;
+        background: #ffffff;
+        border: 2px solid #1a1816;
+        box-shadow: 8px 8px 0px rgba(0, 0, 0, 0.1);
+        text-align: center;
+      }
+
+      .auth-logo-wrap {
+        margin-bottom: 2rem;
+      }
+
+      .auth-heading h2 {
+        font-family: ui-serif, Georgia, Cambria, serif;
+        font-size: 2.2rem;
+        font-weight: 700;
+        margin: 0 0 0.5rem;
+        color: #1a1816;
+      }
+
+      .auth-heading p {
+        color: #4c4643;
+        font-size: 1rem;
+        margin: 0 0 2rem;
+      }
+
+      .auth-divider {
+        display: flex;
+        align-items: center;
+        margin: 2rem 0;
+      }
+
+      .auth-divider-line {
+        flex: 1;
+        height: 2px;
+        background: #e5e0d8;
+      }
+
+      .auth-divider-text {
+        padding: 0 1rem;
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: #8c827a;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .auth-google-btn {
+        width: 100%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.75rem;
+        padding: 0.8rem;
+        background: #ffffff;
+        border: 2px solid #1a1816;
+        color: #1a1816;
+        font-weight: 600;
+        font-size: 1rem;
+        text-decoration: none;
+        transition: all 0.2s ease;
+        box-shadow: 4px 4px 0px #1a1816;
+      }
+
+      .auth-google-btn:hover {
+        transform: translate(-1px, -1px);
+        box-shadow: 6px 6px 0px #1a1816;
+      }
+
+      .auth-google-btn:active {
+        transform: translate(2px, 2px);
+        box-shadow: 0px 0px 0px #1a1816;
+      }
+
+      .auth-footnote {
+        margin-top: 2rem;
+        font-size: 0.85rem;
+        color: #8c827a;
+        line-height: 1.5;
+      }
+    </style>
   </head>
-  <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:20px;">
-    <div style="width:100%;max-width:420px;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:22px;">
-      <h1 style="margin:0 0 8px 0;font-size:20px;">Connect Claude to Tallei</h1>
-      <p style="margin:0 0 18px 0;color:#94a3b8;font-size:14px;line-height:1.5;">Sign in to authorize Claude.ai to access your memory tools.</p>
-      <a href="${escapeHtml(loginUrl)}" style="display:inline-block;margin-top:6px;padding:11px 14px;border:none;border-radius:8px;background:#0284c7;color:#fff;font-weight:600;cursor:pointer;text-decoration:none;">
-        Continue with Google
-      </a>
-    </div>
+  <body>
+    <main class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-logo-wrap" aria-hidden="true">
+          <svg width="96" height="40" viewBox="0 0 231 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M88.9412 73.8462C85.3431 73.8462 82.5855 72.9578 80.6685 71.1811C78.7515 69.4044 77.793 66.5275 77.793 62.5503V45.4286H72.6758V37.3516H77.793V29.967L87.2622 28.9835V37.3516H94.9765V45.4286H87.2622V62.0586C87.2622 64.3059 88.244 65.4286 90.2076 65.4286H94.1166V73.8462H88.9412Z" fill="black"/>
+            <path d="M113.777 74.7582C110.456 74.7582 107.415 73.9159 104.653 72.2313C101.938 70.5001 99.7609 68.2065 98.1212 65.3505C96.5283 62.4476 95.7318 59.2399 95.7318 55.7275C95.7318 53.1053 96.2 50.6468 97.1364 48.3525C98.0729 46.0113 99.3605 43.9739 101 42.2404C102.64 40.4601 104.536 39.078 106.689 38.094C108.889 37.0631 111.253 36.5477 113.777 36.5477C116.956 36.5477 119.435 37.1568 121.214 38.375C122.993 39.5463 124.374 41.1163 125.358 43.0852V37.3516H134.782V73.8462H125.579V67.882C124.596 69.9449 123.192 71.6092 121.368 72.8748C119.589 74.1308 117.058 74.7582 113.777 74.7582ZM115.321 66.1868C117.428 66.1868 119.231 65.7187 120.728 64.7824C122.275 63.7991 123.471 62.5115 124.314 60.9198C125.157 59.3282 125.579 57.5956 125.579 55.722C125.579 53.8015 125.157 52.0445 124.314 50.4529C123.471 48.8613 122.275 47.5736 120.728 46.5904C119.231 45.6072 117.428 45.1156 115.321 45.1156C113.307 45.1156 111.527 45.6072 109.98 46.5904C108.48 47.5267 107.309 48.7902 106.466 50.3818C105.622 51.9735 105.2 53.7305 105.2 55.6509C105.2 57.4773 105.622 59.2098 106.466 60.8497C107.309 62.4413 108.48 63.7289 109.98 64.7122C111.527 65.6954 113.307 66.1868 115.321 66.1868Z" fill="black"/>
+            <path d="M140.544 73.8462V22.5H150.013V73.8462H140.544Z" fill="black"/>
+            <path d="M155.625 73.8462V22.5H165.094V73.8462H155.625Z" fill="black"/>
+            <path d="M188.146 74.7582C184.407 74.7582 181.112 73.8933 178.26 72.1635C175.408 70.4336 173.186 68.14 171.593 65.2826C170.047 62.3797 169.274 59.172 169.274 55.6595C169.274 52.1471 170.094 48.9394 171.734 46.0365C173.374 43.0866 175.596 40.7462 178.401 39.0165C181.253 37.2867 184.501 36.4219 188.146 36.4219C191.791 36.4219 194.992 37.2867 197.751 39.0165C200.556 40.7462 202.731 43.0866 204.278 46.0365C205.871 48.9394 206.668 52.1471 206.668 55.6595C206.668 56.1749 206.645 56.7137 206.598 57.2762C206.551 57.8387 206.48 58.4247 206.386 59.034H179.096C179.611 61.1882 180.641 62.9438 182.186 64.2993C183.778 65.6547 185.768 66.3325 188.146 66.3325C190.2 66.3325 191.978 65.8655 193.48 64.9313C195.027 63.9972 196.222 62.8308 197.066 61.4321L204.429 66.9736C202.979 69.268 200.806 71.1407 197.908 72.5917C195.009 74.0428 191.755 74.7582 188.146 74.7582ZM188.006 44.5454C185.768 44.5454 183.856 45.2231 182.272 46.5785C180.688 47.9339 179.64 49.7101 179.096 51.9116H197.123C196.608 49.8988 195.532 48.1691 193.895 46.7191C192.305 45.2691 190.342 44.5454 188.006 44.5454Z" fill="black"/>
+            <path d="M215.504 34.3123C213.918 34.3123 212.564 33.776 211.442 32.7034C210.367 31.5839 209.829 30.2549 209.829 28.7164C209.829 27.2258 210.367 25.9446 211.442 24.872C212.564 23.7525 213.918 23.1928 215.504 23.1928C217.136 23.1928 218.49 23.7525 219.566 24.872C220.641 25.9446 221.178 27.2258 221.178 28.7164C221.178 30.3016 220.641 31.6308 219.566 32.7034C218.49 33.776 217.136 34.3123 215.504 34.3123ZM210.808 73.8462V37.3516H220.277V73.8462H210.808Z" fill="black"/>
+            <rect width="6.319" height="56.524" transform="matrix(0.321156 -0.947026 -0.947026 -0.321156 53.534 65.327)" fill="black"/>
+            <rect width="6.355" height="39.878" transform="matrix(-1 0 0 1 14.548 33.289)" fill="black"/>
+            <rect width="6.355" height="39.878" transform="matrix(-1 0 0 1 35.938 33.289)" fill="black"/>
+            <rect width="6.355" height="39.878" transform="matrix(-1 0 0 1 46.67 33.947)" fill="black"/>
+            <rect width="6.355" height="39.878" transform="matrix(-1 0 0 1 25.226 33.289)" fill="black"/>
+          </svg>
+        </div>
+
+        <div class="auth-heading">
+          <h2>Welcome back</h2>
+          <p>Sign in to access your AI memory workspace</p>
+        </div>
+
+        <div class="auth-divider">
+          <div class="auth-divider-line"></div>
+          <span class="auth-divider-text">continue with</span>
+          <div class="auth-divider-line"></div>
+        </div>
+
+        <a href="${escapeHtml(loginUrl)}" class="auth-google-btn">
+          <svg width="20" height="20" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path fill="#EA4335" d="M24 9.5c3.2 0 5.7 1.1 7.8 3.1l5.8-5.8C34.2 3.5 29.4 1.5 24 1.5 15.5 1.5 8.2 6.5 4.9 13.7l6.8 5.3C13.5 13 18.3 9.5 24 9.5z"></path>
+            <path fill="#4285F4" d="M46.5 24c0-1.6-.1-3.1-.4-4.5H24v8.5h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8C43.6 36.8 46.5 30.8 46.5 24z"></path>
+            <path fill="#FBBC05" d="M11.7 28.3A14.4 14.4 0 0 1 9.5 24c0-1.5.3-3 .8-4.3l-6.8-5.3A22.4 22.4 0 0 0 1.5 24c0 3.6.9 6.9 2.4 9.9l7.8-5.6z"></path>
+            <path fill="#34A853" d="M24 46.5c5.4 0 9.9-1.8 13.2-4.8l-7.5-5.8c-1.8 1.2-4.2 2-5.7 2-5.6 0-10.4-3.8-12.1-9l-7.8 5.6C8.2 41.5 15.5 46.5 24 46.5z"></path>
+          </svg>
+          Continue with Google
+        </a>
+
+        <p class="auth-footnote">
+          New users are created automatically on first sign-in.
+          <br />
+          By continuing you agree to our Terms of Service.
+        </p>
+      </div>
+    </main>
   </body>
 </html>`);
 }

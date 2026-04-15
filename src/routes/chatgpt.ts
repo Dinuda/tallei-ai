@@ -18,6 +18,17 @@ const saveSchema = z.object({
   content: z.string().min(1, "content is required"),
 });
 
+const runSchema = z
+  .object({
+    query: z.string().min(1, "query is required").optional(),
+    content: z.string().min(1, "content is required").optional(),
+    limit: z.coerce.number().int().min(1).max(20).optional().default(5),
+  })
+  .refine((value) => Boolean(value.query || value.content), {
+    message: "query or content is required",
+    path: ["query"],
+  });
+
 function isTransientMemoryInfraError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /Qdrant|timeout|aborted|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|No route to host/i.test(error.message);
@@ -160,6 +171,13 @@ function requireChatGptScopes(requiredScopes: string[]) {
   };
 }
 
+function authHasRequiredScopes(auth: AuthRequest["authContext"], requiredScopes: string[]): boolean {
+  if (!auth) return false;
+  if (requiredScopes.length === 0) return true;
+  if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
+  return hasRequiredScopes(auth.scopes ?? [], requiredScopes);
+}
+
 function buildOpenApiSpec(serverUrl: string) {
   return {
     openapi: "3.1.0",
@@ -188,7 +206,7 @@ function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/run": {
         post: {
           operationId: "run",
-          summary: "Compatibility alias for memory recall",
+          summary: "Compatibility action for memory recall or save",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
@@ -196,43 +214,61 @@ function buildOpenApiSpec(serverUrl: string) {
               "application/json": {
                 schema: {
                   type: "object",
-                  required: ["query"],
                   properties: {
                     query: { type: "string" },
+                    content: { type: "string" },
                     limit: { type: "integer", minimum: 1, maximum: 20, default: 5 },
                   },
+                  oneOf: [
+                    { required: ["query"] },
+                    { required: ["content"] },
+                  ],
                 },
               },
             },
           },
           responses: {
             "200": {
-              description: "Memory recall results",
+              description: "Memory action result",
               content: {
                 "application/json": {
                   schema: {
-                    type: "object",
-                    required: ["contextBlock", "memories"],
-                    properties: {
-                      contextBlock: { type: "string" },
-                      memories: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          required: ["id", "text", "score", "metadata"],
-                          properties: {
-                            id: { type: "string" },
-                            text: { type: "string" },
-                            score: { type: "number" },
-                            metadata: {
+                    oneOf: [
+                      {
+                        type: "object",
+                        required: ["contextBlock", "memories"],
+                        properties: {
+                          contextBlock: { type: "string" },
+                          memories: {
+                            type: "array",
+                            items: {
                               type: "object",
-                              additionalProperties: true,
+                              required: ["id", "text", "score", "metadata"],
+                              properties: {
+                                id: { type: "string" },
+                                text: { type: "string" },
+                                score: { type: "number" },
+                                metadata: {
+                                  type: "object",
+                                  additionalProperties: true,
+                                },
+                              },
                             },
                           },
                         },
                       },
-                    },
-                  },
+                      {
+                        type: "object",
+                        required: ["success", "memoryId", "title", "summary"],
+                        properties: {
+                          success: { type: "boolean" },
+                          memoryId: { type: "string" },
+                          title: { type: "string" },
+                          summary: { type: "object", additionalProperties: true },
+                        },
+                      },
+                    ],
+                  }
                 },
               },
             },
@@ -413,21 +449,53 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireChatGptScopes
   }
 });
 
-router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = recallSchema.parse(req.body);
+    const body = runSchema.parse(req.body);
     if (!req.authContext) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
 
-    const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
+    if (body.query) {
+      if (!authHasRequiredScopes(req.authContext, ["memory:read"])) {
+        res.status(403).json({
+          error: "Insufficient OAuth scopes",
+          requiredScopes: ["memory:read"],
+        });
+        return;
+      }
+
+      const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
+      await logChatGptAction({
+        auth: req.authContext,
+        method: "chatgpt/actions/run",
+        ok: true,
+      });
+      res.json(result);
+      return;
+    }
+
+    if (!authHasRequiredScopes(req.authContext, ["memory:write"])) {
+      res.status(403).json({
+        error: "Insufficient OAuth scopes",
+        requiredScopes: ["memory:write"],
+      });
+      return;
+    }
+
+    const saved = await saveMemory(body.content as string, req.authContext, "chatgpt", req.ip);
     await logChatGptAction({
       auth: req.authContext,
       method: "chatgpt/actions/run",
       ok: true,
     });
-    res.json(result);
+    res.json({
+      success: true,
+      memoryId: saved.memoryId,
+      title: saved.title,
+      summary: saved.summary,
+    });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });

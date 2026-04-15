@@ -37,6 +37,12 @@ To get Tallei running locally, check out our comprehensive setup guide:
 
 👉 **[Read the Setup Guide (setup.md)](./setup.md)**
 
+## 📚 Deployment Docs
+
+Production deployment and troubleshooting docs live under:
+
+👉 **[docs/README.md](./docs/README.md)**
+
 ## 🤝 Contributing
 
 We welcome contributions! When adding new MCP tools or API routes, please keep performance in mind. If an operation hits OpenAI or a vector DB, always implement caching to maintain our sub-100ms latency standard.
