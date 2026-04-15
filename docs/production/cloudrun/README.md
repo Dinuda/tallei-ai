@@ -10,6 +10,7 @@ This guide documents the production deployment for this repository using two Clo
 - Full deployment sequence: [flow.md](./flow.md)
 - Domain and DNS details: [dns.md](./dns.md)
 - Failure playbook: [troubleshooting.md](./troubleshooting.md)
+- Production changelog: [changelog.md](./changelog.md)
 
 ## Scripts Used
 

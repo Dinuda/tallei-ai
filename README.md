@@ -101,35 +101,35 @@ For a deep dive into the graph architecture, extraction pipeline, and design dec
 - **[Technical Architecture (ARCHITECTURE.md)](./ARCHITECTURE.md)** — Comprehensive guide to system design, async extraction, dual recall modes, insight engine
 - **[Architecture Diagrams (docs/DIAGRAMS.md)](./docs/DIAGRAMS.md)** — Visual explanations with ASCII diagrams of all major flows
 
-## 🚀 Getting Started
+## Getting Started
 
 To get Tallei running locally, check out our comprehensive setup guide:
 
-👉 **[Read the Setup Guide (setup.md)](./setup.md)**
+**[Read the Setup Guide (setup.md)](./setup.md)**
 
-## 📚 Deployment Docs
+## Deployment Docs
 
 Production deployment and troubleshooting docs live under:
 
-👉 **[docs/README.md](./docs/README.md)**
+**[docs/README.md](./docs/README.md)**
 
-## 🚀 Why This Is Different
+## Why This Is Different
 
 ### The Graph Thing
 
 Most AI memory systems are either:
 
 1. **Vector-only** (Pinecone, traditional RAG):
-   - Super fast searches ✅
-   - But can't tell you when you're contradicting yourself ❌
-   - Can't show you how ideas connect ❌
-   - Treats every memory like an island ❌
+   - Super fast searches
+   - But can't tell you when you're contradicting yourself
+   - Can't show you how ideas connect
+   - Treats every memory like an island
 
 2. **Separate graph DBs** (Neo4j, etc.):
-   - Powerful relationship stuff ✅
-   - But requires another database, another set of infrastructure ❌
-   - Harder to deploy, more things to break ❌
-   - More expensive to run ❌
+   - Powerful relationship stuff
+   - But requires another database, another set of infrastructure
+   - Harder to deploy, more things to break
+   - More expensive to run
 
 I wanted something that works *with* Postgres, gives you relationships without the overhead.
 
@@ -154,7 +154,7 @@ Traditional approach: `save → extract → store → return (4.5s)`. Way too sl
 
 ---
 
-## 🔮 What's Next
+## What's Next
 
 ### Phase 1: Fish-Brain (What I'm Thinking About Lately)
 
@@ -162,9 +162,9 @@ The "recency and frequency" layer. I want to know what I've been obsessing over:
 
 ```
 Your interests over time:
-├── 🔥 React (5 mentions this week, trending up)
-├── 📊 Remote work (3 mentions, stable)
-└── 🆕 Kubernetes (1 mention, new interest?)
+├── React (5 mentions this week, trending up)
+├── Remote work (3 mentions, stable)
+└── Kubernetes (1 mention, new interest?)
 ```
 
 Real features:
@@ -209,7 +209,7 @@ Right now memories are separated by AI. Phase 6 is:
 
 ---
 
-## 📸 Memory Graph in Action
+## Memory Graph in Action
 
 Go to `/dashboard/memory-graph` to see your memory as an interactive network. Drag stuff around, click entities to see all memories mentioning them, see the relationships at a glance.
 
@@ -236,7 +236,7 @@ The graph grows as you save more memories. Patterns show up over time.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Want to add stuff? Cool. Just remember: if it's gonna be slow, we need to cache it. If it talks to OpenAI or the database, cache the result. The whole point is to keep MCP tool latency under 100ms.
 

@@ -20,6 +20,7 @@ Start here to understand the system:
   - [Flow (Step-by-step)](./production/cloudrun/flow.md)
   - [Domains and DNS](./production/cloudrun/dns.md)
   - [Troubleshooting](./production/cloudrun/troubleshooting.md)
+  - [Production Changelog](./production/cloudrun/changelog.md)
 
 ## Getting Started
 
