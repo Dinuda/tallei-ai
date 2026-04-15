@@ -89,8 +89,8 @@ Cause:
 
 Fix already applied in code:
 
-- [`dashboard/next.config.ts`](/Users/dinudayaggahavita/Documents/work/tallei-ai/dashboard/next.config.ts)
-- [`dashboard/Dockerfile`](/Users/dinudayaggahavita/Documents/work/tallei-ai/dashboard/Dockerfile)
+- [`dashboard/next.config.ts`](../../../dashboard/next.config.ts)
+- [`dashboard/Dockerfile`](../../../dashboard/Dockerfile)
 
 Redeploy dashboard with:
 

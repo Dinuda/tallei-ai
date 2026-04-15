@@ -148,7 +148,7 @@ gcloud beta run domain-mappings create \
   --domain api.tallei.com
 ```
 
-Then configure DNS from mapping output. See [dns.md](/Users/dinudayaggahavita/Documents/work/tallei-ai/docs/production/cloudrun/dns.md).
+Then configure DNS from mapping output. See [dns.md](./dns.md).
 
 ## 7) Post-deploy Checks
 

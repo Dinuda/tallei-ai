@@ -22,7 +22,7 @@ npm run lint
 
 ## Environment
 
-Use [`dashboard/.env.example`](/Users/dinudayaggahavita/Documents/work/tallei-ai/dashboard/.env.example) as the template for local dashboard configuration.
+Use [`dashboard/.env.example`](./.env.example) as the template for local dashboard configuration.
 
 ## Notes
 

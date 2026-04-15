@@ -7,13 +7,13 @@ This guide documents the production deployment for this repository using two Clo
 
 ## Read This First
 
-- Full deployment sequence: [flow.md](/Users/dinudayaggahavita/Documents/work/tallei-ai/docs/production/cloudrun/flow.md)
-- Domain and DNS details: [dns.md](/Users/dinudayaggahavita/Documents/work/tallei-ai/docs/production/cloudrun/dns.md)
-- Failure playbook: [troubleshooting.md](/Users/dinudayaggahavita/Documents/work/tallei-ai/docs/production/cloudrun/troubleshooting.md)
+- Full deployment sequence: [flow.md](./flow.md)
+- Domain and DNS details: [dns.md](./dns.md)
+- Failure playbook: [troubleshooting.md](./troubleshooting.md)
 
 ## Scripts Used
 
-All scripts are in [`deploy/cloudrun/`](/Users/dinudayaggahavita/Documents/work/tallei-ai/deploy/cloudrun):
+All scripts are in [`deploy/cloudrun/`](../../../deploy/cloudrun):
 
 - `add-secret-versions.sh`: hidden-input secret value entry.
 - `verify-secrets.sh`: validates secret IDs, latest versions, and IAM access.

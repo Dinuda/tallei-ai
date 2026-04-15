@@ -34,7 +34,7 @@ The repo ships a Postgres container:
 docker compose up -d
 ```
 
-This starts local Postgres at `localhost:5432` with default credentials from [`docker-compose.yml`](/Users/dinudayaggahavita/Documents/work/tallei-ai/docker-compose.yml).
+This starts local Postgres at `localhost:5432` with default credentials from [`docker-compose.yml`](./docker-compose.yml).
 
 ## 4) Configure Environment
 
