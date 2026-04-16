@@ -10,8 +10,8 @@ Tallei's a memory layer for when you want your AI to not forget who you are. It 
 
 ### The Basics
 - **Share memories across Claude, ChatGPT, and Gemini** via OAuth. One memory graph, all your AIs.
-- **Sub-10ms saves** — we return instantly, then do the heavy lifting in the background.
-- **~5ms recall** on a warm cache (60s TTL). Cold cache is ~200ms, but you're hitting cache 95% of the time.
+- **Sub-15ms saves** — we return instantly, then do the heavy lifting in the background.
+- **~5ms recall** on a warm cache. Cold cache worst-case is ~700ms. Precomputed snapshots cut that to ~50ms.
 - **Smart summaries** — `gpt-4o-mini` pulls out titles, key points, and decisions without you asking.
 
 ### The Graph Layer (the cool part)
@@ -54,10 +54,117 @@ The MCP server that Claude and friends talk to:
 - **Setup wizard** — 4-step walk-through to connect Claude/ChatGPT/Gemini. Done in 2 min.
 - **Dashboard** — sidebar nav, search bar, insight panels. Responsive, works on phone too.
 
-## Technical Highlights: Graph-Aware Memory
+## Technical Highlights
+
+### Recall Latency: The Journey
+
+Three days of compressing the hot path to nothing:
+
+```
+End-to-end recall latency (p50, production)
+
+Apr 14  ████████████████████████████████████████████████████████████  ~30,000ms
+Apr 15  ████████████████████████████████████████████████  ~24,000ms
+Apr 16  ████  ~717ms handler / ~2,200ms total (auth + rate-limit included)
+
+           0                    10s                   20s                   30s
+```
+
+**What changed each day:**
+
+| Date   | Latency | What we did |
+|--------|---------|-------------|
+| Apr 14 | ~30s    | Baseline — every recall: embed → vector search → fetch → format, all synchronous |
+| Apr 15 | ~24s    | Added basic in-memory recall cache (60s TTL). Cold misses still hit full pipeline |
+| Apr 16 | ~2.2s total / ~717ms handler | Multi-layer cache architecture: serve immediately from fallback, enrich in background. Zero embedding or vector ops in the foreground path on cache miss |
+
+Today's log (cold boot, precomputed snapshot not yet warmed):
+```
+duration_ms=2216   auth_ms=357   rate_limit_ms=426   handler_ms=716
+recall_total_ms=717   recall_embed_ms=0   recall_vector_ms=0
+recall_source=precomputed_graph_miss   recall_snapshot_status=miss
+```
+
+No embedding. No vector search. 717ms from a cold start. When the precomputed snapshot warms up, that drops to ~50ms.
+
+---
+
+### The Multi-Layer Recall Architecture
+
+Every recall request walks down this chain, stopping at the first hit:
+
+```
+recall_memories(query)
+        │
+        ▼
+┌───────────────────────────────┐
+│  Layer 1: In-process cache    │  ~0ms   (10 min TTL, per-process Map)
+└───────────────┬───────────────┘
+                │ miss
+                ▼
+┌───────────────────────────────┐
+│  Layer 2: Redis exact cache   │  ~5ms   (120s TTL, exact query hash)
+└───────────────┬───────────────┘
+                │ miss
+                ▼
+┌───────────────────────────────┐
+│  Layer 3: Redis warm cache    │  ~5ms   (45s TTL, serve + enrich async)
+└───────────────┬───────────────┘
+                │ miss
+                ▼
+┌───────────────────────────────┐
+│  Layer 4: Precomputed graph   │  ~50ms  (snapshot built after every save)
+│           snapshot            │         graph-aware, entity-weighted scoring
+└───────────────┬───────────────┘
+                │ miss/stale
+                ▼
+┌───────────────────────────────┐
+│  Layer 5: Recent fallback     │  ~200–700ms  lexical + recency scoring,
+│           (no embedding)      │              NO embedding, NO vector search
+└───────────────┬───────────────┘
+                │ (always returns something)
+                ▼
+         Background enrichment:
+         semantic recall runs async,
+         writes result to Layers 2–3
+         for next request
+```
+
+**The key insight:** even on a total cold cache miss, we never block the response on embedding or vector search. The foreground path uses lexical + recency scoring (pure in-memory math, no I/O). The expensive semantic pipeline runs in the background and caches its result for the next caller.
+
+---
+
+### Fire-and-Forget Saves
+
+```
+save_memory() ──→ summarize (async) ──→ DB write ──→ return ~15ms ✅
+                                            │
+                                            └──→ [background]
+                                                  embed text
+                                                  upsert vector
+                                                  extract graph entities
+                                                  queue snapshot refresh
+```
+
+The response comes back before the embedding even starts. Graph extraction and snapshot refresh are enqueued and run after the caller has moved on.
+
+---
+
+### LLM Reranker + RAG Fallback
+
+Vector search has a known failure mode: bi-encoder models match semantic clusters, not intent. "Favorite language" and "favorite ice cream" look similar to an embedding model.
+
+Two layers fix this:
+
+1. **LLM Reranker** (`gpt-4o-mini`) — runs after vector search, filters candidates that don't actually answer the query. Kills false positives before they reach the context block.
+
+2. **RAG Fallback** — when the vector index is stale or missing embeddings entirely, we full-scan every DB memory and ask the LLM which ones are relevant. Slower (~1–2s) but always correct. Triggers a background reindex so vector search works next time.
+
+---
 
 ### Why Graph Matters
-Traditional vector-only memory systems excel at semantic similarity but miss relational insights. Tallei's graph layer reveals:
+
+Traditional vector-only memory systems miss relational insights. Tallei's graph layer reveals:
 - **Entity relationships** across memories (e.g., "Which projects mention this tech stack?")
 - **Decision context** by tracking mentions of choices and their outcomes
 - **Contradictions** between stored facts (e.g., conflicting preferences)
@@ -65,22 +172,18 @@ Traditional vector-only memory systems excel at semantic similarity but miss rel
 
 ### The Async Extraction Pipeline
 ```
-Memory Save (10ms)
+Memory Save (~15ms response)
     ↓
-Fire-and-Forget Response
+Fire-and-Forget: background worker picks up job
     ↓
-Background Worker Picks Up Job
+LLM extracts entities & relations
     ↓
-LLM Extracts Entities & Relations
+Postgres stores graph data (entities, mentions, relations)
     ↓
-Postgres Stores Graph Data (entities, mentions, relations)
+Insight engine analyzes relationships
     ↓
-Insight Engine Analyzes Relationships
-    ↓
-Graph Available for Recall & Insights
+Precomputed snapshot refreshed for fast recall
 ```
-
-Decoupling extraction from the critical path means MCP tools respond instantly while graph analysis happens in the background.
 
 ### Multi-Modal Recall
 - **Vector Recall:** "Find memories about X" (semantic matching)
@@ -141,16 +244,14 @@ I wanted something that works *with* Postgres, gives you relationships without t
 
 ### Fire-and-Forget: The Trick
 
-The hack that makes this work:
-
 ```
-save_memory() → queue extraction job → return immediately (15ms) ✅
-                [background] LLM extracts graph, stores it
+save_memory() → return immediately (~15ms) ✅
+               [background] embed → upsert vector → extract graph → refresh snapshot
 ```
 
-No waiting for extraction. You save, you get your response back instantly, then the heavy lifting happens while you're working. Graph shows up in your next recall, totally transparent.
+Traditional approach: `save → extract → embed → store → return (~4.5s)`. Way too slow.
 
-Traditional approach: `save → extract → store → return (4.5s)`. Way too slow.
+The full technical breakdown is in the [Technical Highlights](#technical-highlights) section above.
 
 ---
 

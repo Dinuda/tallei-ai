@@ -1,7 +1,33 @@
-"use client";
-
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
+
+const PRICING_PLANS = [
+  {
+    name: "Free",
+    price: "Free",
+    description: "For trying Tallei and syncing your first memories.",
+    features: ["50 saves/month", "200 recalls/month", "All 3 AI platforms"],
+    href: "/login",
+    cta: "Start free",
+  },
+  {
+    name: "Pro",
+    price: "$9",
+    description: "For daily workflows where memory should just work.",
+    features: ["Unlimited saves", "Unlimited recalls", "All 3 AI platforms", "Graph insights"],
+    href: "/login?plan=pro",
+    cta: "Choose Pro",
+    featured: true,
+  },
+  {
+    name: "Power",
+    price: "$19",
+    description: "For teams and advanced automations with API access.",
+    features: ["Everything in Pro", "API access", "Memory export", "Priority support"],
+    href: "/login?plan=power",
+    cta: "Choose Power",
+  },
+] as const;
 
 /* ─── Component ─────────────────────────────────────────────── */
 
@@ -201,6 +227,124 @@ export function HomeContent() {
                 Tallei sits quietly in the background. If you tell ChatGPT how you prefer your weekly reports formatted, Claude will automatically know it for your next project. It's just one continuous memory.
               </p>
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ═════════════════════════════════════════════════════
+          PRICING
+      ═════════════════════════════════════════════════════ */}
+      <section
+        id="pricing"
+        style={{
+          padding: "6rem 0",
+          background: "#fdfbf7",
+          borderTop: "2px solid #e5e0d8",
+        }}
+      >
+        <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 2rem" }}>
+          <h2 className="section-h2 text-center">Pricing</h2>
+          <p
+            className="text-center"
+            style={{
+              maxWidth: 640,
+              margin: "-1rem auto 2.5rem",
+              color: "#4c4643",
+              fontSize: "1.05rem",
+              lineHeight: 1.6,
+            }}
+          >
+            Built from the same plans you see in billing. Start free, then upgrade when you need more.
+          </p>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+              gap: "1.25rem",
+            }}
+          >
+            {PRICING_PLANS.map((plan) => (
+              <article
+                key={plan.name}
+                className="solid-card"
+                style={{
+                  padding: "2rem 1.5rem",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "1rem",
+                  ...(plan.featured
+                    ? { borderColor: "#5b21b6", boxShadow: "6px 6px 0px #e1d4fc" }
+                    : {}),
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
+                  <h3 style={{ fontSize: "1.25rem", fontWeight: 700, margin: 0, color: "#1a1816" }}>{plan.name}</h3>
+                  {plan.featured && (
+                    <span
+                      style={{
+                        fontSize: "0.7rem",
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.04em",
+                        color: "#5b21b6",
+                        border: "1px solid #5b21b6",
+                        background: "#f6f0ff",
+                        borderRadius: 999,
+                        padding: "0.2rem 0.55rem",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      Most popular
+                    </span>
+                  )}
+                </div>
+
+                <p style={{ margin: 0, fontSize: "2rem", fontWeight: 700, color: "#1a1816", lineHeight: 1.1 }}>
+                  {plan.price}
+                  {plan.price !== "Free" && (
+                    <span style={{ fontSize: "0.95rem", fontWeight: 500, color: "#8c827a", marginLeft: "0.2rem" }}>
+                      /mo
+                    </span>
+                  )}
+                </p>
+                <p style={{ margin: 0, fontSize: "0.98rem", color: "#4c4643", lineHeight: 1.5 }}>{plan.description}</p>
+
+                <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                  {plan.features.map((feature) => (
+                    <li
+                      key={feature}
+                      style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", color: "#3d3733", fontSize: "0.92rem", lineHeight: 1.45 }}
+                    >
+                      <Check size={14} style={{ color: "#5b21b6", marginTop: "0.12rem", flexShrink: 0 }} />
+                      <span>{feature}</span>
+                    </li>
+                  ))}
+                </ul>
+
+                <Link
+                  href={plan.href}
+                  style={{
+                    marginTop: "auto",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "0.45rem",
+                    padding: "0.7rem 1rem",
+                    border: `2px solid ${plan.featured ? "#5b21b6" : "#1a1816"}`,
+                    background: plan.featured ? "#7c3aed" : "#ffffff",
+                    color: plan.featured ? "#ffffff" : "#1a1816",
+                    textDecoration: "none",
+                    fontWeight: 600,
+                    fontSize: "0.92rem",
+                    boxShadow: plan.featured ? "3px 3px 0px #e1d4fc" : "3px 3px 0px rgba(0,0,0,0.1)",
+                  }}
+                >
+                  {plan.cta}
+                  <ArrowRight size={14} />
+                </Link>
+              </article>
+            ))}
           </div>
         </div>
       </section>
