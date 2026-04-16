@@ -18,6 +18,13 @@ type NavSection = {
 };
 
 const ICONS = {
+  billing: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <rect x="1.5" y="3.5" width="12" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M1.5 6.5h12" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="3.5" y="8.5" width="3" height="1.5" rx=".5" fill="currentColor" />
+    </svg>
+  ),
   memories: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M2 3.5C2 2.7 2.7 2 3.5 2h8C12.3 2 13 2.7 13 3.5v8c0 .8-.7 1.5-1.5 1.5h-8C2.7 13 2 12.3 2 11.5v-8Z" stroke="currentColor" strokeWidth="1.2" />
@@ -63,6 +70,7 @@ const NAV: NavSection[] = [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
       { id: "memory-graph", label: "Memory Graph", href: "/dashboard/memory-graph", icon: ICONS.graph },
       { id: "connectors", label: "Connectors", href: "/dashboard/setup", icon: ICONS.connectors },
+      { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
     ],
   },
   {

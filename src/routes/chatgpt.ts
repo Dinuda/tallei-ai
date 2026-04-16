@@ -5,6 +5,7 @@ import { config } from "../config.js";
 import { recallMemories, saveMemory } from "../services/memory.js";
 import { pool } from "../db/index.js";
 import { authContextFromApiKey, authContextFromUserId } from "../services/auth.js";
+import { getPlanForTenant } from "../services/tenancy.js";
 import { hasRequiredScopes, validateOAuthAccessToken } from "../services/oauthTokens.js";
 import { setRequestTimingField } from "../services/requestTiming.js";
 import { runAsyncSafe } from "../services/asyncSafe.js";
@@ -102,7 +103,7 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
     const tenantId = req.headers["x-tenant-id"] as string | undefined;
     req.userId = userId;
     req.authContext = tenantId
-      ? { userId, tenantId, authMode: "internal" }
+      ? { userId, tenantId, authMode: "internal", plan: "free" as const }
       : await authContextFromUserId(userId, "internal");
     noteAuthTiming();
     next();
@@ -145,11 +146,13 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
       return;
     }
 
+    const plan = await getPlanForTenant(tokenContext.tenantId);
     req.userId = tokenContext.userId;
     req.authContext = {
       userId: tokenContext.userId,
       tenantId: tokenContext.tenantId,
       authMode: "oauth",
+      plan,
       clientId: tokenContext.clientId,
       scopes: tokenContext.scopes,
     };

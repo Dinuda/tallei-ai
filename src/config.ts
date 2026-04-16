@@ -172,6 +172,10 @@ export const config = {
   browserHeadless: readBooleanEnv("BROWSER_HEADLESS", true),
   claudeConnectorMcpUrl:
     process.env.CLAUDE_CONNECTOR_MCP_URL || `${process.env.PUBLIC_BASE_URL || localBaseUrl}/mcp`,
+  lemonSqueezyApiKey: readStringEnv("LEMONSQUEEZY_API_KEY"),
+  lemonSqueezyWebhookSecret: readStringEnv("LEMONSQUEEZY_WEBHOOK_SECRET"),
+  lemonSqueezyProVariantId: readStringEnv("LEMONSQUEEZY_PRO_VARIANT_ID"),
+  lemonSqueezyPowerVariantId: readStringEnv("LEMONSQUEEZY_POWER_VARIANT_ID"),
   claudeProjectInstructionsTemplate:
     process.env.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
     "Project: chatgpt memory. Mandatory tool use and preload policy: (1) On the first user message of every new conversation, immediately call recall_memories with query='find tallei' before replying, even if context is not strictly needed, to warm tool/context loading. (2) On each user turn, preload by calling recall_memories once before replying; do not run repeated recall searches in the same turn unless the user explicitly asks for deeper memory search. (3) If you do not know something, are uncertain, or detect missing personal/contextual information, call recall_memories before answering. (4) Before answering personal/contextual questions, ensure the preload recall_memories call has already happened in that turn. (5) Only call remember_user_preference/save_memory when the user explicitly asks to remember something, or when they explicitly asks to remember a correction. (6) If the user corrects a prior fact and asks to remember it, call save_memory with the corrected fact. (7) Do not mention tool calls in the final user-facing response.",
