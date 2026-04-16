@@ -56,6 +56,24 @@ export class MemoryRepository {
     return result.rows;
   }
 
+  /**
+   * Returns ALL non-deleted memories for a user with no row cap.
+   * Used by recall fallback paths so that old memories are not silently skipped
+   * due to a recency-ordered LIMIT.
+   */
+  async listAll(auth: AuthContext): Promise<MemoryRecordRow[]> {
+    const result = await pool.query<MemoryRecordRow>(
+      `SELECT *
+       FROM memory_records
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+       ORDER BY created_at DESC`,
+      [auth.tenantId, auth.userId]
+    );
+    return result.rows;
+  }
+
   async getByIds(auth: AuthContext, ids: string[]): Promise<MemoryRecordRow[]> {
     if (ids.length === 0) return [];
 

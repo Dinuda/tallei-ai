@@ -29,6 +29,16 @@ function readOptionalIntEnv(name: string): number | null {
   return value;
 }
 
+function readFloatEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseFloat(raw);
+  if (Number.isNaN(value)) {
+    throw new Error(`Invalid float env var: ${name}`);
+  }
+  return value;
+}
+
 function readBooleanEnv(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
@@ -112,6 +122,18 @@ export const config = {
   memoryGraphWorkerBatchSize: readIntEnv("MEMORY_GRAPH_WORKER_BATCH_SIZE", 16),
   memoryApiRateLimitPerMinute: readIntEnv("MEMORY_API_RATE_LIMIT_PER_MINUTE", 180),
   mcpRateLimitPerMinute: readIntEnv("MCP_RATE_LIMIT_PER_MINUTE", 240),
+  // Minimum cosine-similarity score for a vector hit to be included in recall results.
+  // Hits below this are discarded; if all are discarded the fallback lexical path runs.
+  recallMinVectorScore: readFloatEnv("RECALL_MIN_VECTOR_SCORE", 0.30),
+  // Minimum lexical score for the fallback path. Results below this are excluded so that
+  // completely unrelated memories are never injected as context.
+  recallMinFallbackScore: readFloatEnv("RECALL_MIN_FALLBACK_SCORE", 0.05),
+  // LLM reranker: pass vector search candidates through gpt-4o-mini to filter truly
+  // irrelevant results before returning context.  Adds ~200-400ms but eliminates
+  // false positives like "favorite language" matching "favorite ice cream".
+  rerankEnabled: readBooleanEnv("RERANK_ENABLED", true),
+  // Minimum rerank score (0–1) to include a memory in the final result.
+  rerankMinScore: readFloatEnv("RERANK_MIN_SCORE", 0.4),
   browserWorkerBaseUrl: process.env.BROWSER_WORKER_BASE_URL || "",
   browserWorkerApiKey: process.env.BROWSER_WORKER_API_KEY || "",
   browserMaxStudentRetries: readIntEnv("BROWSER_MAX_STUDENT_RETRIES", 2),
@@ -123,5 +145,5 @@ export const config = {
     process.env.CLAUDE_CONNECTOR_MCP_URL || `${process.env.PUBLIC_BASE_URL || localBaseUrl}/mcp`,
   claudeProjectInstructionsTemplate:
     process.env.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
-    "Project: chatgpt memory. Mandatory tool use: (1) On the first user message of each new conversation, call recall_memories with a broad query before replying. (2) Before answering any personal/contextual question, call recall_memories first. (3) Whenever the user states a durable fact or preference (name, favorite/favourite color, food, music, habits, goals, project stack, decisions), call remember_user_preference (or save_memory) in the same turn with concise factual content and platform=claude. (4) If user gives a direct answer after you asked for missing preference (example: user says 'blue' to 'what is your favorite color?'), immediately call remember_user_preference/save_memory before replying. (5) If the user corrects a prior fact, call save_memory with the corrected fact. Do not mention tool calls in the final user-facing response.",
+    "Project: chatgpt memory. Mandatory tool use: (1) On the first user message of each new conversation, call recall_memories with a broad query before replying. (2) Before answering any personal/contextual question, call recall_memories first. (3) If recall_memories returns 'No relevant memories found', ALWAYS call list_memories next to scan all stored memories before concluding nothing is saved — the user may have saved it under a different phrasing. (4) Whenever the user states a durable fact or preference (name, favorite/favourite color, food, music, habits, goals, project stack, decisions), call remember_user_preference (or save_memory) in the same turn with concise factual content and platform=claude. (5) If user gives a direct answer after you asked for missing preference (example: user says 'blue' to 'what is your favorite color?'), immediately call remember_user_preference/save_memory before replying. (6) If the user corrects a prior fact, call save_memory with the corrected fact. Do not mention tool calls in the final user-facing response.",
 } as const;
