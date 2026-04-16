@@ -499,7 +499,7 @@ export async function lookupPrecomputedRecallV1(
   const snapshotState = await getSnapshot(auth);
   if (!snapshotState.snapshot || snapshotState.status !== "hit") {
     if (snapshotState.status === "miss" || snapshotState.status === "stale" || snapshotState.status === "error") {
-      await queueSnapshotRefresh(auth, `lookup_${snapshotState.status}`, 750);
+      void queueSnapshotRefresh(auth, `lookup_${snapshotState.status}`, 750).catch(() => {});
     }
     return {
       status: snapshotState.status,
@@ -511,7 +511,7 @@ export async function lookupPrecomputedRecallV1(
 
   const ranked = rankFromSnapshot(snapshotState.snapshot, query, limit, false);
   if (ranked.length === 0) {
-    await queueSnapshotRefresh(auth, "lookup_no_candidates", 750);
+    void queueSnapshotRefresh(auth, "lookup_no_candidates", 750).catch(() => {});
     return {
       status: "miss",
       result: null,
@@ -552,7 +552,7 @@ export async function lookupPrecomputedRecallV2(
   const snapshotState = await getSnapshot(auth);
   if (!snapshotState.snapshot || snapshotState.status !== "hit") {
     if (snapshotState.status === "miss" || snapshotState.status === "stale" || snapshotState.status === "error") {
-      await queueSnapshotRefresh(auth, `lookup_v2_${snapshotState.status}`, 750);
+      void queueSnapshotRefresh(auth, `lookup_v2_${snapshotState.status}`, 750).catch(() => {});
     }
     return {
       status: snapshotState.status,
@@ -564,7 +564,7 @@ export async function lookupPrecomputedRecallV2(
 
   const ranked = rankFromSnapshot(snapshotState.snapshot, query, limit, true);
   if (ranked.length === 0) {
-    await queueSnapshotRefresh(auth, "lookup_v2_no_candidates", 750);
+    void queueSnapshotRefresh(auth, "lookup_v2_no_candidates", 750).catch(() => {});
     return {
       status: "miss",
       result: null,

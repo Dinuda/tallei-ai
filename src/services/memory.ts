@@ -41,7 +41,7 @@ const VECTOR_WARN_INTERVAL_MS = 30_000;
 const MEMORY_DB_TIMEOUT_MS = config.nodeEnv === "production" ? 10_000 : 2_500;
 const MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
 const MEMORY_VECTOR_SEARCH_TIMEOUT_MS = config.nodeEnv === "production" ? 2_000 : 1_250;
-const MEMORY_VECTOR_UPSERT_TIMEOUT_MS = config.nodeEnv === "production" ? 2_500 : 1_500;
+const MEMORY_VECTOR_UPSERT_TIMEOUT_MS = config.memoryVectorUpsertTimeoutMs;
 const FAST_RECALL_EMBED_TIMEOUT_MS = 1_500;
 const FAST_RECALL_VECTOR_TIMEOUT_MS = 1_500;
 const FAST_RECALL_TOTAL_TIMEOUT_MS = 2_500;
@@ -239,13 +239,6 @@ export async function saveMemory(
     console.error("[memory] summarize failed, using fallback:", err);
     return buildFallbackSummary(content);
   });
-  const embeddingPromise = shouldBypassVector()
-    ? null
-    : withTimeout(
-        embedText(buildEmbeddingText(platform, normalizedContent)),
-        MEMORY_EMBED_TIMEOUT_MS,
-        "save.embed"
-      );
 
   const summary = await summaryPromise;
 
@@ -255,35 +248,41 @@ export async function saveMemory(
   const createdAt = new Date().toISOString();
   const memoryId = randomUUID();
 
-  let pointId: string = memoryId;
-  if (embeddingPromise) {
-    try {
-      const vector = await embeddingPromise;
-      const upserted = await withTimeout(
-        vectorRepository.upsertMemoryVector({
-          auth,
-          memoryId,
-          vector,
-          platform,
-          createdAt,
-        }),
-        MEMORY_VECTOR_UPSERT_TIMEOUT_MS,
-        "save.upsert"
-      );
-      pointId = upserted.pointId;
-    } catch (error) {
-      noteVectorFailure(error, "save");
-    }
-  }
-
   await memoryRepository.create(auth, {
     id: memoryId,
     contentCiphertext: encrypted,
     contentHash,
     platform,
     summaryJson: summary,
-    qdrantPointId: pointId,
+    qdrantPointId: memoryId,
   });
+
+  // Keep save latency low: vector embedding/upsert is best-effort in background.
+  if (!shouldBypassVector()) {
+    void (async () => {
+      try {
+        const vector = await withTimeout(
+          embedText(buildEmbeddingText(platform, normalizedContent)),
+          MEMORY_EMBED_TIMEOUT_MS,
+          "save.embed"
+        );
+        await withTimeout(
+          vectorRepository.upsertMemoryVector({
+            auth,
+            memoryId,
+            pointId: memoryId,
+            vector,
+            platform,
+            createdAt,
+          }),
+          MEMORY_VECTOR_UPSERT_TIMEOUT_MS,
+          "save.upsert"
+        );
+      } catch (error) {
+        noteVectorFailure(error, "save_bg");
+      }
+    })();
+  }
 
   void enqueueGraphExtractionJob(auth, memoryId).catch((error) => {
     if (config.nodeEnv !== "production") {

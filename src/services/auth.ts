@@ -439,13 +439,19 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
 
   if (cached) {
     try {
-      await pool.query(
+      const usageUpdate = await pool.query(
         `UPDATE api_keys
          SET last_used_at = NOW(),
              last_ip_hash = $2
-         WHERE id = $1`,
+         WHERE id = $1
+           AND revoked_at IS NULL
+           AND (created_at + (rotation_days || ' days')::interval) > NOW()`,
         [cached.keyId, requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null]
       );
+      if ((usageUpdate.rowCount ?? 0) < 1) {
+        await deleteCacheKey(cacheKey);
+        return null;
+      }
     } catch (error) {
       noteApiKeyDbFailure(error, "[auth] validateApiKeyContext cached usage update failed:");
     }

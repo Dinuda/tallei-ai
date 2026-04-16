@@ -87,9 +87,25 @@ export const config = {
   supabaseUrl: readStringEnv("SUPABASE_URL"),
   supabaseServiceRoleKey: readStringEnv("SUPABASE_SERVICE_ROLE_KEY"),
   redisUrl: readStringEnv("REDIS_URL"),
+  redisConnectTimeoutMs: readIntEnv(
+    "REDIS_CONNECT_TIMEOUT_MS",
+    process.env.NODE_ENV === "production" ? 1500 : 1000
+  ),
+  redisCommandTimeoutMs: readIntEnv(
+    "REDIS_COMMAND_TIMEOUT_MS",
+    process.env.NODE_ENV === "production" ? 800 : 500
+  ),
+  redisFailureCooldownMs: readIntEnv(
+    "REDIS_FAILURE_COOLDOWN_MS",
+    process.env.NODE_ENV === "production" ? 300_000 : 60_000
+  ),
   qdrantUrl: readStringEnv("QDRANT_URL"),
   qdrantApiKey: readStringEnv("QDRANT_API_KEY"),
   qdrantCollectionName: readStringEnv("QDRANT_COLLECTION_NAME", "memories_v1"),
+  memoryVectorUpsertTimeoutMs: readIntEnv(
+    "MEMORY_VECTOR_UPSERT_TIMEOUT_MS",
+    process.env.NODE_ENV === "production" ? 10_000 : 12_000
+  ),
   // Qdrant JS client expects timeout in milliseconds.
   qdrantTimeoutMs:
     qdrantTimeoutMsOverride ??

@@ -4,6 +4,7 @@ import { verifyChallenge } from "pkce-challenge";
 import { pool } from "../db/index.js";
 import { config } from "../config.js";
 import { introspectOAuthAccessToken, parseScopes } from "../services/oauthTokens.js";
+import { deleteCacheKey } from "../services/cache.js";
 import { ensurePrimaryTenantForUser, getPrimaryTenantId } from "../services/tenancy.js";
 import { AuthRequest, internalMiddleware } from "../middleware/auth.js";
 
@@ -15,6 +16,10 @@ const DEVICE_POLL_INTERVAL_SECONDS = 5;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const CLIENT_CREDENTIALS_ACCESS_TTL_SECONDS = 30 * 60;
+
+function apiKeyValidationCacheKey(hash: string): string {
+  return `auth:api_key_v2:${hash}`;
+}
 
 type ClientInfo = {
   client_id: string;
@@ -554,8 +559,24 @@ export function createOauthExtensionsRouter(): Router {
       return;
     }
 
-    await pool.query("UPDATE api_keys SET revoked_at = NOW() WHERE revoked_at IS NULL");
-    res.json({ success: true });
+    const revoked = await pool.query<{ key_hash: string }>(
+      `UPDATE api_keys
+       SET revoked_at = NOW()
+       WHERE revoked_at IS NULL
+         AND connector_type IS NULL
+       RETURNING key_hash`
+    );
+    await Promise.all(
+      revoked.rows
+        .map((row) => row.key_hash)
+        .filter((hash) => hash.length > 0)
+        .map((hash) => deleteCacheKey(apiKeyValidationCacheKey(hash)))
+    );
+    res.json({
+      success: true,
+      revoked: revoked.rowCount ?? 0,
+      scope: "legacy_only",
+    });
   });
 
   router.post("/service-principals", internalMiddleware, async (req: AuthRequest, res) => {

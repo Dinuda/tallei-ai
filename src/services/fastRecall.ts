@@ -34,9 +34,11 @@ const memoryRepository = new MemoryRepository();
 const FAST_RECALL_EXACT_TTL_SECONDS = 120;
 const FAST_RECALL_WARM_TTL_SECONDS = 45;
 const FAST_RECALL_STAMP_TTL_SECONDS = 60 * 60 * 24 * 30;
+const FAST_RECALL_STAMP_SYNC_MS = 2_000;
 
 const localCache = new Map<string, LocalCacheEntry<RecallCacheEnvelope>>();
 const localStampByScope = new Map<string, number>();
+const localStampSyncedAtByScope = new Map<string, number>();
 const localEnrichmentInFlight = new Map<string, Promise<void>>();
 
 function scopeKey(auth: AuthContext): string {
@@ -96,9 +98,25 @@ async function writeCacheEnvelope(key: string, value: RecallCacheEnvelope, ttlSe
 export async function readRecallStamp(auth: AuthContext): Promise<number> {
   const scope = scopeKey(auth);
   const localStamp = localStampByScope.get(scope);
+  if (typeof localStamp === "number") {
+    const lastSyncedAt = localStampSyncedAtByScope.get(scope) ?? 0;
+    if (Date.now() - lastSyncedAt >= FAST_RECALL_STAMP_SYNC_MS) {
+      localStampSyncedAtByScope.set(scope, Date.now());
+      void getCacheJson<number>(stampCacheKey(auth))
+        .then((remoteStamp) => {
+          if (typeof remoteStamp !== "number") return;
+          const next = Math.max(localStampByScope.get(scope) ?? 0, remoteStamp);
+          localStampByScope.set(scope, next);
+        })
+        .catch(() => {});
+    }
+    return localStamp;
+  }
+
   const remoteStamp = await getCacheJson<number>(stampCacheKey(auth));
-  const stamp = Math.max(localStamp ?? 0, typeof remoteStamp === "number" ? remoteStamp : 0);
+  const stamp = typeof remoteStamp === "number" ? remoteStamp : 0;
   localStampByScope.set(scope, stamp);
+  localStampSyncedAtByScope.set(scope, Date.now());
   return stamp;
 }
 
@@ -106,6 +124,7 @@ export async function bumpRecallStamp(auth: AuthContext): Promise<void> {
   const scope = scopeKey(auth);
   const next = (localStampByScope.get(scope) ?? 0) + 1;
   localStampByScope.set(scope, next);
+  localStampSyncedAtByScope.set(scope, Date.now());
   await incrementWithTtl(stampCacheKey(auth), FAST_RECALL_STAMP_TTL_SECONDS);
 }
 
