@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import { randomBytes, createHash, randomUUID } from "crypto";
 import { pool } from "../db/index.js";
 import { config } from "../config.js";
-import { ensurePrimaryTenantForUser, resolveAuthContext } from "./tenancy.js";
+import { ensurePrimaryTenantForUser, resolveAuthContext, getPlanForTenant } from "./tenancy.js";
 import { getCacheJson, setCacheJson, deleteCacheKey } from "./cache.js";
 import type { AuthContext } from "../types/auth.js";
 
@@ -526,10 +526,12 @@ export async function validateApiKey(rawKey: string): Promise<string | null> {
 export async function authContextFromApiKey(rawKey: string, requesterIp?: string): Promise<AuthContext | null> {
   const validation = await validateApiKeyContext(rawKey, requesterIp);
   if (!validation) return null;
+  const plan = await getPlanForTenant(validation.tenantId);
   return {
     userId: validation.userId,
     tenantId: validation.tenantId,
     authMode: "api_key",
+    plan,
     keyId: validation.keyId,
     connectorType: validation.connectorType,
   };

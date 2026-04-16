@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from "crypto";
 import { config } from "../config.js";
+import { pool } from "../db/index.js";
 import type { AuthContext } from "../types/auth.js";
 import type { ConversationSummary } from "./summarizer.js";
 import { summarizeConversation } from "./summarizer.js";
@@ -18,6 +19,26 @@ import {
   legacyRecallMemories,
   legacySaveMemory,
 } from "./legacyMemory.js";
+
+export class QuotaExceededError extends Error {
+  constructor(public readonly message: string) {
+    super(message);
+    this.name = "QuotaExceededError";
+  }
+}
+
+const FREE_SAVE_LIMIT = 50;
+const FREE_RECALL_LIMIT = 200;
+
+async function countMonthlyEvents(tenantId: string, action: string): Promise<number> {
+  const periodStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  const result = await pool.query<{ cnt: number }>(
+    `SELECT COUNT(*)::int AS cnt FROM memory_events
+     WHERE tenant_id = $1 AND action = $2 AND created_at >= $3`,
+    [tenantId, action, periodStart]
+  );
+  return result.rows[0]?.cnt ?? 0;
+}
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -199,6 +220,15 @@ export async function saveMemory(
     return buildFallbackSummary(content);
   });
 
+  if (auth.plan === "free") {
+    const count = await countMonthlyEvents(auth.tenantId, "save");
+    if (count >= FREE_SAVE_LIMIT) {
+      throw new QuotaExceededError(
+        `Free plan limit reached: ${FREE_SAVE_LIMIT} saves/month. Upgrade to Pro at tallei.app/dashboard/billing.`
+      );
+    }
+  }
+
   const memoryText = buildMemoryText(platform, summary, content);
   const encrypted = encryptMemoryContent(memoryText);
   const contentHash = hashMemoryContent(memoryText);
@@ -273,6 +303,15 @@ export async function recallMemories(
   const cached = recallCache.get(cacheKey);
   if (cached && cached.exp > Date.now()) {
     return cached.result;
+  }
+
+  if (auth.plan === "free") {
+    const count = await countMonthlyEvents(auth.tenantId, "recall");
+    if (count >= FREE_RECALL_LIMIT) {
+      throw new QuotaExceededError(
+        `Free plan limit reached: ${FREE_RECALL_LIMIT} recalls/month. Upgrade to Pro at tallei.app/dashboard/billing.`
+      );
+    }
   }
 
   let vectorResults: Array<{ pointId: string; memoryId: string; score: number }> = [];

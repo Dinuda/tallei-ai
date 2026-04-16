@@ -54,6 +54,7 @@ async function processJob(job: {
     tenantId: job.tenant_id,
     userId: job.user_id,
     authMode: "internal",
+    plan: "free",
   };
 
   const memory = await memoryRepository.getByIdScoped(auth, job.memory_id);

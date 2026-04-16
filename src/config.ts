@@ -121,6 +121,10 @@ export const config = {
   browserHeadless: readBooleanEnv("BROWSER_HEADLESS", true),
   claudeConnectorMcpUrl:
     process.env.CLAUDE_CONNECTOR_MCP_URL || `${process.env.PUBLIC_BASE_URL || localBaseUrl}/mcp`,
+  lemonSqueezyApiKey: readStringEnv("LEMONSQUEEZY_API_KEY"),
+  lemonSqueezyWebhookSecret: readStringEnv("LEMONSQUEEZY_WEBHOOK_SECRET"),
+  lemonSqueezyProVariantId: readStringEnv("LEMONSQUEEZY_PRO_VARIANT_ID"),
+  lemonSqueezyPowerVariantId: readStringEnv("LEMONSQUEEZY_POWER_VARIANT_ID"),
   claudeProjectInstructionsTemplate:
     process.env.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
     "Project: chatgpt memory. Mandatory tool use: (1) On the first user message of each new conversation, call recall_memories with a broad query before replying. (2) Before answering any personal/contextual question, call recall_memories first. (3) Whenever the user states a durable fact or preference (name, favorite/favourite color, food, music, habits, goals, project stack, decisions), call remember_user_preference (or save_memory) in the same turn with concise factual content and platform=claude. (4) If user gives a direct answer after you asked for missing preference (example: user says 'blue' to 'what is your favorite color?'), immediately call remember_user_preference/save_memory before replying. (5) If the user corrects a prior fact, call save_memory with the corrected fact. Do not mention tool calls in the final user-facing response.",

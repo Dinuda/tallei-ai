@@ -10,6 +10,7 @@ import {
   listMemories,
   deleteMemory,
   prewarmRecallCache,
+  QuotaExceededError,
 } from "../services/memory.js";
 import {
   explainMemoryConnection,
@@ -18,11 +19,12 @@ import {
 } from "../services/memoryGraph.js";
 import { getMemoryGraphInsights } from "../services/memoryInsights.js";
 import { authContextFromUserId } from "../services/auth.js";
+import { getPlanForTenant } from "../services/tenancy.js";
 import { config } from "../config.js";
 import { pool } from "../db/index.js";
 import { getCacheJson, setCacheJson } from "../services/cache.js";
 import { hasRequiredScopes } from "../services/oauthTokens.js";
-import type { AuthContext } from "../types/auth.js";
+import type { AuthContext, Plan } from "../types/auth.js";
 
 const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
 
@@ -31,6 +33,7 @@ interface OAuthCacheEntry {
   tenantId: string;
   scopes: string[];
   clientId: string;
+  plan?: Plan;
 }
 
 function tokenCacheKey(token: string): string {
@@ -93,10 +96,17 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ content, platform }) => {
-      const saved = await saveMemory(content, auth, platform ?? "claude");
-      return {
-        content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }],
-      };
+      try {
+        const saved = await saveMemory(content, auth, platform ?? "claude");
+        return {
+          content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }],
+        };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -111,10 +121,17 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ fact, platform }) => {
-      const saved = await saveMemory(fact, auth, platform ?? "claude");
-      return {
-        content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }],
-      };
+      try {
+        const saved = await saveMemory(fact, auth, platform ?? "claude");
+        return {
+          content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }],
+        };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -131,8 +148,15 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ query, limit }) => {
-      const result = await recallMemories(query, auth, limit ?? 5);
-      return { content: [{ type: "text", text: result.contextBlock }] };
+      try {
+        const result = await recallMemories(query, auth, limit ?? 5);
+        return { content: [{ type: "text", text: result.contextBlock }] };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -239,8 +263,15 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ query, limit }) => {
-      const result = await recallMemories(query, auth, limit ?? 5);
-      return { content: [{ type: "text", text: result.contextBlock }] };
+      try {
+        const result = await recallMemories(query, auth, limit ?? 5);
+        return { content: [{ type: "text", text: result.contextBlock }] };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -297,6 +328,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
       userId: cached.userId,
       tenantId: cached.tenantId,
       authMode: "oauth",
+      plan: cached.plan ?? "free",
       clientId: cached.clientId,
       scopes: cached.scopes ?? [],
     };
@@ -309,7 +341,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
     if (typeof userIdValue !== "string" || userIdValue.length === 0) return null;
 
     const context = typeof tenantIdValue === "string" && tenantIdValue.length > 0
-      ? { userId: userIdValue, tenantId: tenantIdValue, authMode: "oauth" as const }
+      ? await authContextFromUserId(userIdValue, "oauth")
       : await authContextFromUserId(userIdValue, "oauth");
     const scopes = Array.isArray(authInfo.scopes)
       ? authInfo.scopes.map((scope) => String(scope))
@@ -320,6 +352,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
       {
         userId: context.userId,
         tenantId: context.tenantId,
+        plan: context.plan,
         clientId: authInfo.clientId,
         scopes,
       },
