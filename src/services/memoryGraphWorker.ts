@@ -6,6 +6,7 @@ import { MemoryRepository } from "../repositories/memoryRepository.js";
 import { MemoryGraphRepository } from "../repositories/memoryGraphRepository.js";
 import { MemoryGraphJobRepository } from "../repositories/memoryGraphJobRepository.js";
 import { extractMemoryGraph } from "./memoryGraphExtractor.js";
+import { buildUserSnapshot, queueSnapshotRefresh } from "./precomputedGraphRecall.js";
 
 const memoryRepository = new MemoryRepository();
 const graphRepository = new MemoryGraphRepository();
@@ -38,7 +39,7 @@ function parseSummary(raw: unknown): ConversationSummary {
   };
 }
 
-async function processJob(job: {
+async function processExtractOrBackfillJob(job: {
   id: string;
   tenant_id: string;
   user_id: string;
@@ -140,6 +141,46 @@ async function processJob(job: {
   }
 
   await jobRepository.markDone(job.id);
+  await queueSnapshotRefresh(auth, "graph_extract_done", 1_000);
+}
+
+async function processSnapshotRefreshJob(job: {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+}): Promise<void> {
+  const auth: AuthContext = {
+    tenantId: job.tenant_id,
+    userId: job.user_id,
+    authMode: "internal",
+  };
+  const built = await buildUserSnapshot(auth);
+  await memoryRepository.logEvent({
+    auth,
+    action: "snapshot_refresh",
+    metadata: {
+      source: "worker",
+      snapshot_build_ms: built.snapshot_build_ms,
+      source_window: built.snapshot.source_window,
+      version: built.snapshot.version,
+    },
+  });
+  await jobRepository.markDone(job.id);
+}
+
+async function processJob(job: {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  memory_id: string | null;
+  job_type: "extract" | "backfill" | "snapshot_refresh";
+  attempt_count: number;
+}): Promise<void> {
+  if (job.job_type === "snapshot_refresh") {
+    await processSnapshotRefreshJob(job);
+    return;
+  }
+  await processExtractOrBackfillJob(job);
 }
 
 async function runTick(): Promise<void> {
@@ -155,18 +196,23 @@ async function runTick(): Promise<void> {
       }
     }
 
-    const jobs = await jobRepository.claimJobs(config.memoryGraphWorkerBatchSize);
-    for (const job of jobs) {
-      try {
-        await processJob(job);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown_graph_worker_error";
-        const retryIndex = Math.max(0, Math.min(job.attempt_count - 1, RETRY_DELAYS_SECONDS.length - 1));
-        const shouldFail = job.attempt_count >= RETRY_DELAYS_SECONDS.length + 1;
-        if (shouldFail) {
-          await jobRepository.markFailed(job.id, "worker_error", message);
-        } else {
-          await jobRepository.markRetry(job.id, RETRY_DELAYS_SECONDS[retryIndex], "worker_error", message);
+    // Drain queue batches in one tick so follow-up jobs (e.g. snapshot_refresh)
+    // created by extract/backfill are also processed without waiting.
+    for (;;) {
+      const jobs = await jobRepository.claimJobs(config.memoryGraphWorkerBatchSize);
+      if (jobs.length === 0) break;
+      for (const job of jobs) {
+        try {
+          await processJob(job);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "unknown_graph_worker_error";
+          const retryIndex = Math.max(0, Math.min(job.attempt_count - 1, RETRY_DELAYS_SECONDS.length - 1));
+          const shouldFail = job.attempt_count >= RETRY_DELAYS_SECONDS.length + 1;
+          if (shouldFail) {
+            await jobRepository.markFailed(job.id, "worker_error", message);
+          } else {
+            await jobRepository.markRetry(job.id, RETRY_DELAYS_SECONDS[retryIndex], "worker_error", message);
+          }
         }
       }
     }
@@ -184,4 +230,12 @@ export function startMemoryGraphWorker(): void {
     void runTick();
   }, Math.max(500, config.memoryGraphWorkerPollMs));
   timer.unref();
+}
+
+export function stopMemoryGraphWorker(): void {
+  if (!timer) return;
+  clearInterval(timer);
+  timer = null;
+  running = false;
+  backfillInitialized = false;
 }

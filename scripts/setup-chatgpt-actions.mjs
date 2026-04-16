@@ -4,11 +4,14 @@ import process from "node:process";
 const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory tools.
 
 Rules:
-1) On the first user message in each new chat, call recallMemories with a broad query before replying.
-2) Before answering personal/contextual questions, call recallMemories first.
-3) When the user shares a durable fact or preference, call saveMemory in the same turn.
-4) If the user corrects a prior fact, call saveMemory with the corrected fact.
-5) Do not mention tool calls in the final user-facing response.`;
+1) On the first user message in each new chat, immediately call recallMemories with query="find tallei" before replying, even if context is not strictly needed.
+2) On every user turn, preload once by calling recallMemories before replying.
+3) If you do not know something, are uncertain, or detect missing personal/contextual information, call recallMemories before answering.
+4) Do not run repeated recall searches in the same turn unless the user explicitly asks for a deeper memory search.
+5) Before answering personal/contextual questions, ensure the preload recallMemories call has already happened in that turn.
+6) Only call saveMemory when the user explicitly asks you to remember something, or explicitly asks to remember a correction.
+7) If the user corrects a prior fact and asks to remember it, call saveMemory with the corrected fact.
+8) Do not mention tool calls in the final user-facing response.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);

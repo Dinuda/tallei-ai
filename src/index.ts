@@ -17,8 +17,10 @@ import billingRouter from "./routes/billing.js";
 import { createMcpRouter } from "./mcp/server.js";
 import { TalleiOAuthProvider } from "./mcp/oauth.js";
 import { createRateLimitMiddleware } from "./middleware/rateLimit.js";
+import { requestTimingMiddleware } from "./middleware/requestTiming.js";
 import { createOauthExtensionsRouter } from "./routes/oauth.js";
 import { startMemoryGraphWorker } from "./services/memoryGraphWorker.js";
+import { getRedisHealthState } from "./services/cache.js";
 
 const allowedOrigins = [
   config.frontendUrl,
@@ -57,6 +59,7 @@ function createApp() {
   }));
 
   app.use(express.json({ limit: "1mb" }));
+  app.use(requestTimingMiddleware);
 
   app.use(mcpAuthRouter({
     provider: oauthProvider,
@@ -67,7 +70,17 @@ function createApp() {
   }));
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "tallei", timestamp: new Date().toISOString() });
+    const redis = getRedisHealthState();
+    res.json({
+      status: "ok",
+      service: "tallei",
+      timestamp: new Date().toISOString(),
+      cache: {
+        redis_mode: redis.mode,
+        redis_last_error: redis.lastError,
+        redis_cooldown_until_ms: redis.cooldownUntilMs,
+      },
+    });
   });
 
   app.use("/api/auth", authRouter);
