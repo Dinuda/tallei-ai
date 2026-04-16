@@ -5,8 +5,18 @@ let redisClient: ReturnType<typeof createClient> | null = null;
 let redisInitPromise: Promise<ReturnType<typeof createClient> | null> | null = null;
 let redisDisabledUntil = 0;
 let lastRedisLogAt = 0;
+let lastRedisError: string | null = null;
+let hasWarnedProtocolMismatch = false;
 
 const REDIS_LOG_INTERVAL_MS = 30_000;
+
+type RedisMode = "online" | "cooldown" | "disabled";
+
+export interface RedisHealthState {
+  mode: RedisMode;
+  lastError: string | null;
+  cooldownUntilMs: number;
+}
 
 function isRedisConfigured(): boolean {
   return Boolean(config.redisUrl);
@@ -42,7 +52,35 @@ function shouldSkipRedis(): boolean {
   return Date.now() < redisDisabledUntil;
 }
 
+function sanitizeRedisError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? "unknown redis error");
+  return message.replace(/\s+/g, " ").trim().slice(0, 220);
+}
+
+function maybeWarnProtocolMismatch(error: unknown): void {
+  if (hasWarnedProtocolMismatch || config.nodeEnv === "production") return;
+  const message = sanitizeRedisError(error).toLowerCase();
+  const isSslVersionMismatch =
+    message.includes("err_ssl_wrong_version_number") || message.includes("wrong version number");
+  if (!isSslVersionMismatch) return;
+
+  hasWarnedProtocolMismatch = true;
+  if (config.redisUrl.startsWith("rediss://")) {
+    console.warn(
+      "[redis] TLS handshake mismatch detected. Endpoint may be non-TLS. Try redis:// or a TLS-enabled port."
+    );
+    return;
+  }
+  if (config.redisUrl.startsWith("redis://")) {
+    console.warn(
+      "[redis] TLS handshake mismatch detected. Endpoint may require TLS. Try rediss:// with the provider's TLS port."
+    );
+  }
+}
+
 function logRedisWarning(message: string, error: unknown): void {
+  lastRedisError = sanitizeRedisError(error);
+  maybeWarnProtocolMismatch(error);
   if (config.nodeEnv === "production") return;
   const now = Date.now();
   if (now - lastRedisLogAt < REDIS_LOG_INTERVAL_MS) return;
@@ -78,6 +116,7 @@ async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
     try {
       await withTimeout(client.connect(), config.redisConnectTimeoutMs, "redis.connect");
       redisClient = client;
+      lastRedisError = null;
       return client;
     } catch (error) {
       logRedisWarning("[redis] connection failed; falling back to no-cache mode", error);
@@ -101,6 +140,7 @@ export async function getCacheJson<T>(key: string): Promise<T | null> {
     if (!value) return null;
     return JSON.parse(value) as T;
   } catch {
+    lastRedisError = "redis.get failed";
     disableRedisTemporarily();
     return null;
   }
@@ -117,6 +157,7 @@ export async function setCacheJson(key: string, value: unknown, ttlSeconds: numb
       "redis.set"
     );
   } catch {
+    lastRedisError = "redis.set failed";
     disableRedisTemporarily();
     // Best-effort cache.
   }
@@ -128,6 +169,7 @@ export async function deleteCacheKey(key: string): Promise<void> {
   try {
     await withTimeout(client.del(key), config.redisCommandTimeoutMs, "redis.del");
   } catch {
+    lastRedisError = "redis.del failed";
     disableRedisTemporarily();
     // Best-effort cache.
   }
@@ -144,7 +186,21 @@ export async function incrementWithTtl(key: string, ttlSeconds: number): Promise
     }
     return value;
   } catch {
+    lastRedisError = "redis.incr/expire failed";
     disableRedisTemporarily();
     return 1;
   }
+}
+
+export function getRedisHealthState(): RedisHealthState {
+  if (!isRedisConfigured()) {
+    return { mode: "disabled", lastError: null, cooldownUntilMs: 0 };
+  }
+  if (shouldSkipRedis()) {
+    return { mode: "cooldown", lastError: lastRedisError, cooldownUntilMs: redisDisabledUntil };
+  }
+  if (redisClient?.isOpen) {
+    return { mode: "online", lastError: null, cooldownUntilMs: 0 };
+  }
+  return { mode: "disabled", lastError: lastRedisError, cooldownUntilMs: 0 };
 }

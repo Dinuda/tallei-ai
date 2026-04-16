@@ -31,6 +31,7 @@ import {
   legacyRecallMemories,
   legacySaveMemory,
 } from "./legacyMemory.js";
+import { setRequestTimingFields } from "./requestTiming.js";
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -42,9 +43,9 @@ const MEMORY_DB_TIMEOUT_MS = config.nodeEnv === "production" ? 10_000 : 2_500;
 const MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
 const MEMORY_VECTOR_SEARCH_TIMEOUT_MS = config.nodeEnv === "production" ? 2_000 : 1_250;
 const MEMORY_VECTOR_UPSERT_TIMEOUT_MS = config.memoryVectorUpsertTimeoutMs;
-const FAST_RECALL_EMBED_TIMEOUT_MS = 1_500;
-const FAST_RECALL_VECTOR_TIMEOUT_MS = 1_500;
-const FAST_RECALL_TOTAL_TIMEOUT_MS = 2_500;
+const FAST_RECALL_EMBED_TIMEOUT_MS = config.memoryRecallEmbedTimeoutMs;
+const FAST_RECALL_VECTOR_TIMEOUT_MS = config.memoryRecallVectorTimeoutMs;
+const FAST_RECALL_TOTAL_TIMEOUT_MS = config.memoryRecallTotalTimeoutMs;
 
 interface CachedRecall {
   result: RecallResult;
@@ -234,13 +235,16 @@ export async function saveMemory(
   platform: string,
   requesterIp?: string
 ): Promise<SaveMemoryResult> {
+  const saveStartedAt = process.hrtime.bigint();
   const normalizedContent = content.trim();
+  const summaryStartedAt = process.hrtime.bigint();
   const summaryPromise = summarizeConversation(content).catch((err) => {
     console.error("[memory] summarize failed, using fallback:", err);
     return buildFallbackSummary(content);
   });
 
   const summary = await summaryPromise;
+  const summaryMs = Number(process.hrtime.bigint() - summaryStartedAt) / 1_000_000;
 
   const memoryText = buildMemoryText(platform, summary, content);
   const encrypted = encryptMemoryContent(memoryText);
@@ -248,6 +252,7 @@ export async function saveMemory(
   const createdAt = new Date().toISOString();
   const memoryId = randomUUID();
 
+  const dbWriteStartedAt = process.hrtime.bigint();
   await memoryRepository.create(auth, {
     id: memoryId,
     contentCiphertext: encrypted,
@@ -255,6 +260,14 @@ export async function saveMemory(
     platform,
     summaryJson: summary,
     qdrantPointId: memoryId,
+  });
+  const dbWriteMs = Number(process.hrtime.bigint() - dbWriteStartedAt) / 1_000_000;
+  const saveTotalMs = Number(process.hrtime.bigint() - saveStartedAt) / 1_000_000;
+  setRequestTimingFields({
+    save_summary_ms: summaryMs,
+    save_db_write_ms: dbWriteMs,
+    save_service_ms: saveTotalMs,
+    save_vector_mode: shouldBypassVector() ? "bypass" : "background",
   });
 
   // Keep save latency low: vector embedding/upsert is best-effort in background.
@@ -521,6 +534,20 @@ function logRecallEvent(
   snapshot: { status?: string; lookupMs?: number; ageMs?: number } = {}
 ): void {
   const cacheHit = source === "exact_cache" || source === "warm_cache";
+  setRequestTimingFields({
+    recall_source: source,
+    recall_cache_hit: cacheHit,
+    recall_fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
+    recall_relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
+    recall_enrich_ms: timingsMs.enrich_ms ?? 0,
+    recall_embed_ms: timingsMs.embed_ms ?? 0,
+    recall_vector_ms: timingsMs.vector_ms ?? 0,
+    recall_graph_ms: timingsMs.graph_ms ?? 0,
+    recall_total_ms: timingsMs.total_ms ?? 0,
+    recall_snapshot_status: snapshot.status ?? null,
+    recall_snapshot_lookup_ms: snapshot.lookupMs ?? 0,
+    recall_snapshot_age_ms: snapshot.ageMs ?? 0,
+  });
   void memoryRepository.logEvent({
     auth,
     action: "recall",
@@ -532,6 +559,7 @@ function logRecallEvent(
       source,
       cache_hit: cacheHit,
       fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
+      relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
       enrich_ms: timingsMs.enrich_ms ?? 0,
       embed_ms: timingsMs.embed_ms ?? 0,
       vector_ms: timingsMs.vector_ms ?? 0,
@@ -626,6 +654,9 @@ export async function recallMemories(
   }
 
   const fallback = await buildRecentFallback(auth, normalizedQuery, boundedLimit);
+  if (fallback.relevanceMiss) {
+    void queueSnapshotRefresh(auth, "fallback_relevance_miss_v1", 750).catch(() => {});
+  }
   const result: RecallResult = {
     contextBlock: fallback.contextBlock,
     memories: fallback.memories,
@@ -667,6 +698,7 @@ export async function recallMemories(
   logRecallEvent(query, boundedLimit, auth, requesterIp, result, fallbackSource, {
     fallback_ms: fallback.elapsedMs,
     total_ms: fallback.elapsedMs,
+    relevance_miss: fallback.relevanceMiss ? 1 : 0,
   }, {
     status: snapshotLookup.status,
     lookupMs: snapshotLookup.snapshot_lookup_ms,

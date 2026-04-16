@@ -10,7 +10,8 @@ import {
   runBackgroundRecallEnrichment,
   writeRecallPayload,
 } from "./fastRecall.js";
-import { lookupPrecomputedRecallV2 } from "./precomputedGraphRecall.js";
+import { lookupPrecomputedRecallV2, queueSnapshotRefresh } from "./precomputedGraphRecall.js";
+import { setRequestTimingFields } from "./requestTiming.js";
 import { VectorRepository } from "../repositories/vectorRepository.js";
 import { MemoryRepository } from "../repositories/memoryRepository.js";
 import { MemoryGraphRepository } from "../repositories/memoryGraphRepository.js";
@@ -24,9 +25,9 @@ const graphJobRepository = new MemoryGraphJobRepository();
 const GRAPH_TIMEOUT_MS = 100;
 const RECALL_V2_CACHE_TTL_MS = 5 * 60_000;
 const VECTOR_BYPASS_TTL_MS = config.nodeEnv === "production" ? 0 : 60_000;
-const FAST_RECALL_EMBED_TIMEOUT_MS = 1_500;
-const FAST_RECALL_VECTOR_TIMEOUT_MS = 1_500;
-const FAST_RECALL_TOTAL_TIMEOUT_MS = 2_500;
+const FAST_RECALL_EMBED_TIMEOUT_MS = config.memoryRecallEmbedTimeoutMs;
+const FAST_RECALL_VECTOR_TIMEOUT_MS = config.memoryRecallVectorTimeoutMs;
+const FAST_RECALL_TOTAL_TIMEOUT_MS = config.memoryRecallTotalTimeoutMs;
 
 interface VectorCandidate {
   memoryId: string;
@@ -345,6 +346,21 @@ function logRecallV2Event(
     | "precomputed_graph_stale",
   snapshot: { status?: string; lookupMs?: number; ageMs?: number } = {}
 ): void {
+  setRequestTimingFields({
+    recall_source: source,
+    recall_cache_hit: source === "exact_cache" || source === "warm_cache",
+    recall_mode: result.retrieval_mode,
+    recall_fallback_ms: result.timings_ms.fallback_ms ?? 0,
+    recall_relevance_miss: (result.timings_ms.relevance_miss ?? 0) > 0,
+    recall_enrich_ms: result.timings_ms.total ?? 0,
+    recall_embed_ms: result.timings_ms.embed_ms ?? 0,
+    recall_vector_ms: result.timings_ms.vector_ms ?? 0,
+    recall_graph_ms: result.timings_ms.graph_ms ?? 0,
+    recall_total_ms: result.timings_ms.total ?? 0,
+    recall_snapshot_status: snapshot.status ?? null,
+    recall_snapshot_lookup_ms: snapshot.lookupMs ?? 0,
+    recall_snapshot_age_ms: snapshot.ageMs ?? 0,
+  });
   void memoryRepository.logEvent({
     auth,
     action: "recall_v2",
@@ -358,6 +374,7 @@ function logRecallV2Event(
       source,
       cache_hit: source === "exact_cache" || source === "warm_cache",
       fallback_ms: result.timings_ms.fallback_ms ?? 0,
+      relevance_miss: (result.timings_ms.relevance_miss ?? 0) > 0,
       enrich_ms: result.timings_ms.total ?? 0,
       embed_ms: result.timings_ms.embed_ms ?? 0,
       vector_ms: result.timings_ms.vector_ms ?? 0,
@@ -551,6 +568,10 @@ export async function recallMemoriesV2(
 
   const fallback = await buildRecentFallback(auth, normalizedQuery, boundedLimit);
   const result = fallbackV2Result(fallback.contextBlock, fallback.memories, fallback.elapsedMs);
+  if (fallback.relevanceMiss) {
+    result.timings_ms.relevance_miss = 1;
+    void queueSnapshotRefresh(auth, "fallback_relevance_miss_v2", 750).catch(() => {});
+  }
 
   runBackgroundRecallEnrichment(enrichmentKey(auth, normalizedQuery, boundedLimit, depth), async () => {
     const enriched = await withTimeout(

@@ -19,6 +19,16 @@ function readIntEnv(name: string, fallback: number): number {
   return value;
 }
 
+function readFloatEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseFloat(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`Invalid float env var: ${name}`);
+  }
+  return value;
+}
+
 function readOptionalIntEnv(name: string): number | null {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return null;
@@ -99,12 +109,37 @@ export const config = {
     "REDIS_FAILURE_COOLDOWN_MS",
     process.env.NODE_ENV === "production" ? 300_000 : 60_000
   ),
+  authUsageUpdateDebounceMs: readIntEnv(
+    "AUTH_USAGE_UPDATE_DEBOUNCE_MS",
+    process.env.NODE_ENV === "production" ? 60_000 : 60_000
+  ),
+  authUsageUpdateRetryMs: readIntEnv(
+    "AUTH_USAGE_UPDATE_RETRY_MS",
+    process.env.NODE_ENV === "production" ? 5_000 : 5_000
+  ),
+  authUsageUpdateMaxConcurrency: readIntEnv(
+    "AUTH_USAGE_UPDATE_MAX_CONCURRENCY",
+    process.env.NODE_ENV === "production" ? 4 : 2
+  ),
+  memoryFallbackMinRelevance: readFloatEnv("MEMORY_FALLBACK_MIN_RELEVANCE", 0.2),
   qdrantUrl: readStringEnv("QDRANT_URL"),
   qdrantApiKey: readStringEnv("QDRANT_API_KEY"),
   qdrantCollectionName: readStringEnv("QDRANT_COLLECTION_NAME", "memories_v1"),
   memoryVectorUpsertTimeoutMs: readIntEnv(
     "MEMORY_VECTOR_UPSERT_TIMEOUT_MS",
     process.env.NODE_ENV === "production" ? 10_000 : 12_000
+  ),
+  memoryRecallEmbedTimeoutMs: readIntEnv(
+    "MEMORY_RECALL_EMBED_TIMEOUT_MS",
+    process.env.NODE_ENV === "production" ? 5_000 : 6_000
+  ),
+  memoryRecallVectorTimeoutMs: readIntEnv(
+    "MEMORY_RECALL_VECTOR_TIMEOUT_MS",
+    process.env.NODE_ENV === "production" ? 8_000 : 12_000
+  ),
+  memoryRecallTotalTimeoutMs: readIntEnv(
+    "MEMORY_RECALL_TOTAL_TIMEOUT_MS",
+    process.env.NODE_ENV === "production" ? 12_000 : 20_000
   ),
   // Qdrant JS client expects timeout in milliseconds.
   qdrantTimeoutMs:
@@ -139,5 +174,5 @@ export const config = {
     process.env.CLAUDE_CONNECTOR_MCP_URL || `${process.env.PUBLIC_BASE_URL || localBaseUrl}/mcp`,
   claudeProjectInstructionsTemplate:
     process.env.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
-    "Project: chatgpt memory. Mandatory tool use: (1) On the first user message of each new conversation, call recall_memories with a broad query before replying. (2) Before answering any personal/contextual question, call recall_memories first. (3) Whenever the user states a durable fact or preference (name, favorite/favourite color, food, music, habits, goals, project stack, decisions), call remember_user_preference (or save_memory) in the same turn with concise factual content and platform=claude. (4) If user gives a direct answer after you asked for missing preference (example: user says 'blue' to 'what is your favorite color?'), immediately call remember_user_preference/save_memory before replying. (5) If the user corrects a prior fact, call save_memory with the corrected fact. Do not mention tool calls in the final user-facing response.",
+    "Project: chatgpt memory. Mandatory tool use and preload policy: (1) On the first user message of every new conversation, immediately call recall_memories with query='find tallei' before replying, even if context is not strictly needed, to warm tool/context loading. (2) On each user turn, preload by calling recall_memories once before replying; do not run repeated recall searches in the same turn unless the user explicitly asks for deeper memory search. (3) If you do not know something, are uncertain, or detect missing personal/contextual information, call recall_memories before answering. (4) Before answering personal/contextual questions, ensure the preload recall_memories call has already happened in that turn. (5) Only call remember_user_preference/save_memory when the user explicitly asks to remember something, or when they explicitly asks to remember a correction. (6) If the user corrects a prior fact and asks to remember it, call save_memory with the corrected fact. (7) Do not mention tool calls in the final user-facing response.",
 } as const;

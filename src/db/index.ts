@@ -661,6 +661,7 @@ export async function initDb() {
       UPDATE api_keys
       SET revoked_at = NOW()
       WHERE revoked_at IS NULL
+        AND connector_type IS NULL
     `);
     await applySupabaseRlsPolicies(client);
 

@@ -577,6 +577,11 @@ export function createOauthExtensionsRouter(): Router {
       revoked: revoked.rowCount ?? 0,
       scope: "legacy_only",
     });
+    if ((revoked.rowCount ?? 0) > 0 && config.nodeEnv !== "production") {
+      console.warn("[oauth] revoke-legacy-keys revoked active legacy API keys", {
+        revoked: revoked.rowCount ?? 0,
+      });
+    }
   });
 
   router.post("/service-principals", internalMiddleware, async (req: AuthRequest, res) => {

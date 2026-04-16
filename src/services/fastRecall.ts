@@ -3,6 +3,7 @@ import type { AuthContext } from "../types/auth.js";
 import { decryptMemoryContent } from "./crypto.js";
 import { MemoryRepository } from "../repositories/memoryRepository.js";
 import { getCacheJson, incrementWithTtl, setCacheJson } from "./cache.js";
+import { config } from "../config.js";
 
 export interface FastRecallMemoryItem {
   id: string;
@@ -47,6 +48,30 @@ function scopeKey(auth: AuthContext): string {
 
 function normalizeQuery(query: string): string {
   return query.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+}
+
+function recencyScore(createdAtIso: string): number {
+  const days = Math.max(0, (Date.now() - new Date(createdAtIso).getTime()) / 86_400_000);
+  return Math.max(0, 1 - days / 30);
+}
+
+function lexicalRelevance(queryTokens: Set<string>, text: string): number {
+  if (queryTokens.size === 0) return 0;
+  const textTokens = new Set(tokenize(text));
+  let overlap = 0;
+  for (const token of queryTokens) {
+    if (textTokens.has(token)) overlap += 1;
+  }
+  return overlap / queryTokens.size;
 }
 
 function queryHash(query: string): string {
@@ -213,42 +238,63 @@ export async function buildRecentFallback(
   auth: AuthContext,
   query: string,
   limit: number
-): Promise<{ contextBlock: string; memories: FastRecallMemoryItem[]; elapsedMs: number }> {
+): Promise<{ contextBlock: string; memories: FastRecallMemoryItem[]; elapsedMs: number; relevanceMiss: boolean }> {
   const startedAt = Date.now();
   const bounded = Math.min(20, Math.max(1, limit));
   const maxRecent = Math.min(3, bounded);
-  const rows = await memoryRepository.list(auth, Math.max(maxRecent, 3));
+  const rows = await memoryRepository.list(auth, Math.max(bounded * 2, 12));
+  const queryTokens = new Set(tokenize(normalizeQuery(query)));
 
-  const memories = rows
+  const candidates = rows.map((row) => {
+    let text = "";
+    try {
+      text = decryptMemoryContent(row.content_ciphertext);
+    } catch {
+      text = "[Encrypted memory unavailable]";
+    }
+    const lexical = lexicalRelevance(queryTokens, text);
+    const recency = recencyScore(row.created_at);
+    const metadata = (row.summary_json && typeof row.summary_json === "object"
+      ? (row.summary_json as Record<string, unknown>)
+      : {}) as Record<string, unknown>;
+    return {
+      id: row.id,
+      text,
+      lexical,
+      recency,
+      metadata: {
+        ...metadata,
+        platform: row.platform,
+        createdAt: row.created_at,
+        retrieval: "recent_fallback",
+        query: normalizeQuery(query),
+        lexical_relevance: Number(lexical.toFixed(4)),
+      },
+    };
+  });
+
+  const relevantCandidates = queryTokens.size === 0
+    ? candidates
+    : candidates.filter((candidate) => candidate.lexical >= config.memoryFallbackMinRelevance);
+
+  const memories = relevantCandidates
+    .sort((a, b) => {
+      if (b.lexical !== a.lexical) return b.lexical - a.lexical;
+      return b.recency - a.recency;
+    })
     .slice(0, maxRecent)
-    .map((row, index) => {
-      let text = "";
-      try {
-        text = decryptMemoryContent(row.content_ciphertext);
-      } catch {
-        text = "[Encrypted memory unavailable]";
-      }
-      const metadata = (row.summary_json && typeof row.summary_json === "object"
-        ? (row.summary_json as Record<string, unknown>)
-        : {}) as Record<string, unknown>;
-      return {
-        id: row.id,
-        text,
-        score: Number((1 - index * 0.08).toFixed(4)),
-        metadata: {
-          ...metadata,
-          platform: row.platform,
-          createdAt: row.created_at,
-          retrieval: "recent_fallback",
-          query: normalizeQuery(query),
-        },
-      };
-    });
+    .map((candidate, index) => ({
+      id: candidate.id,
+      text: candidate.text,
+      score: Number((candidate.lexical * 0.85 + candidate.recency * 0.15 - index * 0.01).toFixed(4)),
+      metadata: candidate.metadata,
+    }));
 
   return {
     contextBlock: buildContextBlock(memories),
     memories,
     elapsedMs: Date.now() - startedAt,
+    relevanceMiss: queryTokens.size > 0 && memories.length === 0,
   };
 }
 
