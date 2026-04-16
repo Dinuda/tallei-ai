@@ -149,7 +149,7 @@ export class VectorRepository {
     const pointId = input.pointId ?? input.memoryId ?? randomUUID();
 
     await client.upsert(config.qdrantCollectionName, {
-      wait: true,
+      wait: false,
       points: [
         {
           id: pointId,
@@ -204,7 +204,7 @@ export class VectorRepository {
     const client = getQdrantClient();
 
     await client.delete(config.qdrantCollectionName, {
-      wait: true,
+      wait: false,
       filter: {
         must: [
           { key: "tenant_id", match: { value: auth.tenantId } },

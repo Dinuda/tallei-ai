@@ -13,6 +13,19 @@ import {
   recallMemoriesV2,
 } from "./memoryGraph.js";
 import {
+  buildRecentFallback,
+  bumpRecallStamp,
+  readExactRecallPayload,
+  readWarmRecallPayload,
+  runBackgroundRecallEnrichment,
+  writeRecallPayload,
+} from "./fastRecall.js";
+import {
+  lookupPrecomputedRecallV1,
+  markSnapshotStale,
+  queueSnapshotRefresh,
+} from "./precomputedGraphRecall.js";
+import {
   legacyDeleteMemory,
   legacyListMemories,
   legacyRecallMemories,
@@ -26,11 +39,26 @@ const RECALL_TTL_MS = 10 * 60_000;
 const VECTOR_BYPASS_TTL_MS = config.nodeEnv === "production" ? 0 : 60_000;
 const VECTOR_WARN_INTERVAL_MS = 30_000;
 const MEMORY_DB_TIMEOUT_MS = config.nodeEnv === "production" ? 10_000 : 2_500;
+const MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
+const MEMORY_VECTOR_SEARCH_TIMEOUT_MS = config.nodeEnv === "production" ? 2_000 : 1_250;
+const MEMORY_VECTOR_UPSERT_TIMEOUT_MS = config.nodeEnv === "production" ? 2_500 : 1_500;
+const FAST_RECALL_EMBED_TIMEOUT_MS = 1_500;
+const FAST_RECALL_VECTOR_TIMEOUT_MS = 1_500;
+const FAST_RECALL_TOTAL_TIMEOUT_MS = 2_500;
 
 interface CachedRecall {
   result: RecallResult;
   exp: number;
 }
+
+type RecallSource =
+  | "exact_cache"
+  | "warm_cache"
+  | "recent_fallback"
+  | "semantic_enriched"
+  | "precomputed_graph_hit"
+  | "precomputed_graph_miss"
+  | "precomputed_graph_stale";
 
 const recallCache = new Map<string, CachedRecall>();
 const prewarmedUsers = new Set<string>();
@@ -43,7 +71,11 @@ function cacheScopeKey(auth: AuthContext): string {
 }
 
 function recallCacheKey(auth: AuthContext, query: string, limit: number): string {
-  return `${cacheScopeKey(auth)}:${limit}:${query}`;
+  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}`;
+}
+
+function recallEnrichmentKey(auth: AuthContext, query: string, limit: number): string {
+  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:v1`;
 }
 
 function invalidateRecallCache(auth: AuthContext): void {
@@ -111,6 +143,10 @@ function tokenize(text: string): string[] {
     .filter((t) => t.length >= 2);
 }
 
+function normalizeRecallQuery(query: string): string {
+  return query.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 function fallbackScore(query: string, text: string, createdAt: string): number {
   const queryTokens = new Set(tokenize(query));
   const textTokens = tokenize(text);
@@ -150,6 +186,10 @@ function buildMemoryText(platform: string, summary: ConversationSummary, rawCont
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function buildEmbeddingText(platform: string, rawContent: string): string {
+  return `[${platform.toUpperCase()}]\n${rawContent.trim()}`;
 }
 
 function ipHash(ip?: string): string | null {
@@ -194,10 +234,20 @@ export async function saveMemory(
   platform: string,
   requesterIp?: string
 ): Promise<SaveMemoryResult> {
-  const summary = await summarizeConversation(content).catch((err) => {
+  const normalizedContent = content.trim();
+  const summaryPromise = summarizeConversation(content).catch((err) => {
     console.error("[memory] summarize failed, using fallback:", err);
     return buildFallbackSummary(content);
   });
+  const embeddingPromise = shouldBypassVector()
+    ? null
+    : withTimeout(
+        embedText(buildEmbeddingText(platform, normalizedContent)),
+        MEMORY_EMBED_TIMEOUT_MS,
+        "save.embed"
+      );
+
+  const summary = await summaryPromise;
 
   const memoryText = buildMemoryText(platform, summary, content);
   const encrypted = encryptMemoryContent(memoryText);
@@ -206,16 +256,20 @@ export async function saveMemory(
   const memoryId = randomUUID();
 
   let pointId: string = memoryId;
-  if (!shouldBypassVector()) {
+  if (embeddingPromise) {
     try {
-      const vector = await embedText(memoryText);
-      const upserted = await vectorRepository.upsertMemoryVector({
-        auth,
-        memoryId,
-        vector,
-        platform,
-        createdAt,
-      });
+      const vector = await embeddingPromise;
+      const upserted = await withTimeout(
+        vectorRepository.upsertMemoryVector({
+          auth,
+          memoryId,
+          vector,
+          platform,
+          createdAt,
+        }),
+        MEMORY_VECTOR_UPSERT_TIMEOUT_MS,
+        "save.upsert"
+      );
       pointId = upserted.pointId;
     } catch (error) {
       noteVectorFailure(error, "save");
@@ -249,6 +303,9 @@ export async function saveMemory(
 
   invalidateRecallCache(auth);
   invalidateRecallV2Cache(auth);
+  void bumpRecallStamp(auth).catch(() => {});
+  void markSnapshotStale(auth).catch(() => {});
+  void queueSnapshotRefresh(auth, "save_memory", 1_000).catch(() => {});
 
   if (config.memoryDualWriteEnabled) {
     void legacySaveMemory(content, auth.userId, platform).catch((error) => {
@@ -263,31 +320,41 @@ export async function saveMemory(
   };
 }
 
-export async function recallMemories(
+async function semanticRecallMemories(
   query: string,
   auth: AuthContext,
-  limit = 5,
-  requesterIp?: string
-): Promise<RecallResult> {
-  const cacheKey = recallCacheKey(auth, query, limit);
-  const cached = recallCache.get(cacheKey);
-  if (cached && cached.exp > Date.now()) {
-    return cached.result;
-  }
-
+  limit: number
+): Promise<{ result: RecallResult; timingsMs: Record<string, number> }> {
+  const startedAt = Date.now();
+  const timingsMs: Record<string, number> = {};
   let vectorResults: Array<{ pointId: string; memoryId: string; score: number }> = [];
   let rows = [] as Awaited<ReturnType<typeof memoryRepository.getByIds>>;
 
   if (!shouldBypassVector()) {
     try {
-      const queryVector = await embedText(query);
-      vectorResults = await vectorRepository.searchVectors(auth, queryVector, limit);
-      const memoryIds = vectorResults.map((v) => v.memoryId);
+      const embedStartedAt = Date.now();
+      const queryVector = await withTimeout(
+        embedText(normalizeRecallQuery(query)),
+        FAST_RECALL_EMBED_TIMEOUT_MS,
+        "recall.embed"
+      );
+      timingsMs.embed_ms = Date.now() - embedStartedAt;
+
+      const vectorStartedAt = Date.now();
+      vectorResults = await withTimeout(
+        vectorRepository.searchVectors(auth, queryVector, limit),
+        FAST_RECALL_VECTOR_TIMEOUT_MS,
+        "recall.searchVectors"
+      );
+      timingsMs.vector_ms = Date.now() - vectorStartedAt;
+
+      const dbStartedAt = Date.now();
       rows = await withTimeout(
-        memoryRepository.getByIds(auth, memoryIds),
+        memoryRepository.getByIds(auth, vectorResults.map((v) => v.memoryId)),
         MEMORY_DB_TIMEOUT_MS,
         "recall.getByIds"
       );
+      timingsMs.db_ms = Date.now() - dbStartedAt;
     } catch (error) {
       noteVectorFailure(error, "recall");
     }
@@ -378,19 +445,20 @@ export async function recallMemories(
     lines.length > 0
       ? `--- Your Past Context ---\n${lines.join("\n")}\n---`
       : "--- No relevant memories found ---";
+  timingsMs.total_ms = Date.now() - startedAt;
 
-  const result: RecallResult = { contextBlock, memories };
-  recallCache.set(cacheKey, { result, exp: Date.now() + RECALL_TTL_MS });
+  return {
+    result: { contextBlock, memories },
+    timingsMs,
+  };
+}
 
-  void memoryRepository.logEvent({
-    auth,
-    action: "recall",
-    ipHash: ipHash(requesterIp),
-    metadata: { query, limit, hits: memories.length },
-  }).catch((error) => {
-    noteMemoryDbFailure(error, "recall-log");
-  });
-
+function runRecallShadowChecks(
+  query: string,
+  auth: AuthContext,
+  limit: number,
+  result: RecallResult
+): void {
   if (config.memoryShadowReadEnabled && config.memoryDualWriteEnabled) {
     void legacyRecallMemories(query, auth.userId, limit)
       .then(async (legacyResult) => {
@@ -441,6 +509,171 @@ export async function recallMemories(
         }
       });
   }
+}
+
+function logRecallEvent(
+  query: string,
+  limit: number,
+  auth: AuthContext,
+  requesterIp: string | undefined,
+  result: RecallResult,
+  source: RecallSource,
+  timingsMs: Record<string, number> = {},
+  snapshot: { status?: string; lookupMs?: number; ageMs?: number } = {}
+): void {
+  const cacheHit = source === "exact_cache" || source === "warm_cache";
+  void memoryRepository.logEvent({
+    auth,
+    action: "recall",
+    ipHash: ipHash(requesterIp),
+    metadata: {
+      query,
+      limit,
+      hits: result.memories.length,
+      source,
+      cache_hit: cacheHit,
+      fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
+      enrich_ms: timingsMs.enrich_ms ?? 0,
+      embed_ms: timingsMs.embed_ms ?? 0,
+      vector_ms: timingsMs.vector_ms ?? 0,
+      graph_ms: timingsMs.graph_ms ?? 0,
+      total_ms: timingsMs.total_ms ?? 0,
+      snapshot_status: snapshot.status ?? null,
+      snapshot_lookup_ms: snapshot.lookupMs ?? 0,
+      snapshot_age_ms: snapshot.ageMs ?? 0,
+    },
+  }).catch((error) => {
+    noteMemoryDbFailure(error, "recall-log");
+  });
+}
+
+export async function recallMemories(
+  query: string,
+  auth: AuthContext,
+  limit = 5,
+  requesterIp?: string
+): Promise<RecallResult> {
+  const boundedLimit = Math.min(20, Math.max(1, limit));
+  const normalizedQuery = normalizeRecallQuery(query);
+  const cacheKey = recallCacheKey(auth, normalizedQuery, boundedLimit);
+  const cached = recallCache.get(cacheKey);
+  if (cached && cached.exp > Date.now()) {
+    logRecallEvent(query, boundedLimit, auth, requesterIp, cached.result, "exact_cache");
+    return cached.result;
+  }
+
+  const exactHit = await readExactRecallPayload<RecallResult>(auth, normalizedQuery, "v1");
+  if (exactHit) {
+    recallCache.set(cacheKey, { result: exactHit, exp: Date.now() + RECALL_TTL_MS });
+    logRecallEvent(query, boundedLimit, auth, requesterIp, exactHit, "exact_cache");
+    runRecallShadowChecks(query, auth, boundedLimit, exactHit);
+    return exactHit;
+  }
+
+  const warmHit = await readWarmRecallPayload<RecallResult>(auth, normalizedQuery, "v1");
+  if (warmHit) {
+    recallCache.set(cacheKey, { result: warmHit, exp: Date.now() + RECALL_TTL_MS });
+    runBackgroundRecallEnrichment(
+      recallEnrichmentKey(auth, normalizedQuery, boundedLimit),
+      async () => {
+        const enriched = await withTimeout(
+          semanticRecallMemories(normalizedQuery, auth, boundedLimit),
+          FAST_RECALL_TOTAL_TIMEOUT_MS,
+          "recall.enrichTotal"
+        );
+        recallCache.set(cacheKey, { result: enriched.result, exp: Date.now() + RECALL_TTL_MS });
+        await writeRecallPayload(auth, normalizedQuery, "v1", enriched.result);
+        await memoryRepository.logEvent({
+          auth,
+          action: "recall_enrich",
+          metadata: {
+            query: normalizedQuery,
+            limit: boundedLimit,
+            source: "semantic_enriched",
+            cache_hit: false,
+            enrich_ms: enriched.timingsMs.total_ms ?? 0,
+            embed_ms: enriched.timingsMs.embed_ms ?? 0,
+            vector_ms: enriched.timingsMs.vector_ms ?? 0,
+            graph_ms: 0,
+          },
+        });
+      }
+    );
+    logRecallEvent(query, boundedLimit, auth, requesterIp, warmHit, "warm_cache");
+    runRecallShadowChecks(query, auth, boundedLimit, warmHit);
+    return warmHit;
+  }
+
+  const snapshotLookup = await lookupPrecomputedRecallV1(auth, normalizedQuery, boundedLimit);
+  if (snapshotLookup.status === "hit" && snapshotLookup.result) {
+    recallCache.set(cacheKey, { result: snapshotLookup.result, exp: Date.now() + RECALL_TTL_MS });
+    void writeRecallPayload(auth, normalizedQuery, "v1", snapshotLookup.result).catch(() => {});
+    logRecallEvent(
+      query,
+      boundedLimit,
+      auth,
+      requesterIp,
+      snapshotLookup.result,
+      "precomputed_graph_hit",
+      { total_ms: snapshotLookup.snapshot_lookup_ms },
+      {
+        status: snapshotLookup.status,
+        lookupMs: snapshotLookup.snapshot_lookup_ms,
+        ageMs: snapshotLookup.snapshot_age_ms,
+      }
+    );
+    runRecallShadowChecks(query, auth, boundedLimit, snapshotLookup.result);
+    return snapshotLookup.result;
+  }
+
+  const fallback = await buildRecentFallback(auth, normalizedQuery, boundedLimit);
+  const result: RecallResult = {
+    contextBlock: fallback.contextBlock,
+    memories: fallback.memories,
+  };
+  recallCache.set(cacheKey, { result, exp: Date.now() + RECALL_TTL_MS });
+
+  runBackgroundRecallEnrichment(
+    recallEnrichmentKey(auth, normalizedQuery, boundedLimit),
+    async () => {
+      const enriched = await withTimeout(
+        semanticRecallMemories(normalizedQuery, auth, boundedLimit),
+        FAST_RECALL_TOTAL_TIMEOUT_MS,
+        "recall.enrichTotal"
+      );
+      recallCache.set(cacheKey, { result: enriched.result, exp: Date.now() + RECALL_TTL_MS });
+      await writeRecallPayload(auth, normalizedQuery, "v1", enriched.result);
+      await memoryRepository.logEvent({
+        auth,
+        action: "recall_enrich",
+        metadata: {
+          query: normalizedQuery,
+          limit: boundedLimit,
+          source: "semantic_enriched",
+          cache_hit: false,
+          enrich_ms: enriched.timingsMs.total_ms ?? 0,
+          embed_ms: enriched.timingsMs.embed_ms ?? 0,
+          vector_ms: enriched.timingsMs.vector_ms ?? 0,
+          graph_ms: 0,
+        },
+      });
+    }
+  );
+  const fallbackSource: RecallSource =
+    snapshotLookup.status === "miss"
+      ? "precomputed_graph_miss"
+      : snapshotLookup.status === "stale"
+        ? "precomputed_graph_stale"
+        : "recent_fallback";
+  logRecallEvent(query, boundedLimit, auth, requesterIp, result, fallbackSource, {
+    fallback_ms: fallback.elapsedMs,
+    total_ms: fallback.elapsedMs,
+  }, {
+    status: snapshotLookup.status,
+    lookupMs: snapshotLookup.snapshot_lookup_ms,
+    ageMs: snapshotLookup.snapshot_age_ms,
+  });
+  runRecallShadowChecks(query, auth, boundedLimit, result);
 
   return result;
 }
@@ -530,5 +763,8 @@ export async function deleteMemory(memoryId: string, auth: AuthContext, requeste
 
   invalidateRecallCache(auth);
   invalidateRecallV2Cache(auth);
+  void bumpRecallStamp(auth).catch(() => {});
+  void markSnapshotStale(auth).catch(() => {});
+  void queueSnapshotRefresh(auth, "delete_memory", 1_000).catch(() => {});
   return { success: true };
 }

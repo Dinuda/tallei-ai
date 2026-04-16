@@ -12,6 +12,7 @@ process.env.RECALL_V2_ENABLED = "true";
 process.env.RECALL_V2_SHADOW_MODE = "false";
 process.env.DASHBOARD_GRAPH_V2_ENABLED = "true";
 process.env.MEMORY_MASTER_KEY ??= "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+process.env.REDIS_URL = "";
 
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
@@ -95,7 +96,7 @@ interface InMemoryState {
     tenant_id: string;
     user_id: string;
     memory_id: string | null;
-    job_type: "extract" | "backfill";
+    job_type: "extract" | "backfill" | "snapshot_refresh";
     status: "queued" | "running" | "retry" | "failed" | "done";
     attempt_count: number;
     next_run_at: string;
@@ -144,7 +145,12 @@ interface InMemoryState {
     last_seen_at: string;
     active: boolean;
   }>;
-  events: Array<{ action: string; tenantId: string; userId: string }>;
+  events: Array<{
+    action: string;
+    tenantId: string;
+    userId: string;
+    metadata?: Record<string, unknown>;
+  }>;
 }
 
 function scopeKey(scope: Scope): string {
@@ -236,6 +242,7 @@ MemoryRepository.prototype.logEvent = async function logEvent(input) {
     action: input.action,
     tenantId: input.auth.tenantId,
     userId: input.auth.userId,
+    metadata: (input.metadata ?? {}) as Record<string, unknown>,
   });
 };
 
@@ -276,6 +283,44 @@ MemoryGraphJobRepository.prototype.enqueueExtractJob = async function enqueueExt
     user_id: auth.userId,
     memory_id: memoryId,
     job_type: "extract",
+    status: "queued",
+    attempt_count: 0,
+    next_run_at: now,
+    error_code: null,
+    error_message: null,
+    payload_json: payload ?? {},
+    created_at: now,
+    updated_at: now,
+  });
+};
+
+MemoryGraphJobRepository.prototype.enqueueSnapshotRefreshJob = async function enqueueSnapshotRefreshJob(
+  auth,
+  payload = {},
+  _debounceMs = 1000
+) {
+  const existing = stateRef.current.jobs.find(
+    (job) =>
+      job.tenant_id === auth.tenantId &&
+      job.user_id === auth.userId &&
+      job.job_type === "snapshot_refresh" &&
+      (job.status === "queued" || job.status === "running" || job.status === "retry")
+  );
+  if (existing) {
+    existing.payload_json = {
+      ...(typeof existing.payload_json === "object" && existing.payload_json ? existing.payload_json : {}),
+      ...(typeof payload === "object" && payload ? payload : {}),
+    };
+    return;
+  }
+
+  const now = new Date().toISOString();
+  stateRef.current.jobs.push({
+    id: randomUUID(),
+    tenant_id: auth.tenantId,
+    user_id: auth.userId,
+    memory_id: null,
+    job_type: "snapshot_refresh",
     status: "queued",
     attempt_count: 0,
     next_run_at: now,
@@ -601,19 +646,27 @@ MemoryGraphRepository.prototype.countUncertainRelations = async function countUn
   ).length;
 };
 
-const [{ saveMemory }, { enqueueGraphExtractionJob, recallMemoriesV2 }, { startMemoryGraphWorker }, { getMemoryGraphInsights }, { config }] =
+const [
+  { saveMemory, recallMemories, deleteMemory },
+  { enqueueGraphExtractionJob, recallMemoriesV2 },
+  { startMemoryGraphWorker, stopMemoryGraphWorker },
+  { getMemoryGraphInsights },
+  { config },
+  { buildUserSnapshot },
+] =
   await Promise.all([
     import("../../src/services/memory.js"),
     import("../../src/services/memoryGraph.js"),
     import("../../src/services/memoryGraphWorker.js"),
     import("../../src/services/memoryInsights.js"),
     import("../../src/config.js"),
+    import("../../src/services/precomputedGraphRecall.js"),
   ]);
 
 config.graphExtractionEnabled = true;
 config.recallV2Enabled = true;
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 1500): Promise<void> {
+async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (predicate()) return;
@@ -706,6 +759,7 @@ test(
     } finally {
       globalThis.setInterval = originalSetInterval;
       globalThis.clearInterval = originalClearInterval;
+      stopMemoryGraphWorker();
     }
 
     assert.ok(stateRef.current.entities.length >= 4, "expected extracted entities");
@@ -714,6 +768,15 @@ test(
     const recalled = await recallMemoriesV2("postgres tallei", auth, 5, 1);
     assert.equal(recalled.retrieval_mode, "graph_augmented");
     assert.ok(recalled.memories.some((memory) => memory.id === saveOne.memoryId));
+    assert.ok(
+      stateRef.current.events.some(
+        (event) =>
+          event.action === "recall_v2" &&
+          typeof event.metadata?.source === "string" &&
+          event.metadata.source === "precomputed_graph_hit"
+      ),
+      "expected precomputed graph hit"
+    );
 
     const explanation = recalled.explanations.find((item) => item.memory_id === saveOne.memoryId);
     assert.ok(explanation, "expected explanation entry for first memory");
@@ -738,6 +801,176 @@ test(
         stateRef.current.memories.some((memory) => memory.id === id)
       )
     );
+  }
+);
+
+test(
+  "fast recall returns immediate recent fallback and next call uses enriched cache",
+  { concurrency: false },
+  async () => {
+    resetState();
+    const auth = {
+      tenantId: "tenant-c",
+      userId: "user-c",
+      authMode: "internal" as const,
+    };
+
+    await saveMemory("Alice prefers Postgres for Tallei", auth, "chatgpt");
+    await saveMemory("Alice is exploring Kubernetes", auth, "chatgpt");
+
+    let searchCalls = 0;
+    const originalSearchVectors = VectorRepository.prototype.searchVectors;
+    VectorRepository.prototype.searchVectors = async function wrappedSearch(authArg, queryVector, limit) {
+      searchCalls += 1;
+      return originalSearchVectors.call(this, authArg, queryVector, limit);
+    };
+
+    try {
+      const startedAt = Date.now();
+      const first = await recallMemories("postgres tallei", auth, 5);
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.ok(elapsedMs < 1200, `expected immediate fallback under 1200ms, got ${elapsedMs}ms`);
+      assert.ok(first.memories.every((memory) => memory.metadata.retrieval === "recent_fallback"));
+      assert.ok(
+        stateRef.current.events.some(
+          (event) =>
+            event.action === "recall" &&
+            typeof event.metadata?.source === "string" &&
+            event.metadata.source === "precomputed_graph_miss"
+        ),
+        "expected precomputed miss labeling on fallback"
+      );
+
+      await waitUntil(() => searchCalls > 0);
+      const callsAfterEnrich = searchCalls;
+
+      const second = await recallMemories("postgres tallei", auth, 5);
+      assert.ok(second.memories.length > 0);
+      assert.equal(searchCalls, callsAfterEnrich, "exact cache hit should avoid re-running semantic search");
+    } finally {
+      VectorRepository.prototype.searchVectors = originalSearchVectors;
+    }
+  }
+);
+
+test(
+  "precomputed snapshot hit avoids semantic vector search after worker refresh",
+  { concurrency: false },
+  async () => {
+    resetState();
+    const auth = {
+      tenantId: "tenant-f",
+      userId: "user-f",
+      authMode: "internal" as const,
+    };
+
+    await saveMemory("Project Tallei uses Postgres and Redis", auth, "chatgpt");
+    await saveMemory("Tallei graph memory mentions Postgres", auth, "claude");
+
+    const originalSetInterval = globalThis.setInterval;
+    const originalClearInterval = globalThis.clearInterval;
+    globalThis.setInterval = ((handler: (...args: any[]) => void) => {
+      return { unref() {}, handler } as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+    globalThis.clearInterval = (() => {}) as typeof clearInterval;
+
+    try {
+      startMemoryGraphWorker();
+      await waitUntil(() => {
+        const scoped = stateRef.current.jobs.filter(
+          (job) =>
+            scopeKey({ tenantId: job.tenant_id, userId: job.user_id }) === scopeKey(auth) &&
+            (job.job_type === "extract" || job.job_type === "snapshot_refresh")
+        );
+        return scoped.length >= 2 && scoped.every((job) => job.status === "done");
+      });
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      globalThis.clearInterval = originalClearInterval;
+      stopMemoryGraphWorker();
+    }
+
+    await buildUserSnapshot(auth);
+
+    let searchCalls = 0;
+    const originalSearchVectors = VectorRepository.prototype.searchVectors;
+    VectorRepository.prototype.searchVectors = async function wrappedSearch(authArg, queryVector, limit) {
+      searchCalls += 1;
+      return originalSearchVectors.call(this, authArg, queryVector, limit);
+    };
+
+    try {
+      const recalled = await recallMemories("postgres tallei", auth, 5);
+      assert.ok(recalled.memories.length > 0);
+      assert.ok(
+        recalled.memories.some((memory) => memory.metadata.source === "precomputed_graph"),
+        "expected precomputed graph-backed memories"
+      );
+      assert.equal(searchCalls, 0, "precomputed recall path should avoid vector search");
+      assert.ok(
+        stateRef.current.events.some(
+          (event) =>
+            event.action === "recall" &&
+            typeof event.metadata?.source === "string" &&
+            (event.metadata.source === "precomputed_graph_hit" || event.metadata.source === "exact_cache")
+        ),
+        "expected fast cache or precomputed graph hit"
+      );
+    } finally {
+      VectorRepository.prototype.searchVectors = originalSearchVectors;
+    }
+  }
+);
+
+test(
+  "save/delete invalidates fast recall stamp and forces fallback before re-enrichment",
+  { concurrency: false },
+  async () => {
+    resetState();
+    const auth = {
+      tenantId: "tenant-d",
+      userId: "user-d",
+      authMode: "internal" as const,
+    };
+
+    const saved = await saveMemory("Alice likes Redis and Tallei", auth, "chatgpt");
+
+    await recallMemories("redis", auth, 5);
+    await waitUntil(() => stateRef.current.events.some((event) => event.action === "recall_enrich"));
+
+    const primed = await recallMemories("redis", auth, 5);
+    assert.ok(primed.memories.length > 0);
+
+    await saveMemory("Alice switched to Postgres", auth, "chatgpt");
+    const afterSave = await recallMemories("redis", auth, 5);
+    assert.ok(afterSave.memories.every((memory) => memory.metadata.retrieval === "recent_fallback"));
+
+    await deleteMemory(saved.memoryId, auth);
+    const afterDelete = await recallMemories("redis", auth, 5);
+    assert.ok(afterDelete.memories.every((memory) => memory.metadata.retrieval === "recent_fallback"));
+  }
+);
+
+test(
+  "recall-v2 fallback response keeps compatible shape",
+  { concurrency: false },
+  async () => {
+    resetState();
+    const auth = {
+      tenantId: "tenant-e",
+      userId: "user-e",
+      authMode: "internal" as const,
+    };
+
+    await saveMemory("Alice likes distributed systems", auth, "claude");
+    const result = await recallMemoriesV2("distributed systems", auth, 5, 1);
+
+    assert.equal(result.retrieval_mode, "vector_fallback");
+    assert.ok(Array.isArray(result.memories));
+    assert.ok(Array.isArray(result.explanations));
+    assert.equal(result.explanations.length, result.memories.length);
+    assert.ok(typeof result.contextBlock === "string" && result.contextBlock.length > 0);
   }
 );
 
