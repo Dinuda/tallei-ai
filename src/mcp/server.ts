@@ -10,6 +10,7 @@ import {
   listMemories,
   deleteMemory,
   prewarmRecallCache,
+  QuotaExceededError,
 } from "../services/memory.js";
 import {
   explainMemoryConnection,
@@ -18,11 +19,12 @@ import {
 } from "../services/memoryGraph.js";
 import { getMemoryGraphInsights } from "../services/memoryInsights.js";
 import { authContextFromUserId } from "../services/auth.js";
+import { getPlanForTenant } from "../services/tenancy.js";
 import { config } from "../config.js";
 import { pool } from "../db/index.js";
 import { getCacheJson, setCacheJson } from "../services/cache.js";
 import { hasRequiredScopes } from "../services/oauthTokens.js";
-import type { AuthContext } from "../types/auth.js";
+import type { AuthContext, Plan } from "../types/auth.js";
 
 const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
 
@@ -31,6 +33,7 @@ interface OAuthCacheEntry {
   tenantId: string;
   scopes: string[];
   clientId: string;
+  plan?: Plan;
 }
 
 function tokenCacheKey(token: string): string {
@@ -70,6 +73,11 @@ async function logMcpCallEvent(input: {
   }
 }
 
+function logMcpCallEventAsync(input: Parameters<typeof logMcpCallEvent>[0]): void {
+  setRequestTimingField("event_log_mode", "async");
+  runAsyncSafe(() => logMcpCallEvent(input), "mcp call event");
+}
+
 function buildMcpServer(auth: AuthContext): McpServer {
   const server = new McpServer({
     name: "tallei",
@@ -93,10 +101,17 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ content, platform }) => {
-      const saved = await saveMemory(content, auth, platform ?? "claude");
-      return {
-        content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }],
-      };
+      try {
+        const saved = await saveMemory(content, auth, platform ?? "claude");
+        return {
+          content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }],
+        };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -111,10 +126,17 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ fact, platform }) => {
-      const saved = await saveMemory(fact, auth, platform ?? "claude");
-      return {
-        content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }],
-      };
+      try {
+        const saved = await saveMemory(fact, auth, platform ?? "claude");
+        return {
+          content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }],
+        };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -133,8 +155,15 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ query, limit }) => {
-      const result = await recallMemories(query, auth, limit ?? 5);
-      return { content: [{ type: "text", text: result.contextBlock }] };
+      try {
+        const result = await recallMemories(query, auth, limit ?? 5);
+        return { content: [{ type: "text", text: result.contextBlock }] };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -241,8 +270,15 @@ function buildMcpServer(auth: AuthContext): McpServer {
       },
     },
     async ({ query, limit }) => {
-      const result = await recallMemories(query, auth, limit ?? 5);
-      return { content: [{ type: "text", text: result.contextBlock }] };
+      try {
+        const result = await recallMemories(query, auth, limit ?? 5);
+        return { content: [{ type: "text", text: result.contextBlock }] };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
     }
   );
 
@@ -299,6 +335,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
       userId: cached.userId,
       tenantId: cached.tenantId,
       authMode: "oauth",
+      plan: cached.plan ?? "free",
       clientId: cached.clientId,
       scopes: cached.scopes ?? [],
     };
@@ -311,7 +348,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
     if (typeof userIdValue !== "string" || userIdValue.length === 0) return null;
 
     const context = typeof tenantIdValue === "string" && tenantIdValue.length > 0
-      ? { userId: userIdValue, tenantId: tenantIdValue, authMode: "oauth" as const }
+      ? await authContextFromUserId(userIdValue, "oauth")
       : await authContextFromUserId(userIdValue, "oauth");
     const scopes = Array.isArray(authInfo.scopes)
       ? authInfo.scopes.map((scope) => String(scope))
@@ -322,6 +359,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
       {
         userId: context.userId,
         tenantId: context.tenantId,
+        plan: context.plan,
         clientId: authInfo.clientId,
         scopes,
       },
@@ -345,6 +383,11 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const rpcMethod = typeof req?.body?.method === "string" ? req.body.method : null;
     const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name : null;
     const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
+    const authStartedAt = process.hrtime.bigint();
+    const noteAuthTiming = () => {
+      const authMs = Number(process.hrtime.bigint() - authStartedAt) / 1_000_000;
+      setRequestTimingField("auth_ms", authMs);
+    };
 
     if (config.nodeEnv !== "production") {
       if (rpcMethod === "tools/call" && typeof toolName === "string") {
@@ -361,7 +404,8 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
 
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
-      await logMcpCallEvent({
+      noteAuthTiming();
+      logMcpCallEventAsync({
         method,
         toolName,
         ok: false,
@@ -373,7 +417,8 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
 
     const token = authHeader.split(" ")[1];
     if (token.startsWith("gm_")) {
-      await logMcpCallEvent({
+      noteAuthTiming();
+      logMcpCallEventAsync({
         method,
         toolName,
         authMode: "unknown",
@@ -388,7 +433,8 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const authMode: "oauth" = "oauth";
 
     if (!authContext) {
-      await logMcpCallEvent({
+      noteAuthTiming();
+      logMcpCallEventAsync({
         method,
         toolName,
         authMode,
@@ -399,7 +445,8 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
       return;
     }
     if (!hasRequiredScopes(authContext.scopes ?? [], ["mcp:tools"])) {
-      await logMcpCallEvent({
+      noteAuthTiming();
+      logMcpCallEventAsync({
         userId: authContext.userId,
         tenantId: authContext.tenantId,
         method,
@@ -414,8 +461,9 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
       });
       return;
     }
+    noteAuthTiming();
 
-    await logMcpCallEvent({
+    logMcpCallEventAsync({
       userId: authContext.userId,
       tenantId: authContext.tenantId,
       keyId: null,
@@ -425,6 +473,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
       ok: true,
     });
 
+    req.authContext = authContext;
     prewarmRecallCache(authContext);
 
     const server = buildMcpServer(authContext);

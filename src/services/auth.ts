@@ -3,9 +3,11 @@ import jwt from "jsonwebtoken";
 import { randomBytes, createHash, randomUUID } from "crypto";
 import { pool } from "../db/index.js";
 import { config } from "../config.js";
-import { ensurePrimaryTenantForUser, resolveAuthContext } from "./tenancy.js";
+import { ensurePrimaryTenantForUser, resolveAuthContext, getPlanForTenant } from "./tenancy.js";
 import { getCacheJson, setCacheJson, deleteCacheKey } from "./cache.js";
 import type { AuthContext } from "../types/auth.js";
+import { setRequestTimingField } from "./requestTiming.js";
+import { runAsyncSafe } from "./asyncSafe.js";
 
 export interface User {
   id: string;
@@ -36,6 +38,9 @@ const API_KEY_DB_TIMEOUT_MS = Number.isFinite(apiKeyDbTimeoutParsed)
   : (config.nodeEnv === "production" ? 15_000 : 2_500);
 const API_KEY_DB_COOLDOWN_MS = config.nodeEnv === "production" ? 0 : 60_000;
 const API_KEY_DB_WARN_INTERVAL_MS = 30_000;
+const AUTH_USAGE_UPDATE_DEBOUNCE_MS = Math.max(250, config.authUsageUpdateDebounceMs);
+const AUTH_USAGE_UPDATE_RETRY_MS = Math.max(250, config.authUsageUpdateRetryMs);
+const AUTH_USAGE_UPDATE_MAX_CONCURRENCY = Math.max(1, config.authUsageUpdateMaxConcurrency);
 
 interface EphemeralApiKey {
   id: string;
@@ -52,6 +57,12 @@ const ephemeralApiKeysByHash = new Map<string, EphemeralApiKey>();
 const ephemeralApiKeysByUser = new Map<string, EphemeralApiKey[]>();
 let apiKeyDbBypassUntil = 0;
 let lastApiKeyDbWarnAt = 0;
+const usageUpdateQueue = new Map<
+  string,
+  { lastIpHash: string | null; dueAt: number; timer: ReturnType<typeof setTimeout> | null }
+>();
+const usageUpdateInFlight = new Set<string>();
+let activeUsageUpdateFlushes = 0;
 
 function isDbConnectivityError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -151,6 +162,81 @@ function normalizeEmail(value: string): string {
 
 function apiKeyCacheKey(hash: string): string {
   return `auth:api_key_v2:${hash}`;
+}
+
+function hashIp(ip?: string): string | null {
+  return ip ? createHash("sha256").update(ip).digest("hex") : null;
+}
+
+function scheduleUsageFlush(apiKeyId: string): void {
+  const entry = usageUpdateQueue.get(apiKeyId);
+  if (!entry) return;
+  if (entry.timer) {
+    clearTimeout(entry.timer);
+  }
+  const delayMs = Math.max(0, entry.dueAt - Date.now());
+  entry.timer = setTimeout(() => {
+    const current = usageUpdateQueue.get(apiKeyId);
+    if (current) current.timer = null;
+    void flushUsageUpdate(apiKeyId);
+  }, delayMs);
+  entry.timer.unref?.();
+}
+
+function enqueueUsageUpdate(apiKeyId: string, lastIpHash: string | null, delayMs: number): void {
+  const nextDueAt = Date.now() + Math.max(0, delayMs);
+  const existing = usageUpdateQueue.get(apiKeyId);
+  if (existing) {
+    existing.lastIpHash = lastIpHash;
+    existing.dueAt = nextDueAt;
+  } else {
+    usageUpdateQueue.set(apiKeyId, { lastIpHash, dueAt: nextDueAt, timer: null });
+  }
+  scheduleUsageFlush(apiKeyId);
+}
+
+async function flushUsageUpdate(apiKeyId: string): Promise<void> {
+  if (usageUpdateInFlight.has(apiKeyId)) return;
+  const entry = usageUpdateQueue.get(apiKeyId);
+  if (!entry) return;
+
+  const now = Date.now();
+  if (entry.dueAt > now) {
+    scheduleUsageFlush(apiKeyId);
+    return;
+  }
+
+  if (activeUsageUpdateFlushes >= AUTH_USAGE_UPDATE_MAX_CONCURRENCY) {
+    enqueueUsageUpdate(apiKeyId, entry.lastIpHash, 100);
+    return;
+  }
+
+  usageUpdateQueue.delete(apiKeyId);
+  usageUpdateInFlight.add(apiKeyId);
+  activeUsageUpdateFlushes += 1;
+  try {
+    await pool.query(
+      `UPDATE api_keys
+       SET last_used_at = NOW(),
+           last_ip_hash = $2
+       WHERE id = $1
+         AND revoked_at IS NULL
+         AND (created_at + (rotation_days || ' days')::interval) > NOW()`,
+      [apiKeyId, entry.lastIpHash]
+    );
+  } catch (error) {
+    noteApiKeyDbFailure(error, "[auth] async usage update failed:");
+    enqueueUsageUpdate(apiKeyId, entry.lastIpHash, AUTH_USAGE_UPDATE_RETRY_MS);
+  } finally {
+    usageUpdateInFlight.delete(apiKeyId);
+    activeUsageUpdateFlushes = Math.max(0, activeUsageUpdateFlushes - 1);
+  }
+}
+
+function enqueueApiKeyUsageUpdate(apiKeyId: string, requesterIp?: string): void {
+  setRequestTimingField("auth_usage_update_mode", "async_debounced");
+  setRequestTimingField("auth_usage_update_queued", true);
+  enqueueUsageUpdate(apiKeyId, hashIp(requesterIp), AUTH_USAGE_UPDATE_DEBOUNCE_MS);
 }
 
 export function sanitizeNextPath(input: unknown): string {
@@ -438,17 +524,7 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
   const cached = await getCacheJson<ApiKeyValidation>(cacheKey);
 
   if (cached) {
-    try {
-      await pool.query(
-        `UPDATE api_keys
-         SET last_used_at = NOW(),
-             last_ip_hash = $2
-         WHERE id = $1`,
-        [cached.keyId, requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null]
-      );
-    } catch (error) {
-      noteApiKeyDbFailure(error, "[auth] validateApiKeyContext cached usage update failed:");
-    }
+    enqueueApiKeyUsageUpdate(cached.keyId, requesterIp);
     return cached;
   }
 
@@ -501,19 +577,11 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
     connectorType: row.connector_type ?? null,
   };
 
-  await setCacheJson(cacheKey, value, API_KEY_CACHE_TTL_SECONDS);
-
-  try {
-    await pool.query(
-      `UPDATE api_keys
-       SET last_used_at = NOW(),
-           last_ip_hash = $2
-       WHERE id = $1`,
-      [row.key_id, requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null]
-    );
-  } catch (error) {
-    noteApiKeyDbFailure(error, "[auth] validateApiKeyContext usage update failed:");
-  }
+  runAsyncSafe(
+    () => setCacheJson(cacheKey, value, API_KEY_CACHE_TTL_SECONDS),
+    "api key cache write"
+  );
+  enqueueApiKeyUsageUpdate(row.key_id, requesterIp);
 
   return value;
 }
@@ -526,10 +594,12 @@ export async function validateApiKey(rawKey: string): Promise<string | null> {
 export async function authContextFromApiKey(rawKey: string, requesterIp?: string): Promise<AuthContext | null> {
   const validation = await validateApiKeyContext(rawKey, requesterIp);
   if (!validation) return null;
+  const plan = await getPlanForTenant(validation.tenantId);
   return {
     userId: validation.userId,
     tenantId: validation.tenantId,
     authMode: "api_key",
+    plan,
     keyId: validation.keyId,
     connectorType: validation.connectorType,
   };

@@ -452,7 +452,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         memory_id UUID REFERENCES memory_records(id) ON DELETE CASCADE,
         job_type TEXT NOT NULL
-          CHECK (job_type IN ('extract', 'backfill')),
+          CHECK (job_type IN ('extract', 'backfill', 'snapshot_refresh')),
         status TEXT NOT NULL DEFAULT 'queued'
           CHECK (status IN ('queued', 'running', 'retry', 'failed', 'done')),
         attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -464,9 +464,18 @@ export async function initDb() {
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      ALTER TABLE memory_graph_jobs
+      DROP CONSTRAINT IF EXISTS memory_graph_jobs_job_type_check;
+      ALTER TABLE memory_graph_jobs
+      ADD CONSTRAINT memory_graph_jobs_job_type_check
+      CHECK (job_type IN ('extract', 'backfill', 'snapshot_refresh'));
+
       CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_graph_jobs_extract_unique
         ON memory_graph_jobs(tenant_id, user_id, memory_id, job_type)
         WHERE status IN ('queued', 'running', 'retry');
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_graph_jobs_snapshot_unique
+        ON memory_graph_jobs(tenant_id, user_id, job_type)
+        WHERE job_type = 'snapshot_refresh' AND status IN ('queued', 'running', 'retry');
       CREATE INDEX IF NOT EXISTS idx_memory_graph_jobs_poll
         ON memory_graph_jobs(status, next_run_at, created_at);
       CREATE INDEX IF NOT EXISTS idx_memory_graph_jobs_user_created
@@ -647,11 +656,39 @@ export async function initDb() {
         ON browser_onboarding_fallback_cache(state, hits DESC);
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id            UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        plan                 TEXT NOT NULL DEFAULT 'free',
+        ls_customer_id       TEXT,
+        ls_subscription_id   TEXT UNIQUE,
+        ls_variant_id        TEXT,
+        status               TEXT NOT NULL DEFAULT 'active',
+        cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+        current_period_end   TIMESTAMP WITH TIME ZONE,
+        created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_tenant
+        ON subscriptions(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_subscriptions_ls_subscription
+        ON subscriptions(ls_subscription_id);
+    `);
+
+    // Backfill free-tier rows for tenants that predate billing
+    await client.query(`
+      INSERT INTO subscriptions (tenant_id, plan, status)
+      SELECT id, 'free', 'active' FROM tenants
+      ON CONFLICT (tenant_id) DO NOTHING
+    `);
+
     await backfillTenants(client);
     await client.query(`
       UPDATE api_keys
       SET revoked_at = NOW()
       WHERE revoked_at IS NULL
+        AND connector_type IS NULL
     `);
     await applySupabaseRlsPolicies(client);
 

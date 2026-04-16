@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import {
   authContextFromUserId,
 } from "../services/auth.js";
+import { getPlanForTenant } from "../services/tenancy.js";
 import { hasRequiredScopes, validateOAuthAccessToken } from "../services/oauthTokens.js";
 import type { AuthContext } from "../types/auth.js";
 
@@ -49,7 +50,7 @@ export async function internalMiddleware(req: AuthRequest, res: Response, next: 
 
   const tenantIdFromHeader = req.headers["x-tenant-id"] as string | undefined;
   const context = tenantIdFromHeader
-    ? { userId, tenantId: tenantIdFromHeader, authMode: "internal" as const }
+    ? { userId, tenantId: tenantIdFromHeader, authMode: "internal" as const, plan: "free" as const }
     : await authContextFromUserId(userId, "internal");
 
   req.userId = userId;
@@ -76,7 +77,7 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
     const tenantId = req.headers["x-tenant-id"] as string | undefined;
     req.userId = userId;
     req.authContext = tenantId
-      ? { userId, tenantId, authMode: "internal" }
+      ? { userId, tenantId, authMode: "internal", plan: "free" as const }
       : await authContextFromUserId(userId, "internal");
 
     next();
@@ -107,11 +108,13 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
       return;
     }
 
+    const plan = await getPlanForTenant(tokenContext.tenantId);
     req.userId = tokenContext.userId;
     req.authContext = {
       userId: tokenContext.userId,
       tenantId: tokenContext.tenantId,
       authMode: "oauth",
+      plan,
       clientId: tokenContext.clientId,
       scopes: tokenContext.scopes,
     };

@@ -1,5 +1,5 @@
 import { pool } from "../db/index.js";
-import type { AuthContext, AuthMode } from "../types/auth.js";
+import type { AuthContext, AuthMode, Plan } from "../types/auth.js";
 
 function defaultTenantName(userId: string, email?: string): string {
   if (email && email.includes("@")) {
@@ -50,6 +50,13 @@ export async function ensurePrimaryTenantForUser(userId: string, email?: string)
     const tenantId = tenantResult.rows[0].id;
 
     await client.query(
+      `INSERT INTO subscriptions (tenant_id, plan, status)
+       VALUES ($1, 'free', 'active')
+       ON CONFLICT (tenant_id) DO NOTHING`,
+      [tenantId]
+    );
+
+    await client.query(
       `INSERT INTO tenant_memberships (tenant_id, user_id, role, is_primary)
        VALUES ($1, $2, 'owner', true)
        ON CONFLICT (user_id) DO NOTHING`,
@@ -79,12 +86,24 @@ export async function ensurePrimaryTenantForUser(userId: string, email?: string)
   }
 }
 
+export async function getPlanForTenant(tenantId: string): Promise<Plan> {
+  const result = await pool.query<{ plan: string; status: string }>(
+    `SELECT plan, status FROM subscriptions WHERE tenant_id = $1 LIMIT 1`,
+    [tenantId]
+  );
+  const row = result.rows[0];
+  if (!row || row.status === "expired") return "free";
+  return row.plan as Plan;
+}
+
 export async function resolveAuthContext(userId: string, authMode: AuthMode, keyId?: string): Promise<AuthContext> {
   const tenantId = (await getPrimaryTenantId(userId)) ?? (await ensurePrimaryTenantForUser(userId));
+  const plan = await getPlanForTenant(tenantId);
   return {
     userId,
     tenantId,
     authMode,
+    plan,
     ...(keyId ? { keyId } : {}),
   };
 }
