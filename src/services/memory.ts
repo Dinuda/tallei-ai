@@ -13,6 +13,7 @@ import {
   invalidateRecallV2Cache,
   recallMemoriesV2,
 } from "./memoryGraph.js";
+import { rerankMemories, ragSearchMemories } from "./reranker.js";
 import {
   buildRecentFallback,
   bumpRecallStamp,
@@ -84,6 +85,8 @@ type RecallSource =
 
 const recallCache = new Map<string, CachedRecall>();
 const prewarmedUsers = new Set<string>();
+const reindexCooldown = new Map<string, number>();
+const REINDEX_COOLDOWN_MS = 5 * 60_000;
 let vectorBypassUntil = 0;
 let lastVectorWarnAt = 0;
 let lastMemoryDbWarnAt = 0;
@@ -241,6 +244,45 @@ export interface RecallResult {
     score: number;
     metadata: Record<string, unknown>;
   }>;
+}
+
+async function reindexUserMemories(auth: AuthContext): Promise<void> {
+  const scopeKey = cacheScopeKey(auth);
+  if ((reindexCooldown.get(scopeKey) ?? 0) > Date.now()) return;
+  // Mark cooldown immediately so concurrent recalls don't stack re-indexes.
+  reindexCooldown.set(scopeKey, Date.now() + REINDEX_COOLDOWN_MS);
+
+  let rows: Awaited<ReturnType<typeof memoryRepository.listAll>> = [];
+  try {
+    rows = await memoryRepository.listAll(auth);
+  } catch (error) {
+    noteMemoryDbFailure(error, "reindex-list");
+    return;
+  }
+  if (rows.length === 0) return;
+
+  let reindexed = 0;
+  for (const row of rows) {
+    try {
+      const text = decryptMemoryContent(row.content_ciphertext);
+      const vector = await embedText(text);
+      await vectorRepository.upsertMemoryVector({
+        auth,
+        memoryId: row.id,
+        pointId: row.qdrant_point_id || row.id,
+        vector,
+        platform: row.platform,
+        createdAt: row.created_at,
+      });
+      reindexed += 1;
+    } catch (error) {
+      noteVectorFailure(error, `reindex:${row.id}`);
+    }
+  }
+
+  console.log(`[reindex] completed for user ${auth.userId}: ${reindexed}/${rows.length} memories re-embedded`);
+  invalidateRecallCache(auth);
+  invalidateRecallV2Cache(auth);
 }
 
 export function prewarmRecallCache(auth: AuthContext): void {
@@ -442,13 +484,15 @@ async function semanticRecallMemories(
         },
       };
     })
-    .filter((memory): memory is NonNullable<typeof memory> => Boolean(memory));
+    .filter((memory): memory is NonNullable<typeof memory> => Boolean(memory))
+    .filter((memory) => memory.score >= config.recallMinVectorScore);
 
   if (memories.length === 0) {
-    let fallbackRows = [] as Awaited<ReturnType<typeof memoryRepository.list>>;
+    // Use listAll so old memories are not skipped due to a recency-ordered LIMIT.
+    let fallbackRows = [] as Awaited<ReturnType<typeof memoryRepository.listAll>>;
     try {
       fallbackRows = await withTimeout(
-        memoryRepository.list(auth, Math.max(limit * 6, 30)),
+        memoryRepository.listAll(auth),
         MEMORY_DB_TIMEOUT_MS,
         "recall.listFallback"
       );
@@ -481,8 +525,94 @@ async function semanticRecallMemories(
           },
         };
       })
+      .filter((memory) => memory.score >= config.recallMinFallbackScore)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+  }
+
+  // LLM reranker: pass candidates through gpt-4o-mini to eliminate false positives
+  // that sneak past the bi-encoder threshold (e.g. "favorite language" matching
+  // "favorite ice cream" because both share the "favorite X" semantic cluster).
+  if (config.rerankEnabled && memories.length > 0) {
+    try {
+      const rerankScores = await rerankMemories(query, memories);
+      const scoreById = new Map(rerankScores.map((r) => [r.id, r.rerankScore]));
+      const filtered = memories.filter(
+        (m) => (scoreById.get(m.id) ?? 0) >= config.rerankMinScore
+      );
+      // Only apply if reranker returned sane results; if everything got nuked and
+      // we had good vector scores, trust the reranker (user asked, nothing matches).
+      memories = filtered;
+    } catch (error) {
+      if (config.nodeEnv !== "production") {
+        console.warn("[reranker] rerank step failed, using unranked results", error);
+      }
+    }
+  }
+
+  // RAG fallback: vector search + threshold + reranker all returned nothing.
+  // This means the Qdrant index is likely stale or missing embeddings for this user.
+  // 1. Full-scan RAG: load every DB memory and ask gpt-4o-mini which are relevant.
+  // 2. Return any matches immediately so the user gets a real answer now.
+  // 3. Trigger background reindex so vector search works correctly next time.
+  if (memories.length === 0) {
+    // Use listAll — the failing index may not have vectors for old memories at all.
+    let allRows: Awaited<ReturnType<typeof memoryRepository.listAll>> = [];
+    try {
+      allRows = await withTimeout(
+        memoryRepository.listAll(auth),
+        MEMORY_DB_TIMEOUT_MS,
+        "recall.ragFallback"
+      );
+    } catch (error) {
+      noteMemoryDbFailure(error, "rag-list");
+    }
+
+    if (allRows.length > 0) {
+      const ragCandidates = allRows.flatMap((row) => {
+        let text = "";
+        try {
+          text = decryptMemoryContent(row.content_ciphertext);
+        } catch {
+          return [];
+        }
+        return [{ id: row.id, text, platform: row.platform, createdAt: row.created_at }];
+      });
+
+      try {
+        const ragResults = await ragSearchMemories(query, ragCandidates);
+        memories = ragResults.map((r) => {
+          const row = allRows.find((row) => row.id === r.id);
+          const metadata = (row?.summary_json && typeof row.summary_json === "object"
+            ? (row.summary_json as Record<string, unknown>)
+            : {}) as Record<string, unknown>;
+          return {
+            id: r.id,
+            text: r.text,
+            score: r.score,
+            metadata: {
+              ...metadata,
+              platform: r.platform,
+              createdAt: r.createdAt,
+              retrieval: "rag",
+            },
+          };
+        });
+      } catch (error) {
+        if (config.nodeEnv !== "production") {
+          console.warn("[rag] fallback search failed", error);
+        }
+      }
+    }
+
+    // Reindex in background regardless — fixes the vector index for next time.
+    if (!shouldBypassVector()) {
+      void reindexUserMemories(auth).catch((error) => {
+        if (config.nodeEnv !== "production") {
+          console.warn("[reindex] background re-index failed", error);
+        }
+      });
+    }
   }
 
   const lines = memories.map((memory) => {

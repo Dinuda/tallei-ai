@@ -144,7 +144,9 @@ function buildMcpServer(auth: AuthContext): McpServer {
     "recall_memories",
     {
       title: "Recall Memories",
-      description: "Searches Tallei persistent memory and returns relevant past context.",
+      description:
+        "Searches Tallei persistent memory and returns relevant past context. " +
+        "If this returns 'No relevant memories found', call list_memories next to scan all stored memories before concluding nothing is saved.",
       inputSchema: {
         query: z
           .string()

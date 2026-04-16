@@ -39,6 +39,16 @@ function readOptionalIntEnv(name: string): number | null {
   return value;
 }
 
+function readFloatEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseFloat(raw);
+  if (Number.isNaN(value)) {
+    throw new Error(`Invalid float env var: ${name}`);
+  }
+  return value;
+}
+
 function readBooleanEnv(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
@@ -163,6 +173,18 @@ export const config = {
   memoryGraphWorkerBatchSize: readIntEnv("MEMORY_GRAPH_WORKER_BATCH_SIZE", 16),
   memoryApiRateLimitPerMinute: readIntEnv("MEMORY_API_RATE_LIMIT_PER_MINUTE", 180),
   mcpRateLimitPerMinute: readIntEnv("MCP_RATE_LIMIT_PER_MINUTE", 240),
+  // Minimum cosine-similarity score for a vector hit to be included in recall results.
+  // Hits below this are discarded; if all are discarded the fallback lexical path runs.
+  recallMinVectorScore: readFloatEnv("RECALL_MIN_VECTOR_SCORE", 0.30),
+  // Minimum lexical score for the fallback path. Results below this are excluded so that
+  // completely unrelated memories are never injected as context.
+  recallMinFallbackScore: readFloatEnv("RECALL_MIN_FALLBACK_SCORE", 0.05),
+  // LLM reranker: pass vector search candidates through gpt-4o-mini to filter truly
+  // irrelevant results before returning context.  Adds ~200-400ms but eliminates
+  // false positives like "favorite language" matching "favorite ice cream".
+  rerankEnabled: readBooleanEnv("RERANK_ENABLED", true),
+  // Minimum rerank score (0–1) to include a memory in the final result.
+  rerankMinScore: readFloatEnv("RERANK_MIN_SCORE", 0.4),
   browserWorkerBaseUrl: process.env.BROWSER_WORKER_BASE_URL || "",
   browserWorkerApiKey: process.env.BROWSER_WORKER_API_KEY || "",
   browserMaxStudentRetries: readIntEnv("BROWSER_MAX_STUDENT_RETRIES", 2),
