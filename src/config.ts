@@ -19,16 +19,6 @@ function readIntEnv(name: string, fallback: number): number {
   return value;
 }
 
-function readFloatEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const value = Number.parseFloat(raw);
-  if (!Number.isFinite(value)) {
-    throw new Error(`Invalid float env var: ${name}`);
-  }
-  return value;
-}
-
 function readOptionalIntEnv(name: string): number | null {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return null;
