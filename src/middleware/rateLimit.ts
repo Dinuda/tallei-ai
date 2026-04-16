@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import { incrementWithTtl } from "../services/cache.js";
+import { setRequestTimingField } from "../services/requestTiming.js";
 
 interface RateLimitOptions {
   namespace: string;
@@ -27,6 +28,7 @@ function authFingerprint(req: Request): string {
 
 export function createRateLimitMiddleware(options: RateLimitOptions) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const startedAt = process.hrtime.bigint();
     const windowBucket = Math.floor(Date.now() / (options.windowSeconds * 1000));
     const key = [
       "rl",
@@ -37,6 +39,10 @@ export function createRateLimitMiddleware(options: RateLimitOptions) {
     ].join(":");
 
     const count = await incrementWithTtl(key, options.windowSeconds + 2);
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+    setRequestTimingField("rate_limit_ms", elapsedMs);
+    setRequestTimingField("rate_limit_namespace", options.namespace);
+
     if (count > options.maxRequests) {
       res.status(429).json({
         error: "Rate limit exceeded",

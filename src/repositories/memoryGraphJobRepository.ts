@@ -1,7 +1,7 @@
 import { pool } from "../db/index.js";
 import type { AuthContext } from "../types/auth.js";
 
-export type MemoryGraphJobType = "extract" | "backfill";
+export type MemoryGraphJobType = "extract" | "backfill" | "snapshot_refresh";
 export type MemoryGraphJobStatus = "queued" | "running" | "retry" | "failed" | "done";
 
 export interface MemoryGraphJobRow {
@@ -58,6 +58,25 @@ export class MemoryGraphJobRepository {
       [limit]
     );
     return Number(result.rows[0]?.inserted ?? "0");
+  }
+
+  async enqueueSnapshotRefreshJob(
+    auth: AuthContext,
+    payload?: Record<string, unknown>,
+    debounceMs = 1_000
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO memory_graph_jobs
+        (tenant_id, user_id, memory_id, job_type, status, payload_json, next_run_at)
+       VALUES ($1, $2, NULL, 'snapshot_refresh', 'queued', $3::jsonb, NOW() + ($4::int || ' milliseconds')::interval)
+       ON CONFLICT (tenant_id, user_id, job_type)
+       WHERE job_type = 'snapshot_refresh' AND status IN ('queued', 'running', 'retry')
+       DO UPDATE SET
+         next_run_at = LEAST(memory_graph_jobs.next_run_at, EXCLUDED.next_run_at),
+         payload_json = COALESCE(memory_graph_jobs.payload_json, '{}'::jsonb) || EXCLUDED.payload_json,
+         updated_at = NOW()`,
+      [auth.tenantId, auth.userId, JSON.stringify(payload ?? {}), Math.max(0, debounceMs)]
+    );
   }
 
   async claimJobs(limit: number): Promise<MemoryGraphJobRow[]> {

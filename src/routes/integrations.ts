@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Router } from "express";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.js";
 import { pool } from "../db/index.js";
+import { config } from "../config.js";
 import { parseScopes } from "../services/oauthTokens.js";
 import { deleteCacheKey } from "../services/cache.js";
 import { generateApiKey, listEphemeralApiKeys } from "../services/auth.js";
@@ -454,6 +455,12 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    if (config.nodeEnv !== "production") {
+      console.warn("[integrations] chatgpt token rotation requested", {
+        userId,
+        userAgent: req.get("user-agent") ?? null,
+      });
+    }
 
     const revokeExisting = await pool.query<{ key_hash: string }>(
       `UPDATE api_keys
@@ -464,16 +471,36 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
        RETURNING key_hash`,
       [userId]
     );
-    await invalidateApiKeyValidationCaches(revokeExisting.rows.map((row) => row.key_hash));
+    const revokedKeyHashes = revokeExisting.rows.map((row) => row.key_hash);
+    let generated;
+    try {
+      generated = await generateApiKey(
+        userId,
+        "ChatGPT Action Bearer",
+        365,
+        req.authContext?.tenantId ?? null,
+        "chatgpt",
+        "tly"
+      );
+    } catch (error) {
+      if (revokedKeyHashes.length > 0) {
+        try {
+          await pool.query(
+            `UPDATE api_keys
+             SET revoked_at = NULL
+             WHERE user_id = $1
+               AND connector_type = 'chatgpt'
+               AND key_hash = ANY($2::text[])`,
+            [userId, revokedKeyHashes]
+          );
+        } catch (restoreError) {
+          console.error("Failed to restore previously-active ChatGPT keys after generation failure:", restoreError);
+        }
+      }
+      throw error;
+    }
+    await invalidateApiKeyValidationCaches(revokedKeyHashes);
 
-    const generated = await generateApiKey(
-      userId,
-      "ChatGPT Action Bearer",
-      365,
-      req.authContext?.tenantId ?? null,
-      "chatgpt",
-      "tly"
-    );
     const key = generated.key;
     const tokenPreview = `${key.slice(0, 10)}...${key.slice(-6)}`;
 
@@ -523,6 +550,12 @@ router.post("/disconnect/:provider", requireScopes(["memory:write"]), async (req
       );
       revokedApiKeys = revokeChatGptApiKeys.rowCount ?? 0;
       await invalidateApiKeyValidationCaches(revokeChatGptApiKeys.rows.map((row) => row.key_hash));
+      if (revokedApiKeys > 0 && config.nodeEnv !== "production") {
+        console.warn("[integrations] chatgpt disconnect revoked API keys", {
+          userId,
+          revokedApiKeys,
+        });
+      }
     }
 
     if (targetAccessTokens.length === 0 && revokedApiKeys === 0) {

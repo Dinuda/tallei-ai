@@ -6,6 +6,8 @@ import { recallMemories, saveMemory } from "../services/memory.js";
 import { pool } from "../db/index.js";
 import { authContextFromApiKey, authContextFromUserId } from "../services/auth.js";
 import { hasRequiredScopes, validateOAuthAccessToken } from "../services/oauthTokens.js";
+import { setRequestTimingField } from "../services/requestTiming.js";
+import { runAsyncSafe } from "../services/asyncSafe.js";
 
 const router = Router();
 
@@ -71,16 +73,28 @@ async function logChatGptAction(input: {
   }
 }
 
+function logChatGptActionAsync(input: Parameters<typeof logChatGptAction>[0]): void {
+  setRequestTimingField("event_log_mode", "async");
+  runAsyncSafe(() => logChatGptAction(input), "chatgpt action event");
+}
+
 async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  const authStartedAt = process.hrtime.bigint();
+  const noteAuthTiming = () => {
+    const authMs = Number(process.hrtime.bigint() - authStartedAt) / 1_000_000;
+    setRequestTimingField("auth_ms", authMs);
+  };
   const internalSecret = req.headers["x-internal-secret"];
   if (internalSecret) {
     if (internalSecret !== config.internalApiSecret) {
+      noteAuthTiming();
       res.status(401).json({ error: "Invalid internal secret" });
       return;
     }
 
     const userId = req.headers["x-user-id"] as string | undefined;
     if (!userId) {
+      noteAuthTiming();
       res.status(400).json({ error: "Missing X-User-Id header" });
       return;
     }
@@ -90,18 +104,21 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
     req.authContext = tenantId
       ? { userId, tenantId, authMode: "internal" }
       : await authContextFromUserId(userId, "internal");
+    noteAuthTiming();
     next();
     return;
   }
 
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
+    noteAuthTiming();
     res.status(401).json({ error: "Missing or invalid Authorization header" });
     return;
   }
 
   const token = authHeader.slice("Bearer ".length).trim();
   if (!token) {
+    noteAuthTiming();
     res.status(401).json({ error: "Missing bearer token" });
     return;
   }
@@ -109,11 +126,13 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
   const apiKeyContext = await authContextFromApiKey(token, req.ip);
   if (apiKeyContext) {
     if (apiKeyContext.connectorType && apiKeyContext.connectorType !== "chatgpt") {
+      noteAuthTiming();
       res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
       return;
     }
     req.userId = apiKeyContext.userId;
     req.authContext = apiKeyContext;
+    noteAuthTiming();
     next();
     return;
   }
@@ -121,6 +140,7 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
   try {
     const tokenContext = await validateOAuthAccessToken(token);
     if (!tokenContext) {
+      noteAuthTiming();
       res.status(401).json({ error: "Invalid bearer token" });
       return;
     }
@@ -133,8 +153,10 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
       clientId: tokenContext.clientId,
       scopes: tokenContext.scopes,
     };
+    noteAuthTiming();
     next();
   } catch (error) {
+    noteAuthTiming();
     console.error("ChatGPT action auth failed:", error);
     res.status(500).json({ error: "Server error validating bearer token" });
   }
@@ -417,7 +439,7 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireChatGptScopes
     }
 
     const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
-    await logChatGptAction({
+    logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recall",
       ok: true,
@@ -429,7 +451,7 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireChatGptScopes
       return;
     }
     if (isTransientMemoryInfraError(error)) {
-      await logChatGptAction({
+      logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/actions/recall",
         ok: false,
@@ -438,7 +460,7 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireChatGptScopes
       res.json(degradedRecallResponse());
       return;
     }
-    await logChatGptAction({
+    logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recall",
       ok: false,
@@ -467,7 +489,7 @@ router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]
       }
 
       const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
-      await logChatGptAction({
+      logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/actions/run",
         ok: true,
@@ -485,7 +507,7 @@ router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]
     }
 
     const saved = await saveMemory(body.content as string, req.authContext, "chatgpt", req.ip);
-    await logChatGptAction({
+    logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/run",
       ok: true,
@@ -502,7 +524,7 @@ router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]
       return;
     }
     if (isTransientMemoryInfraError(error)) {
-      await logChatGptAction({
+      logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/actions/run",
         ok: false,
@@ -511,7 +533,7 @@ router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]
       res.json(degradedRecallResponse());
       return;
     }
-    await logChatGptAction({
+    logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/run",
       ok: false,
@@ -531,7 +553,7 @@ router.post("/actions/save", chatGptActionAuthMiddleware, requireChatGptScopes([
     }
 
     const saved = await saveMemory(body.content, req.authContext, "chatgpt", req.ip);
-    await logChatGptAction({
+    logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/save",
       ok: true,
@@ -547,7 +569,7 @@ router.post("/actions/save", chatGptActionAuthMiddleware, requireChatGptScopes([
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
-    await logChatGptAction({
+    logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/save",
       ok: false,

@@ -452,7 +452,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         memory_id UUID REFERENCES memory_records(id) ON DELETE CASCADE,
         job_type TEXT NOT NULL
-          CHECK (job_type IN ('extract', 'backfill')),
+          CHECK (job_type IN ('extract', 'backfill', 'snapshot_refresh')),
         status TEXT NOT NULL DEFAULT 'queued'
           CHECK (status IN ('queued', 'running', 'retry', 'failed', 'done')),
         attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -464,9 +464,18 @@ export async function initDb() {
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      ALTER TABLE memory_graph_jobs
+      DROP CONSTRAINT IF EXISTS memory_graph_jobs_job_type_check;
+      ALTER TABLE memory_graph_jobs
+      ADD CONSTRAINT memory_graph_jobs_job_type_check
+      CHECK (job_type IN ('extract', 'backfill', 'snapshot_refresh'));
+
       CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_graph_jobs_extract_unique
         ON memory_graph_jobs(tenant_id, user_id, memory_id, job_type)
         WHERE status IN ('queued', 'running', 'retry');
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_graph_jobs_snapshot_unique
+        ON memory_graph_jobs(tenant_id, user_id, job_type)
+        WHERE job_type = 'snapshot_refresh' AND status IN ('queued', 'running', 'retry');
       CREATE INDEX IF NOT EXISTS idx_memory_graph_jobs_poll
         ON memory_graph_jobs(status, next_run_at, created_at);
       CREATE INDEX IF NOT EXISTS idx_memory_graph_jobs_user_created
@@ -652,6 +661,7 @@ export async function initDb() {
       UPDATE api_keys
       SET revoked_at = NOW()
       WHERE revoked_at IS NULL
+        AND connector_type IS NULL
     `);
     await applySupabaseRlsPolicies(client);
 

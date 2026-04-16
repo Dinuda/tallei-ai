@@ -3,6 +3,15 @@ import { config } from "../config.js";
 import type { AuthContext } from "../types/auth.js";
 import { embedText } from "./embeddings.js";
 import { decryptMemoryContent } from "./crypto.js";
+import {
+  buildRecentFallback,
+  readExactRecallPayload,
+  readWarmRecallPayload,
+  runBackgroundRecallEnrichment,
+  writeRecallPayload,
+} from "./fastRecall.js";
+import { lookupPrecomputedRecallV2, queueSnapshotRefresh } from "./precomputedGraphRecall.js";
+import { setRequestTimingFields } from "./requestTiming.js";
 import { VectorRepository } from "../repositories/vectorRepository.js";
 import { MemoryRepository } from "../repositories/memoryRepository.js";
 import { MemoryGraphRepository } from "../repositories/memoryGraphRepository.js";
@@ -16,6 +25,9 @@ const graphJobRepository = new MemoryGraphJobRepository();
 const GRAPH_TIMEOUT_MS = 100;
 const RECALL_V2_CACHE_TTL_MS = 5 * 60_000;
 const VECTOR_BYPASS_TTL_MS = config.nodeEnv === "production" ? 0 : 60_000;
+const FAST_RECALL_EMBED_TIMEOUT_MS = config.memoryRecallEmbedTimeoutMs;
+const FAST_RECALL_VECTOR_TIMEOUT_MS = config.memoryRecallVectorTimeoutMs;
+const FAST_RECALL_TOTAL_TIMEOUT_MS = config.memoryRecallTotalTimeoutMs;
 
 interface VectorCandidate {
   memoryId: string;
@@ -114,6 +126,10 @@ function cacheKey(auth: AuthContext, query: string, limit: number, depth: number
   return `recall-v2:${auth.tenantId}:${auth.userId}:${limit}:${depth}:${hash}`;
 }
 
+function enrichmentKey(auth: AuthContext, query: string, limit: number, depth: number): string {
+  return `recall-v2-enrich:${auth.tenantId}:${auth.userId}:${limit}:${depth}:${createHash("sha256").update(query).digest("hex")}`;
+}
+
 export function invalidateRecallV2Cache(auth: AuthContext): void {
   const prefix = `recall-v2:${auth.tenantId}:${auth.userId}:`;
   for (const key of recallV2Cache.keys()) {
@@ -138,6 +154,237 @@ async function vectorCandidates(auth: AuthContext, query: string, limit: number)
     noteVectorFailure(error);
     return [];
   }
+}
+
+function fallbackV2Result(
+  contextBlock: string,
+  memories: Array<{ id: string; text: string; score: number; metadata: Record<string, unknown> }>,
+  fallbackMs: number
+): RecallV2Result {
+  return {
+    contextBlock,
+    memories,
+    explanations: memories.map((memory) => ({
+      memory_id: memory.id,
+      reasons: ["Recent memory fallback"],
+      top_paths: ["recent_memory -> recall"],
+      confidence_summary: { explicit: 0, inferred: 0, uncertain: 0 },
+    })),
+    retrieval_mode: "vector_fallback",
+    timings_ms: {
+      fallback_ms: fallbackMs,
+      total: fallbackMs,
+    },
+    debug_flags: debugFlags({ source: "recent_fallback" }),
+  };
+}
+
+async function semanticRecallMemoriesV2(
+  query: string,
+  auth: AuthContext,
+  limit: number,
+  depth: number
+): Promise<RecallV2Result> {
+  const start = Date.now();
+  const timings: Record<string, number> = {};
+  const flags: Record<string, unknown> = {};
+
+  const vectorStarted = Date.now();
+  let vectorHits: VectorCandidate[] = [];
+  if (!shouldBypassVector()) {
+    try {
+      const embedStarted = Date.now();
+      const queryVector = await withTimeout(
+        embedText(query),
+        FAST_RECALL_EMBED_TIMEOUT_MS,
+        "recall_v2.embed"
+      );
+      timings.embed_ms = Date.now() - embedStarted;
+
+      const searchStarted = Date.now();
+      const results = await withTimeout(
+        vectorRepository.searchVectors(auth, queryVector, Math.max(limit * 3, 20)),
+        FAST_RECALL_VECTOR_TIMEOUT_MS,
+        "recall_v2.searchVectors"
+      );
+      timings.vector_ms = Date.now() - searchStarted;
+      vectorHits = results.map((row) => ({ memoryId: row.memoryId, score: row.score }));
+    } catch (error) {
+      noteVectorFailure(error);
+    }
+  }
+  timings.vector = Date.now() - vectorStarted;
+
+  const graphStarted = Date.now();
+  let signalsByMemory = new Map<string, GraphSignal>();
+  let retrievalMode: RecallV2Result["retrieval_mode"] = "graph_augmented";
+  try {
+    const graph = await withTimeout(graphSignals(auth, query, depth), GRAPH_TIMEOUT_MS, "graph.signals");
+    signalsByMemory = graph.signalsByMemory;
+    flags.graph_entities = graph.entityIds.length;
+  } catch (error) {
+    retrievalMode = "vector_fallback";
+    flags.graph_timeout = true;
+    flags.graph_error = error instanceof Error ? error.message : "graph_failed";
+  }
+  timings.graph_ms = Date.now() - graphStarted;
+  timings.graph = timings.graph_ms;
+
+  const candidateMemoryIds = new Set<string>(vectorHits.map((hit) => hit.memoryId));
+  for (const memoryId of signalsByMemory.keys()) {
+    candidateMemoryIds.add(memoryId);
+  }
+
+  if (candidateMemoryIds.size === 0) {
+    const fallbackRows = await memoryRepository.list(auth, Math.max(limit * 6, 30));
+    for (const row of fallbackRows.slice(0, Math.max(limit * 2, 10))) {
+      candidateMemoryIds.add(row.id);
+    }
+  }
+
+  const rows = await memoryRepository.getByIds(auth, [...candidateMemoryIds]);
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+
+  const maxVectorScore = vectorHits.reduce((max, hit) => Math.max(max, hit.score), 0);
+  const vectorScoreByMemoryId = new Map(vectorHits.map((hit) => [hit.memoryId, hit.score]));
+
+  const ranking = [...candidateMemoryIds]
+    .map((memoryId) => {
+      const row = rowById.get(memoryId);
+      if (!row) return null;
+
+      const vectorScore = vectorNormalize(vectorScoreByMemoryId.get(memoryId) ?? 0, maxVectorScore);
+      const graphSignal = signalsByMemory.get(memoryId);
+      const graphRelevance = Math.max(0, Math.min(1, (graphSignal?.graphScore ?? 0) / 3));
+      const recency = recencyScore(row.created_at);
+
+      const confSummary = graphSignal?.confidenceSummary ?? { explicit: 0, inferred: 0, uncertain: 0 };
+      const confTotal = confSummary.explicit + confSummary.inferred + confSummary.uncertain;
+      const confidenceWeight = confTotal === 0
+        ? 0.5
+        : Math.max(
+            0,
+            Math.min(
+              1,
+              (confSummary.explicit * 1 + confSummary.inferred * 0.7 + confSummary.uncertain * 0.2) / confTotal
+            )
+          );
+
+      const score = Number(
+        (
+          vectorScore * 0.55 +
+          graphRelevance * 0.25 +
+          recency * 0.15 +
+          confidenceWeight * 0.05
+        ).toFixed(5)
+      );
+
+      let text = "";
+      try {
+        text = decryptMemoryContent(row.content_ciphertext);
+      } catch {
+        text = "[Encrypted memory unavailable]";
+      }
+
+      const summaryMetadata = (row.summary_json && typeof row.summary_json === "object"
+        ? (row.summary_json as Record<string, unknown>)
+        : {}) as Record<string, unknown>;
+
+      return {
+        id: memoryId,
+        text,
+        score,
+        metadata: {
+          ...summaryMetadata,
+          platform: row.platform,
+          createdAt: row.created_at,
+        },
+        explanation: {
+          memory_id: memoryId,
+          reasons: graphSignal?.reasons ?? ["Vector similarity match"],
+          top_paths: graphSignal?.topPaths ?? ["query -> vector_match -> memory"],
+          confidence_summary: confSummary,
+        },
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  return {
+    contextBlock: buildContextBlock(ranking),
+    memories: ranking.map((item) => ({
+      id: item.id,
+      text: item.text,
+      score: item.score,
+      metadata: item.metadata,
+    })),
+    explanations: ranking.map((item) => item.explanation),
+    retrieval_mode: retrievalMode,
+    timings_ms: {
+      ...timings,
+      total: Date.now() - start,
+    },
+    debug_flags: debugFlags(flags),
+  };
+}
+
+function logRecallV2Event(
+  auth: AuthContext,
+  query: string,
+  limit: number,
+  depth: number,
+  requesterIp: string | undefined,
+  result: RecallV2Result,
+  source:
+    | "exact_cache"
+    | "warm_cache"
+    | "recent_fallback"
+    | "semantic_enriched"
+    | "precomputed_graph_hit"
+    | "precomputed_graph_miss"
+    | "precomputed_graph_stale",
+  snapshot: { status?: string; lookupMs?: number; ageMs?: number } = {}
+): void {
+  setRequestTimingFields({
+    recall_source: source,
+    recall_cache_hit: source === "exact_cache" || source === "warm_cache",
+    recall_mode: result.retrieval_mode,
+    recall_fallback_ms: result.timings_ms.fallback_ms ?? 0,
+    recall_relevance_miss: (result.timings_ms.relevance_miss ?? 0) > 0,
+    recall_enrich_ms: result.timings_ms.total ?? 0,
+    recall_embed_ms: result.timings_ms.embed_ms ?? 0,
+    recall_vector_ms: result.timings_ms.vector_ms ?? 0,
+    recall_graph_ms: result.timings_ms.graph_ms ?? 0,
+    recall_total_ms: result.timings_ms.total ?? 0,
+    recall_snapshot_status: snapshot.status ?? null,
+    recall_snapshot_lookup_ms: snapshot.lookupMs ?? 0,
+    recall_snapshot_age_ms: snapshot.ageMs ?? 0,
+  });
+  void memoryRepository.logEvent({
+    auth,
+    action: "recall_v2",
+    ipHash: requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null,
+    metadata: {
+      query,
+      limit,
+      graphDepth: depth,
+      retrievalMode: result.retrieval_mode,
+      hits: result.memories.length,
+      source,
+      cache_hit: source === "exact_cache" || source === "warm_cache",
+      fallback_ms: result.timings_ms.fallback_ms ?? 0,
+      relevance_miss: (result.timings_ms.relevance_miss ?? 0) > 0,
+      enrich_ms: result.timings_ms.total ?? 0,
+      embed_ms: result.timings_ms.embed_ms ?? 0,
+      vector_ms: result.timings_ms.vector_ms ?? 0,
+      graph_ms: result.timings_ms.graph_ms ?? 0,
+      snapshot_status: snapshot.status ?? null,
+      snapshot_lookup_ms: snapshot.lookupMs ?? 0,
+      snapshot_age_ms: snapshot.ageMs ?? 0,
+      timings: result.timings_ms,
+    },
+  }).catch(() => {});
 }
 
 function buildContextBlock(memories: Array<{ text: string; metadata: Record<string, unknown> }>): string {
@@ -264,149 +511,89 @@ export async function recallMemoriesV2(
   graphDepth = 1,
   requesterIp?: string
 ): Promise<RecallV2Result> {
+  const normalizedQuery = query.trim().toLowerCase().replace(/\s+/g, " ");
+  const boundedLimit = Math.min(20, Math.max(1, limit));
   const depth = Math.max(1, Math.min(2, graphDepth));
-  const key = cacheKey(auth, query, limit, depth);
+  const key = cacheKey(auth, normalizedQuery, boundedLimit, depth);
   const cached = recallV2Cache.get(key);
   if (cached && cached.exp > Date.now()) {
+    logRecallV2Event(auth, normalizedQuery, boundedLimit, depth, requesterIp, cached.result, "exact_cache");
     return cached.result;
   }
 
-  const start = Date.now();
-  const timings: Record<string, number> = {};
-  const flags: Record<string, unknown> = {};
-
-  const vectorStarted = Date.now();
-  const vectorHits = await vectorCandidates(auth, query, limit);
-  timings.vector = Date.now() - vectorStarted;
-
-  const graphStarted = Date.now();
-  let signalsByMemory = new Map<string, GraphSignal>();
-  let retrievalMode: RecallV2Result["retrieval_mode"] = "graph_augmented";
-  try {
-    const graph = await withTimeout(graphSignals(auth, query, depth), GRAPH_TIMEOUT_MS, "graph.signals");
-    signalsByMemory = graph.signalsByMemory;
-    flags.graph_entities = graph.entityIds.length;
-  } catch (error) {
-    retrievalMode = "vector_fallback";
-    flags.graph_timeout = true;
-    flags.graph_error = error instanceof Error ? error.message : "graph_failed";
-  }
-  timings.graph = Date.now() - graphStarted;
-
-  const candidateMemoryIds = new Set<string>(vectorHits.map((hit) => hit.memoryId));
-  for (const memoryId of signalsByMemory.keys()) {
-    candidateMemoryIds.add(memoryId);
+  const exactHit = await readExactRecallPayload<RecallV2Result>(auth, normalizedQuery, "v2");
+  if (exactHit) {
+    recallV2Cache.set(key, { exp: Date.now() + RECALL_V2_CACHE_TTL_MS, result: exactHit });
+    logRecallV2Event(auth, normalizedQuery, boundedLimit, depth, requesterIp, exactHit, "exact_cache");
+    return exactHit;
   }
 
-  if (candidateMemoryIds.size === 0) {
-    const fallbackRows = await memoryRepository.list(auth, Math.max(limit * 6, 30));
-    for (const row of fallbackRows.slice(0, Math.max(limit * 2, 10))) {
-      candidateMemoryIds.add(row.id);
-    }
-  }
-
-  const rows = await memoryRepository.getByIds(auth, [...candidateMemoryIds]);
-  const rowById = new Map(rows.map((row) => [row.id, row]));
-
-  const maxVectorScore = vectorHits.reduce((max, hit) => Math.max(max, hit.score), 0);
-  const vectorScoreByMemoryId = new Map(vectorHits.map((hit) => [hit.memoryId, hit.score]));
-
-  const ranking = [...candidateMemoryIds]
-    .map((memoryId) => {
-      const row = rowById.get(memoryId);
-      if (!row) return null;
-
-      const vectorScore = vectorNormalize(vectorScoreByMemoryId.get(memoryId) ?? 0, maxVectorScore);
-      const graphSignal = signalsByMemory.get(memoryId);
-      const graphRelevance = Math.max(0, Math.min(1, (graphSignal?.graphScore ?? 0) / 3));
-      const recency = recencyScore(row.created_at);
-
-      const confSummary = graphSignal?.confidenceSummary ?? { explicit: 0, inferred: 0, uncertain: 0 };
-      const confTotal = confSummary.explicit + confSummary.inferred + confSummary.uncertain;
-      const confidenceWeight = confTotal === 0
-        ? 0.5
-        : Math.max(
-            0,
-            Math.min(
-              1,
-              (confSummary.explicit * 1 + confSummary.inferred * 0.7 + confSummary.uncertain * 0.2) / confTotal
-            )
-          );
-
-      const score = Number(
-        (
-          vectorScore * 0.55 +
-          graphRelevance * 0.25 +
-          recency * 0.15 +
-          confidenceWeight * 0.05
-        ).toFixed(5)
+  const warmHit = await readWarmRecallPayload<RecallV2Result>(auth, normalizedQuery, "v2");
+  if (warmHit) {
+    recallV2Cache.set(key, { exp: Date.now() + RECALL_V2_CACHE_TTL_MS, result: warmHit });
+    runBackgroundRecallEnrichment(enrichmentKey(auth, normalizedQuery, boundedLimit, depth), async () => {
+      const enriched = await withTimeout(
+        semanticRecallMemoriesV2(normalizedQuery, auth, boundedLimit, depth),
+        FAST_RECALL_TOTAL_TIMEOUT_MS,
+        "recall_v2.enrichTotal"
       );
+      recallV2Cache.set(key, { exp: Date.now() + RECALL_V2_CACHE_TTL_MS, result: enriched });
+      await writeRecallPayload(auth, normalizedQuery, "v2", enriched);
+      logRecallV2Event(auth, normalizedQuery, boundedLimit, depth, requesterIp, enriched, "semantic_enriched");
+    });
+    logRecallV2Event(auth, normalizedQuery, boundedLimit, depth, requesterIp, warmHit, "warm_cache");
+    return warmHit;
+  }
 
-      let text = "";
-      try {
-        text = decryptMemoryContent(row.content_ciphertext);
-      } catch {
-        text = "[Encrypted memory unavailable]";
+  const snapshotLookup = await lookupPrecomputedRecallV2(auth, normalizedQuery, boundedLimit);
+  if (snapshotLookup.status === "hit" && snapshotLookup.result) {
+    recallV2Cache.set(key, { exp: Date.now() + RECALL_V2_CACHE_TTL_MS, result: snapshotLookup.result });
+    void writeRecallPayload(auth, normalizedQuery, "v2", snapshotLookup.result).catch(() => {});
+    logRecallV2Event(
+      auth,
+      normalizedQuery,
+      boundedLimit,
+      depth,
+      requesterIp,
+      snapshotLookup.result,
+      "precomputed_graph_hit",
+      {
+        status: snapshotLookup.status,
+        lookupMs: snapshotLookup.snapshot_lookup_ms,
+        ageMs: snapshotLookup.snapshot_age_ms,
       }
+    );
+    return snapshotLookup.result;
+  }
 
-      const summaryMetadata = (row.summary_json && typeof row.summary_json === "object"
-        ? (row.summary_json as Record<string, unknown>)
-        : {}) as Record<string, unknown>;
+  const fallback = await buildRecentFallback(auth, normalizedQuery, boundedLimit);
+  const result = fallbackV2Result(fallback.contextBlock, fallback.memories, fallback.elapsedMs);
+  if (fallback.relevanceMiss) {
+    result.timings_ms.relevance_miss = 1;
+    void queueSnapshotRefresh(auth, "fallback_relevance_miss_v2", 750).catch(() => {});
+  }
 
-      return {
-        id: memoryId,
-        text,
-        score,
-        metadata: {
-          ...summaryMetadata,
-          platform: row.platform,
-          createdAt: row.created_at,
-        },
-        explanation: {
-          memory_id: memoryId,
-          reasons: graphSignal?.reasons ?? ["Vector similarity match"],
-          top_paths: graphSignal?.topPaths ?? ["query -> vector_match -> memory"],
-          confidence_summary: confSummary,
-        },
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => Boolean(item))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-
-  const result: RecallV2Result = {
-    contextBlock: buildContextBlock(ranking),
-    memories: ranking.map((item) => ({
-      id: item.id,
-      text: item.text,
-      score: item.score,
-      metadata: item.metadata,
-    })),
-    explanations: ranking.map((item) => item.explanation),
-    retrieval_mode: retrievalMode,
-    timings_ms: {
-      ...timings,
-      total: Date.now() - start,
-    },
-    debug_flags: debugFlags(flags),
-  };
-
-  recallV2Cache.set(key, { exp: Date.now() + RECALL_V2_CACHE_TTL_MS, result });
-
-  void memoryRepository.logEvent({
-    auth,
-    action: "recall_v2",
-    ipHash: requesterIp ? createHash("sha256").update(requesterIp).digest("hex") : null,
-    metadata: {
-      query,
-      limit,
-      graphDepth: depth,
-      retrievalMode: retrievalMode,
-      hits: result.memories.length,
-      timings: result.timings_ms,
-    },
-  }).catch(() => {});
-
+  runBackgroundRecallEnrichment(enrichmentKey(auth, normalizedQuery, boundedLimit, depth), async () => {
+    const enriched = await withTimeout(
+      semanticRecallMemoriesV2(normalizedQuery, auth, boundedLimit, depth),
+      FAST_RECALL_TOTAL_TIMEOUT_MS,
+      "recall_v2.enrichTotal"
+    );
+    recallV2Cache.set(key, { exp: Date.now() + RECALL_V2_CACHE_TTL_MS, result: enriched });
+    await writeRecallPayload(auth, normalizedQuery, "v2", enriched);
+    logRecallV2Event(auth, normalizedQuery, boundedLimit, depth, requesterIp, enriched, "semantic_enriched");
+  });
+  const fallbackSource =
+    snapshotLookup.status === "miss"
+      ? "precomputed_graph_miss"
+      : snapshotLookup.status === "stale"
+        ? "precomputed_graph_stale"
+        : "recent_fallback";
+  logRecallV2Event(auth, normalizedQuery, boundedLimit, depth, requesterIp, result, fallbackSource, {
+    status: snapshotLookup.status,
+    lookupMs: snapshotLookup.snapshot_lookup_ms,
+    ageMs: snapshotLookup.snapshot_age_ms,
+  });
   return result;
 }
 
