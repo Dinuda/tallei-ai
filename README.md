@@ -11,7 +11,7 @@ Tallei's a memory layer for when you want your AI to not forget who you are. It 
 ### The Basics
 - **Share memories across Claude, ChatGPT, and Gemini** via OAuth. One memory graph, all your AIs.
 - **Sub-15ms saves** — we return instantly, then do the heavy lifting in the background.
-- **~5ms recall** on a warm cache. Cold cache worst-case is ~700ms. Precomputed snapshots cut that to ~50ms.
+- **Fast recall under real load** — warm hits return in ~5ms, precomputed graph hits in ~50ms, and cold misses now return in ~717ms without foreground embedding/vector search (down from ~24s).
 - **Smart summaries** — `gpt-4o-mini` pulls out titles, key points, and decisions without you asking.
 
 ### The Graph Layer (the cool part)
@@ -44,9 +44,9 @@ The MCP server that Claude and friends talk to:
 - **Vector layer** — embeddings and semantic search via `mem0ai` + OpenAI
 - **Graph layer** — Postgres stores entities and relationships. LLM extracts them automatically.
 - **Async worker** — picks up extraction jobs in the background. Never blocks the response.
-- **Dual recall modes** — vector search (fast, semantic) + graph traversal (slow, relational)
+- **Hybrid recall stack** — in-process cache → Redis exact/warm cache → precomputed graph snapshot → lexical recency fallback (then async semantic enrichment)
 - **Insights** — watches for contradictions, stale decisions, your core interests
-- **Caching** — tokens (10 min), recall results (60 sec). Keeps latency low.
+- **Caching** — OAuth token cache (10 min), in-process recall cache (10 min), Redis exact cache (120s), Redis warm cache (45s), snapshot freshness controls.
 
 ### Frontend (`/dashboard`)
 - **Memory feed** — browse what you've saved, search it, see where it came from
@@ -56,9 +56,9 @@ The MCP server that Claude and friends talk to:
 
 ## Technical Highlights
 
-### Recall Latency: The Journey
+### Recall Latency: The Journey (Production)
 
-Three days of compressing the hot path to nothing:
+Three days of retrieval-path optimization:
 
 ```
 End-to-end recall latency (p50, production)
@@ -76,7 +76,7 @@ Apr 16  ████  ~717ms handler / ~2,200ms total (auth + rate-limit include
 |--------|---------|-------------|
 | Apr 14 | ~30s    | Baseline — every recall: embed → vector search → fetch → format, all synchronous |
 | Apr 15 | ~24s    | Added basic in-memory recall cache (60s TTL). Cold misses still hit full pipeline |
-| Apr 16 | ~2.2s total / ~717ms handler | Multi-layer cache architecture: serve immediately from fallback, enrich in background. Zero embedding or vector ops in the foreground path on cache miss |
+| Apr 16 | ~2.2s total / ~717ms handler | Multi-layer cache + precomputed graph snapshots + background enrichment. Zero embedding or vector ops in the foreground miss path |
 
 Today's log (cold boot, precomputed snapshot not yet warmed):
 ```
@@ -85,7 +85,7 @@ recall_total_ms=717   recall_embed_ms=0   recall_vector_ms=0
 recall_source=precomputed_graph_miss   recall_snapshot_status=miss
 ```
 
-No embedding. No vector search. 717ms from a cold start. When the precomputed snapshot warms up, that drops to ~50ms.
+No embedding. No vector search. 717ms from a cold start. Relative to Apr 15 (~24s), that's about a 33x improvement on the handler path. When the precomputed snapshot warms up, that drops to ~50ms.
 
 ---
 
