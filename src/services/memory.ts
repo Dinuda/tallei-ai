@@ -14,6 +14,8 @@ import {
   recallMemoriesV2,
 } from "./memoryGraph.js";
 import { rerankMemories, ragSearchMemories } from "./reranker.js";
+import { hybridRecall, invalidateBm25Cache } from "./hybridRetrieval.js";
+import { extractFacts } from "./factExtractor.js";
 import {
   buildRecentFallback,
   bumpRecallStamp,
@@ -315,6 +317,9 @@ export async function saveMemory(
     }
   }
 
+  const summary = await summaryPromise;
+  const summaryMs = Number(process.hrtime.bigint() - summaryStartedAt) / 1_000_000;
+
   const memoryText = buildMemoryText(platform, summary, content);
   const encrypted = encryptMemoryContent(memoryText);
   const contentHash = hashMemoryContent(memoryText);
@@ -363,6 +368,40 @@ export async function saveMemory(
       } catch (error) {
         noteVectorFailure(error, "save_bg");
       }
+
+      // Single-pass add-only fact extraction (mem0 new algorithm)
+      void extractFacts(normalizedContent).then(async (facts) => {
+        for (const fact of facts) {
+          try {
+            const factText = `[FACT] ${fact.text}${fact.temporal_context ? ` (${fact.temporal_context})` : ""}`;
+            const factEncrypted = encryptMemoryContent(factText);
+            const factHash = hashMemoryContent(factText);
+            const factId = randomUUID();
+            await memoryRepository.create(auth, {
+              id: factId,
+              contentCiphertext: factEncrypted,
+              contentHash: factHash,
+              platform: `fact:${platform}`,
+              summaryJson: { source: "extracted_fact", subject: fact.subject, supersedes: fact.supersedes_pattern },
+              qdrantPointId: factId,
+            });
+            const factVector = await embedText(factText).catch(() => null);
+            if (factVector) {
+              await vectorRepository.upsertMemoryVector({
+                auth,
+                memoryId: factId,
+                pointId: factId,
+                vector: factVector,
+                platform: `fact:${platform}`,
+                createdAt: new Date().toISOString(),
+              }).catch(() => {});
+            }
+          } catch {
+            // Best-effort; fact save failures don't block the primary memory
+          }
+        }
+        invalidateBm25Cache(auth);
+      }).catch(() => {});
     })();
   }
 
@@ -384,6 +423,7 @@ export async function saveMemory(
 
   invalidateRecallCache(auth);
   invalidateRecallV2Cache(auth);
+  invalidateBm25Cache(auth);
   void bumpRecallStamp(auth).catch(() => {});
   void markSnapshotStale(auth).catch(() => {});
   void queueSnapshotRefresh(auth, "save_memory", 1_000).catch(() => {});
@@ -405,12 +445,12 @@ async function semanticRecallMemories(
   query: string,
   auth: AuthContext,
   limit = 5,
-  requesterIp?: string
-): Promise<RecallResult> {
+  _requesterIp?: string
+): Promise<{ result: RecallResult; timingsMs: Record<string, number> }> {
   const cacheKey = recallCacheKey(auth, query, limit);
   const cached = recallCache.get(cacheKey);
   if (cached && cached.exp > Date.now()) {
-    return cached.result;
+    return { result: cached.result, timingsMs: {} };
   }
 
   if (auth.plan === "free") {
@@ -422,217 +462,12 @@ async function semanticRecallMemories(
     }
   }
 
-  let vectorResults: Array<{ pointId: string; memoryId: string; score: number }> = [];
-  let rows = [] as Awaited<ReturnType<typeof memoryRepository.getByIds>>;
-
-  if (!shouldBypassVector()) {
-    try {
-      const embedStartedAt = Date.now();
-      const queryVector = await withTimeout(
-        embedText(normalizeRecallQuery(query)),
-        FAST_RECALL_EMBED_TIMEOUT_MS,
-        "recall.embed"
-      );
-      timingsMs.embed_ms = Date.now() - embedStartedAt;
-
-      const vectorStartedAt = Date.now();
-      vectorResults = await withTimeout(
-        vectorRepository.searchVectors(auth, queryVector, limit),
-        FAST_RECALL_VECTOR_TIMEOUT_MS,
-        "recall.searchVectors"
-      );
-      timingsMs.vector_ms = Date.now() - vectorStartedAt;
-
-      const dbStartedAt = Date.now();
-      rows = await withTimeout(
-        memoryRepository.getByIds(auth, vectorResults.map((v) => v.memoryId)),
-        MEMORY_DB_TIMEOUT_MS,
-        "recall.getByIds"
-      );
-      timingsMs.db_ms = Date.now() - dbStartedAt;
-    } catch (error) {
-      noteVectorFailure(error, "recall");
-    }
-  }
-
-  const rowMap = new Map(rows.map((row) => [row.id, row]));
-  let memories = vectorResults
-    .map((vectorHit) => {
-      const row = rowMap.get(vectorHit.memoryId);
-      if (!row) return null;
-
-      let text = "";
-      try {
-        text = decryptMemoryContent(row.content_ciphertext);
-      } catch (error) {
-        console.error("[memory] decrypt failed for memory", row.id, error);
-        text = "[Encrypted memory unavailable]";
-      }
-
-      const metadata = (row.summary_json && typeof row.summary_json === "object"
-        ? (row.summary_json as Record<string, unknown>)
-        : {}) as Record<string, unknown>;
-
-      return {
-        id: row.id,
-        text,
-        score: vectorHit.score,
-        metadata: {
-          ...metadata,
-          platform: row.platform,
-          createdAt: row.created_at,
-        },
-      };
-    })
-    .filter((memory): memory is NonNullable<typeof memory> => Boolean(memory))
-    .filter((memory) => memory.score >= config.recallMinVectorScore);
-
-  if (memories.length === 0) {
-    // Use listAll so old memories are not skipped due to a recency-ordered LIMIT.
-    let fallbackRows = [] as Awaited<ReturnType<typeof memoryRepository.listAll>>;
-    try {
-      fallbackRows = await withTimeout(
-        memoryRepository.listAll(auth),
-        MEMORY_DB_TIMEOUT_MS,
-        "recall.listFallback"
-      );
-    } catch (error) {
-      noteMemoryDbFailure(error, "recall-list-fallback");
-      fallbackRows = [];
-    }
-    memories = fallbackRows
-      .map((row) => {
-        let text = "";
-        try {
-          text = decryptMemoryContent(row.content_ciphertext);
-        } catch {
-          text = "[Encrypted memory unavailable]";
-        }
-
-        const metadata = (row.summary_json && typeof row.summary_json === "object"
-          ? (row.summary_json as Record<string, unknown>)
-          : {}) as Record<string, unknown>;
-
-        return {
-          id: row.id,
-          text,
-          score: fallbackScore(query, text, row.created_at),
-          metadata: {
-            ...metadata,
-            platform: row.platform,
-            createdAt: row.created_at,
-            retrieval: "fallback",
-          },
-        };
-      })
-      .filter((memory) => memory.score >= config.recallMinFallbackScore)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
-  }
-
-  // LLM reranker: pass candidates through gpt-4o-mini to eliminate false positives
-  // that sneak past the bi-encoder threshold (e.g. "favorite language" matching
-  // "favorite ice cream" because both share the "favorite X" semantic cluster).
-  if (config.rerankEnabled && memories.length > 0) {
-    try {
-      const rerankScores = await rerankMemories(query, memories);
-      const scoreById = new Map(rerankScores.map((r) => [r.id, r.rerankScore]));
-      const filtered = memories.filter(
-        (m) => (scoreById.get(m.id) ?? 0) >= config.rerankMinScore
-      );
-      // Only apply if reranker returned sane results; if everything got nuked and
-      // we had good vector scores, trust the reranker (user asked, nothing matches).
-      memories = filtered;
-    } catch (error) {
-      if (config.nodeEnv !== "production") {
-        console.warn("[reranker] rerank step failed, using unranked results", error);
-      }
-    }
-  }
-
-  // RAG fallback: vector search + threshold + reranker all returned nothing.
-  // This means the Qdrant index is likely stale or missing embeddings for this user.
-  // 1. Full-scan RAG: load every DB memory and ask gpt-4o-mini which are relevant.
-  // 2. Return any matches immediately so the user gets a real answer now.
-  // 3. Trigger background reindex so vector search works correctly next time.
-  if (memories.length === 0) {
-    // Use listAll — the failing index may not have vectors for old memories at all.
-    let allRows: Awaited<ReturnType<typeof memoryRepository.listAll>> = [];
-    try {
-      allRows = await withTimeout(
-        memoryRepository.listAll(auth),
-        MEMORY_DB_TIMEOUT_MS,
-        "recall.ragFallback"
-      );
-    } catch (error) {
-      noteMemoryDbFailure(error, "rag-list");
-    }
-
-    if (allRows.length > 0) {
-      const ragCandidates = allRows.flatMap((row) => {
-        let text = "";
-        try {
-          text = decryptMemoryContent(row.content_ciphertext);
-        } catch {
-          return [];
-        }
-        return [{ id: row.id, text, platform: row.platform, createdAt: row.created_at }];
-      });
-
-      try {
-        const ragResults = await ragSearchMemories(query, ragCandidates);
-        memories = ragResults.map((r) => {
-          const row = allRows.find((row) => row.id === r.id);
-          const metadata = (row?.summary_json && typeof row.summary_json === "object"
-            ? (row.summary_json as Record<string, unknown>)
-            : {}) as Record<string, unknown>;
-          return {
-            id: r.id,
-            text: r.text,
-            score: r.score,
-            metadata: {
-              ...metadata,
-              platform: r.platform,
-              createdAt: r.createdAt,
-              retrieval: "rag",
-            },
-          };
-        });
-      } catch (error) {
-        if (config.nodeEnv !== "production") {
-          console.warn("[rag] fallback search failed", error);
-        }
-      }
-    }
-
-    // Reindex in background regardless — fixes the vector index for next time.
-    if (!shouldBypassVector()) {
-      void reindexUserMemories(auth).catch((error) => {
-        if (config.nodeEnv !== "production") {
-          console.warn("[reindex] background re-index failed", error);
-        }
-      });
-    }
-  }
-
-  const lines = memories.map((memory) => {
-    const platformValue = memory.metadata.platform;
-    const platform =
-      typeof platformValue === "string" && platformValue.length > 0
-        ? platformValue
-        : "unknown";
-    return `[${platform.toUpperCase()}] ${memory.text}`;
-  });
-
-  const contextBlock =
-    lines.length > 0
-      ? `--- Your Past Context ---\n${lines.join("\n")}\n---`
-      : "--- No relevant memories found ---";
-  timingsMs.total_ms = Date.now() - startedAt;
+  // Hybrid retrieval: parallel BM25 + vector + entity matching fused with RRF
+  const hybrid = await hybridRecall(query, auth, limit);
 
   return {
-    result: { contextBlock, memories },
-    timingsMs,
+    result: { contextBlock: hybrid.contextBlock, memories: hybrid.memories },
+    timingsMs: hybrid.timingsMs,
   };
 }
 

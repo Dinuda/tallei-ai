@@ -12,10 +12,7 @@
  *   can tell that asking about food preferences is unrelated to coding preferences.
  */
 
-import OpenAI from "openai";
-import { config } from "../config.js";
-
-const openai = new OpenAI({ apiKey: config.openaiApiKey });
+import { llm as openai, llmModel } from "./llmClient.js";
 
 export interface RerankCandidate {
   id: string;
@@ -78,7 +75,7 @@ export async function ragSearchMemories(
   let raw: string;
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: llmModel,
       messages: [
         { role: "system", content: RAG_SYSTEM },
         { role: "user", content: userMessage },
@@ -126,7 +123,7 @@ export async function rerankMemories(
   let raw: string;
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: llmModel,
       messages: [
         { role: "system", content: RERANKER_SYSTEM },
         { role: "user", content: userMessage },

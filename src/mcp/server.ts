@@ -24,6 +24,8 @@ import { config } from "../config.js";
 import { pool } from "../db/index.js";
 import { getCacheJson, setCacheJson } from "../services/cache.js";
 import { hasRequiredScopes } from "../services/oauthTokens.js";
+import { runAsyncSafe } from "../services/asyncSafe.js";
+import { setRequestTimingField } from "../services/requestTiming.js";
 import type { AuthContext, Plan } from "../types/auth.js";
 
 const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
@@ -399,6 +401,28 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
       } else {
         // Transport-level handshake/stream requests often have no JSON-RPC method.
         console.log(`[mcp] ${method}`);
+      }
+    }
+
+    // EVAL_MODE: accept a synthetic Bearer token of the form "eval:<userId>"
+    // so eval scripts can hit the MCP endpoint without OAuth setup.
+    // Only active when EVAL_MODE=true AND NODE_ENV !== "production".
+    if (config.nodeEnv !== "production" && process.env["EVAL_MODE"] === "true") {
+      const evalHeader = req.headers.authorization as string | undefined;
+      const evalToken = evalHeader?.startsWith("Bearer eval:") ? evalHeader.slice("Bearer eval:".length) : null;
+      if (evalToken) {
+        const evalUserId = evalToken.trim();
+        const evalAuth = await authContextFromUserId(evalUserId, "oauth").catch(() => null);
+        if (evalAuth) {
+          noteAuthTiming();
+          req.authContext = evalAuth;
+          prewarmRecallCache(evalAuth);
+          const server = buildMcpServer(evalAuth);
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          await server.connect(transport);
+          await transport.handleRequest(req, res, req.body);
+          return;
+        }
       }
     }
 

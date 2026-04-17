@@ -12,6 +12,7 @@ import {
 } from "./fastRecall.js";
 import { lookupPrecomputedRecallV2, queueSnapshotRefresh } from "./precomputedGraphRecall.js";
 import { setRequestTimingFields } from "./requestTiming.js";
+import { hybridRecall } from "./hybridRetrieval.js";
 import { VectorRepository } from "../repositories/vectorRepository.js";
 import { MemoryRepository } from "../repositories/memoryRepository.js";
 import { MemoryGraphRepository } from "../repositories/memoryGraphRepository.js";
@@ -189,32 +190,21 @@ async function semanticRecallMemoriesV2(
   const timings: Record<string, number> = {};
   const flags: Record<string, unknown> = {};
 
-  const vectorStarted = Date.now();
-  let vectorHits: VectorCandidate[] = [];
-  if (!shouldBypassVector()) {
-    try {
-      const embedStarted = Date.now();
-      const queryVector = await withTimeout(
-        embedText(query),
-        FAST_RECALL_EMBED_TIMEOUT_MS,
-        "recall_v2.embed"
-      );
-      timings.embed_ms = Date.now() - embedStarted;
-
-      const searchStarted = Date.now();
-      const results = await withTimeout(
-        vectorRepository.searchVectors(auth, queryVector, Math.max(limit * 3, 20)),
-        FAST_RECALL_VECTOR_TIMEOUT_MS,
-        "recall_v2.searchVectors"
-      );
-      timings.vector_ms = Date.now() - searchStarted;
-      vectorHits = results.map((row) => ({ memoryId: row.memoryId, score: row.score }));
-    } catch (error) {
-      noteVectorFailure(error);
-    }
+  // ── Hybrid RRF retrieval (parallel BM25 + vector + entity) ───────────────
+  const hybridStarted = Date.now();
+  let hybridCandidates: Array<{ id: string; text: string; score: number; metadata: Record<string, unknown> }> = [];
+  try {
+    const hybrid = await hybridRecall(query, auth, Math.max(limit * 3, 20));
+    hybridCandidates = hybrid.memories;
+    timings.embed_ms = hybrid.timingsMs.vector_ms ?? 0;
+    timings.vector_ms = hybrid.timingsMs.vector_ms ?? 0;
+    timings.bm25_ms = hybrid.timingsMs.bm25_ms ?? 0;
+  } catch (error) {
+    flags.hybrid_error = error instanceof Error ? error.message : "hybrid_failed";
   }
-  timings.vector = Date.now() - vectorStarted;
+  timings.hybrid_ms = Date.now() - hybridStarted;
 
+  // ── Graph signals for post-fusion boost ────────────────────────────────────
   const graphStarted = Date.now();
   let signalsByMemory = new Map<string, GraphSignal>();
   let retrievalMode: RecallV2Result["retrieval_mode"] = "graph_augmented";
@@ -230,33 +220,11 @@ async function semanticRecallMemoriesV2(
   timings.graph_ms = Date.now() - graphStarted;
   timings.graph = timings.graph_ms;
 
-  const candidateMemoryIds = new Set<string>(vectorHits.map((hit) => hit.memoryId));
-  for (const memoryId of signalsByMemory.keys()) {
-    candidateMemoryIds.add(memoryId);
-  }
-
-  if (candidateMemoryIds.size === 0) {
-    const fallbackRows = await memoryRepository.list(auth, Math.max(limit * 6, 30));
-    for (const row of fallbackRows.slice(0, Math.max(limit * 2, 10))) {
-      candidateMemoryIds.add(row.id);
-    }
-  }
-
-  const rows = await memoryRepository.getByIds(auth, [...candidateMemoryIds]);
-  const rowById = new Map(rows.map((row) => [row.id, row]));
-
-  const maxVectorScore = vectorHits.reduce((max, hit) => Math.max(max, hit.score), 0);
-  const vectorScoreByMemoryId = new Map(vectorHits.map((hit) => [hit.memoryId, hit.score]));
-
-  const ranking = [...candidateMemoryIds]
-    .map((memoryId) => {
-      const row = rowById.get(memoryId);
-      if (!row) return null;
-
-      const vectorScore = vectorNormalize(vectorScoreByMemoryId.get(memoryId) ?? 0, maxVectorScore);
-      const graphSignal = signalsByMemory.get(memoryId);
+  // ── Apply graph boost on top of RRF scores and re-rank ────────────────────
+  const ranking = hybridCandidates
+    .map((candidate) => {
+      const graphSignal = signalsByMemory.get(candidate.id);
       const graphRelevance = Math.max(0, Math.min(1, (graphSignal?.graphScore ?? 0) / 3));
-      const recency = recencyScore(row.created_at);
 
       const confSummary = graphSignal?.confidenceSummary ?? { explicit: 0, inferred: 0, uncertain: 0 };
       const confTotal = confSummary.explicit + confSummary.inferred + confSummary.uncertain;
@@ -270,44 +238,29 @@ async function semanticRecallMemoriesV2(
             )
           );
 
+      // Updated scoring: RRF score × 0.65 + graph boost × 0.25 + confidence × 0.10
+      // Temporal relevance is baked into fact texts by factExtractor (no hard recency cliff)
       const score = Number(
         (
-          vectorScore * 0.55 +
+          candidate.score * 0.65 +
           graphRelevance * 0.25 +
-          recency * 0.15 +
-          confidenceWeight * 0.05
+          confidenceWeight * 0.10
         ).toFixed(5)
       );
 
-      let text = "";
-      try {
-        text = decryptMemoryContent(row.content_ciphertext);
-      } catch {
-        text = "[Encrypted memory unavailable]";
-      }
-
-      const summaryMetadata = (row.summary_json && typeof row.summary_json === "object"
-        ? (row.summary_json as Record<string, unknown>)
-        : {}) as Record<string, unknown>;
-
       return {
-        id: memoryId,
-        text,
+        id: candidate.id,
+        text: candidate.text,
         score,
-        metadata: {
-          ...summaryMetadata,
-          platform: row.platform,
-          createdAt: row.created_at,
-        },
+        metadata: candidate.metadata,
         explanation: {
-          memory_id: memoryId,
-          reasons: graphSignal?.reasons ?? ["Vector similarity match"],
-          top_paths: graphSignal?.topPaths ?? ["query -> vector_match -> memory"],
+          memory_id: candidate.id,
+          reasons: graphSignal?.reasons ?? ["Hybrid RRF match"],
+          top_paths: graphSignal?.topPaths ?? ["query -> hybrid_rrf -> memory"],
           confidence_summary: confSummary,
         },
       };
     })
-    .filter((item): item is NonNullable<typeof item> => Boolean(item))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 

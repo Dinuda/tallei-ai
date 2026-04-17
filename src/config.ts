@@ -150,6 +150,12 @@ export const config = {
         ? 30_000
         : 10_000),
   embeddingModel: readStringEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
+  // LLM provider for generation (summarization, reranking, fact extraction).
+  // Set LLM_PROVIDER=ollama locally to avoid burning OpenAI tokens during dev.
+  // Embeddings always use OpenAI (changing dims would require re-indexing Qdrant).
+  llmProvider: readStringEnv("LLM_PROVIDER", "openai") as "openai" | "ollama",
+  ollamaBaseUrl: readStringEnv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+  ollamaModel: readStringEnv("OLLAMA_MODEL", "qwen2.5:7b"),
   memoryMasterKey: readStringEnv("MEMORY_MASTER_KEY"),
   kmsKeyId: readStringEnv("KMS_KEY_ID", "local-dev"),
   enableSupabaseRlsPolicies: readBooleanEnv("ENABLE_SUPABASE_RLS_POLICIES", true),

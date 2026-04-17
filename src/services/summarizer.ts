@@ -1,7 +1,4 @@
-import OpenAI from "openai";
-import { config } from "../config.js";
-
-const openai = new OpenAI({ apiKey: config.openaiApiKey });
+import { llm as openai, llmModel } from "./llmClient.js";
 
 export interface ConversationSummary {
   title: string;
@@ -22,7 +19,7 @@ export async function summarizeConversation(
   content: string
 ): Promise<ConversationSummary> {
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: llmModel,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: `Summarize this conversation:\n\n${content}` },
