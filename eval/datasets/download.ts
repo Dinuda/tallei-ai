@@ -90,16 +90,116 @@ export interface LoCoMoDialogue {
   qa: LoCoMoQA[];
 }
 
+interface RawLoCoMoSessionTurn {
+  speaker?: unknown;
+  text?: unknown;
+  utterance?: unknown;
+}
+
+interface RawLoCoMoQuestion {
+  question?: unknown;
+  answer?: unknown;
+  type?: unknown;
+  category?: unknown;
+}
+
+interface RawLoCoMoConversationObject {
+  [key: string]: unknown;
+}
+
+interface RawLoCoMoDialogue {
+  id?: unknown;
+  sample_id?: unknown;
+  conversations?: unknown;
+  conversation?: unknown;
+  qa?: unknown;
+}
+
 const LOCOMO_URL =
   "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json";
 
 export async function downloadLoCoMo(): Promise<LoCoMoDialogue[]> {
   const path = await downloadFile(LOCOMO_URL, "locomo10.json");
-  const raw = readJsonFile<LoCoMoDialogue[] | Record<string, unknown>>(path);
-  if (Array.isArray(raw)) return raw;
-  // Some releases wrap in an object
-  const values = Object.values(raw);
-  return values.filter((v): v is LoCoMoDialogue => typeof v === "object" && v !== null && "conversations" in v);
+  const raw = readJsonFile<RawLoCoMoDialogue[] | Record<string, unknown>>(path);
+
+  const flattenToDialogues = (value: unknown): RawLoCoMoDialogue[] => {
+    if (Array.isArray(value)) return value as RawLoCoMoDialogue[];
+    if (value && typeof value === "object") {
+      const nested = Object.values(value)
+        .filter((v): v is RawLoCoMoDialogue => typeof v === "object" && v !== null);
+      return nested;
+    }
+    return [];
+  };
+
+  const categoryToType = (category: unknown): string | undefined => {
+    if (typeof category === "number" && Number.isFinite(category)) {
+      return `category_${Math.trunc(category)}`;
+    }
+    if (typeof category === "string" && category.trim().length > 0) {
+      return category.trim();
+    }
+    return undefined;
+  };
+
+  const normalizeTurns = (dialogue: RawLoCoMoDialogue): LoCoMoTurn[] => {
+    const conv = dialogue.conversations;
+    if (Array.isArray(conv)) {
+      return conv
+        .filter((t): t is RawLoCoMoSessionTurn => typeof t === "object" && t !== null)
+        .map((t) => ({
+          speaker: String(t.speaker ?? "unknown"),
+          utterance: String(t.utterance ?? t.text ?? ""),
+        }))
+        .filter((t) => t.utterance.length > 0);
+    }
+
+    const convoObj = dialogue.conversation;
+    if (!convoObj || typeof convoObj !== "object") return [];
+    const obj = convoObj as RawLoCoMoConversationObject;
+    const keys = Object.keys(obj)
+      .filter((k) => /^session_\d+$/.test(k))
+      .sort((a, b) => Number(a.split("_")[1]) - Number(b.split("_")[1]));
+
+    const turns: LoCoMoTurn[] = [];
+    for (const key of keys) {
+      const sessionTurns = obj[key];
+      if (!Array.isArray(sessionTurns)) continue;
+      for (const turn of sessionTurns) {
+        if (!turn || typeof turn !== "object") continue;
+        const t = turn as RawLoCoMoSessionTurn;
+        const utterance = String(t.text ?? t.utterance ?? "");
+        if (!utterance) continue;
+        turns.push({
+          speaker: String(t.speaker ?? "unknown"),
+          utterance,
+        });
+      }
+    }
+    return turns;
+  };
+
+  const normalizeQa = (dialogue: RawLoCoMoDialogue): LoCoMoQA[] => {
+    if (!Array.isArray(dialogue.qa)) return [];
+    return dialogue.qa
+      .filter((q): q is RawLoCoMoQuestion => typeof q === "object" && q !== null)
+      .map((q) => ({
+        question: String(q.question ?? "").trim(),
+        answer: String(q.answer ?? "").trim(),
+        type: typeof q.type === "string" && q.type.trim().length > 0
+          ? q.type.trim()
+          : categoryToType(q.category),
+      }))
+      .filter((q) => q.question.length > 0 && q.answer.length > 0);
+  };
+
+  return flattenToDialogues(raw)
+    .map((dialogue, idx): LoCoMoDialogue => ({
+      id: String(dialogue.id ?? dialogue.sample_id ?? `locomo-${idx + 1}`),
+      conversations: normalizeTurns(dialogue),
+      qa: normalizeQa(dialogue),
+    }))
+    .filter((dialogue) => dialogue.conversations.length > 0 && dialogue.qa.length > 0);
 }
 
 // ─── LongMemEval ──────────────────────────────────────────────────────────────

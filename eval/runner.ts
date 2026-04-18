@@ -13,6 +13,7 @@
  *
  * Environment:
  *   TALLEI_EVAL_URL   MCP endpoint (default: http://localhost:3000/mcp)
+ *   EVAL_USER_ID      Existing user UUID in the local DB (required)
  *   OPENAI_API_KEY    Required for LLM judge scoring
  *   EVAL_MAX_ITEMS    Cap items per benchmark (useful for quick smoke tests)
  */

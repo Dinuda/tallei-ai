@@ -9,7 +9,12 @@
 
 import { randomUUID } from "crypto";
 import { downloadLongMemEval, type LongMemEvalItem } from "../datasets/download.js";
-import { saveMemory, recallMemories } from "../tallei-client.js";
+import {
+  saveMemory,
+  recallMemories,
+  getEvalUserIdOrThrow,
+  assertEvalAuthOrThrow,
+} from "../tallei-client.js";
 import { llmJudge, extractAnswerFromContext } from "../metrics.js";
 
 export interface LongMemEvalResult {
@@ -33,6 +38,8 @@ export async function runLongMemEval(opts: {
   console.log("[longmemeval] downloading dataset...");
   const items = (await downloadLongMemEval()).slice(0, maxItems);
   console.log(`[longmemeval] running ${items.length} questions`);
+  const evalUserId = getEvalUserIdOrThrow();
+  await assertEvalAuthOrThrow(evalUserId);
 
   const scores: number[] = [];
   const byType: Record<string, { count: number; total: number }> = {};
@@ -41,7 +48,8 @@ export async function runLongMemEval(opts: {
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const userId = randomUUID();
+    const scopeId = `longmemeval-${i + 1}-${randomUUID().slice(0, 8)}`;
+    const scopePrefix = `[eval_scope:${scopeId}]`;
 
     // Save all sessions as memories
     for (let si = 0; si < item.sessions.length; si++) {
@@ -49,13 +57,13 @@ export async function runLongMemEval(opts: {
       const sessionText = session
         .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.content}`)
         .join("\n");
-      await saveMemory(`[Session ${si + 1}]\n${sessionText}`, userId).catch(() => {});
+      await saveMemory(`${scopePrefix} [Session ${si + 1}]\n${sessionText}`, evalUserId);
       await sleep(30);
     }
 
     // Query
     const t0 = Date.now();
-    const contextBlock = await recallMemories(item.question, userId, 10);
+    const contextBlock = await recallMemories(`${scopePrefix} ${item.question}`, evalUserId, 10);
     const latencyMs = Date.now() - t0;
     latencies.push(latencyMs);
 

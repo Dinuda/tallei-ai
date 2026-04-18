@@ -12,7 +12,12 @@
 
 import { randomUUID } from "crypto";
 import { downloadBeam, type BeamConversation } from "../datasets/download.js";
-import { saveMemory, recallMemories } from "../tallei-client.js";
+import {
+  saveMemory,
+  recallMemories,
+  getEvalUserIdOrThrow,
+  assertEvalAuthOrThrow,
+} from "../tallei-client.js";
 import { nuggetScore, kendallTauB, extractAnswerFromContext } from "../metrics.js";
 
 export interface BeamResult {
@@ -39,6 +44,8 @@ export async function runBeam(opts: {
   console.log(`[beam] downloading dataset (${scale})...`);
   const conversations = (await downloadBeam(scale)).slice(0, maxConversations);
   console.log(`[beam] running ${conversations.length} conversations`);
+  const evalUserId = getEvalUserIdOrThrow();
+  await assertEvalAuthOrThrow(evalUserId);
 
   const allScores: number[] = [];
   const byType: Record<string, { count: number; total: number }> = {};
@@ -47,7 +54,8 @@ export async function runBeam(opts: {
 
   for (let ci = 0; ci < conversations.length; ci++) {
     const conv = conversations[ci];
-    const userId = randomUUID();
+    const scopeId = `beam-${scale}-${ci + 1}-${randomUUID().slice(0, 8)}`;
+    const scopePrefix = `[eval_scope:${scopeId}]`;
 
     // Save all conversation turns
     const batchSize = 20;
@@ -56,14 +64,14 @@ export async function runBeam(opts: {
       const batchText = batch
         .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
         .join("\n");
-      await saveMemory(batchText, userId).catch(() => {});
+      await saveMemory(`${scopePrefix}\n${batchText}`, evalUserId);
       await sleep(30);
     }
 
     // Answer each question
     for (const q of conv.questions) {
       const t0 = Date.now();
-      const contextBlock = await recallMemories(q.question, userId, 10);
+      const contextBlock = await recallMemories(`${scopePrefix} ${q.question}`, evalUserId, 10);
       const latencyMs = Date.now() - t0;
       latencies.push(latencyMs);
 

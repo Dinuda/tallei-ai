@@ -10,7 +10,12 @@
 
 import { randomUUID } from "crypto";
 import { downloadLoCoMo, type LoCoMoDialogue } from "../datasets/download.js";
-import { saveMemory, recallMemories } from "../tallei-client.js";
+import {
+  saveMemory,
+  recallMemories,
+  getEvalUserIdOrThrow,
+  assertEvalAuthOrThrow,
+} from "../tallei-client.js";
 import { f1Score, extractAnswerFromContext } from "../metrics.js";
 
 export interface LoCoMoResult {
@@ -35,6 +40,8 @@ export async function runLoCoMo(opts: {
   console.log("[locomo] downloading dataset...");
   const dialogues = (await downloadLoCoMo()).slice(0, maxDialogues);
   console.log(`[locomo] running ${dialogues.length} dialogues`);
+  const evalUserId = getEvalUserIdOrThrow();
+  await assertEvalAuthOrThrow(evalUserId);
 
   const f1Scores: number[] = [];
   const byType: Record<string, { count: number; totalF1: number }> = {};
@@ -43,19 +50,20 @@ export async function runLoCoMo(opts: {
 
   for (let di = 0; di < dialogues.length; di++) {
     const dialogue = dialogues[di];
-    const userId = randomUUID();
+    const scopeId = `locomo-${di + 1}-${randomUUID().slice(0, 8)}`;
+    const scopePrefix = `[eval_scope:${scopeId}]`;
 
     // Feed conversation turns as memories
     for (const turn of dialogue.conversations) {
-      const text = `${turn.speaker}: ${turn.utterance}`;
-      await saveMemory(text, userId).catch(() => {});
+      const text = `${scopePrefix} ${turn.speaker}: ${turn.utterance}`;
+      await saveMemory(text, evalUserId);
       await sleep(50); // gentle rate limit
     }
 
     // Answer each QA pair
     for (const qa of dialogue.qa) {
       const t0 = Date.now();
-      const contextBlock = await recallMemories(qa.question, userId, 10);
+      const contextBlock = await recallMemories(`${scopePrefix} ${qa.question}`, evalUserId, 10);
       const latencyMs = Date.now() - t0;
       latencies.push(latencyMs);
 

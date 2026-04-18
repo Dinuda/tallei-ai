@@ -8,18 +8,23 @@
  *
  * Environment:
  *   TALLEI_EVAL_URL    MCP endpoint (default: http://localhost:3000/mcp)
- *   EVAL_USER_ID       Test user UUID (generates one if not set)
+ *   EVAL_USER_ID       Existing user UUID in local DB (required)
  */
 
-import { randomUUID } from "crypto";
-import { saveMemory, recallMemories } from "./tallei-client.js";
+import {
+  saveMemory,
+  recallMemories,
+  getEvalUserIdOrThrow,
+  assertEvalAuthOrThrow,
+} from "./tallei-client.js";
 
 async function main() {
-  const userId = process.env["EVAL_USER_ID"] ?? randomUUID();
+  const userId = getEvalUserIdOrThrow();
   console.log(`[smoke] testing Tallei MCP at ${process.env["TALLEI_EVAL_URL"] ?? "http://localhost:3000/mcp"}`);
   console.log(`[smoke] user ID: ${userId}`);
 
   try {
+    await assertEvalAuthOrThrow(userId);
     console.log("[smoke] saving test memory...");
     await saveMemory("I love building AI systems with TypeScript", userId);
     console.log("[smoke] ✓ save_memory OK");
