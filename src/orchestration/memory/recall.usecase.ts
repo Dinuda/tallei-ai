@@ -48,12 +48,7 @@ interface RecallMemoryUseCaseDeps {
   readonly runBackgroundRecallEnrichment: (key: string, task: () => Promise<void>) => void;
   readonly withTimeout: <T>(promise: Promise<T>, ms: number, label: string) => Promise<T>;
   readonly fastRecallTotalTimeoutMs: number;
-  readonly semanticRecallMemories: (
-    query: string,
-    auth: AuthContext,
-    limit: number,
-    requesterIp?: string
-  ) => Promise<{ result: RecallResult; timingsMs: Record<string, number> }>;
+  readonly hybridRecall: (query: string, auth: AuthContext, limit: number) => Promise<{ contextBlock: string; memories: RecallResult["memories"]; timingsMs: Record<string, number> }>;
   readonly memoryRepository: {
     logEvent(input: {
       auth: AuthContext;
@@ -124,13 +119,17 @@ export class RecallMemoryUseCase {
       this.deps.runBackgroundRecallEnrichment(
         this.deps.recallEnrichmentKey(input.auth, normalizedQuery, boundedLimit),
         async () => {
-          const enriched = await this.deps.withTimeout(
-            this.deps.semanticRecallMemories(normalizedQuery, input.auth, boundedLimit),
+          const hybridResult = await this.deps.withTimeout(
+            this.deps.hybridRecall(normalizedQuery, input.auth, boundedLimit),
             this.deps.fastRecallTotalTimeoutMs,
             "recall.enrichTotal"
           );
-          this.deps.setCachedRecall(cacheKey, enriched.result);
-          await this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", enriched.result);
+          const enrichedResult: RecallResult = {
+            contextBlock: hybridResult.contextBlock,
+            memories: hybridResult.memories,
+          };
+          this.deps.setCachedRecall(cacheKey, enrichedResult);
+          await this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", enrichedResult);
           await this.deps.memoryRepository.logEvent({
             auth: input.auth,
             action: "recall_enrich",
@@ -139,9 +138,9 @@ export class RecallMemoryUseCase {
               limit: boundedLimit,
               source: "semantic_enriched",
               cache_hit: false,
-              enrich_ms: enriched.timingsMs.total_ms ?? 0,
-              embed_ms: enriched.timingsMs.embed_ms ?? 0,
-              vector_ms: enriched.timingsMs.vector_ms ?? 0,
+              enrich_ms: hybridResult.timingsMs.total_ms ?? 0,
+              embed_ms: hybridResult.timingsMs.embed_ms ?? 0,
+              vector_ms: hybridResult.timingsMs.vector_ms ?? 0,
               graph_ms: 0,
             },
           });
@@ -193,13 +192,17 @@ export class RecallMemoryUseCase {
     this.deps.runBackgroundRecallEnrichment(
       this.deps.recallEnrichmentKey(input.auth, normalizedQuery, boundedLimit),
       async () => {
-        const enriched = await this.deps.withTimeout(
-          this.deps.semanticRecallMemories(normalizedQuery, input.auth, boundedLimit),
+        const hybridResult = await this.deps.withTimeout(
+          this.deps.hybridRecall(normalizedQuery, input.auth, boundedLimit),
           this.deps.fastRecallTotalTimeoutMs,
           "recall.enrichTotal"
         );
-        this.deps.setCachedRecall(cacheKey, enriched.result);
-        await this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", enriched.result);
+        const enrichedResult: RecallResult = {
+          contextBlock: hybridResult.contextBlock,
+          memories: hybridResult.memories,
+        };
+        this.deps.setCachedRecall(cacheKey, enrichedResult);
+        await this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", enrichedResult);
         await this.deps.memoryRepository.logEvent({
           auth: input.auth,
           action: "recall_enrich",
@@ -208,9 +211,9 @@ export class RecallMemoryUseCase {
             limit: boundedLimit,
             source: "semantic_enriched",
             cache_hit: false,
-            enrich_ms: enriched.timingsMs.total_ms ?? 0,
-            embed_ms: enriched.timingsMs.embed_ms ?? 0,
-            vector_ms: enriched.timingsMs.vector_ms ?? 0,
+            enrich_ms: hybridResult.timingsMs.total_ms ?? 0,
+            embed_ms: hybridResult.timingsMs.embed_ms ?? 0,
+            vector_ms: hybridResult.timingsMs.vector_ms ?? 0,
             graph_ms: 0,
           },
         });

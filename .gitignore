@@ -9,3 +9,4 @@ dashboard/node_modules/
 *.bak
 memory.db
 login-ngrok.png
+.env*

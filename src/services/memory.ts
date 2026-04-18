@@ -331,7 +331,7 @@ const recallMemoryUseCase = new RecallMemoryUseCase({
   runBackgroundRecallEnrichment,
   withTimeout,
   fastRecallTotalTimeoutMs: FAST_RECALL_TOTAL_TIMEOUT_MS,
-  semanticRecallMemories,
+  hybridRecall,
   memoryRepository,
   lookupPrecomputedRecallV1,
   buildRecentFallback,
