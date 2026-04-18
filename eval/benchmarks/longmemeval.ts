@@ -1,5 +1,6 @@
 /**
  * LongMemEval benchmark runner.
+ * @deprecated Non-default heavy benchmark. Use `eval/runner.ts` UX relevance flow for normal checks.
  *
  * Dataset: 500 questions across multi-session chat histories.
  * Uses the "short" (longmemeval_s) variant (~10-50 sessions per history).

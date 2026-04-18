@@ -67,6 +67,14 @@ function normalizeBaseUrl(raw: string): string {
 }
 
 const port = readIntEnv("PORT", 3000);
+const nodeEnv = process.env.NODE_ENV || "development";
+const localModelModeDefault = nodeEnv !== "production";
+const localModelMode = readBooleanEnv("LOCAL_MODEL_MODE", localModelModeDefault);
+const defaultLlmProvider = localModelMode ? "ollama" : "openai";
+const defaultEmbeddingProvider = localModelMode ? "ollama" : "openai";
+const defaultEmbeddingModel = localModelMode ? "nomic-embed-text" : "text-embedding-3-small";
+const defaultEmbeddingDims = localModelMode ? 768 : 1536;
+const defaultQdrantCollectionName = localModelMode ? "memories_local_v1" : "memories_v1";
 const localBaseUrl = `http://localhost:${port}`;
 const configuredPublicBaseUrl = process.env.PUBLIC_BASE_URL || localBaseUrl;
 const publicBaseUrl = normalizeBaseUrl(configuredPublicBaseUrl);
@@ -75,10 +83,11 @@ const qdrantTimeoutSecondsLegacy = readOptionalIntEnv("QDRANT_TIMEOUT_SECONDS");
 
 export const config = {
   port,
-  nodeEnv: process.env.NODE_ENV || "development",
+  nodeEnv,
+  localModelMode,
   host: readStringEnv(
     "HOST",
-    (process.env.NODE_ENV || "development") === "production" ? "0.0.0.0" : "127.0.0.1"
+    nodeEnv === "production" ? "0.0.0.0" : "127.0.0.1"
   ),
   publicBaseUrl,
   dashboardBaseUrl: normalizeBaseUrl(
@@ -92,7 +101,7 @@ export const config = {
   mcpPublicUrl: process.env.MCP_URL || "",
   databaseUrl: requireEnv("DATABASE_URL"),
   databaseUrlFallback: readStringEnv("DATABASE_URL_FALLBACK", "postgresql://tallei:tallei@localhost:5432/tallei"),
-  openaiApiKey: requireEnv("OPENAI_API_KEY"),
+  openaiApiKey: readStringEnv("OPENAI_API_KEY"),
   jwtSecret: requireEnv("JWT_SECRET"),
   supabaseUrl: readStringEnv("SUPABASE_URL"),
   supabaseServiceRoleKey: readStringEnv("SUPABASE_SERVICE_ROLE_KEY"),
@@ -124,7 +133,7 @@ export const config = {
   memoryFallbackMinRelevance: readFloatEnv("MEMORY_FALLBACK_MIN_RELEVANCE", 0.2),
   qdrantUrl: readStringEnv("QDRANT_URL"),
   qdrantApiKey: readStringEnv("QDRANT_API_KEY"),
-  qdrantCollectionName: readStringEnv("QDRANT_COLLECTION_NAME", "memories_v1"),
+  qdrantCollectionName: readStringEnv("QDRANT_COLLECTION_NAME", defaultQdrantCollectionName),
   memoryVectorUpsertTimeoutMs: readIntEnv(
     "MEMORY_VECTOR_UPSERT_TIMEOUT_MS",
     process.env.NODE_ENV === "production" ? 10_000 : 12_000
@@ -149,11 +158,13 @@ export const config = {
       : process.env.NODE_ENV === "production"
         ? 30_000
         : 10_000),
-  embeddingModel: readStringEnv("EMBEDDING_MODEL", "text-embedding-3-small"),
+  embeddingProvider: readStringEnv("EMBEDDING_PROVIDER", defaultEmbeddingProvider) as "openai" | "ollama",
+  embeddingModel: readStringEnv("EMBEDDING_MODEL", defaultEmbeddingModel),
+  embeddingDims: readIntEnv("EMBEDDING_DIMS", defaultEmbeddingDims),
   // LLM provider for generation (summarization, reranking, fact extraction).
-  // Set LLM_PROVIDER=ollama locally to avoid burning OpenAI tokens during dev.
-  // Embeddings always use OpenAI (changing dims would require re-indexing Qdrant).
-  llmProvider: readStringEnv("LLM_PROVIDER", "openai") as "openai" | "ollama",
+  // In local mode, provider defaults to Ollama.
+  llmProvider: readStringEnv("LLM_PROVIDER", defaultLlmProvider) as "openai" | "ollama",
+  openaiModel: readStringEnv("OPENAI_MODEL", "gpt-4o-mini"),
   ollamaBaseUrl: readStringEnv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
   ollamaModel: readStringEnv("OLLAMA_MODEL", "qwen2.5:7b"),
   memoryMasterKey: readStringEnv("MEMORY_MASTER_KEY"),

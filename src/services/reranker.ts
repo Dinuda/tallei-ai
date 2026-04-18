@@ -2,7 +2,7 @@
  * LLM-based reranker for recall results.
  *
  * After a bi-encoder vector search retrieves candidates, this runs a single
- * gpt-4o-mini call that sees both the query and every candidate together —
+ * LLM call that sees both the query and every candidate together —
  * the same "cross-encoder" pattern used by Cohere Rerank / BGE reranker.
  *
  * Why this works where threshold alone doesn't:
@@ -12,7 +12,7 @@
  *   can tell that asking about food preferences is unrelated to coding preferences.
  */
 
-import { llm as openai, llmModel } from "./llmClient.js";
+import { llm, llmModel } from "./llmClient.js";
 
 export interface RerankCandidate {
   id: string;
@@ -55,7 +55,7 @@ Output ONLY a JSON array of numbers in the same order as the input, e.g. [0, 9, 
 No keys. No explanation. Just the array.`;
 
 /**
- * Full-scan RAG search: loads every memory and asks gpt-4o-mini which ones are
+ * Full-scan RAG search: loads every memory and asks the configured LLM which ones are
  * relevant to the query. Used as a last-resort fallback when vector search +
  * threshold filtering returns nothing (stale index, missing embeddings, etc.).
  */
@@ -74,7 +74,7 @@ export async function ragSearchMemories(
 
   let raw: string;
   try {
-    const response = await openai.chat.completions.create({
+    const response = await llm.chat.completions.create({
       model: llmModel,
       messages: [
         { role: "system", content: RAG_SYSTEM },
@@ -122,7 +122,7 @@ export async function rerankMemories(
 
   let raw: string;
   try {
-    const response = await openai.chat.completions.create({
+    const response = await llm.chat.completions.create({
       model: llmModel,
       messages: [
         { role: "system", content: RERANKER_SYSTEM },

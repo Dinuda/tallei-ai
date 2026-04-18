@@ -1,5 +1,5 @@
-import OpenAI from "openai";
 import { config } from "../config.js";
+import { llm, llmModel } from "./llmClient.js";
 import type { ConversationSummary } from "./summarizer.js";
 import type { ConfidenceLabel } from "../repositories/memoryGraphRepository.js";
 
@@ -28,8 +28,6 @@ export interface MemoryExtractionResult {
   relations: ExtractedRelation[];
   llmUsed: boolean;
 }
-
-const openai = new OpenAI({ apiKey: config.openaiApiKey });
 
 const STOPWORDS = new Set([
   "the",
@@ -204,13 +202,19 @@ function noteLlmFailure(): void {
 }
 
 async function llmExtraction(memoryText: string, summary: ConversationSummary): Promise<MemoryExtractionResult> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+  const response = await llm.chat.completions.create({
+    model: llmModel,
     messages: [
       {
         role: "system",
-        content:
-          "Extract compact memory graph structure. Return entities and relations grounded in text. Keep relation labels short snake_case.",
+        content: [
+          "Extract compact memory graph structure.",
+          "Return JSON object with keys: entities, relations.",
+          "entities: array of {label, entityType, confidence}.",
+          "relations: array of {sourceLabel, targetLabel, relationType, confidenceLabel, confidenceScore}.",
+          "Keep relation labels short snake_case and confidenceLabel in [explicit,inferred,uncertain].",
+          "Return JSON only.",
+        ].join(" "),
       },
       {
         role: "user",
@@ -223,54 +227,9 @@ async function llmExtraction(memoryText: string, summary: ConversationSummary): 
         ].join("\n"),
       },
     ],
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "memory_graph_extract",
-        strict: true,
-        schema: {
-          type: "object",
-          properties: {
-            entities: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  label: { type: "string" },
-                  entityType: { type: "string" },
-                  confidence: { type: "number" },
-                },
-                required: ["label", "entityType", "confidence"],
-                additionalProperties: false,
-              },
-            },
-            relations: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  sourceLabel: { type: "string" },
-                  targetLabel: { type: "string" },
-                  relationType: { type: "string" },
-                  confidenceLabel: { type: "string", enum: ["explicit", "inferred", "uncertain"] },
-                  confidenceScore: { type: "number" },
-                },
-                required: [
-                  "sourceLabel",
-                  "targetLabel",
-                  "relationType",
-                  "confidenceLabel",
-                  "confidenceScore",
-                ],
-                additionalProperties: false,
-              },
-            },
-          },
-          required: ["entities", "relations"],
-          additionalProperties: false,
-        },
-      },
-    },
+    response_format: { type: "json_object" },
+    temperature: 0,
+    max_tokens: 700,
   });
 
   const content = response.choices[0]?.message?.content ?? "";

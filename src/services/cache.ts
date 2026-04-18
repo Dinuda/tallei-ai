@@ -9,6 +9,13 @@ let lastRedisError: string | null = null;
 let hasWarnedProtocolMismatch = false;
 
 const REDIS_LOG_INTERVAL_MS = 30_000;
+const INCREMENT_WITH_TTL_LUA = `
+local c = redis.call('INCR', KEYS[1])
+if c == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return c
+`;
 
 type RedisMode = "online" | "cooldown" | "disabled";
 
@@ -180,13 +187,20 @@ export async function incrementWithTtl(key: string, ttlSeconds: number): Promise
   if (!client) return 1;
 
   try {
-    const value = await withTimeout(client.incr(key), config.redisCommandTimeoutMs, "redis.incr");
-    if (value === 1) {
-      await withTimeout(client.expire(key, ttlSeconds), config.redisCommandTimeoutMs, "redis.expire");
+    const value = await withTimeout(
+      client.eval(INCREMENT_WITH_TTL_LUA, {
+        keys: [key],
+        arguments: [String(ttlSeconds)],
+      }),
+      config.redisCommandTimeoutMs,
+      "redis.eval.incr_ttl"
+    );
+    if (typeof value !== "number") {
+      throw new Error("redis.eval.incr_ttl returned non-numeric value");
     }
     return value;
   } catch {
-    lastRedisError = "redis.incr/expire failed";
+    lastRedisError = "redis.incr_ttl failed";
     disableRedisTemporarily();
     return 1;
   }

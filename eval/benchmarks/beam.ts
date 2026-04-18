@@ -1,5 +1,6 @@
 /**
  * BEAM benchmark runner (Beyond a Million Tokens).
+ * @deprecated Non-default heavy benchmark. Use `eval/runner.ts` UX relevance flow for normal checks.
  *
  * Dataset: 100 conversations, ~2000 questions at 1M token scale (or 10M).
  * Metrics:

@@ -1,4 +1,4 @@
-import { llm as openai, llmModel } from "./llmClient.js";
+import { llm, llmModel } from "./llmClient.js";
 
 export interface ConversationSummary {
   title: string;
@@ -15,34 +15,43 @@ Rules:
 - Summary should capture the essence of the conversation
 - Do NOT include personal data like emails or passwords`;
 
+const SUMMARY_INPUT_CHAR_LIMIT = 4_000;
+const SUMMARY_TIMEOUT_MS = 8_000;
+const SUMMARY_MAX_TOKENS = 400;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 export async function summarizeConversation(
   content: string
 ): Promise<ConversationSummary> {
-  const response = await openai.chat.completions.create({
-    model: llmModel,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: `Summarize this conversation:\n\n${content}` },
-    ],
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "conversation_summary",
-        schema: {
-          type: "object",
-          properties: {
-            title: { type: "string" },
-            keyPoints: { type: "array", items: { type: "string" } },
-            decisions: { type: "array", items: { type: "string" } },
-            summary: { type: "string" }
-          },
-          required: ["title", "keyPoints", "decisions", "summary"],
-          additionalProperties: false
-        },
-        strict: true
-      }
-    }
-  });
+  const boundedContent = content.slice(0, SUMMARY_INPUT_CHAR_LIMIT);
+  const response = await withTimeout(
+    llm.chat.completions.create({
+      model: llmModel,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: `Summarize this conversation:\n\n${boundedContent}` },
+      ],
+      response_format: { type: "json_object" },
+      max_tokens: SUMMARY_MAX_TOKENS,
+    }),
+    SUMMARY_TIMEOUT_MS,
+    "summarizeConversation"
+  );
 
   const text = response.choices[0].message.content || "";
 
@@ -58,4 +67,3 @@ export async function summarizeConversation(
     };
   }
 }
-

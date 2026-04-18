@@ -35,6 +35,7 @@ import {
   legacyRecallMemories,
   legacySaveMemory,
 } from "./legacyMemory.js";
+import { incrementWithTtl } from "./cache.js";
 import { setRequestTimingFields } from "./requestTiming.js";
 
 export class QuotaExceededError extends Error {
@@ -46,6 +47,18 @@ export class QuotaExceededError extends Error {
 
 const FREE_SAVE_LIMIT = 50;
 const FREE_RECALL_LIMIT = 200;
+const SAVE_QUOTA_TTL_SECONDS = 35 * 24 * 60 * 60;
+const IS_EVAL_MODE = config.nodeEnv !== "production" && process.env["EVAL_MODE"] === "true";
+
+function currentYearMonthBucket(now = new Date()): string {
+  const year = now.getUTCFullYear();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+}
+
+function monthlySaveQuotaKey(tenantId: string): string {
+  return `quota:${tenantId}:save:${currentYearMonthBucket()}`;
+}
 
 async function countMonthlyEvents(tenantId: string, action: string): Promise<number> {
   const periodStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
@@ -55,6 +68,12 @@ async function countMonthlyEvents(tenantId: string, action: string): Promise<num
     [tenantId, action, periodStart]
   );
   return result.rows[0]?.cnt ?? 0;
+}
+
+async function consumeMonthlySaveQuota(auth: AuthContext): Promise<number> {
+  if (IS_EVAL_MODE) return 0;
+  if (auth.plan !== "free") return 0;
+  return incrementWithTtl(monthlySaveQuotaKey(auth.tenantId), SAVE_QUOTA_TTL_SECONDS);
 }
 
 const memoryRepository = new MemoryRepository();
@@ -302,51 +321,71 @@ export async function saveMemory(
 ): Promise<SaveMemoryResult> {
   const saveStartedAt = process.hrtime.bigint();
   const normalizedContent = content.trim();
-  const summaryStartedAt = process.hrtime.bigint();
-  const summaryPromise = summarizeConversation(content).catch((err) => {
-    console.error("[memory] summarize failed, using fallback:", err);
-    return buildFallbackSummary(content);
-  });
+  const summary = buildFallbackSummary(normalizedContent);
+  const memoryId = randomUUID();
+  const createdAt = new Date().toISOString();
 
-  if (auth.plan === "free") {
-    const count = await countMonthlyEvents(auth.tenantId, "save");
-    if (count >= FREE_SAVE_LIMIT) {
-      throw new QuotaExceededError(
-        `Free plan limit reached: ${FREE_SAVE_LIMIT} saves/month. Upgrade to Pro at tallei.app/dashboard/billing.`
-      );
-    }
+  const encryptStartedAt = process.hrtime.bigint();
+  const encrypted = encryptMemoryContent(normalizedContent);
+  const contentHash = hashMemoryContent(normalizedContent);
+  const encryptMs = Number(process.hrtime.bigint() - encryptStartedAt) / 1_000_000;
+
+  const quotaPromise = (async () => {
+    const startedAt = process.hrtime.bigint();
+    const count = await consumeMonthlySaveQuota(auth);
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+    return { count, elapsedMs };
+  })();
+  const insertPromise = (async () => {
+    const startedAt = process.hrtime.bigint();
+    await memoryRepository.create(auth, {
+      id: memoryId,
+      contentCiphertext: encrypted,
+      contentHash,
+      platform,
+      summaryJson: summary,
+      qdrantPointId: memoryId,
+    });
+    return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+  })();
+
+  const [quotaOutcome, insertOutcome] = await Promise.allSettled([quotaPromise, insertPromise]);
+  if (insertOutcome.status === "rejected") {
+    throw insertOutcome.reason;
   }
 
-  const summary = await summaryPromise;
-  const summaryMs = Number(process.hrtime.bigint() - summaryStartedAt) / 1_000_000;
+  const insertMs = insertOutcome.value;
+  const quotaMs = quotaOutcome.status === "fulfilled" ? quotaOutcome.value.elapsedMs : 0;
+  const quotaCount = quotaOutcome.status === "fulfilled" ? quotaOutcome.value.count : 0;
+  const quotaMode = IS_EVAL_MODE
+    ? "bypassed_eval"
+    : auth.plan === "free"
+      ? (quotaOutcome.status === "fulfilled" ? "redis" : "fail_open")
+      : "skipped";
+  if (auth.plan === "free" && quotaCount > FREE_SAVE_LIMIT) {
+    await memoryRepository.softDeleteScoped(auth, memoryId).catch((error) => {
+      noteMemoryDbFailure(error, "save-quota-soft-delete");
+    });
+    throw new QuotaExceededError(
+      `Free plan limit reached: ${FREE_SAVE_LIMIT} saves/month. Upgrade to Pro at tallei.app/dashboard/billing.`
+    );
+  }
 
-  const memoryText = buildMemoryText(platform, summary, content);
-  const encrypted = encryptMemoryContent(memoryText);
-  const contentHash = hashMemoryContent(memoryText);
-  const createdAt = new Date().toISOString();
-  const memoryId = randomUUID();
-
-  const dbWriteStartedAt = process.hrtime.bigint();
-  await memoryRepository.create(auth, {
-    id: memoryId,
-    contentCiphertext: encrypted,
-    contentHash,
-    platform,
-    summaryJson: summary,
-    qdrantPointId: memoryId,
-  });
-  const dbWriteMs = Number(process.hrtime.bigint() - dbWriteStartedAt) / 1_000_000;
   const saveTotalMs = Number(process.hrtime.bigint() - saveStartedAt) / 1_000_000;
   setRequestTimingFields({
-    save_summary_ms: summaryMs,
-    save_db_write_ms: dbWriteMs,
+    save_summary_ms: 0,
+    save_quota_ms: quotaMs,
+    save_encrypt_ms: encryptMs,
+    save_insert_ms: insertMs,
+    save_db_write_ms: insertMs,
     save_service_ms: saveTotalMs,
+    save_quota_mode: quotaMode,
     save_vector_mode: shouldBypassVector() ? "bypass" : "background",
   });
 
-  // Keep save latency low: vector embedding/upsert is best-effort in background.
-  if (!shouldBypassVector()) {
-    void (async () => {
+  void (async () => {
+    const embedAndUpsert = async () => {
+      if (shouldBypassVector()) return;
       try {
         const vector = await withTimeout(
           embedText(buildEmbeddingText(platform, normalizedContent)),
@@ -368,9 +407,11 @@ export async function saveMemory(
       } catch (error) {
         noteVectorFailure(error, "save_bg");
       }
+    };
 
-      // Single-pass add-only fact extraction (mem0 new algorithm)
-      void extractFacts(normalizedContent).then(async (facts) => {
+    const extractAndSaveFacts = async () => {
+      try {
+        const facts = await extractFacts(normalizedContent);
         for (const fact of facts) {
           try {
             const factText = `[FACT] ${fact.text}${fact.temporal_context ? ` (${fact.temporal_context})` : ""}`;
@@ -397,13 +438,38 @@ export async function saveMemory(
               }).catch(() => {});
             }
           } catch {
-            // Best-effort; fact save failures don't block the primary memory
+            // Best-effort; fact save failures don't block the primary memory.
           }
         }
         invalidateBm25Cache(auth);
-      }).catch(() => {});
-    })();
-  }
+      } catch {
+        // Best-effort; fact extraction failures don't block the primary memory.
+      }
+    };
+
+    const summarizeAndUpdate = async () => {
+      if (IS_EVAL_MODE) return;
+      try {
+        const refinedSummary = await summarizeConversation(normalizedContent);
+        const refinedContent = buildMemoryText(platform, refinedSummary, normalizedContent);
+        await memoryRepository.updateContentAndSummaryScoped(auth, memoryId, {
+          contentCiphertext: encryptMemoryContent(refinedContent),
+          contentHash: hashMemoryContent(refinedContent),
+          summaryJson: refinedSummary,
+        });
+      } catch (error) {
+        if (config.nodeEnv !== "production") {
+          console.warn("[memory] background summary update failed", error);
+        }
+      }
+    };
+
+    await Promise.allSettled([
+      embedAndUpsert(),
+      extractAndSaveFacts(),
+      summarizeAndUpdate(),
+    ]);
+  })();
 
   void enqueueGraphExtractionJob(auth, memoryId).catch((error) => {
     if (config.nodeEnv !== "production") {
@@ -453,7 +519,7 @@ async function semanticRecallMemories(
     return { result: cached.result, timingsMs: {} };
   }
 
-  if (auth.plan === "free") {
+  if (!IS_EVAL_MODE && auth.plan === "free") {
     const count = await countMonthlyEvents(auth.tenantId, "recall");
     if (count >= FREE_RECALL_LIMIT) {
       throw new QuotaExceededError(
@@ -543,6 +609,7 @@ function logRecallEvent(
   setRequestTimingFields({
     recall_source: source,
     recall_cache_hit: cacheHit,
+    recall_cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
     recall_fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
     recall_relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
     recall_enrich_ms: timingsMs.enrich_ms ?? 0,
@@ -564,6 +631,7 @@ function logRecallEvent(
       hits: result.memories.length,
       source,
       cache_hit: cacheHit,
+      cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
       fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
       relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
       enrich_ms: timingsMs.enrich_ms ?? 0,
@@ -586,19 +654,25 @@ export async function recallMemories(
   limit = 5,
   requesterIp?: string
 ): Promise<RecallResult> {
+  const lookupStartedAt = process.hrtime.bigint();
+  const cacheLookupMs = () => Number(process.hrtime.bigint() - lookupStartedAt) / 1_000_000;
   const boundedLimit = Math.min(20, Math.max(1, limit));
   const normalizedQuery = normalizeRecallQuery(query);
   const cacheKey = recallCacheKey(auth, normalizedQuery, boundedLimit);
   const cached = recallCache.get(cacheKey);
   if (cached && cached.exp > Date.now()) {
-    logRecallEvent(query, boundedLimit, auth, requesterIp, cached.result, "exact_cache");
+    logRecallEvent(query, boundedLimit, auth, requesterIp, cached.result, "exact_cache", {
+      cache_lookup_ms: cacheLookupMs(),
+    });
     return cached.result;
   }
 
   const exactHit = await readExactRecallPayload<RecallResult>(auth, normalizedQuery, "v1");
   if (exactHit) {
     recallCache.set(cacheKey, { result: exactHit, exp: Date.now() + RECALL_TTL_MS });
-    logRecallEvent(query, boundedLimit, auth, requesterIp, exactHit, "exact_cache");
+    logRecallEvent(query, boundedLimit, auth, requesterIp, exactHit, "exact_cache", {
+      cache_lookup_ms: cacheLookupMs(),
+    });
     runRecallShadowChecks(query, auth, boundedLimit, exactHit);
     return exactHit;
   }
@@ -632,7 +706,9 @@ export async function recallMemories(
         });
       }
     );
-    logRecallEvent(query, boundedLimit, auth, requesterIp, warmHit, "warm_cache");
+    logRecallEvent(query, boundedLimit, auth, requesterIp, warmHit, "warm_cache", {
+      cache_lookup_ms: cacheLookupMs(),
+    });
     runRecallShadowChecks(query, auth, boundedLimit, warmHit);
     return warmHit;
   }
@@ -648,7 +724,10 @@ export async function recallMemories(
       requesterIp,
       snapshotLookup.result,
       "precomputed_graph_hit",
-      { total_ms: snapshotLookup.snapshot_lookup_ms },
+      {
+        cache_lookup_ms: cacheLookupMs(),
+        total_ms: snapshotLookup.snapshot_lookup_ms,
+      },
       {
         status: snapshotLookup.status,
         lookupMs: snapshotLookup.snapshot_lookup_ms,
@@ -702,6 +781,7 @@ export async function recallMemories(
         ? "precomputed_graph_stale"
         : "recent_fallback";
   logRecallEvent(query, boundedLimit, auth, requesterIp, result, fallbackSource, {
+    cache_lookup_ms: cacheLookupMs(),
     fallback_ms: fallback.elapsedMs,
     total_ms: fallback.elapsedMs,
     relevance_miss: fallback.relevanceMiss ? 1 : 0,

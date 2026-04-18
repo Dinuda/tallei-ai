@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import OpenAI from "openai";
 import { config } from "../config.js";
 import { browserFallbackCache } from "./browserFallbackCache.js";
+import { llm, llmModel } from "./llmClient.js";
 import type { OnboardingCheckpoint, OnboardingSession, OnboardingState } from "./claudeOnboarding.js";
 
 type ExecutionMode = "student" | "llm_fallback";
@@ -67,8 +67,6 @@ const STUDENT_POLICY: Record<Exclude<OnboardingState, "queued">, StudentPolicyIn
 };
 
 class LlmFallbackPlanner {
-  private readonly openai = new OpenAI({ apiKey: config.openaiApiKey });
-
   async buildInstruction(input: {
     state: Exclude<OnboardingState, "queued">;
     lastError: string;
@@ -98,13 +96,17 @@ class LlmFallbackPlanner {
       "Instruction:",
     ].join("\n");
 
-    const response = await this.openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: prompt,
-      max_output_tokens: 120,
+    const response = await llm.chat.completions.create({
+      model: llmModel,
+      messages: [
+        { role: "system", content: "You are a browser automation recovery planner." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.2,
+      max_tokens: 140,
     });
 
-    const text = (response.output_text || "").trim();
+    const text = (response.choices[0]?.message?.content || "").trim();
     const instruction = text || `Recover ${input.state}: navigate to the relevant Claude page, re-run objective, verify expected signal.`;
     const { signature } = await browserFallbackCache.put(input.state, input.lastError, instruction);
 

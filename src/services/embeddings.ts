@@ -1,9 +1,22 @@
 import OpenAI from "openai";
 import { config } from "../config.js";
 
-const openai = new OpenAI({ apiKey: config.openaiApiKey });
+function buildEmbeddingClient(): OpenAI {
+  if (config.embeddingProvider === "ollama") {
+    return new OpenAI({
+      baseURL: config.ollamaBaseUrl,
+      apiKey: "ollama",
+    });
+  }
+  if (!config.openaiApiKey) {
+    throw new Error("OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai");
+  }
+  return new OpenAI({ apiKey: config.openaiApiKey });
+}
 
-export const EMBEDDING_DIMS = 1536;
+const embeddingClient = buildEmbeddingClient();
+
+export const EMBEDDING_DIMS = config.embeddingDims;
 const EMBEDDING_CACHE_TTL_MS = config.nodeEnv === "production" ? 5 * 60_000 : 60_000;
 const MAX_EMBEDDING_CACHE_ENTRIES = 512;
 
@@ -50,7 +63,7 @@ export async function embedText(text: string): Promise<number[]> {
     return inFlight;
   }
 
-  const request = openai.embeddings.create({
+  const request = embeddingClient.embeddings.create({
     model: config.embeddingModel,
     input: normalized,
   }).then((response) => {

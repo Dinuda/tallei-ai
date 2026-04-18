@@ -153,6 +153,7 @@ async function processSnapshotRefreshJob(job: {
     tenantId: job.tenant_id,
     userId: job.user_id,
     authMode: "internal",
+    plan: "free",
   };
   const built = await buildUserSnapshot(auth);
   await memoryRepository.logEvent({

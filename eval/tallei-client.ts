@@ -21,6 +21,16 @@ interface JsonRpcEnvelope {
   error?: JsonRpcError;
 }
 
+interface ToolContentItem {
+  type?: string;
+  text?: string;
+}
+
+interface ToolCallResult {
+  content?: ToolContentItem[];
+  isError?: boolean;
+}
+
 function parseSseJsonRpc(body: string): JsonRpcEnvelope {
   const events: string[] = [];
   const lines = body.split(/\r?\n/);
@@ -91,11 +101,29 @@ async function mcpCall(userId: string, method: string, params: Record<string, un
   return json.result;
 }
 
+function toolMessage(result: ToolCallResult): string {
+  const text = result?.content?.[0]?.text;
+  if (typeof text === "string" && text.trim().length > 0) return text;
+  return "Unknown tool response";
+}
+
+function parseToolCallResult(result: unknown): ToolCallResult {
+  if (!result || typeof result !== "object") {
+    throw new Error(`Unexpected MCP tool result shape: ${String(result)}`);
+  }
+  return result as ToolCallResult;
+}
+
 export async function saveMemory(content: string, userId: string): Promise<void> {
-  await mcpCall(userId, "tools/call", {
+  const rawResult = await mcpCall(userId, "tools/call", {
     name: "save_memory",
     arguments: { content, platform: "other" },
   });
+  const result = parseToolCallResult(rawResult);
+  const message = toolMessage(result);
+  if (result.isError || message.startsWith("⚠️")) {
+    throw new Error(`save_memory failed: ${message}`);
+  }
 }
 
 export async function recallMemories(
@@ -103,12 +131,29 @@ export async function recallMemories(
   userId: string,
   limit = 10
 ): Promise<string> {
-  const result = await mcpCall(userId, "tools/call", {
+  const rawResult = await mcpCall(userId, "tools/call", {
     name: "recall_memories",
     arguments: { query, limit },
-  }) as { content?: Array<{ type: string; text: string }> };
+  });
+  const result = parseToolCallResult(rawResult);
+  const message = toolMessage(result);
+  if (result.isError || message.startsWith("⚠️")) {
+    throw new Error(`recall_memories failed: ${message}`);
+  }
+  return message || "--- No relevant memories found ---";
+}
 
-  return result?.content?.[0]?.text ?? "--- No relevant memories found ---";
+export async function listMemoriesText(userId: string): Promise<string> {
+  const rawResult = await mcpCall(userId, "tools/call", {
+    name: "list_memories",
+    arguments: {},
+  });
+  const result = parseToolCallResult(rawResult);
+  const message = toolMessage(result);
+  if (result.isError || message.startsWith("⚠️")) {
+    throw new Error(`list_memories failed: ${message}`);
+  }
+  return message;
 }
 
 export async function deleteAllMemories(userId: string): Promise<void> {

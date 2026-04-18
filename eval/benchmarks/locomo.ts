@@ -34,12 +34,23 @@ function sleep(ms: number) {
 
 export async function runLoCoMo(opts: {
   maxDialogues?: number;
+  maxTurnsPerDialogue?: number;
+  maxQuestionsPerDialogue?: number;
   verbose?: boolean;
 }): Promise<LoCoMoResult> {
-  const { maxDialogues = 50, verbose = false } = opts;
+  const {
+    maxDialogues = 50,
+    maxTurnsPerDialogue,
+    maxQuestionsPerDialogue,
+    verbose = false,
+  } = opts;
   console.log("[locomo] downloading dataset...");
   const dialogues = (await downloadLoCoMo()).slice(0, maxDialogues);
-  console.log(`[locomo] running ${dialogues.length} dialogues`);
+  console.log(
+    `[locomo] running ${dialogues.length} dialogues` +
+      (maxTurnsPerDialogue ? `, turns/dialogue<=${maxTurnsPerDialogue}` : "") +
+      (maxQuestionsPerDialogue ? `, questions/dialogue<=${maxQuestionsPerDialogue}` : "")
+  );
   const evalUserId = getEvalUserIdOrThrow();
   await assertEvalAuthOrThrow(evalUserId);
 
@@ -52,16 +63,27 @@ export async function runLoCoMo(opts: {
     const dialogue = dialogues[di];
     const scopeId = `locomo-${di + 1}-${randomUUID().slice(0, 8)}`;
     const scopePrefix = `[eval_scope:${scopeId}]`;
+    const turns = maxTurnsPerDialogue
+      ? dialogue.conversations.slice(0, maxTurnsPerDialogue)
+      : dialogue.conversations;
+    const qaList = maxQuestionsPerDialogue
+      ? dialogue.qa.slice(0, maxQuestionsPerDialogue)
+      : dialogue.qa;
 
     // Feed conversation turns as memories
-    for (const turn of dialogue.conversations) {
+    for (let ti = 0; ti < turns.length; ti++) {
+      const turn = turns[ti];
       const text = `${scopePrefix} ${turn.speaker}: ${turn.utterance}`;
       await saveMemory(text, evalUserId);
-      await sleep(50); // gentle rate limit
+      if (verbose && (ti + 1) % 25 === 0) {
+        console.log(`  [d${di + 1}] turns saved ${ti + 1}/${turns.length}`);
+      }
+      await sleep(5); // keep requests smooth without adding major runtime
     }
 
     // Answer each QA pair
-    for (const qa of dialogue.qa) {
+    for (let qi = 0; qi < qaList.length; qi++) {
+      const qa = qaList[qi];
       const t0 = Date.now();
       const contextBlock = await recallMemories(`${scopePrefix} ${qa.question}`, evalUserId, 10);
       const latencyMs = Date.now() - t0;
@@ -81,12 +103,13 @@ export async function runLoCoMo(opts: {
       if (verbose) {
         console.log(`  [d${di} q] type=${qType} f1=${f1.toFixed(3)} pred="${predicted.slice(0, 60)}" gold="${qa.answer.slice(0, 60)}"`);
       }
+      if (!verbose && (qi + 1) % 10 === 0) {
+        console.log(`  [d${di + 1}] questions scored ${qi + 1}/${qaList.length}`);
+      }
     }
 
-    if ((di + 1) % 5 === 0) {
-      const partialF1 = f1Scores.reduce((a, b) => a + b, 0) / f1Scores.length;
-      console.log(`[locomo] ${di + 1}/${dialogues.length} dialogues done, macro-F1=${partialF1.toFixed(3)}`);
-    }
+    const partialF1 = f1Scores.reduce((a, b) => a + b, 0) / Math.max(1, f1Scores.length);
+    console.log(`[locomo] ${di + 1}/${dialogues.length} dialogues done, macro-F1=${partialF1.toFixed(3)}`);
   }
 
   const macroF1 = f1Scores.length > 0

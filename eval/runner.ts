@@ -1,32 +1,45 @@
 #!/usr/bin/env tsx
 /**
- * Tallei memory eval runner.
+ * Tallei UX relevance eval runner.
  *
  * Requires a running Tallei server with EVAL_MODE=true.
  *
  * Usage:
- *   npx tsx eval/runner.ts --benchmark locomo
- *   npx tsx eval/runner.ts --benchmark longmemeval
- *   npx tsx eval/runner.ts --benchmark beam --scale 1m
- *   npx tsx eval/runner.ts --benchmark beam --scale 10m
- *   npx tsx eval/runner.ts --all
+ *   npx tsx eval/runner.ts
+ *   npx tsx eval/runner.ts --benchmark ux-relevance
+ *   npx tsx eval/runner.ts --max-dialogues 10 --max-turns-per-dialogue 80 --max-questions-per-dialogue 20 --f1-threshold 0.70 --verbose
  *
  * Environment:
- *   TALLEI_EVAL_URL   MCP endpoint (default: http://localhost:3000/mcp)
- *   EVAL_USER_ID      Existing user UUID in the local DB (required)
- *   OPENAI_API_KEY    Required for LLM judge scoring
- *   EVAL_MAX_ITEMS    Cap items per benchmark (useful for quick smoke tests)
+ *   TALLEI_EVAL_URL    MCP endpoint (default: http://localhost:3000/mcp)
+ *   EVAL_USER_ID       Existing user UUID in the local DB (required)
+ *   LLM_PROVIDER       ollama|openai (recommended local: ollama)
+ *   OLLAMA_MODEL       local model for eval answer extraction (when using ollama)
  */
 
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { runLoCoMo } from "./benchmarks/locomo.js";
-import { runLongMemEval } from "./benchmarks/longmemeval.js";
-import { runBeam } from "./benchmarks/beam.js";
+import {
+  assertEvalAuthOrThrow,
+  getEvalUserIdOrThrow,
+  listMemoriesText,
+  recallMemories,
+  saveMemory,
+} from "./tallei-client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR = join(__dirname, "results");
+const UX_BENCHMARK_NAME = "ux-relevance";
+const DEFAULT_MAX_DIALOGUES = 10;
+const DEFAULT_MAX_TURNS_PER_DIALOGUE = 80;
+const DEFAULT_MAX_QUESTIONS_PER_DIALOGUE = 20;
+const DEFAULT_F1_THRESHOLD = 0.70;
+const DEPRECATED_BENCHMARKS = new Set(["locomo", "longmemeval", "beam"]);
+const SMOKE_LIST_TIMEOUT_MS = 8_000;
+const SMOKE_LIST_INTERVAL_MS = 300;
+const SMOKE_RECALL_TIMEOUT_MS = 8_000;
+const SMOKE_RECALL_INTERVAL_MS = 350;
 
 // ─── CLI arg parsing ──────────────────────────────────────────────────────────
 
@@ -37,11 +50,25 @@ const getArg = (flag: string): string | null => {
 };
 const hasFlag = (flag: string) => args.includes(flag);
 
-const benchmarkArg = getArg("--benchmark");
-const scaleArg = (getArg("--scale") ?? "1m") as "1m" | "10m";
-const runAll = hasFlag("--all");
+const benchmarkArg = getArg("--benchmark") ?? UX_BENCHMARK_NAME;
 const verbose = hasFlag("--verbose") || hasFlag("-v");
-const maxItems = process.env["EVAL_MAX_ITEMS"] ? parseInt(process.env["EVAL_MAX_ITEMS"], 10) : undefined;
+const maxDialoguesArg = getArg("--max-dialogues");
+const maxTurnsPerDialogueArg = getArg("--max-turns-per-dialogue");
+const maxQuestionsPerDialogueArg = getArg("--max-questions-per-dialogue");
+const f1ThresholdArg = getArg("--f1-threshold");
+const scaleArg = getArg("--scale");
+const runAll = hasFlag("--all");
+const maxItemsEnv = process.env["EVAL_MAX_ITEMS"] ? parseInt(process.env["EVAL_MAX_ITEMS"], 10) : undefined;
+const maxDialogues = maxDialoguesArg
+  ? parseInt(maxDialoguesArg, 10)
+  : (maxItemsEnv ?? DEFAULT_MAX_DIALOGUES);
+const maxTurnsPerDialogue = maxTurnsPerDialogueArg
+  ? parseInt(maxTurnsPerDialogueArg, 10)
+  : DEFAULT_MAX_TURNS_PER_DIALOGUE;
+const maxQuestionsPerDialogue = maxQuestionsPerDialogueArg
+  ? parseInt(maxQuestionsPerDialogueArg, 10)
+  : DEFAULT_MAX_QUESTIONS_PER_DIALOGUE;
+const f1Threshold = f1ThresholdArg ? parseFloat(f1ThresholdArg) : DEFAULT_F1_THRESHOLD;
 
 // ─── Result persistence ───────────────────────────────────────────────────────
 
@@ -53,80 +80,183 @@ function saveResult(name: string, result: unknown): void {
   console.log(`[runner] result saved to ${file}`);
 }
 
-// ─── Summary table ────────────────────────────────────────────────────────────
-
-function printSummaryTable(
-  rows: Array<{ benchmark: string; score: number; tokens: number; p50Ms: number }>
-): void {
-  console.log("\n╔══════════════════╦═══════╦══════════╦═════════════╗");
-  console.log("║ Benchmark        ║ Score ║ Tokens   ║ Latency p50 ║");
-  console.log("╠══════════════════╬═══════╬══════════╬═════════════╣");
-  for (const row of rows) {
-    const bench = row.benchmark.padEnd(16);
-    const score = (row.score * 100).toFixed(1).padStart(5);
-    const tokens = `${(row.tokens / 1000).toFixed(1)}K`.padStart(8);
-    const latency = `${(row.p50Ms / 1000).toFixed(2)}s`.padStart(11);
-    console.log(`║ ${bench} ║ ${score} ║ ${tokens} ║ ${latency} ║`);
+function validateUxOnlyCli(): void {
+  if (runAll || scaleArg) {
+    console.error(
+      "[runner] unsupported flags: --all/--scale were removed. Use:\n" +
+      "  npx tsx eval/runner.ts --benchmark ux-relevance --max-dialogues 10 --max-turns-per-dialogue 80 --max-questions-per-dialogue 20 --f1-threshold 0.70"
+    );
+    process.exit(2);
   }
-  console.log("╚══════════════════╩═══════╩══════════╩═════════════╝");
+
+  if (benchmarkArg !== UX_BENCHMARK_NAME) {
+    if (DEPRECATED_BENCHMARKS.has(benchmarkArg)) {
+      console.error(
+        `[runner] benchmark '${benchmarkArg}' is deprecated for default UX checks.\n` +
+        `Use '--benchmark ${UX_BENCHMARK_NAME}' instead.`
+      );
+    } else {
+      console.error(
+        `[runner] unsupported benchmark '${benchmarkArg}'. Supported: ${UX_BENCHMARK_NAME}`
+      );
+    }
+    process.exit(2);
+  }
+
+  if (!Number.isFinite(maxDialogues) || maxDialogues <= 0) {
+    console.error(`[runner] invalid --max-dialogues value: ${String(maxDialoguesArg ?? maxItemsEnv ?? "")}`);
+    process.exit(2);
+  }
+  if (!Number.isFinite(maxTurnsPerDialogue) || maxTurnsPerDialogue <= 0) {
+    console.error(`[runner] invalid --max-turns-per-dialogue value: ${String(maxTurnsPerDialogueArg ?? "")}`);
+    process.exit(2);
+  }
+  if (!Number.isFinite(maxQuestionsPerDialogue) || maxQuestionsPerDialogue <= 0) {
+    console.error(`[runner] invalid --max-questions-per-dialogue value: ${String(maxQuestionsPerDialogueArg ?? "")}`);
+    process.exit(2);
+  }
+  if (!Number.isFinite(f1Threshold) || f1Threshold < 0 || f1Threshold > 1) {
+    console.error(`[runner] invalid --f1-threshold value: ${String(f1ThresholdArg ?? "")}`);
+    process.exit(2);
+  }
+}
+
+async function runSmokeProbe(): Promise<{
+  probe: string;
+  listLatencyMs: number;
+  listFoundProbe: boolean;
+  recallLatencyMs: number;
+  recallFoundProbe: boolean;
+}> {
+  const userId = getEvalUserIdOrThrow();
+  await assertEvalAuthOrThrow(userId);
+
+  const probe = `uxprobe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const probePhrase = `Smoke probe fact ${probe}`;
+  await saveMemory(probePhrase, userId);
+
+  const listStartedAt = Date.now();
+  let lastList = "";
+  let lastListLatencyMs = 0;
+  while (Date.now() - listStartedAt < SMOKE_LIST_TIMEOUT_MS) {
+    const listAttemptStartedAt = Date.now();
+    lastList = await listMemoriesText(userId);
+    lastListLatencyMs = Date.now() - listAttemptStartedAt;
+    if (lastList.includes(probe)) {
+      break;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, SMOKE_LIST_INTERVAL_MS));
+  }
+  if (!lastList.includes(probe)) {
+    throw new Error(
+      "Smoke probe list_memories did not include the just-saved probe memory within timeout. " +
+      `Last list snippet: ${lastList.slice(0, 220)}`
+    );
+  }
+
+  // Recall freshness can lag behind DB visibility because indexing/enrichment runs async.
+  // Keep this as a health signal, but do not block the benchmark on it.
+  const recallStartedAt = Date.now();
+  let lastContext = "";
+  let lastRecallLatencyMs = 0;
+  while (Date.now() - recallStartedAt < SMOKE_RECALL_TIMEOUT_MS) {
+    const recallAttemptStartedAt = Date.now();
+    // Query with the full phrase to bias lexical fallback while vector enrichment catches up.
+    const context = await recallMemories(`${probePhrase}`, userId, 10);
+    lastRecallLatencyMs = Date.now() - recallAttemptStartedAt;
+    lastContext = context;
+    if (context.includes(probe)) {
+      return {
+        probe,
+        listLatencyMs: lastListLatencyMs,
+        listFoundProbe: true,
+        recallLatencyMs: lastRecallLatencyMs,
+        recallFoundProbe: true,
+      };
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, SMOKE_RECALL_INTERVAL_MS));
+  }
+
+  console.warn(
+    "[ux] smoke warning: recall_memories did not return the probe within timeout. " +
+    `Continuing to LoCoMo. Last recall snippet: ${lastContext.slice(0, 220)}`
+  );
+  return {
+    probe,
+    listLatencyMs: lastListLatencyMs,
+    listFoundProbe: true,
+    recallLatencyMs: lastRecallLatencyMs,
+    recallFoundProbe: false,
+  };
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  if (!benchmarkArg && !runAll) {
-    console.error("Usage: npx tsx eval/runner.ts --benchmark <locomo|longmemeval|beam> [--scale 1m|10m] [--all] [-v]");
+  validateUxOnlyCli();
+
+  console.log("\n═══ UX Relevance Check (Smoke + LoCoMo Mini) ═══");
+  console.log(
+    `[ux] config: benchmark=${UX_BENCHMARK_NAME} max_dialogues=${maxDialogues} ` +
+    `max_turns_per_dialogue=${maxTurnsPerDialogue} ` +
+    `max_questions_per_dialogue=${maxQuestionsPerDialogue} ` +
+    `f1_threshold=${f1Threshold.toFixed(2)}`
+  );
+
+  console.log("[ux] running smoke probe...");
+  const smoke = await runSmokeProbe();
+  console.log(
+    `[ux] smoke: PASS (list latency ${smoke.listLatencyMs}ms, recall latency ${smoke.recallLatencyMs}ms, recall_found=${smoke.recallFoundProbe})`
+  );
+
+  console.log("[ux] running LoCoMo mini...");
+  const locomo = await runLoCoMo({
+    maxDialogues,
+    maxTurnsPerDialogue,
+    maxQuestionsPerDialogue,
+    verbose,
+  });
+  const pass = locomo.macroF1 >= f1Threshold;
+
+  const result = {
+    benchmark: UX_BENCHMARK_NAME as const,
+    passed: pass,
+    threshold: f1Threshold,
+    config: {
+      maxDialogues,
+      maxTurnsPerDialogue,
+      maxQuestionsPerDialogue,
+    },
+    smoke: {
+      ok: true,
+      listFoundProbe: smoke.listFoundProbe,
+      listLatencyMs: smoke.listLatencyMs,
+      recallFoundProbe: smoke.recallFoundProbe,
+      recallLatencyMs: smoke.recallLatencyMs,
+      probe: smoke.probe,
+    },
+    locomo: {
+      dialogues: locomo.dialogues,
+      questions: locomo.questions,
+      macroF1: locomo.macroF1,
+      p50LatencyMs: locomo.p50LatencyMs,
+      avgTokensUsed: locomo.avgTokensUsed,
+      byType: locomo.byType,
+    },
+  };
+  saveResult("ux-relevance", result);
+
+  console.log(
+    `[ux] macroF1=${locomo.macroF1.toFixed(3)} ` +
+    `questions=${locomo.questions} p50=${locomo.p50LatencyMs}ms`
+  );
+
+  if (!pass) {
+    console.error(`[ux] FAIL: macro-F1 ${locomo.macroF1.toFixed(3)} < ${f1Threshold.toFixed(2)}`);
     process.exit(1);
   }
 
-  const summaryRows: Array<{ benchmark: string; score: number; tokens: number; p50Ms: number }> = [];
-
-  const runLocomo = runAll || benchmarkArg === "locomo";
-  const runLongMem = runAll || benchmarkArg === "longmemeval";
-  const runBeamBench = runAll || benchmarkArg === "beam";
-
-  if (runLocomo) {
-    console.log("\n═══ LoCoMo ═══");
-    const result = await runLoCoMo({ maxDialogues: maxItems ?? 50, verbose });
-    saveResult("locomo", result);
-    console.log(`[locomo] macro-F1: ${(result.macroF1 * 100).toFixed(1)}`);
-    summaryRows.push({
-      benchmark: "LoCoMo",
-      score: result.macroF1,
-      tokens: result.avgTokensUsed,
-      p50Ms: result.p50LatencyMs,
-    });
-  }
-
-  if (runLongMem) {
-    console.log("\n═══ LongMemEval ═══");
-    const result = await runLongMemEval({ maxItems: maxItems ?? 500, verbose });
-    saveResult("longmemeval", result);
-    console.log(`[longmemeval] accuracy: ${(result.accuracy * 100).toFixed(1)}`);
-    summaryRows.push({
-      benchmark: "LongMemEval",
-      score: result.accuracy,
-      tokens: result.avgTokensUsed,
-      p50Ms: result.p50LatencyMs,
-    });
-  }
-
-  if (runBeamBench) {
-    console.log(`\n═══ BEAM (${scaleArg}) ═══`);
-    const result = await runBeam({ scale: scaleArg, maxConversations: maxItems ?? 100, verbose });
-    saveResult(`beam-${scaleArg}`, result);
-    console.log(`[beam-${scaleArg}] overall score: ${(result.overallScore * 100).toFixed(1)}`);
-    summaryRows.push({
-      benchmark: `BEAM (${scaleArg})`,
-      score: result.overallScore,
-      tokens: result.avgTokensUsed,
-      p50Ms: result.p50LatencyMs,
-    });
-  }
-
-  if (summaryRows.length > 0) {
-    printSummaryTable(summaryRows);
-  }
+  console.log(`[ux] PASS: macro-F1 ${locomo.macroF1.toFixed(3)} >= ${f1Threshold.toFixed(2)}`);
 }
 
 main().catch((err) => {

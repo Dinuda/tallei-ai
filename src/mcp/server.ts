@@ -29,6 +29,7 @@ import { setRequestTimingField } from "../services/requestTiming.js";
 import type { AuthContext, Plan } from "../types/auth.js";
 
 const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
+const OAUTH_LOCAL_CACHE_TTL_MS = 60_000;
 
 interface OAuthCacheEntry {
   userId: string;
@@ -38,9 +39,33 @@ interface OAuthCacheEntry {
   plan?: Plan;
 }
 
+interface OAuthLocalCacheEntry {
+  exp: number;
+  entry: OAuthCacheEntry;
+}
+
+const oauthLocalCache = new Map<string, OAuthLocalCacheEntry>();
+
 function tokenCacheKey(token: string): string {
   const hash = createHash("sha256").update(token).digest("hex");
   return `auth:oauth:${hash}`;
+}
+
+function readLocalOAuthCache(cacheKey: string): OAuthCacheEntry | null {
+  const cached = oauthLocalCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.exp <= Date.now()) {
+    oauthLocalCache.delete(cacheKey);
+    return null;
+  }
+  return cached.entry;
+}
+
+function writeLocalOAuthCache(cacheKey: string, entry: OAuthCacheEntry): void {
+  oauthLocalCache.set(cacheKey, {
+    entry,
+    exp: Date.now() + OAUTH_LOCAL_CACHE_TTL_MS,
+  });
 }
 
 async function logMcpCallEvent(input: {
@@ -331,8 +356,23 @@ function sendUnauthorized(res: any, resourceMetadataUrl: string, message: string
 
 async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifier): Promise<AuthContext | null> {
   const cacheKey = tokenCacheKey(token);
+  const localCached = readLocalOAuthCache(cacheKey);
+  if (localCached?.userId && localCached?.tenantId && localCached?.clientId) {
+    setRequestTimingField("auth_cache_layer", "l1");
+    return {
+      userId: localCached.userId,
+      tenantId: localCached.tenantId,
+      authMode: "oauth",
+      plan: localCached.plan ?? "free",
+      clientId: localCached.clientId,
+      scopes: localCached.scopes ?? [],
+    };
+  }
+
   const cached = await getCacheJson<OAuthCacheEntry>(cacheKey);
   if (cached?.userId && cached?.tenantId && cached?.clientId) {
+    setRequestTimingField("auth_cache_layer", "l2");
+    writeLocalOAuthCache(cacheKey, cached);
     return {
       userId: cached.userId,
       tenantId: cached.tenantId,
@@ -344,6 +384,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
   }
 
   try {
+    setRequestTimingField("auth_cache_layer", "db");
     const authInfo = await oauthVerifier.verifyAccessToken(token);
     const userIdValue = authInfo.extra?.userId;
     const tenantIdValue = authInfo.extra?.tenantId;
@@ -356,17 +397,16 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
       ? authInfo.scopes.map((scope) => String(scope))
       : [];
 
-    await setCacheJson(
-      cacheKey,
-      {
-        userId: context.userId,
-        tenantId: context.tenantId,
-        plan: context.plan,
-        clientId: authInfo.clientId,
-        scopes,
-      },
-      OAUTH_CACHE_TTL_SECONDS
-    );
+    const cacheEntry: OAuthCacheEntry = {
+      userId: context.userId,
+      tenantId: context.tenantId,
+      plan: context.plan,
+      clientId: authInfo.clientId,
+      scopes,
+    };
+
+    writeLocalOAuthCache(cacheKey, cacheEntry);
+    await setCacheJson(cacheKey, cacheEntry, OAUTH_CACHE_TTL_SECONDS);
 
     return {
       ...context,
@@ -384,11 +424,17 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
   const handleMcp = async (req: any, res: any) => {
     const rpcMethod = typeof req?.body?.method === "string" ? req.body.method : null;
     const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name : null;
+    const isRecallToolCall = toolName === "recall_memories" ||
+      toolName === "recall_user_context" ||
+      toolName === "recall_memories_v2";
     const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
     const authStartedAt = process.hrtime.bigint();
     const noteAuthTiming = () => {
       const authMs = Number(process.hrtime.bigint() - authStartedAt) / 1_000_000;
       setRequestTimingField("auth_ms", authMs);
+      if (isRecallToolCall) {
+        setRequestTimingField("recall_auth_ms", authMs);
+      }
     };
 
     if (config.nodeEnv !== "production") {
@@ -506,7 +552,12 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     });
 
     await server.connect(transport);
+    const dispatchStartedAt = process.hrtime.bigint();
     await transport.handleRequest(req, res, req.body);
+    const dispatchMs = Number(process.hrtime.bigint() - dispatchStartedAt) / 1_000_000;
+    if (isRecallToolCall) {
+      setRequestTimingField("recall_mcp_dispatch_ms", dispatchMs);
+    }
   };
 
   router.all("/", handleMcp);

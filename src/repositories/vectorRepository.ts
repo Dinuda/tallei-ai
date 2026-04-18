@@ -95,6 +95,22 @@ async function ensureCollection(): Promise<void> {
           on_disk_payload: true,
         })
       );
+    } else {
+      const details = await withQdrantRetry(() => client.getCollection(collectionName));
+      const vectorsConfig = (details?.config?.params as { vectors?: unknown } | undefined)?.vectors;
+      const size =
+        typeof vectorsConfig === "object" &&
+        vectorsConfig !== null &&
+        "size" in vectorsConfig &&
+        typeof (vectorsConfig as { size?: unknown }).size === "number"
+          ? (vectorsConfig as { size: number }).size
+          : null;
+      if (typeof size === "number" && size !== EMBEDDING_DIMS) {
+        throw new Error(
+          `Qdrant collection "${collectionName}" vector size is ${size}, but EMBEDDING_DIMS=${EMBEDDING_DIMS}. ` +
+          `Use a different QDRANT_COLLECTION_NAME or set EMBEDDING_DIMS to match the collection.`
+        );
+      }
     }
 
     const payloadIndexes: Array<{ field_name: string; field_schema: "keyword" | "datetime" }> = [

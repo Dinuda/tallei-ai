@@ -1,4 +1,4 @@
-import { llm as openai, llmModel } from "./llmClient.js";
+import { llm, llmModel } from "./llmClient.js";
 
 export interface ExtractedFact {
   text: string;
@@ -16,11 +16,12 @@ Rules:
 - Each fact must be a single, self-contained statement a person could act on later.
 - If a fact likely supersedes a common stored pattern (e.g. new location, new job), set supersedes_pattern to a keyword or phrase that identifies the old fact.
 - Omit pleasantries, filler, repeated info, and opinions without factual content.
-- Maximum 10 facts per extraction.`;
+- Maximum 10 facts per extraction.
+- Return JSON only: {"facts":[{"text":"...","subject":"...","temporal_context":null,"supersedes_pattern":null}]}.`;
 
 export async function extractFacts(content: string): Promise<ExtractedFact[]> {
   try {
-    const response = await openai.chat.completions.create({
+    const response = await llm.chat.completions.create({
       model: llmModel,
       temperature: 0,
       max_tokens: 600,
@@ -31,34 +32,7 @@ export async function extractFacts(content: string): Promise<ExtractedFact[]> {
           content: `Extract facts from this conversation:\n\n${content.slice(0, 4000)}`,
         },
       ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "extracted_facts",
-          strict: true,
-          schema: {
-            type: "object",
-            properties: {
-              facts: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    text: { type: "string" },
-                    subject: { type: "string" },
-                    temporal_context: { type: ["string", "null"] },
-                    supersedes_pattern: { type: ["string", "null"] },
-                  },
-                  required: ["text", "subject", "temporal_context", "supersedes_pattern"],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ["facts"],
-            additionalProperties: false,
-          },
-        },
-      },
+      response_format: { type: "json_object" },
     });
 
     const raw = response.choices[0]?.message?.content ?? "{}";

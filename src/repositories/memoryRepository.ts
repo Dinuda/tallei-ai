@@ -23,6 +23,12 @@ interface CreateMemoryRecordInput {
   qdrantPointId: string;
 }
 
+interface UpdateMemoryRecordContentInput {
+  contentCiphertext: string;
+  contentHash: string;
+  summaryJson: unknown;
+}
+
 export class MemoryRepository {
   async create(auth: AuthContext, input: CreateMemoryRecordInput): Promise<void> {
     await pool.query(
@@ -40,6 +46,32 @@ export class MemoryRepository {
         input.qdrantPointId,
       ]
     );
+  }
+
+  async updateContentAndSummaryScoped(
+    auth: AuthContext,
+    memoryId: string,
+    input: UpdateMemoryRecordContentInput
+  ): Promise<boolean> {
+    const result = await pool.query(
+      `UPDATE memory_records
+       SET content_ciphertext = $1,
+           content_hash = $2,
+           summary_json = $3::jsonb
+       WHERE id = $4
+         AND tenant_id = $5
+         AND user_id = $6
+         AND deleted_at IS NULL`,
+      [
+        input.contentCiphertext,
+        input.contentHash,
+        JSON.stringify(input.summaryJson ?? {}),
+        memoryId,
+        auth.tenantId,
+        auth.userId,
+      ]
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async list(auth: AuthContext, limit = 100): Promise<MemoryRecordRow[]> {

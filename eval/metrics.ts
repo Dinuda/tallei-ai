@@ -1,14 +1,22 @@
 /**
- * Scoring utilities for LoCoMo, LongMemEval, and BEAM benchmarks.
+ * Scoring utilities for eval benchmarks.
+ *
+ * Local-first behavior:
+ * - Uses Ollama when LLM_PROVIDER=ollama
+ * - Uses OpenAI when LLM_PROVIDER=openai
  */
 
 import OpenAI from "openai";
 
+const EVAL_PROVIDER = (process.env["LLM_PROVIDER"] ?? "openai").trim().toLowerCase();
+const EVAL_MODEL = EVAL_PROVIDER === "ollama"
+  ? (process.env["OLLAMA_MODEL"] ?? "qwen2.5:7b")
+  : (process.env["OPENAI_MODEL"] ?? "gpt-4o-mini");
+
 let _openai: OpenAI | null = null;
 function openai(): OpenAI {
   if (!_openai) {
-    const provider = process.env["LLM_PROVIDER"] ?? "openai";
-    _openai = provider === "ollama"
+    _openai = EVAL_PROVIDER === "ollama"
       ? new OpenAI({ baseURL: process.env["OLLAMA_BASE_URL"] ?? "http://localhost:11434/v1", apiKey: "ollama" })
       : new OpenAI({ apiKey: process.env["OPENAI_API_KEY"] });
   }
@@ -70,7 +78,7 @@ Return ONLY a number between 0.0 and 1.0.`;
 
   try {
     const res = await openai().chat.completions.create({
-      model: "gpt-4o-mini",
+      model: EVAL_MODEL,
       temperature: 0,
       max_tokens: 8,
       messages: [{ role: "user", content: prompt }],
@@ -106,7 +114,7 @@ Return ONLY a JSON array of numbers, one per nugget. Example: [1.0, 0.5, 0.0]`;
 
   try {
     const res = await openai().chat.completions.create({
-      model: "gpt-4o-mini",
+      model: EVAL_MODEL,
       temperature: 0,
       max_tokens: nuggets.length * 8 + 16,
       messages: [{ role: "user", content: prompt }],
@@ -168,7 +176,7 @@ Answer concisely in 1-2 sentences using only information from the context. If th
 
   try {
     const res = await openai().chat.completions.create({
-      model: "gpt-4o-mini",
+      model: EVAL_MODEL,
       temperature: 0,
       max_tokens: 80,
       messages: [{ role: "user", content: prompt }],

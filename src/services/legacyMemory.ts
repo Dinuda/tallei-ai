@@ -20,23 +20,49 @@ function getPgVectorConfig() {
   };
 }
 
+function getLegacyLlmConfig() {
+  if (config.llmProvider === "ollama") {
+    return {
+      provider: "ollama",
+      config: {
+        model: config.ollamaModel,
+        baseURL: config.ollamaBaseUrl.replace(/\/v1\/?$/, ""),
+      },
+    };
+  }
+  return {
+    provider: "openai",
+    config: {
+      model: config.openaiModel,
+      apiKey: config.openaiApiKey,
+    },
+  };
+}
+
+function getLegacyEmbedderConfig() {
+  if (config.embeddingProvider === "ollama") {
+    return {
+      provider: "ollama",
+      config: {
+        model: config.embeddingModel,
+        baseURL: config.ollamaBaseUrl.replace(/\/v1\/?$/, ""),
+      },
+    };
+  }
+  return {
+    provider: "openai",
+    config: {
+      model: config.embeddingModel,
+      apiKey: config.openaiApiKey,
+    },
+  };
+}
+
 function getMemory(): InstanceType<typeof Memory> {
   if (!_memory) {
     _memory = new Memory({
-      llm: {
-        provider: "openai",
-        config: {
-          model: "gpt-4o-mini",
-          apiKey: config.openaiApiKey,
-        },
-      },
-      embedder: {
-        provider: "openai",
-        config: {
-          model: "text-embedding-3-small",
-          apiKey: config.openaiApiKey,
-        },
-      },
+      llm: getLegacyLlmConfig(),
+      embedder: getLegacyEmbedderConfig(),
       vectorStore: {
         provider: "pgvector",
         config: getPgVectorConfig(),

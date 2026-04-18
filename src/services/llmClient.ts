@@ -1,12 +1,8 @@
 /**
  * Shared LLM client factory.
  *
- * Defaults to OpenAI. Set LLM_PROVIDER=ollama to route generation calls
- * through a local Ollama instance instead (recommended: qwen2.5:7b).
+ * In local mode, defaults to Ollama. Set LLM_PROVIDER=openai to force OpenAI.
  * Ollama exposes an OpenAI-compatible API so no extra SDK is needed.
- *
- * Embeddings are NOT affected — they always go through OpenAI since
- * changing the embedding model would require re-indexing Qdrant.
  */
 
 import OpenAI from "openai";
@@ -19,6 +15,9 @@ function buildClient(): OpenAI {
       apiKey: "ollama", // required by the SDK but ignored by Ollama
     });
   }
+  if (!config.openaiApiKey) {
+    throw new Error("OPENAI_API_KEY is required when LLM_PROVIDER=openai");
+  }
   return new OpenAI({ apiKey: config.openaiApiKey });
 }
 
@@ -27,4 +26,4 @@ export const llm = buildClient();
 
 /** Model name for the active provider. */
 export const llmModel =
-  config.llmProvider === "ollama" ? config.ollamaModel : "gpt-4o-mini";
+  config.llmProvider === "ollama" ? config.ollamaModel : config.openaiModel;
