@@ -1,0 +1,566 @@
+import { createHash } from "crypto";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { Router } from "express";
+import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/provider.js";
+import { z } from "zod";
+import {
+  saveMemory,
+  recallMemories,
+  listMemories,
+  deleteMemory,
+  prewarmRecallCache,
+  QuotaExceededError,
+} from "../services/memory.js";
+import {
+  explainMemoryConnection,
+  listMemoryEntities,
+  recallMemoriesV2,
+} from "../services/memoryGraph.js";
+import { getMemoryGraphInsights } from "../services/memoryInsights.js";
+import { authContextFromUserId } from "../services/auth.js";
+import { getPlanForTenant } from "../services/tenancy.js";
+import { config } from "../config.js";
+import { pool } from "../db/index.js";
+import { getCacheJson, setCacheJson } from "../services/cache.js";
+import { hasRequiredScopes } from "../services/oauthTokens.js";
+import { runAsyncSafe } from "../services/asyncSafe.js";
+import { setRequestTimingField } from "../services/requestTiming.js";
+import type { AuthContext, Plan } from "../types/auth.js";
+
+const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
+const OAUTH_LOCAL_CACHE_TTL_MS = 60_000;
+
+interface OAuthCacheEntry {
+  userId: string;
+  tenantId: string;
+  scopes: string[];
+  clientId: string;
+  plan?: Plan;
+}
+
+interface OAuthLocalCacheEntry {
+  exp: number;
+  entry: OAuthCacheEntry;
+}
+
+const oauthLocalCache = new Map<string, OAuthLocalCacheEntry>();
+
+function tokenCacheKey(token: string): string {
+  const hash = createHash("sha256").update(token).digest("hex");
+  return `auth:oauth:${hash}`;
+}
+
+function readLocalOAuthCache(cacheKey: string): OAuthCacheEntry | null {
+  const cached = oauthLocalCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.exp <= Date.now()) {
+    oauthLocalCache.delete(cacheKey);
+    return null;
+  }
+  return cached.entry;
+}
+
+function writeLocalOAuthCache(cacheKey: string, entry: OAuthCacheEntry): void {
+  oauthLocalCache.set(cacheKey, {
+    entry,
+    exp: Date.now() + OAUTH_LOCAL_CACHE_TTL_MS,
+  });
+}
+
+async function logMcpCallEvent(input: {
+  userId?: string | null;
+  tenantId?: string | null;
+  keyId?: string | null;
+  authMode?: "api_key" | "oauth" | "unknown";
+  method: string;
+  toolName?: string | null;
+  ok: boolean;
+  error?: string | null;
+}): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        input.tenantId ?? null,
+        input.userId ?? null,
+        input.keyId ?? null,
+        input.authMode ?? "unknown",
+        input.method,
+        input.toolName ?? null,
+        input.ok,
+        input.error ?? null,
+      ]
+    );
+  } catch (error) {
+    if (config.nodeEnv !== "production") {
+      console.error("[mcp] failed to persist call event:", error);
+    }
+  }
+}
+
+function logMcpCallEventAsync(input: Parameters<typeof logMcpCallEvent>[0]): void {
+  setRequestTimingField("event_log_mode", "async");
+  runAsyncSafe(() => logMcpCallEvent(input), "mcp call event");
+}
+
+function buildMcpServer(auth: AuthContext): McpServer {
+  const server = new McpServer({
+    name: "tallei",
+    version: "1.0.0",
+  });
+
+  server.registerTool(
+    "save_memory",
+    {
+      title: "Save Memory",
+      description: "Saves information to Tallei persistent memory.",
+      inputSchema: {
+        content: z
+          .string()
+          .describe("The fact, preference, or information to remember. Be specific and concise."),
+        platform: z
+          .enum(["claude", "chatgpt", "gemini", "other"])
+          .optional()
+          .default("claude")
+          .describe("The AI platform this memory is from"),
+      },
+    },
+    async ({ content, platform }) => {
+      try {
+        const saved = await saveMemory(content, auth, platform ?? "claude");
+        return {
+          content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }],
+        };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "remember_user_preference",
+    {
+      title: "Remember User Preference",
+      description: "Saves a durable user preference/fact immediately.",
+      inputSchema: {
+        fact: z.string().describe("The exact concise fact/preference to remember."),
+        platform: z.enum(["claude", "chatgpt", "gemini", "other"]).optional().default("claude"),
+      },
+    },
+    async ({ fact, platform }) => {
+      try {
+        const saved = await saveMemory(fact, auth, platform ?? "claude");
+        return {
+          content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }],
+        };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "recall_memories",
+    {
+      title: "Recall Memories",
+      description:
+        "Searches Tallei persistent memory and returns relevant past context. " +
+        "If this returns 'No relevant memories found', call list_memories next to scan all stored memories before concluding nothing is saved.",
+      inputSchema: {
+        query: z
+          .string()
+          .describe("What to search for. Use topic keywords like 'favorite food' or 'project stack'."),
+        limit: z.number().int().min(1).max(20).optional().default(5),
+      },
+    },
+    async ({ query, limit }) => {
+      try {
+        const result = await recallMemories(query, auth, limit ?? 5);
+        return { content: [{ type: "text", text: result.contextBlock }] };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "recall_memories_v2",
+    {
+      title: "Recall Memories v2",
+      description: "Graph-enhanced recall with compact reasoning paths.",
+      inputSchema: {
+        query: z.string().describe("What to search for."),
+        limit: z.number().int().min(1).max(20).optional().default(5),
+        graph_depth: z.number().int().min(1).max(2).optional().default(1),
+      },
+    },
+    async ({ query, limit, graph_depth }) => {
+      if (!config.recallV2Enabled) {
+        return { content: [{ type: "text", text: "recall_memories_v2 is disabled." }] };
+      }
+
+      const result = await recallMemoriesV2(query, auth, limit ?? 5, graph_depth ?? 1);
+      return {
+        content: [{ type: "text", text: result.contextBlock }],
+      };
+    }
+  );
+
+  server.registerTool(
+    "list_memory_entities",
+    {
+      title: "List Memory Entities",
+      description: "Lists graph entities extracted from user memories.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).optional().default(30),
+        query: z.string().optional(),
+      },
+    },
+    async ({ limit, query }) => {
+      const entities = await listMemoryEntities(auth, limit ?? 30, query);
+      if (entities.length === 0) {
+        return { content: [{ type: "text", text: "No memory entities found yet." }] };
+      }
+      const text = entities
+        .map((entity) => `• ${entity.label} [${entity.entityType}] conf=${entity.confidence.toFixed(2)}`)
+        .join("\n");
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  server.registerTool(
+    "explain_memory_connection",
+    {
+      title: "Explain Memory Connection",
+      description: "Finds graph connection path between two entity queries.",
+      inputSchema: {
+        source: z.string().describe("Source entity query"),
+        target: z.string().describe("Target entity query"),
+      },
+    },
+    async ({ source, target }) => {
+      const result = await explainMemoryConnection(auth, source, target);
+      if (!result.found) {
+        return { content: [{ type: "text", text: result.explanation }] };
+      }
+      return {
+        content: [{ type: "text", text: `${result.explanation}\nPath: ${result.path.join(" -> ")}` }],
+      };
+    }
+  );
+
+  server.registerTool(
+    "memory_graph_insights",
+    {
+      title: "Memory Graph Insights",
+      description: "Returns contradictions, stale decisions, and high-impact relationships.",
+      inputSchema: {},
+    },
+    async () => {
+      if (!config.graphExtractionEnabled) {
+        return { content: [{ type: "text", text: "memory_graph_insights is disabled." }] };
+      }
+      const insights = await getMemoryGraphInsights(auth);
+      const lines = [
+        `Generated: ${insights.generatedAt}`,
+        `Contradictions: ${insights.summary.contradictionCount}`,
+        `Stale decisions: ${insights.summary.staleDecisionCount}`,
+        `High-impact relations: ${insights.summary.highImpactCount}`,
+        "",
+      ];
+      for (const recommendation of insights.recommendations.slice(0, 4)) {
+        lines.push(`• ${recommendation}`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
+  server.registerTool(
+    "recall_user_context",
+    {
+      title: "Recall User Context",
+      description: "Searches stored user context and preferences. Alias of recall_memories.",
+      inputSchema: {
+        query: z.string().describe("What to look up about the user/context."),
+        limit: z.number().int().min(1).max(20).optional().default(5),
+      },
+    },
+    async ({ query, limit }) => {
+      try {
+        const result = await recallMemories(query, auth, limit ?? 5);
+        return { content: [{ type: "text", text: result.contextBlock }] };
+      } catch (err) {
+        if (err instanceof QuotaExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "list_memories",
+    {
+      title: "List Memories",
+      description: "Lists all recent memories stored in Tallei for this user.",
+      inputSchema: {},
+    },
+    async () => {
+      const memories = await listMemories(auth);
+      if (memories.length === 0) {
+        return { content: [{ type: "text", text: "No memories stored yet." }] };
+      }
+      const text = memories.map((memory) => `• ${memory.text}`).join("\n");
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  server.registerTool(
+    "delete_memory",
+    {
+      title: "Delete Memory",
+      description: "Deletes a specific memory from Tallei by its ID.",
+      inputSchema: {
+        memory_id: z.string().describe("The unique ID of the memory to delete"),
+      },
+    },
+    async ({ memory_id }) => {
+      const result = await deleteMemory(memory_id, auth);
+      return {
+        content: [{ type: "text", text: `Deleted memory ${memory_id}. Success: ${result.success}` }],
+      };
+    }
+  );
+
+  return server;
+}
+
+function sendUnauthorized(res: any, resourceMetadataUrl: string, message: string): void {
+  res.setHeader(
+    "WWW-Authenticate",
+    `Bearer resource_metadata="${resourceMetadataUrl}", error="invalid_token", error_description="${message}"`
+  );
+  res.status(401).json({ error: message });
+}
+
+async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifier): Promise<AuthContext | null> {
+  const cacheKey = tokenCacheKey(token);
+  const localCached = readLocalOAuthCache(cacheKey);
+  if (localCached?.userId && localCached?.tenantId && localCached?.clientId) {
+    setRequestTimingField("auth_cache_layer", "l1");
+    return {
+      userId: localCached.userId,
+      tenantId: localCached.tenantId,
+      authMode: "oauth",
+      plan: localCached.plan ?? "free",
+      clientId: localCached.clientId,
+      scopes: localCached.scopes ?? [],
+    };
+  }
+
+  const cached = await getCacheJson<OAuthCacheEntry>(cacheKey);
+  if (cached?.userId && cached?.tenantId && cached?.clientId) {
+    setRequestTimingField("auth_cache_layer", "l2");
+    writeLocalOAuthCache(cacheKey, cached);
+    return {
+      userId: cached.userId,
+      tenantId: cached.tenantId,
+      authMode: "oauth",
+      plan: cached.plan ?? "free",
+      clientId: cached.clientId,
+      scopes: cached.scopes ?? [],
+    };
+  }
+
+  try {
+    setRequestTimingField("auth_cache_layer", "db");
+    const authInfo = await oauthVerifier.verifyAccessToken(token);
+    const userIdValue = authInfo.extra?.userId;
+    const tenantIdValue = authInfo.extra?.tenantId;
+    if (typeof userIdValue !== "string" || userIdValue.length === 0) return null;
+
+    const context = typeof tenantIdValue === "string" && tenantIdValue.length > 0
+      ? await authContextFromUserId(userIdValue, "oauth")
+      : await authContextFromUserId(userIdValue, "oauth");
+    const scopes = Array.isArray(authInfo.scopes)
+      ? authInfo.scopes.map((scope) => String(scope))
+      : [];
+
+    const cacheEntry: OAuthCacheEntry = {
+      userId: context.userId,
+      tenantId: context.tenantId,
+      plan: context.plan,
+      clientId: authInfo.clientId,
+      scopes,
+    };
+
+    writeLocalOAuthCache(cacheKey, cacheEntry);
+    await setCacheJson(cacheKey, cacheEntry, OAUTH_CACHE_TTL_SECONDS);
+
+    return {
+      ...context,
+      clientId: authInfo.clientId,
+      scopes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetadataUrl: string): Router {
+  const router = Router();
+
+  const handleMcp = async (req: any, res: any) => {
+    const rpcMethod = typeof req?.body?.method === "string" ? req.body.method : null;
+    const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name : null;
+    const isRecallToolCall = toolName === "recall_memories" ||
+      toolName === "recall_user_context" ||
+      toolName === "recall_memories_v2";
+    const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
+    const authStartedAt = process.hrtime.bigint();
+    const noteAuthTiming = () => {
+      const authMs = Number(process.hrtime.bigint() - authStartedAt) / 1_000_000;
+      setRequestTimingField("auth_ms", authMs);
+      if (isRecallToolCall) {
+        setRequestTimingField("recall_auth_ms", authMs);
+      }
+    };
+
+    if (config.nodeEnv !== "production") {
+      if (rpcMethod === "tools/call" && typeof toolName === "string") {
+        console.log(`[mcp] tools/call -> ${toolName}`);
+      } else if (rpcMethod === "initialize") {
+        console.log("[mcp] initialize");
+      } else if (typeof rpcMethod === "string") {
+        console.log(`[mcp] ${rpcMethod}`);
+      } else {
+        // Transport-level handshake/stream requests often have no JSON-RPC method.
+        console.log(`[mcp] ${method}`);
+      }
+    }
+
+    // EVAL_MODE: accept a synthetic Bearer token of the form "eval:<userId>"
+    // so eval scripts can hit the MCP endpoint without OAuth setup.
+    // Only active when EVAL_MODE=true AND NODE_ENV !== "production".
+    if (config.nodeEnv !== "production" && process.env["EVAL_MODE"] === "true") {
+      const evalHeader = req.headers.authorization as string | undefined;
+      const evalToken = evalHeader?.startsWith("Bearer eval:") ? evalHeader.slice("Bearer eval:".length) : null;
+      if (evalToken) {
+        const evalUserId = evalToken.trim();
+        const evalAuth = await authContextFromUserId(evalUserId, "oauth").catch(() => null);
+        if (evalAuth) {
+          noteAuthTiming();
+          req.authContext = evalAuth;
+          prewarmRecallCache(evalAuth);
+          const server = buildMcpServer(evalAuth);
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          await server.connect(transport);
+          await transport.handleRequest(req, res, req.body);
+          return;
+        }
+      }
+    }
+
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      noteAuthTiming();
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        ok: false,
+        error: "Missing or invalid Authorization header",
+      });
+      sendUnauthorized(res, resourceMetadataUrl, "Missing or invalid Authorization header");
+      return;
+    }
+
+    const token = authHeader.split(" ")[1];
+    if (token.startsWith("gm_")) {
+      noteAuthTiming();
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        authMode: "unknown",
+        ok: false,
+        error: "Legacy API keys are no longer supported on /mcp",
+      });
+      sendUnauthorized(res, resourceMetadataUrl, "Legacy API keys are no longer supported. Reconnect via OAuth.");
+      return;
+    }
+
+    const authContext = await authFromOAuthToken(token, oauthVerifier);
+    const authMode: "oauth" = "oauth";
+
+    if (!authContext) {
+      noteAuthTiming();
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        authMode,
+        ok: false,
+        error: "Invalid or expired token",
+      });
+      sendUnauthorized(res, resourceMetadataUrl, "Invalid or expired token");
+      return;
+    }
+    if (!hasRequiredScopes(authContext.scopes ?? [], ["mcp:tools"])) {
+      noteAuthTiming();
+      logMcpCallEventAsync({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        method,
+        toolName,
+        authMode,
+        ok: false,
+        error: "Missing mcp:tools scope",
+      });
+      res.status(403).json({
+        error: "Insufficient OAuth scopes",
+        requiredScopes: ["mcp:tools"],
+      });
+      return;
+    }
+    noteAuthTiming();
+
+    logMcpCallEventAsync({
+      userId: authContext.userId,
+      tenantId: authContext.tenantId,
+      keyId: null,
+      authMode,
+      method,
+      toolName,
+      ok: true,
+    });
+
+    req.authContext = authContext;
+    prewarmRecallCache(authContext);
+
+    const server = buildMcpServer(authContext);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+
+    await server.connect(transport);
+    const dispatchStartedAt = process.hrtime.bigint();
+    await transport.handleRequest(req, res, req.body);
+    const dispatchMs = Number(process.hrtime.bigint() - dispatchStartedAt) / 1_000_000;
+    if (isRecallToolCall) {
+      setRequestTimingField("recall_mcp_dispatch_ms", dispatchMs);
+    }
+  };
+
+  router.all("/", handleMcp);
+  router.all("/{*path}", handleMcp);
+  return router;
+}

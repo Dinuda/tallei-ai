@@ -70,10 +70,10 @@ globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
 const [{ randomUUID }, { MemoryRepository }, { VectorRepository }, { MemoryGraphRepository }, { MemoryGraphJobRepository }] =
   await Promise.all([
     import("node:crypto"),
-    import("../../src/infrastructure/repositories/memory.repository.js"),
-    import("../../src/infrastructure/repositories/vector.repository.js"),
-    import("../../src/infrastructure/repositories/memory-graph.repository.js"),
-    import("../../src/infrastructure/repositories/memory-graph-job.repository.js"),
+    import("../../src/repositories/memoryRepository.js"),
+    import("../../src/repositories/vectorRepository.js"),
+    import("../../src/repositories/memoryGraphRepository.js"),
+    import("../../src/repositories/memoryGraphJobRepository.js"),
   ]);
 
 type Scope = { tenantId: string; userId: string };
@@ -656,11 +656,11 @@ const [
 ] =
   await Promise.all([
     import("../../src/services/memory.js"),
-    import("../../src/orchestration/graph/recall-v2.usecase.js"),
-    import("../../src/orchestration/graph/extract-graph.worker.js"),
-    import("../../src/orchestration/graph/graph-insights.usecase.js"),
-    import("../../src/config/index.js"),
-    import("../../src/orchestration/graph/precomputed-recall.usecase.js"),
+    import("../../src/services/memoryGraph.js"),
+    import("../../src/services/memoryGraphWorker.js"),
+    import("../../src/services/memoryInsights.js"),
+    import("../../src/config.js"),
+    import("../../src/services/precomputedGraphRecall.js"),
   ]);
 
 config.graphExtractionEnabled = true;
