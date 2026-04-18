@@ -9,6 +9,7 @@ const PRICING_PLANS = [
     features: ["50 saves/month", "200 recalls/month", "All 3 AI platforms"],
     href: "/login",
     cta: "Start free",
+    featured: false,
   },
   {
     name: "Pro",
@@ -26,6 +27,7 @@ const PRICING_PLANS = [
     features: ["Everything in Pro", "API access", "Memory export", "Priority support"],
     href: "/login?plan=power",
     cta: "Choose Power",
+    featured: false,
   },
 ] as const;
 
