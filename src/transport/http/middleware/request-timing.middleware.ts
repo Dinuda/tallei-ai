@@ -86,22 +86,12 @@ function inferMcpTarget(req: Request): TimingTarget | null {
   const toolName = typeof params?.name === "string" ? params.name : "";
   if (!toolName) return null;
 
-  if (toolName === "save_memory" || toolName === "remember_user_preference") {
-    return {
-      surface: "mcp",
-      operation: "save",
-      route: path,
-      toolName,
-    };
+  if (toolName === "save_memory") {
+    return { surface: "mcp", operation: "save", route: path, toolName };
   }
 
-  if (toolName === "recall_memories" || toolName === "recall_user_context") {
-    return {
-      surface: "mcp",
-      operation: "recall_v1",
-      route: path,
-      toolName,
-    };
+  if (toolName === "recall_memories") {
+    return { surface: "mcp", operation: "recall_v1", route: path, toolName };
   }
 
   if (toolName === "recall_memories_v2") {

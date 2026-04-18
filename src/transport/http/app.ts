@@ -14,6 +14,7 @@ import billingRouter from "./routes/billing.js";
 import { createMcpRouter } from "../mcp/server.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requestTimingMiddleware } from "./middleware/request-timing.middleware.js";
+import { errorHandlerMiddleware } from "./middleware/error-handler.middleware.js";
 import { createOauthExtensionsRouter } from "./routes/oauth.js";
 import { getRedisHealthState } from "../../infrastructure/cache/redis-cache.js";
 import { TalleiOAuthProvider } from "../mcp/oauth.js";
@@ -81,6 +82,8 @@ export function createApp(deps: AppFactoryDeps): Express {
 
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(deps.mcpPublicUrl);
   app.use("/mcp", deps.mcpRateLimit, createMcpRouter(deps.oauthProvider, resourceMetadataUrl));
+
+  app.use(errorHandlerMiddleware);
 
   return app;
 }

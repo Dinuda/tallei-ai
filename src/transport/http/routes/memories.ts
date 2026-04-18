@@ -17,10 +17,8 @@ import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.m
 
 const router = Router();
 
-// Apply auth to all memory routes
 router.use(authMiddleware);
 
-// --- Schemas ---
 const saveSchema = z.object({
   content: z.string().min(1, "content is required"),
   platform: z.enum(["claude", "chatgpt", "gemini", "other"]).default("other"),
@@ -37,23 +35,11 @@ const recallV2Schema = z.object({
   graph_depth: z.coerce.number().int().min(1).max(2).optional().default(1),
 });
 
-// --- POST /api/memories ---
 router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = saveSchema.parse(req.body);
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    const result = await saveMemory(body.content, req.authContext, body.platform, req.ip);
-
-    res.status(201).json({
-      success: true,
-      memoryId: result.memoryId,
-      title: result.title,
-      summary: result.summary,
-    });
+    const result = await saveMemory(body.content, req.authContext!, body.platform, req.ip);
+    res.status(201).json({ success: true, memoryId: result.memoryId, title: result.title, summary: result.summary });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -64,17 +50,10 @@ router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: 
   }
 });
 
-// --- GET /api/memories/recall ---
 router.get("/recall", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const query = recallSchema.parse(req.query);
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    const result = await recallMemories(query.q, req.authContext, query.limit, req.ip);
-
+    const result = await recallMemories(query.q, req.authContext!, query.limit, req.ip);
     res.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -86,7 +65,6 @@ router.get("/recall", requireScopes(["memory:read"]), async (req: AuthRequest, r
   }
 });
 
-// --- GET /api/memories/recall-v2 ---
 router.get("/recall-v2", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   if (!config.recallV2Enabled) {
     res.status(404).json({ error: "recall-v2 is disabled" });
@@ -95,19 +73,7 @@ router.get("/recall-v2", requireScopes(["memory:read"]), async (req: AuthRequest
 
   try {
     const query = recallV2Schema.parse(req.query);
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    const result = await recallMemoriesV2(
-      query.q,
-      req.authContext,
-      query.limit,
-      query.graph_depth,
-      req.ip
-    );
-
+    const result = await recallMemoriesV2(query.q, req.authContext!, query.limit, query.graph_depth, req.ip);
     res.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -119,14 +85,9 @@ router.get("/recall-v2", requireScopes(["memory:read"]), async (req: AuthRequest
   }
 });
 
-// --- GET /api/memories ---
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    const memories = await listMemories(req.authContext);
+    const memories = await listMemories(req.authContext!);
     res.json({ memories });
   } catch (error) {
     console.error("Error listing memories:", error);
@@ -134,7 +95,6 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
   }
 });
 
-// --- GET /api/memories/graph ---
 router.get("/graph", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   if (!config.dashboardGraphV2Enabled) {
     res.status(404).json({ error: "memory graph v2 is disabled" });
@@ -142,11 +102,7 @@ router.get("/graph", requireScopes(["memory:read"]), async (req: AuthRequest, re
   }
 
   try {
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    const graph = await getMemoryGraphSnapshot(req.authContext);
+    const graph = await getMemoryGraphSnapshot(req.authContext!);
     res.json(graph);
   } catch (error) {
     console.error("Error fetching memory graph:", error);
@@ -154,16 +110,11 @@ router.get("/graph", requireScopes(["memory:read"]), async (req: AuthRequest, re
   }
 });
 
-// --- GET /api/memories/entities ---
 router.get("/entities", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
     const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit ?? "40"), 10) || 40));
     const q = typeof req.query.q === "string" ? req.query.q : undefined;
-    const entities = await listMemoryEntities(req.authContext, limit, q);
+    const entities = await listMemoryEntities(req.authContext!, limit, q);
     res.json({ entities });
   } catch (error) {
     console.error("Error listing entities:", error);
@@ -171,7 +122,6 @@ router.get("/entities", requireScopes(["memory:read"]), async (req: AuthRequest,
   }
 });
 
-// --- GET /api/memories/insights ---
 router.get("/insights", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   if (!config.graphExtractionEnabled) {
     res.status(404).json({ error: "memory graph extraction is disabled" });
@@ -179,11 +129,7 @@ router.get("/insights", requireScopes(["memory:read"]), async (req: AuthRequest,
   }
 
   try {
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    const insights = await getMemoryGraphInsights(req.authContext);
+    const insights = await getMemoryGraphInsights(req.authContext!);
     res.json(insights);
   } catch (error) {
     console.error("Error generating memory insights:", error);
@@ -191,14 +137,9 @@ router.get("/insights", requireScopes(["memory:read"]), async (req: AuthRequest,
   }
 });
 
-// --- DELETE /api/memories/:id ---
 router.delete("/:id", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    const result = await deleteMemory(String(req.params.id), req.authContext, req.ip);
+    const result = await deleteMemory(String(req.params.id), req.authContext!, req.ip);
     res.json(result);
   } catch (error) {
     if (error instanceof Error && /not found|not owned/i.test(error.message)) {

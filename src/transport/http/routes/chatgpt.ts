@@ -1,6 +1,6 @@
 import { Router, Response, NextFunction } from "express";
 import { z } from "zod";
-import { AuthRequest } from "../middleware/auth.middleware.js";
+import { AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
 import { recallMemories, saveMemory } from "../../../services/memory.js";
 import { pool } from "../../../infrastructure/db/index.js";
@@ -163,44 +163,6 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
     console.error("ChatGPT action auth failed:", error);
     res.status(500).json({ error: "Server error validating bearer token" });
   }
-}
-
-function requireChatGptScopes(requiredScopes: string[]) {
-  return (req: AuthRequest, res: Response, next: NextFunction): void => {
-    if (requiredScopes.length === 0) {
-      next();
-      return;
-    }
-
-    const auth = req.authContext;
-    if (!auth) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    if (auth.authMode === "internal" || auth.authMode === "api_key") {
-      next();
-      return;
-    }
-
-    const scopes = auth.scopes ?? [];
-    if (!hasRequiredScopes(scopes, requiredScopes)) {
-      res.status(403).json({
-        error: "Insufficient OAuth scopes",
-        requiredScopes,
-      });
-      return;
-    }
-
-    next();
-  };
-}
-
-function authHasRequiredScopes(auth: AuthRequest["authContext"], requiredScopes: string[]): boolean {
-  if (!auth) return false;
-  if (requiredScopes.length === 0) return true;
-  if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
-  return hasRequiredScopes(auth.scopes ?? [], requiredScopes);
 }
 
 function buildOpenApiSpec(serverUrl: string) {
@@ -433,15 +395,10 @@ router.get("/openapi.json", (_req, res: Response) => {
   res.json(buildOpenApiSpec(serverUrl));
 });
 
-router.post("/actions/recall", chatGptActionAuthMiddleware, requireChatGptScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallSchema.parse(req.body);
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
+    const result = await recallMemories(body.query, req.authContext!, body.limit, req.ip);
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recall",
@@ -474,7 +431,7 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireChatGptScopes
   }
 });
 
-router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/run", chatGptActionAuthMiddleware, requireScopes([]), async (req: AuthRequest, res: Response) => {
   try {
     const body = runSchema.parse(req.body);
     if (!req.authContext) {
@@ -482,30 +439,23 @@ router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]
       return;
     }
 
+    const auth = req.authContext!;
+    const isPrivileged = auth.authMode === "internal" || auth.authMode === "api_key";
+
     if (body.query) {
-      if (!authHasRequiredScopes(req.authContext, ["memory:read"])) {
-        res.status(403).json({
-          error: "Insufficient OAuth scopes",
-          requiredScopes: ["memory:read"],
-        });
+      if (!isPrivileged && !hasRequiredScopes(auth.scopes ?? [], ["memory:read"])) {
+        res.status(403).json({ error: "Insufficient OAuth scopes", requiredScopes: ["memory:read"] });
         return;
       }
 
-      const result = await recallMemories(body.query, req.authContext, body.limit, req.ip);
-      logChatGptActionAsync({
-        auth: req.authContext,
-        method: "chatgpt/actions/run",
-        ok: true,
-      });
+      const result = await recallMemories(body.query, auth, body.limit, req.ip);
+      logChatGptActionAsync({ auth, method: "chatgpt/actions/run", ok: true });
       res.json(result);
       return;
     }
 
-    if (!authHasRequiredScopes(req.authContext, ["memory:write"])) {
-      res.status(403).json({
-        error: "Insufficient OAuth scopes",
-        requiredScopes: ["memory:write"],
-      });
+    if (!isPrivileged && !hasRequiredScopes(auth.scopes ?? [], ["memory:write"])) {
+      res.status(403).json({ error: "Insufficient OAuth scopes", requiredScopes: ["memory:write"] });
       return;
     }
 
@@ -547,15 +497,10 @@ router.post("/actions/run", chatGptActionAuthMiddleware, requireChatGptScopes([]
   }
 });
 
-router.post("/actions/save", chatGptActionAuthMiddleware, requireChatGptScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/save", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = saveSchema.parse(req.body);
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    const saved = await saveMemory(body.content, req.authContext, "chatgpt", req.ip);
+    const saved = await saveMemory(body.content, req.authContext!, "chatgpt", req.ip);
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/save",

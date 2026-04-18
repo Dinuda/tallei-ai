@@ -4,7 +4,7 @@ import { config } from "../config/index.js";
 import { initDb } from "../infrastructure/db/index.js";
 import { TalleiOAuthProvider } from "../transport/mcp/oauth.js";
 import { createRateLimitMiddleware } from "../transport/http/middleware/rate-limit.middleware.js";
-import { createApp } from "./server.js";
+import { createApp } from "../transport/http/app.js";
 import { startWorkers, stopWorkers } from "./workers.js";
 import type { AppServices } from "./container.js";
 

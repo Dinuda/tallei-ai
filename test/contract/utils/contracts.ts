@@ -291,8 +291,9 @@ export function extractHttpRouteContract(repoRoot: string): HttpRouteContractEnt
 
 export function extractMcpToolContract(repoRoot: string): McpToolContractEntry[] {
   const candidates = [
-    path.join(repoRoot, "src/mcp/server.ts"),
+    path.join(repoRoot, "src/transport/mcp/tools/index.ts"),
     path.join(repoRoot, "src/transport/mcp/server.ts"),
+    path.join(repoRoot, "src/mcp/server.ts"),
   ];
   const serverPath = candidates.find((candidate) => {
     try {

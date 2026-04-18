@@ -1,15 +1,26 @@
 import type { Request, Response, NextFunction } from "express";
 import { config } from "../../../config/index.js";
-import {
-  authContextFromUserId,
-} from "../../../infrastructure/auth/auth.js";
+import { authContextFromUserId } from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
 import { hasRequiredScopes, validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
-import type { AuthContext } from "../../../domain/auth/index.js";
+import type { AuthContext, Plan } from "../../../domain/auth/index.js";
 
 export interface AuthRequest extends Request {
   userId?: string;
   authContext?: AuthContext;
+}
+
+const PLAN_CACHE_TTL_MS = 5 * 60_000;
+
+interface PlanCacheEntry { plan: Plan; exp: number }
+const planCache = new Map<string, PlanCacheEntry>();
+
+async function cachedPlan(tenantId: string): Promise<Plan> {
+  const cached = planCache.get(tenantId);
+  if (cached && cached.exp > Date.now()) return cached.plan;
+  const plan = await getPlanForTenant(tenantId);
+  planCache.set(tenantId, { plan, exp: Date.now() + PLAN_CACHE_TTL_MS });
+  return plan;
 }
 
 function sendLegacyApiKeyMigrationError(res: Response): void {
@@ -19,10 +30,6 @@ function sendLegacyApiKeyMigrationError(res: Response): void {
   });
 }
 
-/**
- * Internal middleware: validates X-Internal-Secret only.
- * Used for server-to-server calls that do not yet have a user context.
- */
 export async function internalSecretMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const secret = req.headers["x-internal-secret"];
   if (!secret || secret !== config.internalApiSecret) {
@@ -32,10 +39,6 @@ export async function internalSecretMiddleware(req: AuthRequest, res: Response, 
   next();
 }
 
-/**
- * Internal middleware: validates X-Internal-Secret + X-User-Id headers.
- * Used for server-to-server calls that require an explicit user context.
- */
 export async function internalMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const secret = req.headers["x-internal-secret"];
   if (!secret || secret !== config.internalApiSecret) {
@@ -58,9 +61,6 @@ export async function internalMiddleware(req: AuthRequest, res: Response, next: 
   next();
 }
 
-/**
- * Public middleware: accepts OAuth bearer tokens or internal secret.
- */
 export async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const internalSecret = req.headers["x-internal-secret"];
   if (internalSecret) {
@@ -79,7 +79,6 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
     req.authContext = tenantId
       ? { userId, tenantId, authMode: "internal", plan: "free" as const }
       : await authContextFromUserId(userId, "internal");
-
     next();
     return;
   }
@@ -90,7 +89,7 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
     return;
   }
 
-  const token = authHeader.split(" ")[1];
+  const token = authHeader.slice(7).trim();
   if (!token) {
     res.status(401).json({ error: "Missing bearer token" });
     return;
@@ -108,7 +107,7 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
       return;
     }
 
-    const plan = await getPlanForTenant(tokenContext.tenantId);
+    const plan = await cachedPlan(tokenContext.tenantId);
     req.userId = tokenContext.userId;
     req.authContext = {
       userId: tokenContext.userId,
@@ -138,20 +137,16 @@ export function requireScopes(requiredScopes: string[]) {
       return;
     }
 
-    if (auth.authMode === "internal") {
+    if (auth.authMode === "internal" || auth.authMode === "api_key") {
       next();
       return;
     }
 
-    const scopes = auth.scopes ?? [];
-    if (!hasRequiredScopes(scopes, requiredScopes)) {
-      res.status(403).json({
-        error: "Insufficient OAuth scopes",
-        requiredScopes,
-      });
+    if (!hasRequiredScopes(auth.scopes ?? [], requiredScopes)) {
+      res.status(403).json({ error: "Insufficient OAuth scopes", requiredScopes });
       return;
     }
 
     next();
-  }
+  };
 }

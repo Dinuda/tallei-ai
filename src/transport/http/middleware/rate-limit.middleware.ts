@@ -80,7 +80,7 @@ function isRecallRequest(req: Request): boolean {
     ? (body.params as Record<string, unknown>)
     : null;
   const toolName = typeof params?.name === "string" ? params.name : "";
-  return toolName === "recall_memories" || toolName === "recall_user_context" || toolName === "recall_memories_v2";
+  return toolName === "recall_memories" || toolName === "recall_memories_v2";
 }
 
 export function createRateLimitMiddleware(options: RateLimitOptions) {
