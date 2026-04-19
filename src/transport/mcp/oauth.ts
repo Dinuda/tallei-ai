@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash, randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
@@ -7,6 +7,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { InvalidGrantError, InvalidRequestError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import { deleteCacheKey } from "../../infrastructure/cache/redis-cache.js";
 import { sanitizeNextPath } from "../../infrastructure/auth/auth.js";
 import { ensurePrimaryTenantForUser, getPrimaryTenantId } from "../../infrastructure/auth/tenancy.js";
 
@@ -18,6 +19,10 @@ const SUPPORTED_SCOPES = new Set([...DEFAULT_SCOPES, "automation:run"]);
 
 function createOpaqueToken(prefix: string): string {
   return `${prefix}_${randomBytes(32).toString("hex")}`;
+}
+
+function hashOAuthToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function normalizeScopes(scopes?: string[]): string[] {
@@ -384,11 +389,11 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
 
     await pool.query(
       `INSERT INTO oauth_tokens
-       (access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'), NOW() + ($9::int * INTERVAL '1 second'))`,
+       (access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at, token_family_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'), NOW() + ($9::int * INTERVAL '1 second'), $10)`,
       [
-        accessToken,
-        refreshToken,
+        hashOAuthToken(accessToken),
+        hashOAuthToken(refreshToken),
         code.client_id,
         code.tenant_id,
         code.user_id,
@@ -396,6 +401,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
         resourceValue,
         ACCESS_TOKEN_TTL_SECONDS,
         REFRESH_TOKEN_TTL_SECONDS,
+        randomUUID(),
       ]
     );
 
@@ -414,11 +420,13 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
     scopes?: string[],
     resource?: URL
   ): Promise<OAuthTokens> {
-    const result = await pool.query<OAuthTokenRow>(
-      `SELECT access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at, revoked_at
+    const refreshHash = hashOAuthToken(refreshToken);
+    const result = await pool.query<OAuthTokenRow & { rotated_at: Date | null; token_family_id: string | null }>(
+      `SELECT access_token, refresh_token, client_id, tenant_id, user_id, scope, resource,
+              access_expires_at, refresh_expires_at, revoked_at, rotated_at, token_family_id
        FROM oauth_tokens
        WHERE refresh_token = $1`,
-      [refreshToken]
+      [refreshHash]
     );
 
     const token = result.rows[0];
@@ -426,6 +434,18 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
     if (token.client_id !== client.client_id) throw new InvalidGrantError("Refresh token was not issued to this client");
     if (token.revoked_at) throw new InvalidGrantError("Refresh token revoked");
     if (token.refresh_expires_at.getTime() <= Date.now()) throw new InvalidGrantError("Refresh token expired");
+
+    if (token.rotated_at) {
+      // Reuse of an already-rotated token → revoke entire token family
+      if (token.token_family_id) {
+        await pool.query(
+          `UPDATE oauth_tokens SET revoked_at = NOW()
+           WHERE token_family_id = $1 AND revoked_at IS NULL`,
+          [token.token_family_id]
+        );
+      }
+      throw new InvalidGrantError("Refresh token reuse detected; all tokens in this session have been revoked");
+    }
 
     const existingScopes = normalizeScopes((token.scope ?? "").split(" ").filter(Boolean));
     const nextScopes = normalizeScopes(scopes && scopes.length > 0 ? scopes : existingScopes);
@@ -437,24 +457,34 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
 
     const nextAccessToken = createOpaqueToken("tla_at");
     const nextRefreshToken = createOpaqueToken("tla_rt");
+    const nextScope = nextScopes.length > 0 ? nextScopes.join(" ") : null;
 
+    // Mark old token as rotated (not deleted — keeps family history for reuse detection)
     await pool.query(
-      `UPDATE oauth_tokens
-       SET access_token = $1,
-           refresh_token = $2,
-           scope = $3,
-           resource = $4,
-           access_expires_at = NOW() + ($5::int * INTERVAL '1 second'),
-           refresh_expires_at = NOW() + ($6::int * INTERVAL '1 second')
-       WHERE refresh_token = $7`,
+      "UPDATE oauth_tokens SET rotated_at = NOW() WHERE refresh_token = $1",
+      [refreshHash]
+    );
+
+    // Insert new token inheriting the same family
+    await pool.query(
+      `INSERT INTO oauth_tokens
+       (access_token, refresh_token, client_id, tenant_id, user_id, scope, resource,
+        access_expires_at, refresh_expires_at, token_family_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7,
+               NOW() + ($8::int * INTERVAL '1 second'),
+               NOW() + ($9::int * INTERVAL '1 second'),
+               $10)`,
       [
-        nextAccessToken,
-        nextRefreshToken,
-        nextScopes.length > 0 ? nextScopes.join(" ") : null,
+        hashOAuthToken(nextAccessToken),
+        hashOAuthToken(nextRefreshToken),
+        token.client_id,
+        token.tenant_id,
+        token.user_id,
+        nextScope,
         nextResource,
         ACCESS_TOKEN_TTL_SECONDS,
         REFRESH_TOKEN_TTL_SECONDS,
-        refreshToken,
+        token.token_family_id ?? randomUUID(),
       ]
     );
 
@@ -463,7 +493,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
       token_type: "bearer",
       expires_in: ACCESS_TOKEN_TTL_SECONDS,
       refresh_token: nextRefreshToken,
-      scope: nextScopes.length > 0 ? nextScopes.join(" ") : undefined,
+      scope: nextScope ?? undefined,
     };
   }
 
@@ -472,7 +502,7 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
       `SELECT access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at, revoked_at
        FROM oauth_tokens
        WHERE access_token = $1`,
-      [token]
+      [hashOAuthToken(token)]
     );
 
     const access = result.rows[0];
@@ -498,12 +528,28 @@ export class TalleiOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
+    const tokenHash = hashOAuthToken(request.token);
+
+    const affected = await pool.query<{ access_token: string }>(
+      `SELECT access_token FROM oauth_tokens
+       WHERE client_id = $1 AND (access_token = $2 OR refresh_token = $2) AND revoked_at IS NULL`,
+      [client.client_id, tokenHash]
+    );
+
     await pool.query(
       `UPDATE oauth_tokens
        SET revoked_at = NOW()
        WHERE client_id = $1
          AND (access_token = $2 OR refresh_token = $2)`,
-      [client.client_id, request.token]
+      [client.client_id, tokenHash]
+    );
+
+    // access_token column now stores sha256 hashes — use them directly as cache key suffixes
+    await Promise.all(
+      affected.rows.flatMap((row) => [
+        deleteCacheKey(`auth:oauth:${row.access_token}`),
+        deleteCacheKey(`auth:oauth:v2:${row.access_token}`),
+      ])
     );
   }
 }

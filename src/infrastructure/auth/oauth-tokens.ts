@@ -70,11 +70,12 @@ export async function validateOAuthAccessToken(
     return cached.token;
   }
 
+  const tokenHash = createHash("sha256").update(token).digest("hex");
   const result = await pool.query<OAuthTokenRow>(
     `SELECT access_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, revoked_at
      FROM oauth_tokens
      WHERE access_token = $1`,
-    [token]
+    [tokenHash]
   );
 
   const row = result.rows[0];

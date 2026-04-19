@@ -16,7 +16,7 @@ import type { AuthContext, Plan } from "../../domain/auth/index.js";
 import { registerTools } from "./tools/index.js";
 
 const OAUTH_CACHE_TTL_SECONDS = 10 * 60;
-const OAUTH_LOCAL_CACHE_TTL_MS = 60_000;
+const OAUTH_LOCAL_CACHE_TTL_MS = 10_000;
 
 interface OAuthCacheEntry {
   userId: string;
@@ -117,6 +117,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
     const authInfo = await oauthVerifier.verifyAccessToken(token);
     const userIdValue = authInfo.extra?.userId;
     if (typeof userIdValue !== "string" || userIdValue.length === 0) return null;
+    if (typeof authInfo.clientId !== "string") return null;
 
     const context = await authContextFromUserId(userIdValue, "oauth");
     const scopes = Array.isArray(authInfo.scopes) ? authInfo.scopes.map(String) : [];
@@ -126,7 +127,8 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
     await setCacheJson(cacheKey, entry, OAUTH_CACHE_TTL_SECONDS);
 
     return { ...context, clientId: authInfo.clientId, scopes };
-  } catch {
+  } catch (err) {
+    console.error("[mcp] token verification failed:", err instanceof Error ? err.message : String(err));
     return null;
   }
 }
@@ -135,8 +137,8 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
   const router = Router();
 
   const handleMcp = async (req: any, res: any) => {
-    const rpcMethod = typeof req?.body?.method === "string" ? req.body.method : null;
-    const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name : null;
+    const rpcMethod = typeof req?.body?.method === "string" ? req.body.method.slice(0, 128) : null;
+    const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name.slice(0, 128) : null;
     const isRecallToolCall = toolName === "recall_memories" || toolName === "recall_memories_v2";
     const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
     const authStartedAt = process.hrtime.bigint();

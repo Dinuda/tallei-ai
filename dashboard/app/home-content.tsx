@@ -405,7 +405,9 @@ export function HomeContent() {
       ═════════════════════════════════════════════════════ */}
       <footer className="footer-section">
         <div className="footer-inner">
-          <div className="footer-brand">tallei</div>
+          <div className="footer-brand">
+            <img src="/tallei.svg" alt="Tallei logo" width={24} height={24} />
+          </div>
           <div className="footer-links">
             <Link href="/privacy">Privacy</Link>
             <Link href="/terms">Terms of Service</Link>

@@ -57,6 +57,7 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_REDIS__FAILURE_COOLDOWN_MS",oldKey: "REDIS_FAILURE_COOLDOWN_MS" },
   // Auth / crypto
   { newKey: "TALLEI_AUTH__JWT_SECRET",          oldKey: "JWT_SECRET" },
+  { newKey: "TALLEI_AUTH__API_KEY_PEPPER",      oldKey: "API_KEY_PEPPER" },
   { newKey: "TALLEI_AUTH__SUPABASE_URL",        oldKey: "SUPABASE_URL" },
   { newKey: "TALLEI_AUTH__SUPABASE_SERVICE_ROLE_KEY", oldKey: "SUPABASE_SERVICE_ROLE_KEY" },
   { newKey: "TALLEI_AUTH__MEMORY_MASTER_KEY",   oldKey: "MEMORY_MASTER_KEY" },
@@ -173,6 +174,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     databaseUrlFallback: readStringEnv(e, "TALLEI_DB__URL_FALLBACK", "postgresql://tallei:tallei@localhost:5432/tallei"),
     openaiApiKey: readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
     jwtSecret: requireEnv(e, "TALLEI_AUTH__JWT_SECRET"),
+    apiKeyPepper: readStringEnv(e, "TALLEI_AUTH__API_KEY_PEPPER"),
     supabaseUrl: readStringEnv(e, "TALLEI_AUTH__SUPABASE_URL"),
     supabaseServiceRoleKey: readStringEnv(e, "TALLEI_AUTH__SUPABASE_SERVICE_ROLE_KEY"),
     redisUrl: readStringEnv(e, "TALLEI_REDIS__URL"),

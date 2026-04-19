@@ -1,6 +1,6 @@
 import { Router, Response, NextFunction } from "express";
 import { z } from "zod";
-import { AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
+import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
 import { recallMemories, saveMemory } from "../../../services/memory.js";
 import { pool } from "../../../infrastructure/db/index.js";
@@ -87,7 +87,7 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
   };
   const internalSecret = req.headers["x-internal-secret"];
   if (internalSecret) {
-    if (internalSecret !== config.internalApiSecret) {
+    if (!safeSecretEqual(String(internalSecret), config.internalApiSecret)) {
       noteAuthTiming();
       res.status(401).json({ error: "Invalid internal secret" });
       return;
@@ -367,28 +367,11 @@ function buildOpenApiSpec(serverUrl: string) {
 }
 
 router.get("/openapi.json", (_req, res: Response) => {
-  const forwardedProto = _req.header("x-forwarded-proto")?.split(",")[0]?.trim();
-  const forwardedHost = _req.header("x-forwarded-host")?.split(",")[0]?.trim();
-  const host = forwardedHost || _req.get("host") || "";
-  const proto = forwardedProto || _req.protocol || "https";
-
-  const localhostPattern = /^(localhost|127\.0\.0\.1)(:\d+)?$/i;
-
-  let serverUrl = "";
-  if (host && !localhostPattern.test(host)) {
-    serverUrl = `${proto}://${host}`;
-  } else {
-    try {
-      const fallback = new URL(config.publicBaseUrl);
-      serverUrl = `${fallback.protocol}//${fallback.host}`;
-    } catch {
-      if (host) {
-        serverUrl = `${proto}://${host}`;
-      }
-    }
-  }
-
-  if (!serverUrl) {
+  let serverUrl: string;
+  try {
+    const base = new URL(config.publicBaseUrl);
+    serverUrl = `${base.protocol}//${base.host}`;
+  } catch {
     serverUrl = "http://127.0.0.1:3000";
   }
 

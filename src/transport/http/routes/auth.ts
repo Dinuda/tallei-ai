@@ -1,6 +1,7 @@
 import { Response, Router } from "express";
 import {
   getUserById,
+  revokeSessionJwt,
   upsertGoogleUser,
   verifySessionToken,
 } from "../../../infrastructure/auth/auth.js";
@@ -16,7 +17,12 @@ function parseCookies(header: string | undefined): Record<string, string> {
   for (const part of header.split(";")) {
     const [rawName, ...rest] = part.trim().split("=");
     if (!rawName || rest.length === 0) continue;
-    out[rawName] = decodeURIComponent(rest.join("="));
+    const raw = rest.join("=");
+    try {
+      out[rawName] = decodeURIComponent(raw);
+    } catch {
+      out[rawName] = raw;
+    }
   }
   return out;
 }
@@ -65,7 +71,7 @@ router.get("/exchange-cookie", async (req, res) => {
       return;
     }
 
-    const payload = verifySessionToken(token);
+    const payload = await verifySessionToken(token);
     const user = await getUserById(payload.id);
     if (!user) {
       res.status(401).json({ error: "Invalid session" });
@@ -78,8 +84,10 @@ router.get("/exchange-cookie", async (req, res) => {
   }
 });
 
-router.post("/logout", async (_req, res) => {
+router.post("/logout", async (req, res) => {
   try {
+    const token = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME];
+    if (token) await revokeSessionJwt(token);
     clearSessionCookie(res);
     res.json({ success: true });
   } catch (error) {
