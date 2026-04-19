@@ -45,6 +45,14 @@ export function TopNav() {
         </Link>
 
         <div className="site-nav-actions">
+          <a
+            href="https://github.com/Dinuda/tallei-ai"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="nav-open-source-link"
+          >
+            Open Source
+          </a>
           {isLoading ? (
             <div style={{ width: "80px" }} aria-hidden="true" />
           ) : isAuthenticated ? (
