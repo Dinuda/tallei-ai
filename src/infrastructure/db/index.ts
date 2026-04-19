@@ -683,6 +683,57 @@ export async function initDb() {
       ON CONFLICT (tenant_id) DO NOTHING
     `);
 
+    // #13 + #9: Hash-only token storage + family-based rotation
+    // One-time migration: clear plaintext tokens before adding new columns.
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'oauth_tokens' AND column_name = 'token_family_id'
+        ) THEN
+          DELETE FROM oauth_tokens;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      ALTER TABLE oauth_tokens
+        ADD COLUMN IF NOT EXISTS token_family_id UUID,
+        ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMP WITH TIME ZONE;
+      CREATE INDEX IF NOT EXISTS idx_oauth_tokens_family
+        ON oauth_tokens(token_family_id) WHERE token_family_id IS NOT NULL;
+    `);
+
+    // #7: Session JWT revocation denylist
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS jwt_revocations (
+        jti TEXT PRIMARY KEY,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_jwt_revocations_expires
+        ON jwt_revocations(expires_at);
+    `);
+    await client.query(`DELETE FROM jwt_revocations WHERE expires_at < NOW()`);
+
+    // #10: HMAC-pepper for API key hashes
+    // One-time migration: clear old bare-SHA-256 keys before switching to HMAC.
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'api_keys' AND column_name = 'pepper_version'
+        ) THEN
+          DELETE FROM api_keys;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      ALTER TABLE api_keys
+        ADD COLUMN IF NOT EXISTS pepper_version TEXT NOT NULL DEFAULT 'v1';
+    `);
+
     await backfillTenants(client);
     await client.query(`
       UPDATE api_keys

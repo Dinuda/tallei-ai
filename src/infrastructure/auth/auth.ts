@@ -1,6 +1,6 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { randomBytes, createHash, randomUUID } from "crypto";
+import { randomBytes, createHash, createHmac, randomUUID } from "crypto";
 import { pool } from "../db/index.js";
 import { config } from "../../config/index.js";
 import { ensurePrimaryTenantForUser, resolveAuthContext, getPlanForTenant } from "./tenancy.js";
@@ -160,6 +160,14 @@ function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function hashApiKey(rawKey: string): string {
+  const pepper = config.apiKeyPepper;
+  if (pepper) {
+    return createHmac("sha256", pepper).update(rawKey).digest("hex");
+  }
+  return createHash("sha256").update(rawKey).digest("hex");
+}
+
 function apiKeyCacheKey(hash: string): string {
   return `auth:api_key_v2:${hash}`;
 }
@@ -251,6 +259,7 @@ export function sanitizeNextPath(input: unknown): string {
 export function issueSessionToken(user: User): string {
   return jwt.sign(
     {
+      jti: randomUUID(),
       id: user.id,
       email: user.email,
       tenant_id: user.tenantId,
@@ -260,13 +269,37 @@ export function issueSessionToken(user: User): string {
   );
 }
 
-export function verifySessionToken(token: string): SessionPayload {
-  const payload = jwt.verify(token, config.jwtSecret) as Record<string, unknown>;
+export async function verifySessionToken(token: string): Promise<SessionPayload> {
+  const payload = jwt.verify(token, config.jwtSecret, { algorithms: ["HS256"] }) as Record<string, unknown>;
+  const jti = typeof payload.jti === "string" ? payload.jti : null;
+  if (jti) {
+    const revoked = await pool.query<{ jti: string }>(
+      "SELECT jti FROM jwt_revocations WHERE jti = $1 AND expires_at > NOW() LIMIT 1",
+      [jti]
+    );
+    if (revoked.rows.length > 0) throw new Error("Token has been revoked");
+  }
   return {
     id: String(payload.id ?? payload.sub ?? ""),
     email: String(payload.email ?? ""),
     tenantId: typeof payload.tenant_id === "string" ? payload.tenant_id : undefined,
   };
+}
+
+export async function revokeSessionJwt(token: string): Promise<void> {
+  try {
+    const payload = jwt.decode(token) as Record<string, unknown> | null;
+    const jti = payload && typeof payload.jti === "string" ? payload.jti : null;
+    if (!jti) return;
+    const exp = typeof payload?.exp === "number" ? payload.exp : null;
+    const expiresAt = exp ? new Date(exp * 1000) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await pool.query(
+      "INSERT INTO jwt_revocations (jti, expires_at) VALUES ($1, $2) ON CONFLICT (jti) DO NOTHING",
+      [jti, expiresAt]
+    );
+  } catch {
+    // best-effort — do not fail logout if DB is unavailable
+  }
 }
 
 async function hydrateUser(id: string, email: string): Promise<User> {
@@ -407,7 +440,7 @@ export async function generateApiKey(
 
   const normalizedPrefix = keyPrefix.trim().length > 0 ? keyPrefix.trim() : "tly";
   const rawKey = `${normalizedPrefix}_` + randomBytes(32).toString("hex");
-  const hash = createHash("sha256").update(rawKey).digest("hex");
+  const hash = hashApiKey(rawKey);
 
   if (config.nodeEnv !== "production" && shouldBypassApiKeyDbPath()) {
     const fallbackId = randomUUID();
@@ -519,7 +552,7 @@ export async function revokeApiKey(
 }
 
 export async function validateApiKeyContext(rawKey: string, requesterIp?: string): Promise<ApiKeyValidation | null> {
-  const hash = createHash("sha256").update(rawKey).digest("hex");
+  const hash = hashApiKey(rawKey);
   const cacheKey = apiKeyCacheKey(hash);
   const cached = await getCacheJson<ApiKeyValidation>(cacheKey);
 

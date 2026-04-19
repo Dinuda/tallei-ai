@@ -1,4 +1,4 @@
-import { randomBytes, randomInt } from "node:crypto";
+import { randomBytes, randomInt, createHash, randomUUID } from "node:crypto";
 import express, { Router } from "express";
 import { verifyChallenge } from "pkce-challenge";
 import { pool } from "../../../infrastructure/db/index.js";
@@ -53,6 +53,10 @@ type ServicePrincipal = {
 
 function createOpaqueToken(prefix: string): string {
   return `${prefix}_${randomBytes(32).toString("hex")}`;
+}
+
+function hashOAuthToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function createUserCode(): string {
@@ -133,14 +137,15 @@ async function issueTokens(input: {
   const accessToken = createOpaqueToken("tla_at");
   const refreshToken = createOpaqueToken("tla_rt");
   const scope = input.scopes.length > 0 ? input.scopes.join(" ") : null;
+  const familyId = randomUUID();
 
   await pool.query(
     `INSERT INTO oauth_tokens
-     (access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at, grant_type)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'), NOW() + ($9::int * INTERVAL '1 second'), $10)`,
+     (access_token, refresh_token, client_id, tenant_id, user_id, scope, resource, access_expires_at, refresh_expires_at, grant_type, token_family_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + ($8::int * INTERVAL '1 second'), NOW() + ($9::int * INTERVAL '1 second'), $10, $11)`,
     [
-      accessToken,
-      refreshToken,
+      hashOAuthToken(accessToken),
+      hashOAuthToken(refreshToken),
       input.clientId,
       input.tenantId,
       input.userId,
@@ -149,6 +154,7 @@ async function issueTokens(input: {
       input.accessTtlSeconds,
       input.refreshTtlSeconds,
       input.grantType,
+      familyId,
     ]
   );
 

@@ -54,7 +54,10 @@ router.post("/code", internalMiddleware, async (req: AuthRequest, res) => {
     }
 
     const code = `tla_code_${randomBytes(32).toString("hex")}`;
-    const scopeValue = scope || DEFAULT_SCOPE;
+    const SUPPORTED_SCOPES = new Set(["mcp:tools", "memory:read", "memory:write", "automation:run"]);
+    const rawScopes = (scope || DEFAULT_SCOPE).split(" ").map((s) => s.trim()).filter(Boolean);
+    const sanitizedScopes = rawScopes.filter((s) => SUPPORTED_SCOPES.has(s));
+    const scopeValue = sanitizedScopes.length > 0 ? sanitizedScopes.join(" ") : DEFAULT_SCOPE;
     const resourceValue = resource || config.mcpPublicUrl || new URL("/mcp", config.publicBaseUrl).toString();
 
     await pool.query(

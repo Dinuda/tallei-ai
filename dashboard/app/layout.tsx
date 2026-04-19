@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { auth } from "../auth";
 import { Providers } from "./providers";
 import { TopNav } from "./top-nav";
 import "./globals.css";
@@ -109,15 +110,17 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const session = await auth();
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body suppressHydrationWarning>
-        <Providers>
+        <Providers session={session}>
           <TopNav />
           {children}
         </Providers>

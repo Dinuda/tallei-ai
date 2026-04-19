@@ -4,6 +4,7 @@ import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { Avatar, AvatarFallback, AvatarImage } from "../../components/ui/avatar";
 
 type NavItem = {
   id: string;
@@ -138,7 +139,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 </svg>
               )}
             </button>
-            <img src="/tallei.svg" alt="Tallei" style={{ height: "36px", width: "auto" }} />
+            <Link href="/dashboard" style={{ display: "flex", alignItems: "center" }}>
+              <img src="/tallei.svg" alt="Tallei" style={{ height: "36px", width: "auto" }} />
+            </Link>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", borderLeft: "1px solid var(--border)", paddingLeft: "1rem", position: "relative" }}>
@@ -148,13 +151,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               style={{ background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
               aria-label="Toggle profile menu"
             >
-              <div
-                className="dashboard-avatar"
-                title={session?.user?.email ?? "User"}
-                style={{ background: "linear-gradient(145deg, #1f2225 0%, #0a0b0d 100%)", color: "#fff" }}
-              >
-                {initials}
-              </div>
+              <Avatar size="sm">
+                <AvatarImage src={session?.user?.image ?? undefined} alt={session?.user?.name ?? "User"} />
+                <AvatarFallback>{initials}</AvatarFallback>
+              </Avatar>
             </button>
 
             {profileOpen && (

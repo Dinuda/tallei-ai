@@ -70,6 +70,7 @@ interface CachedRecall {
   exp: number;
 }
 
+const RECALL_CACHE_MAX_SIZE = 500;
 const recallCache = new Map<string, CachedRecall>();
 const prewarmedUsers = new Set<string>();
 let vectorBypassUntil = 0;
@@ -110,6 +111,10 @@ function getCachedRecall(cacheKey: string): RecallResult | null {
 }
 
 function setCachedRecall(cacheKey: string, result: RecallResult): void {
+  if (recallCache.size >= RECALL_CACHE_MAX_SIZE) {
+    const firstKey = recallCache.keys().next().value;
+    if (firstKey !== undefined) recallCache.delete(firstKey);
+  }
   recallCache.set(cacheKey, { result, exp: Date.now() + RECALL_TTL_MS });
 }
 
