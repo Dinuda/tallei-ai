@@ -412,6 +412,7 @@ export function HomeContent() {
             <Link href="/privacy">Privacy</Link>
             <Link href="/terms">Terms of Service</Link>
             <a href="mailto:hello@tallei.com">Contact</a>
+            <a href="https://github.com/Dinuda/tallei-ai" target="_blank" rel="noopener noreferrer" className="footer-link-open-source">Open Source</a>
           </div>
         </div>
       </footer>

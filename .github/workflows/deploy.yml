@@ -1,0 +1,111 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which service to deploy
+        type: choice
+        options: [both, backend, dashboard]
+        default: both
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'src/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'tsconfig.json'
+              - 'Dockerfile'
+              - 'deploy/cloudrun/deploy-backend.sh'
+              - '.github/workflows/deploy.yml'
+            dashboard:
+              - 'dashboard/**'
+              - 'deploy/cloudrun/deploy-dashboard.sh'
+              - '.github/workflows/deploy.yml'
+
+  backend:
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.backend == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'backend'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy backend
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          AR_REPO: ${{ vars.AR_REPO }}
+          BACKEND_SERVICE_ACCOUNT: ${{ secrets.BACKEND_SERVICE_ACCOUNT }}
+          IMAGE_TAG: ${{ github.sha }}
+          PUBLIC_BASE_URL: ${{ vars.PUBLIC_BASE_URL }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          MCP_URL: ${{ vars.MCP_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          INTERNAL_API_SECRET: ${{ vars.INTERNAL_API_SECRET_ID }}
+          OPENAI_API_KEY: ${{ vars.OPENAI_API_KEY_ID }}
+          JWT_SECRET: ${{ vars.JWT_SECRET_ID }}
+          MEMORY_MASTER_KEY: ${{ vars.MEMORY_MASTER_KEY_ID }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          GOOGLE_REDIRECT_URI: ${{ vars.GOOGLE_REDIRECT_URI }}
+        run: bash deploy/cloudrun/deploy-backend.sh
+
+  dashboard:
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.dashboard == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'dashboard'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy dashboard
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          AR_REPO: ${{ vars.AR_REPO }}
+          DASHBOARD_SERVICE_ACCOUNT: ${{ secrets.DASHBOARD_SERVICE_ACCOUNT }}
+          IMAGE_TAG: ${{ github.sha }}
+          NEXTAUTH_URL: ${{ vars.NEXTAUTH_URL }}
+          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+          API_PROXY_TARGET: ${{ vars.API_PROXY_TARGET }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ vars.GOOGLE_CLIENT_SECRET_ID }}
+          INTERNAL_API_SECRET: ${{ vars.INTERNAL_API_SECRET_ID }}
+          NEXTAUTH_SECRET: ${{ vars.NEXTAUTH_SECRET_ID }}
+        run: bash deploy/cloudrun/deploy-dashboard.sh

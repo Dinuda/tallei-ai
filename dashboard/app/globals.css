@@ -199,6 +199,36 @@ pre {
   align-items: center;
   gap: 0.55rem;
 }
+.nav-open-source-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.44rem 0.8rem;
+  border-radius: 999px;
+  border: 2px solid #7c3aed;
+  background: #f3ecff;
+  color: #2f2368;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  transition: transform var(--t-fast), box-shadow var(--t-fast), background-color var(--t-fast), border-color var(--t-fast);
+  box-shadow: 2px 2px 0px rgba(124, 58, 237, 0.2);
+}
+.nav-open-source-link:hover {
+  background: #ede2ff;
+  transform: translateY(-1px);
+}
+.nav-open-source-link:focus-visible {
+  outline: 2px solid #5b21b6;
+  outline-offset: 2px;
+}
+@media (max-width: 560px) {
+  .nav-open-source-link {
+    padding: 0.4rem 0.62rem;
+    font-size: 0.72rem;
+  }
+}
 
 .btn {
   display: inline-flex;
@@ -1867,6 +1897,13 @@ pre {
 .footer-links a:hover {
   text-decoration: underline;
   color: #1a1816;
+}
+.footer-link-open-source {
+  font-weight: 700;
+  color: #5b21b6 !important;
+}
+.footer-link-open-source:hover {
+  color: #1a1816 !important;
 }
 
 /* Ensure no transparent nav issues */
