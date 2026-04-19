@@ -23,7 +23,6 @@ import {
   recallMemoriesV2,
 } from "../orchestration/graph/recall-v2.usecase.js";
 import { hybridRecall, invalidateBm25Cache } from "../infrastructure/recall/hybrid-retrieval.js";
-import { extractFacts } from "../orchestration/ai/fact-extract.usecase.js";
 import {
   buildRecentFallback,
   bumpRecallStamp,
