@@ -67,10 +67,37 @@ if ! gcloud artifacts repositories describe "$AR_REPO" --location "$REGION" --pr
     --description="Tallei Cloud Run images"
 fi
 
-gcloud builds submit \
+echo "Submitting Cloud Build for backend image..."
+build_id="$(gcloud builds submit \
   --project "$PROJECT_ID" \
   --tag "$IMAGE_URI" \
-  .
+  --async \
+  --format='value(id)' \
+  .)"
+
+if [[ -z "$build_id" ]]; then
+  echo "Failed to capture Cloud Build ID for backend deploy." >&2
+  exit 1
+fi
+
+echo "Cloud Build started: ${build_id}"
+while true; do
+  build_status="$(gcloud builds describe "$build_id" --project "$PROJECT_ID" --format='value(status)')"
+  case "$build_status" in
+    SUCCESS)
+      echo "Cloud Build succeeded: ${build_id}"
+      break
+      ;;
+    FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED)
+      echo "Cloud Build failed with status ${build_status}: ${build_id}" >&2
+      gcloud builds describe "$build_id" --project "$PROJECT_ID" --format='value(logUrl)' >&2 || true
+      exit 1
+      ;;
+    *)
+      sleep 5
+      ;;
+  esac
+done
 
 env_vars=(
   "NODE_ENV=production"
