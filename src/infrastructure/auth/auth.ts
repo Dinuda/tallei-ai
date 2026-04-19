@@ -151,7 +151,7 @@ export function listEphemeralApiKeys(userId: string): Array<{
     createdAt: row.createdAt,
     lastUsedAt: null,
     revokedAt: row.revokedAt,
-    rotationDays: 90,
+    rotationDays: 30,
     connectorType: row.connectorType,
   }));
 }
@@ -395,7 +395,7 @@ export async function login(email: string, passwordRaw: string): Promise<{ token
 export async function generateApiKey(
   userId: string,
   name: string,
-  rotationDays = 90,
+  rotationDays = 30,
   tenantIdInput?: string | null,
   connectorType?: string | null,
   keyPrefix = "tly"

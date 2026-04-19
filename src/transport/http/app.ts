@@ -1,5 +1,6 @@
 import express, { type Express, type RequestHandler } from "express";
 import cors from "cors";
+import helmet from "helmet";
 
 import authRouter from "./routes/auth.js";
 import browserUseRouter from "./routes/browserUse.js";
@@ -14,6 +15,7 @@ import billingRouter from "./routes/billing.js";
 import { createMcpRouter } from "../mcp/server.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requestTimingMiddleware } from "./middleware/request-timing.middleware.js";
+import { errorHandlerMiddleware } from "./middleware/error-handler.middleware.js";
 import { createOauthExtensionsRouter } from "./routes/oauth.js";
 import { getRedisHealthState } from "../../infrastructure/cache/redis-cache.js";
 import { TalleiOAuthProvider } from "../mcp/oauth.js";
@@ -32,6 +34,11 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
 
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: false, // API server; no HTML responses
+  }));
+
   app.use(cors({
     origin: (origin, callback) => {
       // Allow requests with no Origin header (mcp-bridge, curl, server-to-server).
@@ -42,7 +49,7 @@ export function createApp(deps: AppFactoryDeps): Express {
     credentials: true,
   }));
 
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "1mb", strict: true, type: ["application/json"] }));
   app.use(requestTimingMiddleware);
 
   app.use(mcpAuthRouter({
@@ -81,6 +88,8 @@ export function createApp(deps: AppFactoryDeps): Express {
 
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(deps.mcpPublicUrl);
   app.use("/mcp", deps.mcpRateLimit, createMcpRouter(deps.oauthProvider, resourceMetadataUrl));
+
+  app.use(errorHandlerMiddleware);
 
   return app;
 }

@@ -28,15 +28,7 @@
     "inputSchema": "{\n        query: z.string().describe(\"What to search for.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        graph_depth: z.number().int().min(1).max(2).optional().default(1),\n      }"
   },
   {
-    "name": "recall_user_context",
-    "inputSchema": "{\n        query: z.string().describe(\"What to look up about the user/context.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n      }"
-  },
-  {
-    "name": "remember_user_preference",
-    "inputSchema": "{\n        fact: z.string().describe(\"The exact concise fact/preference to remember.\"),\n        platform: z.enum([\"claude\", \"chatgpt\", \"gemini\", \"other\"]).optional().default(\"claude\"),\n      }"
-  },
-  {
     "name": "save_memory",
-    "inputSchema": "{\n        content: z\n          .string()\n          .describe(\"The fact, preference, or information to remember. Be specific and concise.\"),\n        platform: z\n          .enum([\"claude\", \"chatgpt\", \"gemini\", \"other\"])\n          .optional()\n          .default(\"claude\")\n          .describe(\"The AI platform this memory is from\"),\n      }"
+    "inputSchema": "{\n        content: z\n          .string()\n          .describe(\"The fact, preference, or information to remember. Be specific and concise.\"),\n        platform: PlatformSchema.optional().default(\"claude\").describe(\"The AI platform this memory is from\"),\n      }"
   }
 ]

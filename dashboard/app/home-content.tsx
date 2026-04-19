@@ -408,7 +408,7 @@ export function HomeContent() {
           <div className="footer-brand">tallei</div>
           <div className="footer-links">
             <Link href="/privacy">Privacy</Link>
-            <Link href="/terms">Terms</Link>
+            <Link href="/terms">Terms of Service</Link>
             <a href="mailto:hello@tallei.com">Contact</a>
           </div>
         </div>

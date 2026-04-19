@@ -18,13 +18,6 @@ const LOCAL_RATE_LIMIT_SAMPLE_RATIO = 0.8;
 const localRateLimit = new Map<string, LocalRateLimitEntry>();
 
 function requestIp(req: Request): string {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  if (Array.isArray(forwardedFor) && forwardedFor[0]) {
-    return forwardedFor[0].split(",")[0].trim();
-  }
   return req.ip || "unknown";
 }
 
@@ -80,7 +73,7 @@ function isRecallRequest(req: Request): boolean {
     ? (body.params as Record<string, unknown>)
     : null;
   const toolName = typeof params?.name === "string" ? params.name : "";
-  return toolName === "recall_memories" || toolName === "recall_user_context" || toolName === "recall_memories_v2";
+  return toolName === "recall_memories" || toolName === "recall_memories_v2";
 }
 
 export function createRateLimitMiddleware(options: RateLimitOptions) {
