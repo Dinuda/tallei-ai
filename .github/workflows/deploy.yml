@@ -43,7 +43,7 @@ jobs:
   backend:
     needs: changes
     if: |
-      (github.event_name == 'push' && needs.changes.outputs.backend == 'true') ||
+      (github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'backend'))
     runs-on: ubuntu-latest
     permissions:
