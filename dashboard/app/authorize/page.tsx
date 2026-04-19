@@ -16,7 +16,7 @@ export default async function AuthorizePage({
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
   const params = await searchParams;
-  const { client_id, code_challenge, redirect_uri, scope, state, resource, response_type } = params;
+  const { client_id, code_challenge, redirect_uri, scope, state, resource } = params;
 
   // Basic validation
   if (!client_id || !code_challenge || !redirect_uri) {
@@ -42,9 +42,11 @@ export default async function AuthorizePage({
   const backendUrl = process.env.BACKEND_URL ?? "http://localhost:3000";
   const secret = process.env.INTERNAL_API_SECRET!;
 
-  let code: string;
-  let finalRedirectUri: string;
-  let returnedState: string | null;
+  let code: string | null = null;
+  let finalRedirectUri: string | null = null;
+  let returnedState: string | null = null;
+  let errorTitle: string | null = null;
+  let errorMessage: string | null = null;
 
   try {
     const res = await fetch(`${backendUrl}/api/mcp/code`, {
@@ -66,25 +68,35 @@ export default async function AuthorizePage({
 
     if (!res.ok) {
       const { error } = (await res.json()) as { error: string };
-      return (
-        <main style={{ fontFamily: "sans-serif", padding: "2rem", maxWidth: 480 }}>
-          <h1 style={{ fontSize: "1.2rem" }}>Authorization Failed</h1>
-          <p style={{ color: "#6b7280" }}>{error}</p>
-        </main>
-      );
+      errorTitle = "Authorization Failed";
+      errorMessage = error;
+    } else {
+      ({ code, redirectUri: finalRedirectUri, state: returnedState } = (await res.json()) as {
+        code: string;
+        redirectUri: string;
+        state: string | null;
+      });
     }
-
-    ({ code, redirectUri: finalRedirectUri, state: returnedState } = (await res.json()) as {
-      code: string;
-      redirectUri: string;
-      state: string | null;
-    });
   } catch (err) {
     console.error("[authorize] Failed to obtain auth code:", err);
+    errorTitle = "Authorization Error";
+    errorMessage = "Could not connect to the Tallei backend.";
+  }
+
+  if (errorTitle && errorMessage) {
+    return (
+      <main style={{ fontFamily: "sans-serif", padding: "2rem", maxWidth: 480 }}>
+        <h1 style={{ fontSize: "1.2rem" }}>{errorTitle}</h1>
+        <p style={{ color: "#6b7280" }}>{errorMessage}</p>
+      </main>
+    );
+  }
+
+  if (!code || !finalRedirectUri) {
     return (
       <main style={{ fontFamily: "sans-serif", padding: "2rem", maxWidth: 480 }}>
         <h1 style={{ fontSize: "1.2rem" }}>Authorization Error</h1>
-        <p style={{ color: "#6b7280" }}>Could not connect to the Tallei backend.</p>
+        <p style={{ color: "#6b7280" }}>Failed to create an authorization code.</p>
       </main>
     );
   }

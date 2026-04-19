@@ -172,13 +172,13 @@ export function HomeContent() {
                 <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
                   <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
                 </div>
-                <div className="mockup-value">"Always keep my emails short, punchy, and use bullet points."</div>
+                <div className="mockup-value">&ldquo;Always keep my emails short, punchy, and use bullet points.&rdquo;</div>
               </div>
               <div className="mockup-row" style={{ alignItems: 'center' }}>
                 <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
                   <img src="/claude.svg" alt="Claude" width={28} height={28} />
                 </div>
-                <div className="mockup-value">"Draft a project update for the team."</div>
+                <div className="mockup-value">&ldquo;Draft a project update for the team.&rdquo;</div>
               </div>
               <div className="mockup-row" style={{ alignItems: 'center' }}>
                 <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center', position: 'relative' }}>
@@ -210,7 +210,7 @@ export function HomeContent() {
               <div className="story-num">01</div>
               <h3 className="story-h3">The blank slate sucks</h3>
               <p className="story-p">
-                Every time you switch from ChatGPT to Claude, it's like meeting someone for the first time. You have to explain your business, your tone of voice, and your rules all over again. It's exhausting.
+                Every time you switch from ChatGPT to Claude, it&apos;s like meeting someone for the first time. You have to explain your business, your tone of voice, and your rules all over again. It&apos;s exhausting.
               </p>
             </div>
 
@@ -218,7 +218,7 @@ export function HomeContent() {
               <div className="story-num">02</div>
               <h3 className="story-h3">Stop copy-pasting</h3>
               <p className="story-p">
-                Right now, you're acting as the messenger between two supercomputers. Copying custom instructions from one chat to paste into another is busywork you shouldn't be doing.
+                Right now, you&apos;re acting as the messenger between two supercomputers. Copying custom instructions from one chat to paste into another is busywork you shouldn&apos;t be doing.
               </p>
             </div>
 
@@ -226,7 +226,7 @@ export function HomeContent() {
               <div className="story-num">03</div>
               <h3 className="story-h3">Teach one, both learn</h3>
               <p className="story-p">
-                Tallei sits quietly in the background. If you tell ChatGPT how you prefer your weekly reports formatted, Claude will automatically know it for your next project. It's just one continuous memory.
+                Tallei sits quietly in the background. If you tell ChatGPT how you prefer your weekly reports formatted, Claude will automatically know it for your next project. It&apos;s just one continuous memory.
               </p>
             </div>
           </div>
@@ -361,8 +361,8 @@ export function HomeContent() {
             <li className="solid-card detail-card">
               <h3 className="detail-h4">Is it secure?</h3>
               <p className="detail-p">
-                Yes. Your memories are encrypted. We don't read them, and we definitely
-                don't train models on them. It's your private data.
+                Yes. Your memories are encrypted. We don&apos;t read them, and we definitely
+                don&apos;t train models on them. It&apos;s your private data.
               </p>
             </li>
             <li className="solid-card detail-card">
@@ -376,7 +376,7 @@ export function HomeContent() {
               <h3 className="detail-h4">Is there a limit?</h3>
               <p className="detail-p">
                 No. Save as many facts, preferences, and details as you need. Tallei
-                automatically retrieves only what's relevant to your current conversation.
+                automatically retrieves only what&apos;s relevant to your current conversation.
               </p>
             </li>
           </ul>

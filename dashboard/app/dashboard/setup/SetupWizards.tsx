@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useEffect } from "react";
-import { Check, Copy, ExternalLink, Sparkles, MessageSquare, ChevronRight, Zap, Hand, ArrowRight, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X } from "lucide-react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
+import { Check, Copy, ExternalLink, Zap, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X } from "lucide-react";
 import { Button } from "../../../components/ui/button";
 
 export type SaveMode = "instant" | "on_request";
@@ -170,37 +170,26 @@ export function GuideImage({ src, alt, caption, defaultExpanded = false }: { src
 
 export function VerifyChecklist({ items, onVerified, autoCheck, onToggle }: { items: string[]; onVerified?: (isVerified: boolean) => void; autoCheck?: boolean[]; onToggle?: (index: number, isChecked: boolean) => void }) {
   const [checked, setChecked] = useState<boolean[]>(() => items.map(() => false));
-  
-  const allDone = checked.every(Boolean);
+
+  const effectiveChecked = useMemo(
+    () => items.map((_, i) => Boolean(checked[i] || autoCheck?.[i])),
+    [autoCheck, checked, items]
+  );
+
+  const allDone = effectiveChecked.every(Boolean);
 
   useEffect(() => {
     if (onVerified) onVerified(allDone);
   }, [allDone, onVerified]);
 
-  useEffect(() => {
-    if (autoCheck) {
-      setChecked(prev => {
-        let changed = false;
-        const next = [...prev];
-        autoCheck.forEach((val, i) => {
-          if (val && !next[i]) {
-            next[i] = true;
-            changed = true;
-          }
-        });
-        return changed ? next : prev;
-      });
-    }
-  }, [autoCheck]);
-
   const toggle = useCallback((index: number) => {
     setChecked(prev => {
       const next = [...prev];
-      next[index] = !next[index];
+      next[index] = !effectiveChecked[index];
       if (onToggle) onToggle(index, next[index]);
       return next;
     });
-  }, [onToggle]);
+  }, [effectiveChecked, onToggle]);
 
   return (
     <div style={{ borderRadius: '12px', border: allDone ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid #f3f4f6', background: allDone ? 'rgba(240, 253, 244, 0.5)' : '#ffffff', padding: '1rem', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', boxShadow: allDone ? '0 0 16px rgba(34, 197, 94, 0.1)' : '0 1px 3px rgba(0,0,0,0.02)' }}>
@@ -209,9 +198,9 @@ export function VerifyChecklist({ items, onVerified, autoCheck, onToggle }: { it
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
         {items.map((item, i) => (
-          <label key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: checked[i] ? '#16a34a' : '#4b5563', lineHeight: 1.45, transition: 'all 0.2s', transform: checked[i] ? 'translateX(2px)' : 'none' }}>
-            <input type="checkbox" checked={checked[i]} onChange={() => toggle(i)} style={{ accentColor: '#16a34a', width: '16px', height: '16px', marginTop: '2px', flexShrink: 0, cursor: 'pointer', borderRadius: '4px' }} />
-            <span style={{ textDecoration: checked[i] ? 'line-through' : 'none', opacity: checked[i] ? 0.8 : 1 }}>{item}</span>
+          <label key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: effectiveChecked[i] ? '#16a34a' : '#4b5563', lineHeight: 1.45, transition: 'all 0.2s', transform: effectiveChecked[i] ? 'translateX(2px)' : 'none' }}>
+            <input type="checkbox" checked={effectiveChecked[i]} onChange={() => toggle(i)} style={{ accentColor: '#16a34a', width: '16px', height: '16px', marginTop: '2px', flexShrink: 0, cursor: 'pointer', borderRadius: '4px' }} />
+            <span style={{ textDecoration: effectiveChecked[i] ? 'line-through' : 'none', opacity: effectiveChecked[i] ? 0.8 : 1 }}>{item}</span>
           </label>
         ))}
       </div>
@@ -383,9 +372,22 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
 
   const totalSteps = 4;
 
+  const resetConnectionVerification = useCallback(() => {
+    setVerificationStartedAt(Date.now());
+    setConnectionVerified(false);
+    setConnectionVerificationMessage(null);
+  }, []);
+
   const handleNext = () => {
-    if (step < totalSteps) setStep(s => s + 1);
-    else onClose(); // Done
+    if (step < totalSteps) {
+      const nextStep = step + 1;
+      if (nextStep === 4) {
+        resetConnectionVerification();
+      }
+      setStep(nextStep);
+      return;
+    }
+    onClose();
   };
 
   const handleBack = () => {
@@ -398,14 +400,6 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     if (step === 4) return connectionVerified;
     return true; // Step 3 & 4 don't block
   };
-
-  useEffect(() => {
-    if (step === 4) {
-      setVerificationStartedAt(Date.now());
-      setConnectionVerified(false);
-      setConnectionVerificationMessage(null);
-    }
-  }, [step]);
 
   async function handleVerifyConnection() {
     setVerifyingConnection(true);
@@ -472,7 +466,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
               </div>
 
               <div>
-                <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 0.75rem 0', color: '#111827' }}>Paste this into your Project&apos;s "Custom Instructions":</h4>
+                <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 0.75rem 0', color: '#111827' }}>Paste this into your Project&apos;s <code>Custom Instructions</code>:</h4>
                 <CodeBlock value={getClaudeInstructions(saveMode)} language="txt" />
               </div>
             </>
@@ -516,7 +510,6 @@ export function ChatGPTWizard({
   issuedToken,
   generatingToken,
   onGenerateToken,
-  openApiUrl,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -524,7 +517,6 @@ export function ChatGPTWizard({
   issuedToken: string | null;
   generatingToken: boolean;
   onGenerateToken: () => Promise<void>;
-  openApiUrl: string;
 }) {
   const [step, setStep] = useState(1);
   const [saveMode, setSaveMode] = useState<SaveMode>("instant");
@@ -541,9 +533,22 @@ export function ChatGPTWizard({
 
   const totalSteps = 4;
 
+  const resetConnectionVerification = useCallback(() => {
+    setVerificationStartedAt(Date.now());
+    setConnectionVerified(false);
+    setConnectionVerificationMessage(null);
+  }, []);
+
   const handleNext = () => {
-    if (step < totalSteps) setStep(s => s + 1);
-    else onClose();
+    if (step < totalSteps) {
+      const nextStep = step + 1;
+      if (nextStep === 4) {
+        resetConnectionVerification();
+      }
+      setStep(nextStep);
+      return;
+    }
+    onClose();
   };
   const handleBack = () => {
     if (step > 1) setStep(s => s - 1);
@@ -555,14 +560,6 @@ export function ChatGPTWizard({
     if (step === 4) return connectionVerified;
     return true;
   };
-
-  useEffect(() => {
-    if (step === 4) {
-      setVerificationStartedAt(Date.now());
-      setConnectionVerified(false);
-      setConnectionVerificationMessage(null);
-    }
-  }, [step]);
 
   async function handleVerifyConnection() {
     setVerifyingConnection(true);
@@ -627,14 +624,14 @@ export function ChatGPTWizard({
               <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>Almost done. We just need to give the GPT your token and its instructions.</p>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
-                <div>Click the ⚙️ gear icon next to "API Key" in Actions. Set Auth Type to <strong>Bearer</strong>, and paste the token from Step 1. Click Save.</div>
+                <div>Click the ⚙️ gear icon next to <code>API Key</code> in Actions. Set Auth Type to <strong>Bearer</strong>, and paste the token from Step 1. Click Save.</div>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
                 <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
-                <div>Paste these instructions into the GPT's <strong>Instructions</strong> box:</div>
+                <div>Paste these instructions into the GPT&apos;s <strong>Instructions</strong> box:</div>
                 <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" />
-                <div style={{ marginTop: '0.25rem', fontWeight: 600, color: '#111827' }}>Save the GPT (set visibility to "Only me") and add it to a ChatGPT Project.</div>
+                <div style={{ marginTop: '0.25rem', fontWeight: 600, color: '#111827' }}>Save the GPT (set visibility to <code>Only me</code>) and add it to a ChatGPT Project.</div>
               </div>
 
               <VerifyChecklist items={['I set the Auth to Bearer with my token', 'I pasted the custom instructions', 'I saved the GPT and added it to my Project']} onVerified={setStep3Verified} />

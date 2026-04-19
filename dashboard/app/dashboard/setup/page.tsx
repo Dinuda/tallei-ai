@@ -143,10 +143,6 @@ export default function ConnectorsPage() {
     ? `${window.location.origin}/mcp`
     : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/mcp`;
 
-  const openApiUrl = typeof window !== "undefined"
-    ? `${window.location.origin}/api/chatgpt/openapi.json`
-    : `${process.env.NEXT_PUBLIC_API_BASE_URL || ""}/api/chatgpt/openapi.json`;
-
   const loadStatus = useCallback(async () => {
     try {
       const [integrationRes, tokenRes] = await Promise.all([
@@ -367,7 +363,6 @@ export default function ConnectorsPage() {
           issuedToken={issuedChatgptToken}
           generatingToken={generatingChatgptToken}
           onGenerateToken={rotateChatGptToken}
-          openApiUrl={openApiUrl}
         />
       )}
 

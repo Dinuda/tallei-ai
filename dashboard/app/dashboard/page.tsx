@@ -10,7 +10,6 @@ import {
   User,
   FileText,
   Tag,
-  MoreHorizontal,
   Trash2,
 } from "lucide-react";
 

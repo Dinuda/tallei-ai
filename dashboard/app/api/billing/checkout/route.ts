@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
     } catch {
       return new NextResponse(await res.text(), { status: res.status });
     }
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: "Failed to reach backend" }, { status: 502 });
   }
 }

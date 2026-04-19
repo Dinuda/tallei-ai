@@ -70,7 +70,7 @@ function EmptyState() {
 export default function McpEventsPage() {
   const [events, setEvents] = useState<McpEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [now, setNow] = useState<number>(Date.now());
+  const [now, setNow] = useState<number | null>(null);
 
   const fetchEvents = useCallback(() => {
     setLoading(true);
@@ -82,11 +82,15 @@ export default function McpEventsPage() {
   }, []);
 
   useEffect(() => {
-    fetchEvents();
+    fetch("/api/mcp-events?limit=100")
+      .then((res) => res.json())
+      .then((data) => setEvents(data.events || []))
+      .catch(console.error)
+      .finally(() => setLoading(false));
     
     const interval = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(interval);
-  }, [fetchEvents]);
+  }, []);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem", paddingBottom: "3rem" }}>
@@ -136,7 +140,7 @@ export default function McpEventsPage() {
 
           {/* Refresh */}
           <button 
-            onClick={fetchEvents}
+            onClick={() => fetchEvents()}
             disabled={loading}
             style={{
               display: "inline-flex", alignItems: "center", justifyContent: "center",

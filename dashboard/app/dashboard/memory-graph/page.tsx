@@ -215,7 +215,7 @@ export default function MemoryGraphPage() {
 
   const nodes = useMemo(() => positionNodes(payload.nodes ?? []), [payload.nodes]);
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
-  const edges = payload.edges ?? [];
+  const edges = useMemo(() => payload.edges ?? [], [payload.edges]);
   const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) ?? null : null;
 
   const adjacency = useMemo(() => {
