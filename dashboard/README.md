@@ -11,7 +11,7 @@ This is the Next.js frontend for Tallei.
 
 ## Scripts
 
-Run these from the `dashboard/` :
+Run these from the `dashboard/` directory:
 
 ```bash
 npm run dev
