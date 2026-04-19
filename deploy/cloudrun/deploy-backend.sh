@@ -34,6 +34,21 @@ validate_secret_id() {
   fi
 }
 
+ensure_secret_access() {
+  local secret_id="$1"
+  [[ -z "$secret_id" ]] && return 0
+
+  if ! gcloud secrets add-iam-policy-binding "$secret_id" \
+    --project "$PROJECT_ID" \
+    --member "serviceAccount:${SERVICE_ACCOUNT}" \
+    --role "roles/secretmanager.secretAccessor" \
+    --quiet >/dev/null 2>&1; then
+    echo "Unable to grant roles/secretmanager.secretAccessor on ${secret_id} to ${SERVICE_ACCOUNT}." >&2
+    echo "Grant this role manually (or to the project) and rerun deploy." >&2
+    exit 1
+  fi
+}
+
 PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-us-central1}"
 AR_REPO="${AR_REPO:-tallei}"
@@ -66,6 +81,10 @@ validate_secret_id INTERNAL_API_SECRET
 validate_secret_id OPENAI_API_KEY
 validate_secret_id JWT_SECRET
 validate_secret_id MEMORY_MASTER_KEY
+ensure_secret_access INTERNAL_API_SECRET
+ensure_secret_access OPENAI_API_KEY
+ensure_secret_access JWT_SECRET
+ensure_secret_access MEMORY_MASTER_KEY
 
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${IMAGE_TAG}"
 
@@ -152,22 +171,27 @@ secret_vars=(
 
 if [[ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
   validate_secret_id SUPABASE_SERVICE_ROLE_KEY
+  ensure_secret_access SUPABASE_SERVICE_ROLE_KEY
   secret_vars+=("SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}:latest")
 fi
 if [[ -n "${QDRANT_API_KEY:-}" ]]; then
   validate_secret_id QDRANT_API_KEY
+  ensure_secret_access QDRANT_API_KEY
   secret_vars+=("QDRANT_API_KEY=${QDRANT_API_KEY}:latest")
 fi
 if [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]]; then
   validate_secret_id GOOGLE_CLIENT_SECRET
+  ensure_secret_access GOOGLE_CLIENT_SECRET
   secret_vars+=("GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}:latest")
 fi
 if [[ -n "${BROWSER_WORKER_API_KEY:-}" ]]; then
   validate_secret_id BROWSER_WORKER_API_KEY
+  ensure_secret_access BROWSER_WORKER_API_KEY
   secret_vars+=("BROWSER_WORKER_API_KEY=${BROWSER_WORKER_API_KEY}:latest")
 fi
 if [[ -n "${KMS_KEY_ID:-}" ]]; then
   validate_secret_id KMS_KEY_ID
+  ensure_secret_access KMS_KEY_ID
   secret_vars+=("KMS_KEY_ID=${KMS_KEY_ID}:latest")
 fi
 

@@ -34,6 +34,21 @@ validate_secret_id() {
   fi
 }
 
+ensure_secret_access() {
+  local secret_id="$1"
+  [[ -z "$secret_id" ]] && return 0
+
+  if ! gcloud secrets add-iam-policy-binding "$secret_id" \
+    --project "$PROJECT_ID" \
+    --member "serviceAccount:${SERVICE_ACCOUNT}" \
+    --role "roles/secretmanager.secretAccessor" \
+    --quiet >/dev/null 2>&1; then
+    echo "Unable to grant roles/secretmanager.secretAccessor on ${secret_id} to ${SERVICE_ACCOUNT}." >&2
+    echo "Grant this role manually (or to the project) and rerun deploy." >&2
+    exit 1
+  fi
+}
+
 PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-us-central1}"
 AR_REPO="${AR_REPO:-tallei}"
@@ -67,6 +82,9 @@ fi
 validate_secret_id INTERNAL_API_SECRET
 validate_secret_id NEXTAUTH_SECRET
 validate_secret_id GOOGLE_CLIENT_SECRET
+ensure_secret_access INTERNAL_API_SECRET
+ensure_secret_access NEXTAUTH_SECRET
+ensure_secret_access GOOGLE_CLIENT_SECRET
 
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${IMAGE_TAG}"
 
