@@ -155,20 +155,24 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     }
 
     if (config.nodeEnv !== "production" && process.env["EVAL_MODE"] === "true") {
-      const evalHeader = req.headers.authorization as string | undefined;
-      const evalToken = evalHeader?.startsWith("Bearer eval:") ? evalHeader.slice("Bearer eval:".length) : null;
-      if (evalToken) {
-        const evalAuth = await authContextFromUserId(evalToken.trim(), "oauth").catch(() => null);
-        if (evalAuth) {
-          noteAuthTiming();
-          req.authContext = evalAuth;
-          prewarmRecallCache(evalAuth);
-          const server = new McpServer({ name: "tallei", version: "1.0.0" });
-          registerTools(server, evalAuth);
-          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-          await server.connect(transport);
-          await transport.handleRequest(req, res, req.body);
-          return;
+      const remoteIp = req.ip || req.socket?.remoteAddress || "";
+      const isLoopback = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1";
+      if (isLoopback) {
+        const evalHeader = req.headers.authorization as string | undefined;
+        const evalToken = evalHeader?.startsWith("Bearer eval:") ? evalHeader.slice("Bearer eval:".length) : null;
+        if (evalToken) {
+          const evalAuth = await authContextFromUserId(evalToken.trim(), "oauth").catch(() => null);
+          if (evalAuth) {
+            noteAuthTiming();
+            req.authContext = evalAuth;
+            prewarmRecallCache(evalAuth);
+            const server = new McpServer({ name: "tallei", version: "1.0.0" });
+            registerTools(server, evalAuth);
+            const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+            await server.connect(transport);
+            await transport.handleRequest(req, res, req.body);
+            return;
+          }
         }
       }
     }

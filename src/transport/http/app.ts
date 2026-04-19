@@ -1,5 +1,6 @@
 import express, { type Express, type RequestHandler } from "express";
 import cors from "cors";
+import helmet from "helmet";
 
 import authRouter from "./routes/auth.js";
 import browserUseRouter from "./routes/browserUse.js";
@@ -33,6 +34,11 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
 
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: false, // API server; no HTML responses
+  }));
+
   app.use(cors({
     origin: (origin, callback) => {
       // Allow requests with no Origin header (mcp-bridge, curl, server-to-server).
@@ -43,7 +49,7 @@ export function createApp(deps: AppFactoryDeps): Express {
     credentials: true,
   }));
 
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "1mb", strict: true, type: ["application/json"] }));
   app.use(requestTimingMiddleware);
 
   app.use(mcpAuthRouter({

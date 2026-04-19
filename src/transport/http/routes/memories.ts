@@ -110,11 +110,15 @@ router.get("/graph", requireScopes(["memory:read"]), async (req: AuthRequest, re
   }
 });
 
+const entitiesSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(40),
+  q: z.string().optional(),
+});
+
 router.get("/entities", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit ?? "40"), 10) || 40));
-    const q = typeof req.query.q === "string" ? req.query.q : undefined;
-    const entities = await listMemoryEntities(req.authContext!, limit, q);
+    const query = entitiesSchema.parse(req.query);
+    const entities = await listMemoryEntities(req.authContext!, query.limit, query.q);
     res.json({ entities });
   } catch (error) {
     console.error("Error listing entities:", error);

@@ -1,9 +1,26 @@
+import { timingSafeEqual } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import { config } from "../../../config/index.js";
 import { authContextFromUserId } from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
 import { hasRequiredScopes, validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
 import type { AuthContext, Plan } from "../../../domain/auth/index.js";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function safeSecretEqual(a: string, b: string): boolean {
+  try {
+    const ab = Buffer.from(a);
+    const bb = Buffer.from(b);
+    if (ab.length !== bb.length) {
+      timingSafeEqual(ab, ab); // keep timing constant
+      return false;
+    }
+    return timingSafeEqual(ab, bb);
+  } catch {
+    return false;
+  }
+}
 
 export interface AuthRequest extends Request {
   userId?: string;
@@ -32,7 +49,7 @@ function sendLegacyApiKeyMigrationError(res: Response): void {
 
 export async function internalSecretMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const secret = req.headers["x-internal-secret"];
-  if (!secret || secret !== config.internalApiSecret) {
+  if (!secret || !safeSecretEqual(String(secret), config.internalApiSecret)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
@@ -41,13 +58,13 @@ export async function internalSecretMiddleware(req: AuthRequest, res: Response, 
 
 export async function internalMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const secret = req.headers["x-internal-secret"];
-  if (!secret || secret !== config.internalApiSecret) {
+  if (!secret || !safeSecretEqual(String(secret), config.internalApiSecret)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
   const userId = req.headers["x-user-id"] as string | undefined;
-  if (!userId) {
-    res.status(400).json({ error: "Missing X-User-Id header" });
+  if (!userId || !UUID_RE.test(userId)) {
+    res.status(400).json({ error: "Missing or invalid X-User-Id header" });
     return;
   }
 
@@ -64,13 +81,13 @@ export async function internalMiddleware(req: AuthRequest, res: Response, next: 
 export async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const internalSecret = req.headers["x-internal-secret"];
   if (internalSecret) {
-    if (internalSecret !== config.internalApiSecret) {
+    if (!safeSecretEqual(String(internalSecret), config.internalApiSecret)) {
       res.status(401).json({ error: "Invalid internal secret" });
       return;
     }
     const userId = req.headers["x-user-id"] as string | undefined;
-    if (!userId) {
-      res.status(400).json({ error: "Missing X-User-Id header" });
+    if (!userId || !UUID_RE.test(userId)) {
+      res.status(400).json({ error: "Missing or invalid X-User-Id header" });
       return;
     }
 

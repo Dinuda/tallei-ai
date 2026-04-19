@@ -10,22 +10,11 @@ interface CipherEnvelope {
   data: string;
 }
 
-let warnedDevFallback = false;
-
 function resolveMasterKey(): Buffer {
   const raw = config.memoryMasterKey;
 
   if (!raw) {
-    if (config.nodeEnv === "production") {
-      throw new Error("MEMORY_MASTER_KEY is required in production");
-    }
-
-    if (!warnedDevFallback) {
-      warnedDevFallback = true;
-      console.warn("[crypto] MEMORY_MASTER_KEY missing; using derived dev-only key");
-    }
-
-    return createHash("sha256").update(config.jwtSecret).digest();
+    throw new Error("MEMORY_MASTER_KEY is required. Generate one with: openssl rand -hex 32");
   }
 
   if (/^[a-fA-F0-9]{64}$/.test(raw)) {
