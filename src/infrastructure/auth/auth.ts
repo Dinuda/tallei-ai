@@ -41,6 +41,7 @@ const API_KEY_DB_WARN_INTERVAL_MS = 30_000;
 const AUTH_USAGE_UPDATE_DEBOUNCE_MS = Math.max(250, config.authUsageUpdateDebounceMs);
 const AUTH_USAGE_UPDATE_RETRY_MS = Math.max(250, config.authUsageUpdateRetryMs);
 const AUTH_USAGE_UPDATE_MAX_CONCURRENCY = Math.max(1, config.authUsageUpdateMaxConcurrency);
+const SESSION_JWT_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface EphemeralApiKey {
   id: string;
@@ -288,11 +289,16 @@ export async function verifySessionToken(token: string): Promise<SessionPayload>
 
 export async function revokeSessionJwt(token: string): Promise<void> {
   try {
-    const payload = jwt.decode(token) as Record<string, unknown> | null;
+    const payload = jwt.verify(token, config.jwtSecret, { algorithms: ["HS256"] }) as Record<
+      string,
+      unknown
+    >;
     const jti = payload && typeof payload.jti === "string" ? payload.jti : null;
     if (!jti) return;
     const exp = typeof payload?.exp === "number" ? payload.exp : null;
-    const expiresAt = exp ? new Date(exp * 1000) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const maxExpiresAt = Date.now() + SESSION_JWT_MAX_TTL_MS;
+    const expMs = exp ? exp * 1000 : maxExpiresAt;
+    const expiresAt = new Date(Math.min(expMs, maxExpiresAt));
     await pool.query(
       "INSERT INTO jwt_revocations (jti, expires_at) VALUES ($1, $2) ON CONFLICT (jti) DO NOTHING",
       [jti, expiresAt]
