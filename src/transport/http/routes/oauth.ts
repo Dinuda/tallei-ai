@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import express, { Router } from "express";
 import { verifyChallenge } from "pkce-challenge";
 import { pool } from "../../../infrastructure/db/index.js";
@@ -6,7 +6,7 @@ import { config } from "../../../config/index.js";
 import { introspectOAuthAccessToken, parseScopes } from "../../../infrastructure/auth/oauth-tokens.js";
 import { deleteCacheKey } from "../../../infrastructure/cache/redis-cache.js";
 import { ensurePrimaryTenantForUser, getPrimaryTenantId } from "../../../infrastructure/auth/tenancy.js";
-import { AuthRequest, internalMiddleware } from "../middleware/auth.middleware.js";
+import { AuthRequest, internalMiddleware, safeSecretEqual } from "../middleware/auth.middleware.js";
 
 const AUTH_CODE_DEFAULT_SCOPES = ["mcp:tools", "memory:read", "memory:write"];
 const AUTOMATION_DEFAULT_SCOPES = ["memory:read", "memory:write", "automation:run"];
@@ -59,7 +59,7 @@ function createUserCode(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
   for (let i = 0; i < 8; i += 1) {
-    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    code += alphabet[randomInt(alphabet.length)];
   }
   return `${code.slice(0, 4)}-${code.slice(4)}`;
 }
@@ -108,7 +108,7 @@ async function loadClient(clientId: string): Promise<ClientInfo | null> {
 function validateClientSecret(client: ClientInfo, providedSecret: string | undefined): string | null {
   if (!client.client_secret) return null;
   if (!providedSecret) return "Client secret is required";
-  if (client.client_secret !== providedSecret) return "Invalid client secret";
+  if (!safeSecretEqual(client.client_secret, providedSecret)) return "Invalid client secret";
   if (
     typeof client.client_secret_expires_at === "number" &&
     client.client_secret_expires_at > 0 &&
@@ -536,7 +536,7 @@ export function createOauthExtensionsRouter(): Router {
 
   router.post("/introspect", async (req, res) => {
     const internalSecret = req.headers["x-internal-secret"];
-    if (!internalSecret || internalSecret !== config.internalApiSecret) {
+    if (!internalSecret || !safeSecretEqual(String(internalSecret), config.internalApiSecret)) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
@@ -554,7 +554,7 @@ export function createOauthExtensionsRouter(): Router {
 
   router.post("/revoke-legacy-keys", async (req, res) => {
     const internalSecret = req.headers["x-internal-secret"];
-    if (!internalSecret || internalSecret !== config.internalApiSecret) {
+    if (!internalSecret || !safeSecretEqual(String(internalSecret), config.internalApiSecret)) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }

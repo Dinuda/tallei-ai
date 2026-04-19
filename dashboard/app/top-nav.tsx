@@ -7,7 +7,8 @@ import { useEffect, useState } from "react";
 const HIDDEN_PREFIXES = ["/dashboard", "/login", "/register", "/authorize"];
 
 export function TopNav() {
-  const pathname = usePathname() || "";
+  const pathname = usePathname();
+  if (!pathname) return null;
   const isHidden = HIDDEN_PREFIXES.some(prefix => pathname.startsWith(prefix));
   const isHome = pathname === "/";
 

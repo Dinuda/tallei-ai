@@ -8,7 +8,7 @@ import type { AuthContext, Plan } from "../../../domain/auth/index.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function safeSecretEqual(a: string, b: string): boolean {
+export function safeSecretEqual(a: string, b: string): boolean {
   try {
     const ab = Buffer.from(a);
     const bb = Buffer.from(b);
