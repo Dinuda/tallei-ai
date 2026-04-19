@@ -43,9 +43,8 @@ ensure_secret_access() {
     --member "serviceAccount:${SERVICE_ACCOUNT}" \
     --role "roles/secretmanager.secretAccessor" \
     --quiet >/dev/null 2>&1; then
-    echo "Unable to grant roles/secretmanager.secretAccessor on ${secret_id} to ${SERVICE_ACCOUNT}." >&2
-    echo "Grant this role manually (or to the project) and rerun deploy." >&2
-    exit 1
+    echo "Warning: unable to grant roles/secretmanager.secretAccessor on ${secret_id} to ${SERVICE_ACCOUNT}." >&2
+    echo "Continuing deploy; if runtime secret access is missing, Cloud Run revision creation will fail." >&2
   fi
 }
 
