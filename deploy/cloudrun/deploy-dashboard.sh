@@ -54,6 +54,16 @@ require_env NEXTAUTH_SECRET
 
 AUTH_URL="${AUTH_URL:-$NEXTAUTH_URL}"
 
+# Accept either a full service account email or a short account name.
+if [[ "$SERVICE_ACCOUNT" != *"@"* ]]; then
+  SERVICE_ACCOUNT="${SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
+fi
+
+if ! gcloud iam service-accounts describe "$SERVICE_ACCOUNT" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  echo "Invalid or missing service account in project ${PROJECT_ID}: ${SERVICE_ACCOUNT}" >&2
+  exit 1
+fi
+
 validate_secret_id INTERNAL_API_SECRET
 validate_secret_id NEXTAUTH_SECRET
 validate_secret_id GOOGLE_CLIENT_SECRET
