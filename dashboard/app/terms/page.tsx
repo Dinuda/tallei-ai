@@ -176,6 +176,24 @@ export default function TermsPage() {
           </section>
 
           <section style={sectionStyle}>
+            <h2 style={sectionTitleStyle}>9.1 Fair Use Policy (FUP)</h2>
+            <p>
+              Paid plans are intended for fair, normal, and lawful use by the account owner or authorized team members. To
+              protect service reliability and security for all users, we may apply usage controls such as rate limits,
+              throttling, or temporary restrictions where usage is excessive or abusive.
+            </p>
+            <p style={{ marginTop: "0.5rem" }}>
+              Prohibited usage includes, for example, credential sharing outside authorized team access, abusive automation,
+              denial-of-service style traffic, unlawful use, or attempts to circumvent plan limits or security controls.
+            </p>
+            <p style={{ marginTop: "0.5rem" }}>
+              If your usage materially exceeds fair-use expectations, we may require a plan upgrade, apply technical limits, or
+              suspend access. Where practical, we will provide prior notice and an opportunity to remediate, except where
+              immediate action is needed for legal, security, or abuse-prevention reasons.
+            </p>
+          </section>
+
+          <section style={sectionStyle}>
             <h2 style={sectionTitleStyle}>10. Service Availability and Changes</h2>
             <p>
               We may modify, suspend, or discontinue all or part of the Service at any time, including for maintenance,
