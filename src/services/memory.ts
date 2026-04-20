@@ -22,20 +22,17 @@ import {
   invalidateRecallV2Cache,
   recallMemoriesV2,
 } from "../orchestration/graph/recall-v2.usecase.js";
-import { hybridRecall, invalidateBm25Cache } from "../infrastructure/recall/hybrid-retrieval.js";
+import { invalidateBm25Cache } from "../infrastructure/recall/hybrid-retrieval.js";
 import {
-  buildRecentFallback,
   bumpRecallStamp,
   readExactRecallPayload,
-  readWarmRecallPayload,
-  runBackgroundRecallEnrichment,
   writeRecallPayload,
 } from "../infrastructure/recall/fast-recall.js";
 import {
-  lookupPrecomputedRecallV1,
   markSnapshotStale,
   queueSnapshotRefresh,
 } from "../orchestration/graph/precomputed-recall.usecase.js";
+import { bucketRecall } from "../infrastructure/recall/bucket-recall.js";
 import { incrementWithTtl } from "../infrastructure/cache/redis-cache.js";
 import { setRequestTimingFields } from "../observability/request-timing.js";
 import { SaveMemoryUseCase } from "../orchestration/memory/save.usecase.js";
@@ -101,9 +98,6 @@ function recallCacheKey(auth: AuthContext, query: string, limit: number, types?:
   return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:${normalizeRecallTypes(types)}`;
 }
 
-function recallEnrichmentKey(auth: AuthContext, query: string, limit: number, types?: MemoryType[]): string {
-  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:${normalizeRecallTypes(types)}:v1`;
-}
 
 function getCachedRecall(cacheKey: string): RecallResult | null {
   const cached = recallCache.get(cacheKey);
@@ -286,27 +280,6 @@ function logRecallEvent(
   }).catch((error) => { noteMemoryDbFailure(error, "recall-log"); });
 }
 
-// ── Semantic recall (passed as dep to RecallMemoryUseCase) ────────────────────
-
-async function semanticRecallMemories(
-  query: string,
-  auth: AuthContext,
-  limit = 5,
-  types?: MemoryType[],
-  _requesterIp?: string
-): Promise<{ result: RecallResult; timingsMs: Record<string, number> }> {
-  if (!IS_EVAL_MODE && auth.plan === "free") {
-    const count = await countMonthlyEvents(auth.tenantId, "recall");
-    if (count >= FREE_RECALL_LIMIT) {
-      throw new QuotaExceededError(
-        `Free plan limit reached: ${FREE_RECALL_LIMIT} recalls/month. Upgrade to Pro at tallei.app/dashboard/billing.`
-      );
-    }
-  }
-  const hybrid = await hybridRecall(query, auth, limit, { types });
-  return { result: { contextBlock: hybrid.contextBlock, memories: hybrid.memories }, timingsMs: hybrid.timingsMs };
-}
-
 // ── Use-case instances ────────────────────────────────────────────────────────
 
 const saveMemoryUseCase = new SaveMemoryUseCase({
@@ -331,22 +304,25 @@ const saveMemoryUseCase = new SaveMemoryUseCase({
 });
 
 const recallMemoryUseCase = new RecallMemoryUseCase({
-  normalizeRecallQuery,
   recallCacheKey,
-  recallEnrichmentKey,
   getCachedRecall,
   setCachedRecall,
   readExactRecallPayload,
-  readWarmRecallPayload,
   writeRecallPayload,
-  runBackgroundRecallEnrichment,
   withTimeout,
-  fastRecallTotalTimeoutMs: FAST_RECALL_TOTAL_TIMEOUT_MS,
-  hybridRecall,
+  totalTimeoutMs: FAST_RECALL_TOTAL_TIMEOUT_MS,
+  bucketRecall: async (query, auth) => {
+    if (!IS_EVAL_MODE && auth.plan === "free") {
+      const count = await countMonthlyEvents(auth.tenantId, "recall");
+      if (count >= FREE_RECALL_LIMIT) {
+        throw new QuotaExceededError(
+          `Free plan limit reached: ${FREE_RECALL_LIMIT} recalls/month. Upgrade to Pro at tallei.app/dashboard/billing.`
+        );
+      }
+    }
+    return bucketRecall(query, auth);
+  },
   memoryRepository,
-  lookupPrecomputedRecallV1,
-  buildRecentFallback,
-  queueSnapshotRefresh,
   logRecallEvent,
   runRecallShadowChecks,
 });
