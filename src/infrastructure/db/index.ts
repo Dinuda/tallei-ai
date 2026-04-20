@@ -279,6 +279,16 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
     },
     {
+      table: "document_lots",
+      policy: "document_lots_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "documents",
+      policy: "documents_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
       table: "api_keys",
       policy: "api_keys_tenant_user_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
@@ -443,6 +453,56 @@ export async function initDb() {
         ON memory_records(qdrant_point_id);
       CREATE INDEX IF NOT EXISTS idx_memory_records_active
         ON memory_records(tenant_id, user_id, deleted_at)
+        WHERE deleted_at IS NULL;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS document_lots (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ref_handle TEXT NOT NULL,
+        title TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        deleted_at TIMESTAMPTZ,
+        UNIQUE (tenant_id, ref_handle)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_document_lots_tenant_user_created
+        ON document_lots(tenant_id, user_id, created_at DESC)
+        WHERE deleted_at IS NULL;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ref_handle TEXT NOT NULL,
+        lot_id UUID NULL REFERENCES document_lots(id) ON DELETE SET NULL,
+        filename TEXT,
+        title TEXT,
+        mime_type TEXT,
+        byte_size INTEGER NOT NULL,
+        content_ciphertext TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        qdrant_point_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'ready', 'failed')),
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        deleted_at TIMESTAMPTZ,
+        UNIQUE (tenant_id, ref_handle)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_documents_tenant_user_created
+        ON documents(tenant_id, user_id, created_at DESC)
+        WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_documents_lot
+        ON documents(lot_id)
+        WHERE lot_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_documents_content_hash_active
+        ON documents(tenant_id, user_id, content_hash)
         WHERE deleted_at IS NULL;
     `);
 

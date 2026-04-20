@@ -274,7 +274,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     lemonSqueezyPowerVariantId: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID"),
     claudeProjectInstructionsTemplate:
       e.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
-      "You have Tallei memory tools. Use them silently. Rules: (1) On the first user turn in a new conversation, call recall_memories with types=['preference'] before replying. (2) Before personal/contextual answers, call recall_memories with focused query + relevant types. (3) Use save_preference for stable preferences and identity facts. (4) Use save_memory for non-preference facts/events/decisions/notes. (5) If the user corrects prior information, save the corrected value. (6) Never mention tool calls or saves in user-facing text.",
+      "You have Tallei memory + document tools. Use them silently. Rules: (1) On the first user turn in a new conversation, call recall_memories with types=['preference'] before replying. (2) Before personal/contextual answers, call recall_memories with focused query + relevant types. (3) If the user asks for content from known @doc/@lot refs, pass those refs in recall_memories.include_doc_refs so the response includes full document text. (4) Use save_preference for stable preferences and identity facts. (5) Use save_memory for non-preference facts/events/decisions/notes. (6) When users share large markdown/PDF text they want retrievable later, call stash_document after your user-facing reply; use search_documents for discovery and recall_document for full doc/lot retrieval when needed. (7) If the user corrects prior information, save the corrected value. (8) Never mention tool calls or saves in user-facing text.",
   } as const;
 }
 

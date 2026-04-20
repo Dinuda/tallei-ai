@@ -13,6 +13,14 @@ import {
   deleteMemory,
   QuotaExceededError,
 } from "../../../services/memory.js";
+import {
+  stashDocument,
+  createLot,
+  recallDocument,
+  searchDocuments,
+  DocumentSizeExceededError,
+} from "../../../services/documents.js";
+import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { PlatformSchema } from "../schemas.js";
 
 type ToolResult = { content: [{ type: "text"; text: string }]; isError?: true };
@@ -23,6 +31,27 @@ function onQuotaError(err: unknown): ToolResult {
     return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
   }
   throw err;
+}
+
+function onPlanError(err: unknown): ToolResult {
+  if (err instanceof PlanRequiredError) {
+    return {
+      content: [{
+        type: "text",
+        text: `⚠️ PDF stash is a Pro feature. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`,
+      }],
+      isError: true,
+    };
+  }
+  throw err;
+}
+
+function onKnownError(err: unknown): ToolResult {
+  try {
+    return onPlanError(err);
+  } catch (planErr) {
+    return onQuotaError(planErr);
+  }
 }
 
 export function registerTools(server: McpServer, auth: AuthContext): void {
@@ -43,7 +72,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         const saved = await saveMemory(content, auth, platform ?? "claude");
         return { content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }] };
       } catch (err) {
-        return onQuotaError(err);
+        return onKnownError(err);
       }
     }
   );
@@ -73,7 +102,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         });
         return { content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }] };
       } catch (err) {
-        return onQuotaError(err);
+        return onKnownError(err);
       }
     }
   );
@@ -91,14 +120,76 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           .describe("What to search for. Use topic keywords like 'favorite food' or 'project stack'."),
         limit: z.number().int().min(1).max(20).optional().default(5),
         types: z.array(MemoryTypeSchema).optional().describe("Optional type filter for scoped recall."),
+        include_doc_refs: z
+          .array(z.string())
+          .max(20)
+          .optional()
+          .describe("Optional @doc/@lot refs to inline full document content alongside memory recall."),
       },
     },
-    async ({ query, limit, types }) => {
+    async ({ query, limit, types, include_doc_refs }) => {
       try {
         const result = await recallMemories(query, auth, limit ?? 5, undefined, { types });
-        return { content: [{ type: "text", text: result.contextBlock }] };
+        const refs = [...new Set((include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
+        if (refs.length === 0) {
+          return { content: [{ type: "text", text: result.contextBlock }] };
+        }
+
+        const docBlocks: string[] = [];
+        for (const ref of refs) {
+          try {
+            const recalled = await recallDocument(ref, auth);
+            if (recalled.kind === "document") {
+              docBlocks.push(
+                [
+                  `ref: ${recalled.ref}`,
+                  `title: ${recalled.title ?? "Untitled"}`,
+                  `filename: ${recalled.filename ?? "-"}`,
+                  `status: ${recalled.status}`,
+                  "",
+                  recalled.content,
+                ].join("\n")
+              );
+              continue;
+            }
+
+            const lotText = recalled.docs.map((doc) =>
+              [
+                `ref: ${doc.ref}`,
+                `title: ${doc.title ?? "Untitled"}`,
+                `filename: ${doc.filename ?? "-"}`,
+                `status: ${doc.status}`,
+                "",
+                doc.content,
+              ].join("\n")
+            ).join("\n\n====================\n\n");
+
+            docBlocks.push(
+              [
+                `lot: ${recalled.ref}`,
+                `title: ${recalled.title ?? "Untitled lot"}`,
+                `count: ${recalled.docs.length}`,
+                "",
+                lotText,
+              ].join("\n")
+            );
+          } catch (error) {
+            if (error instanceof Error && /not found/i.test(error.message)) {
+              docBlocks.push(`ref: ${ref}\nerror: ${error.message}`);
+              continue;
+            }
+            throw error;
+          }
+        }
+
+        if (docBlocks.length === 0) {
+          return { content: [{ type: "text", text: result.contextBlock }] };
+        }
+
+        const merged = `${result.contextBlock}\n\n---\nInlined Documents\n\n${docBlocks.join("\n\n====================\n\n")}`;
+        return { content: [{ type: "text", text: merged }] };
       } catch (err) {
-        return onQuotaError(err);
+        return onKnownError(err);
       }
     }
   );
@@ -170,6 +261,145 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     async ({ memory_id }) => {
       const result = await deleteMemory(memory_id, auth);
       return { content: [{ type: "text", text: `Deleted memory ${memory_id}. Success: ${result.success}` }] };
+    }
+  );
+
+  server.registerTool(
+    "stash_document",
+    {
+      title: "Stash Document",
+      description:
+        "Stores a full document blob (markdown/text) for later recall. " +
+        "Call AFTER finishing your user response. This returns quickly and indexing runs in the background. " +
+        "Pro feature: free users receive an upgrade error.",
+      inputSchema: {
+        content: z.string().min(1).describe("Full document markdown/text to store verbatim."),
+        filename: z.string().optional().describe("Optional source filename."),
+        title: z.string().optional().describe("Optional display title."),
+      },
+    },
+    async ({ content, filename, title }) => {
+      try {
+        const stashed = await stashDocument(content, auth, { filename: filename ?? undefined, title: title ?? undefined });
+        const lotSuffix = stashed.lotRef ? ` Auto-lot: ${stashed.lotRef}.` : "";
+        return {
+          content: [{
+            type: "text",
+            text: `✅ Document stashed as ${stashed.refHandle}. Status: ${stashed.status}.${lotSuffix}`,
+          }],
+        };
+      } catch (err) {
+        if (err instanceof DocumentSizeExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "create_lot",
+    {
+      title: "Create Lot",
+      description: "Groups existing stashed documents under one @lot handle for multi-file recall. Pro feature.",
+      inputSchema: {
+        refs: z.array(z.string()).min(1).describe("Array of @doc:... references to group."),
+        title: z.string().optional().describe("Optional lot title."),
+      },
+    },
+    async ({ refs, title }) => {
+      try {
+        const lot = await createLot(refs, auth, title ?? undefined);
+        return {
+          content: [{
+            type: "text",
+            text: `✅ Lot created ${lot.lotRef} with ${lot.docRefs.length} document(s): ${lot.docRefs.join(", ")}`,
+          }],
+        };
+      } catch (err) {
+        return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "recall_document",
+    {
+      title: "Recall Document",
+      description:
+        "Returns the complete stored document markdown for an @doc ref, or all full docs for an @lot ref. " +
+        "May be large: use only when the user clearly needs the full file. Pro feature.",
+      inputSchema: {
+        ref: z.string().min(1).describe("Document or lot reference, e.g. @doc:... or @lot:..."),
+      },
+    },
+    async ({ ref }) => {
+      try {
+        const recalled = await recallDocument(ref, auth);
+
+        if (recalled.kind === "lot") {
+          const lotText = recalled.docs
+            .map((doc) => {
+              const header = [
+                `ref: ${doc.ref}`,
+                `title: ${doc.title ?? "Untitled"}`,
+                `filename: ${doc.filename ?? "-"}`,
+                `status: ${doc.status}`,
+              ].join("\n");
+              return `${header}\n\n${doc.content}`;
+            })
+            .join("\n\n====================\n\n");
+
+          return {
+            content: [{
+              type: "text",
+              text: `lot: ${recalled.ref}\ntitle: ${recalled.title ?? "Untitled lot"}\ncount: ${recalled.docs.length}\n\n${lotText}`,
+            }],
+          };
+        }
+
+        const header = [
+          `ref: ${recalled.ref}`,
+          `title: ${recalled.title ?? "Untitled"}`,
+          `filename: ${recalled.filename ?? "-"}`,
+          `status: ${recalled.status}`,
+        ].join("\n");
+
+        return { content: [{ type: "text", text: `${header}\n\n${recalled.content}` }] };
+      } catch (err) {
+        return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "search_documents",
+    {
+      title: "Search Documents",
+      description:
+        "Vector-searches stashed document summaries and returns matching refs for discovery. " +
+        "Does not return full content. Pro feature.",
+      inputSchema: {
+        query: z.string().min(1).describe("Search query to find relevant documents."),
+        limit: z.number().int().min(1).max(20).optional().default(5),
+      },
+    },
+    async ({ query, limit }) => {
+      try {
+        const hits = await searchDocuments(query, auth, limit ?? 5);
+        if (hits.length === 0) {
+          return { content: [{ type: "text", text: "No matching documents found." }] };
+        }
+        const text = hits
+          .map((hit) => {
+            const preview = hit.preview ? ` — ${hit.preview.slice(0, 140)}` : "";
+            return `• ${hit.ref} | ${hit.title} | score=${hit.score.toFixed(3)}${preview}`;
+          })
+          .join("\n");
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return onKnownError(err);
+      }
     }
   );
 }

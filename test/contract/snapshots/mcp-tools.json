@@ -1,5 +1,9 @@
 [
   {
+    "name": "create_lot",
+    "inputSchema": "{\n        refs: z.array(z.string()).min(1).describe(\"Array of @doc:... references to group.\"),\n        title: z.string().optional().describe(\"Optional lot title.\"),\n      }"
+  },
+  {
     "name": "delete_memory",
     "inputSchema": "{\n        memory_id: z.string().describe(\"The unique ID of the memory to delete\"),\n      }"
   },
@@ -16,8 +20,12 @@
     "inputSchema": "{}"
   },
   {
+    "name": "recall_document",
+    "inputSchema": "{\n        ref: z.string().min(1).describe(\"Document or lot reference, e.g. @doc:... or @lot:...\"),\n      }"
+  },
+  {
     "name": "recall_memories",
-    "inputSchema": "{\n        query: z\n          .string()\n          .describe(\"What to search for. Use topic keywords like 'favorite food' or 'project stack'.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        types: z.array(MemoryTypeSchema).optional().describe(\"Optional type filter for scoped recall.\"),\n      }"
+    "inputSchema": "{\n        query: z\n          .string()\n          .describe(\"What to search for. Use topic keywords like 'favorite food' or 'project stack'.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        types: z.array(MemoryTypeSchema).optional().describe(\"Optional type filter for scoped recall.\"),\n        include_doc_refs: z\n          .array(z.string())\n          .max(20)\n          .optional()\n          .describe(\"Optional @doc/@lot refs to inline full document content alongside memory recall.\"),\n      }"
   },
   {
     "name": "save_memory",
@@ -26,5 +34,13 @@
   {
     "name": "save_preference",
     "inputSchema": "{\n        content: z\n          .string()\n          .describe(\"The preference to store (e.g., favorite color, preferred stack, name/pronouns).\"),\n        category: z.string().optional().describe(\"Optional preference category like identity, ui, stack.\"),\n        preference_key: z\n          .string()\n          .optional()\n          .describe(\"Optional stable conflict key (e.g., favorite_color, identity_name).\"),\n        platform: PlatformSchema.optional().default(\"claude\").describe(\"The AI platform this preference is from\"),\n      }"
+  },
+  {
+    "name": "search_documents",
+    "inputSchema": "{\n        query: z.string().min(1).describe(\"Search query to find relevant documents.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n      }"
+  },
+  {
+    "name": "stash_document",
+    "inputSchema": "{\n        content: z.string().min(1).describe(\"Full document markdown/text to store verbatim.\"),\n        filename: z.string().optional().describe(\"Optional source filename.\"),\n        title: z.string().optional().describe(\"Optional display title.\"),\n      }"
   }
 ]

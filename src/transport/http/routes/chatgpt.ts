@@ -3,6 +3,8 @@ import { z } from "zod";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
 import { recallMemories, saveMemory, savePreference } from "../../../services/memory.js";
+import { recallDocument } from "../../../services/documents.js";
+import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import { authContextFromApiKey, authContextFromUserId } from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
@@ -17,6 +19,7 @@ const recallSchema = z.object({
   query: z.string().min(1, "query is required"),
   limit: z.coerce.number().int().min(1).max(20).optional().default(5),
   types: z.array(memoryTypeSchema).optional(),
+  include_doc_refs: z.array(z.string()).max(20).optional(),
 });
 
 const saveSchema = z.object({
@@ -44,6 +47,64 @@ function degradedRecallResponse() {
     contextBlock: "--- No relevant memories found ---",
     memories: [],
   };
+}
+
+async function inlineDocumentRefs(
+  refs: string[],
+  auth: NonNullable<AuthRequest["authContext"]>
+): Promise<string[]> {
+  const uniqueRefs = [...new Set(refs.map((value) => value.trim()).filter(Boolean))];
+  const blocks: string[] = [];
+
+  for (const ref of uniqueRefs) {
+    try {
+      const recalled = await recallDocument(ref, auth);
+      if (recalled.kind === "document") {
+        blocks.push(
+          [
+            `ref: ${recalled.ref}`,
+            `title: ${recalled.title ?? "Untitled"}`,
+            `filename: ${recalled.filename ?? "-"}`,
+            `status: ${recalled.status}`,
+            "",
+            recalled.content,
+          ].join("\n")
+        );
+        continue;
+      }
+
+      const lotText = recalled.docs
+        .map((doc) =>
+          [
+            `ref: ${doc.ref}`,
+            `title: ${doc.title ?? "Untitled"}`,
+            `filename: ${doc.filename ?? "-"}`,
+            `status: ${doc.status}`,
+            "",
+            doc.content,
+          ].join("\n")
+        )
+        .join("\n\n====================\n\n");
+
+      blocks.push(
+        [
+          `lot: ${recalled.ref}`,
+          `title: ${recalled.title ?? "Untitled lot"}`,
+          `count: ${recalled.docs.length}`,
+          "",
+          lotText,
+        ].join("\n")
+      );
+    } catch (error) {
+      if (error instanceof Error && /not found/i.test(error.message)) {
+        blocks.push(`ref: ${ref}\nerror: ${error.message}`);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return blocks;
 }
 
 async function logChatGptAction(input: {
@@ -264,10 +325,17 @@ function buildOpenApiSpec(serverUrl: string) {
                       description:
                         "Optional memory type scope. Use only when it helps; avoid forcing a fixed type set every turn.",
                     },
+                    include_doc_refs: {
+                      type: "array",
+                      items: { type: "string" },
+                      description:
+                        "Optional @doc/@lot refs to inline full document content in the recall response contextBlock.",
+                    },
                   },
                   example: {
                     query: "do you think that customer segment will buy at my price?",
                     types: ["fact", "decision", "preference"],
+                    include_doc_refs: ["@doc:pricing-memo-ab12"],
                     limit: 5,
                   },
                 },
@@ -388,6 +456,15 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
     const result = await recallMemories(body.query, req.authContext!, body.limit, req.ip, {
       types: body.types,
     });
+
+    const refs = [...new Set((body.include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
+    if (refs.length > 0) {
+      const docBlocks = await inlineDocumentRefs(refs, req.authContext!);
+      if (docBlocks.length > 0) {
+        result.contextBlock = `${result.contextBlock}\n\n---\nInlined Documents\n\n${docBlocks.join("\n\n====================\n\n")}`;
+      }
+    }
+
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recall",
@@ -407,6 +484,10 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
         error: error instanceof Error ? error.message : "Transient memory infra error",
       });
       res.json(degradedRecallResponse());
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json({ error: error.message });
       return;
     }
     logChatGptActionAsync({

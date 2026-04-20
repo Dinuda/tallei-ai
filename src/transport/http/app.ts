@@ -7,6 +7,7 @@ import browserUseRouter from "./routes/browserUse.js";
 import claudeOnboardingRouter from "./routes/claudeOnboarding.js";
 import keysRouter from "./routes/keys.js";
 import memoriesRouter from "./routes/memories.js";
+import documentsRouter from "./routes/documents.js";
 import mcpEventsRouter from "./routes/mcpEvents.js";
 import mcpCodeRouter from "./routes/mcp.js";
 import chatgptRouter from "./routes/chatgpt.js";
@@ -49,7 +50,7 @@ export function createApp(deps: AppFactoryDeps): Express {
     credentials: true,
   }));
 
-  app.use(express.json({ limit: "1mb", strict: true, type: ["application/json"] }));
+  app.use(express.json({ limit: "3mb", strict: true, type: ["application/json"] }));
   app.use(requestTimingMiddleware);
 
   app.use(mcpAuthRouter({
@@ -81,6 +82,7 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/oauth", createOauthExtensionsRouter());
   app.use("/api/keys", keysRouter);
   app.use("/api/memories", deps.memoryRateLimit, memoriesRouter);
+  app.use("/api/documents", deps.memoryRateLimit, documentsRouter);
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
   app.use("/api/billing", billingRouter);

@@ -111,6 +111,21 @@
   },
   {
     "method": "GET",
+    "path": "/api/documents",
+    "source": "src/routes/documents.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/documents/:ref",
+    "source": "src/routes/documents.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/documents/:ref",
+    "source": "src/routes/documents.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/integrations/chatgpt/token",
     "source": "src/routes/integrations.ts"
   },

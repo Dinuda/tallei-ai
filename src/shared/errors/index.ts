@@ -1,5 +1,5 @@
 export { AppError } from "./base.js";
-export { DomainError, QuotaExceededError } from "./domain-errors.js";
+export { DomainError, QuotaExceededError, PlanRequiredError } from "./domain-errors.js";
 export {
   CircuitOpenError,
   ProviderAuthError,

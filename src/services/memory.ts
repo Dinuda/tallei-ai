@@ -34,10 +34,10 @@ import { ListMemoriesUseCase } from "../orchestration/memory/list.usecase.js";
 import { DeleteMemoryUseCase } from "../orchestration/memory/delete.usecase.js";
 import type { RecallSource } from "../orchestration/memory/fallback-policy.js";
 import type { MemoryType } from "../orchestration/memory/memory-types.js";
-import { QuotaExceededError } from "../shared/errors/index.js";
+import { PlanRequiredError, QuotaExceededError } from "../shared/errors/index.js";
 
 export type { RecallResult, SaveMemoryResult };
-export { QuotaExceededError };
+export { QuotaExceededError, PlanRequiredError };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
