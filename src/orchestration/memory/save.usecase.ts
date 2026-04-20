@@ -83,13 +83,9 @@ interface SaveMemoryUseCaseDeps {
   readonly noteVectorFailure: (error: unknown, context: string) => void;
   readonly noteMemoryDbFailure: (error: unknown, context: string) => void;
   readonly setRequestTimingFields: (fields: RequestTimingValues) => void;
-  readonly enqueueGraphExtractionJob: (auth: AuthContext, memoryId: string) => Promise<void>;
   readonly invalidateRecallCache: (auth: AuthContext) => void;
-  readonly invalidateRecallV2Cache: (auth: AuthContext) => void;
   readonly invalidateBm25Cache: (auth: AuthContext) => void;
   readonly bumpRecallStamp: (auth: AuthContext) => Promise<void>;
-  readonly markSnapshotStale: (auth: AuthContext) => Promise<void>;
-  readonly queueSnapshotRefresh: (auth: AuthContext, reason: string, delayMs: number) => Promise<void>;
   readonly ipHash: (ip?: string) => string | null;
   readonly createQuotaExceededError: (message: string) => Error;
   readonly isEvalMode: boolean;
@@ -196,13 +192,10 @@ export class SaveMemoryUseCase {
     this.deps = deps;
   }
 
-  private invalidateRecallArtifacts(auth: AuthContext, reason = "save_memory"): void {
+  private invalidateRecallArtifacts(auth: AuthContext): void {
     this.deps.invalidateRecallCache(auth);
-    this.deps.invalidateRecallV2Cache(auth);
     this.deps.invalidateBm25Cache(auth);
     void this.deps.bumpRecallStamp(auth).catch(() => {});
-    void this.deps.markSnapshotStale(auth).catch(() => {});
-    void this.deps.queueSnapshotRefresh(auth, reason, 1_000).catch(() => {});
   }
 
   private async dedupeByVector(
@@ -248,7 +241,7 @@ export class SaveMemoryUseCase {
     const exactDuplicate = await this.deps.memoryRepository.findActiveByContentHash(input.auth, contentHash);
     if (exactDuplicate) {
       await this.deps.memoryRepository.incrementReferenceScoped(input.auth, exactDuplicate.id);
-      this.invalidateRecallArtifacts(input.auth, "save_memory_dedup");
+      this.invalidateRecallArtifacts(input.auth);
       const summary = summaryFromRow(exactDuplicate.summary_json, normalizedContent);
       return {
         memoryId: exactDuplicate.id,
@@ -299,7 +292,7 @@ export class SaveMemoryUseCase {
 
     const vectorDuplicate = await this.dedupeByVector(input, memoryType);
     if (vectorDuplicate) {
-      this.invalidateRecallArtifacts(input.auth, "save_memory_dedup_vector");
+      this.invalidateRecallArtifacts(input.auth);
       return {
         memoryId: vectorDuplicate.memoryId,
         title: summaryForStorage.title,
@@ -460,12 +453,6 @@ export class SaveMemoryUseCase {
         extractAndSaveFacts(),
       ]);
     })();
-
-    void this.deps.enqueueGraphExtractionJob(input.auth, memoryId).catch((error) => {
-      if (config.nodeEnv !== "production") {
-        console.warn("[graph] failed to enqueue extraction job", error);
-      }
-    });
 
     void this.deps.memoryRepository.logEvent({
       auth: input.auth,

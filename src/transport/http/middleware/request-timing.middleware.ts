@@ -8,7 +8,7 @@ import {
 import { getRedisHealthState } from "../../../infrastructure/cache/redis-cache.js";
 
 type TimingSurface = "mcp" | "chatgpt_actions";
-type TimingOperation = "save" | "recall_v1" | "recall_v2";
+type TimingOperation = "save" | "recall_v1";
 
 interface TimingTarget {
   surface: TimingSurface;
@@ -96,15 +96,6 @@ function inferMcpTarget(req: Request): TimingTarget | null {
 
   if (toolName === "recall_memories") {
     return { surface: "mcp", operation: "recall_v1", route: path, toolName };
-  }
-
-  if (toolName === "recall_memories_v2") {
-    return {
-      surface: "mcp",
-      operation: "recall_v2",
-      route: path,
-      toolName,
-    };
   }
 
   return null;

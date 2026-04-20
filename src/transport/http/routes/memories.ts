@@ -9,13 +9,6 @@ import {
   forgetPreference,
   deleteMemory,
 } from "../../../services/memory.js";
-import {
-  getMemoryGraphSnapshot,
-  listMemoryEntities,
-  recallMemoriesV2,
-} from "../../../orchestration/graph/recall-v2.usecase.js";
-import { getMemoryGraphInsights } from "../../../orchestration/graph/graph-insights.usecase.js";
-import { config } from "../../../config/index.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -44,11 +37,6 @@ const recallSchema = z.object({
   ),
 });
 
-const recallV2Schema = z.object({
-  q: z.string().min(1, "query is required"),
-  limit: z.coerce.number().int().min(1).max(20).default(5),
-  graph_depth: z.coerce.number().int().min(1).max(2).optional().default(1),
-});
 
 router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
@@ -129,25 +117,6 @@ router.get("/recall", requireScopes(["memory:read"]), async (req: AuthRequest, r
   }
 });
 
-router.get("/recall-v2", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  if (!config.recallV2Enabled) {
-    res.status(404).json({ error: "recall-v2 is disabled" });
-    return;
-  }
-
-  try {
-    const query = recallV2Schema.parse(req.query);
-    const result = await recallMemoriesV2(query.q, req.authContext!, query.limit, query.graph_depth, req.ip);
-    res.json(result);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error recalling memories v2:", error);
-    res.status(500).json({ error: "Failed to recall memories v2" });
-  }
-});
 
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
@@ -159,51 +128,6 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
   }
 });
 
-router.get("/graph", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  if (!config.dashboardGraphV2Enabled) {
-    res.status(404).json({ error: "memory graph v2 is disabled" });
-    return;
-  }
-
-  try {
-    const graph = await getMemoryGraphSnapshot(req.authContext!);
-    res.json(graph);
-  } catch (error) {
-    console.error("Error fetching memory graph:", error);
-    res.status(500).json({ error: "Failed to load memory graph" });
-  }
-});
-
-const entitiesSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(40),
-  q: z.string().optional(),
-});
-
-router.get("/entities", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const query = entitiesSchema.parse(req.query);
-    const entities = await listMemoryEntities(req.authContext!, query.limit, query.q);
-    res.json({ entities });
-  } catch (error) {
-    console.error("Error listing entities:", error);
-    res.status(500).json({ error: "Failed to list entities" });
-  }
-});
-
-router.get("/insights", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  if (!config.graphExtractionEnabled) {
-    res.status(404).json({ error: "memory graph extraction is disabled" });
-    return;
-  }
-
-  try {
-    const insights = await getMemoryGraphInsights(req.authContext!);
-    res.json(insights);
-  } catch (error) {
-    console.error("Error generating memory insights:", error);
-    res.status(500).json({ error: "Failed to generate memory insights" });
-  }
-});
 
 router.delete("/:id", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {

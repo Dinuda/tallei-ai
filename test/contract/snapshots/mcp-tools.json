@@ -4,10 +4,6 @@
     "inputSchema": "{\n        memory_id: z.string().describe(\"The unique ID of the memory to delete\"),\n      }"
   },
   {
-    "name": "explain_memory_connection",
-    "inputSchema": "{\n        source: z.string().describe(\"Source entity query\"),\n        target: z.string().describe(\"Target entity query\"),\n      }"
-  },
-  {
     "name": "forget_preference",
     "inputSchema": "{\n        preference_id: z.string().describe(\"Preference memory ID\"),\n      }"
   },
@@ -16,24 +12,12 @@
     "inputSchema": "{}"
   },
   {
-    "name": "list_memory_entities",
-    "inputSchema": "{\n        limit: z.number().int().min(1).max(100).optional().default(30),\n        query: z.string().optional(),\n      }"
-  },
-  {
     "name": "list_preferences",
-    "inputSchema": "{}"
-  },
-  {
-    "name": "memory_graph_insights",
     "inputSchema": "{}"
   },
   {
     "name": "recall_memories",
     "inputSchema": "{\n        query: z\n          .string()\n          .describe(\"What to search for. Use topic keywords like 'favorite food' or 'project stack'.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        types: z.array(MemoryTypeSchema).optional().describe(\"Optional type filter for scoped recall.\"),\n      }"
-  },
-  {
-    "name": "recall_memories_v2",
-    "inputSchema": "{\n        query: z.string().describe(\"What to search for.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        graph_depth: z.number().int().min(1).max(2).optional().default(1),\n      }"
   },
   {
     "name": "save_memory",

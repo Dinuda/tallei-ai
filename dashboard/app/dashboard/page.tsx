@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../components/ui/button";
-import { Card, CardContent, CardFooter } from "../../components/ui/card";
+import { Card } from "../../components/ui/card";
 import styles from "./page.module.css";
 
 type MemoryItem = {
@@ -232,6 +232,14 @@ const messageClass: Record<MessageKind, string> = {
   info: styles.messageInfo,
 };
 
+function formatMemoryText(value: string): string {
+  return value.replace(/^\[.*?\]\s*/, "").trim();
+}
+
+function sourceInitial(platform: Platform): string {
+  return platform === "other" ? "O" : platform.slice(0, 1).toUpperCase();
+}
+
 export default function DashboardMemoriesPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -248,6 +256,7 @@ export default function DashboardMemoriesPage() {
   const [isImportOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const [quickPreference, setQuickPreference] = useState("");
+  const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
   const [copyLabel, setCopyLabel] = useState("Copy prompt");
   const [importBusy, setImportBusy] = useState(false);
   const [modalMessage, setModalMessage] = useState<ModalMessage | null>(null);
@@ -383,6 +392,18 @@ export default function DashboardMemoriesPage() {
       .slice(0, 14);
   }, [enriched]);
 
+  const sourceCounts = useMemo(() => {
+    const total = Math.max(enriched.length, 1);
+    return PLATFORM_BUCKETS.map((platform) => {
+      const count = platformCounts.get(platform) || 0;
+      return {
+        platform,
+        count,
+        ratio: Math.max(6, Math.round((count / total) * 100)),
+      };
+    }).filter((entry) => entry.count > 0 || entry.platform === "other");
+  }, [enriched.length, platformCounts]);
+
   const filtered = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
@@ -399,6 +420,16 @@ export default function DashboardMemoriesPage() {
   }, [enriched, query, selectedType, selectedPlatform, selectedCategory]);
 
   const hasActiveFilters = Boolean(selectedType || selectedPlatform || selectedCategory);
+  const topCategory = categoryCounts[0]?.[0] ?? "None";
+  const preferenceCount = typeCounts.get("preference") || 0;
+  const visibleRatio = enriched.length > 0 ? Math.round((filtered.length / enriched.length) * 100) : 0;
+  const topCategoryCount = categoryCounts[0]?.[1] ?? 0;
+  const heroMetrics = [
+    { label: "Visible", value: filtered.length, hint: "Matches the current query" },
+    { label: "Total", value: enriched.length, hint: "All stored memories" },
+    { label: "Preferences", value: preferenceCount, hint: "Stable preference items" },
+    { label: "Leading source", value: titleCase(sourceCounts.find((entry) => entry.count > 0)?.platform ?? "other"), hint: "Most represented assistant" },
+  ];
 
   const savePreference = useCallback(async (content: string, platform: Platform | "other", category: string) => {
     const preferenceKey = normalizePreferenceKey(content);
@@ -504,14 +535,35 @@ export default function DashboardMemoriesPage() {
 
   return (
     <div className={styles.page}>
-      <header className={styles.header}>
+      <header className={styles.heroPanel}>
         <div className={styles.headingBlock}>
+          <div className={styles.heroKicker}>Archive index</div>
           <h1 className={styles.title}>Memories</h1>
-          <p className={styles.subtitle}>Manage cross-AI memory with precise filters and controlled preference imports.</p>
+          <p className={styles.subtitle}>
+            A quieter control surface for cross-AI memory. The page now reads like an index drawer, not a color-coded feed.
+          </p>
+          <div className={styles.heroPills}>
+            <span className={styles.heroPill}>Visible {filtered.length}</span>
+            <span className={styles.heroPill}>Coverage {visibleRatio}%</span>
+            <span className={styles.heroPill}>Top category {titleCase(topCategory)}</span>
+          </div>
         </div>
 
+        <div className={styles.snapshotPanel} aria-label="Memory summary">
+          {heroMetrics.map((metric) => (
+            <article key={metric.label} className={styles.snapshotCard}>
+              <p className={styles.snapshotLabel}>{metric.label}</p>
+              <p className={styles.snapshotValue}>{metric.value}</p>
+              <p className={styles.snapshotHint}>{metric.hint}</p>
+            </article>
+          ))}
+        </div>
+      </header>
+
+      <div className={styles.toolbarRow}>
         <div className={styles.headerActions}>
-          <Button variant="outline"
+          <Button
+            variant="outline"
             onClick={() => void fetchMemories("refresh")}
             disabled={loading || refreshing}
           >
@@ -529,156 +581,247 @@ export default function DashboardMemoriesPage() {
             Import Preferences
           </Button>
         </div>
-      </header>
 
-      {error && <div className={`${styles.banner} ${styles.bannerError}`}>{error}</div>}
+        {error && <div className={`${styles.banner} ${styles.bannerError}`}>{error}</div>}
+      </div>
 
-      
-      <section className={styles.filterBar}>
-          <label className={styles.searchWrap}>
-            <Search size={16} className={styles.searchIcon} aria-hidden />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search text, platform, type, category..."
-              className={styles.searchInput}
-            />
-          </label>
+      <div className={styles.workspace}>
+        <aside className={styles.controlRail}>
+          <section className={styles.railSection}>
+            <div className={styles.railHeader}>
+              <div>
+                <p className={styles.sectionLabel}>Search index</p>
+                <h2 className={styles.sectionTitle}>Filter by signal, not palette</h2>
+              </div>
+              {hasActiveFilters && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={styles.clearButton}
+                  onClick={() => {
+                    setSelectedType(null);
+                    setSelectedPlatform(null);
+                    setSelectedCategory(null);
+                  }}
+                >
+                  <FilterX size={14} />
+                  Clear
+                </Button>
+              )}
+            </div>
 
+            <label className={styles.searchWrap}>
+              <Search size={16} className={styles.searchIcon} aria-hidden />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search text, platform, type, category..."
+                className={styles.searchInput}
+              />
+            </label>
 
-        <div className={styles.filterGroup}>
-          <select 
-            className={styles.filterSelect}
-            value={selectedType || ""}
-            onChange={(e) => setSelectedType(e.target.value as MemoryType || null)}
-          >
-            <option value="">All Types</option>
-            {TYPE_BUCKETS.map((type) => (
-              <option key={type} value={type}>{titleCase(type)} ({typeCounts.get(type) || 0})</option>
-            ))}
-          </select>
-        </div>
+            <div className={styles.filterGrid}>
+              <label className={styles.filterGroup}>
+                <span className={styles.filterLabel}>Type</span>
+                <select
+                  className={styles.filterSelect}
+                  value={selectedType || ""}
+                  onChange={(e) => setSelectedType((e.target.value as MemoryType) || null)}
+                >
+                  <option value="">All Types</option>
+                  {TYPE_BUCKETS.map((type) => (
+                    <option key={type} value={type}>{titleCase(type)} ({typeCounts.get(type) || 0})</option>
+                  ))}
+                </select>
+              </label>
 
-        <div className={styles.filterGroup}>
-          <select 
-            className={styles.filterSelect}
-            value={selectedPlatform || ""}
-            onChange={(e) => setSelectedPlatform(e.target.value as Platform || null)}
-          >
-            <option value="">All Platforms</option>
-            {PLATFORM_BUCKETS.map((platform) => (
-              <option key={platform} value={platform}>{titleCase(platform)} ({platformCounts.get(platform) || 0})</option>
-            ))}
-          </select>
-        </div>
+              <label className={styles.filterGroup}>
+                <span className={styles.filterLabel}>Platform</span>
+                <select
+                  className={styles.filterSelect}
+                  value={selectedPlatform || ""}
+                  onChange={(e) => setSelectedPlatform((e.target.value as Platform) || null)}
+                >
+                  <option value="">All Platforms</option>
+                  {PLATFORM_BUCKETS.map((platform) => (
+                    <option key={platform} value={platform}>{titleCase(platform)} ({platformCounts.get(platform) || 0})</option>
+                  ))}
+                </select>
+              </label>
 
-        <div className={styles.filterGroup}>
-          <select 
-            className={styles.filterSelect}
-            value={selectedCategory || ""}
-            onChange={(e) => setSelectedCategory(e.target.value || null)}
-          >
-            <option value="">All Categories</option>
-            {categoryCounts.map(([category, count]) => (
-              <option key={category} value={category}>{titleCase(category)} ({count})</option>
-            ))}
-          </select>
-        </div>
+              <label className={styles.filterGroup}>
+                <span className={styles.filterLabel}>Category</span>
+                <select
+                  className={styles.filterSelect}
+                  value={selectedCategory || ""}
+                  onChange={(e) => setSelectedCategory(e.target.value || null)}
+                >
+                  <option value="">All Categories</option>
+                  {categoryCounts.map(([category, count]) => (
+                    <option key={category} value={category}>{titleCase(category)} ({count})</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </section>
 
-        
+          <section className={styles.railSection}>
+            <p className={styles.sectionLabel}>Signal map</p>
+            <div className={styles.metricStack}>
+              {[
+                { label: "Visible", value: filtered.length, hint: "Current query" },
+                { label: "Total", value: enriched.length, hint: "All memories" },
+                { label: "Preferences", value: preferenceCount, hint: "Stable items" },
+                { label: "Top category", value: titleCase(topCategory), hint: `${topCategoryCount} items` },
+              ].map((item) => (
+                <article key={item.label} className={styles.metricCard}>
+                  <div>
+                    <p className={styles.metricLabel}>{item.label}</p>
+                    <p className={styles.metricValue}>{item.value}</p>
+                  </div>
+                  <p className={styles.metricHint}>{item.hint}</p>
+                </article>
+              ))}
+            </div>
+          </section>
 
-      
-        {hasActiveFilters && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-slate-500"
-            onClick={() => {
-              setSelectedType(null);
-              setSelectedPlatform(null);
-              setSelectedCategory(null);
-            }}
-          >
-            <FilterX size={14} />
-            Clear
-          </Button>
-        )}
-      </section>
+          <section className={styles.railSection}>
+            <p className={styles.sectionLabel}>Source mix</p>
+            <div className={styles.distributionList}>
+              {sourceCounts.map((entry) => (
+                <div key={entry.platform} className={styles.distributionRow}>
+                  <div className={styles.distributionHead}>
+                    <span className={styles.sourceChip}>{titleCase(entry.platform)}</span>
+                    <span className={styles.distributionCount}>{entry.count}</span>
+                  </div>
+                  <div className={styles.distributionBar} aria-hidden>
+                    <span className={styles.distributionFill} style={{ width: `${entry.ratio}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
 
-      <section className={styles.listPanel}>
-        {loading ? (
-          <div className={styles.skeletonStack}>
-            <div className={styles.skeleton} />
-            <div className={styles.skeleton} />
-            <div className={styles.skeleton} />
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className={styles.emptyState}>
-            <h2 className={styles.emptyTitle}>No memories match</h2>
-            <p className={styles.emptyText}>
-              {query || hasActiveFilters
-                ? "Try a different search term or clear active filters."
-                : "No memories yet. Add memories from your connected assistants or import preferences."}
+          <section className={styles.railSection}>
+            <p className={styles.sectionLabel}>Category index</p>
+            <div className={styles.categoryList}>
+              {categoryCounts.slice(0, 6).map(([category, count]) => {
+                const ratio = Math.max(7, Math.round((count / Math.max(filtered.length, 1)) * 100));
+                return (
+                  <div key={category} className={styles.categoryRow}>
+                    <div className={styles.categoryHead}>
+                      <span>{titleCase(category)}</span>
+                      <span className={styles.categoryCount}>{count}</span>
+                    </div>
+                    <div className={styles.categoryBar} aria-hidden>
+                      <span className={styles.categoryFill} style={{ width: `${ratio}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </aside>
+
+        <section className={styles.listPanel}>
+          <div className={styles.listHeader}>
+            <div>
+              <p className={styles.sectionLabel}>Memory shelf</p>
+              <h2 className={styles.deckTitle}>{filtered.length} items</h2>
+            </div>
+            <p className={styles.deckMeta}>
+              {hasActiveFilters ? "Filtered results" : "Full archive"} · top category {titleCase(topCategory)} ({topCategoryCount})
             </p>
           </div>
-        ) : (
-          <ul className={styles.memoryList}>
-            {filtered.map((memory) => {
-              const isDeleting = deletingId === memory.id;
-              return (
-                <Card key={memory.id} className={`relative overflow-hidden group hover:border-[var(--accent-dim)] transition-all ${
-                  memory.platform === 'claude' ? 'border-l-orange-400 border-l-[3px]' :
-                  memory.platform === 'chatgpt' ? 'border-l-blue-400 border-l-[3px]' :
-                  memory.platform === 'gemini' ? 'border-l-purple-400 border-l-[3px]' :
-                  'border-l-[var(--border)] border-l-[3px]'
-                }`}>
-                  <CardContent className="pt-5 pb-3">
-                    <p className="text-[0.95rem] text-[var(--text)] leading-relaxed whitespace-pre-wrap">
-                      {memory.text.replace(/^\[.*?\]\s*/, "")}
-                    </p>
-                  </CardContent>
-                  
-                  <CardFooter className="py-3 px-5 border-t border-[var(--border-light)] bg-slate-50/50 flex flex-wrap gap-x-4 gap-y-2 items-center justify-between text-[0.8rem] text-[var(--text-muted)]">
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-1.5 font-semibold text-[var(--text-2)]">
-                        <span className={`w-1.5 h-1.5 rounded-full ${
-                          memory.platform === 'claude' ? 'bg-orange-400' :
-                          memory.platform === 'chatgpt' ? 'bg-blue-400' :
-                          memory.platform === 'gemini' ? 'bg-purple-400' :
-                          'bg-slate-400'
-                        }`} />
-                        {titleCase(memory.platform)}
+
+          {loading ? (
+            <div className={styles.skeletonStack}>
+              <div className={styles.skeleton} />
+              <div className={styles.skeleton} />
+              <div className={styles.skeleton} />
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className={styles.emptyState}>
+              <h2 className={styles.emptyTitle}>No memories match</h2>
+              <p className={styles.emptyText}>
+                {query || hasActiveFilters
+                  ? "Try a different search term or clear active filters."
+                  : "No memories yet. Add memories from your connected assistants or import preferences."}
+              </p>
+            </div>
+          ) : (
+            <ul className={styles.memoryList}>
+              {filtered.map((memory) => {
+                const isDeleting = deletingId === memory.id;
+                const cleanText = formatMemoryText(memory.text);
+                const canExpand = cleanText.length > 260;
+                const isExpanded = Boolean(expandedById[memory.id]);
+                return (
+                  <Card key={memory.id} variant="flat" className={styles.memoryCard}>
+                    <div className={styles.memoryCardHeader}>
+                      <div className={styles.memoryStamp}>
+                        <span className={styles.memoryMonogram}>{sourceInitial(memory.platform)}</span>
+                        <div className={styles.memoryStampText}>
+                          <span className={styles.memorySourceLabel}>{titleCase(memory.platform)}</span>
+                          <span className={styles.memorySourceMeta}>
+                            {titleCase(memory.memoryType)} · {titleCase(memory.category)}
+                          </span>
+                        </div>
                       </div>
-                      <span>•</span>
-                      <span>{titleCase(memory.memoryType)}</span>
-                      <span>•</span>
-                      <span>{titleCase(memory.category)}</span>
-                      <span>•</span>
-                      <span>{relativeDate(memory.createdAt)}</span>
-                    </div>
-                    
-                    <div className="flex items-center gap-2">
-                      <div className="px-2 py-0.5 rounded-md bg-[var(--surface)] border border-[var(--border-light)] text-[0.7rem] font-medium">
-                        Score {memory.importance}
+
+                      <div className={styles.memoryScore}>
+                        <span className={styles.memoryScoreLabel}>Index</span>
+                        <strong className={styles.memoryScoreValue}>{memory.importance}</strong>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-slate-400 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={() => void handleDeleteMemory(memory.id)}
-                        disabled={isDeleting}
-                        title="Remove memory"
-                      >
-                        <Trash2 size={14} />
-                      </Button>
                     </div>
-                  </CardFooter>
-                </Card>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+
+                    <div className={styles.memoryBody}>
+                      <p className={`${styles.memoryText} ${!isExpanded ? styles.memoryTextClamped : ""}`}>
+                        {cleanText}
+                      </p>
+                      {canExpand && (
+                        <button
+                          type="button"
+                          className={styles.expandButton}
+                          onClick={() =>
+                            setExpandedById((current) => ({
+                              ...current,
+                              [memory.id]: !current[memory.id],
+                            }))
+                          }
+                        >
+                          {isExpanded ? "Show less" : "Show more"}
+                        </button>
+                      )}
+                    </div>
+
+                    <div className={styles.memoryFooter}>
+                      <div className={styles.memoryMeta}>
+                        <span className={styles.metaPill}>{titleCase(memory.memoryType)}</span>
+                        <span className={styles.metaPill}>{titleCase(memory.category)}</span>
+                        <span className={styles.metaDate}>{relativeDate(memory.createdAt)}</span>
+                      </div>
+
+                      <div className={styles.memoryActions}>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={styles.deleteButton}
+                          onClick={() => void handleDeleteMemory(memory.id)}
+                          disabled={isDeleting}
+                          title="Remove memory"
+                        >
+                          <Trash2 size={14} />
+                        </Button>
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      </div>
 
       {isImportOpen && (
         <div
@@ -690,7 +833,7 @@ export default function DashboardMemoriesPage() {
           <div className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="import-dialog-title" ref={modalRef}>
             <div className={styles.modalHeader}>
               <h2 id="import-dialog-title" className={styles.modalTitle}>Import Preferences From ChatGPT</h2>
-              <Button variant="ghost" size="icon" className="h-8 w-8 text-slate-500"
+              <Button variant="ghost" size="icon" className={styles.modalClose}
                 onClick={() => setImportOpen(false)}
                 aria-label="Close dialog"
               >

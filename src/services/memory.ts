@@ -17,21 +17,12 @@ import type { AuthContext } from "../domain/auth/index.js";
 import { decryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { MemoryRepository } from "../infrastructure/repositories/memory.repository.js";
 import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
-import {
-  enqueueGraphExtractionJob,
-  invalidateRecallV2Cache,
-  recallMemoriesV2,
-} from "../orchestration/graph/recall-v2.usecase.js";
 import { invalidateBm25Cache } from "../infrastructure/recall/hybrid-retrieval.js";
 import {
   bumpRecallStamp,
   readExactRecallPayload,
   writeRecallPayload,
 } from "../infrastructure/recall/fast-recall.js";
-import {
-  markSnapshotStale,
-  queueSnapshotRefresh,
-} from "../orchestration/graph/precomputed-recall.usecase.js";
 import { bucketRecall } from "../infrastructure/recall/bucket-recall.js";
 import { incrementWithTtl } from "../infrastructure/cache/redis-cache.js";
 import { setRequestTimingFields } from "../observability/request-timing.js";
@@ -200,39 +191,6 @@ async function consumeMonthlySaveQuota(auth: AuthContext): Promise<number> {
   return incrementWithTtl(monthlySaveQuotaKey(auth.tenantId), SAVE_QUOTA_TTL_SECONDS);
 }
 
-// ── Shadow-mode helpers (passed as use-case deps) ─────────────────────────────
-
-function runRecallShadowChecks(
-  query: string,
-  auth: AuthContext,
-  limit: number,
-  result: RecallResult
-): void {
-  if (!config.recallV2ShadowMode) return;
-  void recallMemoriesV2(query, auth, limit, 1)
-    .then(async (v2) => {
-      const left = result.memories.map((m) => m.id).sort();
-      const right = v2.memories.map((m) => m.id).sort();
-      const same = left.length === right.length && left.every((v, i) => v === right[i]);
-      if (!same) {
-        await memoryRepository.logEvent({
-          auth,
-          action: "shadow_divergence",
-          metadata: {
-            operation: "recall_v2_shadow", query, limit,
-            baselineCount: left.length, v2Count: right.length,
-            baselineTop: left.slice(0, 5), v2Top: right.slice(0, 5),
-          },
-        });
-      }
-    })
-    .catch((error) => {
-      if (config.nodeEnv !== "production") {
-        console.warn("[memory] recall_v2 shadow check failed", error);
-      }
-    });
-}
-
 function logRecallEvent(
   query: string,
   limit: number,
@@ -240,24 +198,16 @@ function logRecallEvent(
   requesterIp: string | undefined,
   result: RecallResult,
   source: RecallSource,
-  timingsMs: Record<string, number> = {},
-  snapshot: { status?: string; lookupMs?: number; ageMs?: number } = {}
+  timingsMs: Record<string, number> = {}
 ): void {
   const cacheHit = source === "exact_cache" || source === "warm_cache";
   setRequestTimingFields({
     recall_source: source,
     recall_cache_hit: cacheHit,
     recall_cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
-    recall_fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
-    recall_relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
-    recall_enrich_ms: timingsMs.enrich_ms ?? 0,
     recall_embed_ms: timingsMs.embed_ms ?? 0,
     recall_vector_ms: timingsMs.vector_ms ?? 0,
-    recall_graph_ms: timingsMs.graph_ms ?? 0,
     recall_total_ms: timingsMs.total_ms ?? 0,
-    recall_snapshot_status: snapshot.status ?? null,
-    recall_snapshot_lookup_ms: snapshot.lookupMs ?? 0,
-    recall_snapshot_age_ms: snapshot.ageMs ?? 0,
   });
   void memoryRepository.logEvent({
     auth,
@@ -266,16 +216,9 @@ function logRecallEvent(
     metadata: {
       query, limit, hits: result.memories.length, source, cache_hit: cacheHit,
       cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
-      fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
-      relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
-      enrich_ms: timingsMs.enrich_ms ?? 0,
       embed_ms: timingsMs.embed_ms ?? 0,
       vector_ms: timingsMs.vector_ms ?? 0,
-      graph_ms: timingsMs.graph_ms ?? 0,
       total_ms: timingsMs.total_ms ?? 0,
-      snapshot_status: snapshot.status ?? null,
-      snapshot_lookup_ms: snapshot.lookupMs ?? 0,
-      snapshot_age_ms: snapshot.ageMs ?? 0,
     },
   }).catch((error) => { noteMemoryDbFailure(error, "recall-log"); });
 }
@@ -290,13 +233,9 @@ const saveMemoryUseCase = new SaveMemoryUseCase({
   noteVectorFailure,
   noteMemoryDbFailure,
   setRequestTimingFields,
-  enqueueGraphExtractionJob,
   invalidateRecallCache,
-  invalidateRecallV2Cache,
   invalidateBm25Cache,
   bumpRecallStamp,
-  markSnapshotStale,
-  queueSnapshotRefresh,
   ipHash,
   createQuotaExceededError: (message) => new QuotaExceededError(message),
   isEvalMode: IS_EVAL_MODE,
@@ -324,7 +263,7 @@ const recallMemoryUseCase = new RecallMemoryUseCase({
   },
   memoryRepository,
   logRecallEvent,
-  runRecallShadowChecks,
+  runRecallShadowChecks: () => {},
 });
 
 const listMemoriesUseCase = new ListMemoriesUseCase({
@@ -339,10 +278,7 @@ const deleteMemoryUseCase = new DeleteMemoryUseCase({
   noteVectorFailure,
   noteMemoryDbFailure,
   invalidateRecallCache,
-  invalidateRecallV2Cache,
   bumpRecallStamp,
-  markSnapshotStale,
-  queueSnapshotRefresh,
   ipHash,
 });
 
