@@ -10,6 +10,12 @@ export interface MemoryRecordRow {
   platform: string;
   summary_json: unknown;
   qdrant_point_id: string;
+  memory_type: string;
+  category: string | null;
+  is_pinned: boolean;
+  reference_count: number;
+  last_referenced_at: string | null;
+  superseded_by: string | null;
   created_at: string;
   deleted_at: string | null;
 }
@@ -21,6 +27,11 @@ interface CreateMemoryRecordInput {
   platform: string;
   summaryJson: unknown;
   qdrantPointId: string;
+  memoryType?: string;
+  category?: string | null;
+  isPinned?: boolean;
+  referenceCount?: number;
+  lastReferencedAt?: string | null;
 }
 
 interface UpdateMemoryRecordContentInput {
@@ -29,12 +40,23 @@ interface UpdateMemoryRecordContentInput {
   summaryJson: unknown;
 }
 
+interface ListMemoryOptions {
+  types?: string[];
+  pinnedOnly?: boolean;
+  includeSuperseded?: boolean;
+}
+
+function normalizeTypes(types?: string[]): string[] {
+  if (!types || types.length === 0) return [];
+  return [...new Set(types.map((value) => value.trim().toLowerCase()).filter(Boolean))];
+}
+
 export class MemoryRepository {
   async create(auth: AuthContext, input: CreateMemoryRecordInput): Promise<void> {
     await pool.query(
       `INSERT INTO memory_records
-       (id, tenant_id, user_id, content_ciphertext, content_hash, platform, summary_json, qdrant_point_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+       (id, tenant_id, user_id, content_ciphertext, content_hash, platform, summary_json, qdrant_point_id, memory_type, category, is_pinned, reference_count, last_referenced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13)`,
       [
         input.id,
         auth.tenantId,
@@ -44,6 +66,11 @@ export class MemoryRepository {
         input.platform,
         JSON.stringify(input.summaryJson ?? {}),
         input.qdrantPointId,
+        input.memoryType ?? "fact",
+        input.category ?? null,
+        input.isPinned ?? false,
+        input.referenceCount ?? 1,
+        input.lastReferencedAt ?? null,
       ]
     );
   }
@@ -74,39 +101,158 @@ export class MemoryRepository {
     return (result.rowCount ?? 0) > 0;
   }
 
-  async list(auth: AuthContext, limit = 100): Promise<MemoryRecordRow[]> {
+  async findActiveByContentHash(auth: AuthContext, contentHash: string): Promise<MemoryRecordRow | null> {
     const result = await pool.query<MemoryRecordRow>(
       `SELECT *
        FROM memory_records
        WHERE tenant_id = $1
          AND user_id = $2
          AND deleted_at IS NULL
+         AND superseded_by IS NULL
+         AND content_hash = $3
        ORDER BY created_at DESC
-       LIMIT $3`,
-      [auth.tenantId, auth.userId, limit]
+       LIMIT 1`,
+      [auth.tenantId, auth.userId, contentHash]
     );
+    return result.rows[0] ?? null;
+  }
+
+  async incrementReferenceScoped(
+    auth: AuthContext,
+    memoryId: string,
+    delta = 1,
+    referencedAtIso = new Date().toISOString()
+  ): Promise<boolean> {
+    const result = await pool.query(
+      `UPDATE memory_records
+       SET reference_count = reference_count + GREATEST($1, 1),
+           last_referenced_at = $2::timestamptz
+       WHERE id = $3
+         AND tenant_id = $4
+         AND user_id = $5
+         AND deleted_at IS NULL
+         AND superseded_by IS NULL`,
+      [delta, referencedAtIso, memoryId, auth.tenantId, auth.userId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async touchReferencedScoped(
+    auth: AuthContext,
+    memoryIds: string[],
+    referencedAtIso = new Date().toISOString()
+  ): Promise<void> {
+    if (memoryIds.length === 0) return;
+    await pool.query(
+      `UPDATE memory_records
+       SET last_referenced_at = $1::timestamptz
+       WHERE tenant_id = $2
+         AND user_id = $3
+         AND deleted_at IS NULL
+         AND superseded_by IS NULL
+         AND id = ANY($4::uuid[])`,
+      [referencedAtIso, auth.tenantId, auth.userId, memoryIds]
+    );
+  }
+
+  private async listWithOptions(
+    auth: AuthContext,
+    limit: number | null,
+    options: ListMemoryOptions = {}
+  ): Promise<MemoryRecordRow[]> {
+    const clauses = [
+      "tenant_id = $1",
+      "user_id = $2",
+      "deleted_at IS NULL",
+    ];
+    const values: unknown[] = [auth.tenantId, auth.userId];
+    const types = normalizeTypes(options.types);
+
+    if (!options.includeSuperseded) {
+      clauses.push("superseded_by IS NULL");
+    }
+    if (types.length > 0) {
+      values.push(types);
+      clauses.push(`memory_type = ANY($${values.length}::text[])`);
+    }
+    if (options.pinnedOnly) {
+      clauses.push("is_pinned = TRUE");
+    }
+
+    let sql = `SELECT *
+       FROM memory_records
+       WHERE ${clauses.join("\n         AND ")}
+       ORDER BY is_pinned DESC, last_referenced_at DESC NULLS LAST, created_at DESC`;
+
+    if (typeof limit === "number") {
+      values.push(limit);
+      sql += `\n       LIMIT $${values.length}`;
+    }
+
+    const result = await pool.query<MemoryRecordRow>(sql, values);
     return result.rows;
+  }
+
+  async list(auth: AuthContext, limit = 100, options: ListMemoryOptions = {}): Promise<MemoryRecordRow[]> {
+    return this.listWithOptions(auth, limit, options);
   }
 
   /**
-   * Returns ALL non-deleted memories for a user with no row cap.
-   * Used by recall fallback paths so that old memories are not silently skipped
-   * due to a recency-ordered LIMIT.
+   * Returns ALL active memories for a user with no row cap.
    */
-  async listAll(auth: AuthContext): Promise<MemoryRecordRow[]> {
-    const result = await pool.query<MemoryRecordRow>(
-      `SELECT *
-       FROM memory_records
-       WHERE tenant_id = $1
-         AND user_id = $2
-         AND deleted_at IS NULL
-       ORDER BY created_at DESC`,
-      [auth.tenantId, auth.userId]
-    );
-    return result.rows;
+  async listAll(auth: AuthContext, options: ListMemoryOptions = {}): Promise<MemoryRecordRow[]> {
+    return this.listWithOptions(auth, null, options);
   }
 
-  async getByIds(auth: AuthContext, ids: string[]): Promise<MemoryRecordRow[]> {
+  async listPinnedPreferences(auth: AuthContext): Promise<MemoryRecordRow[]> {
+    return this.listWithOptions(auth, null, {
+      types: ["preference"],
+      pinnedOnly: true,
+      includeSuperseded: false,
+    });
+  }
+
+  async listPreferences(auth: AuthContext, limit = 200): Promise<MemoryRecordRow[]> {
+    return this.listWithOptions(auth, limit, {
+      types: ["preference"],
+      includeSuperseded: false,
+    });
+  }
+
+  async markSupersededPreferences(auth: AuthContext, input: {
+    supersededById: string;
+    preferenceKey?: string | null;
+    category?: string | null;
+    excludeContentHash?: string;
+  }): Promise<string[]> {
+    const result = await pool.query<{ id: string }>(
+      `UPDATE memory_records
+       SET superseded_by = $1
+       WHERE tenant_id = $2
+         AND user_id = $3
+         AND deleted_at IS NULL
+         AND superseded_by IS NULL
+         AND memory_type = 'preference'
+         AND id <> $1
+         AND ($6::text IS NULL OR content_hash <> $6)
+         AND (
+           ($4::text IS NOT NULL AND summary_json->>'preference_key' = $4)
+           OR ($5::text IS NOT NULL AND category = $5)
+         )
+       RETURNING id`,
+      [
+        input.supersededById,
+        auth.tenantId,
+        auth.userId,
+        input.preferenceKey ?? null,
+        input.category ?? null,
+        input.excludeContentHash ?? null,
+      ]
+    );
+    return result.rows.map((row) => row.id);
+  }
+
+  async getByIds(auth: AuthContext, ids: string[], includeSuperseded = false): Promise<MemoryRecordRow[]> {
     if (ids.length === 0) return [];
 
     const result = await pool.query<MemoryRecordRow>(
@@ -115,6 +261,7 @@ export class MemoryRepository {
        WHERE tenant_id = $1
          AND user_id = $2
          AND deleted_at IS NULL
+         ${includeSuperseded ? "" : "AND superseded_by IS NULL"}
          AND id = ANY($3::uuid[])`,
       [auth.tenantId, auth.userId, ids]
     );
@@ -122,13 +269,14 @@ export class MemoryRepository {
     return result.rows;
   }
 
-  async getByIdScoped(auth: AuthContext, id: string): Promise<MemoryRecordRow | null> {
+  async getByIdScoped(auth: AuthContext, id: string, includeSuperseded = true): Promise<MemoryRecordRow | null> {
     const result = await pool.query<MemoryRecordRow>(
       `SELECT *
        FROM memory_records
        WHERE tenant_id = $1
          AND user_id = $2
          AND deleted_at IS NULL
+         ${includeSuperseded ? "" : "AND superseded_by IS NULL"}
          AND id = $3
        LIMIT 1`,
       [auth.tenantId, auth.userId, id]

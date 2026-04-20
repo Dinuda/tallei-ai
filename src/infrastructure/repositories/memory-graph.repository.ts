@@ -235,6 +235,7 @@ export class MemoryGraphRepository {
        WHERE tenant_id = $1
          AND user_id = $2
          AND deleted_at IS NULL
+         AND superseded_by IS NULL
        ORDER BY created_at DESC
        LIMIT $3`,
       [auth.tenantId, auth.userId, limit]

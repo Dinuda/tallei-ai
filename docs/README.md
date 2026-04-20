@@ -13,6 +13,18 @@ Start here to understand the system:
   - Entity relationship graphs
   - Database schema
 
+## Memory Model Update (April 2026)
+
+- Memory records are now typed (`preference`, `fact`, `event`, `decision`, `note`) with pinning and supersede support.
+- Recall is preference-first and type-aware (decay + similarity floor + context dedup).
+- New MCP preference tools:
+  - `save_preference`
+  - `list_preferences`
+  - `forget_preference`
+- `recall_memories` now supports optional type filters via `types`.
+- ChatGPT Actions importer URL:
+  - `/chatgpt/actions/openapi.json`
+
 ## Deployment & Operations
 
 - Production deployment:

@@ -1,4 +1,5 @@
 import type { AuthContext } from "../../domain/auth/index.js";
+import type { MemoryType } from "./memory-types.js";
 import {
   buildFallbackTimings,
   selectFallbackSource,
@@ -38,8 +39,8 @@ interface FallbackResult {
 
 interface RecallMemoryUseCaseDeps {
   readonly normalizeRecallQuery: (query: string) => string;
-  readonly recallCacheKey: (auth: AuthContext, query: string, limit: number) => string;
-  readonly recallEnrichmentKey: (auth: AuthContext, query: string, limit: number) => string;
+  readonly recallCacheKey: (auth: AuthContext, query: string, limit: number, types?: MemoryType[]) => string;
+  readonly recallEnrichmentKey: (auth: AuthContext, query: string, limit: number, types?: MemoryType[]) => string;
   readonly getCachedRecall: (cacheKey: string) => RecallResult | null;
   readonly setCachedRecall: (cacheKey: string, result: RecallResult) => void;
   readonly readExactRecallPayload: <T>(auth: AuthContext, query: string, slot: "v1" | "v2") => Promise<T | null>;
@@ -48,7 +49,12 @@ interface RecallMemoryUseCaseDeps {
   readonly runBackgroundRecallEnrichment: (key: string, task: () => Promise<void>) => void;
   readonly withTimeout: <T>(promise: Promise<T>, ms: number, label: string) => Promise<T>;
   readonly fastRecallTotalTimeoutMs: number;
-  readonly hybridRecall: (query: string, auth: AuthContext, limit: number) => Promise<{ contextBlock: string; memories: RecallResult["memories"]; timingsMs: Record<string, number> }>;
+  readonly hybridRecall: (
+    query: string,
+    auth: AuthContext,
+    limit: number,
+    options?: { types?: MemoryType[] }
+  ) => Promise<{ contextBlock: string; memories: RecallResult["memories"]; timingsMs: Record<string, number> }>;
   readonly memoryRepository: {
     logEvent(input: {
       auth: AuthContext;
@@ -59,7 +65,12 @@ interface RecallMemoryUseCaseDeps {
     }): Promise<void>;
   };
   readonly lookupPrecomputedRecallV1: (auth: AuthContext, query: string, limit: number) => Promise<SnapshotLookup>;
-  readonly buildRecentFallback: (auth: AuthContext, query: string, limit: number) => Promise<FallbackResult>;
+  readonly buildRecentFallback: (
+    auth: AuthContext,
+    query: string,
+    limit: number,
+    types?: MemoryType[]
+  ) => Promise<FallbackResult>;
   readonly queueSnapshotRefresh: (auth: AuthContext, reason: string, delayMs: number) => Promise<void>;
   readonly logRecallEvent: (
     query: string,
@@ -79,6 +90,7 @@ interface RecallMemoryUseCaseInput {
   readonly auth: AuthContext;
   readonly limit?: number;
   readonly requesterIp?: string;
+  readonly types?: MemoryType[];
 }
 
 export class RecallMemoryUseCase {
@@ -94,7 +106,13 @@ export class RecallMemoryUseCase {
 
     const boundedLimit = Math.min(20, Math.max(1, input.limit ?? 5));
     const normalizedQuery = this.deps.normalizeRecallQuery(input.query);
-    const cacheKey = this.deps.recallCacheKey(input.auth, normalizedQuery, boundedLimit);
+    const normalizedTypes = input.types && input.types.length > 0
+      ? [...new Set(input.types)].sort()
+      : [];
+    const cacheQuery = normalizedTypes.length > 0
+      ? `${normalizedQuery} [types:${normalizedTypes.join(",")}]`
+      : normalizedQuery;
+    const cacheKey = this.deps.recallCacheKey(input.auth, cacheQuery, boundedLimit, normalizedTypes);
     const cached = this.deps.getCachedRecall(cacheKey);
     if (cached) {
       this.deps.logRecallEvent(input.query, boundedLimit, input.auth, input.requesterIp, cached, "exact_cache", {
@@ -103,7 +121,7 @@ export class RecallMemoryUseCase {
       return cached;
     }
 
-    const exactHit = await this.deps.readExactRecallPayload<RecallResult>(input.auth, normalizedQuery, "v1");
+    const exactHit = await this.deps.readExactRecallPayload<RecallResult>(input.auth, cacheQuery, "v1");
     if (exactHit) {
       this.deps.setCachedRecall(cacheKey, exactHit);
       this.deps.logRecallEvent(input.query, boundedLimit, input.auth, input.requesterIp, exactHit, "exact_cache", {
@@ -113,14 +131,14 @@ export class RecallMemoryUseCase {
       return exactHit;
     }
 
-    const warmHit = await this.deps.readWarmRecallPayload<RecallResult>(input.auth, normalizedQuery, "v1");
+    const warmHit = await this.deps.readWarmRecallPayload<RecallResult>(input.auth, cacheQuery, "v1");
     if (warmHit) {
       this.deps.setCachedRecall(cacheKey, warmHit);
       this.deps.runBackgroundRecallEnrichment(
-        this.deps.recallEnrichmentKey(input.auth, normalizedQuery, boundedLimit),
+        this.deps.recallEnrichmentKey(input.auth, cacheQuery, boundedLimit, normalizedTypes),
         async () => {
           const hybridResult = await this.deps.withTimeout(
-            this.deps.hybridRecall(normalizedQuery, input.auth, boundedLimit),
+            this.deps.hybridRecall(normalizedQuery, input.auth, boundedLimit, { types: normalizedTypes }),
             this.deps.fastRecallTotalTimeoutMs,
             "recall.enrichTotal"
           );
@@ -129,7 +147,7 @@ export class RecallMemoryUseCase {
             memories: hybridResult.memories,
           };
           this.deps.setCachedRecall(cacheKey, enrichedResult);
-          await this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", enrichedResult);
+          await this.deps.writeRecallPayload(input.auth, cacheQuery, "v1", enrichedResult);
           await this.deps.memoryRepository.logEvent({
             auth: input.auth,
             action: "recall_enrich",
@@ -153,10 +171,10 @@ export class RecallMemoryUseCase {
       return warmHit;
     }
 
-    const snapshotLookup = await this.deps.lookupPrecomputedRecallV1(input.auth, normalizedQuery, boundedLimit);
+    const snapshotLookup = await this.deps.lookupPrecomputedRecallV1(input.auth, cacheQuery, boundedLimit);
     if (snapshotLookup.status === "hit" && snapshotLookup.result) {
       this.deps.setCachedRecall(cacheKey, snapshotLookup.result);
-      void this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", snapshotLookup.result).catch(() => {});
+      void this.deps.writeRecallPayload(input.auth, cacheQuery, "v1", snapshotLookup.result).catch(() => {});
       this.deps.logRecallEvent(
         input.query,
         boundedLimit,
@@ -178,49 +196,52 @@ export class RecallMemoryUseCase {
       return snapshotLookup.result;
     }
 
-    const fallback = await this.deps.buildRecentFallback(input.auth, normalizedQuery, boundedLimit);
-    if (fallback.relevanceMiss) {
-      void this.deps.queueSnapshotRefresh(input.auth, "fallback_relevance_miss_v1", 750).catch(() => {});
-    }
+    // Run semantic search synchronously so the first call returns the correct
+    // memory. The old pattern (lexical fallback now + semantic in background)
+    // meant the right answer only appeared on the second identical query.
+    // If semantic search times out, fall back to recent memories.
+    let result: RecallResult;
+    let source: ReturnType<typeof selectFallbackSource>;
+    let fallbackElapsedMs = 0;
+    let relevanceMiss = false;
 
-    const result: RecallResult = {
-      contextBlock: fallback.contextBlock,
-      memories: fallback.memories,
-    };
-    this.deps.setCachedRecall(cacheKey, result);
-
-    this.deps.runBackgroundRecallEnrichment(
-      this.deps.recallEnrichmentKey(input.auth, normalizedQuery, boundedLimit),
-      async () => {
-        const hybridResult = await this.deps.withTimeout(
-          this.deps.hybridRecall(normalizedQuery, input.auth, boundedLimit),
-          this.deps.fastRecallTotalTimeoutMs,
-          "recall.enrichTotal"
-        );
-        const enrichedResult: RecallResult = {
-          contextBlock: hybridResult.contextBlock,
-          memories: hybridResult.memories,
-        };
-        this.deps.setCachedRecall(cacheKey, enrichedResult);
-        await this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", enrichedResult);
-        await this.deps.memoryRepository.logEvent({
-          auth: input.auth,
-          action: "recall_enrich",
-          metadata: {
-            query: normalizedQuery,
-            limit: boundedLimit,
-            source: "semantic_enriched",
-            cache_hit: false,
-            enrich_ms: hybridResult.timingsMs.total_ms ?? 0,
-            embed_ms: hybridResult.timingsMs.embed_ms ?? 0,
-            vector_ms: hybridResult.timingsMs.vector_ms ?? 0,
-            graph_ms: 0,
-          },
-        });
+    try {
+      const hybridResult = await this.deps.withTimeout(
+        this.deps.hybridRecall(normalizedQuery, input.auth, boundedLimit, { types: normalizedTypes }),
+        this.deps.fastRecallTotalTimeoutMs,
+        "recall.hybridSync"
+      );
+      result = { contextBlock: hybridResult.contextBlock, memories: hybridResult.memories };
+      source = "semantic_enriched" satisfies RecallSource;
+      this.deps.setCachedRecall(cacheKey, result);
+      void this.deps.writeRecallPayload(input.auth, cacheQuery, "v1", result).catch(() => {});
+      void this.deps.memoryRepository.logEvent({
+        auth: input.auth,
+        action: "recall_hybrid_sync",
+        metadata: {
+          query: normalizedQuery,
+          limit: boundedLimit,
+          enrich_ms: hybridResult.timingsMs.total_ms ?? 0,
+          vector_ms: hybridResult.timingsMs.vector_ms ?? 0,
+        },
+      }).catch(() => {});
+    } catch {
+      // Semantic search timed out — use recent memories as safety net.
+      const fallback = await this.deps.buildRecentFallback(
+        input.auth,
+        normalizedQuery,
+        boundedLimit,
+        normalizedTypes
+      );
+      result = { contextBlock: fallback.contextBlock, memories: fallback.memories };
+      source = selectFallbackSource(snapshotLookup.status);
+      fallbackElapsedMs = fallback.elapsedMs;
+      relevanceMiss = fallback.relevanceMiss;
+      this.deps.setCachedRecall(cacheKey, result);
+      if (relevanceMiss) {
+        void this.deps.queueSnapshotRefresh(input.auth, "fallback_relevance_miss_v1", 750).catch(() => {});
       }
-    );
-
-    const fallbackSource = selectFallbackSource(snapshotLookup.status);
+    }
 
     this.deps.logRecallEvent(
       input.query,
@@ -228,11 +249,11 @@ export class RecallMemoryUseCase {
       input.auth,
       input.requesterIp,
       result,
-      fallbackSource,
+      source,
       buildFallbackTimings({
         cacheLookupMs: cacheLookupMs(),
-        fallbackElapsedMs: fallback.elapsedMs,
-        relevanceMiss: fallback.relevanceMiss,
+        fallbackElapsedMs,
+        relevanceMiss,
       }),
       {
         status: snapshotLookup.status,

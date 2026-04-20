@@ -110,9 +110,12 @@ transport/mcp/tools/save-memory.ts
     ▼
 orchestration/memory/save.usecase.ts  (SaveMemoryUseCase.execute)
     │
+    ├─ summarize + classify memory type/category (server-decided)
+    ├─ dedup pass (content hash + high-sim vector match) -> bump reference_count if duplicate
     ├─ encrypt content (infrastructure/crypto/memory-crypto.ts)
     ├─ consume monthly quota (Redis; fail-open for free plan)
     ├─ INSERT row → infrastructure/repositories/memory.repository.ts → PG
+    ├─ for preferences: supersede conflicting active preference rows via superseded_by
     │
     └─ BACKGROUND (fire-and-forget):
         ├─ embed text  → providers/ai/registry.ts → OpenAiProvider.embed
@@ -144,12 +147,14 @@ orchestration/memory/recall.usecase.ts  (RecallMemoryUseCase.execute)
     └─ MISS PATH:
         ├─ buildRecentFallback (BM25 lexical, no I/O to Qdrant) → return immediately
         └─ BACKGROUND: hybridRecall
+            ├─ prepend pinned preferences (no scoring/decay)
             ├─ embed query → providers/ai/registry.ts → OpenAiProvider.embed
             │               (embedPolicy: 5s timeout, 3× retry)
             ├─ vector search → infrastructure/vector/vector-store.ts → Qdrant
             │                  (vectorSearchPolicy: 8s, 2× retry, CB)
             ├─ BM25 lexical search → infrastructure/recall/bm25.ts
-            ├─ RRF fusion + rerank → orchestration/ai/rerank.usecase.ts
+            ├─ type-aware RRF scoring + decay + reference_count boost
+            ├─ similarity floor filter + context dedup
             └─ write enriched result back to caches
 ```
 
@@ -196,7 +201,7 @@ Breakers are keyed by `(provider, capability)`: `openai:chat`, `openai:embed`, `
 The following are **never** changed without a deprecation window and consumer notification:
 
 **MCP tools** (names + `inputSchema`):
-`save_memory`, `recall_memories`, `recall_memories_v2`, `list_memory_entities`, `explain_memory_connection`, `memory_graph_insights`, `recall_user_context`, `list_memories`, `delete_memory`, `remember_user_preference`
+`save_memory`, `save_preference`, `recall_memories`, `recall_memories_v2`, `list_memory_entities`, `explain_memory_connection`, `memory_graph_insights`, `list_memories`, `list_preferences`, `delete_memory`, `forget_preference`
 
 **HTTP routes**: all routes in `src/transport/http/routes/` — paths and methods are frozen.
 

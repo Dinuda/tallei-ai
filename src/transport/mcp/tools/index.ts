@@ -5,8 +5,11 @@ import { config } from "../../../config/index.js";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import {
   saveMemory,
+  savePreference,
   recallMemories,
   listMemories,
+  listPreferences,
+  forgetPreference,
   deleteMemory,
   QuotaExceededError,
 } from "../../../services/memory.js";
@@ -19,6 +22,7 @@ import { getMemoryGraphInsights } from "../../../orchestration/graph/graph-insig
 import { PlatformSchema } from "../schemas.js";
 
 type ToolResult = { content: [{ type: "text"; text: string }]; isError?: true };
+const MemoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
 
 function onQuotaError(err: unknown): ToolResult {
   if (err instanceof QuotaExceededError) {
@@ -51,6 +55,36 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
+    "save_preference",
+    {
+      title: "Save Preference",
+      description: "Saves a durable user preference as pinned memory. Use this for identity and stable preferences.",
+      inputSchema: {
+        content: z
+          .string()
+          .describe("The preference to store (e.g., favorite color, preferred stack, name/pronouns)."),
+        category: z.string().optional().describe("Optional preference category like identity, ui, stack."),
+        preference_key: z
+          .string()
+          .optional()
+          .describe("Optional stable conflict key (e.g., favorite_color, identity_name)."),
+        platform: PlatformSchema.optional().default("claude").describe("The AI platform this preference is from"),
+      },
+    },
+    async ({ content, category, preference_key, platform }) => {
+      try {
+        const saved = await savePreference(content, auth, platform ?? "claude", undefined, {
+          category: category ?? null,
+          preferenceKey: preference_key ?? null,
+        });
+        return { content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }] };
+      } catch (err) {
+        return onQuotaError(err);
+      }
+    }
+  );
+
+  server.registerTool(
     "recall_memories",
     {
       title: "Recall Memories",
@@ -62,11 +96,12 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           .string()
           .describe("What to search for. Use topic keywords like 'favorite food' or 'project stack'."),
         limit: z.number().int().min(1).max(20).optional().default(5),
+        types: z.array(MemoryTypeSchema).optional().describe("Optional type filter for scoped recall."),
       },
     },
-    async ({ query, limit }) => {
+    async ({ query, limit, types }) => {
       try {
-        const result = await recallMemories(query, auth, limit ?? 5);
+        const result = await recallMemories(query, auth, limit ?? 5, undefined, { types });
         return { content: [{ type: "text", text: result.contextBlock }] };
       } catch (err) {
         return onQuotaError(err);
@@ -156,6 +191,45 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         ...insights.recommendations.slice(0, 4).map((r) => `• ${r}`),
       ];
       return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
+  server.registerTool(
+    "list_preferences",
+    {
+      title: "List Preferences",
+      description: "Lists pinned and active user preferences.",
+      inputSchema: {},
+    },
+    async () => {
+      const preferences = await listPreferences(auth);
+      if (preferences.length === 0) {
+        return { content: [{ type: "text", text: "No preferences stored yet." }] };
+      }
+      const text = preferences
+        .map((preference) => `• ${preference.text} (id=${preference.id})`)
+        .join("\n");
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  server.registerTool(
+    "forget_preference",
+    {
+      title: "Forget Preference",
+      description: "Deletes a preference memory by ID.",
+      inputSchema: {
+        preference_id: z.string().describe("Preference memory ID"),
+      },
+    },
+    async ({ preference_id }) => {
+      try {
+        const result = await forgetPreference(preference_id, auth);
+        return { content: [{ type: "text", text: `Deleted preference ${preference_id}. Success: ${result.success}` }] };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to delete preference";
+        return { content: [{ type: "text", text: message }], isError: true };
+      }
     }
   );
 

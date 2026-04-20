@@ -75,6 +75,9 @@ export function createApp(deps: AppFactoryDeps): Express {
   });
 
   app.use("/api/auth", authRouter);
+  app.get("/chatgpt/actions/openapi.json", (_req, res) => {
+    res.redirect(302, "/api/chatgpt/actions/openapi.json");
+  });
   app.use("/api/oauth", createOauthExtensionsRouter());
   app.use("/api/keys", keysRouter);
   app.use("/api/memories", deps.memoryRateLimit, memoriesRouter);

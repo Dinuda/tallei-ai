@@ -91,6 +91,10 @@ If you want graph features locally, you can also enable:
 - `DASHBOARD_GRAPH_V2_ENABLED=true`
 - `RECALL_V2_ENABLED=true`
 
+Optional recall tuning:
+
+- `TALLEI_MISC__RECALL_HYBRID_SIMILARITY_FLOOR=0.35`
+
 ## 5) Run Backend
 
 From repo root:
@@ -143,6 +147,15 @@ For external OAuth/MCP testing from Claude/ChatGPT, use a public tunnel and upda
 - `NEXTAUTH_URL`
 - `NEXT_PUBLIC_APP_URL`
 - `GOOGLE_REDIRECT_URI`
+
+For ChatGPT Actions import, use:
+
+- `http://<your-public-host>/chatgpt/actions/openapi.json`
+
+Instruction templates are split by runtime:
+
+- Claude: `instructions/claude.md`
+- ChatGPT: `instructions/chatgpt.md`
 
 ## 9) Common Local Issues
 

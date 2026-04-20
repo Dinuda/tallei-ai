@@ -38,6 +38,7 @@ export class MemoryGraphJobRepository {
          SELECT mr.tenant_id, mr.user_id, mr.id AS memory_id
          FROM memory_records mr
          WHERE mr.deleted_at IS NULL
+           AND mr.superseded_by IS NULL
          ORDER BY mr.created_at DESC
          LIMIT $1
        ),

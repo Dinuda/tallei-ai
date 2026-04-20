@@ -35,7 +35,11 @@ function inferChatGptActionTarget(req: Request): TimingTarget | null {
   if (req.method !== "POST") return null;
   const path = stripQuery(req.originalUrl || req.url || "");
 
-  if (path === "/api/chatgpt/actions/save") {
+  if (
+    path === "/api/chatgpt/actions/save" ||
+    path === "/api/chatgpt/actions/save_memory" ||
+    path === "/api/chatgpt/actions/save_preference"
+  ) {
     return {
       surface: "chatgpt_actions",
       operation: "save",
@@ -86,7 +90,7 @@ function inferMcpTarget(req: Request): TimingTarget | null {
   const toolName = typeof params?.name === "string" ? params.name : "";
   if (!toolName) return null;
 
-  if (toolName === "save_memory") {
+  if (toolName === "save_memory" || toolName === "save_preference") {
     return { surface: "mcp", operation: "save", route: path, toolName };
   }
 

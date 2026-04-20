@@ -4,6 +4,7 @@ import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 import { MemoryRepository } from "../repositories/memory.repository.js";
 import { getCacheJson, incrementWithTtl, setCacheJson } from "../cache/redis-cache.js";
 import { config } from "../../config/index.js";
+import type { MemoryType } from "../../orchestration/memory/memory-types.js";
 
 export interface FastRecallMemoryItem {
   id: string;
@@ -53,6 +54,8 @@ function normalizeQuery(query: string): string {
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
+    // Collapse slash-joined abbreviations like "A/L", "A/Ls" → "al", "als"
+    .replace(/([a-z])\/([a-z])/g, "$1$2")
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .map((token) => token.trim())
@@ -237,12 +240,16 @@ function buildContextBlock(memories: FastRecallMemoryItem[]): string {
 export async function buildRecentFallback(
   auth: AuthContext,
   query: string,
-  limit: number
+  limit: number,
+  types?: MemoryType[]
 ): Promise<{ contextBlock: string; memories: FastRecallMemoryItem[]; elapsedMs: number; relevanceMiss: boolean }> {
   const startedAt = Date.now();
   const bounded = Math.min(20, Math.max(1, limit));
   const maxRecent = Math.min(3, bounded);
-  const rows = await memoryRepository.list(auth, Math.max(bounded * 2, 12));
+  const rows = await memoryRepository.list(auth, Math.max(bounded * 2, 12), {
+    types,
+    includeSuperseded: false,
+  });
   const queryTokens = new Set(tokenize(normalizeQuery(query)));
 
   const candidates = rows.map((row) => {

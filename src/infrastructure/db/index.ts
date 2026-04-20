@@ -1,14 +1,24 @@
 import pg from "pg";
 import { config } from "../../config/index.js";
+import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 
 const { Pool } = pg;
 
 function createPool(connectionString: string): pg.Pool {
-  return new Pool({
+  const dbPool = new Pool({
     connectionString,
     connectionTimeoutMillis: 5000,
     query_timeout: 45000,
   });
+
+  dbPool.on("error", (error: Error & { code?: string }) => {
+    const code = error?.code ?? "UNKNOWN";
+    const message = error?.message ?? "unknown pool error";
+    // Prevent process crash on idle client socket errors from pg-pool.
+    console.error(`[db] pool idle client error code=${code} message=${message}`);
+  });
+
+  return dbPool;
 }
 
 function shouldFallback(error: unknown): boolean {
@@ -27,6 +37,103 @@ export let pool = createPool(config.databaseUrl);
 let fallbackAttempted = false;
 
 type DbClient = pg.PoolClient;
+
+type MemoryType = "preference" | "fact" | "event" | "decision" | "note";
+
+const MEMORY_TYPE_CHECK = "'preference', 'fact', 'event', 'decision', 'note'";
+
+function classifyLegacyMemoryText(content: string): { memoryType: MemoryType; category: string | null; isPinned: boolean } {
+  const text = content.trim();
+  const isPreference =
+    /\b(i\s+prefer|i\s+like|i\s+love|i\s+hate|my\s+favou?rite|preferred)\b/i.test(text) ||
+    /\b(my\s+name\s+is|my\s+email\s+is|my\s+phone|my\s+pronouns|i\s+live\s+in|i\s+am\s+from)\b/i.test(text);
+  if (isPreference) {
+    if (/\b(my\s+name\s+is|my\s+email\s+is|my\s+phone|my\s+pronouns)\b/i.test(text)) {
+      return { memoryType: "preference", category: "identity", isPinned: true };
+    }
+    if (/\b(ui|ux|design|theme|color|style)\b/i.test(text)) {
+      return { memoryType: "preference", category: "ui", isPinned: true };
+    }
+    if (/\b(next\.js|typescript|react|node|postgres|qdrant|stack)\b/i.test(text)) {
+      return { memoryType: "preference", category: "stack", isPinned: true };
+    }
+    return { memoryType: "preference", category: null, isPinned: true };
+  }
+  if (/\b(decide|decided|decision|agreed|chose|chosen)\b/i.test(text)) {
+    return { memoryType: "decision", category: null, isPinned: false };
+  }
+  if (/\b(yesterday|today|tomorrow|last\s+week|last\s+month|meeting|event|happened)\b/i.test(text)) {
+    return { memoryType: "event", category: null, isPinned: false };
+  }
+  if (/\b(note|reminder|todo|to\s*do)\b/i.test(text)) {
+    return { memoryType: "note", category: null, isPinned: false };
+  }
+  return { memoryType: "fact", category: null, isPinned: false };
+}
+
+async function hasColumn(client: DbClient, table: string, column: string): Promise<boolean> {
+  const result = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = $1
+        AND column_name = $2
+    ) AS exists`,
+    [table, column]
+  );
+  return Boolean(result.rows[0]?.exists);
+}
+
+async function backfillMemoryTypes(client: DbClient): Promise<void> {
+  const rows = await client.query<{
+    id: string;
+    content_ciphertext: string;
+    memory_type: string;
+    category: string | null;
+    is_pinned: boolean | null;
+  }>(
+    `SELECT id, content_ciphertext, memory_type, category, is_pinned
+     FROM memory_records
+     WHERE deleted_at IS NULL
+       AND superseded_by IS NULL`
+  );
+
+  for (const row of rows.rows) {
+    if (
+      row.memory_type !== "fact" ||
+      row.category !== null ||
+      row.is_pinned === true
+    ) {
+      continue;
+    }
+
+    let plaintext = "";
+    try {
+      plaintext = decryptMemoryContent(row.content_ciphertext);
+    } catch {
+      continue;
+    }
+
+    const classified = classifyLegacyMemoryText(plaintext);
+    if (
+      classified.memoryType === "fact" &&
+      classified.category === null &&
+      classified.isPinned === false
+    ) {
+      continue;
+    }
+
+    await client.query(
+      `UPDATE memory_records
+       SET memory_type = $1,
+           category = COALESCE($2, category),
+           is_pinned = CASE WHEN $3 THEN TRUE ELSE is_pinned END
+       WHERE id = $4`,
+      [classified.memoryType, classified.category, classified.isPinned, row.id]
+    );
+  }
+}
 
 async function connectWithFallback(): Promise<DbClient> {
   try {
@@ -340,6 +447,12 @@ export async function initDb() {
         platform TEXT NOT NULL,
         summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         qdrant_point_id TEXT NOT NULL,
+        memory_type TEXT NOT NULL DEFAULT 'fact',
+        category TEXT,
+        is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+        reference_count INTEGER NOT NULL DEFAULT 1,
+        last_referenced_at TIMESTAMP WITH TIME ZONE,
+        superseded_by UUID NULL REFERENCES memory_records(id) ON DELETE SET NULL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         deleted_at TIMESTAMP WITH TIME ZONE
       );
@@ -352,6 +465,79 @@ export async function initDb() {
         ON memory_records(tenant_id, user_id, deleted_at)
         WHERE deleted_at IS NULL;
     `);
+
+    const hadMemoryTypeColumn = await hasColumn(client, "memory_records", "memory_type");
+    const hadCategoryColumn = await hasColumn(client, "memory_records", "category");
+    const hadPinnedColumn = await hasColumn(client, "memory_records", "is_pinned");
+    const hadReferenceCountColumn = await hasColumn(client, "memory_records", "reference_count");
+    const hadLastReferencedAtColumn = await hasColumn(client, "memory_records", "last_referenced_at");
+    const hadSupersededByColumn = await hasColumn(client, "memory_records", "superseded_by");
+
+    await client.query(`
+      ALTER TABLE memory_records
+      ADD COLUMN IF NOT EXISTS memory_type TEXT,
+      ADD COLUMN IF NOT EXISTS category TEXT,
+      ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS reference_count INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS last_referenced_at TIMESTAMP WITH TIME ZONE,
+      ADD COLUMN IF NOT EXISTS superseded_by UUID NULL REFERENCES memory_records(id) ON DELETE SET NULL;
+    `);
+
+    await client.query(`
+      UPDATE memory_records
+      SET memory_type = 'fact'
+      WHERE memory_type IS NULL;
+      UPDATE memory_records
+      SET is_pinned = FALSE
+      WHERE is_pinned IS NULL;
+      UPDATE memory_records
+      SET reference_count = 1
+      WHERE reference_count IS NULL;
+    `);
+
+    await client.query(`
+      ALTER TABLE memory_records
+      ALTER COLUMN memory_type SET DEFAULT 'fact',
+      ALTER COLUMN memory_type SET NOT NULL,
+      ALTER COLUMN is_pinned SET DEFAULT FALSE,
+      ALTER COLUMN is_pinned SET NOT NULL,
+      ALTER COLUMN reference_count SET DEFAULT 1,
+      ALTER COLUMN reference_count SET NOT NULL;
+    `);
+
+    await client.query(`
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_memory_type_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_memory_type_check
+      CHECK (memory_type IN (${MEMORY_TYPE_CHECK}));
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_memory_records_type_pin
+        ON memory_records(tenant_id, user_id, memory_type, is_pinned)
+        WHERE deleted_at IS NULL AND superseded_by IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_memory_records_reference_count
+        ON memory_records(tenant_id, user_id, reference_count DESC, last_referenced_at DESC)
+        WHERE deleted_at IS NULL AND superseded_by IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_memory_records_superseded_by
+        ON memory_records(tenant_id, user_id, superseded_by)
+        WHERE superseded_by IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_memory_records_content_hash_active
+        ON memory_records(tenant_id, user_id, content_hash)
+        WHERE deleted_at IS NULL AND superseded_by IS NULL;
+    `);
+
+    if (
+      !hadMemoryTypeColumn ||
+      !hadCategoryColumn ||
+      !hadPinnedColumn ||
+      !hadReferenceCountColumn ||
+      !hadLastReferencedAtColumn ||
+      !hadSupersededByColumn
+    ) {
+      await backfillMemoryTypes(client);
+    }
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS memory_events (

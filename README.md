@@ -8,6 +8,15 @@ Tallei's a memory layer for when you want your AI to not forget who you are. It 
 
 ## What You Get
 
+### Recent Changes (April 2026)
+- **Preference-first memory model** — memories now have `memory_type`, `category`, `is_pinned`, `reference_count`, `last_referenced_at`, and `superseded_by`.
+- **Pinned preferences always come first** — recall prepends pinned preferences and prevents them from decaying out.
+- **Cleaner recall with less noise** — type-aware decay, similarity floor filtering, and context deduplication reduce irrelevant/duplicate context.
+- **Deduplicated saves** — duplicate content or near-duplicate vector matches increment `reference_count` instead of creating noisy rows.
+- **New preference tools/APIs** — `save_preference`, `list_preferences`, `forget_preference` and type-scoped recall (`types` filter).
+- **Split runtime instructions** — Claude and ChatGPT now have separate instruction sets (`instructions/claude.md`, `instructions/chatgpt.md`).
+- **ChatGPT Actions OpenAPI endpoint** — stable importer URL: `/chatgpt/actions/openapi.json`.
+
 ### The Basics
 - **Share memories across Claude, ChatGPT, and Gemini** via OAuth. One memory graph, all your AIs.
 - **Sub-15ms saves** — we return instantly, then do the heavy lifting in the background.

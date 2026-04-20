@@ -45,6 +45,7 @@ import type { RecallResult } from "../orchestration/memory/recall.usecase.js";
 import { ListMemoriesUseCase } from "../orchestration/memory/list.usecase.js";
 import { DeleteMemoryUseCase } from "../orchestration/memory/delete.usecase.js";
 import type { RecallSource } from "../orchestration/memory/fallback-policy.js";
+import type { MemoryType } from "../orchestration/memory/memory-types.js";
 import { QuotaExceededError } from "../shared/errors/index.js";
 
 export type { RecallResult, SaveMemoryResult };
@@ -91,12 +92,17 @@ export function normalizeRecallQuery(query: string): string {
   return query.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function recallCacheKey(auth: AuthContext, query: string, limit: number): string {
-  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}`;
+function normalizeRecallTypes(types?: MemoryType[]): string {
+  if (!types || types.length === 0) return "all";
+  return [...new Set(types.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort().join(",");
 }
 
-function recallEnrichmentKey(auth: AuthContext, query: string, limit: number): string {
-  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:v1`;
+function recallCacheKey(auth: AuthContext, query: string, limit: number, types?: MemoryType[]): string {
+  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:${normalizeRecallTypes(types)}`;
+}
+
+function recallEnrichmentKey(auth: AuthContext, query: string, limit: number, types?: MemoryType[]): string {
+  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:${normalizeRecallTypes(types)}:v1`;
 }
 
 function getCachedRecall(cacheKey: string): RecallResult | null {
@@ -286,6 +292,7 @@ async function semanticRecallMemories(
   query: string,
   auth: AuthContext,
   limit = 5,
+  types?: MemoryType[],
   _requesterIp?: string
 ): Promise<{ result: RecallResult; timingsMs: Record<string, number> }> {
   if (!IS_EVAL_MODE && auth.plan === "free") {
@@ -296,7 +303,7 @@ async function semanticRecallMemories(
       );
     }
   }
-  const hybrid = await hybridRecall(query, auth, limit);
+  const hybrid = await hybridRecall(query, auth, limit, { types });
   return { result: { contextBlock: hybrid.contextBlock, memories: hybrid.memories }, timingsMs: hybrid.timingsMs };
 }
 
@@ -369,18 +376,40 @@ export async function saveMemory(
   content: string,
   auth: AuthContext,
   platform: string,
-  requesterIp?: string
+  requesterIp?: string,
+  options?: {
+    memoryType?: MemoryType;
+    category?: string | null;
+    isPinned?: boolean;
+    preferenceKey?: string | null;
+  }
 ): Promise<SaveMemoryResult> {
-  return saveMemoryUseCase.execute({ content, auth, platform, requesterIp });
+  return saveMemoryUseCase.execute({
+    content,
+    auth,
+    platform,
+    requesterIp,
+    memoryType: options?.memoryType,
+    category: options?.category,
+    isPinned: options?.isPinned,
+    preferenceKey: options?.preferenceKey,
+  });
 }
 
 export async function recallMemories(
   query: string,
   auth: AuthContext,
   limit = 5,
-  requesterIp?: string
+  requesterIp?: string,
+  options?: { types?: MemoryType[] }
 ): Promise<RecallResult> {
-  return recallMemoryUseCase.execute({ query, auth, limit, requesterIp });
+  return recallMemoryUseCase.execute({
+    query,
+    auth,
+    limit,
+    requesterIp,
+    types: options?.types,
+  });
 }
 
 export async function listMemories(auth: AuthContext) {
@@ -394,6 +423,61 @@ export async function deleteMemory(
 ): Promise<{ success: true }> {
   await deleteMemoryUseCase.execute({ memoryId, auth, requesterIp });
   return { success: true };
+}
+
+export async function savePreference(
+  content: string,
+  auth: AuthContext,
+  platform: string,
+  requesterIp?: string,
+  options?: {
+    category?: string | null;
+    preferenceKey?: string | null;
+  }
+): Promise<SaveMemoryResult> {
+  return saveMemory(content, auth, platform, requesterIp, {
+    memoryType: "preference",
+    isPinned: true,
+    category: options?.category ?? null,
+    preferenceKey: options?.preferenceKey ?? null,
+  });
+}
+
+export async function listPreferences(auth: AuthContext) {
+  const rows = await memoryRepository.listPreferences(auth, 200);
+  return rows.map((row) => {
+    let text = "";
+    try {
+      text = decryptMemoryContent(row.content_ciphertext);
+    } catch {
+      text = "[Encrypted memory unavailable]";
+    }
+    const summaryMeta = row.summary_json && typeof row.summary_json === "object"
+      ? (row.summary_json as Record<string, unknown>)
+      : {};
+    return {
+      id: row.id,
+      text,
+      category: row.category,
+      isPinned: row.is_pinned,
+      preferenceKey: typeof summaryMeta["preference_key"] === "string" ? summaryMeta["preference_key"] : null,
+      referenceCount: row.reference_count,
+      createdAt: row.created_at,
+      metadata: summaryMeta,
+    };
+  });
+}
+
+export async function forgetPreference(
+  preferenceId: string,
+  auth: AuthContext,
+  requesterIp?: string
+): Promise<{ success: true }> {
+  const row = await memoryRepository.getByIdScoped(auth, preferenceId, true);
+  if (!row || row.memory_type !== "preference") {
+    throw new Error("Preference not found");
+  }
+  return deleteMemory(preferenceId, auth, requesterIp);
 }
 
 // ── Prewarm ───────────────────────────────────────────────────────────────────

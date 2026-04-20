@@ -96,6 +96,7 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   // Misc
   { newKey: "TALLEI_MISC__RECALL_MIN_VECTOR_SCORE",  oldKey: "RECALL_MIN_VECTOR_SCORE" },
   { newKey: "TALLEI_MISC__RECALL_MIN_FALLBACK_SCORE",oldKey: "RECALL_MIN_FALLBACK_SCORE" },
+  { newKey: "TALLEI_MISC__RECALL_HYBRID_SIMILARITY_FLOOR", oldKey: "RECALL_HYBRID_SIMILARITY_FLOOR" },
   { newKey: "TALLEI_MISC__RERANK_MIN_SCORE",         oldKey: "RERANK_MIN_SCORE" },
   { newKey: "TALLEI_MISC__MEMORY_FALLBACK_MIN_RELEVANCE", oldKey: "MEMORY_FALLBACK_MIN_RELEVANCE" },
   { newKey: "TALLEI_MISC__GRAPH_WORKER_POLL_MS",     oldKey: "MEMORY_GRAPH_WORKER_POLL_MS" },
@@ -267,6 +268,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     mcpRateLimitPerMinute: readIntEnv(e, "TALLEI_RATE__MCP_PER_MINUTE", 240),
     recallMinVectorScore: readFloatEnv(e, "TALLEI_MISC__RECALL_MIN_VECTOR_SCORE", 0.30),
     recallMinFallbackScore: readFloatEnv(e, "TALLEI_MISC__RECALL_MIN_FALLBACK_SCORE", 0.05),
+    recallHybridSimilarityFloor: readFloatEnv(e, "TALLEI_MISC__RECALL_HYBRID_SIMILARITY_FLOOR", 0.35),
     rerankEnabled: readBooleanEnv(e, "TALLEI_FEATURE__RERANK", true),
     rerankMinScore: readFloatEnv(e, "TALLEI_MISC__RERANK_MIN_SCORE", 0.4),
     browserWorkerBaseUrl: e.TALLEI_BROWSER__WORKER_BASE_URL || "",
@@ -284,7 +286,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     lemonSqueezyPowerVariantId: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID"),
     claudeProjectInstructionsTemplate:
       e.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
-      "Project: chatgpt memory. Mandatory tool use and preload policy: (1) On the first user message of every new conversation, immediately call recall_memories with query='find tallei' before replying, even if context is not strictly needed, to warm tool/context loading. (2) On each user turn, preload by calling recall_memories once before replying; do not run repeated recall searches in the same turn unless the user explicitly asks for deeper memory search. (3) If you do not know something, are uncertain, or detect missing personal/contextual information, call recall_memories before answering. (4) Before answering personal/contextual questions, ensure the preload recall_memories call has already happened in that turn. (5) Only call remember_user_preference/save_memory when the user explicitly asks to remember something, or when they explicitly asks to remember a correction. (6) If the user corrects a prior fact and asks to remember it, call save_memory with the corrected fact. (7) Do not mention tool calls in the final user-facing response.",
+      "You have Tallei memory tools. Use them silently. Rules: (1) On the first user turn in a new conversation, call recall_memories with types=['preference'] before replying. (2) Before personal/contextual answers, call recall_memories with focused query + relevant types. (3) Use save_preference for stable preferences and identity facts. (4) Use save_memory for non-preference facts/events/decisions/notes. (5) If the user corrects prior information, save the corrected value. (6) Never mention tool calls or saves in user-facing text.",
   } as const;
 }
 

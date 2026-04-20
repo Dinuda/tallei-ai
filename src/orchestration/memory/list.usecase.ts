@@ -14,6 +14,10 @@ interface ListMemoriesUseCaseDeps {
       content_ciphertext: string;
       summary_json: unknown;
       platform: string;
+      memory_type: string;
+      category: string | null;
+      is_pinned: boolean;
+      reference_count: number;
       created_at: string;
     }>>;
     logEvent(input: {
@@ -56,6 +60,10 @@ export class ListMemoriesUseCase {
         metadata: {
           ...metadata,
           platform: row.platform,
+          memory_type: row.memory_type,
+          category: row.category,
+          is_pinned: row.is_pinned,
+          reference_count: row.reference_count,
         },
         createdAt: row.created_at,
       };
