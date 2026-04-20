@@ -50,6 +50,11 @@
     "source": "src/routes/browserUse.ts"
   },
   {
+    "method": "GET",
+    "path": "/api/chatgpt/actions/openapi.json",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
     "method": "POST",
     "path": "/api/chatgpt/actions/recall",
     "source": "src/routes/chatgpt.ts"
@@ -62,6 +67,16 @@
   {
     "method": "POST",
     "path": "/api/chatgpt/actions/save",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/save_memory",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/save_preference",
     "source": "src/routes/chatgpt.ts"
   },
   {
@@ -156,27 +171,22 @@
   },
   {
     "method": "GET",
-    "path": "/api/memories/entities",
+    "path": "/api/memories/preferences",
     "source": "src/routes/memories.ts"
   },
   {
-    "method": "GET",
-    "path": "/api/memories/graph",
+    "method": "POST",
+    "path": "/api/memories/preferences",
     "source": "src/routes/memories.ts"
   },
   {
-    "method": "GET",
-    "path": "/api/memories/insights",
+    "method": "DELETE",
+    "path": "/api/memories/preferences/:id",
     "source": "src/routes/memories.ts"
   },
   {
     "method": "GET",
     "path": "/api/memories/recall",
-    "source": "src/routes/memories.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/memories/recall-v2",
     "source": "src/routes/memories.ts"
   },
   {
@@ -213,6 +223,11 @@
     "method": "POST",
     "path": "/api/oauth/token",
     "source": "src/routes/oauth.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/chatgpt/actions/openapi.json",
+    "source": "src/index.ts"
   },
   {
     "method": "GET",

@@ -19,24 +19,20 @@ function resolveBackendUrl(req?: NextRequest): string {
       return fallback.replace(/\/$/, "");
     }
   } catch {
-    // Keep configured value.
+    // Use configured value as-is if URL parsing fails.
   }
 
   return configured.replace(/\/$/, "");
-}
-
-function backendHeaders(userId: string) {
-  return {
-    "X-Internal-Secret": SECRET,
-    "X-User-Id": userId,
-  };
 }
 
 async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -50,25 +46,25 @@ async function safeJson(response: Response): Promise<unknown> {
   }
 }
 
-export async function GET(req: NextRequest) {
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   const session = await auth();
   if (!session?.user?.id) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const q = req.nextUrl.searchParams.get("q") ?? "";
-  const limit = req.nextUrl.searchParams.get("limit") ?? "5";
-  const graphDepth = req.nextUrl.searchParams.get("graph_depth") ?? "1";
+  const { id } = await params;
   const backend = resolveBackendUrl(req);
 
   try {
-    const target =
-      `${backend}/api/memories/recall-v2` +
-      `?q=${encodeURIComponent(q)}` +
-      `&limit=${encodeURIComponent(limit)}` +
-      `&graph_depth=${encodeURIComponent(graphDepth)}`;
-    const res = await fetchWithTimeout(target, {
-      headers: backendHeaders(session.user.id),
+    const res = await fetchWithTimeout(`${backend}/api/memories/${id}`, {
+      method: "DELETE",
+      headers: {
+        "X-Internal-Secret": SECRET,
+        "X-User-Id": session.user.id,
+      },
     });
     const data = await safeJson(res);
     return Response.json(data, { status: res.status });
@@ -78,8 +74,8 @@ export async function GET(req: NextRequest) {
     return Response.json(
       {
         error: isAbort
-          ? "Timed out contacting backend /api/memories/recall-v2"
-          : "Failed to reach backend /api/memories/recall-v2",
+          ? "Timed out contacting backend /api/memories/:id"
+          : "Failed to reach backend /api/memories/:id",
       },
       { status: isAbort ? 504 : 502 }
     );

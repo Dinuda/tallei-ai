@@ -19,16 +19,17 @@ function resolveBackendUrl(req?: NextRequest): string {
       return fallback.replace(/\/$/, "");
     }
   } catch {
-    // Keep configured value.
+    // Use configured value as-is if URL parsing fails.
   }
 
   return configured.replace(/\/$/, "");
 }
 
-function backendHeaders(userId: string) {
+function backendHeaders(userId: string, extra?: Record<string, string>) {
   return {
     "X-Internal-Secret": SECRET,
     "X-User-Id": userId,
+    ...extra,
   };
 }
 
@@ -36,7 +37,10 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -57,8 +61,9 @@ export async function GET(req: NextRequest) {
   }
 
   const backend = resolveBackendUrl(req);
+
   try {
-    const res = await fetchWithTimeout(`${backend}/api/memories/insights`, {
+    const res = await fetchWithTimeout(`${backend}/api/memories/preferences`, {
       headers: backendHeaders(session.user.id),
     });
     const data = await safeJson(res);
@@ -69,8 +74,39 @@ export async function GET(req: NextRequest) {
     return Response.json(
       {
         error: isAbort
-          ? "Timed out contacting backend /api/memories/insights"
-          : "Failed to reach backend /api/memories/insights",
+          ? "Timed out contacting backend /api/memories/preferences"
+          : "Failed to reach backend /api/memories/preferences",
+      },
+      { status: isAbort ? 504 : 502 }
+    );
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const body = await req.json();
+  const backend = resolveBackendUrl(req);
+
+  try {
+    const res = await fetchWithTimeout(`${backend}/api/memories/preferences`, {
+      method: "POST",
+      headers: backendHeaders(session.user.id, { "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    const data = await safeJson(res);
+    return Response.json(data, { status: res.status });
+  } catch (error) {
+    const isAbort =
+      error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
+    return Response.json(
+      {
+        error: isAbort
+          ? "Timed out contacting backend /api/memories/preferences"
+          : "Failed to reach backend /api/memories/preferences",
       },
       { status: isAbort ? 504 : 502 }
     );

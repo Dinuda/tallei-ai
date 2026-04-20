@@ -4,6 +4,7 @@ import { Button } from "../../../components/ui/button";
 
 export type SaveMode = "instant" | "on_request";
 export type Provider = "claude" | "chatgpt";
+const CHATGPT_ACTIONS_SPEC_VERSION = "3.1.0";
 
 type McpEvent = {
   authMode?: string | null;
@@ -24,7 +25,11 @@ type ChatGptTokenStatus = {
   lastTokenUsedAt: string | null;
 };
 
-async function verifyConnectivityEvent(provider: Provider, sinceMs: number): Promise<{ ok: boolean; message: string }> {
+async function verifyConnectivityEvent(
+  provider: Provider,
+  sinceMs: number,
+  options?: { lastTokenUsedAt?: string | null }
+): Promise<{ ok: boolean; message: string }> {
   try {
     const response = await fetch("/api/mcp-events?limit=100");
     if (!response.ok) {
@@ -33,23 +38,48 @@ async function verifyConnectivityEvent(provider: Provider, sinceMs: number): Pro
     const payload = (await response.json()) as McpEventsResponse;
     const events = Array.isArray(payload?.events) ? payload.events : [];
 
-    const hasMatch = events.some((event) => {
-      if (!event?.ok || !event?.createdAt || !event?.method) return false;
-      const createdAtMs = Date.parse(event.createdAt);
-      if (!Number.isFinite(createdAtMs) || createdAtMs < sinceMs) return false;
+    const isProviderEvent = (event: McpEvent) => {
+      if (!event?.method) return false;
       if (provider === "chatgpt") return event.method.startsWith("chatgpt/actions/");
       return event.authMode === "oauth" && !event.method.startsWith("chatgpt/actions/");
+    };
+
+    const hasFreshMatch = events.some((event) => {
+      if (!event?.ok || !event?.createdAt || !isProviderEvent(event)) return false;
+      const createdAtMs = Date.parse(event.createdAt);
+      if (!Number.isFinite(createdAtMs) || createdAtMs < sinceMs) return false;
+      return true;
     });
 
-    if (hasMatch) {
+    if (hasFreshMatch) {
       return { ok: true, message: "Connectivity verified with a fresh successful event." };
+    }
+
+    const recentSuccessful = events.find((event) => event?.ok && event?.createdAt && isProviderEvent(event));
+    if (recentSuccessful?.createdAt) {
+      const when = new Date(recentSuccessful.createdAt).toLocaleString();
+      return {
+        ok: true,
+        message: `Connectivity verified with a recent successful event (${when}).`,
+      };
+    }
+
+    if (provider === "chatgpt" && options?.lastTokenUsedAt) {
+      const usedAtMs = Date.parse(options.lastTokenUsedAt);
+      const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+      if (Number.isFinite(usedAtMs) && Date.now() - usedAtMs <= sevenDaysMs) {
+        return {
+          ok: true,
+          message: `Connectivity verified from recent token usage (${new Date(usedAtMs).toLocaleString()}).`,
+        };
+      }
     }
 
     return {
       ok: false,
       message:
         provider === "chatgpt"
-          ? "No new ChatGPT action event found yet. Send the test prompt, approve Actions, then verify again."
+          ? "No ChatGPT action event found yet. Send the test prompt, click Confirm on the action permission card, then verify again."
           : "No new Claude connector event found yet. Send the test prompt in Claude, then verify again.",
     };
   } catch {
@@ -60,16 +90,16 @@ async function verifyConnectivityEvent(provider: Provider, sinceMs: number): Pro
 // --- Shared Utilities (Copied from page.tsx) ---
 export function getClaudeInstructions(mode: SaveMode): string {
   if (mode === "instant") {
-    return `You have access to Tallei shared memory via the Tallei Memory connector.\n\nRules:\n1) At the start of every conversation, use tallei to recall relevant memories.\n2) Whenever the user shares a preference, fact, or important detail, save it to Tallei immediately.\n3) If the user corrects a previous fact, save the correction right away.\n4) Never mention memory tools to the user.`;
+    return `You have Tallei memory tools. Use them silently.\n\nRules:\n1) On the first user turn in a new conversation, call recall_memories with types=[\"preference\"].\n2) Before personal/contextual answers, call recall_memories with focused query + relevant types.\n3) Use save_preference for stable preferences and identity facts.\n4) Use save_memory for non-preference facts, decisions, events, and notes.\n5) If the user corrects prior information, save the corrected value immediately.\n6) Never mention tool calls or saves in user-facing text.`;
   }
-  return `You have access to Tallei shared memory via the Tallei Memory connector.\n\nRules:\n1) At the start of every conversation, use tallei to recall relevant memories.\n2) Only save memories when the user explicitly asks you to remember something (e.g., "remember this").\n3) If the user corrects a previous fact and asks you to remember, save the correction.\n4) Never mention memory tools to the user.`;
+  return `You have Tallei memory tools. Use them silently.\n\nRules:\n1) On the first user turn in a new conversation, call recall_memories with types=[\"preference\"].\n2) Before personal/contextual answers, call recall_memories with focused query + relevant types.\n3) Use save_preference for stable preferences and identity facts.\n4) Use save_memory only when the user explicitly asks to remember non-preference details.\n5) If the user corrects prior information and asks to remember it, save the corrected value.\n6) Never mention tool calls or saves in user-facing text.`;
 }
 
 export function getChatGptInstructions(mode: SaveMode): string {
   if (mode === "instant") {
-    return `You have access to Tallei shared memory tools.\n\nRules:\n1) On the first user message in each new chat, call recallMemories with a broad query before replying.\n2) Before answering personal/contextual questions, call recallMemories first.\n3) When the user shares a durable fact or preference, call saveMemory in the same turn.\n4) If the user corrects a prior fact, call saveMemory with the corrected fact.\n5) Do not mention tool calls in the final user-facing response.`;
+    return `You have Tallei Actions tools.\n\nAvailable actions:\n- recallMemories\n- saveMemoryAction\n- savePreferenceAction\n\nRules:\n1) On every user turn, call recallMemories exactly once before writing any answer.\n2) Set recallMemories.query from the latest user message. Prefer using the user message verbatim (or a short faithful rewrite). Never use a fixed generic query.\n3) Use types based on intent: preferences/identity -> [\"preference\"], ongoing plans/projects -> [\"fact\",\"decision\",\"preference\"], otherwise omit types.\n4) Do not chain multiple recall calls in one turn unless the user explicitly asks for deeper memory search.\n5) Use savePreferenceAction for stable preferences and identity.\n6) Use saveMemoryAction for non-preference facts/events/decisions/notes.\n7) Never mention tool calls in user-facing text.`;
   }
-  return `You have access to Tallei shared memory tools.\n\nRules:\n1) On the first user message in each new chat, call recallMemories with a broad query before replying.\n2) Before answering personal/contextual questions, call recallMemories first.\n3) Only call saveMemory when the user explicitly asks you to remember something.\n4) If the user corrects a prior fact and asks you to remember, call saveMemory with the corrected fact.\n5) Do not mention tool calls in the final user-facing response.`;
+  return `You have Tallei Actions tools.\n\nAvailable actions:\n- recallMemories\n- saveMemoryAction\n- savePreferenceAction\n\nRules:\n1) On every user turn, call recallMemories exactly once before writing any answer.\n2) Set recallMemories.query from the latest user message. Prefer using the user message verbatim (or a short faithful rewrite). Never use a fixed generic query.\n3) Use types based on intent: preferences/identity -> [\"preference\"], ongoing plans/projects -> [\"fact\",\"decision\",\"preference\"], otherwise omit types.\n4) Do not chain multiple recall calls in one turn unless the user explicitly asks for deeper memory search.\n5) Use savePreferenceAction for stable preferences and identity.\n6) Call saveMemoryAction only when the user explicitly asks to remember non-preference details.\n7) Never mention tool calls in user-facing text.`;
 }
 
 export function CopyField({ value, label, onCopy }: { value: string; label?: string; onCopy?: () => void }) {
@@ -95,7 +125,19 @@ export function CopyField({ value, label, onCopy }: { value: string; label?: str
   );
 }
 
-export function CodeBlock({ value, language = "txt", onCopy, label }: { value: string; language?: string; onCopy?: () => void; label?: string }) {
+export function CodeBlock({
+  value,
+  language = "txt",
+  onCopy,
+  label,
+  maxHeight,
+}: {
+  value: string;
+  language?: string;
+  onCopy?: () => void;
+  label?: string;
+  maxHeight?: string | number;
+}) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     try {
@@ -126,7 +168,7 @@ export function CodeBlock({ value, language = "txt", onCopy, label }: { value: s
           {copied ? <Check size={16} /> : <Copy size={16} />}
         </button>
       </div>
-      <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto' }}>
+      <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto', overflowY: maxHeight ? 'auto' : 'visible', maxHeight }}>
         <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, monospace', color: '#1f2937' }}>{value}</code>
       </div>
     </div>
@@ -183,12 +225,13 @@ export function VerifyChecklist({ items, onVerified, autoCheck, onToggle }: { it
   }, [allDone, onVerified]);
 
   const toggle = useCallback((index: number) => {
-    setChecked(prev => {
+    const nextValue = !effectiveChecked[index];
+    setChecked((prev) => {
       const next = [...prev];
-      next[index] = !effectiveChecked[index];
-      if (onToggle) onToggle(index, next[index]);
+      next[index] = nextValue;
       return next;
     });
+    if (onToggle) onToggle(index, nextValue);
   }, [effectiveChecked, onToggle]);
 
   return (
@@ -530,6 +573,8 @@ export function ChatGPTWizard({
   const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
 
   const [tokenCopied, setTokenCopied] = useState(false);
+  const openApiBase = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? window.location.origin : "");
+  const openApiUrl = `${openApiBase.replace(/\/$/, "")}/chatgpt/actions/openapi.json?v=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_VERSION)}`;
 
   const totalSteps = 4;
 
@@ -564,7 +609,9 @@ export function ChatGPTWizard({
   async function handleVerifyConnection() {
     setVerifyingConnection(true);
     const since = verificationStartedAt ?? Date.now() - 2 * 60 * 1000;
-    const result = await verifyConnectivityEvent("chatgpt", since);
+    const result = await verifyConnectivityEvent("chatgpt", since, {
+      lastTokenUsedAt: tokenStatus.lastTokenUsedAt,
+    });
     setConnectionVerified(result.ok);
     setConnectionVerificationMessage(result.message);
     setVerifyingConnection(false);
@@ -600,12 +647,25 @@ export function ChatGPTWizard({
 
       {step === 2 && (
         <TwoColumnStep
-          media={<StepMedia src="/mcp-connect.mp4" alt="Connect Connector" caption="Connecting and authorizing" />}
+          media={<StepMedia src="/auth-bearer.mp4" alt="Import OpenAPI" caption="Importing Actions schema" />}
           content={
             <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>Now click <strong>Connect</strong> inside Claude and approve the OAuth window that appears.</p>
-              <InfoCallout>This allows Claude to read and write memories to your secure Tallei vault.</InfoCallout>
-              <VerifyChecklist items={['I clicked Connect', 'I approved the OAuth access', 'The connector status inside Claude now shows "Connected"']} onVerified={setStep2Verified} />
+              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>
+                In GPT Builder, open <strong>Actions</strong> and import this OpenAPI URL.
+              </p>
+              <Button
+                variant="default"
+                onClick={() => window.open("https://chatgpt.com/gpts/editor", "_blank")}
+                style={{ width: 'fit-content' }}
+              >
+                Open GPT Builder <ExternalLink size={14} style={{ marginLeft: "8px" }} />
+              </Button>
+              <CodeBlock value={openApiUrl} language="url" label="OpenAPI URL" />
+              <InfoCallout>This registers only recall + save memory + save preference actions for ChatGPT.</InfoCallout>
+              <VerifyChecklist
+                items={['I opened GPT Builder → Actions', 'I imported the OpenAPI URL', 'The actions loaded without schema errors']}
+                onVerified={setStep2Verified}
+              />
             </>
           }
         />
@@ -630,7 +690,7 @@ export function ChatGPTWizard({
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
                 <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
                 <div>Paste these instructions into the GPT&apos;s <strong>Instructions</strong> box:</div>
-                <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" />
+                <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" maxHeight={260} />
                 <div style={{ marginTop: '0.25rem', fontWeight: 600, color: '#111827' }}>Save the GPT (set visibility to <code>Only me</code>) and add it to a ChatGPT Project.</div>
               </div>
 

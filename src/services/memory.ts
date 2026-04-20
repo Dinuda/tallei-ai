@@ -17,25 +17,13 @@ import type { AuthContext } from "../domain/auth/index.js";
 import { decryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { MemoryRepository } from "../infrastructure/repositories/memory.repository.js";
 import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
+import { invalidateBm25Cache } from "../infrastructure/recall/hybrid-retrieval.js";
 import {
-  enqueueGraphExtractionJob,
-  invalidateRecallV2Cache,
-  recallMemoriesV2,
-} from "../orchestration/graph/recall-v2.usecase.js";
-import { hybridRecall, invalidateBm25Cache } from "../infrastructure/recall/hybrid-retrieval.js";
-import {
-  buildRecentFallback,
   bumpRecallStamp,
   readExactRecallPayload,
-  readWarmRecallPayload,
-  runBackgroundRecallEnrichment,
   writeRecallPayload,
 } from "../infrastructure/recall/fast-recall.js";
-import {
-  lookupPrecomputedRecallV1,
-  markSnapshotStale,
-  queueSnapshotRefresh,
-} from "../orchestration/graph/precomputed-recall.usecase.js";
+import { bucketRecall } from "../infrastructure/recall/bucket-recall.js";
 import { incrementWithTtl } from "../infrastructure/cache/redis-cache.js";
 import { setRequestTimingFields } from "../observability/request-timing.js";
 import { SaveMemoryUseCase } from "../orchestration/memory/save.usecase.js";
@@ -45,6 +33,7 @@ import type { RecallResult } from "../orchestration/memory/recall.usecase.js";
 import { ListMemoriesUseCase } from "../orchestration/memory/list.usecase.js";
 import { DeleteMemoryUseCase } from "../orchestration/memory/delete.usecase.js";
 import type { RecallSource } from "../orchestration/memory/fallback-policy.js";
+import type { MemoryType } from "../orchestration/memory/memory-types.js";
 import { QuotaExceededError } from "../shared/errors/index.js";
 
 export type { RecallResult, SaveMemoryResult };
@@ -91,13 +80,15 @@ export function normalizeRecallQuery(query: string): string {
   return query.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function recallCacheKey(auth: AuthContext, query: string, limit: number): string {
-  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}`;
+function normalizeRecallTypes(types?: MemoryType[]): string {
+  if (!types || types.length === 0) return "all";
+  return [...new Set(types.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort().join(",");
 }
 
-function recallEnrichmentKey(auth: AuthContext, query: string, limit: number): string {
-  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:v1`;
+function recallCacheKey(auth: AuthContext, query: string, limit: number, types?: MemoryType[]): string {
+  return `${cacheScopeKey(auth)}:${limit}:${normalizeRecallQuery(query)}:${normalizeRecallTypes(types)}`;
 }
+
 
 function getCachedRecall(cacheKey: string): RecallResult | null {
   const cached = recallCache.get(cacheKey);
@@ -200,39 +191,6 @@ async function consumeMonthlySaveQuota(auth: AuthContext): Promise<number> {
   return incrementWithTtl(monthlySaveQuotaKey(auth.tenantId), SAVE_QUOTA_TTL_SECONDS);
 }
 
-// ── Shadow-mode helpers (passed as use-case deps) ─────────────────────────────
-
-function runRecallShadowChecks(
-  query: string,
-  auth: AuthContext,
-  limit: number,
-  result: RecallResult
-): void {
-  if (!config.recallV2ShadowMode) return;
-  void recallMemoriesV2(query, auth, limit, 1)
-    .then(async (v2) => {
-      const left = result.memories.map((m) => m.id).sort();
-      const right = v2.memories.map((m) => m.id).sort();
-      const same = left.length === right.length && left.every((v, i) => v === right[i]);
-      if (!same) {
-        await memoryRepository.logEvent({
-          auth,
-          action: "shadow_divergence",
-          metadata: {
-            operation: "recall_v2_shadow", query, limit,
-            baselineCount: left.length, v2Count: right.length,
-            baselineTop: left.slice(0, 5), v2Top: right.slice(0, 5),
-          },
-        });
-      }
-    })
-    .catch((error) => {
-      if (config.nodeEnv !== "production") {
-        console.warn("[memory] recall_v2 shadow check failed", error);
-      }
-    });
-}
-
 function logRecallEvent(
   query: string,
   limit: number,
@@ -240,24 +198,16 @@ function logRecallEvent(
   requesterIp: string | undefined,
   result: RecallResult,
   source: RecallSource,
-  timingsMs: Record<string, number> = {},
-  snapshot: { status?: string; lookupMs?: number; ageMs?: number } = {}
+  timingsMs: Record<string, number> = {}
 ): void {
   const cacheHit = source === "exact_cache" || source === "warm_cache";
   setRequestTimingFields({
     recall_source: source,
     recall_cache_hit: cacheHit,
     recall_cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
-    recall_fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
-    recall_relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
-    recall_enrich_ms: timingsMs.enrich_ms ?? 0,
     recall_embed_ms: timingsMs.embed_ms ?? 0,
     recall_vector_ms: timingsMs.vector_ms ?? 0,
-    recall_graph_ms: timingsMs.graph_ms ?? 0,
     recall_total_ms: timingsMs.total_ms ?? 0,
-    recall_snapshot_status: snapshot.status ?? null,
-    recall_snapshot_lookup_ms: snapshot.lookupMs ?? 0,
-    recall_snapshot_age_ms: snapshot.ageMs ?? 0,
   });
   void memoryRepository.logEvent({
     auth,
@@ -266,38 +216,11 @@ function logRecallEvent(
     metadata: {
       query, limit, hits: result.memories.length, source, cache_hit: cacheHit,
       cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
-      fallback_ms: source === "recent_fallback" ? timingsMs.fallback_ms ?? 0 : 0,
-      relevance_miss: (timingsMs.relevance_miss ?? 0) > 0,
-      enrich_ms: timingsMs.enrich_ms ?? 0,
       embed_ms: timingsMs.embed_ms ?? 0,
       vector_ms: timingsMs.vector_ms ?? 0,
-      graph_ms: timingsMs.graph_ms ?? 0,
       total_ms: timingsMs.total_ms ?? 0,
-      snapshot_status: snapshot.status ?? null,
-      snapshot_lookup_ms: snapshot.lookupMs ?? 0,
-      snapshot_age_ms: snapshot.ageMs ?? 0,
     },
   }).catch((error) => { noteMemoryDbFailure(error, "recall-log"); });
-}
-
-// ── Semantic recall (passed as dep to RecallMemoryUseCase) ────────────────────
-
-async function semanticRecallMemories(
-  query: string,
-  auth: AuthContext,
-  limit = 5,
-  _requesterIp?: string
-): Promise<{ result: RecallResult; timingsMs: Record<string, number> }> {
-  if (!IS_EVAL_MODE && auth.plan === "free") {
-    const count = await countMonthlyEvents(auth.tenantId, "recall");
-    if (count >= FREE_RECALL_LIMIT) {
-      throw new QuotaExceededError(
-        `Free plan limit reached: ${FREE_RECALL_LIMIT} recalls/month. Upgrade to Pro at tallei.app/dashboard/billing.`
-      );
-    }
-  }
-  const hybrid = await hybridRecall(query, auth, limit);
-  return { result: { contextBlock: hybrid.contextBlock, memories: hybrid.memories }, timingsMs: hybrid.timingsMs };
 }
 
 // ── Use-case instances ────────────────────────────────────────────────────────
@@ -310,13 +233,9 @@ const saveMemoryUseCase = new SaveMemoryUseCase({
   noteVectorFailure,
   noteMemoryDbFailure,
   setRequestTimingFields,
-  enqueueGraphExtractionJob,
   invalidateRecallCache,
-  invalidateRecallV2Cache,
   invalidateBm25Cache,
   bumpRecallStamp,
-  markSnapshotStale,
-  queueSnapshotRefresh,
   ipHash,
   createQuotaExceededError: (message) => new QuotaExceededError(message),
   isEvalMode: IS_EVAL_MODE,
@@ -324,24 +243,27 @@ const saveMemoryUseCase = new SaveMemoryUseCase({
 });
 
 const recallMemoryUseCase = new RecallMemoryUseCase({
-  normalizeRecallQuery,
   recallCacheKey,
-  recallEnrichmentKey,
   getCachedRecall,
   setCachedRecall,
   readExactRecallPayload,
-  readWarmRecallPayload,
   writeRecallPayload,
-  runBackgroundRecallEnrichment,
   withTimeout,
-  fastRecallTotalTimeoutMs: FAST_RECALL_TOTAL_TIMEOUT_MS,
-  hybridRecall,
+  totalTimeoutMs: FAST_RECALL_TOTAL_TIMEOUT_MS,
+  bucketRecall: async (query, auth) => {
+    if (!IS_EVAL_MODE && auth.plan === "free") {
+      const count = await countMonthlyEvents(auth.tenantId, "recall");
+      if (count >= FREE_RECALL_LIMIT) {
+        throw new QuotaExceededError(
+          `Free plan limit reached: ${FREE_RECALL_LIMIT} recalls/month. Upgrade to Pro at tallei.app/dashboard/billing.`
+        );
+      }
+    }
+    return bucketRecall(query, auth);
+  },
   memoryRepository,
-  lookupPrecomputedRecallV1,
-  buildRecentFallback,
-  queueSnapshotRefresh,
   logRecallEvent,
-  runRecallShadowChecks,
+  runRecallShadowChecks: () => {},
 });
 
 const listMemoriesUseCase = new ListMemoriesUseCase({
@@ -356,10 +278,7 @@ const deleteMemoryUseCase = new DeleteMemoryUseCase({
   noteVectorFailure,
   noteMemoryDbFailure,
   invalidateRecallCache,
-  invalidateRecallV2Cache,
   bumpRecallStamp,
-  markSnapshotStale,
-  queueSnapshotRefresh,
   ipHash,
 });
 
@@ -369,18 +288,40 @@ export async function saveMemory(
   content: string,
   auth: AuthContext,
   platform: string,
-  requesterIp?: string
+  requesterIp?: string,
+  options?: {
+    memoryType?: MemoryType;
+    category?: string | null;
+    isPinned?: boolean;
+    preferenceKey?: string | null;
+  }
 ): Promise<SaveMemoryResult> {
-  return saveMemoryUseCase.execute({ content, auth, platform, requesterIp });
+  return saveMemoryUseCase.execute({
+    content,
+    auth,
+    platform,
+    requesterIp,
+    memoryType: options?.memoryType,
+    category: options?.category,
+    isPinned: options?.isPinned,
+    preferenceKey: options?.preferenceKey,
+  });
 }
 
 export async function recallMemories(
   query: string,
   auth: AuthContext,
   limit = 5,
-  requesterIp?: string
+  requesterIp?: string,
+  options?: { types?: MemoryType[] }
 ): Promise<RecallResult> {
-  return recallMemoryUseCase.execute({ query, auth, limit, requesterIp });
+  return recallMemoryUseCase.execute({
+    query,
+    auth,
+    limit,
+    requesterIp,
+    types: options?.types,
+  });
 }
 
 export async function listMemories(auth: AuthContext) {
@@ -394,6 +335,61 @@ export async function deleteMemory(
 ): Promise<{ success: true }> {
   await deleteMemoryUseCase.execute({ memoryId, auth, requesterIp });
   return { success: true };
+}
+
+export async function savePreference(
+  content: string,
+  auth: AuthContext,
+  platform: string,
+  requesterIp?: string,
+  options?: {
+    category?: string | null;
+    preferenceKey?: string | null;
+  }
+): Promise<SaveMemoryResult> {
+  return saveMemory(content, auth, platform, requesterIp, {
+    memoryType: "preference",
+    isPinned: true,
+    category: options?.category ?? null,
+    preferenceKey: options?.preferenceKey ?? null,
+  });
+}
+
+export async function listPreferences(auth: AuthContext) {
+  const rows = await memoryRepository.listPreferences(auth, 200);
+  return rows.map((row) => {
+    let text = "";
+    try {
+      text = decryptMemoryContent(row.content_ciphertext);
+    } catch {
+      text = "[Encrypted memory unavailable]";
+    }
+    const summaryMeta = row.summary_json && typeof row.summary_json === "object"
+      ? (row.summary_json as Record<string, unknown>)
+      : {};
+    return {
+      id: row.id,
+      text,
+      category: row.category,
+      isPinned: row.is_pinned,
+      preferenceKey: typeof summaryMeta["preference_key"] === "string" ? summaryMeta["preference_key"] : null,
+      referenceCount: row.reference_count,
+      createdAt: row.created_at,
+      metadata: summaryMeta,
+    };
+  });
+}
+
+export async function forgetPreference(
+  preferenceId: string,
+  auth: AuthContext,
+  requesterIp?: string
+): Promise<{ success: true }> {
+  const row = await memoryRepository.getByIdScoped(auth, preferenceId, true);
+  if (!row || row.memory_type !== "preference") {
+    throw new Error("Preference not found");
+  }
+  return deleteMemory(preferenceId, auth, requesterIp);
 }
 
 // ── Prewarm ───────────────────────────────────────────────────────────────────

@@ -41,13 +41,13 @@ Tallei is a cross-AI ghost memory service that bridges Claude, ChatGPT, and Gemi
 │   middleware/   │      │   recall.usecase  │    │  OllamaProvider       │
 │   dto/          │      │   list.usecase    │    │  ProviderRegistry     │
 │  mcp/           │      │   delete.usecase  │    │  prompt-templates/    │
-│   tools/        │      │  graph/           │    └─────────┬─────────────┘
-│   schemas.ts    │      │   recall-v2       │              │ uses
-│  (FROZEN API)   │      │   extract-graph   │    ┌─────────▼─────────────┐
-└─────────────────┘      │  ai/              │    │    resilience/        │
-                         │   summarize       │    │                       │
-                         │   rerank          │    │  retry.ts             │
-                         │   fact-extract    │    │  timeout.ts           │
+│   tools/        │      │                   │    └─────────┬─────────────┘
+│   schemas.ts    │      │  ai/              │              │ uses
+│  (FROZEN API)   │      │   summarize       │    ┌─────────▼─────────────┐
+└─────────────────┘      │   rerank          │    │    resilience/        │
+                         │   fact-extract    │    │                       │
+                         │                   │    │  retry.ts             │
+                         │                   │    │  timeout.ts           │
                          │  browser/         │    │  circuit-breaker.ts   │
                          │  billing/         │    │  policy.ts            │
                          └────────┬──────────┘    │  policies.ts          │
@@ -59,8 +59,8 @@ Tallei is a cross-AI ghost memory service that bridges Claude, ChatGPT, and Gemi
 │                                                                          │
 │  repositories/          vector/              cache/                      │
 │   memory.repository     qdrant-client        redis-cache                 │
-│   memory-graph.repo     vector-store         memory-cache                │
-│   vector.repository                          embedding-cache             │
+│   vector.repository    vector-store         memory-cache                │
+│                                              embedding-cache             │
 │                                                                          │
 │  db/                    crypto/              auth/                       │
 │   pool                  memory-crypto        jwt                         │
@@ -68,9 +68,9 @@ Tallei is a cross-AI ghost memory service that bridges Claude, ChatGPT, and Gemi
 │   migrations                                                             │
 │                                                                          │
 │  recall/                browser/             billing/                    │
-│   hybrid-retrieval      browser-worker       lemonsqueezy.client         │
-│   fast-recall           fallback-cache                                   │
-│   bm25                                                                   │
+│   bucket-recall         browser-worker       lemonsqueezy.client         │
+│   hybrid-retrieval      fallback-cache                                   │
+│   fast-recall (cache)                                                    │
 └─────────────────────────────────────────────────────────────────────────┘
                                   │ pure types only
           ┌───────────────────────┼──────────────────────────────────────────┐
@@ -79,11 +79,11 @@ Tallei is a cross-AI ghost memory service that bridges Claude, ChatGPT, and Gemi
 │    domain/       │   │  observability/    │   │        shared/              │
 │                  │   │                   │   │                             │
 │  memory/         │   │  logger.ts         │   │  errors/                   │
-│  graph/          │   │  metrics.ts        │   │   AppError hierarchy       │
-│  auth/           │   │  request-timing.ts │   │  result.ts                 │
-│  tenant/         │   │  tracing.ts        │   │  async-safe.ts             │
-│  (pure types,    │   │                   │   │  ids.ts                    │
-│   no I/O)        │   └───────────────────┘   └─────────────────────────────┘
+│  auth/           │   │  metrics.ts        │   │   AppError hierarchy       │
+│  tenant/         │   │  request-timing.ts │   │  result.ts                 │
+│  (pure types,    │   │  tracing.ts        │   │  async-safe.ts             │
+│   no I/O)        │   │                   │   │  ids.ts                    │
+│                  │   └───────────────────┘   └─────────────────────────────┘
 └──────────────────┘
           │
           ▼
@@ -110,9 +110,12 @@ transport/mcp/tools/save-memory.ts
     ▼
 orchestration/memory/save.usecase.ts  (SaveMemoryUseCase.execute)
     │
+    ├─ summarize + classify memory type/category (server-decided)
+    ├─ dedup pass (content hash + high-sim vector match) -> bump reference_count if duplicate
     ├─ encrypt content (infrastructure/crypto/memory-crypto.ts)
     ├─ consume monthly quota (Redis; fail-open for free plan)
     ├─ INSERT row → infrastructure/repositories/memory.repository.ts → PG
+    ├─ for preferences: supersede conflicting active preference rows via superseded_by
     │
     └─ BACKGROUND (fire-and-forget):
         ├─ embed text  → providers/ai/registry.ts → OpenAiProvider.embed
@@ -137,21 +140,38 @@ transport/mcp/tools/recall-memories.ts
     ▼
 orchestration/memory/recall.usecase.ts  (RecallMemoryUseCase.execute)
     │
-    ├─ check in-memory LRU cache (60s TTL) → hit: return ~2ms
-    ├─ check Redis exact-match cache → hit: background enrich, return ~15ms
-    ├─ check precomputed graph snapshot → hit: return ~20ms
+    ├─ check in-memory LRU cache (10 min TTL) → hit: return ~0ms
+    ├─ check Redis exact-match cache (120s TTL) → hit: return ~5ms
     │
-    └─ MISS PATH:
-        ├─ buildRecentFallback (BM25 lexical, no I/O to Qdrant) → return immediately
-        └─ BACKGROUND: hybridRecall
-            ├─ embed query → providers/ai/registry.ts → OpenAiProvider.embed
-            │               (embedPolicy: 5s timeout, 3× retry)
-            ├─ vector search → infrastructure/vector/vector-store.ts → Qdrant
-            │                  (vectorSearchPolicy: 8s, 2× retry, CB)
-            ├─ BM25 lexical search → infrastructure/recall/bm25.ts
-            ├─ RRF fusion + rerank → orchestration/ai/rerank.usecase.ts
-            └─ write enriched result back to caches
+    └─ MISS PATH: infrastructure/recall/bucket-recall.ts (bucketRecall)
+        │
+        ├─ single DB fetch: all non-deleted memories (one Postgres query)
+        ├─ decrypt all rows
+        ├─ split into three buckets by memory_type:
+        │
+        ├─ PREFERENCE bucket (1 500 tok cap)
+        │   sort: is_pinned DESC, reference_count DESC
+        │   strategy: always inject, no search
+        │
+        ├─ LONG-TERM bucket (4 800 tok cap) — facts + decisions
+        │   if total tokens ≤ 4 800:
+        │     dump all, sorted by reference_count DESC  (~30ms total)
+        │   else (overflow):
+        │     1. expand query abbreviations (static dict, 0ms)
+        │     2. vector top-25 → Qdrant (no score floor)
+        │     3. BM25 top-15 → in-process (abbreviation-aware tokeniser)
+        │     4. temporal top-5 (most recent, safety net)
+        │     5. union + score + pack under budget
+        │
+        └─ SHORT-TERM bucket (1 700 tok cap) — events + notes ≤ 60 days old
+            sort: created_at DESC
+            strategy: recency-first, no search
+        │
+        ├─ write result to LRU + Redis exact cache
+        └─ return combined context block (~30ms dump-all / ~400ms overflow)
 ```
+
+See [ADR-011](adr/011-three-bucket-recall.md) for full rationale and trade-offs.
 
 ---
 
@@ -182,7 +202,6 @@ interface AiProvider {
 | `rerank` | 8 s | 1× | 3 / 60s / 1 | return vector-only hits, `degraded=true` |
 | `summarize` | 15 s | 1× | 3 / 60s / 1 | return raw content truncated |
 | `fact-extract` | 10 s | 1× | 3 / 60s / 1 | skip; save without facts |
-| `graph-extract` | 30 s | 2× exp-2s, 10s cap | 5 / 120s / 2 | job marked failed, worker retries |
 | `vector.search` | 8 s | 2× exp-300ms | 6 / 30s / 2 | fall to lexical |
 | `vector.upsert` | 10 s | 3× exp-500ms | 6 / 30s / 2 | PG row persists; `degraded:"vector_unavailable"` |
 | `cache (Redis)` | 800 ms | 0 | existing cooldown | miss = absent; writes swallowed |
@@ -196,7 +215,7 @@ Breakers are keyed by `(provider, capability)`: `openai:chat`, `openai:embed`, `
 The following are **never** changed without a deprecation window and consumer notification:
 
 **MCP tools** (names + `inputSchema`):
-`save_memory`, `recall_memories`, `recall_memories_v2`, `list_memory_entities`, `explain_memory_connection`, `memory_graph_insights`, `recall_user_context`, `list_memories`, `delete_memory`, `remember_user_preference`
+`save_memory`, `save_preference`, `recall_memories`, `list_memories`, `list_preferences`, `delete_memory`, `forget_preference`
 
 **HTTP routes**: all routes in `src/transport/http/routes/` — paths and methods are frozen.
 
@@ -218,3 +237,5 @@ Contract tests in `test/contract/` snapshot these and fail on any drift.
 | [008](adr/008-frozen-http-mcp-contract.md) | Frozen HTTP/MCP public contract | Accepted |
 | [009](adr/009-composition-root.md) | Composition root as sole wiring location | Accepted |
 | [010](adr/010-embedding-cache-in-infrastructure.md) | Embedding cache lives in infrastructure, not provider | Accepted |
+| [011](adr/011-three-bucket-recall.md) | Three-bucket recall — synchronous, accuracy-first retrieval | Accepted |
+| [012](adr/012-remove-graph-layer.md) | Remove LLM graph extraction layer | Accepted |

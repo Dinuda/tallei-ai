@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { auth } from "../../../../auth";
+import { auth } from "../../../../../auth";
 
 const SECRET = process.env.INTERNAL_API_SECRET!;
 const BACKEND_TIMEOUT_MS = 60_000;
@@ -19,24 +19,20 @@ function resolveBackendUrl(req?: NextRequest): string {
       return fallback.replace(/\/$/, "");
     }
   } catch {
-    // Keep configured value.
+    // Use configured value as-is if URL parsing fails.
   }
 
   return configured.replace(/\/$/, "");
-}
-
-function backendHeaders(userId: string) {
-  return {
-    "X-Internal-Secret": SECRET,
-    "X-User-Id": userId,
-  };
 }
 
 async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -50,16 +46,25 @@ async function safeJson(response: Response): Promise<unknown> {
   }
 }
 
-export async function GET(req: NextRequest) {
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   const session = await auth();
   if (!session?.user?.id) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const { id } = await params;
   const backend = resolveBackendUrl(req);
+
   try {
-    const res = await fetchWithTimeout(`${backend}/api/memories/graph`, {
-      headers: backendHeaders(session.user.id),
+    const res = await fetchWithTimeout(`${backend}/api/memories/preferences/${id}`, {
+      method: "DELETE",
+      headers: {
+        "X-Internal-Secret": SECRET,
+        "X-User-Id": session.user.id,
+      },
     });
     const data = await safeJson(res);
     return Response.json(data, { status: res.status });
@@ -69,8 +74,8 @@ export async function GET(req: NextRequest) {
     return Response.json(
       {
         error: isAbort
-          ? "Timed out contacting backend /api/memories/graph"
-          : "Failed to reach backend /api/memories/graph",
+          ? "Timed out contacting backend /api/memories/preferences/:id"
+          : "Failed to reach backend /api/memories/preferences/:id",
       },
       { status: isAbort ? 504 : 502 }
     );

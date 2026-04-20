@@ -1,7 +1,7 @@
 # ADR-008 — Frozen HTTP/MCP public contract
 
 **Status**: Accepted  
-**Date**: 2026-04-18
+**Date**: 2026-04-20
 
 ## Context
 
@@ -17,9 +17,9 @@ The following are permanently frozen. Changes require a versioning strategy and 
 
 **MCP tool names + `inputSchema`** (in `src/transport/mcp/schemas.ts`):
 ```
-save_memory, recall_memories, recall_memories_v2, list_memory_entities,
-explain_memory_connection, memory_graph_insights, recall_user_context,
-list_memories, delete_memory, remember_user_preference
+save_memory, save_preference, recall_memories, recall_memories_v2,
+list_memory_entities, explain_memory_connection, memory_graph_insights,
+list_memories, list_preferences, delete_memory, forget_preference
 ```
 
 **HTTP route paths + methods** (in `src/transport/http/routes/`):

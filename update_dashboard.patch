@@ -1,0 +1,147 @@
+--- dashboard/app/dashboard/page.tsx
++++ dashboard/app/dashboard/page.tsx
+@@ -298,59 +298,28 @@
+       {error && <div className={`${styles.banner} ${styles.bannerError}`}>{error}</div>}
+ 
+-      <section className={styles.bucketPanel}>
+-        <div className={styles.bucketGroup}>
+-          <p className={styles.bucketLabel}>Type buckets</p>
+-          <div className={styles.chips}>
+-            {TYPE_BUCKETS.map((type) => (
+-              <button
+-                key={type}
+-                type="button"
+-                className={`${styles.chip} ${selectedType === type ? styles.chipActive : ""}`}
+-                onClick={() => setSelectedType((current) => (current === type ? null : type))}
+-              >
+-                <span>{titleCase(type)}</span>
+-                <span className={styles.chipCount}>{typeCounts.get(type) || 0}</span>
+-              </button>
+-            ))}
+-          </div>
+-        </div>
+-
+-        <div className={styles.bucketGroup}>
+-          <p className={styles.bucketLabel}>Platform buckets</p>
+-          <div className={styles.chips}>
+-            {PLATFORM_BUCKETS.map((platform) => (
+-              <button
+-                key={platform}
+-                type="button"
+-                className={`${styles.chip} ${selectedPlatform === platform ? styles.chipActive : ""}`}
+-                onClick={() => setSelectedPlatform((current) => (current === platform ? null : platform))}
+-              >
+-                <span>{titleCase(platform)}</span>
+-                <span className={styles.chipCount}>{platformCounts.get(platform) || 0}</span>
+-              </button>
+-            ))}
+-          </div>
+-        </div>
+-
+-        <div className={styles.bucketGroup}>
+-          <p className={styles.bucketLabel}>Category buckets</p>
+-          {categoryCounts.length === 0 ? (
+-            <p className={styles.emptyInline}>No categories yet.</p>
+-          ) : (
+-            <div className={styles.chips}>
+-              {categoryCounts.map(([category, count]) => (
+-                <button
+-                  key={category}
+-                  type="button"
+-                  className={`${styles.chip} ${selectedCategory === category ? styles.chipActive : ""}`}
+-                  onClick={() => setSelectedCategory((current) => (current === category ? null : category))}
+-                >
+-                  <span>{titleCase(category)}</span>
+-                  <span className={styles.chipCount}>{count}</span>
+-                </button>
+-              ))}
+-            </div>
+-          )}
+-        </div>
+-      </section>
++      <section className={styles.filterBar}>
++        <select 
++          className={styles.filterSelect}
++          value={selectedType || ""}
++          onChange={(e) => setSelectedType(e.target.value as MemoryType || null)}
++        >
++          <option value="">All Types</option>
++          {TYPE_BUCKETS.map((type) => (
++            <option key={type} value={type}>{titleCase(type)} ({typeCounts.get(type) || 0})</option>
++          ))}
++        </select>
++
++        <select 
++          className={styles.filterSelect}
++          value={selectedPlatform || ""}
++          onChange={(e) => setSelectedPlatform(e.target.value as Platform || null)}
++        >
++          <option value="">All Platforms</option>
++          {PLATFORM_BUCKETS.map((platform) => (
++            <option key={platform} value={platform}>{titleCase(platform)} ({platformCounts.get(platform) || 0})</option>
++          ))}
++        </select>
++
++        <select 
++          className={styles.filterSelect}
++          value={selectedCategory || ""}
++          onChange={(e) => setSelectedCategory(e.target.value || null)}
++        >
++          <option value="">All Categories</option>
++          {categoryCounts.map(([category, count]) => (
++            <option key={category} value={category}>{titleCase(category)} ({count})</option>
++          ))}
++        </select>
++
++        {hasActiveFilters && (
++          <button
++            type="button"
++            className={styles.clearBtn}
++            onClick={() => {
++              setSelectedType(null);
++              setSelectedPlatform(null);
++              setSelectedCategory(null);
++            }}
++          >
++            <FilterX size={14} />
++            Clear
++          </button>
++        )}
++      </section>
+ 
+-      {hasActiveFilters && (
+-        <section className={styles.activeFilters}>
+-          <div className={styles.activeFilterItems}>
+-            <span className={styles.activeFilterLabel}>Active filters</span>
+-            {selectedType && <span className={styles.activeFilterChip}>Type: {titleCase(selectedType)}</span>}
+-            {selectedPlatform && <span className={styles.activeFilterChip}>Platform: {titleCase(selectedPlatform)}</span>}
+-            {selectedCategory && <span className={styles.activeFilterChip}>Category: {titleCase(selectedCategory)}</span>}
+-          </div>
+-          <button
+-            type="button"
+-            className={styles.clearBtn}
+-            onClick={() => {
+-              setSelectedType(null);
+-              setSelectedPlatform(null);
+-              setSelectedCategory(null);
+-            }}
+-          >
+-            <FilterX size={14} />
+-            Clear all
+-          </button>
+-        </section>
+-      )}
+-
+       <section className={styles.listPanel}>
+@@ -382,9 +347,9 @@
+                     <div className={styles.cardBadges}>
+                       <span className={`${styles.badge} ${platformBadgeClass[memory.platform]}`}>
+-                        {memory.platform.toUpperCase()}
++                        {titleCase(memory.platform)}
+                       </span>
+-                      <span className={`${styles.badge} ${styles.typeBadge}`}>{memory.memoryType.toUpperCase()}</span>
+-                      <span className={`${styles.badge} ${styles.categoryBadge}`}>{titleCase(memory.category)}</span>
++                      <span className={`${styles.badge} ${styles.typeBadge}`}>{titleCase(memory.memoryType)}</span>
++                      <span className={`${styles.badge} ${styles.categoryBadge}`}>{titleCase(memory.category)}</span>
+                     </div>
+                     <div className={styles.cardMeta}>

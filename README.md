@@ -8,18 +8,24 @@ Tallei's a memory layer for when you want your AI to not forget who you are. It 
 
 ## What You Get
 
+### Recent Changes (April 2026)
+- **Three-bucket recall** — memories are now split into preference / long-term / short-term buckets, each with a fixed token budget. Semantic search runs synchronously so the first call always returns the right memory. See [ADR-011](docs/adr/011-three-bucket-recall.md).
+- **Graph layer removed** — LLM entity extraction pipeline removed. The host LLM (Claude/GPT-4) does relationship reasoning in-context for free, with higher accuracy and no extra API cost. See [ADR-012](docs/adr/012-remove-graph-layer.md).
+- **Dump-all for small memory sets** — users with < ~60 long-term memories get everything injected directly (ChatGPT-style). No embedding, no vector search, ~30ms.
+- **Recall-first hybrid for overflow** — union of vector top-25 + BM25 top-15 + temporal top-5, no similarity floor, token-budget-capped. Maximises recall so the host LLM acts as reranker.
+- **Abbreviation expansion** — static dict expands "AL" → "advanced level exam results" before embedding and BM25, fixing retrieval for regional/domain abbreviations.
+- **Preference-first memory model** — memories now have `memory_type`, `category`, `is_pinned`, `reference_count`, `last_referenced_at`, and `superseded_by`.
+- **Deduplicated saves** — duplicate content or near-duplicate vector matches increment `reference_count` instead of creating noisy rows.
+- **New preference tools/APIs** — `save_preference`, `list_preferences`, `forget_preference` and type-scoped recall (`types` filter).
+- **Split runtime instructions** — Claude and ChatGPT now have separate instruction sets (`instructions/claude.md`, `instructions/chatgpt.md`).
+- **ChatGPT Actions OpenAPI endpoint** — stable importer URL: `/chatgpt/actions/openapi.json`.
+
 ### The Basics
 - **Share memories across Claude, ChatGPT, and Gemini** via OAuth. One memory graph, all your AIs.
 - **Sub-15ms saves** — we return instantly, then do the heavy lifting in the background.
-- **Fast recall under real load** — warm hits return in ~5ms, precomputed graph hits in ~50ms, and cold misses now return in ~717ms without foreground embedding/vector search (down from ~24s).
+- **Fast recall under real load** — LRU cache hits ~0ms, Redis hits ~5ms, dump-all cold miss ~30ms, overflow hybrid ~400ms. Always semantically correct on the first call.
 - **Smart summaries** — `gpt-4o-mini` pulls out titles, key points, and decisions without you asking.
 
-### The Graph Layer (the cool part)
-- **Auto-extract entities and relationships** from every memory using an LLM. Runs in the background, never blocks your workflow.
-- **Two ways to recall**: Vector search for "find me stuff about X", or graph traversal for "show me X and everything connected to it".
-- **Contradiction detection** — We'll tell you when you're saying conflicting things. Useful for catching when your preferences shift.
-- **See your memory as a graph** — Interactive visualization showing which ideas relate to each other, which are outdated, which are your obsessions.
-- **Insight engine** — Automatically flags stale decisions, high-impact connections, contradictions you probably didn't notice.
 
 ### The Dashboard
 - **Clean UI** — light greenish-yellow and lime theme (because dark mode is boring).
@@ -34,103 +40,101 @@ Tallei's a memory layer for when you want your AI to not forget who you are. It 
 - **Database:** Postgres + pgvector for vectors, plus native tables for the graph (entities, relations, mentions)
 - **AI:** OpenAI embeddings, gpt-4o-mini for summaries, mem0ai SDK
 - **Auth:** Google OAuth, JWT sessions
-- **Workers:** In-process async job processor (no external queue, keep it simple)
-
 ## How It's Built
 
 ### Backend (`/src`)
 The MCP server that Claude and friends talk to:
-- **MCP tools** — save, recall, analyze memories. Around 10 of them.
-- **Vector layer** — embeddings and semantic search via `mem0ai` + OpenAI
-- **Graph layer** — Postgres stores entities and relationships. LLM extracts them automatically.
-- **Async worker** — picks up extraction jobs in the background. Never blocks the response.
-- **Hybrid recall stack** — in-process cache → Redis exact/warm cache → precomputed graph snapshot → lexical recency fallback (then async semantic enrichment)
-- **Insights** — watches for contradictions, stale decisions, your core interests
-- **Caching** — OAuth token cache (10 min), in-process recall cache (10 min), Redis exact cache (120s), Redis warm cache (45s), snapshot freshness controls.
+- **MCP tools** — save_memory, save_preference, recall_memories, list_memories, list_preferences, delete_memory, forget_preference
+- **Vector layer** — embeddings and semantic search via OpenAI
+- **Three-bucket recall** — preference / long-term / short-term buckets, each with a fixed token budget. Dump-all for small sets, recall-first hybrid for overflow.
+- **Caching** — OAuth token cache (10 min), in-process LRU recall cache (10 min), Redis exact cache (120s).
 
 ### Frontend (`/dashboard`)
 - **Memory feed** — browse what you've saved, search it, see where it came from
-- **Memory graph** — see your ideas as a network. Click around, explore connections.
 - **Setup wizard** — 4-step walk-through to connect Claude/ChatGPT/Gemini. Done in 2 min.
-- **Dashboard** — sidebar nav, search bar, insight panels. Responsive, works on phone too.
+- **Dashboard** — sidebar nav, search bar. Responsive, works on phone too.
 
 ## Technical Highlights
 
 ### Recall Latency: The Journey (Production)
 
-Three days of retrieval-path optimization:
-
 ```
 End-to-end recall latency (p50, production)
 
-Apr 14  ████████████████████████████████████████████████████████████  ~30,000ms
-Apr 15  ████████████████████████████████████████████████  ~24,000ms
-Apr 16  ████  ~717ms handler / ~2,200ms total (auth + rate-limit included)
+Apr 14  ████████████████████████████████████████████████████████████  ~30,000ms  (baseline)
+Apr 15  ████████████████████████████████████████████████  ~24,000ms  (in-memory cache)
+Apr 16  ████  ~717ms  (multi-layer cache + background enrichment)
+Apr 20  ██    ~30ms dump-all / ~400ms overflow  (three-bucket recall, always correct)
 
            0                    10s                   20s                   30s
 ```
 
-**What changed each day:**
+| Date   | p50 latency | Approach | Accuracy |
+|--------|-------------|----------|----------|
+| Apr 14 | ~30s | Baseline — full pipeline synchronous per call | ✓ |
+| Apr 15 | ~24s | In-memory recall cache (60s TTL) | ✓ |
+| Apr 16 | ~717ms handler | Multi-layer cache + lexical fallback + background semantic enrichment | ✗ first call |
+| **Apr 20** | **~30ms / ~400ms** | **Three-bucket recall — synchronous, always correct** | **✓ always** |
 
-| Date   | Latency | What we did |
-|--------|---------|-------------|
-| Apr 14 | ~30s    | Baseline — every recall: embed → vector search → fetch → format, all synchronous |
-| Apr 15 | ~24s    | Added basic in-memory recall cache (60s TTL). Cold misses still hit full pipeline |
-| Apr 16 | ~2.2s total / ~717ms handler | Multi-layer cache + precomputed graph snapshots + background enrichment. Zero embedding or vector ops in the foreground miss path |
-
-Today's log (cold boot, precomputed snapshot not yet warmed):
-```
-duration_ms=2216   auth_ms=357   rate_limit_ms=426   handler_ms=716
-recall_total_ms=717   recall_embed_ms=0   recall_vector_ms=0
-recall_source=precomputed_graph_miss   recall_snapshot_status=miss
-```
-
-No embedding. No vector search. 717ms from a cold start. Relative to Apr 15 (~24s), that's about a 33x improvement on the handler path. When the precomputed snapshot warms up, that drops to ~50ms.
+Apr 16 looked fast but the first response to any novel query was the wrong memory. Apr 20 is slightly slower on overflow but always returns the semantically correct result on the first call.
 
 ---
 
-### The Multi-Layer Recall Architecture
+### Three-Bucket Recall Architecture
 
-Every recall request walks down this chain, stopping at the first hit:
+Every recall request walks this path synchronously — no background jobs, no "correct answer on the second call":
 
 ```
 recall_memories(query)
         │
         ▼
 ┌───────────────────────────────┐
-│  Layer 1: In-process cache    │  ~0ms   (10 min TTL, per-process Map)
+│  LRU in-process cache         │  ~0ms   (10 min TTL)
 └───────────────┬───────────────┘
                 │ miss
                 ▼
 ┌───────────────────────────────┐
-│  Layer 2: Redis exact cache   │  ~5ms   (120s TTL, exact query hash)
+│  Redis exact cache            │  ~5ms   (120s TTL, query-hash keyed)
 └───────────────┬───────────────┘
                 │ miss
                 ▼
-┌───────────────────────────────┐
-│  Layer 3: Redis warm cache    │  ~5ms   (45s TTL, serve + enrich async)
-└───────────────┬───────────────┘
-                │ miss
-                ▼
-┌───────────────────────────────┐
-│  Layer 4: Precomputed graph   │  ~50ms  (snapshot built after every save)
-│           snapshot            │         graph-aware, entity-weighted scoring
-└───────────────┬───────────────┘
-                │ miss/stale
-                ▼
-┌───────────────────────────────┐
-│  Layer 5: Recent fallback     │  ~200–700ms  lexical + recency scoring,
-│           (no embedding)      │              NO embedding, NO vector search
-└───────────────┬───────────────┘
-                │ (always returns something)
-                ▼
-         Background enrichment:
-         semantic recall runs async,
-         writes result to Layers 2–3
-         for next request
+┌───────────────────────────────────────────────────────┐
+│  bucketRecall (src/infrastructure/recall/bucket-recall.ts) │
+│                                                       │
+│  Single Postgres fetch → decrypt all rows             │
+│                                                       │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │ PREFERENCE bucket  (1 500 tok cap)              │  │
+│  │ Always inject, sorted: pinned → refcount        │  │
+│  └─────────────────────────────────────────────────┘  │
+│                                                       │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │ LONG-TERM bucket   (4 800 tok cap)              │  │
+│  │ facts + decisions                               │  │
+│  │                                                 │  │
+│  │  fits? → dump all, sorted by refcount    ~30ms  │  │
+│  │  overflow? → recall-first hybrid:       ~400ms  │  │
+│  │    1. expand abbreviations (static dict, 0ms)   │  │
+│  │    2. vector top-25  (no score floor)           │  │
+│  │    3. BM25 top-15    (abbrev-aware tokeniser)   │  │
+│  │    4. temporal top-5 (safety net)               │  │
+│  │    union → score → pack under budget            │  │
+│  └─────────────────────────────────────────────────┘  │
+│                                                       │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │ SHORT-TERM bucket  (1 700 tok cap)              │  │
+│  │ events + notes, ≤ 60 days old, recency-first    │  │
+│  └─────────────────────────────────────────────────┘  │
+│                                                       │
+│  → write to LRU + Redis → return context block        │
+└───────────────────────────────────────────────────────┘
 ```
 
-**The key insight:** even on a total cold cache miss, we never block the response on embedding or vector search. The foreground path uses lexical + recency scoring (pure in-memory math, no I/O). The expensive semantic pipeline runs in the background and caches its result for the next caller.
+**The key insight:** the host LLM (Claude/GPT-4) is the reranker. The retrieval layer's job is **recall**, not precision — get the right memory into the context window and let the model decide what's relevant. "Fast wrong answer" is strictly worse than "slightly slower correct answer."
+
+Token estimation is `ceil(chars / 4)` — no tokeniser dependency, zero overhead.
+
+See [ADR-011](docs/adr/011-three-bucket-recall.md) for full rationale, alternatives considered, and trade-offs.
 
 ---
 
@@ -162,48 +166,6 @@ Two layers fix this:
 
 ---
 
-### Why Graph Matters
-
-Traditional vector-only memory systems miss relational insights. Tallei's graph layer reveals:
-- **Entity relationships** across memories (e.g., "Which projects mention this tech stack?")
-- **Decision context** by tracking mentions of choices and their outcomes
-- **Contradictions** between stored facts (e.g., conflicting preferences)
-- **Stale information** by detecting when decisions are no longer relevant
-
-### The Async Extraction Pipeline
-```
-Memory Save (~15ms response)
-    ↓
-Fire-and-Forget: background worker picks up job
-    ↓
-LLM extracts entities & relations
-    ↓
-Postgres stores graph data (entities, mentions, relations)
-    ↓
-Insight engine analyzes relationships
-    ↓
-Precomputed snapshot refreshed for fast recall
-```
-
-### Multi-Modal Recall
-- **Vector Recall:** "Find memories about X" (semantic matching)
-- **Graph Recall (v2):** "Show me X and everything related" (traversal + context)
-- **Insight Recall:** "Detect contradictions in my memory" (relationship analysis)
-
-### Native PostgreSQL Graph Storage
-Rather than a separate graph DB, Tallei leverages PostgreSQL's JSON/array capabilities for:
-- **Normalized entities and relations** (ACID guarantees)
-- **Mention tracking** (which memory mentions which entity)
-- **Fast path queries** (single DB connection for both vector and graph ops)
-- **Simplified deployment** (one database, not three)
-
-## Technical Documentation
-
-For a deep dive into the graph architecture, extraction pipeline, and design decisions:
-
-- **[Technical Architecture (ARCHITECTURE.md)](./ARCHITECTURE.md)** — Comprehensive guide to system design, async extraction, dual recall modes, insight engine
-- **[Architecture Diagrams (docs/DIAGRAMS.md)](./docs/DIAGRAMS.md)** — Visual explanations with ASCII diagrams of all major flows
-
 ## Getting Started
 
 To get Tallei running locally, check out our comprehensive setup guide:
@@ -218,35 +180,13 @@ Production deployment and troubleshooting docs live under:
 
 ## Why This Is Different
 
-### The Graph Thing
-
-Most AI memory systems are either:
-
-1. **Vector-only** (Pinecone, traditional RAG):
-   - Super fast searches
-   - But can't tell you when you're contradicting yourself
-   - Can't show you how ideas connect
-   - Treats every memory like an island
-
-2. **Separate graph DBs** (Neo4j, etc.):
-   - Powerful relationship stuff
-   - But requires another database, another set of infrastructure
-   - Harder to deploy, more things to break
-   - More expensive to run
-
-I wanted something that works *with* Postgres, gives you relationships without the overhead.
-
-**So Tallei does**: Lightweight graph layer on Postgres. You get:
-- Fast recall (5ms warm cache)
-- Relationship awareness (catch contradictions, find connections)
-- Single database (keep it simple)
-- Async extraction (doesn't slow down your AI)
+Three-bucket recall means memories are always injected in the right order: preferences first, then long-term facts, then recent events. For most users the entire context fits under the token budget with no vector search needed (~30ms). For larger memory sets the recall-first hybrid (vector + BM25 + temporal) optimises for recall — getting the right memory into the context window so the host LLM can do the reasoning.
 
 ### Fire-and-Forget: The Trick
 
 ```
 save_memory() → return immediately (~15ms) ✅
-               [background] embed → upsert vector → extract graph → refresh snapshot
+               [background] embed → upsert vector → summarize → update row
 ```
 
 Traditional approach: `save → extract → embed → store → return (~4.5s)`. Way too slow.
@@ -279,61 +219,18 @@ This is the "fish brain" thing—only remembers what matters *now*.
 
 ### Phase 2: Gemini Integration
 
-Right now we support Claude (MCP) and ChatGPT (via OAuth). Adding Gemini next so it's truly cross-AI. Same setup, same memory, same graph.
+Right now we support Claude (MCP) and ChatGPT (via OAuth). Adding Gemini next so it's truly cross-AI. Same setup, same memory.
 
 ### Phase 3: Memory Compression
 
-Old memories stack up. Compress old clusters into summaries but keep the graph intact. So you can archive stuff without losing relationships.
+Old memories stack up. Compress old clusters into summaries so you can archive stuff without losing the context.
 
-### Phase 4: Better Relationship Queries
+### Phase 4: Cross-AI Fusion
 
-Multi-hop queries:
-- "Show me all projects that use React and Python"
-- "What contradicts my decision to go remote?"
-- "Who/what am I most interested in?" (ego graphs)
-
-### Phase 5: Custom Extraction Prompts
-
-Let people define what they want extracted:
-- "Find every business outcome I mention"
-- "Extract technical decisions and their rationale"
-- "Pull out all my complaints about X"
-
-Domain-specific pipelines for power users.
-
-### Phase 6: Smarter Cross-AI Fusion
-
-Right now memories are separated by AI. Phase 6 is:
-- Unified entity namespace across all platforms
+Right now memories are tagged by platform. Phase 4 merges them:
+- Unified memory namespace across all platforms
 - "You mentioned this in Claude and ChatGPT—consolidate?"
 - Platform-specific insights ("You mostly code in ChatGPT")
-
----
-
-## Memory Graph in Action
-
-Go to `/dashboard/memory-graph` to see your memory as an interactive network. Drag stuff around, click entities to see all memories mentioning them, see the relationships at a glance.
-
-```
-       React
-        /  \
-   uses    prefer
-      \    /
-     Projects
-      /    \
-   uses    involve
-      \    /
-      Python
-```
-
-What's useful:
-- Drag nodes around, see connections
-- Click an entity to find every memory that mentions it
-- See what contradicts what (when Tallei catches it)
-- Spot which entities are "hot" (mentioned a lot recently)
-- Find the core things you care about without having to search
-
-The graph grows as you save more memories. Patterns show up over time.
 
 ---
 

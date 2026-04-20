@@ -5,20 +5,18 @@ import { config } from "../../../config/index.js";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import {
   saveMemory,
+  savePreference,
   recallMemories,
   listMemories,
+  listPreferences,
+  forgetPreference,
   deleteMemory,
   QuotaExceededError,
 } from "../../../services/memory.js";
-import {
-  explainMemoryConnection,
-  listMemoryEntities,
-  recallMemoriesV2,
-} from "../../../orchestration/graph/recall-v2.usecase.js";
-import { getMemoryGraphInsights } from "../../../orchestration/graph/graph-insights.usecase.js";
 import { PlatformSchema } from "../schemas.js";
 
 type ToolResult = { content: [{ type: "text"; text: string }]; isError?: true };
+const MemoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
 
 function onQuotaError(err: unknown): ToolResult {
   if (err instanceof QuotaExceededError) {
@@ -51,6 +49,36 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
+    "save_preference",
+    {
+      title: "Save Preference",
+      description: "Saves a durable user preference as pinned memory. Use this for identity and stable preferences.",
+      inputSchema: {
+        content: z
+          .string()
+          .describe("The preference to store (e.g., favorite color, preferred stack, name/pronouns)."),
+        category: z.string().optional().describe("Optional preference category like identity, ui, stack."),
+        preference_key: z
+          .string()
+          .optional()
+          .describe("Optional stable conflict key (e.g., favorite_color, identity_name)."),
+        platform: PlatformSchema.optional().default("claude").describe("The AI platform this preference is from"),
+      },
+    },
+    async ({ content, category, preference_key, platform }) => {
+      try {
+        const saved = await savePreference(content, auth, platform ?? "claude", undefined, {
+          category: category ?? null,
+          preferenceKey: preference_key ?? null,
+        });
+        return { content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }] };
+      } catch (err) {
+        return onQuotaError(err);
+      }
+    }
+  );
+
+  server.registerTool(
     "recall_memories",
     {
       title: "Recall Memories",
@@ -62,11 +90,12 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           .string()
           .describe("What to search for. Use topic keywords like 'favorite food' or 'project stack'."),
         limit: z.number().int().min(1).max(20).optional().default(5),
+        types: z.array(MemoryTypeSchema).optional().describe("Optional type filter for scoped recall."),
       },
     },
-    async ({ query, limit }) => {
+    async ({ query, limit, types }) => {
       try {
-        const result = await recallMemories(query, auth, limit ?? 5);
+        const result = await recallMemories(query, auth, limit ?? 5, undefined, { types });
         return { content: [{ type: "text", text: result.contextBlock }] };
       } catch (err) {
         return onQuotaError(err);
@@ -75,87 +104,41 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "recall_memories_v2",
+    "list_preferences",
     {
-      title: "Recall Memories v2",
-      description: "Graph-enhanced recall with compact reasoning paths.",
-      inputSchema: {
-        query: z.string().describe("What to search for."),
-        limit: z.number().int().min(1).max(20).optional().default(5),
-        graph_depth: z.number().int().min(1).max(2).optional().default(1),
-      },
+      title: "List Preferences",
+      description: "Lists pinned and active user preferences.",
+      inputSchema: {},
     },
-    async ({ query, limit, graph_depth }) => {
-      if (!config.recallV2Enabled) {
-        return { content: [{ type: "text", text: "recall_memories_v2 is disabled." }] };
+    async () => {
+      const preferences = await listPreferences(auth);
+      if (preferences.length === 0) {
+        return { content: [{ type: "text", text: "No preferences stored yet." }] };
       }
-      const result = await recallMemoriesV2(query, auth, limit ?? 5, graph_depth ?? 1);
-      return { content: [{ type: "text", text: result.contextBlock }] };
-    }
-  );
-
-  server.registerTool(
-    "list_memory_entities",
-    {
-      title: "List Memory Entities",
-      description: "Lists graph entities extracted from user memories.",
-      inputSchema: {
-        limit: z.number().int().min(1).max(100).optional().default(30),
-        query: z.string().optional(),
-      },
-    },
-    async ({ limit, query }) => {
-      const entities = await listMemoryEntities(auth, limit ?? 30, query);
-      if (entities.length === 0) {
-        return { content: [{ type: "text", text: "No memory entities found yet." }] };
-      }
-      const text = entities
-        .map((e) => `• ${e.label} [${e.entityType}] conf=${e.confidence.toFixed(2)}`)
+      const text = preferences
+        .map((preference) => `• ${preference.text} (id=${preference.id})`)
         .join("\n");
       return { content: [{ type: "text", text }] };
     }
   );
 
   server.registerTool(
-    "explain_memory_connection",
+    "forget_preference",
     {
-      title: "Explain Memory Connection",
-      description: "Finds the graph connection path between two entity queries.",
+      title: "Forget Preference",
+      description: "Deletes a preference memory by ID.",
       inputSchema: {
-        source: z.string().describe("Source entity query"),
-        target: z.string().describe("Target entity query"),
+        preference_id: z.string().describe("Preference memory ID"),
       },
     },
-    async ({ source, target }) => {
-      const result = await explainMemoryConnection(auth, source, target);
-      const text = result.found
-        ? `${result.explanation}\nPath: ${result.path.join(" -> ")}`
-        : result.explanation;
-      return { content: [{ type: "text", text }] };
-    }
-  );
-
-  server.registerTool(
-    "memory_graph_insights",
-    {
-      title: "Memory Graph Insights",
-      description: "Returns contradictions, stale decisions, and high-impact relationships.",
-      inputSchema: {},
-    },
-    async () => {
-      if (!config.graphExtractionEnabled) {
-        return { content: [{ type: "text", text: "memory_graph_insights is disabled." }] };
+    async ({ preference_id }) => {
+      try {
+        const result = await forgetPreference(preference_id, auth);
+        return { content: [{ type: "text", text: `Deleted preference ${preference_id}. Success: ${result.success}` }] };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to delete preference";
+        return { content: [{ type: "text", text: message }], isError: true };
       }
-      const insights = await getMemoryGraphInsights(auth);
-      const lines = [
-        `Generated: ${insights.generatedAt}`,
-        `Contradictions: ${insights.summary.contradictionCount}`,
-        `Stale decisions: ${insights.summary.staleDecisionCount}`,
-        `High-impact relations: ${insights.summary.highImpactCount}`,
-        "",
-        ...insights.recommendations.slice(0, 4).map((r) => `• ${r}`),
-      ];
-      return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 

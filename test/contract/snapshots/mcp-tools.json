@@ -4,31 +4,27 @@
     "inputSchema": "{\n        memory_id: z.string().describe(\"The unique ID of the memory to delete\"),\n      }"
   },
   {
-    "name": "explain_memory_connection",
-    "inputSchema": "{\n        source: z.string().describe(\"Source entity query\"),\n        target: z.string().describe(\"Target entity query\"),\n      }"
+    "name": "forget_preference",
+    "inputSchema": "{\n        preference_id: z.string().describe(\"Preference memory ID\"),\n      }"
   },
   {
     "name": "list_memories",
     "inputSchema": "{}"
   },
   {
-    "name": "list_memory_entities",
-    "inputSchema": "{\n        limit: z.number().int().min(1).max(100).optional().default(30),\n        query: z.string().optional(),\n      }"
-  },
-  {
-    "name": "memory_graph_insights",
+    "name": "list_preferences",
     "inputSchema": "{}"
   },
   {
     "name": "recall_memories",
-    "inputSchema": "{\n        query: z\n          .string()\n          .describe(\"What to search for. Use topic keywords like 'favorite food' or 'project stack'.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n      }"
-  },
-  {
-    "name": "recall_memories_v2",
-    "inputSchema": "{\n        query: z.string().describe(\"What to search for.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        graph_depth: z.number().int().min(1).max(2).optional().default(1),\n      }"
+    "inputSchema": "{\n        query: z\n          .string()\n          .describe(\"What to search for. Use topic keywords like 'favorite food' or 'project stack'.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        types: z.array(MemoryTypeSchema).optional().describe(\"Optional type filter for scoped recall.\"),\n      }"
   },
   {
     "name": "save_memory",
     "inputSchema": "{\n        content: z\n          .string()\n          .describe(\"The fact, preference, or information to remember. Be specific and concise.\"),\n        platform: PlatformSchema.optional().default(\"claude\").describe(\"The AI platform this memory is from\"),\n      }"
+  },
+  {
+    "name": "save_preference",
+    "inputSchema": "{\n        content: z\n          .string()\n          .describe(\"The preference to store (e.g., favorite color, preferred stack, name/pronouns).\"),\n        category: z.string().optional().describe(\"Optional preference category like identity, ui, stack.\"),\n        preference_key: z\n          .string()\n          .optional()\n          .describe(\"Optional stable conflict key (e.g., favorite_color, identity_name).\"),\n        platform: PlatformSchema.optional().default(\"claude\").describe(\"The AI platform this preference is from\"),\n      }"
   }
 ]

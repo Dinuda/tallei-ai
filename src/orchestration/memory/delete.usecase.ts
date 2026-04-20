@@ -17,10 +17,7 @@ interface DeleteMemoryUseCaseDeps {
   readonly noteVectorFailure: (error: unknown, context: string) => void;
   readonly noteMemoryDbFailure: (error: unknown, context: string) => void;
   readonly invalidateRecallCache: (auth: AuthContext) => void;
-  readonly invalidateRecallV2Cache: (auth: AuthContext) => void;
   readonly bumpRecallStamp: (auth: AuthContext) => Promise<void>;
-  readonly markSnapshotStale: (auth: AuthContext) => Promise<void>;
-  readonly queueSnapshotRefresh: (auth: AuthContext, reason: string, delayMs: number) => Promise<void>;
   readonly ipHash: (ip?: string) => string | null;
 }
 
@@ -59,9 +56,6 @@ export class DeleteMemoryUseCase {
     });
 
     this.deps.invalidateRecallCache(input.auth);
-    this.deps.invalidateRecallV2Cache(input.auth);
     void this.deps.bumpRecallStamp(input.auth).catch(() => {});
-    void this.deps.markSnapshotStale(input.auth).catch(() => {});
-    void this.deps.queueSnapshotRefresh(input.auth, "delete_memory", 1_000).catch(() => {});
   }
 }

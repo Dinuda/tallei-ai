@@ -1,5 +1,8 @@
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 
+const projectRoot = dirname(fileURLToPath(import.meta.url));
 const defaultBackend =
   process.env.NODE_ENV === "production" ? "https://api.tallei.com" : "http://127.0.0.1:3000";
 const BACKEND = (
@@ -32,6 +35,10 @@ const allowedDevOrigins = Array.from(new Set([
 const nextConfig: NextConfig = {
   output: "standalone",
   allowedDevOrigins,
+  outputFileTracingRoot: projectRoot,
+  turbopack: {
+    root: projectRoot,
+  },
 
   async rewrites() {
     return {

@@ -8,7 +8,7 @@ import {
 import { getRedisHealthState } from "../../../infrastructure/cache/redis-cache.js";
 
 type TimingSurface = "mcp" | "chatgpt_actions";
-type TimingOperation = "save" | "recall_v1" | "recall_v2";
+type TimingOperation = "save" | "recall_v1";
 
 interface TimingTarget {
   surface: TimingSurface;
@@ -35,7 +35,11 @@ function inferChatGptActionTarget(req: Request): TimingTarget | null {
   if (req.method !== "POST") return null;
   const path = stripQuery(req.originalUrl || req.url || "");
 
-  if (path === "/api/chatgpt/actions/save") {
+  if (
+    path === "/api/chatgpt/actions/save" ||
+    path === "/api/chatgpt/actions/save_memory" ||
+    path === "/api/chatgpt/actions/save_preference"
+  ) {
     return {
       surface: "chatgpt_actions",
       operation: "save",
@@ -86,21 +90,12 @@ function inferMcpTarget(req: Request): TimingTarget | null {
   const toolName = typeof params?.name === "string" ? params.name : "";
   if (!toolName) return null;
 
-  if (toolName === "save_memory") {
+  if (toolName === "save_memory" || toolName === "save_preference") {
     return { surface: "mcp", operation: "save", route: path, toolName };
   }
 
   if (toolName === "recall_memories") {
     return { surface: "mcp", operation: "recall_v1", route: path, toolName };
-  }
-
-  if (toolName === "recall_memories_v2") {
-    return {
-      surface: "mcp",
-      operation: "recall_v2",
-      route: path,
-      toolName,
-    };
   }
 
   return null;
