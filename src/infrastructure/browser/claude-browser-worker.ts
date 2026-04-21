@@ -10,6 +10,8 @@ export interface BrowserWorkerExecuteRequest {
   sessionId: string;
   state: Exclude<OnboardingState, "queued">;
   projectName: string;
+  applyProjectInstructions?: boolean;
+  projectInstructions?: string;
   expectedInstructionsHash?: string;
   expectedInstructionSnippet?: string;
   attempt: number;
@@ -50,6 +52,11 @@ function containsWords(text: string, words: string[]): boolean {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function shouldApplyProjectInstructions(input: BrowserWorkerExecuteRequest): boolean {
+  if (typeof input.applyProjectInstructions === "boolean") return input.applyProjectInstructions;
+  return true;
 }
 
 class ClaudeBrowserWorkerService {
@@ -362,12 +369,25 @@ class ClaudeBrowserWorkerService {
     runtime: RuntimeSession,
     input: BrowserWorkerExecuteRequest
   ): Promise<BrowserWorkerExecuteResponse> {
+    if (!shouldApplyProjectInstructions(input)) {
+      return {
+        status: "ok",
+        output: {
+          state: input.state,
+          mode: input.mode,
+          instructionsApplied: false,
+          instructionsSource: "skipped",
+        },
+      };
+    }
+
     const page = runtime.page;
+    const template = (input.projectInstructions ?? "").trim() || config.claudeProjectInstructionsTemplate;
+
     await this.tryClickByText(page, [/instructions/i, /project settings/i, /custom instructions/i, /settings/i]);
 
     const textarea = page.locator("textarea").first();
     const contentEditable = page.locator("[contenteditable='true']").first();
-    const template = config.claudeProjectInstructionsTemplate;
 
     if ((await textarea.count()) > 0) {
       await textarea.fill(template);
@@ -378,19 +398,15 @@ class ClaudeBrowserWorkerService {
       });
       await page.keyboard.type(template);
     } else {
-      const liveUrl = await this.getLiveSessionUrl(page);
+      // Best effort only: MCP runtime instructions remain authoritative.
       return {
-        status: "checkpoint",
-        checkpoint: {
-          type: "manual_review",
-          blockedState: "instructions_applied",
-          message: "Instruction editor not found in Claude project UI.",
-          resumeHint: liveUrl
-            ? "Open the live cloud browser session, open project instructions, paste template, then resume onboarding."
-            : "Open project instructions, paste template, then resume onboarding.",
-          actionUrl: liveUrl || undefined,
+        status: "ok",
+        output: {
+          state: input.state,
+          mode: input.mode,
+          instructionsApplied: false,
+          instructionsSource: "editor-not-found",
         },
-        output: { state: input.state, mode: input.mode },
       };
     }
 
@@ -402,7 +418,9 @@ class ClaudeBrowserWorkerService {
       output: {
         state: input.state,
         mode: input.mode,
-        instructionsHash: sha256(template),
+        instructionsApplied: true,
+        instructionsSource: "project-template",
+        instructionsHash: sha256(template.trim()),
       },
     };
   }
@@ -418,20 +436,26 @@ class ClaudeBrowserWorkerService {
       .isVisible()
       .catch(() => false);
 
-    const instructionText = await this.readInstructionText(page);
-    const normalizedInstruction = instructionText?.replace(/\r\n/g, "\n").trim() ?? "";
-    const instructionHash = normalizedInstruction ? sha256(normalizedInstruction) : null;
-    const expectedHash = input.expectedInstructionsHash?.trim() || "";
-    const expectedSnippetRaw = input.expectedInstructionSnippet?.toLowerCase().trim() || "";
-    const expectedSnippets = expectedSnippetRaw
-      ? expectedSnippetRaw.split("|").map((s) => s.trim()).filter(Boolean)
-      : [];
-    const normalizedInstructionLower = normalizedInstruction.toLowerCase();
-    const snippetMatched = expectedSnippets.length > 0
-      ? expectedSnippets.every((snippet) => normalizedInstructionLower.includes(snippet))
-      : true;
-    const hashMatched = expectedHash ? instructionHash === expectedHash : true;
-    const instructionsMatched = snippetMatched && hashMatched;
+    const shouldVerifyInstructions = shouldApplyProjectInstructions(input);
+    let instructionHash: string | null = null;
+    let expectedHash = "";
+    let instructionsMatched = true;
+    if (shouldVerifyInstructions) {
+      const instructionText = await this.readInstructionText(page);
+      const normalizedInstruction = instructionText?.replace(/\r\n/g, "\n").trim() ?? "";
+      instructionHash = normalizedInstruction ? sha256(normalizedInstruction) : null;
+      expectedHash = input.expectedInstructionsHash?.trim() || "";
+      const expectedSnippetRaw = input.expectedInstructionSnippet?.toLowerCase().trim() || "";
+      const expectedSnippets = expectedSnippetRaw
+        ? expectedSnippetRaw.split("|").map((s) => s.trim()).filter(Boolean)
+        : [];
+      const normalizedInstructionLower = normalizedInstruction.toLowerCase();
+      const snippetMatched = expectedSnippets.length > 0
+        ? expectedSnippets.every((snippet) => normalizedInstructionLower.includes(snippet))
+        : true;
+      const hashMatched = expectedHash ? instructionHash === expectedHash : true;
+      instructionsMatched = snippetMatched && hashMatched;
+    }
 
     await page.goto("https://claude.ai/settings/connectors", {
       waitUntil: "domcontentloaded",
@@ -457,6 +481,7 @@ class ClaudeBrowserWorkerService {
           mode: input.mode,
           projectPresent,
           connectorConnected,
+          shouldVerifyInstructions,
           instructionsMatched,
           instructionHash,
           expectedInstructionsHash: expectedHash || null,
@@ -472,6 +497,7 @@ class ClaudeBrowserWorkerService {
         verified: true,
         projectPresent,
         connectorConnected,
+        shouldVerifyInstructions,
         instructionsMatched,
         instructionHash,
       },

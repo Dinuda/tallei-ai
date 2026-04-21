@@ -25,7 +25,11 @@
   },
   {
     "name": "recall_memories",
-    "inputSchema": "{\n        query: z\n          .string()\n          .describe(\"What to search for. Use topic keywords like 'favorite food' or 'project stack'.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        types: z.array(MemoryTypeSchema).optional().describe(\"Optional type filter for scoped recall.\"),\n        include_doc_refs: z\n          .array(z.string())\n          .max(20)\n          .optional()\n          .describe(\"Optional @doc/@lot refs to inline full document content alongside memory recall.\"),\n      }"
+    "inputSchema": "{\n        query: z\n          .string()\n          .describe(\"What to search for. Use topic keywords like 'favorite food' or 'project stack'.\"),\n        limit: z.number().int().min(1).max(20).optional().default(5),\n        types: z.array(MemoryTypeSchema).optional().describe(\"Optional type filter for scoped recall.\"),\n        include_doc_refs: z\n          .array(z.string())\n          .max(20)\n          .optional()\n          .describe(\"Optional @doc/@lot refs to append brief document metadata (no full content).\"),\n      }"
+  },
+  {
+    "name": "remember",
+    "inputSchema": "{\n        kind: z\n          .enum([\"fact\", \"preference\", \"document-note\", \"document-blob\"])\n          .describe(\"What type of thing to remember.\"),\n        content: z\n          .string()\n          .optional()\n          .describe(\"The text to save. Required for fact/preference/document-blob. Omit for document-note.\"),\n        title: z.string().optional().describe(\"Display title. Used for document-note and document-blob.\"),\n        key_points: z\n          .array(z.string())\n          .max(10)\n          .optional()\n          .describe(\"3–8 bullet points for document-note. Each ~20 words. Omit for other kinds.\"),\n        summary: z\n          .string()\n          .optional()\n          .describe(\"Short paragraph summary for document-note. Omit for other kinds.\"),\n        source_hint: z\n          .string()\n          .optional()\n          .describe(\"Human-readable hint about the source, e.g. 'Product catalogue PDF attached this turn'. document-note only.\"),\n        category: z.string().optional().describe(\"Preference category (preference kind only).\"),\n        preference_key: z.string().optional().describe(\"Stable conflict key for preferences, e.g. favorite_color.\"),\n        platform: PlatformSchema.optional().default(\"claude\"),\n      }"
   },
   {
     "name": "save_memory",
@@ -42,5 +46,9 @@
   {
     "name": "stash_document",
     "inputSchema": "{\n        content: z.string().min(1).describe(\"Full document markdown/text to store verbatim.\"),\n        filename: z.string().optional().describe(\"Optional source filename.\"),\n        title: z.string().optional().describe(\"Optional display title.\"),\n      }"
+  },
+  {
+    "name": "undo_save",
+    "inputSchema": "{\n        ref: z.string().min(1).describe(\"The @doc ref to delete, e.g. @doc:catalogue-a3f2\"),\n      }"
   }
 ]

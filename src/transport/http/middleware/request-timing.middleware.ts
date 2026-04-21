@@ -8,7 +8,7 @@ import {
 import { getRedisHealthState } from "../../../infrastructure/cache/redis-cache.js";
 
 type TimingSurface = "mcp" | "chatgpt_actions";
-type TimingOperation = "save" | "recall_v1";
+type TimingOperation = "save" | "recall_v1" | "documents";
 
 interface TimingTarget {
   surface: TimingSurface;
@@ -27,18 +27,13 @@ function stripQuery(path: string): string {
   return idx >= 0 ? path.slice(0, idx) : path;
 }
 
-function looksLikeNonEmptyString(value: unknown): boolean {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
 function inferChatGptActionTarget(req: Request): TimingTarget | null {
   if (req.method !== "POST") return null;
   const path = stripQuery(req.originalUrl || req.url || "");
 
   if (
-    path === "/api/chatgpt/actions/save" ||
-    path === "/api/chatgpt/actions/save_memory" ||
-    path === "/api/chatgpt/actions/save_preference"
+    path === "/api/chatgpt/actions/remember" ||
+    path === "/api/chatgpt/actions/undo_save"
   ) {
     return {
       surface: "chatgpt_actions",
@@ -55,20 +50,14 @@ function inferChatGptActionTarget(req: Request): TimingTarget | null {
     };
   }
 
-  if (path !== "/api/chatgpt/actions/run") return null;
-
-  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : null;
-  if (looksLikeNonEmptyString(body?.query)) {
+  if (
+    path === "/api/chatgpt/actions/documents/recent" ||
+    path === "/api/chatgpt/actions/documents/search" ||
+    path === "/api/chatgpt/actions/documents/recall"
+  ) {
     return {
       surface: "chatgpt_actions",
-      operation: "recall_v1",
-      route: path,
-    };
-  }
-  if (looksLikeNonEmptyString(body?.content)) {
-    return {
-      surface: "chatgpt_actions",
-      operation: "save",
+      operation: "documents",
       route: path,
     };
   }
@@ -90,7 +79,7 @@ function inferMcpTarget(req: Request): TimingTarget | null {
   const toolName = typeof params?.name === "string" ? params.name : "";
   if (!toolName) return null;
 
-  if (toolName === "save_memory" || toolName === "save_preference") {
+  if (toolName === "save_memory" || toolName === "save_preference" || toolName === "remember" || toolName === "undo_save") {
     return { surface: "mcp", operation: "save", route: path, toolName };
   }
 

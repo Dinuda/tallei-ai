@@ -49,7 +49,7 @@ type EventRow = {
   created_at: Date;
 };
 
-const EXECUTION_STEPS: Exclude<OnboardingState, "queued">[] = [
+const BASE_EXECUTION_STEPS: Exclude<OnboardingState, "queued">[] = [
   "browser_started",
   "claude_authenticated",
   "connector_connected",
@@ -106,13 +106,27 @@ function mapEventRow(row: EventRow): OnboardingEvent {
   };
 }
 
-function computeNextState(currentState: OnboardingState): Exclude<OnboardingState, "queued"> | null {
+function shouldApplyProjectInstructions(session: OnboardingSession): boolean {
+  const value = session.metadata["applyProjectInstructions"];
+  if (typeof value === "boolean") return value;
+  return true;
+}
+
+function computeExecutionSteps(session: OnboardingSession): Exclude<OnboardingState, "queued">[] {
+  if (shouldApplyProjectInstructions(session)) return BASE_EXECUTION_STEPS;
+  return BASE_EXECUTION_STEPS.filter((step) => step !== "instructions_applied");
+}
+
+function computeNextState(
+  currentState: OnboardingState,
+  executionSteps: Exclude<OnboardingState, "queued">[]
+): Exclude<OnboardingState, "queued"> | null {
   if (currentState === "queued") {
-    return EXECUTION_STEPS[0];
+    return executionSteps[0] ?? null;
   }
-  const index = EXECUTION_STEPS.indexOf(currentState as Exclude<OnboardingState, "queued">);
+  const index = executionSteps.indexOf(currentState as Exclude<OnboardingState, "queued">);
   if (index === -1) return null;
-  return EXECUTION_STEPS[index + 1] ?? null;
+  return executionSteps[index + 1] ?? null;
 }
 
 function isTerminalStatus(status: OnboardingStatus): boolean {
@@ -122,18 +136,34 @@ function isTerminalStatus(status: OnboardingStatus): boolean {
 export class ClaudeOnboardingService {
   private readonly running = new Set<string>();
 
-  async createAndStart(userId: string, input?: { projectName?: string }): Promise<OnboardingSession> {
-    const projectName = input?.projectName?.trim() || "chatgpt memory";
+  async createAndStart(userId: string, input?: {
+    projectName?: string;
+    applyProjectInstructions?: boolean;
+    projectInstructions?: string;
+  }): Promise<OnboardingSession> {
+    const projectName = input?.projectName?.trim() || "Tallei Memory";
+    const applyProjectInstructions = input?.applyProjectInstructions ?? true;
+    const projectInstructions = typeof input?.projectInstructions === "string" ? input.projectInstructions.trim() : "";
+    const metadataPatch: Record<string, unknown> = {
+      applyProjectInstructions,
+    };
+    if (projectInstructions.length > 0) {
+      metadataPatch["projectInstructions"] = projectInstructions;
+    }
     const authContext = await authContextFromUserId(userId, "internal");
     const result = await pool.query<SessionRow>(
-      `INSERT INTO claude_onboarding_sessions (tenant_id, user_id, status, current_state, project_name)
-       VALUES ($1, $2, 'queued', 'queued', $3)
+      `INSERT INTO claude_onboarding_sessions (tenant_id, user_id, status, current_state, project_name, metadata)
+       VALUES ($1, $2, 'queued', 'queued', $3, $4::jsonb)
        RETURNING *`,
-      [authContext.tenantId, userId, projectName]
+      [authContext.tenantId, userId, projectName, JSON.stringify(metadataPatch)]
     );
 
     const session = mapSessionRow(result.rows[0]);
-    await this.logEvent(session.id, "session_created", "queued", { projectName });
+    await this.logEvent(session.id, "session_created", "queued", {
+      projectName,
+      applyProjectInstructions,
+      projectInstructionsProvided: projectInstructions.length > 0,
+    });
     this.scheduleProcess(session.id);
     return session;
   }
@@ -236,7 +266,8 @@ export class ClaudeOnboardingService {
           await this.updateSessionStatus(sessionId, "running");
         }
 
-        const nextState = computeNextState(session.currentState);
+        const executionSteps = computeExecutionSteps(session);
+        const nextState = computeNextState(session.currentState, executionSteps);
         if (!nextState) {
           await this.completeSession(sessionId);
           await this.logEvent(sessionId, "session_completed", session.currentState, null);

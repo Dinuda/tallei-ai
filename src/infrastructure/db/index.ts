@@ -506,6 +506,11 @@ export async function initDb() {
         WHERE deleted_at IS NULL;
     `);
 
+    await client.query(`
+      ALTER TABLE documents
+      ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'blob';
+    `);
+
     const hadMemoryTypeColumn = await hasColumn(client, "memory_records", "memory_type");
     const hadCategoryColumn = await hasColumn(client, "memory_records", "category");
     const hadPinnedColumn = await hasColumn(client, "memory_records", "is_pinned");
@@ -723,7 +728,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         status TEXT NOT NULL,
         current_state TEXT NOT NULL,
-        project_name TEXT NOT NULL DEFAULT 'chatgpt memory',
+        project_name TEXT NOT NULL DEFAULT 'Tallei Memory',
         checkpoint JSONB,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         last_error TEXT,
@@ -735,6 +740,9 @@ export async function initDb() {
 
       ALTER TABLE claude_onboarding_sessions
       ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE;
+
+      ALTER TABLE claude_onboarding_sessions
+      ALTER COLUMN project_name SET DEFAULT 'Tallei Memory';
 
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_user_created ON claude_onboarding_sessions(user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_tenant_created ON claude_onboarding_sessions(tenant_id, created_at DESC);

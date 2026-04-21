@@ -15,16 +15,40 @@ import {
 } from "../../../services/memory.js";
 import {
   stashDocument,
+  stashDocumentNote,
   createLot,
   recallDocument,
   searchDocuments,
+  deleteDocumentByRef,
   DocumentSizeExceededError,
+  recentDocumentBriefs,
+  documentBriefsByRefs,
+  type DocumentBrief,
+  type DocumentRefBrief,
 } from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { PlatformSchema } from "../schemas.js";
 
 type ToolResult = { content: [{ type: "text"; text: string }]; isError?: true };
 const MemoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
+
+function formatDocumentBriefLine(doc: DocumentBrief): string {
+  const parts = [`• ${doc.ref}`, doc.title];
+  if (doc.preview) parts.push(doc.preview);
+  return parts.join(" | ");
+}
+
+function formatReferencedBriefLine(item: DocumentRefBrief): string {
+  if (item.kind === "document") {
+    return formatDocumentBriefLine(item);
+  }
+  if (item.kind === "lot") {
+    const docSummary = item.documents.map((doc) => doc.title).join(", ");
+    const suffix = docSummary ? ` | docs: ${docSummary}` : "";
+    return `• ${item.ref} | ${item.title} | count=${item.documentCount}${suffix}`;
+  }
+  return `• ${item.ref} | ${item.error}`;
+}
 
 function onQuotaError(err: unknown): ToolResult {
   if (err instanceof QuotaExceededError) {
@@ -59,7 +83,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "save_memory",
     {
       title: "Save Memory",
-      description: "Saves a fact, preference, or piece of information to Tallei persistent memory.",
+      description: "Prefer the `remember` tool — it handles facts, preferences, and document notes in one call. This tool exists for backward compatibility.",
       inputSchema: {
         content: z
           .string()
@@ -81,7 +105,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "save_preference",
     {
       title: "Save Preference",
-      description: "Saves a durable user preference as pinned memory. Use this for identity and stable preferences.",
+      description: "Prefer the `remember` tool with kind=\"preference\". This exists for backward compatibility.",
       inputSchema: {
         content: z
           .string()
@@ -113,7 +137,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       title: "Recall Memories",
       description:
         "Searches Tallei persistent memory and returns relevant past context. " +
-        "If this returns 'No relevant memories found', call list_memories next to scan all stored memories before concluding nothing is saved.",
+        "Call ONLY when the user explicitly references prior sessions, asks about their preferences, or the task requires personalized past context. " +
+        "Do NOT call this before answering — answer first, then recall if needed. " +
+        "Pinned preferences are already available as the 'Pinned Preferences' MCP resource; do not recall them here.",
       inputSchema: {
         query: z
           .string()
@@ -124,70 +150,30 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           .array(z.string())
           .max(20)
           .optional()
-          .describe("Optional @doc/@lot refs to inline full document content alongside memory recall."),
+          .describe("Optional @doc/@lot refs to append brief document metadata (no full content)."),
       },
     },
     async ({ query, limit, types, include_doc_refs }) => {
       try {
-        const result = await recallMemories(query, auth, limit ?? 5, undefined, { types });
-        const refs = [...new Set((include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
-        if (refs.length === 0) {
-          return { content: [{ type: "text", text: result.contextBlock }] };
+        const scopedTypes: Array<z.infer<typeof MemoryTypeSchema>> =
+          types && types.length > 0 ? types : ["fact", "preference"];
+        const result = await recallMemories(query, auth, limit ?? 5, undefined, { types: scopedTypes });
+        const sections: string[] = [result.contextBlock];
+
+        const recentDocs = await recentDocumentBriefs(auth, 5);
+        if (recentDocs.length > 0) {
+          sections.push(`Recent Documents (latest 5)\n${recentDocs.map(formatDocumentBriefLine).join("\n")}`);
         }
 
-        const docBlocks: string[] = [];
-        for (const ref of refs) {
-          try {
-            const recalled = await recallDocument(ref, auth);
-            if (recalled.kind === "document") {
-              docBlocks.push(
-                [
-                  `ref: ${recalled.ref}`,
-                  `title: ${recalled.title ?? "Untitled"}`,
-                  `filename: ${recalled.filename ?? "-"}`,
-                  `status: ${recalled.status}`,
-                  "",
-                  recalled.content,
-                ].join("\n")
-              );
-              continue;
-            }
-
-            const lotText = recalled.docs.map((doc) =>
-              [
-                `ref: ${doc.ref}`,
-                `title: ${doc.title ?? "Untitled"}`,
-                `filename: ${doc.filename ?? "-"}`,
-                `status: ${doc.status}`,
-                "",
-                doc.content,
-              ].join("\n")
-            ).join("\n\n====================\n\n");
-
-            docBlocks.push(
-              [
-                `lot: ${recalled.ref}`,
-                `title: ${recalled.title ?? "Untitled lot"}`,
-                `count: ${recalled.docs.length}`,
-                "",
-                lotText,
-              ].join("\n")
-            );
-          } catch (error) {
-            if (error instanceof Error && /not found/i.test(error.message)) {
-              docBlocks.push(`ref: ${ref}\nerror: ${error.message}`);
-              continue;
-            }
-            throw error;
+        const refs = [...new Set((include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
+        if (refs.length > 0) {
+          const referenced = await documentBriefsByRefs(refs, auth, { maxLotDocs: 5 });
+          if (referenced.length > 0) {
+            sections.push(`Referenced Documents (brief)\n${referenced.map(formatReferencedBriefLine).join("\n")}`);
           }
         }
 
-        if (docBlocks.length === 0) {
-          return { content: [{ type: "text", text: result.contextBlock }] };
-        }
-
-        const merged = `${result.contextBlock}\n\n---\nInlined Documents\n\n${docBlocks.join("\n\n====================\n\n")}`;
-        return { content: [{ type: "text", text: merged }] };
+        return { content: [{ type: "text", text: sections.join("\n\n---\n") }] };
       } catch (err) {
         return onKnownError(err);
       }
@@ -267,11 +253,12 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   server.registerTool(
     "stash_document",
     {
-      title: "Stash Document",
+      title: "Stash Document Full Blob",
       description:
-        "Stores a full document blob (markdown/text) for later recall. " +
-        "Call AFTER finishing your user response. This returns quickly and indexing runs in the background. " +
-        "Pro feature: free users receive an upgrade error.",
+        "HEAVY: Requires emitting the entire document as the `content` argument. " +
+        "Prefer remember(kind=\"document-note\") for most 'save this document' requests — it needs no content field. " +
+        "Only use this when the user explicitly says to archive or store the full file for future retrieval. " +
+        "Call AFTER finishing your user response. Indexing runs in the background. Pro feature.",
       inputSchema: {
         content: z.string().min(1).describe("Full document markdown/text to store verbatim."),
         filename: z.string().optional().describe("Optional source filename."),
@@ -400,6 +387,136 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       } catch (err) {
         return onKnownError(err);
       }
+    }
+  );
+
+  // Unified entry point — the preferred tool for all save operations.
+  server.registerTool(
+    "remember",
+    {
+      title: "Save / Stash to Memory (remember)",
+      description:
+        "Save a memory, save a preference, or stash a document to Tallei persistent memory. " +
+        "Use this for explicit save requests AND required auto-save of newly processed structured content. " +
+        "For auto-save footers, call remember before finalizing the reply so you can include the saved @doc ref.\n\n" +
+        "• kind=\"fact\" — a single fact or observation. Pass text in `content`.\n" +
+        "• kind=\"preference\" — a stable user preference. Pass text in `content`.\n" +
+        "• kind=\"document-note\" — DEFAULT for document/file/PDF saves and auto-save notes. " +
+        "Pass title + key_points (array of strings, one per product/item/section, up to 10) + summary. " +
+        "Do NOT pass `content` — it is ignored. Fast (~50ms). Recall returns the structured note.\n" +
+        "• kind=\"document-blob\" — only for 'sf' / 'archive full file' / 'full stash'. " +
+        "Requires the complete document text in `content`. Warn the user it will take a moment. " +
+        "Use stash_document as a fallback if this times out.\n\n" +
+        "One remember call replaces chaining save_memory + stash_document.",
+      inputSchema: {
+        kind: z
+          .enum(["fact", "preference", "document-note", "document-blob"])
+          .describe("What type of thing to remember."),
+        content: z
+          .string()
+          .optional()
+          .describe("The text to save. Required for fact/preference/document-blob. Omit for document-note."),
+        title: z.string().optional().describe("Display title. Used for document-note and document-blob."),
+        key_points: z
+          .array(z.string())
+          .max(10)
+          .optional()
+          .describe("3–8 bullet points for document-note. Each ~20 words. Omit for other kinds."),
+        summary: z
+          .string()
+          .optional()
+          .describe("Short paragraph summary for document-note. Omit for other kinds."),
+        source_hint: z
+          .string()
+          .optional()
+          .describe("Human-readable hint about the source, e.g. 'Product catalogue PDF attached this turn'. document-note only."),
+        category: z.string().optional().describe("Preference category (preference kind only)."),
+        preference_key: z.string().optional().describe("Stable conflict key for preferences, e.g. favorite_color."),
+        platform: PlatformSchema.optional().default("claude"),
+      },
+    },
+    async ({ kind, content, title, key_points, summary, source_hint, category, preference_key, platform }) => {
+      try {
+        if (kind === "fact") {
+          if (!content) return { content: [{ type: "text", text: "⚠️ content is required for kind=fact" }], isError: true };
+          const saved = await saveMemory(content, auth, platform ?? "claude");
+          return { content: [{ type: "text", text: `✅ Fact saved (${saved.memoryId}).` }] };
+        }
+
+        if (kind === "preference") {
+          if (!content) return { content: [{ type: "text", text: "⚠️ content is required for kind=preference" }], isError: true };
+          const saved = await savePreference(content, auth, platform ?? "claude", undefined, {
+            category: category ?? null,
+            preferenceKey: preference_key ?? null,
+          });
+          return { content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }] };
+        }
+
+        if (kind === "document-note") {
+          const noteTitle = title ?? "Untitled Note";
+          const stashed = await stashDocumentNote({
+            title: noteTitle,
+            key_points: key_points ?? [],
+            summary: summary ?? "",
+            source_hint: source_hint ?? "",
+          }, auth);
+          return { content: [{ type: "text", text: `✅ Document note saved as ${stashed.refHandle}.` }] };
+        }
+
+        // document-blob
+        if (!content) return { content: [{ type: "text", text: "⚠️ content is required for kind=document-blob" }], isError: true };
+        const stashed = await stashDocument(content, auth, { title: title ?? undefined });
+        const lotSuffix = stashed.lotRef ? ` Auto-lot: ${stashed.lotRef}.` : "";
+        return { content: [{ type: "text", text: `✅ Document archived as ${stashed.refHandle}.${lotSuffix}` }] };
+      } catch (err) {
+        if (err instanceof DocumentSizeExceededError) {
+          return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
+        }
+        return onKnownError(err);
+      }
+    }
+  );
+
+  // One-word undo for auto-saves: user replies "undo" and Claude calls this.
+  server.registerTool(
+    "undo_save",
+    {
+      title: "Undo Save",
+      description:
+        "Deletes a recently auto-saved document or memory by ref. " +
+        "Call when the user replies 'undo', 'del', or 'delete' after an auto-save footer. " +
+        "Pass the @doc ref from the footer.",
+      inputSchema: {
+        ref: z.string().min(1).describe("The @doc ref to delete, e.g. @doc:catalogue-a3f2"),
+      },
+    },
+    async ({ ref }) => {
+      try {
+        const result = await deleteDocumentByRef(ref, auth);
+        return { content: [{ type: "text", text: result.success ? `🗑️ Deleted ${ref}.` : `⚠️ Could not delete ${ref}.` }] };
+      } catch (err) {
+        return onKnownError(err);
+      }
+    }
+  );
+
+  // Expose pinned preferences as a passive MCP resource so Claude doesn't need to call recall_memories for stable facts.
+  server.registerResource(
+    "Pinned Preferences",
+    "tallei://preferences/pinned",
+    {
+      mimeType: "text/markdown",
+      description: "User's durable pinned preferences. Read once instead of calling recall_memories for stable facts like identity, defaults, or favourite things.",
+    },
+    async () => {
+      const prefs = await listPreferences(auth);
+      const text =
+        prefs.length === 0
+          ? "_No pinned preferences stored yet._"
+          : prefs.map((p) => `- ${p.text}`).join("\n");
+      return {
+        contents: [{ uri: "tallei://preferences/pinned", mimeType: "text/markdown", text }],
+      };
     }
   );
 }

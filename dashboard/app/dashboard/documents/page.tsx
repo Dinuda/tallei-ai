@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Copy, FileText, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
+import { useSession } from "next-auth/react";
+import { Button } from "../../../components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "../../../components/ui/alert";
 
 type DocStatus = "pending" | "ready" | "failed";
 
@@ -73,6 +76,7 @@ function relativeDate(iso: string): string {
 }
 
 export default function DocumentsPage() {
+  const { data: session, status: sessionStatus } = useSession();
   const [docs, setDocs] = useState<DocListItem[]>([]);
   const [lots, setLots] = useState<LotListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -83,12 +87,22 @@ export default function DocumentsPage() {
   const [selected, setSelected] = useState<ModalPayload | null>(null);
   const [loadingSelected, setLoadingSelected] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const plan = session?.user?.plan;
 
   const load = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
     if (mode === "initial") setLoading(true);
     if (mode === "refresh") setRefreshing(true);
 
     try {
+      if (sessionStatus === "loading") return;
+      if (plan === "free") {
+        setProRequired(true);
+        setError(null);
+        setDocs([]);
+        setLots([]);
+        return;
+      }
+
       const res = await fetch("/api/documents");
       const data = await res.json();
 
@@ -114,11 +128,13 @@ export default function DocumentsPage() {
       if (mode === "initial") setLoading(false);
       if (mode === "refresh") setRefreshing(false);
     }
-  }, []);
+  }, [plan, sessionStatus]);
 
   useEffect(() => {
-    void load("initial");
-  }, [load]);
+    if (sessionStatus !== "loading") {
+      void load("initial");
+    }
+  }, [load, sessionStatus]);
 
   const openRef = useCallback(async (ref: string) => {
     setLoadingSelected(true);
@@ -200,38 +216,21 @@ export default function DocumentsPage() {
       )}
 
       {proRequired ? (
-        <div style={{
-          background: "var(--surface)",
-          border: "1px solid var(--border)",
-          borderRadius: 16,
-          padding: "1.3rem",
-          boxShadow: "var(--shadow-sm)",
-        }}>
-          <h2 style={{ margin: 0, fontSize: "1.1rem", color: "var(--text)" }}>PDF / Document Stash is Pro-only</h2>
-          <p style={{ margin: "0.5rem 0 0.9rem", color: "var(--text-muted)", fontSize: "0.92rem" }}>
-            Upgrade to Pro or Power to stash full documents, create lots, and recall full markdown by ref.
-          </p>
-          <a
-            href="/api/billing/checkout?plan=pro"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              padding: "0.55rem 0.95rem",
-              borderRadius: 10,
-              textDecoration: "none",
-              color: "#fff",
-              background: "var(--accent)",
-              fontWeight: 600,
-              fontSize: "0.88rem",
-            }}
-          >
-            Upgrade to Pro
-          </a>
-        </div>
+        <Alert style={{ boxShadow: "var(--shadow-sm)" }}>
+          <AlertTitle>Documents is a Pro feature</AlertTitle>
+          <AlertDescription style={{ color: "var(--text-muted)" }}>
+            Upgrade to Pro or Power to stash full documents, create lots, and recall full markdown by reference.
+          </AlertDescription>
+          <div style={{ marginTop: "0.85rem" }}>
+            <Button asChild>
+              <a href="/dashboard/billing">View plans</a>
+            </Button>
+          </div>
+        </Alert>
       ) : loading ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
           {[1, 2, 3].map((value) => (
-            <div key={value} style={{ height: 64, borderRadius: 12, border: "1px solid var(--border-light)", background: "var(--surface)" }} />
+            <div key={value} style={{ height: 64, minWidth: 760, borderRadius: 12, border: "1px solid var(--border-light)", background: "var(--surface)" }} />
           ))}
         </div>
       ) : !hasItems ? (

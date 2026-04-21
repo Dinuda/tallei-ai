@@ -5,6 +5,8 @@ import { claudeOnboardingService } from "../../../orchestration/browser/run-auto
 
 const createSessionSchema = z.object({
   projectName: z.string().trim().min(1).max(100).optional(),
+  applyProjectInstructions: z.boolean().optional(),
+  projectInstructions: z.string().trim().min(1).max(20000).optional(),
 });
 
 const resumeSchema = z.object({

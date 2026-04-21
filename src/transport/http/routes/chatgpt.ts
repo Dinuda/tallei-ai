@@ -3,17 +3,27 @@ import { z } from "zod";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
 import { recallMemories, saveMemory, savePreference } from "../../../services/memory.js";
-import { recallDocument } from "../../../services/documents.js";
+import {
+  stashDocument,
+  stashDocumentNote,
+  recallDocument,
+  searchDocuments,
+  deleteDocumentByRef,
+  recentDocumentBriefs,
+  documentBriefsByRefs,
+  DocumentSizeExceededError,
+} from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import { authContextFromApiKey, authContextFromUserId } from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
-import { hasRequiredScopes, validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
+import { validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
 import { setRequestTimingField } from "../../../observability/request-timing.js";
 import { runAsyncSafe } from "../../../shared/async-safe.js";
 
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
+const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);
 
 const recallSchema = z.object({
   query: z.string().min(1, "query is required"),
@@ -22,20 +32,34 @@ const recallSchema = z.object({
   include_doc_refs: z.array(z.string()).max(20).optional(),
 });
 
-const saveSchema = z.object({
-  content: z.string().min(1, "content is required"),
+const rememberSchema = z.object({
+  kind: rememberKindSchema,
+  content: z.string().optional(),
+  title: z.string().optional(),
+  key_points: z.array(z.string()).max(10).optional(),
+  summary: z.string().optional(),
+  source_hint: z.string().optional(),
+  category: z.string().optional(),
+  preference_key: z.string().optional(),
+  platform: z.enum(["claude", "chatgpt", "gemini", "other"]).optional().default("chatgpt"),
 });
 
-const runSchema = z
-  .object({
-    query: z.string().min(1, "query is required").optional(),
-    content: z.string().min(1, "content is required").optional(),
-    limit: z.coerce.number().int().min(1).max(20).optional().default(5),
-  })
-  .refine((value) => Boolean(value.query || value.content), {
-    message: "query or content is required",
-    path: ["query"],
-  });
+const undoSaveSchema = z.object({
+  ref: z.string().min(1, "ref is required"),
+});
+
+const recentDocumentsSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(20).optional().default(5),
+});
+
+const searchDocumentsSchema = z.object({
+  query: z.string().min(1, "query is required"),
+  limit: z.coerce.number().int().min(1).max(20).optional().default(5),
+});
+
+const recallDocumentSchema = z.object({
+  ref: z.string().min(1, "ref is required"),
+});
 
 function isTransientMemoryInfraError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -46,75 +70,25 @@ function degradedRecallResponse() {
   return {
     contextBlock: "--- No relevant memories found ---",
     memories: [],
+    recentDocuments: [],
+    referencedDocuments: [],
   };
 }
 
-async function inlineDocumentRefs(
-  refs: string[],
-  auth: NonNullable<AuthRequest["authContext"]>
-): Promise<string[]> {
-  const uniqueRefs = [...new Set(refs.map((value) => value.trim()).filter(Boolean))];
-  const blocks: string[] = [];
-
-  for (const ref of uniqueRefs) {
-    try {
-      const recalled = await recallDocument(ref, auth);
-      if (recalled.kind === "document") {
-        blocks.push(
-          [
-            `ref: ${recalled.ref}`,
-            `title: ${recalled.title ?? "Untitled"}`,
-            `filename: ${recalled.filename ?? "-"}`,
-            `status: ${recalled.status}`,
-            "",
-            recalled.content,
-          ].join("\n")
-        );
-        continue;
-      }
-
-      const lotText = recalled.docs
-        .map((doc) =>
-          [
-            `ref: ${doc.ref}`,
-            `title: ${doc.title ?? "Untitled"}`,
-            `filename: ${doc.filename ?? "-"}`,
-            `status: ${doc.status}`,
-            "",
-            doc.content,
-          ].join("\n")
-        )
-        .join("\n\n====================\n\n");
-
-      blocks.push(
-        [
-          `lot: ${recalled.ref}`,
-          `title: ${recalled.title ?? "Untitled lot"}`,
-          `count: ${recalled.docs.length}`,
-          "",
-          lotText,
-        ].join("\n")
-      );
-    } catch (error) {
-      if (error instanceof Error && /not found/i.test(error.message)) {
-        blocks.push(`ref: ${ref}\nerror: ${error.message}`);
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  return blocks;
+function recallTypesOrDefault(types?: Array<z.infer<typeof memoryTypeSchema>>): Array<z.infer<typeof memoryTypeSchema>> {
+  if (types && types.length > 0) return types;
+  return ["fact", "preference"];
 }
 
 async function logChatGptAction(input: {
   auth: AuthRequest["authContext"];
   method:
     | "chatgpt/actions/recall"
-    | "chatgpt/actions/run"
-    | "chatgpt/actions/save"
-    | "chatgpt/actions/save_memory"
-    | "chatgpt/actions/save_preference";
+    | "chatgpt/actions/remember"
+    | "chatgpt/actions/undo_save"
+    | "chatgpt/actions/documents/recent"
+    | "chatgpt/actions/documents/search"
+    | "chatgpt/actions/documents/recall";
   ok: boolean;
   error?: string | null;
 }): Promise<void> {
@@ -236,18 +210,64 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
 function buildOpenApiSpec(serverUrl: string) {
   const memoryResultSchema = {
     type: "object",
-    required: ["success", "memoryId", "title", "summary"],
+    required: ["success", "kind"],
     properties: {
       success: { type: "boolean" },
+      kind: { type: "string", enum: ["fact", "preference", "document-note", "document-blob"] },
       memoryId: { type: "string" },
       title: { type: "string" },
       summary: { type: "object", additionalProperties: true },
+      ref: { type: "string" },
+      status: { type: "string" },
+      lotRef: { type: ["string", "null"] },
+    },
+  };
+
+  const documentBriefSchema = {
+    type: "object",
+    required: ["kind", "ref", "title", "status", "createdAt", "preview"],
+    properties: {
+      kind: { type: "string", enum: ["document"] },
+      ref: { type: "string" },
+      title: { type: "string" },
+      filename: { type: ["string", "null"] },
+      status: { type: "string", enum: ["pending", "ready", "failed"] },
+      createdAt: { type: "string" },
+      preview: { type: "string" },
+      lotRef: { type: ["string", "null"] },
+      lotTitle: { type: ["string", "null"] },
+    },
+  };
+
+  const lotBriefSchema = {
+    type: "object",
+    required: ["kind", "ref", "title", "createdAt", "documentCount", "documents"],
+    properties: {
+      kind: { type: "string", enum: ["lot"] },
+      ref: { type: "string" },
+      title: { type: "string" },
+      createdAt: { type: "string" },
+      documentCount: { type: "integer" },
+      documents: {
+        type: "array",
+        items: documentBriefSchema,
+      },
+    },
+  };
+
+  const missingRefSchema = {
+    type: "object",
+    required: ["kind", "ref", "error"],
+    properties: {
+      kind: { type: "string", enum: ["missing"] },
+      ref: { type: "string" },
+      error: { type: "string" },
     },
   };
 
   const recallResultSchema = {
     type: "object",
-    required: ["contextBlock", "memories"],
+    required: ["contextBlock", "memories", "recentDocuments", "referencedDocuments"],
     properties: {
       contextBlock: { type: "string" },
       memories: {
@@ -266,6 +286,53 @@ function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
+      recentDocuments: {
+        type: "array",
+        items: documentBriefSchema,
+      },
+      referencedDocuments: {
+        type: "array",
+        items: {
+          oneOf: [documentBriefSchema, lotBriefSchema, missingRefSchema],
+        },
+      },
+    },
+  };
+
+  const documentRecallSchema = {
+    type: "object",
+    required: ["kind", "ref", "filename", "title", "content", "status"],
+    properties: {
+      kind: { type: "string", enum: ["document"] },
+      ref: { type: "string" },
+      filename: { type: ["string", "null"] },
+      title: { type: ["string", "null"] },
+      content: { type: "string" },
+      status: { type: "string", enum: ["ready", "pending_embedding", "failed_indexing"] },
+    },
+  };
+
+  const lotRecallSchema = {
+    type: "object",
+    required: ["kind", "ref", "title", "docs"],
+    properties: {
+      kind: { type: "string", enum: ["lot"] },
+      ref: { type: "string" },
+      title: { type: ["string", "null"] },
+      docs: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["ref", "filename", "title", "content", "status"],
+          properties: {
+            ref: { type: "string" },
+            filename: { type: ["string", "null"] },
+            title: { type: ["string", "null"] },
+            content: { type: "string" },
+            status: { type: "string", enum: ["ready", "pending_embedding", "failed_indexing"] },
+          },
+        },
+      },
     },
   };
 
@@ -273,8 +340,8 @@ function buildOpenApiSpec(serverUrl: string) {
     openapi: "3.1.0",
     info: {
       title: "Tallei ChatGPT Actions API",
-      version: "3.1.0",
-      description: "Shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key).",
+      version: "4.0.0",
+      description: "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key).",
     },
     servers: [
       {
@@ -295,11 +362,11 @@ function buildOpenApiSpec(serverUrl: string) {
     paths: {
       "/api/chatgpt/actions/recall": {
         post: {
-          operationId: "recallMemories",
-          summary: "Recall relevant memories before answering",
+          operationId: "recallMemoriesV2",
+          summary: "Recall relevant memories with docs-lite briefs",
           description:
-            "Call this exactly once on every user turn before answering. " +
-            "Use a query derived from the current user message (same topic/entities), not a fixed generic query.",
+            "Call when prior context is needed. Returns memory context plus recent/referenced document briefs. " +
+            "Full document content is never inlined here.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -312,8 +379,7 @@ function buildOpenApiSpec(serverUrl: string) {
                   properties: {
                     query: {
                       type: "string",
-                      description:
-                        "Memory lookup query derived from the current user prompt (same topic/entities/intent). Prefer passing the latest user message verbatim.",
+                      description: "Memory lookup query derived from the current user prompt.",
                     },
                     limit: { type: "integer", minimum: 1, maximum: 20, default: 5 },
                     types: {
@@ -322,21 +388,13 @@ function buildOpenApiSpec(serverUrl: string) {
                         type: "string",
                         enum: ["preference", "fact", "event", "decision", "note"],
                       },
-                      description:
-                        "Optional memory type scope. Use only when it helps; avoid forcing a fixed type set every turn.",
+                      description: "Optional memory type scope. Defaults to [fact, preference] when omitted.",
                     },
                     include_doc_refs: {
                       type: "array",
                       items: { type: "string" },
-                      description:
-                        "Optional @doc/@lot refs to inline full document content in the recall response contextBlock.",
+                      description: "Optional @doc/@lot refs to include as brief metadata (no full content).",
                     },
-                  },
-                  example: {
-                    query: "do you think that customer segment will buy at my price?",
-                    types: ["fact", "decision", "preference"],
-                    include_doc_refs: ["@doc:pricing-memo-ab12"],
-                    limit: 5,
                   },
                 },
               },
@@ -356,10 +414,10 @@ function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
-      "/api/chatgpt/actions/save_memory": {
+      "/api/chatgpt/actions/remember": {
         post: {
-          operationId: "saveMemoryAction",
-          summary: "Save durable memory",
+          operationId: "rememberActionV2",
+          summary: "Unified save endpoint for memory and documents",
           "x-openai-isConsequential": true,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -368,9 +426,17 @@ function buildOpenApiSpec(serverUrl: string) {
               "application/json": {
                 schema: {
                   type: "object",
-                  required: ["content"],
+                  required: ["kind"],
                   properties: {
+                    kind: { type: "string", enum: ["fact", "preference", "document-note", "document-blob"] },
                     content: { type: "string" },
+                    title: { type: "string" },
+                    key_points: { type: "array", items: { type: "string" }, maxItems: 10 },
+                    summary: { type: "string" },
+                    source_hint: { type: "string" },
+                    category: { type: "string" },
+                    preference_key: { type: "string" },
+                    platform: { type: "string", enum: ["claude", "chatgpt", "gemini", "other"] },
                   },
                 },
               },
@@ -378,7 +444,7 @@ function buildOpenApiSpec(serverUrl: string) {
           },
           responses: {
             "200": {
-              description: "Memory saved",
+              description: "Saved",
               content: {
                 "application/json": {
                   schema: memoryResultSchema,
@@ -390,10 +456,10 @@ function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
-      "/api/chatgpt/actions/save_preference": {
+      "/api/chatgpt/actions/undo_save": {
         post: {
-          operationId: "savePreferenceAction",
-          summary: "Save a durable pinned preference",
+          operationId: "undoSaveActionV2",
+          summary: "Delete an auto-saved document by @doc/@lot ref",
           "x-openai-isConsequential": true,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -402,11 +468,9 @@ function buildOpenApiSpec(serverUrl: string) {
               "application/json": {
                 schema: {
                   type: "object",
-                  required: ["content"],
+                  required: ["ref"],
                   properties: {
-                    content: { type: "string" },
-                    category: { type: "string" },
-                    preference_key: { type: "string" },
+                    ref: { type: "string" },
                   },
                 },
               },
@@ -414,15 +478,148 @@ function buildOpenApiSpec(serverUrl: string) {
           },
           responses: {
             "200": {
-              description: "Preference saved",
+              description: "Deleted",
               content: {
                 "application/json": {
-                  schema: memoryResultSchema,
+                  schema: {
+                    type: "object",
+                    required: ["success", "ref", "type"],
+                    properties: {
+                      success: { type: "boolean" },
+                      ref: { type: "string" },
+                      type: { type: "string", enum: ["document", "lot"] },
+                    },
+                  },
                 },
               },
             },
-            "401": { description: "Unauthorized" },
-            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/actions/documents/recent": {
+        post: {
+          operationId: "recentDocumentsActionV2",
+          summary: "Return recent document briefs",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: false,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    limit: { type: "integer", minimum: 1, maximum: 20, default: 5 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Recent document briefs",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["documents", "count"],
+                    properties: {
+                      documents: {
+                        type: "array",
+                        items: documentBriefSchema,
+                      },
+                      count: { type: "integer" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/api/chatgpt/actions/documents/search": {
+        post: {
+          operationId: "searchDocumentsActionV2",
+          summary: "Search document briefs by query",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["query"],
+                  properties: {
+                    query: { type: "string" },
+                    limit: { type: "integer", minimum: 1, maximum: 20, default: 5 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Search hits",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["matches", "count"],
+                    properties: {
+                      matches: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          required: ["ref", "title", "score", "preview"],
+                          properties: {
+                            ref: { type: "string" },
+                            title: { type: "string" },
+                            score: { type: "number" },
+                            preview: { type: "string" },
+                          },
+                        },
+                      },
+                      count: { type: "integer" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/api/chatgpt/actions/documents/recall": {
+        post: {
+          operationId: "recallDocumentActionV2",
+          summary: "Recall full content for a document or lot",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["ref"],
+                  properties: {
+                    ref: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Full document content",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [documentRecallSchema, lotRecallSchema],
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -454,23 +651,25 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
   try {
     const body = recallSchema.parse(req.body);
     const result = await recallMemories(body.query, req.authContext!, body.limit, req.ip, {
-      types: body.types,
+      types: recallTypesOrDefault(body.types),
     });
 
+    const recentDocuments = await recentDocumentBriefs(req.authContext!, 5);
     const refs = [...new Set((body.include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
-    if (refs.length > 0) {
-      const docBlocks = await inlineDocumentRefs(refs, req.authContext!);
-      if (docBlocks.length > 0) {
-        result.contextBlock = `${result.contextBlock}\n\n---\nInlined Documents\n\n${docBlocks.join("\n\n====================\n\n")}`;
-      }
-    }
+    const referencedDocuments = refs.length > 0
+      ? await documentBriefsByRefs(refs, req.authContext!, { maxLotDocs: 5 })
+      : [];
 
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recall",
       ok: true,
     });
-    res.json(result);
+    res.json({
+      ...result,
+      recentDocuments,
+      referencedDocuments,
+    });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -486,10 +685,6 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
       res.json(degradedRecallResponse());
       return;
     }
-    if (error instanceof PlanRequiredError) {
-      res.status(402).json({ error: error.message });
-      return;
-    }
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recall",
@@ -501,87 +696,137 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
   }
 });
 
-router.post("/actions/run", chatGptActionAuthMiddleware, requireScopes([]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = runSchema.parse(req.body);
-    if (!req.authContext) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
+    const body = rememberSchema.parse(req.body);
 
-    const auth = req.authContext!;
-    const isPrivileged = auth.authMode === "internal" || auth.authMode === "api_key";
-
-    if (body.query) {
-      if (!isPrivileged && !hasRequiredScopes(auth.scopes ?? [], ["memory:read"])) {
-        res.status(403).json({ error: "Insufficient OAuth scopes", requiredScopes: ["memory:read"] });
+    if (body.kind === "fact") {
+      if (!body.content) {
+        res.status(400).json({ error: "content is required for kind=fact" });
         return;
       }
-
-      const result = await recallMemories(body.query, auth, body.limit, req.ip);
-      logChatGptActionAsync({ auth, method: "chatgpt/actions/run", ok: true });
-      res.json(result);
-      return;
-    }
-
-    if (!isPrivileged && !hasRequiredScopes(auth.scopes ?? [], ["memory:write"])) {
-      res.status(403).json({ error: "Insufficient OAuth scopes", requiredScopes: ["memory:write"] });
-      return;
-    }
-
-    const saved = await saveMemory(body.content as string, req.authContext, "chatgpt", req.ip);
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/run",
-      ok: true,
-    });
-    res.json({
-      success: true,
-      memoryId: saved.memoryId,
-      title: saved.title,
-      summary: saved.summary,
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (isTransientMemoryInfraError(error)) {
-      logChatGptActionAsync({
-        auth: req.authContext,
-        method: "chatgpt/actions/run",
-        ok: false,
-        error: error instanceof Error ? error.message : "Transient memory infra error",
+      const saved = await saveMemory(body.content, req.authContext!, body.platform ?? "chatgpt", req.ip);
+      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
+      res.json({
+        success: true,
+        kind: body.kind,
+        memoryId: saved.memoryId,
+        title: saved.title,
+        summary: saved.summary,
       });
-      res.json(degradedRecallResponse());
+      return;
+    }
+
+    if (body.kind === "preference") {
+      if (!body.content) {
+        res.status(400).json({ error: "content is required for kind=preference" });
+        return;
+      }
+      const saved = await savePreference(body.content, req.authContext!, body.platform ?? "chatgpt", req.ip, {
+        category: body.category ?? null,
+        preferenceKey: body.preference_key ?? null,
+      });
+      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
+      res.json({
+        success: true,
+        kind: body.kind,
+        memoryId: saved.memoryId,
+        title: saved.title,
+        summary: saved.summary,
+      });
+      return;
+    }
+
+    if (body.kind === "document-note") {
+      const saved = await stashDocumentNote({
+        title: body.title ?? "Untitled Note",
+        key_points: body.key_points ?? [],
+        summary: body.summary ?? "",
+        source_hint: body.source_hint ?? "",
+      }, req.authContext!);
+      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
+      res.json({
+        success: true,
+        kind: body.kind,
+        ref: saved.refHandle,
+        status: saved.status,
+      });
+      return;
+    }
+
+    if (!body.content) {
+      res.status(400).json({ error: "content is required for kind=document-blob" });
+      return;
+    }
+    const saved = await stashDocument(body.content, req.authContext!, { title: body.title ?? undefined });
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
+    res.json({
+      success: true,
+      kind: body.kind,
+      ref: saved.refHandle,
+      status: saved.status,
+      lotRef: saved.lotRef ?? null,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json({ error: error.message });
+      return;
+    }
+    if (error instanceof DocumentSizeExceededError) {
+      res.status(413).json({ error: error.message });
       return;
     }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/run",
+      method: "chatgpt/actions/remember",
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to run memory action",
+      error: error instanceof Error ? error.message : "Failed to remember",
     });
-    console.error("Error running ChatGPT memory action:", error);
-    res.status(500).json({ error: "Failed to run memory action" });
+    console.error("Error saving ChatGPT remember action:", error);
+    res.status(500).json({ error: "Failed to remember" });
   }
 });
 
-router.post("/actions/save_memory", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/undo_save", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = saveSchema.parse(req.body);
-    const saved = await saveMemory(body.content, req.authContext!, "chatgpt", req.ip);
+    const body = undoSaveSchema.parse(req.body);
+    const deleted = await deleteDocumentByRef(body.ref, req.authContext!);
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/undo_save", ok: true });
+    res.json({ success: true, ref: body.ref, type: deleted.type });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json({ error: error.message });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/save_memory",
-      ok: true,
+      method: "chatgpt/actions/undo_save",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to undo save",
     });
-    res.json({
-      success: true,
-      memoryId: saved.memoryId,
-      title: saved.title,
-      summary: saved.summary,
-    });
+    console.error("Error undoing ChatGPT saved document:", error);
+    res.status(500).json({ error: "Failed to undo save" });
+  }
+});
+
+router.post("/actions/documents/recent", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = recentDocumentsSchema.parse(req.body ?? {});
+    const documents = await recentDocumentBriefs(req.authContext!, body.limit);
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/documents/recent", ok: true });
+    res.json({ documents, count: documents.length });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -589,80 +834,68 @@ router.post("/actions/save_memory", chatGptActionAuthMiddleware, requireScopes([
     }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/save_memory",
+      method: "chatgpt/actions/documents/recent",
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to save memory",
+      error: error instanceof Error ? error.message : "Failed to load recent documents",
     });
-    console.error("Error saving ChatGPT memory:", error);
-    res.status(500).json({ error: "Failed to save memory" });
+    console.error("Error loading recent ChatGPT documents:", error);
+    res.status(500).json({ error: "Failed to load recent documents" });
   }
 });
 
-router.post("/actions/save_preference", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/documents/search", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = saveSchema.extend({
-      category: z.string().optional(),
-      preference_key: z.string().optional(),
-    }).parse(req.body);
-    const saved = await savePreference(body.content, req.authContext!, "chatgpt", req.ip, {
-      category: body.category ?? null,
-      preferenceKey: body.preference_key ?? null,
-    });
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/save_preference",
-      ok: true,
-    });
-    res.json({
-      success: true,
-      memoryId: saved.memoryId,
-      title: saved.title,
-      summary: saved.summary,
-    });
+    const body = searchDocumentsSchema.parse(req.body);
+    const matches = await searchDocuments(body.query, req.authContext!, body.limit);
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/documents/search", ok: true });
+    res.json({ matches, count: matches.length });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json({ error: error.message });
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/save_preference",
+      method: "chatgpt/actions/documents/search",
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to save preference",
+      error: error instanceof Error ? error.message : "Failed to search documents",
     });
-    console.error("Error saving ChatGPT preference:", error);
-    res.status(500).json({ error: "Failed to save preference" });
+    console.error("Error searching ChatGPT documents:", error);
+    res.status(500).json({ error: "Failed to search documents" });
   }
 });
 
-router.post("/actions/save", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/documents/recall", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = saveSchema.parse(req.body);
-    const saved = await saveMemory(body.content, req.authContext!, "chatgpt", req.ip);
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/save",
-      ok: true,
-    });
-    res.json({
-      success: true,
-      memoryId: saved.memoryId,
-      title: saved.title,
-      summary: saved.summary,
-    });
+    const body = recallDocumentSchema.parse(req.body);
+    const document = await recallDocument(body.ref, req.authContext!);
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/documents/recall", ok: true });
+    res.json(document);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json({ error: error.message });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/save",
+      method: "chatgpt/actions/documents/recall",
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to save memory",
+      error: error instanceof Error ? error.message : "Failed to recall document",
     });
-    console.error("Error saving ChatGPT memory:", error);
-    res.status(500).json({ error: "Failed to save memory" });
+    console.error("Error recalling ChatGPT document:", error);
+    res.status(500).json({ error: "Failed to recall document" });
   }
 });
 

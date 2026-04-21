@@ -48,23 +48,46 @@ const STUDENT_POLICY: Record<Exclude<OnboardingState, "queued">, StudentPolicyIn
   },
   project_upserted: {
     state: "project_upserted",
-    objective: "Create or open project named 'chatgpt memory'.",
+    objective: "Create or open the configured Claude project.",
     selectors: ["a[href*='/projects']", "button", "input", "textarea"],
-    expectedSignal: "Project 'chatgpt memory' is open",
+    expectedSignal: "Configured Claude project is open",
   },
   instructions_applied: {
     state: "instructions_applied",
-    objective: "Apply project custom instructions for ChatGPT memory sync behavior.",
+    objective: "Apply project custom instructions for Tallei memory behavior.",
     selectors: ["textarea", "[contenteditable='true']", "button"],
-    expectedSignal: "Instruction editor contains expected template text",
+    expectedSignal: "Instruction editor contains the expected Tallei template",
   },
   verified: {
     state: "verified",
-    objective: "Verify connector, project name, and instruction template hash.",
+    objective: "Verify connector, project name, and instruction configuration (when enabled).",
     selectors: ["body", "main"],
     expectedSignal: "All verification checks passed",
   },
 };
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function shouldApplyProjectInstructions(session: OnboardingSession): boolean {
+  const value = session.metadata["applyProjectInstructions"];
+  if (typeof value === "boolean") return value;
+  return true;
+}
+
+function getProjectInstructions(session: OnboardingSession): string | undefined {
+  const raw = session.metadata["projectInstructions"];
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function getExpectedInstructionsHash(session: OnboardingSession): string | undefined {
+  const instructions = getProjectInstructions(session) ?? config.claudeProjectInstructionsTemplate;
+  const normalized = instructions.trim();
+  return normalized.length > 0 ? sha256(normalized) : undefined;
+}
 
 class LlmFallbackPlanner {
   async buildInstruction(input: {
@@ -116,14 +139,6 @@ class LlmFallbackPlanner {
       errorSignature: signature,
     };
   }
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
-function getExpectedInstructionsHash(): string {
-  return sha256(config.claudeProjectInstructionsTemplate);
 }
 
 class CloudBrowserWorkerClient {
@@ -264,8 +279,10 @@ class CloudBrowserWorkerClient {
         sessionId: input.session.id,
         state: input.state,
         projectName: input.session.projectName,
-        expectedInstructionsHash: getExpectedInstructionsHash(),
-        expectedInstructionSnippet: "recall_memories|save_memory",
+        applyProjectInstructions: shouldApplyProjectInstructions(input.session),
+        projectInstructions: getProjectInstructions(input.session),
+        expectedInstructionsHash: shouldApplyProjectInstructions(input.session) ? getExpectedInstructionsHash(input.session) : undefined,
+        expectedInstructionSnippet: shouldApplyProjectInstructions(input.session) ? "tallei memory + document tools|remember" : undefined,
         instruction: input.instruction,
         attempt: input.attempt,
       }),

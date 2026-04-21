@@ -133,6 +133,23 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
   }
 }
 
+const TALLEI_INSTRUCTIONS = `Tallei stores durable memory across AI tools. Follow these rules on every turn:
+
+1. DON'T RECALL REFLEXIVELY. Only call recall_memories when the user references prior sessions ("last time", "remember", "what did I say about"), asks about preferences, or the task clearly requires personalized past context. If you can answer from the attached file or the current message, do not call recall_memories.
+2. PINNED PREFERENCES are already available as the "Pinned Preferences" MCP resource. Do not call recall_memories just to look up the user's known preferences.
+3. RECALL IS DOCS-LITE. recall_memories defaults to fact+preference scope and returns brief document context only; full document content is never auto-inlined there.
+4. DOCUMENT DISCOVERY ORDER: use the recent-doc brief (latest 5) first. If user references an older document by name, call search_documents and include matching refs. Use recall_document only when the full file text is explicitly required.
+5. USE REMEMBER AS THE SAVE ENTRY POINT. Prefer one remember call instead of chaining multiple save tools.
+6. DOCUMENT SAVES — TWO MODES:
+   a) FAST NOTE (default): remember(kind="document-note", title="...", key_points=["item 1","item 2",...], summary="..."). Put meaningful content into key_points (up to 10). Do NOT pass content.
+   b) FULL ARCHIVE (only for "archive", "full stash", "store the whole file"): remember(kind="document-blob", content="<full text>", title="..."). Warn the user this can take longer.
+7. AUTO-SAVE WITH UNDO (required when new structured content appears): If this turn includes new content the user may need later (uploaded file, pasted doc/spec/transcript, list/table/data, extracted PDF text), auto-save without asking:
+   - Call remember(kind="document-note", ...) in the same turn.
+   - Then append exactly this footer on its own line in the final reply:
+     📎 Auto-saved as @doc:<ref> · reply **undo** to delete
+   - Skip auto-save only if: user explicitly said not to save, the turn is purely conversational, or this content was already saved.
+8. UNDO HANDLING: If the user replies "undo", "del", or "delete" after that footer, call undo_save with the referenced @doc ref immediately.`;
+
 export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetadataUrl: string): Router {
   const router = Router();
 
@@ -168,7 +185,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
             noteAuthTiming();
             req.authContext = evalAuth;
             prewarmRecallCache(evalAuth);
-            const server = new McpServer({ name: "tallei", version: "1.0.0" });
+            const server = new McpServer({ name: "tallei", version: "1.0.0" }, { instructions: TALLEI_INSTRUCTIONS });
             registerTools(server, evalAuth);
             const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
             await server.connect(transport);
@@ -216,7 +233,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     req.authContext = authContext;
     prewarmRecallCache(authContext);
 
-    const server = new McpServer({ name: "tallei", version: "1.0.0" });
+    const server = new McpServer({ name: "tallei", version: "1.0.0" }, { instructions: TALLEI_INSTRUCTIONS });
     registerTools(server, authContext);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     await server.connect(transport);

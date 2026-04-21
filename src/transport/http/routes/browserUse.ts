@@ -18,6 +18,8 @@ const executeSchema = z.object({
     "verified",
   ]),
   projectName: z.string().trim().min(1).max(120),
+  applyProjectInstructions: z.boolean().optional(),
+  projectInstructions: z.string().trim().min(1).max(20000).optional(),
   expectedInstructionsHash: z.string().trim().length(64).optional(),
   expectedInstructionSnippet: z.string().trim().min(1).max(120).optional(),
   attempt: z.number().int().min(1).max(10),

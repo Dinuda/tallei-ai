@@ -354,22 +354,7 @@ export default function ConnectorsPage() {
         </div>
       )}
 
-      <section style={{ marginTop: "2rem", display: "grid", gap: "1rem" }}>
-        <h2 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 700, color: "#111827" }}>Runtime Instructions</h2>
-        <p style={{ margin: 0, color: "#6b7280", fontSize: "0.9rem" }}>
-          Copy the runtime-specific instruction set that matches your connector.
-        </p>
-        <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
-          <div style={{ display: "grid", gap: "0.6rem" }}>
-            <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#111827" }}>Claude (MCP)</div>
-            <CodeBlock value={getClaudeInstructions("instant")} language="txt" label="claude.md" />
-          </div>
-          <div style={{ display: "grid", gap: "0.6rem" }}>
-            <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#111827" }}>ChatGPT (Actions)</div>
-            <CodeBlock value={getChatGptInstructions("instant")} language="txt" label="chatgpt.md" />
-          </div>
-        </div>
-      </section>
+
 
       {selected === "claude" && (
         <ClaudeWizard 

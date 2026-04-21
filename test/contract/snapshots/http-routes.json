@@ -25,13 +25,33 @@
     "source": "src/routes/auth.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/billing/cancel",
+    "source": "src/routes/billing.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/billing/checkout",
     "source": "src/routes/billing.ts"
   },
   {
     "method": "GET",
+    "path": "/api/billing/invoices",
+    "source": "src/routes/billing.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/billing/payment-method",
+    "source": "src/routes/billing.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/billing/portal",
+    "source": "src/routes/billing.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/billing/resume",
     "source": "src/routes/billing.ts"
   },
   {
@@ -46,8 +66,18 @@
   },
   {
     "method": "POST",
-    "path": "/api/browser-use/claude-onboarding/execute",
-    "source": "src/routes/browserUse.ts"
+    "path": "/api/chatgpt/actions/documents/recall",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/documents/recent",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/documents/search",
+    "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "GET",
@@ -61,53 +91,18 @@
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/run",
+    "path": "/api/chatgpt/actions/remember",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/save",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/save_memory",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/save_preference",
+    "path": "/api/chatgpt/actions/undo_save",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "GET",
     "path": "/api/chatgpt/openapi.json",
     "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/claude-onboarding/sessions",
-    "source": "src/routes/claudeOnboarding.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/claude-onboarding/sessions/:id",
-    "source": "src/routes/claudeOnboarding.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/claude-onboarding/sessions/:id/cancel",
-    "source": "src/routes/claudeOnboarding.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/claude-onboarding/sessions/:id/events",
-    "source": "src/routes/claudeOnboarding.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/claude-onboarding/sessions/:id/resume",
-    "source": "src/routes/claudeOnboarding.ts"
   },
   {
     "method": "GET",
@@ -122,6 +117,11 @@
   {
     "method": "GET",
     "path": "/api/documents/:ref",
+    "source": "src/routes/documents.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/documents/upload",
     "source": "src/routes/documents.ts"
   },
   {

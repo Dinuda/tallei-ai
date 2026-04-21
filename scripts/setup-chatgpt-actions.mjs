@@ -1,17 +1,25 @@
 #!/usr/bin/env node
 import process from "node:process";
 
-const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory tools.
+const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory + documents tools.
+
+Available actions:
+- recallMemoriesV2
+- rememberActionV2
+- undoSaveActionV2
+- recentDocumentsActionV2
+- searchDocumentsActionV2
+- recallDocumentActionV2
 
 Rules:
-1) On the first user message in each new chat, immediately call recallMemories with query="find tallei" before replying, even if context is not strictly needed.
-2) On every user turn, preload once by calling recallMemories before replying.
-3) If you do not know something, are uncertain, or detect missing personal/contextual information, call recallMemories before answering.
-4) Do not run repeated recall searches in the same turn unless the user explicitly asks for a deeper memory search.
-5) Before answering personal/contextual questions, ensure the preload recallMemories call has already happened in that turn.
-6) Only call saveMemory when the user explicitly asks you to remember something, or explicitly asks to remember a correction.
-7) If the user corrects a prior fact and asks to remember it, call saveMemory with the corrected fact.
-8) Do not mention tool calls in the final user-facing response.`;
+1) Call recallMemoriesV2 only when prior-session context is needed.
+2) recallMemoriesV2 provides docs-lite context only; include_doc_refs returns brief metadata only.
+3) Use recentDocumentsActionV2 first (latest 5 docs). If doc isn't there, use searchDocumentsActionV2.
+4) Use recallDocumentActionV2 only when full document content is explicitly needed.
+5) Use rememberActionV2 as the unified save endpoint (fact/preference/document-note/document-blob).
+6) For new structured content, auto-save with rememberActionV2 kind="document-note".
+7) If the user says "undo"/"delete", call undoSaveActionV2 with the saved @doc ref.
+8) Do not mention tool calls in user-facing responses (except required auto-save footer if configured).`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);
@@ -70,9 +78,9 @@ async function main() {
     : rawAccessToken;
 
   const healthUrl = `${baseUrl}/health`;
-  const openApiUrl = `${baseUrl}/api/chatgpt/openapi.json`;
+  const openApiUrl = `${baseUrl}/api/chatgpt/actions/openapi.json`;
   const recallUrl = `${baseUrl}/api/chatgpt/actions/recall`;
-  const saveUrl = `${baseUrl}/api/chatgpt/actions/save`;
+  const rememberUrl = `${baseUrl}/api/chatgpt/actions/remember`;
 
   console.log("Tallei ChatGPT Actions Setup");
   console.log("============================");
@@ -122,8 +130,8 @@ async function main() {
       if (!data.paths?.["/api/chatgpt/actions/recall"]) {
         throw new Error("Missing /api/chatgpt/actions/recall path");
       }
-      if (!data.paths?.["/api/chatgpt/actions/save"]) {
-        throw new Error("Missing /api/chatgpt/actions/save path");
+      if (!data.paths?.["/api/chatgpt/actions/remember"]) {
+        throw new Error("Missing /api/chatgpt/actions/remember path");
       }
     })
   );
@@ -152,18 +160,19 @@ async function main() {
     );
 
     checks.push(
-      await runCheck("Authenticated save smoke check", async () => {
-        const res = await fetch(saveUrl, {
+      await runCheck("Authenticated remember smoke check", async () => {
+        const res = await fetch(rememberUrl, {
           method: "POST",
           headers: authHeaders,
           body: JSON.stringify({
+            kind: "fact",
             content: `Setup verification memory (${new Date().toISOString()})`,
           }),
         });
         if (!res.ok) throw new Error(`Expected 200, got ${res.status}`);
         const data = await safeJson(res);
-        if (!data || data.success !== true || typeof data.memoryId !== "string") {
-          throw new Error("Invalid save response shape");
+        if (!data || data.success !== true) {
+          throw new Error("Invalid remember response shape");
         }
       })
     );

@@ -32,10 +32,30 @@ interface DocumentRow {
   content_ciphertext: string;
   summary_json: unknown;
   status: "pending" | "ready" | "failed";
+  kind: "blob" | "note";
   created_at: string;
 }
 
 interface LotRow {
+  id: string;
+  ref_handle: string;
+  title: string | null;
+  created_at: string;
+}
+
+interface DocumentBriefRow {
+  ref_handle: string;
+  filename: string | null;
+  title: string | null;
+  status: "pending" | "ready" | "failed";
+  created_at: string;
+  summary_json: unknown;
+  lot_id: string | null;
+  lot_ref: string | null;
+  lot_title: string | null;
+}
+
+interface LotBriefRow {
   id: string;
   ref_handle: string;
   title: string | null;
@@ -51,6 +71,35 @@ interface AutoLotWindow {
 }
 
 const autoLotByActor = new Map<string, AutoLotWindow>();
+
+export interface DocumentBrief {
+  kind: "document";
+  ref: string;
+  title: string;
+  filename: string | null;
+  status: "pending" | "ready" | "failed";
+  createdAt: string;
+  preview: string;
+  lotRef: string | null;
+  lotTitle: string | null;
+}
+
+export interface LotBrief {
+  kind: "lot";
+  ref: string;
+  title: string;
+  createdAt: string;
+  documentCount: number;
+  documents: DocumentBrief[];
+}
+
+export interface MissingDocumentBrief {
+  kind: "missing";
+  ref: string;
+  error: string;
+}
+
+export type DocumentRefBrief = DocumentBrief | LotBrief | MissingDocumentBrief;
 
 function actorKey(auth: AuthContext): string {
   return `${auth.tenantId}:${auth.userId}`;
@@ -120,6 +169,24 @@ function summaryPreview(summaryJson: unknown): string {
     if (typeof first === "string") return first;
   }
   return "";
+}
+
+function displayTitle(input: { title: string | null; filename: string | null; ref: string }): string {
+  return input.title ?? input.filename ?? input.ref;
+}
+
+function toDocumentBrief(row: DocumentBriefRow): DocumentBrief {
+  return {
+    kind: "document",
+    ref: row.ref_handle,
+    title: displayTitle({ title: row.title, filename: row.filename, ref: row.ref_handle }),
+    filename: row.filename,
+    status: row.status,
+    createdAt: row.created_at,
+    preview: summaryPreview(row.summary_json).slice(0, 220),
+    lotRef: row.lot_ref,
+    lotTitle: row.lot_title,
+  };
 }
 
 function embeddingInputFromSummary(summaryJson: Record<string, unknown>): string {
@@ -477,6 +544,58 @@ export async function stashDocument(
   return lotRef ? { refHandle, status: "pending", lotRef } : { refHandle, status: "pending" };
 }
 
+export async function stashDocumentNote(
+  note: {
+    title: string;
+    key_points: string[];
+    summary: string;
+    source_hint: string;
+  },
+  auth: AuthContext
+): Promise<{ refHandle: string; status: "ready" }> {
+  assertPro(auth);
+
+  const noteJson = JSON.stringify({
+    title: note.title,
+    key_points: note.key_points,
+    summary: note.summary,
+    source_hint: note.source_hint,
+  });
+
+  const byteSize = Buffer.byteLength(noteJson, "utf8");
+  const slug = toSlug(note.title, "note");
+  const documentId = randomUUID();
+  const contentHash = hashMemoryContent(noteJson);
+  const encrypted = encryptMemoryContent(noteJson);
+  const createdAt = new Date().toISOString();
+
+  let refHandle = "";
+  for (let attempt = 0; attempt < MAX_REF_HANDLE_RETRIES; attempt += 1) {
+    const candidate = buildRefHandle("doc", slug);
+    try {
+      await pool.query(
+        `INSERT INTO documents
+         (id, tenant_id, user_id, ref_handle, lot_id, filename, title, mime_type, byte_size, content_ciphertext, content_hash, summary_json, status, kind, created_at)
+         VALUES ($1, $2, $3, $4, NULL, NULL, $5, 'application/json', $6, $7, $8, '{}'::jsonb, 'ready', 'note', $9)`,
+        [documentId, auth.tenantId, auth.userId, candidate, note.title || null, byteSize, encrypted, contentHash, createdAt]
+      );
+      refHandle = candidate;
+      break;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (!refHandle) {
+    throw new Error("Failed to generate a unique document reference");
+  }
+
+  return { refHandle, status: "ready" };
+}
+
 export async function createLot(
   refHandles: string[],
   auth: AuthContext,
@@ -517,11 +636,32 @@ function decodeDocumentRow(row: DocumentRow): {
   filename: string | null;
   title: string | null;
   content: string;
+  kind: "blob" | "note";
   status: "ready" | "pending_embedding" | "failed_indexing";
 } {
   let content = "";
   try {
-    content = decryptMemoryContent(row.content_ciphertext);
+    const raw = decryptMemoryContent(row.content_ciphertext);
+    if (row.kind === "note") {
+      // Note rows store JSON; render as readable summary block.
+      try {
+        const note = JSON.parse(raw) as { title?: string; key_points?: string[]; summary?: string; source_hint?: string };
+        const lines: string[] = [];
+        if (note.title) lines.push(`**${note.title}**`);
+        if (note.source_hint) lines.push(`_Source: ${note.source_hint}_`);
+        if (note.summary) lines.push(`\n${note.summary}`);
+        if (note.key_points && note.key_points.length > 0) {
+          lines.push("\nKey points:");
+          note.key_points.forEach((kp) => lines.push(`- ${kp}`));
+        }
+        lines.push("\n⚠️ Summary-only note. Full document was not stored. Ask the user to re-attach the file if full contents are needed.");
+        content = lines.join("\n");
+      } catch {
+        content = raw;
+      }
+    } else {
+      content = raw;
+    }
   } catch {
     content = "[Encrypted document unavailable]";
   }
@@ -537,6 +677,7 @@ function decodeDocumentRow(row: DocumentRow): {
     filename: row.filename,
     title: row.title,
     content,
+    kind: row.kind ?? "blob",
     status,
   };
 }
@@ -581,7 +722,7 @@ export async function recallDocument(
   }
 
   const documentResult = await pool.query<DocumentRow>(
-    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, created_at
+    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, created_at
      FROM documents
      WHERE tenant_id = $1
        AND user_id = $2
@@ -640,7 +781,7 @@ export async function recallLot(
   }
 
   const docsResult = await pool.query<DocumentRow>(
-    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, created_at
+    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, created_at
      FROM documents
      WHERE tenant_id = $1
        AND user_id = $2
@@ -736,6 +877,143 @@ export async function searchDocuments(
   }
 
   return lexicalSearchDocuments(normalizedQuery, auth, normalizedLimit);
+}
+
+export async function recentDocumentBriefs(
+  auth: AuthContext,
+  limit = 5
+): Promise<DocumentBrief[]> {
+  const normalizedLimit = Math.min(20, Math.max(1, Math.floor(limit)));
+  const rows = await pool.query<DocumentBriefRow>(
+    `SELECT d.ref_handle,
+            d.filename,
+            d.title,
+            d.status,
+            d.created_at,
+            d.summary_json,
+            d.lot_id,
+            l.ref_handle AS lot_ref,
+            l.title AS lot_title
+     FROM documents d
+     LEFT JOIN document_lots l
+       ON l.id = d.lot_id
+      AND l.deleted_at IS NULL
+     WHERE d.tenant_id = $1
+       AND d.user_id = $2
+       AND d.deleted_at IS NULL
+     ORDER BY d.created_at DESC
+     LIMIT $3`,
+    [auth.tenantId, auth.userId, normalizedLimit]
+  );
+
+  return rows.rows.map((row) => toDocumentBrief(row));
+}
+
+export async function documentBriefsByRefs(
+  refHandles: string[],
+  auth: AuthContext,
+  options?: { maxLotDocs?: number }
+): Promise<DocumentRefBrief[]> {
+  const uniqueRefs = [...new Set(refHandles.map((value) => normalizeRef(value)).filter(Boolean))];
+  if (uniqueRefs.length === 0) return [];
+
+  const maxLotDocs = Math.min(20, Math.max(1, Math.floor(options?.maxLotDocs ?? 5)));
+  const docRefs = uniqueRefs.filter((ref) => isDocumentRef(ref));
+  const lotRefs = uniqueRefs.filter((ref) => isLotRef(ref));
+
+  const documentsResult = docRefs.length > 0
+    ? await pool.query<DocumentBriefRow>(
+      `SELECT d.ref_handle,
+              d.filename,
+              d.title,
+              d.status,
+              d.created_at,
+              d.summary_json,
+              d.lot_id,
+              l.ref_handle AS lot_ref,
+              l.title AS lot_title
+       FROM documents d
+       LEFT JOIN document_lots l
+         ON l.id = d.lot_id
+        AND l.deleted_at IS NULL
+       WHERE d.tenant_id = $1
+         AND d.user_id = $2
+         AND d.deleted_at IS NULL
+         AND d.ref_handle = ANY($3::text[])`,
+      [auth.tenantId, auth.userId, docRefs]
+    )
+    : { rows: [] as DocumentBriefRow[] };
+
+  const lotsResult = lotRefs.length > 0
+    ? await pool.query<LotBriefRow>(
+      `SELECT id, ref_handle, title, created_at
+       FROM document_lots
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND ref_handle = ANY($3::text[])`,
+      [auth.tenantId, auth.userId, lotRefs]
+    )
+    : { rows: [] as LotBriefRow[] };
+
+  const lotIds = lotsResult.rows.map((row) => row.id);
+  const lotDocsResult = lotIds.length > 0
+    ? await pool.query<DocumentBriefRow>(
+      `SELECT d.ref_handle,
+              d.filename,
+              d.title,
+              d.status,
+              d.created_at,
+              d.summary_json,
+              d.lot_id,
+              l.ref_handle AS lot_ref,
+              l.title AS lot_title
+       FROM documents d
+       LEFT JOIN document_lots l
+         ON l.id = d.lot_id
+        AND l.deleted_at IS NULL
+       WHERE d.tenant_id = $1
+         AND d.user_id = $2
+         AND d.deleted_at IS NULL
+         AND d.lot_id = ANY($3::uuid[])
+       ORDER BY d.created_at DESC`,
+      [auth.tenantId, auth.userId, lotIds]
+    )
+    : { rows: [] as DocumentBriefRow[] };
+
+  const docByRef = new Map(documentsResult.rows.map((row) => [row.ref_handle, toDocumentBrief(row)]));
+  const lotByRef = new Map(lotsResult.rows.map((row) => [row.ref_handle, row]));
+  const lotDocs = new Map<string, DocumentBrief[]>();
+  for (const row of lotDocsResult.rows) {
+    if (!row.lot_id) continue;
+    const docs = lotDocs.get(row.lot_id) ?? [];
+    docs.push(toDocumentBrief(row));
+    lotDocs.set(row.lot_id, docs);
+  }
+
+  return uniqueRefs.map((ref): DocumentRefBrief => {
+    const doc = docByRef.get(ref);
+    if (doc) return doc;
+
+    const lot = lotByRef.get(ref);
+    if (lot) {
+      const docs = (lotDocs.get(lot.id) ?? []).slice(0, maxLotDocs);
+      return {
+        kind: "lot",
+        ref: lot.ref_handle,
+        title: lot.title ?? lot.ref_handle,
+        createdAt: lot.created_at,
+        documentCount: lotDocs.get(lot.id)?.length ?? 0,
+        documents: docs,
+      };
+    }
+
+    return {
+      kind: "missing",
+      ref,
+      error: "Document or lot not found",
+    };
+  });
 }
 
 export async function listDocuments(auth: AuthContext): Promise<{

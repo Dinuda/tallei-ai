@@ -3,8 +3,6 @@ import cors from "cors";
 import helmet from "helmet";
 
 import authRouter from "./routes/auth.js";
-import browserUseRouter from "./routes/browserUse.js";
-import claudeOnboardingRouter from "./routes/claudeOnboarding.js";
 import keysRouter from "./routes/keys.js";
 import memoriesRouter from "./routes/memories.js";
 import documentsRouter from "./routes/documents.js";
@@ -97,8 +95,6 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/billing", billingRouter);
   app.use("/api/mcp/events", mcpEventsRouter);
   app.use("/api/mcp", mcpCodeRouter);
-  app.use("/api/claude-onboarding", claudeOnboardingRouter);
-  app.use("/api/browser-use", browserUseRouter);
 
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(deps.mcpPublicUrl);
   app.use("/mcp", deps.mcpRateLimit, createMcpRouter(deps.oauthProvider, resourceMetadataUrl));
