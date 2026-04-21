@@ -3,7 +3,12 @@ import test from "node:test";
 
 import { z } from "zod";
 
-import { conversationIdSchema, openAiFileRefSchema, uploadBlobBodySchema } from "../../../src/transport/http/schemas/uploaded-files.js";
+import {
+  conversationIdSchema,
+  normalizeUploadedFileRequestBody,
+  openAiFileRefSchema,
+  uploadBlobBodySchema,
+} from "../../../src/transport/http/schemas/uploaded-files.js";
 
 const recallLikeSchema = z.object({
   query: z.string().optional(),
@@ -65,4 +70,63 @@ test("uploadBlobBodySchema rejects malformed openaiFileIdRefs", () => {
       }),
     /download_link/
   );
+});
+
+test("normalizeUploadedFileRequestBody accepts top-level and item aliases", () => {
+  const normalized = normalizeUploadedFileRequestBody({
+    files: [
+      {
+        fileId: "file_alias",
+        filename: "alias.pdf",
+        mimeType: "application/pdf",
+        downloadLink: "https://example.com/alias.pdf",
+      },
+    ],
+    conversation_id: "conv_alias",
+  });
+
+  const parsed = uploadBlobBodySchema.parse(normalized);
+  assert.equal(parsed.openaiFileIdRefs.length, 1);
+  assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_alias");
+  assert.equal(parsed.openaiFileIdRefs[0]?.download_link, "https://example.com/alias.pdf");
+  assert.equal(parsed.openaiFileIdRefs[0]?.mime_type, "application/pdf");
+});
+
+test("normalizeUploadedFileRequestBody accepts stringified refs", () => {
+  const normalized = normalizeUploadedFileRequestBody({
+    openai_file_id_refs: JSON.stringify([
+      {
+        file_id: "file_json",
+        name: "json.txt",
+        mime_type: "text/plain",
+        download_url: "https://example.com/json.txt",
+      },
+    ]),
+  });
+
+  const parsed = uploadBlobBodySchema.parse(normalized);
+  assert.equal(parsed.openaiFileIdRefs.length, 1);
+  assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_json");
+  assert.equal(parsed.openaiFileIdRefs[0]?.download_link, "https://example.com/json.txt");
+});
+
+test("normalizeUploadedFileRequestBody accepts nested payload wrappers", () => {
+  const normalized = normalizeUploadedFileRequestBody({
+    payload: {
+      openaiFileRefs: [
+        {
+          fileId: "file_nested",
+          filename: "nested.pdf",
+          mimeType: "application/pdf",
+          downloadLink: "https://example.com/nested.pdf",
+        },
+      ],
+    },
+    conversation_id: "conv_nested",
+  });
+
+  const parsed = uploadBlobBodySchema.parse(normalized);
+  assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_nested");
+  assert.equal(parsed.openaiFileIdRefs[0]?.download_link, "https://example.com/nested.pdf");
+  assert.equal(parsed.conversation_id, "conv_nested");
 });

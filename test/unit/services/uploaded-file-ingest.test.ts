@@ -5,6 +5,9 @@ import type { AuthContext } from "../../../src/domain/auth/index.js";
 import {
   ingestUploadedFileToDocument,
   ingestUploadedFilesToDocuments,
+  isDocxLikeFile,
+  isLegacyDocFile,
+  isPdfLikeFile,
   type UploadedFileRef,
 } from "../../../src/services/uploaded-file-ingest.js";
 
@@ -149,4 +152,27 @@ test("ingestUploadedFilesToDocuments returns mixed success and errors", async ()
   assert.equal(result.saved[0]?.conversation_id, "conv-mixed");
   assert.equal(result.errors[0]?.file_id, "bad-1");
   assert.match(result.errors[0]?.error ?? "", /blob upload failed/);
+});
+
+test("file type helpers detect pdf and word formats", () => {
+  assert.equal(isPdfLikeFile({
+    id: "p1",
+    name: "report.PDF",
+    mime_type: null,
+    download_link: "https://example.com/report.pdf",
+  }), true);
+
+  assert.equal(isDocxLikeFile({
+    id: "w1",
+    name: "notes.docx",
+    mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    download_link: "https://example.com/notes.docx",
+  }), true);
+
+  assert.equal(isLegacyDocFile({
+    id: "w2",
+    name: "legacy.doc",
+    mime_type: "application/msword",
+    download_link: "https://example.com/legacy.doc",
+  }), true);
 });
