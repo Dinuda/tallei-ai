@@ -24,6 +24,28 @@ function resolveBackendUrl(req?: NextRequest): string {
   return configured.replace(/\/$/, "");
 }
 
+function resolveRedirectUrl(
+  backend: string,
+  response: Response
+): string | null {
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (!location) return null;
+
+    try {
+      return new URL(location, backend).toString();
+    } catch {
+      return location;
+    }
+  }
+
+  if (response.redirected && response.url) {
+    return response.url;
+  }
+
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -44,17 +66,19 @@ export async function GET(req: NextRequest) {
         "X-User-Id": session.user.id,
       },
     });
-    
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get("location");
-      if (location) {
-        return NextResponse.redirect(location);
-      }
+
+    const redirectUrl = resolveRedirectUrl(backend, res);
+    if (redirectUrl) {
+      return NextResponse.redirect(redirectUrl, { status: 302 });
     }
-    
+
     // If not a redirect, return the response JSON
     try {
-      const data = await res.json();
+      const data = (await res.json()) as { url?: string; checkoutUrl?: string };
+      const bodyUrl = data.url ?? data.checkoutUrl;
+      if (bodyUrl) {
+        return NextResponse.redirect(bodyUrl, { status: 302 });
+      }
       return NextResponse.json(data, { status: res.status });
     } catch {
       return new NextResponse(await res.text(), { status: res.status });

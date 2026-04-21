@@ -119,7 +119,7 @@ export function invalidateRecallCache(auth: AuthContext): void {
 
 function isVectorInfraError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return /Qdrant|timeout|aborted|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|No route to host/i.test(error.message);
+  return /Qdrant|timeout|aborted|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|No route to host|connection error|fetch failed|APIConnectionError|EHOSTUNREACH|EAI_AGAIN/i.test(error.message);
 }
 
 export function shouldBypassVector(): boolean {

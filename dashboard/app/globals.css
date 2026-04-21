@@ -679,11 +679,19 @@ pre {
 
 .dashboard-main {
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   margin-left: var(--sidebar-w);
   padding-top: calc(var(--nav-h) + 1.75rem);
   padding-right: 1.55rem;
   padding-left: 1.55rem;
   padding-bottom: 3rem;
+}
+
+.dashboard-content-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 .page-title {

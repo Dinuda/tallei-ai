@@ -1,4 +1,4 @@
-import express, { type Express, type RequestHandler } from "express";
+import express, { type Express, type Request, type RequestHandler } from "express";
 import cors from "cors";
 import helmet from "helmet";
 
@@ -50,7 +50,16 @@ export function createApp(deps: AppFactoryDeps): Express {
     credentials: true,
   }));
 
-  app.use(express.json({ limit: "3mb", strict: true, type: ["application/json"] }));
+  app.use(
+    express.json({
+      limit: "3mb",
+      strict: true,
+      type: ["application/json"],
+      verify: (req, _res, buf) => {
+        (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+      },
+    })
+  );
   app.use(requestTimingMiddleware);
 
   app.use(mcpAuthRouter({

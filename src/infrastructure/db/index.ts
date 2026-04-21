@@ -595,6 +595,8 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_memory_events_tenant_user_created
         ON memory_events(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_events_tenant_action_created
+        ON memory_events(tenant_id, action, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id
         ON memory_events(memory_id, created_at DESC);
     `);
@@ -784,6 +786,7 @@ export async function initDb() {
         status               TEXT NOT NULL DEFAULT 'active',
         cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
         current_period_end   TIMESTAMP WITH TIME ZONE,
+        trial_ends_at        TIMESTAMP WITH TIME ZONE,
         created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
@@ -798,6 +801,12 @@ export async function initDb() {
       INSERT INTO subscriptions (tenant_id, plan, status)
       SELECT id, 'free', 'active' FROM tenants
       ON CONFLICT (tenant_id) DO NOTHING
+    `);
+
+    // Add trial_ends_at column for free-trial promotions
+    await client.query(`
+      ALTER TABLE subscriptions
+        ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP WITH TIME ZONE;
     `);
 
     // #13 + #9: Hash-only token storage + family-based rotation

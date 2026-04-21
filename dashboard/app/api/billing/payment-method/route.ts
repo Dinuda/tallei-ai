@@ -55,10 +55,10 @@ export async function GET(req: NextRequest) {
   const backend = resolveBackendUrl(req);
 
   try {
-    const url = new URL(`${backend}/api/billing/portal`);
-    
+    const url = new URL(`${backend}/api/billing/payment-method`);
+
     const res = await fetch(url.toString(), {
-      redirect: "manual", // We want to capture the 302 redirect and forward it
+      redirect: "manual",
       headers: {
         "X-Internal-Secret": SECRET,
         "X-User-Id": session.user.id,
@@ -70,10 +70,9 @@ export async function GET(req: NextRequest) {
       return NextResponse.redirect(redirectUrl, { status: 302 });
     }
 
-    // If not a redirect, return the response JSON
     try {
-      const data = (await res.json()) as { url?: string; portalUrl?: string };
-      const bodyUrl = data.url ?? data.portalUrl;
+      const data = (await res.json()) as { url?: string; paymentMethodUrl?: string };
+      const bodyUrl = data.url ?? data.paymentMethodUrl;
       if (bodyUrl) {
         return NextResponse.redirect(bodyUrl, { status: 302 });
       }
