@@ -1,14 +1,8 @@
 import { Router, Response } from "express";
 import multer from "multer";
-import { PDFParse } from "pdf-parse";
-
-async function extractPdfText(buffer: Buffer): Promise<string> {
-  const parser = new PDFParse({ data: buffer });
-  const result = await parser.getText();
-  return result.text;
-}
 import { z } from "zod";
 
+import { assertUploadThingConfigured, UploadThingConfigError } from "../../../infrastructure/storage/uploadthing-client.js";
 import {
   listDocuments,
   recallDocument,
@@ -17,7 +11,9 @@ import {
   stashDocumentNote,
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
+import { extractPdfText, ingestUploadedFilesToDocuments } from "../../../services/uploaded-file-ingest.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
+import { uploadBlobBodySchema } from "../schemas/uploaded-files.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const upload = multer({
@@ -90,6 +86,44 @@ router.delete("/:ref", requireScopes(["memory:write"]), async (req: AuthRequest,
     }
     console.error("Error deleting document:", error);
     res.status(500).json({ error: "Failed to delete document" });
+  }
+});
+
+router.post("/upload-blob", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = uploadBlobBodySchema.parse(req.body ?? {});
+    assertUploadThingConfigured();
+
+    const { saved, errors } = await ingestUploadedFilesToDocuments(body.openaiFileIdRefs, req.authContext!, {
+      title: body.title,
+      conversation_id: body.conversation_id ?? null,
+    });
+
+    res.json({
+      success: true,
+      count: saved.length,
+      saved,
+      errors,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json({ error: error.message });
+      return;
+    }
+    if (error instanceof UploadThingConfigError) {
+      res.status(503).json({ error: error.message });
+      return;
+    }
+    if (error instanceof DocumentSizeExceededError) {
+      res.status(413).json({ error: error.message });
+      return;
+    }
+    console.error("Error uploading document blob:", error);
+    res.status(500).json({ error: "Failed to upload document blob" });
   }
 });
 

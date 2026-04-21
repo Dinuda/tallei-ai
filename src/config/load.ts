@@ -62,6 +62,8 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_AUTH__SUPABASE_SERVICE_ROLE_KEY", oldKey: "SUPABASE_SERVICE_ROLE_KEY" },
   { newKey: "TALLEI_AUTH__MEMORY_MASTER_KEY",   oldKey: "MEMORY_MASTER_KEY" },
   { newKey: "TALLEI_AUTH__KMS_KEY_ID",          oldKey: "KMS_KEY_ID" },
+  // Storage
+  { newKey: "TALLEI_STORAGE__UPLOADTHING_TOKEN", oldKey: "UPLOADTHING_TOKEN" },
   // Billing
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_API_KEY",        oldKey: "LEMONSQUEEZY_API_KEY" },
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_WEBHOOK_SECRET", oldKey: "LEMONSQUEEZY_WEBHOOK_SECRET" },
@@ -245,6 +247,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ollamaModel: readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen2.5:7b"),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
     kmsKeyId: readStringEnv(e, "TALLEI_AUTH__KMS_KEY_ID", "local-dev"),
+    uploadthingToken: readStringEnv(e, "TALLEI_STORAGE__UPLOADTHING_TOKEN"),
     enableSupabaseRlsPolicies: readBooleanEnv(e, "ENABLE_SUPABASE_RLS_POLICIES", true),
     // Phase 3 feature flags — shadow cutover for memory.ts extraction (ADR-007)
     memoryDualWriteEnabled: readBooleanEnv(e, "MEMORY_DUAL_WRITE_ENABLED", false),

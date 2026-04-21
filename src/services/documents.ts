@@ -22,6 +22,13 @@ const DOCUMENT_LEXICAL_CANDIDATE_LIMIT = 250;
 
 const vectorRepository = new VectorRepository();
 
+export interface DocumentBlobMetadata {
+  provider: "uploadthing";
+  key: string;
+  url: string;
+  sourceFileId: string;
+}
+
 interface DocumentRow {
   id: string;
   ref_handle: string;
@@ -33,6 +40,11 @@ interface DocumentRow {
   summary_json: unknown;
   status: "pending" | "ready" | "failed";
   kind: "blob" | "note";
+  conversation_id: string | null;
+  blob_provider: string | null;
+  blob_key: string | null;
+  blob_url: string | null;
+  blob_source_file_id: string | null;
   created_at: string;
 }
 
@@ -53,6 +65,10 @@ interface DocumentBriefRow {
   lot_id: string | null;
   lot_ref: string | null;
   lot_title: string | null;
+  blob_provider: string | null;
+  blob_key: string | null;
+  blob_url: string | null;
+  blob_source_file_id: string | null;
 }
 
 interface LotBriefRow {
@@ -82,6 +98,12 @@ export interface DocumentBrief {
   preview: string;
   lotRef: string | null;
   lotTitle: string | null;
+  blob: {
+    provider: "uploadthing";
+    key: string;
+    url: string;
+    source_file_id: string;
+  } | null;
 }
 
 export interface LotBrief {
@@ -176,6 +198,12 @@ function displayTitle(input: { title: string | null; filename: string | null; re
 }
 
 function toDocumentBrief(row: DocumentBriefRow): DocumentBrief {
+  const hasBlob =
+    row.blob_provider === "uploadthing" &&
+    typeof row.blob_key === "string" &&
+    typeof row.blob_url === "string" &&
+    typeof row.blob_source_file_id === "string";
+
   return {
     kind: "document",
     ref: row.ref_handle,
@@ -186,6 +214,14 @@ function toDocumentBrief(row: DocumentBriefRow): DocumentBrief {
     preview: summaryPreview(row.summary_json).slice(0, 220),
     lotRef: row.lot_ref,
     lotTitle: row.lot_title,
+    blob: hasBlob
+      ? {
+        provider: "uploadthing",
+        key: row.blob_key!,
+        url: row.blob_url!,
+        source_file_id: row.blob_source_file_id!,
+      }
+      : null,
   };
 }
 
@@ -467,8 +503,16 @@ export async function stashDocument(
     filename?: string;
     title?: string;
     mimeType?: string;
+    conversationId?: string | null;
+    blob?: DocumentBlobMetadata;
   }
-): Promise<{ refHandle: string; status: "pending"; lotRef?: string }> {
+): Promise<{
+  refHandle: string;
+  status: "pending";
+  lotRef?: string;
+  conversationId: string | null;
+  blob: DocumentBlobMetadata | null;
+}> {
   assertPro(auth);
 
   const rawContent = normalizeContent(content);
@@ -491,6 +535,8 @@ export async function stashDocument(
   const contentHash = hashMemoryContent(rawContent);
   const encrypted = encryptMemoryContent(rawContent);
   const createdAt = new Date().toISOString();
+  const conversationId = opts?.conversationId?.trim() || null;
+  const blob = opts?.blob ?? null;
 
   let refHandle = "";
   for (let attempt = 0; attempt < MAX_REF_HANDLE_RETRIES; attempt += 1) {
@@ -498,8 +544,8 @@ export async function stashDocument(
     try {
       await pool.query(
         `INSERT INTO documents
-         (id, tenant_id, user_id, ref_handle, lot_id, filename, title, mime_type, byte_size, content_ciphertext, content_hash, summary_json, status, created_at)
-         VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, '{}'::jsonb, 'pending', $11)`,
+         (id, tenant_id, user_id, ref_handle, lot_id, filename, title, mime_type, byte_size, content_ciphertext, content_hash, summary_json, status, conversation_id, blob_provider, blob_key, blob_url, blob_source_file_id, created_at)
+         VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, '{}'::jsonb, 'pending', $11, $12, $13, $14, $15, $16)`,
         [
           documentId,
           auth.tenantId,
@@ -511,6 +557,11 @@ export async function stashDocument(
           byteSize,
           encrypted,
           contentHash,
+          conversationId,
+          blob?.provider ?? null,
+          blob?.key ?? null,
+          blob?.url ?? null,
+          blob?.sourceFileId ?? null,
           createdAt,
         ]
       );
@@ -541,7 +592,8 @@ export async function stashDocument(
     }
   });
 
-  return lotRef ? { refHandle, status: "pending", lotRef } : { refHandle, status: "pending" };
+  const base = { refHandle, status: "pending" as const, conversationId, blob };
+  return lotRef ? { ...base, lotRef } : base;
 }
 
 export async function stashDocumentNote(
@@ -551,7 +603,10 @@ export async function stashDocumentNote(
     summary: string;
     source_hint: string;
   },
-  auth: AuthContext
+  auth: AuthContext,
+  opts?: {
+    conversationId?: string | null;
+  }
 ): Promise<{ refHandle: string; status: "ready" }> {
   assertPro(auth);
 
@@ -568,6 +623,7 @@ export async function stashDocumentNote(
   const contentHash = hashMemoryContent(noteJson);
   const encrypted = encryptMemoryContent(noteJson);
   const createdAt = new Date().toISOString();
+  const conversationId = opts?.conversationId?.trim() || null;
 
   let refHandle = "";
   for (let attempt = 0; attempt < MAX_REF_HANDLE_RETRIES; attempt += 1) {
@@ -575,9 +631,9 @@ export async function stashDocumentNote(
     try {
       await pool.query(
         `INSERT INTO documents
-         (id, tenant_id, user_id, ref_handle, lot_id, filename, title, mime_type, byte_size, content_ciphertext, content_hash, summary_json, status, kind, created_at)
-         VALUES ($1, $2, $3, $4, NULL, NULL, $5, 'application/json', $6, $7, $8, '{}'::jsonb, 'ready', 'note', $9)`,
-        [documentId, auth.tenantId, auth.userId, candidate, note.title || null, byteSize, encrypted, contentHash, createdAt]
+         (id, tenant_id, user_id, ref_handle, lot_id, filename, title, mime_type, byte_size, content_ciphertext, content_hash, summary_json, status, kind, conversation_id, created_at)
+         VALUES ($1, $2, $3, $4, NULL, NULL, $5, 'application/json', $6, $7, $8, '{}'::jsonb, 'ready', 'note', $9, $10)`,
+        [documentId, auth.tenantId, auth.userId, candidate, note.title || null, byteSize, encrypted, contentHash, conversationId, createdAt]
       );
       refHandle = candidate;
       break;
@@ -638,6 +694,13 @@ function decodeDocumentRow(row: DocumentRow): {
   content: string;
   kind: "blob" | "note";
   status: "ready" | "pending_embedding" | "failed_indexing";
+  conversation_id: string | null;
+  blob: {
+    provider: "uploadthing";
+    key: string;
+    url: string;
+    source_file_id: string;
+  } | null;
 } {
   let content = "";
   try {
@@ -679,6 +742,19 @@ function decodeDocumentRow(row: DocumentRow): {
     content,
     kind: row.kind ?? "blob",
     status,
+    conversation_id: row.conversation_id ?? null,
+    blob:
+      row.blob_provider === "uploadthing" &&
+        typeof row.blob_key === "string" &&
+        typeof row.blob_url === "string" &&
+        typeof row.blob_source_file_id === "string"
+        ? {
+          provider: "uploadthing",
+          key: row.blob_key,
+          url: row.blob_url,
+          source_file_id: row.blob_source_file_id,
+        }
+        : null,
   };
 }
 
@@ -693,6 +769,13 @@ export async function recallDocument(
     title: string | null;
     content: string;
     status: "ready" | "pending_embedding" | "failed_indexing";
+    conversation_id: string | null;
+    blob: {
+      provider: "uploadthing";
+      key: string;
+      url: string;
+      source_file_id: string;
+    } | null;
   }
   | {
     kind: "lot";
@@ -704,6 +787,13 @@ export async function recallDocument(
       title: string | null;
       content: string;
       status: "ready" | "pending_embedding" | "failed_indexing";
+      conversation_id: string | null;
+      blob: {
+        provider: "uploadthing";
+        key: string;
+        url: string;
+        source_file_id: string;
+      } | null;
     }>;
   }
 > {
@@ -722,7 +812,7 @@ export async function recallDocument(
   }
 
   const documentResult = await pool.query<DocumentRow>(
-    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, created_at
+    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, conversation_id, blob_provider, blob_key, blob_url, blob_source_file_id, created_at
      FROM documents
      WHERE tenant_id = $1
        AND user_id = $2
@@ -745,6 +835,8 @@ export async function recallDocument(
     title: decoded.title,
     content: decoded.content,
     status: decoded.status,
+    conversation_id: decoded.conversation_id,
+    blob: decoded.blob,
   };
 }
 
@@ -760,6 +852,13 @@ export async function recallLot(
     title: string | null;
     content: string;
     status: "ready" | "pending_embedding" | "failed_indexing";
+    conversation_id: string | null;
+    blob: {
+      provider: "uploadthing";
+      key: string;
+      url: string;
+      source_file_id: string;
+    } | null;
   }>;
 }> {
   assertPro(auth);
@@ -781,7 +880,7 @@ export async function recallLot(
   }
 
   const docsResult = await pool.query<DocumentRow>(
-    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, created_at
+    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, conversation_id, blob_provider, blob_key, blob_url, blob_source_file_id, created_at
      FROM documents
      WHERE tenant_id = $1
        AND user_id = $2
@@ -893,7 +992,11 @@ export async function recentDocumentBriefs(
             d.summary_json,
             d.lot_id,
             l.ref_handle AS lot_ref,
-            l.title AS lot_title
+            l.title AS lot_title,
+            d.blob_provider,
+            d.blob_key,
+            d.blob_url,
+            d.blob_source_file_id
      FROM documents d
      LEFT JOIN document_lots l
        ON l.id = d.lot_id
@@ -931,7 +1034,11 @@ export async function documentBriefsByRefs(
               d.summary_json,
               d.lot_id,
               l.ref_handle AS lot_ref,
-              l.title AS lot_title
+              l.title AS lot_title,
+              d.blob_provider,
+              d.blob_key,
+              d.blob_url,
+              d.blob_source_file_id
        FROM documents d
        LEFT JOIN document_lots l
          ON l.id = d.lot_id
@@ -967,7 +1074,11 @@ export async function documentBriefsByRefs(
               d.summary_json,
               d.lot_id,
               l.ref_handle AS lot_ref,
-              l.title AS lot_title
+              l.title AS lot_title,
+              d.blob_provider,
+              d.blob_key,
+              d.blob_url,
+              d.blob_source_file_id
        FROM documents d
        LEFT JOIN document_lots l
          ON l.id = d.lot_id
@@ -1026,6 +1137,12 @@ export async function listDocuments(auth: AuthContext): Promise<{
     createdAt: string;
     lotRef: string | null;
     lotTitle: string | null;
+    blob: {
+      provider: "uploadthing";
+      key: string;
+      url: string;
+      source_file_id: string;
+    } | null;
   }>;
   lots: Array<{
     ref: string;
@@ -1045,6 +1162,10 @@ export async function listDocuments(auth: AuthContext): Promise<{
     created_at: string;
     lot_ref: string | null;
     lot_title: string | null;
+    blob_provider: string | null;
+    blob_key: string | null;
+    blob_url: string | null;
+    blob_source_file_id: string | null;
   }>(
     `SELECT d.ref_handle,
             d.filename,
@@ -1053,7 +1174,11 @@ export async function listDocuments(auth: AuthContext): Promise<{
             d.status,
             d.created_at,
             l.ref_handle AS lot_ref,
-            l.title AS lot_title
+            l.title AS lot_title,
+            d.blob_provider,
+            d.blob_key,
+            d.blob_url,
+            d.blob_source_file_id
      FROM documents d
      LEFT JOIN document_lots l
        ON l.id = d.lot_id
@@ -1097,6 +1222,18 @@ export async function listDocuments(auth: AuthContext): Promise<{
       createdAt: row.created_at,
       lotRef: row.lot_ref,
       lotTitle: row.lot_title,
+      blob:
+        row.blob_provider === "uploadthing" &&
+          typeof row.blob_key === "string" &&
+          typeof row.blob_url === "string" &&
+          typeof row.blob_source_file_id === "string"
+          ? {
+            provider: "uploadthing",
+            key: row.blob_key,
+            url: row.blob_url,
+            source_file_id: row.blob_source_file_id,
+          }
+          : null,
     })),
     lots: lotsResult.rows.map((row) => ({
       ref: row.ref_handle,

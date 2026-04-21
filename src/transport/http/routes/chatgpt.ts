@@ -1,8 +1,8 @@
 import { Router, Response, NextFunction } from "express";
 import { z } from "zod";
-import { PDFParse } from "pdf-parse";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
+import { assertUploadThingConfigured, UploadThingConfigError } from "../../../infrastructure/storage/uploadthing-client.js";
 import { recallMemories, saveMemory, savePreference } from "../../../services/memory.js";
 import {
   stashDocument,
@@ -14,6 +14,7 @@ import {
   documentBriefsByRefs,
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
+import { ingestUploadedFileToDocument } from "../../../services/uploaded-file-ingest.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import { authContextFromApiKey, authContextFromUserId } from "../../../infrastructure/auth/auth.js";
@@ -21,16 +22,11 @@ import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
 import { validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
 import { setRequestTimingField } from "../../../observability/request-timing.js";
 import { runAsyncSafe } from "../../../shared/async-safe.js";
+import { conversationIdSchema, openAiFileRefSchema } from "../schemas/uploaded-files.js";
 
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
 const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);
-const openAiFileRefSchema = z.object({
-  id: z.string().min(1, "file id is required"),
-  name: z.string().optional(),
-  mime_type: z.string().nullable().optional(),
-  download_link: z.string().url("download_link must be a valid URL"),
-});
 
 const recallSchema = z.object({
   query: z.string().trim().optional().default("latest user context, goals, preferences, and relevant prior facts"),
@@ -38,6 +34,7 @@ const recallSchema = z.object({
   types: z.array(memoryTypeSchema).optional(),
   include_doc_refs: z.array(z.string()).max(20).optional(),
   openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+  conversation_id: conversationIdSchema,
 });
 
 const rememberSchema = z.object({
@@ -51,6 +48,7 @@ const rememberSchema = z.object({
   preference_key: z.string().optional(),
   platform: z.enum(["claude", "chatgpt", "gemini", "other"]).optional().default("chatgpt"),
   openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+  conversation_id: conversationIdSchema,
 });
 
 const undoSaveSchema = z.object({
@@ -89,54 +87,7 @@ function recallTypesOrDefault(types?: Array<z.infer<typeof memoryTypeSchema>>): 
   return ["fact", "preference"];
 }
 
-async function extractPdfText(buffer: Buffer): Promise<string> {
-  const parser = new PDFParse({ data: buffer });
-  const result = await parser.getText();
-  return result.text;
-}
-
-async function fetchUploadedFileBuffer(ref: z.infer<typeof openAiFileRefSchema>): Promise<Buffer> {
-  const response = await fetch(ref.download_link, { redirect: "follow" });
-  if (!response.ok) {
-    throw new Error(`Failed to download uploaded file ${ref.id}: HTTP ${response.status}`);
-  }
-  const arrayBuffer = await response.arrayBuffer();
-  return Buffer.from(arrayBuffer);
-}
-
-async function uploadedFileToText(
-  ref: z.infer<typeof openAiFileRefSchema>,
-  buffer: Buffer
-): Promise<string> {
-  const mime = (ref.mime_type ?? "").toLowerCase();
-  const name = (ref.name ?? "").toLowerCase();
-  const isPdf = mime === "application/pdf" || name.endsWith(".pdf");
-  if (isPdf) {
-    return extractPdfText(buffer);
-  }
-  return buffer.toString("utf8");
-}
-
-function buildDocumentNoteDraft(input: {
-  name: string;
-  titleOverride?: string;
-  sourceHint?: string;
-  text: string;
-}): { title: string; key_points: string[]; summary: string; source_hint: string } {
-  const preview = input.text.slice(0, 3000);
-  const lines = preview
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 20)
-    .slice(0, 8);
-  return {
-    title: input.titleOverride?.trim() || input.name || "Uploaded Document",
-    key_points: lines,
-    summary: `Uploaded file: ${input.name || "document"}`,
-    source_hint: input.sourceHint?.trim() || `Uploaded via ChatGPT action — ${input.name || "document"}`,
-  };
-}
-
+// TODO: move somwhere else, dont have data layer in route handler file
 async function logChatGptAction(input: {
   auth: AuthRequest["authContext"];
   method:
@@ -152,6 +103,8 @@ async function logChatGptAction(input: {
   const auth = input.auth;
   if (!auth) return;
 
+  // TODO: see if you can multi-thread this or something if the db insert becomes a bottleneck. Dont want to lose events but also dont want to slow down the main request flow. Also will 
+  // probably want to batch these up and do bulk inserts if traffic is high, expect 100k events/month at 10k users and 1-2 events per user per day.
   try {
     await pool.query(
       `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
@@ -180,6 +133,7 @@ function logChatGptActionAsync(input: Parameters<typeof logChatGptAction>[0]): v
 
 async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const authStartedAt = process.hrtime.bigint();
+  // TODO: consider moving this to the observability layer as a general "auth timing" middleware since we will want to track auth performance for all endpoints, not just chatgpt actions. For now its only on chatgpt actions so its here.
   const noteAuthTiming = () => {
     const authMs = Number(process.hrtime.bigint() - authStartedAt) / 1_000_000;
     setRequestTimingField("auth_ms", authMs);
@@ -282,6 +236,16 @@ function buildOpenApiSpec(serverUrl: string) {
       ref: { type: "string" },
       status: { type: "string" },
       lotRef: { type: ["string", "null"] },
+      conversation_id: { type: ["string", "null"] },
+      blob: {
+        type: ["object", "null"],
+        properties: {
+          provider: { type: "string", enum: ["uploadthing"] },
+          key: { type: "string" },
+          url: { type: "string" },
+          source_file_id: { type: "string" },
+        },
+      },
       count: { type: "integer" },
       saved: {
         type: "array",
@@ -293,6 +257,16 @@ function buildOpenApiSpec(serverUrl: string) {
             status: { type: "string" },
             title: { type: "string" },
             filename: { type: ["string", "null"] },
+            conversation_id: { type: ["string", "null"] },
+            blob: {
+              type: ["object", "null"],
+              properties: {
+                provider: { type: "string", enum: ["uploadthing"] },
+                key: { type: "string" },
+                url: { type: "string" },
+                source_file_id: { type: "string" },
+              },
+            },
           },
         },
       },
@@ -486,6 +460,10 @@ function buildOpenApiSpec(serverUrl: string) {
                         },
                       },
                     },
+                    conversation_id: {
+                      type: "string",
+                      description: "Optional client-provided conversation identifier to link uploaded files to a conversation.",
+                    },
                   },
                 },
               },
@@ -544,6 +522,10 @@ function buildOpenApiSpec(serverUrl: string) {
                           download_link: { type: "string", format: "uri" },
                         },
                       },
+                    },
+                    conversation_id: {
+                      type: "string",
+                      description: "Optional client-provided conversation identifier to link uploaded files to a conversation.",
                     },
                   },
                 },
@@ -777,32 +759,34 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
 
     // --- Server-side auto-save of uploaded files ---
     const uploadedFiles = body.openaiFileIdRefs ?? [];
-    const autoSaved: Array<{ ref: string; title: string; filename: string | null }> = [];
-    const autoSaveErrors: Array<{ filename: string; error: string }> = [];
+    const autoSaved: Array<{
+      ref: string;
+      status: string;
+      title: string;
+      filename: string | null;
+      conversation_id: string | null;
+      blob: { provider: "uploadthing"; key: string; url: string; source_file_id: string };
+    }> = [];
+    const autoSaveErrors: Array<{ file_id: string; filename: string; error: string }> = [];
     if (uploadedFiles.length > 0 && req.authContext) {
+      assertUploadThingConfigured();
       for (const fileRef of uploadedFiles) {
         try {
-          if (!fileRef.download_link) continue;
-          const buffer = await fetchUploadedFileBuffer(fileRef);
-          const text = (await uploadedFileToText(fileRef, buffer)).trim();
-          if (!text) {
-            autoSaveErrors.push({ filename: fileRef.name ?? fileRef.id, error: "Empty content after parsing" });
-            continue;
-          }
-          // Stash the full document as a blob
-          const saved = await stashDocument(text, req.authContext!, {
-            title: fileRef.name ?? "Uploaded Document",
-            filename: fileRef.name ?? undefined,
+          const saved = await ingestUploadedFileToDocument(fileRef, req.authContext!, {
+            conversation_id: body.conversation_id ?? null,
           });
           autoSaved.push({
-            ref: saved.refHandle,
-            title: fileRef.name ?? "Uploaded Document",
-            filename: fileRef.name ?? null,
+            ref: saved.ref,
+            status: saved.status,
+            title: saved.title,
+            filename: saved.filename,
+            conversation_id: saved.conversation_id,
+            blob: saved.blob,
           });
         } catch (fileErr) {
           const errMsg = fileErr instanceof Error ? fileErr.message : String(fileErr);
           console.error(`[chatgpt] auto-save file ${fileRef.id} failed:`, errMsg);
-          autoSaveErrors.push({ filename: fileRef.name ?? fileRef.id, error: errMsg });
+          autoSaveErrors.push({ file_id: fileRef.id, filename: fileRef.name ?? fileRef.id, error: errMsg });
         }
       }
     }
@@ -825,6 +809,10 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof UploadThingConfigError) {
+      res.status(503).json({ error: error.message });
       return;
     }
     if (isTransientMemoryInfraError(error)) {
@@ -859,7 +847,17 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
         return;
       }
 
-      const savedFromFiles: Array<{ ref: string; status: string; title: string; filename: string | null; type: "note" | "blob" }> = [];
+      assertUploadThingConfigured();
+
+      const savedFromFiles: Array<{
+        ref: string;
+        status: string;
+        title: string;
+        filename: string | null;
+        type: "note" | "blob";
+        conversation_id: string | null;
+        blob: { provider: "uploadthing"; key: string; url: string; source_file_id: string } | null;
+      }> = [];
       for (const fileRef of uploadedFiles) {
         try {
           // 1. Save the note using ChatGPT's summary (no local summarization)
@@ -869,34 +867,32 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
               key_points: body.key_points ?? [],
               summary: body.summary ?? "",
               source_hint: body.source_hint ?? `Uploaded via ChatGPT — ${fileRef.name || fileRef.id}`,
-            }, req.authContext!);
+            }, req.authContext!, { conversationId: body.conversation_id ?? null });
             savedFromFiles.push({
               ref: noteResult.refHandle,
               status: noteResult.status,
               title: body.title ?? fileRef.name ?? "Uploaded Document",
               filename: fileRef.name ?? null,
               type: "note",
+              conversation_id: body.conversation_id ?? null,
+              blob: null,
             });
           }
 
-          // 2. Download the full file and stash as blob
-          if (fileRef.download_link) {
-            const buffer = await fetchUploadedFileBuffer(fileRef);
-            const text = (await uploadedFileToText(fileRef, buffer)).trim();
-            if (text) {
-              const blobResult = await stashDocument(text, req.authContext!, {
-                title: body.title ?? fileRef.name,
-                filename: fileRef.name ?? undefined,
-              });
-              savedFromFiles.push({
-                ref: blobResult.refHandle,
-                status: blobResult.status,
-                title: body.title ?? fileRef.name ?? "Uploaded Document",
-                filename: fileRef.name ?? null,
-                type: "blob",
-              });
-            }
-          }
+          // 2. Download, upload full file as blob, then stash parsed text
+          const blobSaved = await ingestUploadedFileToDocument(fileRef, req.authContext!, {
+            title: body.title,
+            conversation_id: body.conversation_id ?? null,
+          });
+          savedFromFiles.push({
+            ref: blobSaved.ref,
+            status: blobSaved.status,
+            title: blobSaved.title,
+            filename: blobSaved.filename,
+            type: "blob",
+            conversation_id: blobSaved.conversation_id,
+            blob: blobSaved.blob,
+          });
         } catch (fileErr) {
           console.error(`[chatgpt] remember file ${fileRef.id} failed:`, fileErr instanceof Error ? fileErr.message : fileErr);
         }
@@ -913,6 +909,8 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
           status: first.status,
           title: first.title,
           filename: first.filename,
+          conversation_id: first.conversation_id,
+          blob: first.blob,
         });
         return;
       }
@@ -969,13 +967,15 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
         key_points: body.key_points ?? [],
         summary: body.summary ?? "",
         source_hint: body.source_hint ?? "",
-      }, req.authContext!);
+      }, req.authContext!, { conversationId: body.conversation_id ?? null });
       logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
       res.json({
         success: true,
         kind: body.kind,
         ref: saved.refHandle,
         status: saved.status,
+        conversation_id: body.conversation_id ?? null,
+        blob: null,
       });
       return;
     }
@@ -992,10 +992,21 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
       ref: saved.refHandle,
       status: saved.status,
       lotRef: saved.lotRef ?? null,
+      conversation_id: saved.conversationId,
+      blob: saved.blob ? {
+        provider: saved.blob.provider,
+        key: saved.blob.key,
+        url: saved.blob.url,
+        source_file_id: saved.blob.sourceFileId,
+      } : null,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof UploadThingConfigError) {
+      res.status(503).json({ error: error.message });
       return;
     }
     if (error instanceof PlanRequiredError) {

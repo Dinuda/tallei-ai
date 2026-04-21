@@ -125,6 +125,11 @@
     "source": "src/routes/documents.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/documents/upload-blob",
+    "source": "src/routes/documents.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/integrations/chatgpt/token",
     "source": "src/routes/integrations.ts"

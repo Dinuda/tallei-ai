@@ -8,6 +8,13 @@ import { Alert, AlertDescription, AlertTitle } from "../../../components/ui/aler
 
 type DocStatus = "pending" | "ready" | "failed";
 
+type BlobMeta = {
+  provider: "uploadthing";
+  key: string;
+  url: string;
+  source_file_id: string;
+};
+
 type DocListItem = {
   ref: string;
   filename: string | null;
@@ -17,6 +24,7 @@ type DocListItem = {
   createdAt: string;
   lotRef: string | null;
   lotTitle: string | null;
+  blob: BlobMeta | null;
 };
 
 type LotListItem = {
@@ -32,6 +40,7 @@ type ModalDocument = {
   title: string | null;
   content: string;
   status: "ready" | "pending_embedding" | "failed_indexing";
+  blob: BlobMeta | null;
 };
 
 type ModalPayload =
@@ -42,6 +51,7 @@ type ModalPayload =
     title: string | null;
     content: string;
     status: "ready" | "pending_embedding" | "failed_indexing";
+    blob: BlobMeta | null;
   }
   | {
     kind: "lot";
@@ -49,6 +59,8 @@ type ModalPayload =
     title: string | null;
     docs: ModalDocument[];
   };
+
+const PAGE_SIZE = 10;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -83,6 +95,8 @@ export default function DocumentsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [proRequired, setProRequired] = useState(false);
+  const [docPage, setDocPage] = useState(1);
+  const [lotPage, setLotPage] = useState(1);
 
   const [selected, setSelected] = useState<ModalPayload | null>(null);
   const [loadingSelected, setLoadingSelected] = useState(false);
@@ -179,6 +193,31 @@ export default function DocumentsPage() {
   }, [load, selected]);
 
   const hasItems = useMemo(() => docs.length > 0 || lots.length > 0, [docs.length, lots.length]);
+  const docPageCount = useMemo(() => Math.max(1, Math.ceil(docs.length / PAGE_SIZE)), [docs.length]);
+  const lotPageCount = useMemo(() => Math.max(1, Math.ceil(lots.length / PAGE_SIZE)), [lots.length]);
+
+  const visibleDocs = useMemo(() => {
+    const start = (docPage - 1) * PAGE_SIZE;
+    return docs.slice(start, start + PAGE_SIZE);
+  }, [docPage, docs]);
+
+  const visibleLots = useMemo(() => {
+    const start = (lotPage - 1) * PAGE_SIZE;
+    return lots.slice(start, start + PAGE_SIZE);
+  }, [lotPage, lots]);
+
+  useEffect(() => {
+    setDocPage((current) => Math.min(current, docPageCount));
+  }, [docPageCount]);
+
+  useEffect(() => {
+    setLotPage((current) => Math.min(current, lotPageCount));
+  }, [lotPageCount]);
+
+  const docRangeStart = docs.length === 0 ? 0 : (docPage - 1) * PAGE_SIZE + 1;
+  const docRangeEnd = Math.min(docPage * PAGE_SIZE, docs.length);
+  const lotRangeStart = lots.length === 0 ? 0 : (lotPage - 1) * PAGE_SIZE + 1;
+  const lotRangeEnd = Math.min(lotPage * PAGE_SIZE, lots.length);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem", maxWidth: 980, margin: "0 auto", paddingBottom: "3rem" }}>
@@ -250,32 +289,193 @@ export default function DocumentsPage() {
             background: "var(--surface)",
             border: "1px solid var(--border)",
             borderRadius: 14,
-            overflowX: "auto",
+            overflow: "hidden",
           }}>
             <div style={{ padding: "0.85rem 1rem", borderBottom: "1px solid var(--border-light)", fontWeight: 600, color: "var(--text)" }}>
               Documents
             </div>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
-              <thead>
-                <tr style={{ background: "#fafafa", borderBottom: "1px solid var(--border-light)" }}>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Ref</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>File</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Lot</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Size</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Status</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {docs.map((doc) => {
-                  const chip = statusChip(doc.status);
-                  return (
-                    <tr key={doc.ref} style={{ borderBottom: "1px solid var(--border-light)" }}>
+            <div style={{ maxHeight: 420, overflow: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+                <thead>
+                  <tr style={{ background: "#fafafa", borderBottom: "1px solid var(--border-light)" }}>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Ref</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>File</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Lot</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Size</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Status</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleDocs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} style={{ padding: "0.9rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.84rem" }}>
+                        No documents on this page.
+                      </td>
+                    </tr>
+                  ) : visibleDocs.map((doc) => {
+                    const chip = statusChip(doc.status);
+                    return (
+                      <tr key={doc.ref} style={{ borderBottom: "1px solid var(--border-light)" }}>
+                        <td style={{ padding: "0.7rem 0.85rem" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
+                            <button
+                              type="button"
+                              onClick={() => void openRef(doc.ref)}
+                              style={{
+                                border: "none",
+                                background: "transparent",
+                                color: "var(--text)",
+                                cursor: "pointer",
+                                fontFamily: "monospace",
+                                fontSize: "0.8rem",
+                                padding: 0,
+                                textAlign: "left",
+                              }}
+                            >
+                              {doc.ref}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void copyRef(doc.ref)}
+                              style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", padding: 0 }}
+                              aria-label={`Copy ${doc.ref}`}
+                            >
+                              <Copy size={13} />
+                            </button>
+                          </div>
+                        </td>
+                        <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-2)", fontSize: "0.86rem" }}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                            <span>{(doc.filename ?? doc.title ?? "Untitled").slice(0, 64)}</span>
+                            {doc.blob?.url ? (
+                              <a
+                                href={doc.blob.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ fontSize: "0.75rem", color: "#2563eb", textDecoration: "none" }}
+                              >
+                                Open file
+                              </a>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.82rem", fontFamily: "monospace" }}>
+                          {doc.lotRef ?? "-"}
+                        </td>
+                        <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.83rem" }}>
+                          {formatSize(doc.byteSize)}
+                        </td>
+                        <td style={{ padding: "0.7rem 0.85rem" }}>
+                          <span style={{
+                            display: "inline-flex",
+                            fontSize: "0.72rem",
+                            fontWeight: 600,
+                            borderRadius: 999,
+                            padding: "0.2rem 0.5rem",
+                            background: chip.bg,
+                            color: chip.color,
+                            border: `1px solid ${chip.border}`,
+                          }}>
+                            {chip.label}
+                          </span>
+                        </td>
+                        <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.83rem" }}>
+                          {relativeDate(doc.createdAt)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{
+              borderTop: "1px solid var(--border-light)",
+              padding: "0.65rem 0.9rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.65rem",
+              flexWrap: "wrap",
+            }}>
+              <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                Showing {docRangeStart}-{docRangeEnd} of {docs.length}
+              </span>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
+                <button
+                  type="button"
+                  onClick={() => setDocPage((current) => Math.max(1, current - 1))}
+                  disabled={docPage === 1}
+                  style={{
+                    border: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    color: "var(--text-2)",
+                    borderRadius: 8,
+                    fontSize: "0.78rem",
+                    padding: "0.3rem 0.55rem",
+                    cursor: docPage === 1 ? "not-allowed" : "pointer",
+                    opacity: docPage === 1 ? 0.55 : 1,
+                  }}
+                >
+                  Prev
+                </button>
+                <span style={{ color: "var(--text-muted)", fontSize: "0.78rem", minWidth: 70, textAlign: "center" }}>
+                  Page {docPage} / {docPageCount}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDocPage((current) => Math.min(docPageCount, current + 1))}
+                  disabled={docPage === docPageCount}
+                  style={{
+                    border: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    color: "var(--text-2)",
+                    borderRadius: 8,
+                    fontSize: "0.78rem",
+                    padding: "0.3rem 0.55rem",
+                    cursor: docPage === docPageCount ? "not-allowed" : "pointer",
+                    opacity: docPage === docPageCount ? 0.55 : 1,
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section style={{
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: 14,
+            overflow: "hidden",
+          }}>
+            <div style={{ padding: "0.85rem 1rem", borderBottom: "1px solid var(--border-light)", fontWeight: 600, color: "var(--text)" }}>
+              Lots
+            </div>
+            <div style={{ maxHeight: 420, overflow: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 560 }}>
+                <thead>
+                  <tr style={{ background: "#fafafa", borderBottom: "1px solid var(--border-light)" }}>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Lot Ref</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Title</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Docs</th>
+                    <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleLots.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} style={{ padding: "0.9rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.84rem" }}>
+                        No lots on this page.
+                      </td>
+                    </tr>
+                  ) : visibleLots.map((lot) => (
+                    <tr key={lot.ref} style={{ borderBottom: "1px solid var(--border-light)" }}>
                       <td style={{ padding: "0.7rem 0.85rem" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
                           <button
                             type="button"
-                            onClick={() => void openRef(doc.ref)}
+                            onClick={() => void openRef(lot.ref)}
                             style={{
                               border: "none",
                               background: "transparent",
@@ -287,113 +487,84 @@ export default function DocumentsPage() {
                               textAlign: "left",
                             }}
                           >
-                            {doc.ref}
+                            {lot.ref}
                           </button>
                           <button
                             type="button"
-                            onClick={() => void copyRef(doc.ref)}
+                            onClick={() => void copyRef(lot.ref)}
                             style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", padding: 0 }}
-                            aria-label={`Copy ${doc.ref}`}
+                            aria-label={`Copy ${lot.ref}`}
                           >
                             <Copy size={13} />
                           </button>
                         </div>
                       </td>
                       <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-2)", fontSize: "0.86rem" }}>
-                        {(doc.filename ?? doc.title ?? "Untitled").slice(0, 64)}
-                      </td>
-                      <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.82rem", fontFamily: "monospace" }}>
-                        {doc.lotRef ?? "-"}
+                        {lot.title ?? "Untitled lot"}
                       </td>
                       <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.83rem" }}>
-                        {formatSize(doc.byteSize)}
-                      </td>
-                      <td style={{ padding: "0.7rem 0.85rem" }}>
-                        <span style={{
-                          display: "inline-flex",
-                          fontSize: "0.72rem",
-                          fontWeight: 600,
-                          borderRadius: 999,
-                          padding: "0.2rem 0.5rem",
-                          background: chip.bg,
-                          color: chip.color,
-                          border: `1px solid ${chip.border}`,
-                        }}>
-                          {chip.label}
-                        </span>
+                        {lot.documentCount}
                       </td>
                       <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.83rem" }}>
-                        {relativeDate(doc.createdAt)}
+                        {relativeDate(lot.createdAt)}
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </section>
-
-          <section style={{
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            borderRadius: 14,
-            overflowX: "auto",
-          }}>
-            <div style={{ padding: "0.85rem 1rem", borderBottom: "1px solid var(--border-light)", fontWeight: 600, color: "var(--text)" }}>
-              Lots
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 560 }}>
-              <thead>
-                <tr style={{ background: "#fafafa", borderBottom: "1px solid var(--border-light)" }}>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Lot Ref</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Title</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Docs</th>
-                  <th style={{ textAlign: "left", padding: "0.65rem 0.85rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {lots.map((lot) => (
-                  <tr key={lot.ref} style={{ borderBottom: "1px solid var(--border-light)" }}>
-                    <td style={{ padding: "0.7rem 0.85rem" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
-                        <button
-                          type="button"
-                          onClick={() => void openRef(lot.ref)}
-                          style={{
-                            border: "none",
-                            background: "transparent",
-                            color: "var(--text)",
-                            cursor: "pointer",
-                            fontFamily: "monospace",
-                            fontSize: "0.8rem",
-                            padding: 0,
-                            textAlign: "left",
-                          }}
-                        >
-                          {lot.ref}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void copyRef(lot.ref)}
-                          style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", padding: 0 }}
-                          aria-label={`Copy ${lot.ref}`}
-                        >
-                          <Copy size={13} />
-                        </button>
-                      </div>
-                    </td>
-                    <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-2)", fontSize: "0.86rem" }}>
-                      {lot.title ?? "Untitled lot"}
-                    </td>
-                    <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.83rem" }}>
-                      {lot.documentCount}
-                    </td>
-                    <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-muted)", fontSize: "0.83rem" }}>
-                      {relativeDate(lot.createdAt)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div style={{
+              borderTop: "1px solid var(--border-light)",
+              padding: "0.65rem 0.9rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.65rem",
+              flexWrap: "wrap",
+            }}>
+              <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                Showing {lotRangeStart}-{lotRangeEnd} of {lots.length}
+              </span>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
+                <button
+                  type="button"
+                  onClick={() => setLotPage((current) => Math.max(1, current - 1))}
+                  disabled={lotPage === 1}
+                  style={{
+                    border: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    color: "var(--text-2)",
+                    borderRadius: 8,
+                    fontSize: "0.78rem",
+                    padding: "0.3rem 0.55rem",
+                    cursor: lotPage === 1 ? "not-allowed" : "pointer",
+                    opacity: lotPage === 1 ? 0.55 : 1,
+                  }}
+                >
+                  Prev
+                </button>
+                <span style={{ color: "var(--text-muted)", fontSize: "0.78rem", minWidth: 70, textAlign: "center" }}>
+                  Page {lotPage} / {lotPageCount}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setLotPage((current) => Math.min(lotPageCount, current + 1))}
+                  disabled={lotPage === lotPageCount}
+                  style={{
+                    border: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    color: "var(--text-2)",
+                    borderRadius: 8,
+                    fontSize: "0.78rem",
+                    padding: "0.3rem 0.55rem",
+                    cursor: lotPage === lotPageCount ? "not-allowed" : "pointer",
+                    opacity: lotPage === lotPageCount ? 0.55 : 1,
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </section>
         </>
       )}
@@ -488,6 +659,16 @@ export default function DocumentsPage() {
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
                     <span style={{ color: "var(--text-muted)", fontSize: "0.82rem" }}>{selected.filename ?? selected.title ?? "Untitled"}</span>
+                    {selected.blob?.url ? (
+                      <a
+                        href={selected.blob.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ fontSize: "0.78rem", color: "#2563eb", textDecoration: "none" }}
+                      >
+                        Open original file
+                      </a>
+                    ) : null}
                     <span style={{
                       display: "inline-flex",
                       borderRadius: 999,
@@ -519,7 +700,19 @@ export default function DocumentsPage() {
                   {selected.docs.map((doc) => (
                     <div key={doc.ref} style={{ border: "1px solid var(--border-light)", borderRadius: 10, overflow: "hidden" }}>
                       <div style={{ padding: "0.55rem 0.7rem", borderBottom: "1px solid var(--border-light)", background: "#fafafa", color: "var(--text)", fontSize: "0.82rem", fontFamily: "monospace" }}>
-                        {doc.ref}
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
+                          <span>{doc.ref}</span>
+                          {doc.blob?.url ? (
+                            <a
+                              href={doc.blob.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ fontSize: "0.75rem", color: "#2563eb", textDecoration: "none", fontFamily: "inherit" }}
+                            >
+                              Open file
+                            </a>
+                          ) : null}
+                        </div>
                       </div>
                       <pre style={{ margin: 0, padding: "0.7rem", whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "0.82rem", color: "var(--text-2)", lineHeight: 1.5 }}>{doc.content}</pre>
                     </div>

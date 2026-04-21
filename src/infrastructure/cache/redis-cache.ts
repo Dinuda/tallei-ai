@@ -116,7 +116,7 @@ async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
           if (retries > 3) return false;
           return Math.min(retries * 200, 1000);
         },
-        keepAlive: 15000,
+        keepAlive: true,
       },
     });
     client.on("error", (error) => {

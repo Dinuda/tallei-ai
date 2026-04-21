@@ -514,6 +514,21 @@ export async function initDb() {
       ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'blob';
     `);
 
+    await client.query(`
+      ALTER TABLE documents
+      ADD COLUMN IF NOT EXISTS conversation_id TEXT,
+      ADD COLUMN IF NOT EXISTS blob_provider TEXT,
+      ADD COLUMN IF NOT EXISTS blob_key TEXT,
+      ADD COLUMN IF NOT EXISTS blob_url TEXT,
+      ADD COLUMN IF NOT EXISTS blob_source_file_id TEXT;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_documents_conversation_id
+        ON documents(tenant_id, user_id, conversation_id, created_at DESC)
+        WHERE deleted_at IS NULL AND conversation_id IS NOT NULL;
+    `);
+
     const hadMemoryTypeColumn = await hasColumn(client, "memory_records", "memory_type");
     const hadCategoryColumn = await hasColumn(client, "memory_records", "category");
     const hadPinnedColumn = await hasColumn(client, "memory_records", "is_pinned");
