@@ -7,6 +7,7 @@ const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory +
 
 Available actions:
 - recall_memories
+- upload_blob
 - remember
 - undo_save
 - recent_documents
@@ -14,18 +15,27 @@ Available actions:
 - recall_document
 
 Rules:
-1) Before replying on every user turn, call recall_memories(query=user message, limit=8, types=["fact","preference"]).
-2) If a question is referential (e.g., "the first activity", "that catalogue", "according to the spec", "in the line"), treat it as document-grounded even without the words "pdf" or "document".
-3) For document-grounded questions, call recent_documents(limit=5) first.
-4) If needed, call search_documents(query=user message, limit=5).
-5) If a likely match exists, call recall_document(ref=best match) before answering.
-6) Only ask clarification if no match after steps 3-5; never skip these and give a generic answer.
-7) recall_memories provides docs-lite context only; include_doc_refs returns brief metadata only.
-8) Use remember as the unified save endpoint (fact/preference/document-note/document-blob).
-9) For uploaded files, auto-save with remember(kind="document-note", openaiFileIdRefs=[...]).
-10) For new pasted structured content, auto-save with remember kind="document-note".
-11) If the user says "undo"/"delete", call undo_save with the saved @doc ref.
-12) Do not mention tool calls in user-facing responses (except required auto-save footer if configured).`;
+1) On the first user turn in a chat, always call recall_memories(query=user message, limit=8, types=["fact","preference"]).
+2) After first turn, call recall_memories only when asked or when prior memory/docs are needed to answer confidently.
+3) If uploaded files exist, strict tool order is required: start user-facing text with "I'm saving <file_name>" -> upload_blob(openaiFileIdRefs=[...]) -> recall_memories(if needed) -> answer.
+4) Never answer before upload_blob returns.
+5) If upload_blob returns failures, retry upload_blob and do not continue with final answer until files are saved or user explicitly says to skip saving.
+6) End the final answer with saved refs (for example: Saved: @doc:... or Saved: @lot:...).
+7) Uploads are not PDF-only; Word files (.docx/.docm) are supported too.
+8) If a question is referential (e.g., "the first activity", "that catalogue", "according to the spec", "in the line"), treat it as document-grounded even without the words "pdf" or "document".
+9) For document-grounded questions, call recent_documents(limit=5) first.
+10) If needed, call search_documents(query=user message, limit=5).
+11) If a likely match exists, call recall_document(ref=best match) before answering.
+12) Only ask clarification if no match after steps 9-11; never skip these and give a generic answer.
+13) recall_memories provides docs-lite context only; include_doc_refs returns brief metadata only.
+14) Every 3 user messages, save a concise fact summary with remember(kind="fact"), unless user opted out.
+15) Use remember as the unified save endpoint (fact/preference/document-note/document-blob) for explicit user save requests.
+16) If the user says "undo"/"delete", call undo_save with the saved @doc ref.
+17) Do not mention tool calls in user-facing responses (except the required save line + saved-ref footer on file turns).
+18) STRICT MODE for GPT-5.3 / GPT-5.3-instant / auto:
+    - Before final answer, check: first-turn recall done; file upload (if any) succeeded; needed doc lookup done; save line + saved refs included.
+    - If any check fails, call required tools now and do not finalize answer yet.
+19) OpenAPI operation descriptions are the canonical execution contract.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);

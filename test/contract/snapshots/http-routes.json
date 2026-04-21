@@ -100,6 +100,11 @@
     "source": "src/routes/chatgpt.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/upload_blob",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/chatgpt/openapi.json",
     "source": "src/routes/chatgpt.ts"

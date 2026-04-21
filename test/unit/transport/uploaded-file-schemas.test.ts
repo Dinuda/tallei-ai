@@ -130,3 +130,63 @@ test("normalizeUploadedFileRequestBody accepts nested payload wrappers", () => {
   assert.equal(parsed.openaiFileIdRefs[0]?.download_link, "https://example.com/nested.pdf");
   assert.equal(parsed.conversation_id, "conv_nested");
 });
+
+test("normalizeUploadedFileRequestBody accepts singular nested file aliases", () => {
+  const normalized = normalizeUploadedFileRequestBody({
+    attachment: {
+      file: {
+        file_id: "file_single",
+        filename: "single.docx",
+        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        downloadURL: "https://example.com/single.docx",
+      },
+    },
+  });
+
+  const parsed = uploadBlobBodySchema.parse(normalized);
+  assert.equal(parsed.openaiFileIdRefs.length, 1);
+  assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_single");
+  assert.equal(parsed.openaiFileIdRefs[0]?.download_link, "https://example.com/single.docx");
+});
+
+test("normalizeUploadedFileRequestBody accepts deeply nested arrays", () => {
+  const normalized = normalizeUploadedFileRequestBody({
+    request: {
+      turns: [
+        {
+          payload: {
+            resources: [
+              {
+                id: "file_deep",
+                name: "deep.pdf",
+                mime_type: "application/pdf",
+                download_link: "https://example.com/deep.pdf",
+              },
+            ],
+          },
+        },
+      ],
+    },
+  });
+
+  const parsed = uploadBlobBodySchema.parse(normalized);
+  assert.equal(parsed.openaiFileIdRefs.length, 1);
+  assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_deep");
+});
+
+test("normalizeUploadedFileRequestBody accepts stringified object body", () => {
+  const normalized = normalizeUploadedFileRequestBody(JSON.stringify({
+    attachments: [
+      {
+        fileId: "file_string_body",
+        filename: "string.pdf",
+        mimeType: "application/pdf",
+        downloadLink: "https://example.com/string.pdf",
+      },
+    ],
+  }));
+
+  const parsed = uploadBlobBodySchema.parse(normalized);
+  assert.equal(parsed.openaiFileIdRefs.length, 1);
+  assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_string_body");
+});

@@ -1,4 +1,5 @@
 import { PDFParse } from "pdf-parse";
+import mammoth from "mammoth";
 
 import type { AuthContext } from "../domain/auth/index.js";
 import { uploadBufferToUploadThing } from "../infrastructure/storage/uploadthing-client.js";
@@ -59,10 +60,38 @@ const defaultDeps: IngestUploadedFileDeps = {
   stashBlobDocument: stashDocument,
 };
 
+export function isPdfLikeFile(ref: UploadedFileRef): boolean {
+  const mime = (ref.mime_type ?? "").toLowerCase();
+  const name = (ref.name ?? "").toLowerCase();
+  return mime === "application/pdf" || name.endsWith(".pdf");
+}
+
+export function isDocxLikeFile(ref: UploadedFileRef): boolean {
+  const mime = (ref.mime_type ?? "").toLowerCase();
+  const name = (ref.name ?? "").toLowerCase();
+  return (
+    mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    || mime === "application/vnd.ms-word.document.macroenabled.12"
+    || name.endsWith(".docx")
+    || name.endsWith(".docm")
+  );
+}
+
+export function isLegacyDocFile(ref: UploadedFileRef): boolean {
+  const mime = (ref.mime_type ?? "").toLowerCase();
+  const name = (ref.name ?? "").toLowerCase();
+  return mime === "application/msword" || name.endsWith(".doc");
+}
+
 export async function extractPdfText(buffer: Buffer): Promise<string> {
   const parser = new PDFParse({ data: buffer });
   const result = await parser.getText();
   return result.text;
+}
+
+export async function extractWordText(buffer: Buffer): Promise<string> {
+  const result = await mammoth.extractRawText({ buffer });
+  return result.value;
 }
 
 export async function fetchUploadedFileBuffer(ref: UploadedFileRef): Promise<Buffer> {
@@ -75,11 +104,14 @@ export async function fetchUploadedFileBuffer(ref: UploadedFileRef): Promise<Buf
 }
 
 export async function uploadedFileToText(ref: UploadedFileRef, buffer: Buffer): Promise<string> {
-  const mime = (ref.mime_type ?? "").toLowerCase();
-  const name = (ref.name ?? "").toLowerCase();
-  const isPdf = mime === "application/pdf" || name.endsWith(".pdf");
-  if (isPdf) {
+  if (isPdfLikeFile(ref)) {
     return extractPdfText(buffer);
+  }
+  if (isDocxLikeFile(ref)) {
+    return extractWordText(buffer);
+  }
+  if (isLegacyDocFile(ref)) {
+    throw new Error("Legacy .doc files are not supported yet. Please upload as .docx.");
   }
   return buffer.toString("utf8");
 }

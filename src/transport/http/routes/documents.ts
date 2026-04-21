@@ -11,9 +11,9 @@ import {
   stashDocumentNote,
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
-import { extractPdfText, ingestUploadedFilesToDocuments } from "../../../services/uploaded-file-ingest.js";
+import { ingestUploadedFilesToDocuments, uploadedFileToText } from "../../../services/uploaded-file-ingest.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
-import { uploadBlobBodySchema } from "../schemas/uploaded-files.js";
+import { normalizeUploadedFileRequestBody, uploadBlobBodySchema } from "../schemas/uploaded-files.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const upload = multer({
@@ -91,13 +91,25 @@ router.delete("/:ref", requireScopes(["memory:write"]), async (req: AuthRequest,
 
 router.post("/upload-blob", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = uploadBlobBodySchema.parse(req.body ?? {});
+    const body = uploadBlobBodySchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
     assertUploadThingConfigured();
 
     const { saved, errors } = await ingestUploadedFilesToDocuments(body.openaiFileIdRefs, req.authContext!, {
       title: body.title,
       conversation_id: body.conversation_id ?? null,
     });
+
+    if (errors.length > 0) {
+      res.status(422).json({
+        success: false,
+        error: "One or more files failed to save.",
+        count_saved: saved.length,
+        count_failed: errors.length,
+        saved,
+        errors,
+      });
+      return;
+    }
 
     res.json({
       success: true,
@@ -128,7 +140,7 @@ router.post("/upload-blob", requireScopes(["memory:write"]), async (req: AuthReq
 });
 
 // Direct file upload — used by browser extension or dashboard drag-and-drop.
-// Accepts multipart/form-data with a `file` field (text, markdown, or PDF).
+// Accepts multipart/form-data with a `file` field (text, markdown, PDF, or Word .docx/.docm).
 // Optional `mode` field: "note" (default, fast) or "blob" (full archive).
 router.post(
   "/upload",
@@ -143,17 +155,28 @@ router.post(
 
       const mode = (req.body?.mode === "blob" ? "blob" : "note") as "note" | "blob";
       const title = typeof req.body?.title === "string" && req.body.title ? req.body.title : req.file.originalname;
-      const mime = req.file.mimetype;
-
       let text: string;
-      if (mime === "application/pdf") {
-        text = await extractPdfText(req.file.buffer);
-        if (!text.trim()) {
-          res.status(422).json({ error: "PDF appears to be image-only or unreadable. Use a text-based PDF." });
-          return;
-        }
-      } else {
-        text = req.file.buffer.toString("utf8");
+      try {
+        text = await uploadedFileToText(
+          {
+            id: "local-upload",
+            name: req.file.originalname,
+            mime_type: req.file.mimetype,
+            download_link: "local://upload",
+          },
+          req.file.buffer
+        );
+      } catch (parseErr) {
+        const message = parseErr instanceof Error ? parseErr.message : "Failed to parse uploaded file.";
+        res.status(422).json({ error: message });
+        return;
+      }
+
+      if (!text.trim()) {
+        res.status(422).json({
+          error: "Uploaded file appears empty or unreadable. For Word files, upload .docx/.docm with selectable text.",
+        });
+        return;
       }
 
       if (mode === "blob") {

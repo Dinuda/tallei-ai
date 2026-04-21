@@ -19,6 +19,7 @@ type DocListItem = {
   ref: string;
   filename: string | null;
   title: string | null;
+  preview: string;
   byteSize: number;
   status: DocStatus;
   createdAt: string;
@@ -348,6 +349,11 @@ export default function DocumentsPage() {
                         <td style={{ padding: "0.7rem 0.85rem", color: "var(--text-2)", fontSize: "0.86rem" }}>
                           <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
                             <span>{(doc.filename ?? doc.title ?? "Untitled").slice(0, 64)}</span>
+                            {doc.preview ? (
+                              <span style={{ color: "var(--text-muted)", fontSize: "0.75rem", lineHeight: 1.35 }}>
+                                {doc.preview}
+                              </span>
+                            ) : null}
                             {doc.blob?.url ? (
                               <a
                                 href={doc.blob.url}

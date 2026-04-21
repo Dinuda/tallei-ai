@@ -1132,6 +1132,7 @@ export async function listDocuments(auth: AuthContext): Promise<{
     ref: string;
     filename: string | null;
     title: string | null;
+    preview: string;
     byteSize: number;
     status: "pending" | "ready" | "failed";
     createdAt: string;
@@ -1157,6 +1158,7 @@ export async function listDocuments(auth: AuthContext): Promise<{
     ref_handle: string;
     filename: string | null;
     title: string | null;
+    summary_json: unknown;
     byte_size: number;
     status: "pending" | "ready" | "failed";
     created_at: string;
@@ -1170,6 +1172,7 @@ export async function listDocuments(auth: AuthContext): Promise<{
     `SELECT d.ref_handle,
             d.filename,
             d.title,
+            d.summary_json,
             d.byte_size,
             d.status,
             d.created_at,
@@ -1217,6 +1220,7 @@ export async function listDocuments(auth: AuthContext): Promise<{
       ref: row.ref_handle,
       filename: row.filename,
       title: row.title,
+      preview: summaryPreview(row.summary_json).slice(0, 220),
       byteSize: row.byte_size,
       status: row.status,
       createdAt: row.created_at,

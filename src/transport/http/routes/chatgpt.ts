@@ -14,7 +14,7 @@ import {
   documentBriefsByRefs,
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
-import { ingestUploadedFileToDocument } from "../../../services/uploaded-file-ingest.js";
+import { ingestUploadedFileToDocument, ingestUploadedFilesToDocuments } from "../../../services/uploaded-file-ingest.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import { authContextFromApiKey, authContextFromUserId } from "../../../infrastructure/auth/auth.js";
@@ -22,7 +22,12 @@ import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
 import { validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
 import { setRequestTimingField } from "../../../observability/request-timing.js";
 import { runAsyncSafe } from "../../../shared/async-safe.js";
-import { conversationIdSchema, openAiFileRefSchema } from "../schemas/uploaded-files.js";
+import {
+  conversationIdSchema,
+  normalizeUploadedFileRequestBody,
+  openAiFileRefSchema,
+  uploadBlobBodySchema,
+} from "../schemas/uploaded-files.js";
 
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
@@ -78,7 +83,14 @@ function degradedRecallResponse() {
     contextBlock: "--- No relevant memories found ---",
     memories: [],
     recentDocuments: [],
+    matchedDocuments: [],
     referencedDocuments: [],
+    autoSave: {
+      requested: 0,
+      complete: true,
+      saved: [],
+      errors: [],
+    },
   };
 }
 
@@ -93,6 +105,7 @@ async function logChatGptAction(input: {
   method:
     | "chatgpt/actions/recall_memories"
     | "chatgpt/actions/remember"
+    | "chatgpt/actions/upload_blob"
     | "chatgpt/actions/undo_save"
     | "chatgpt/actions/recent_documents"
     | "chatgpt/actions/search_documents"
@@ -222,7 +235,42 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
   }
 }
 
-function buildOpenApiSpec(serverUrl: string) {
+export function buildOpenApiSpec(serverUrl: string) {
+  const openAiFileRefJsonSchema = {
+    type: "object",
+    required: ["id", "download_link"],
+    properties: {
+      id: { type: "string" },
+      name: { type: "string" },
+      mime_type: { type: "string" },
+      download_link: { type: "string", format: "uri" },
+    },
+  };
+
+  const canonicalUploadExample = {
+    openaiFileIdRefs: [
+      {
+        id: "file_123",
+        name: "Q2-report.pdf",
+        mime_type: "application/pdf",
+        download_link: "https://files.oaiusercontent.com/file-abc",
+      },
+    ],
+    conversation_id: "conv_123",
+  };
+
+  const aliasUploadExample = {
+    openai_file_id_refs: [
+      {
+        fileId: "file_456",
+        filename: "brief.md",
+        mimeType: "text/markdown",
+        downloadLink: "https://files.oaiusercontent.com/file-def",
+      },
+    ],
+    conversation_id: "conv_123",
+  };
+
   const memoryResultSchema = {
     type: "object",
     required: ["success", "kind"],
@@ -247,6 +295,20 @@ function buildOpenApiSpec(serverUrl: string) {
         },
       },
       count: { type: "integer" },
+      count_saved: { type: "integer" },
+      count_failed: { type: "integer" },
+      errors: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["file_id", "filename", "error"],
+          properties: {
+            file_id: { type: "string" },
+            filename: { type: "string" },
+            error: { type: "string" },
+          },
+        },
+      },
       saved: {
         type: "array",
         items: {
@@ -270,6 +332,19 @@ function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
+    },
+  };
+
+  const uploadBlobResultSchema = {
+    type: "object",
+    required: ["success", "count_saved", "count_failed", "saved", "errors"],
+    properties: {
+      success: { type: "boolean" },
+      count_saved: { type: "integer" },
+      count_failed: { type: "integer" },
+      saved: memoryResultSchema.properties.saved,
+      errors: memoryResultSchema.properties.errors,
+      error: { type: "string" },
     },
   };
 
@@ -317,7 +392,7 @@ function buildOpenApiSpec(serverUrl: string) {
 
   const recallResultSchema = {
     type: "object",
-    required: ["contextBlock", "memories", "recentDocuments", "referencedDocuments"],
+    required: ["contextBlock", "memories", "recentDocuments", "matchedDocuments", "referencedDocuments", "autoSave"],
     properties: {
       contextBlock: { type: "string" },
       memories: {
@@ -340,12 +415,70 @@ function buildOpenApiSpec(serverUrl: string) {
         type: "array",
         items: documentBriefSchema,
       },
+      matchedDocuments: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["ref", "title", "score", "preview"],
+          properties: {
+            ref: { type: "string" },
+            title: { type: "string" },
+            score: { type: "number" },
+            preview: { type: "string" },
+          },
+        },
+      },
       referencedDocuments: {
         type: "array",
         items: {
           oneOf: [documentBriefSchema, lotBriefSchema, missingRefSchema],
         },
       },
+      autoSave: {
+        type: "object",
+        required: ["requested", "complete", "saved", "errors"],
+        properties: {
+          requested: { type: "integer" },
+          complete: { type: "boolean" },
+          saved: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["ref", "status", "title", "filename", "conversation_id", "blob"],
+              properties: {
+                ref: { type: "string" },
+                status: { type: "string" },
+                title: { type: "string" },
+                filename: { type: ["string", "null"] },
+                conversation_id: { type: ["string", "null"] },
+                blob: {
+                  type: "object",
+                  required: ["provider", "key", "url", "source_file_id"],
+                  properties: {
+                    provider: { type: "string", enum: ["uploadthing"] },
+                    key: { type: "string" },
+                    url: { type: "string" },
+                    source_file_id: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          errors: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["file_id", "filename", "error"],
+              properties: {
+                file_id: { type: "string" },
+                filename: { type: "string" },
+                error: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+      autoSaveNotice: { type: "string" },
     },
   };
 
@@ -391,7 +524,9 @@ function buildOpenApiSpec(serverUrl: string) {
     info: {
       title: "Tallei ChatGPT Actions API",
       version: "2026-04-21",
-      description: "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key).",
+      description:
+        "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key). " +
+        "OpenAPI operation descriptions are the canonical execution contract.",
     },
     servers: [
       {
@@ -413,10 +548,11 @@ function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/recall_memories": {
         post: {
           operationId: "recall_memories",
-          summary: "REQUIRED: Call this on EVERY user turn before responding",
+          summary: "First turn required; later turns conditional recall",
           description:
-            "MUST call on every user message before responding. Loads persistent memory, preferences, and recent docs. " +
-            "If files were uploaded, include openaiFileIdRefs to auto-save them. Do not skip. Do not answer first.",
+            "NON-NEGOTIABLE: first user turn must call this. Later turns call only when asked or context is missing. " +
+            "If files exist, do not answer yet: upload_blob (wait), then recall_memories if needed, then answer. " +
+            "Mini/auto guard: if unsure, call tools before answering.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -448,21 +584,29 @@ function buildOpenApiSpec(serverUrl: string) {
                     openaiFileIdRefs: {
                       type: "array",
                       description:
-                        "If the user uploaded files this turn, pass them here. The server will auto-save them to memory.",
-                      items: {
-                        type: "object",
-                        required: ["id", "download_link"],
-                        properties: {
-                          id: { type: "string" },
-                          name: { type: "string" },
-                          mime_type: { type: "string" },
-                          download_link: { type: "string", format: "uri" },
-                        },
-                      },
+                        "Canonical upload refs. Aliases are accepted by the server, but this canonical field should be preferred.",
+                      items: openAiFileRefJsonSchema,
                     },
                     conversation_id: {
                       type: "string",
                       description: "Optional client-provided conversation identifier to link uploaded files to a conversation.",
+                    },
+                  },
+                },
+                examples: {
+                  canonical: {
+                    summary: "Canonical upload refs",
+                    value: {
+                      query: "Summarize this uploaded report",
+                      ...canonicalUploadExample,
+                    },
+                  },
+                  alias: {
+                    summary: "Alias upload refs (accepted)",
+                    value: {
+                      query: "Summarize this uploaded report",
+                      attachments: aliasUploadExample.openai_file_id_refs,
+                      conversation_id: "conv_123",
                     },
                   },
                 },
@@ -478,6 +622,88 @@ function buildOpenApiSpec(serverUrl: string) {
                 },
               },
             },
+            "422": {
+              description: "Uploaded file ingestion failed. Retry upload_blob before answering.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["error", "autoSave"],
+                    properties: {
+                      error: { type: "string" },
+                      autoSave: recallResultSchema.properties.autoSave,
+                    },
+                  },
+                },
+              },
+            },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/actions/upload_blob": {
+        post: {
+          operationId: "upload_blob",
+          summary: "REQUIRED first step for uploaded files: save full files before answering",
+          description:
+            "NON-NEGOTIABLE for file turns: call first and wait before any answer. Supports PDF and Word (.docx/.docm). " +
+            "Do not use direct attachment text before save. User text rule: start with I'm saving \"<file_name>\" and end with saved @doc/@lot link. " +
+            "Retry/report any failure.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["openaiFileIdRefs"],
+                  properties: {
+                    openaiFileIdRefs: {
+                      type: "array",
+                      items: openAiFileRefJsonSchema,
+                    },
+                    conversation_id: {
+                      type: "string",
+                      description: "Optional client-provided conversation identifier to link uploaded files to a conversation.",
+                    },
+                    title: {
+                      type: "string",
+                      description: "Optional override title applied to uploaded file saves.",
+                    },
+                  },
+                },
+                examples: {
+                  canonical: {
+                    summary: "Canonical upload payload",
+                    value: canonicalUploadExample,
+                  },
+                  alias: {
+                    summary: "Alias payload accepted by server",
+                    value: aliasUploadExample,
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "All uploaded files persisted successfully.",
+              content: {
+                "application/json": {
+                  schema: uploadBlobResultSchema,
+                },
+              },
+            },
+            "422": {
+              description: "One or more files failed; inspect saved/errors and retry failed files.",
+              content: {
+                "application/json": {
+                  schema: uploadBlobResultSchema,
+                },
+              },
+            },
             "401": { description: "Unauthorized" },
             "403": { description: "Insufficient scope" },
           },
@@ -488,7 +714,8 @@ function buildOpenApiSpec(serverUrl: string) {
           operationId: "remember",
           summary: "Unified save endpoint for memory and documents (supports uploaded files)",
           description:
-            "For uploaded conversation files, pass openaiFileIdRefs and kind=document-note to auto-save file-derived notes.",
+            "Use for explicit saves and cadence: every 3 user messages, save a concise fact summary unless user opts out. " +
+            "For files, upload_blob must run first and complete. If persistence fails, return failure and never claim success.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -511,21 +738,29 @@ function buildOpenApiSpec(serverUrl: string) {
                     openaiFileIdRefs: {
                       type: "array",
                       description:
-                        "Conversation file references provided by ChatGPT. Use this exact field name to receive uploaded files.",
-                      items: {
-                        type: "object",
-                        required: ["id", "download_link"],
-                        properties: {
-                          id: { type: "string" },
-                          name: { type: "string" },
-                          mime_type: { type: "string" },
-                          download_link: { type: "string", format: "uri" },
-                        },
-                      },
+                        "Canonical upload refs. Aliases are accepted, but this canonical field should be preferred.",
+                      items: openAiFileRefJsonSchema,
                     },
                     conversation_id: {
                       type: "string",
                       description: "Optional client-provided conversation identifier to link uploaded files to a conversation.",
+                    },
+                  },
+                },
+                examples: {
+                  canonical: {
+                    summary: "Canonical remember upload payload",
+                    value: {
+                      kind: "document-note",
+                      ...canonicalUploadExample,
+                    },
+                  },
+                  alias: {
+                    summary: "Alias remember upload payload",
+                    value: {
+                      kind: "document-note",
+                      files: aliasUploadExample.openai_file_id_refs,
+                      conversation_id: "conv_123",
                     },
                   },
                 },
@@ -535,6 +770,14 @@ function buildOpenApiSpec(serverUrl: string) {
           responses: {
             "200": {
               description: "Saved",
+              content: {
+                "application/json": {
+                  schema: memoryResultSchema,
+                },
+              },
+            },
+            "422": {
+              description: "One or more uploaded files failed to persist.",
               content: {
                 "application/json": {
                   schema: memoryResultSchema,
@@ -745,12 +988,13 @@ router.get("/actions/openapi.json", (_req, res: Response) => {
 
 router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = recallSchema.parse(req.body ?? {});
-    const [result, recentDocuments] = await Promise.all([
+    const body = recallSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const [result, recentDocuments, matchedDocuments] = await Promise.all([
       recallMemories(body.query, req.authContext!, body.limit, req.ip, {
         types: recallTypesOrDefault(body.types),
       }),
       recentDocumentBriefs(req.authContext!, 5),
+      searchDocuments(body.query, req.authContext!, 3).catch(() => []),
     ]);
     const refs = [...new Set((body.include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
     const referencedDocuments = refs.length > 0
@@ -791,6 +1035,25 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
       }
     }
 
+    if (uploadedFiles.length > 0 && autoSaveErrors.length > 0) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/recall_memories",
+        ok: false,
+        error: `${autoSaveErrors.length} uploaded file(s) failed to persist`,
+      });
+      res.status(422).json({
+        error: "One or more uploaded files failed to save. Retry upload_blob before answering.",
+        autoSave: {
+          requested: uploadedFiles.length,
+          complete: false,
+          saved: autoSaved,
+          errors: autoSaveErrors,
+        },
+      });
+      return;
+    }
+
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recall_memories",
@@ -799,7 +1062,14 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
     res.json({
       ...result,
       recentDocuments,
+      matchedDocuments,
       referencedDocuments,
+      autoSave: {
+        requested: uploadedFiles.length,
+        complete: autoSaveErrors.length === 0,
+        saved: autoSaved,
+        errors: autoSaveErrors,
+      },
       ...(autoSaved.length > 0 ? {
         autoSaved,
         autoSaveNotice: `📎 Auto-saved ${autoSaved.length} file(s) to Tallei: ${autoSaved.map(s => `${s.title} → ${s.ref}`).join(", ")}. User can reply "undo" to delete.`,
@@ -838,7 +1108,7 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
 
 router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = rememberSchema.parse(req.body);
+    const body = rememberSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
     const uploadedFiles = body.openaiFileIdRefs ?? [];
 
     if (uploadedFiles.length > 0) {
@@ -858,6 +1128,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
         conversation_id: string | null;
         blob: { provider: "uploadthing"; key: string; url: string; source_file_id: string } | null;
       }> = [];
+      const fileErrors: Array<{ file_id: string; filename: string; error: string }> = [];
       for (const fileRef of uploadedFiles) {
         try {
           // 1. Save the note using ChatGPT's summary (no local summarization)
@@ -894,8 +1165,33 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
             blob: blobSaved.blob,
           });
         } catch (fileErr) {
-          console.error(`[chatgpt] remember file ${fileRef.id} failed:`, fileErr instanceof Error ? fileErr.message : fileErr);
+          const errMsg = fileErr instanceof Error ? fileErr.message : String(fileErr);
+          console.error(`[chatgpt] remember file ${fileRef.id} failed:`, errMsg);
+          fileErrors.push({
+            file_id: fileRef.id,
+            filename: fileRef.name ?? fileRef.id,
+            error: errMsg,
+          });
         }
+      }
+
+      if (fileErrors.length > 0) {
+        logChatGptActionAsync({
+          auth: req.authContext,
+          method: "chatgpt/actions/remember",
+          ok: false,
+          error: `${fileErrors.length} uploaded file(s) failed to persist`,
+        });
+        res.status(422).json({
+          success: false,
+          kind: body.kind,
+          error: "One or more files failed to save.",
+          count_saved: savedFromFiles.length,
+          count_failed: fileErrors.length,
+          saved: savedFromFiles,
+          errors: fileErrors,
+        });
+        return;
       }
 
       logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
@@ -1025,6 +1321,70 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
     });
     console.error("Error saving ChatGPT remember action:", error);
     res.status(500).json({ error: "Failed to remember" });
+  }
+});
+
+router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = uploadBlobBodySchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    assertUploadThingConfigured();
+
+    const { saved, errors } = await ingestUploadedFilesToDocuments(body.openaiFileIdRefs, req.authContext!, {
+      title: body.title,
+      conversation_id: body.conversation_id ?? null,
+    });
+
+    if (errors.length > 0) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/upload_blob",
+        ok: false,
+        error: `${errors.length} uploaded file(s) failed to persist`,
+      });
+      res.status(422).json({
+        success: false,
+        error: "One or more files failed to save.",
+        count_saved: saved.length,
+        count_failed: errors.length,
+        saved,
+        errors,
+      });
+      return;
+    }
+
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/upload_blob", ok: true });
+    res.json({
+      success: true,
+      count_saved: saved.length,
+      count_failed: 0,
+      saved,
+      errors: [],
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof UploadThingConfigError) {
+      res.status(503).json({ error: error.message });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json({ error: error.message });
+      return;
+    }
+    if (error instanceof DocumentSizeExceededError) {
+      res.status(413).json({ error: error.message });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/upload_blob",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to upload blobs",
+    });
+    console.error("Error uploading ChatGPT file blobs:", error);
+    res.status(500).json({ error: "Failed to upload file blobs" });
   }
 });
 

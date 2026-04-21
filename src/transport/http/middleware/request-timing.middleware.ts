@@ -33,6 +33,7 @@ function inferChatGptActionTarget(req: Request): TimingTarget | null {
 
   if (
     path === "/api/chatgpt/actions/remember" ||
+    path === "/api/chatgpt/actions/upload_blob" ||
     path === "/api/chatgpt/actions/undo_save"
   ) {
     return {
