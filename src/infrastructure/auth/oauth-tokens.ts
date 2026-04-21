@@ -4,6 +4,9 @@ import { getCacheJson, setCacheJson } from "../cache/redis-cache.js";
 import { resolveAuthContext } from "./tenancy.js";
 
 const OAUTH_ACCESS_CACHE_TTL_SECONDS = 120;
+const LOCAL_OAUTH_CACHE_TTL_MS = 30_000;
+const LOCAL_OAUTH_CACHE_MAX = 256;
+const localOAuthCache = new Map<string, { token: OAuthTokenContext; exp: number }>();
 
 export interface OAuthTokenContext {
   accessToken: string;
@@ -59,6 +62,18 @@ export async function validateOAuthAccessToken(
 ): Promise<OAuthTokenContext | null> {
   const expectedResource = options?.expectedResource ?? null;
   const cacheKey = tokenCacheKey(token);
+
+  const localHit = localOAuthCache.get(cacheKey);
+  if (localHit && localHit.exp > Date.now()) {
+    if (expectedResource && localHit.token.resource && localHit.token.resource !== expectedResource) {
+      return null;
+    }
+    if (localHit.token.expiresAt <= Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+    return localHit.token;
+  }
+
   const cached = await getCacheJson<OAuthCacheEntry>(cacheKey);
   if (cached?.token) {
     if (expectedResource && cached.token.resource && cached.token.resource !== expectedResource) {
@@ -99,6 +114,13 @@ export async function validateOAuthAccessToken(
 
   const ttl = Math.max(1, Math.min(OAUTH_ACCESS_CACHE_TTL_SECONDS, context.expiresAt - Math.floor(Date.now() / 1000)));
   await setCacheJson(cacheKey, { token: context }, ttl);
+
+  if (localOAuthCache.size >= LOCAL_OAUTH_CACHE_MAX) {
+    const firstKey = localOAuthCache.keys().next().value;
+    if (firstKey) localOAuthCache.delete(firstKey);
+  }
+  localOAuthCache.set(cacheKey, { token: context, exp: Date.now() + LOCAL_OAUTH_CACHE_TTL_MS });
+
   return context;
 }
 

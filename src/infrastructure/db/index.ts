@@ -7,8 +7,11 @@ const { Pool } = pg;
 function createPool(connectionString: string): pg.Pool {
   const dbPool = new Pool({
     connectionString,
-    connectionTimeoutMillis: 5000,
-    query_timeout: 45000,
+    connectionTimeoutMillis: 10000,
+    query_timeout: 30000,
+    max: 5,
+    idleTimeoutMillis: 30000,
+    keepAlive: true,
   });
 
   dbPool.on("error", (error: Error & { code?: string }) => {

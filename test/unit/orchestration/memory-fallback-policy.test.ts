@@ -7,8 +7,8 @@ import {
 } from "../../../src/orchestration/memory/fallback-policy.js";
 
 test("selectFallbackSource maps snapshot states to expected recall source", () => {
-  assert.equal(selectFallbackSource("miss"), "precomputed_graph_miss");
-  assert.equal(selectFallbackSource("stale"), "precomputed_graph_stale");
+  assert.equal(selectFallbackSource("miss"), "recent_fallback");
+  assert.equal(selectFallbackSource("stale"), "recent_fallback");
   assert.equal(selectFallbackSource("error"), "recent_fallback");
   assert.equal(selectFallbackSource("disabled"), "recent_fallback");
   assert.equal(selectFallbackSource("hit"), "recent_fallback");

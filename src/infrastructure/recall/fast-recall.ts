@@ -36,7 +36,7 @@ const memoryRepository = new MemoryRepository();
 const FAST_RECALL_EXACT_TTL_SECONDS = 120;
 const FAST_RECALL_WARM_TTL_SECONDS = 45;
 const FAST_RECALL_STAMP_TTL_SECONDS = 60 * 60 * 24 * 30;
-const FAST_RECALL_STAMP_SYNC_MS = 2_000;
+const FAST_RECALL_STAMP_SYNC_MS = 10_000;
 
 const localCache = new Map<string, LocalCacheEntry<RecallCacheEnvelope>>();
 const localStampByScope = new Map<string, number>();
@@ -141,11 +141,16 @@ export async function readRecallStamp(auth: AuthContext): Promise<number> {
     return localStamp;
   }
 
-  const remoteStamp = await getCacheJson<number>(stampCacheKey(auth));
-  const stamp = typeof remoteStamp === "number" ? remoteStamp : 0;
-  localStampByScope.set(scope, stamp);
+  localStampByScope.set(scope, 0);
   localStampSyncedAtByScope.set(scope, Date.now());
-  return stamp;
+  void getCacheJson<number>(stampCacheKey(auth))
+    .then((remoteStamp) => {
+      if (typeof remoteStamp !== "number") return;
+      const next = Math.max(localStampByScope.get(scope) ?? 0, remoteStamp);
+      localStampByScope.set(scope, next);
+    })
+    .catch(() => {});
+  return 0;
 }
 
 export async function bumpRecallStamp(auth: AuthContext): Promise<void> {

@@ -65,6 +65,10 @@ const usageUpdateQueue = new Map<
 const usageUpdateInFlight = new Set<string>();
 let activeUsageUpdateFlushes = 0;
 
+const LOCAL_API_KEY_CACHE_TTL_MS = 60_000;
+const LOCAL_API_KEY_CACHE_MAX = 256;
+const localApiKeyCache = new Map<string, { value: ApiKeyValidation; exp: number }>();
+
 function isDbConnectivityError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return (
@@ -550,6 +554,7 @@ export async function revokeApiKey(
 
   if (result.rows.length > 0) {
     const cacheKey = apiKeyCacheKey(result.rows[0].key_hash);
+    localApiKeyCache.delete(result.rows[0].key_hash);
     await deleteCacheKey(cacheKey);
     return true;
   }
@@ -559,6 +564,13 @@ export async function revokeApiKey(
 
 export async function validateApiKeyContext(rawKey: string, requesterIp?: string): Promise<ApiKeyValidation | null> {
   const hash = hashApiKey(rawKey);
+
+  const localHit = localApiKeyCache.get(hash);
+  if (localHit && localHit.exp > Date.now()) {
+    enqueueApiKeyUsageUpdate(localHit.value.keyId, requesterIp);
+    return localHit.value;
+  }
+
   const cacheKey = apiKeyCacheKey(hash);
   const cached = await getCacheJson<ApiKeyValidation>(cacheKey);
 
@@ -620,6 +632,13 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
     () => setCacheJson(cacheKey, value, API_KEY_CACHE_TTL_SECONDS),
     "api key cache write"
   );
+  
+  if (localApiKeyCache.size >= LOCAL_API_KEY_CACHE_MAX) {
+    const firstKey = localApiKeyCache.keys().next().value;
+    if (firstKey) localApiKeyCache.delete(firstKey);
+  }
+  localApiKeyCache.set(hash, { value, exp: Date.now() + LOCAL_API_KEY_CACHE_TTL_MS });
+
   enqueueApiKeyUsageUpdate(row.key_id, requesterIp);
 
   return value;

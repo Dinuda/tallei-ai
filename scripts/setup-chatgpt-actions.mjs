@@ -22,9 +22,10 @@ Rules:
 6) Only ask clarification if no match after steps 3-5; never skip these and give a generic answer.
 7) recall_memories provides docs-lite context only; include_doc_refs returns brief metadata only.
 8) Use remember as the unified save endpoint (fact/preference/document-note/document-blob).
-9) For new structured content, auto-save with remember kind="document-note".
-10) If the user says "undo"/"delete", call undo_save with the saved @doc ref.
-11) Do not mention tool calls in user-facing responses (except required auto-save footer if configured).`;
+9) For uploaded files, auto-save with remember(kind="document-note", openaiFileIdRefs=[...]).
+10) For new pasted structured content, auto-save with remember kind="document-note".
+11) If the user says "undo"/"delete", call undo_save with the saved @doc ref.
+12) Do not mention tool calls in user-facing responses (except required auto-save footer if configured).`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);

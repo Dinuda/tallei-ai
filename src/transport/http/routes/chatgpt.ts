@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from "express";
 import { z } from "zod";
+import { PDFParse } from "pdf-parse";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
 import { recallMemories, saveMemory, savePreference } from "../../../services/memory.js";
@@ -24,12 +25,19 @@ import { runAsyncSafe } from "../../../shared/async-safe.js";
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
 const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);
+const openAiFileRefSchema = z.object({
+  id: z.string().min(1, "file id is required"),
+  name: z.string().optional(),
+  mime_type: z.string().optional(),
+  download_link: z.string().url("download_link must be a valid URL"),
+});
 
 const recallSchema = z.object({
   query: z.string().trim().optional().default("latest user context, goals, preferences, and relevant prior facts"),
   limit: z.coerce.number().int().min(1).max(20).optional().default(5),
   types: z.array(memoryTypeSchema).optional(),
   include_doc_refs: z.array(z.string()).max(20).optional(),
+  openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
 });
 
 const rememberSchema = z.object({
@@ -42,6 +50,7 @@ const rememberSchema = z.object({
   category: z.string().optional(),
   preference_key: z.string().optional(),
   platform: z.enum(["claude", "chatgpt", "gemini", "other"]).optional().default("chatgpt"),
+  openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
 });
 
 const undoSaveSchema = z.object({
@@ -78,6 +87,54 @@ function degradedRecallResponse() {
 function recallTypesOrDefault(types?: Array<z.infer<typeof memoryTypeSchema>>): Array<z.infer<typeof memoryTypeSchema>> {
   if (types && types.length > 0) return types;
   return ["fact", "preference"];
+}
+
+async function extractPdfText(buffer: Buffer): Promise<string> {
+  const parser = new PDFParse({ data: buffer });
+  const result = await parser.getText();
+  return result.text;
+}
+
+async function fetchUploadedFileBuffer(ref: z.infer<typeof openAiFileRefSchema>): Promise<Buffer> {
+  const response = await fetch(ref.download_link, { redirect: "follow" });
+  if (!response.ok) {
+    throw new Error(`Failed to download uploaded file ${ref.id}: HTTP ${response.status}`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+async function uploadedFileToText(
+  ref: z.infer<typeof openAiFileRefSchema>,
+  buffer: Buffer
+): Promise<string> {
+  const mime = (ref.mime_type ?? "").toLowerCase();
+  const name = (ref.name ?? "").toLowerCase();
+  const isPdf = mime === "application/pdf" || name.endsWith(".pdf");
+  if (isPdf) {
+    return extractPdfText(buffer);
+  }
+  return buffer.toString("utf8");
+}
+
+function buildDocumentNoteDraft(input: {
+  name: string;
+  titleOverride?: string;
+  sourceHint?: string;
+  text: string;
+}): { title: string; key_points: string[]; summary: string; source_hint: string } {
+  const preview = input.text.slice(0, 3000);
+  const lines = preview
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 20)
+    .slice(0, 8);
+  return {
+    title: input.titleOverride?.trim() || input.name || "Uploaded Document",
+    key_points: lines,
+    summary: `Uploaded file: ${input.name || "document"}`,
+    source_hint: input.sourceHint?.trim() || `Uploaded via ChatGPT action — ${input.name || "document"}`,
+  };
 }
 
 async function logChatGptAction(input: {
@@ -166,18 +223,22 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
     return;
   }
 
-  const apiKeyContext = await authContextFromApiKey(token, req.ip);
-  if (apiKeyContext) {
-    if (apiKeyContext.connectorType && apiKeyContext.connectorType !== "chatgpt") {
+  const isLikelyApiKey = token.startsWith("tly_") || token.startsWith("gm_");
+
+  if (isLikelyApiKey) {
+    const apiKeyContext = await authContextFromApiKey(token, req.ip);
+    if (apiKeyContext) {
+      if (apiKeyContext.connectorType && apiKeyContext.connectorType !== "chatgpt") {
+        noteAuthTiming();
+        res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
+        return;
+      }
+      req.userId = apiKeyContext.userId;
+      req.authContext = apiKeyContext;
       noteAuthTiming();
-      res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
+      next();
       return;
     }
-    req.userId = apiKeyContext.userId;
-    req.authContext = apiKeyContext;
-    noteAuthTiming();
-    next();
-    return;
   }
 
   try {
@@ -216,10 +277,25 @@ function buildOpenApiSpec(serverUrl: string) {
       kind: { type: "string", enum: ["fact", "preference", "document-note", "document-blob"] },
       memoryId: { type: "string" },
       title: { type: "string" },
+      filename: { type: ["string", "null"] },
       summary: { type: "object", additionalProperties: true },
       ref: { type: "string" },
       status: { type: "string" },
       lotRef: { type: ["string", "null"] },
+      count: { type: "integer" },
+      saved: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["ref", "status", "title", "filename"],
+          properties: {
+            ref: { type: "string" },
+            status: { type: "string" },
+            title: { type: "string" },
+            filename: { type: ["string", "null"] },
+          },
+        },
+      },
     },
   };
 
@@ -363,11 +439,10 @@ function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/recall_memories": {
         post: {
           operationId: "recall_memories",
-          summary: "Load memory context before answering referential questions",
+          summary: "REQUIRED: Call this on EVERY user turn before responding",
           description:
-            "Call at the start of turns that may depend on prior context or references (for example: 'the first activity', 'that spec', 'in the catalogue'). " +
-            "Returns memory context plus recent/referenced document briefs. " +
-            "Full document content is never inlined here.",
+            "MUST call on every user message before responding. Loads persistent memory, preferences, and recent docs. " +
+            "If files were uploaded, include openaiFileIdRefs to auto-save them. Do not skip. Do not answer first.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -396,6 +471,21 @@ function buildOpenApiSpec(serverUrl: string) {
                       items: { type: "string" },
                       description: "Optional @doc/@lot refs to include as brief metadata (no full content).",
                     },
+                    openaiFileIdRefs: {
+                      type: "array",
+                      description:
+                        "If the user uploaded files this turn, pass them here. The server will auto-save them to memory.",
+                      items: {
+                        type: "object",
+                        required: ["id", "download_link"],
+                        properties: {
+                          id: { type: "string" },
+                          name: { type: "string" },
+                          mime_type: { type: "string" },
+                          download_link: { type: "string", format: "uri" },
+                        },
+                      },
+                    },
                   },
                 },
               },
@@ -403,7 +493,7 @@ function buildOpenApiSpec(serverUrl: string) {
           },
           responses: {
             "200": {
-              description: "Memory recall results",
+              description: "Memory recall results, plus auto-saved document refs if files were uploaded",
               content: {
                 "application/json": {
                   schema: recallResultSchema,
@@ -418,8 +508,10 @@ function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/remember": {
         post: {
           operationId: "remember",
-          summary: "Unified save endpoint for memory and documents",
-          "x-openai-isConsequential": true,
+          summary: "Unified save endpoint for memory and documents (supports uploaded files)",
+          description:
+            "For uploaded conversation files, pass openaiFileIdRefs and kind=document-note to auto-save file-derived notes.",
+          "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
@@ -438,6 +530,21 @@ function buildOpenApiSpec(serverUrl: string) {
                     category: { type: "string" },
                     preference_key: { type: "string" },
                     platform: { type: "string", enum: ["claude", "chatgpt", "gemini", "other"] },
+                    openaiFileIdRefs: {
+                      type: "array",
+                      description:
+                        "Conversation file references provided by ChatGPT. Use this exact field name to receive uploaded files.",
+                      items: {
+                        type: "object",
+                        required: ["id", "download_link"],
+                        properties: {
+                          id: { type: "string" },
+                          name: { type: "string" },
+                          mime_type: { type: "string" },
+                          download_link: { type: "string", format: "uri" },
+                        },
+                      },
+                    },
                   },
                 },
               },
@@ -657,15 +764,42 @@ router.get("/actions/openapi.json", (_req, res: Response) => {
 router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallSchema.parse(req.body ?? {});
-    const result = await recallMemories(body.query, req.authContext!, body.limit, req.ip, {
-      types: recallTypesOrDefault(body.types),
-    });
-
-    const recentDocuments = await recentDocumentBriefs(req.authContext!, 5);
+    const [result, recentDocuments] = await Promise.all([
+      recallMemories(body.query, req.authContext!, body.limit, req.ip, {
+        types: recallTypesOrDefault(body.types),
+      }),
+      recentDocumentBriefs(req.authContext!, 5),
+    ]);
     const refs = [...new Set((body.include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
     const referencedDocuments = refs.length > 0
       ? await documentBriefsByRefs(refs, req.authContext!, { maxLotDocs: 5 })
       : [];
+
+    // --- Server-side auto-save of uploaded files ---
+    const uploadedFiles = body.openaiFileIdRefs ?? [];
+    const autoSaved: Array<{ ref: string; title: string; filename: string | null }> = [];
+    if (uploadedFiles.length > 0 && req.authContext) {
+      for (const fileRef of uploadedFiles) {
+        try {
+          const buffer = await fetchUploadedFileBuffer(fileRef);
+          const text = (await uploadedFileToText(fileRef, buffer)).trim();
+          if (!text) continue;
+          const note = buildDocumentNoteDraft({
+            name: fileRef.name ?? "uploaded-file",
+            text,
+            sourceHint: `Auto-saved from ChatGPT file upload — ${fileRef.name || fileRef.id}`,
+          });
+          const saved = await stashDocumentNote(note, req.authContext!);
+          autoSaved.push({
+            ref: saved.refHandle,
+            title: note.title,
+            filename: fileRef.name ?? null,
+          });
+        } catch (fileErr) {
+          console.error(`[chatgpt] auto-save file ${fileRef.id} failed:`, fileErr);
+        }
+      }
+    }
 
     logChatGptActionAsync({
       auth: req.authContext,
@@ -676,6 +810,10 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
       ...result,
       recentDocuments,
       referencedDocuments,
+      ...(autoSaved.length > 0 ? {
+        autoSaved,
+        autoSaveNotice: `📎 Auto-saved ${autoSaved.length} file(s) to Tallei: ${autoSaved.map(s => `${s.title} → ${s.ref}`).join(", ")}. User can reply "undo" to delete.`,
+      } : {}),
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -706,6 +844,73 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
 router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = rememberSchema.parse(req.body);
+    const uploadedFiles = body.openaiFileIdRefs ?? [];
+
+    if (uploadedFiles.length > 0) {
+      if (body.kind !== "document-note" && body.kind !== "document-blob") {
+        res.status(400).json({ error: "openaiFileIdRefs can only be used with kind=document-note or kind=document-blob" });
+        return;
+      }
+
+      const savedFromFiles: Array<{ ref: string; status: string; title: string; filename: string | null }> = [];
+      for (const fileRef of uploadedFiles) {
+        const buffer = await fetchUploadedFileBuffer(fileRef);
+        const text = (await uploadedFileToText(fileRef, buffer)).trim();
+        if (!text) {
+          continue;
+        }
+
+        if (body.kind === "document-blob") {
+          const result = await stashDocument(text, req.authContext!, {
+            title: body.title ?? fileRef.name,
+            filename: fileRef.name ?? undefined,
+          });
+          savedFromFiles.push({
+            ref: result.refHandle,
+            status: result.status,
+            title: body.title ?? fileRef.name ?? "Uploaded Document",
+            filename: fileRef.name ?? null,
+          });
+        } else {
+          const note = buildDocumentNoteDraft({
+            name: fileRef.name ?? "uploaded-file",
+            titleOverride: body.title,
+            sourceHint: body.source_hint,
+            text,
+          });
+          const result = await stashDocumentNote(note, req.authContext!);
+          savedFromFiles.push({
+            ref: result.refHandle,
+            status: result.status,
+            title: note.title,
+            filename: fileRef.name ?? null,
+          });
+        }
+      }
+
+      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
+
+      const first = savedFromFiles[0];
+      if (savedFromFiles.length === 1 && first) {
+        res.json({
+          success: true,
+          kind: body.kind,
+          ref: first.ref,
+          status: first.status,
+          title: first.title,
+          filename: first.filename,
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        kind: body.kind,
+        count: savedFromFiles.length,
+        saved: savedFromFiles,
+      });
+      return;
+    }
 
     if (body.kind === "fact") {
       if (!body.content) {

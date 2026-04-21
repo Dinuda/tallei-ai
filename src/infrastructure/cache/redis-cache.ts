@@ -112,7 +112,11 @@ async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
       url: config.redisUrl,
       socket: {
         connectTimeout: config.redisConnectTimeoutMs,
-        reconnectStrategy: () => false,
+        reconnectStrategy: (retries) => {
+          if (retries > 3) return false;
+          return Math.min(retries * 200, 1000);
+        },
+        keepAlive: 15000,
       },
     });
     client.on("error", (error) => {

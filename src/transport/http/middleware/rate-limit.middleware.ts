@@ -36,7 +36,7 @@ function cleanupLocalRateLimit(key: string): void {
 }
 
 function canUseLocalSampling(options: RateLimitOptions): boolean {
-  return options.namespace === "mcp";
+  return options.namespace === "mcp" || options.namespace === "memory-api";
 }
 
 function tryLocalSample(key: string, maxRequests: number): number | null {
