@@ -28,7 +28,7 @@ const rememberKindSchema = z.enum(["fact", "preference", "document-note", "docum
 const openAiFileRefSchema = z.object({
   id: z.string().min(1, "file id is required"),
   name: z.string().optional(),
-  mime_type: z.string().optional(),
+  mime_type: z.string().nullable().optional(),
   download_link: z.string().url("download_link must be a valid URL"),
 });
 
@@ -778,25 +778,31 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
     // --- Server-side auto-save of uploaded files ---
     const uploadedFiles = body.openaiFileIdRefs ?? [];
     const autoSaved: Array<{ ref: string; title: string; filename: string | null }> = [];
+    const autoSaveErrors: Array<{ filename: string; error: string }> = [];
     if (uploadedFiles.length > 0 && req.authContext) {
       for (const fileRef of uploadedFiles) {
         try {
+          if (!fileRef.download_link) continue;
           const buffer = await fetchUploadedFileBuffer(fileRef);
           const text = (await uploadedFileToText(fileRef, buffer)).trim();
-          if (!text) continue;
-          const note = buildDocumentNoteDraft({
-            name: fileRef.name ?? "uploaded-file",
-            text,
-            sourceHint: `Auto-saved from ChatGPT file upload — ${fileRef.name || fileRef.id}`,
+          if (!text) {
+            autoSaveErrors.push({ filename: fileRef.name ?? fileRef.id, error: "Empty content after parsing" });
+            continue;
+          }
+          // Stash the full document as a blob
+          const saved = await stashDocument(text, req.authContext!, {
+            title: fileRef.name ?? "Uploaded Document",
+            filename: fileRef.name ?? undefined,
           });
-          const saved = await stashDocumentNote(note, req.authContext!);
           autoSaved.push({
             ref: saved.refHandle,
-            title: note.title,
+            title: fileRef.name ?? "Uploaded Document",
             filename: fileRef.name ?? null,
           });
         } catch (fileErr) {
-          console.error(`[chatgpt] auto-save file ${fileRef.id} failed:`, fileErr);
+          const errMsg = fileErr instanceof Error ? fileErr.message : String(fileErr);
+          console.error(`[chatgpt] auto-save file ${fileRef.id} failed:`, errMsg);
+          autoSaveErrors.push({ filename: fileRef.name ?? fileRef.id, error: errMsg });
         }
       }
     }
@@ -814,6 +820,7 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
         autoSaved,
         autoSaveNotice: `📎 Auto-saved ${autoSaved.length} file(s) to Tallei: ${autoSaved.map(s => `${s.title} → ${s.ref}`).join(", ")}. User can reply "undo" to delete.`,
       } : {}),
+      ...(autoSaveErrors.length > 0 ? { autoSaveErrors } : {}),
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -852,39 +859,46 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
         return;
       }
 
-      const savedFromFiles: Array<{ ref: string; status: string; title: string; filename: string | null }> = [];
+      const savedFromFiles: Array<{ ref: string; status: string; title: string; filename: string | null; type: "note" | "blob" }> = [];
       for (const fileRef of uploadedFiles) {
-        const buffer = await fetchUploadedFileBuffer(fileRef);
-        const text = (await uploadedFileToText(fileRef, buffer)).trim();
-        if (!text) {
-          continue;
-        }
+        try {
+          // 1. Save the note using ChatGPT's summary (no local summarization)
+          if (body.kind === "document-note") {
+            const noteResult = await stashDocumentNote({
+              title: body.title ?? fileRef.name ?? "Uploaded Document",
+              key_points: body.key_points ?? [],
+              summary: body.summary ?? "",
+              source_hint: body.source_hint ?? `Uploaded via ChatGPT — ${fileRef.name || fileRef.id}`,
+            }, req.authContext!);
+            savedFromFiles.push({
+              ref: noteResult.refHandle,
+              status: noteResult.status,
+              title: body.title ?? fileRef.name ?? "Uploaded Document",
+              filename: fileRef.name ?? null,
+              type: "note",
+            });
+          }
 
-        if (body.kind === "document-blob") {
-          const result = await stashDocument(text, req.authContext!, {
-            title: body.title ?? fileRef.name,
-            filename: fileRef.name ?? undefined,
-          });
-          savedFromFiles.push({
-            ref: result.refHandle,
-            status: result.status,
-            title: body.title ?? fileRef.name ?? "Uploaded Document",
-            filename: fileRef.name ?? null,
-          });
-        } else {
-          const note = buildDocumentNoteDraft({
-            name: fileRef.name ?? "uploaded-file",
-            titleOverride: body.title,
-            sourceHint: body.source_hint,
-            text,
-          });
-          const result = await stashDocumentNote(note, req.authContext!);
-          savedFromFiles.push({
-            ref: result.refHandle,
-            status: result.status,
-            title: note.title,
-            filename: fileRef.name ?? null,
-          });
+          // 2. Download the full file and stash as blob
+          if (fileRef.download_link) {
+            const buffer = await fetchUploadedFileBuffer(fileRef);
+            const text = (await uploadedFileToText(fileRef, buffer)).trim();
+            if (text) {
+              const blobResult = await stashDocument(text, req.authContext!, {
+                title: body.title ?? fileRef.name,
+                filename: fileRef.name ?? undefined,
+              });
+              savedFromFiles.push({
+                ref: blobResult.refHandle,
+                status: blobResult.status,
+                title: body.title ?? fileRef.name ?? "Uploaded Document",
+                filename: fileRef.name ?? null,
+                type: "blob",
+              });
+            }
+          }
+        } catch (fileErr) {
+          console.error(`[chatgpt] remember file ${fileRef.id} failed:`, fileErr instanceof Error ? fileErr.message : fileErr);
         }
       }
 
