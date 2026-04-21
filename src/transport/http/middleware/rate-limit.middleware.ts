@@ -64,7 +64,7 @@ function syncLocalSample(key: string, count: number, ttlSeconds: number): void {
 
 function isRecallRequest(req: Request): boolean {
   const path = (req.originalUrl || req.url || "").split("?")[0];
-  if (path.endsWith("/actions/recall")) return true;
+  if (path.endsWith("/actions/recall_memories")) return true;
   if (!path.startsWith("/mcp")) return false;
 
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : null;
@@ -73,7 +73,7 @@ function isRecallRequest(req: Request): boolean {
     ? (body.params as Record<string, unknown>)
     : null;
   const toolName = typeof params?.name === "string" ? params.name : "";
-  return toolName === "recall_memories" || toolName === "recall_memories_v2";
+  return toolName === "recall_memories";
 }
 
 export function createRateLimitMiddleware(options: RateLimitOptions) {

@@ -1,25 +1,30 @@
 #!/usr/bin/env node
 import process from "node:process";
 
+const CHATGPT_ACTIONS_SPEC_TAG = "stable";
+
 const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory + documents tools.
 
 Available actions:
-- recallMemoriesV2
-- rememberActionV2
-- undoSaveActionV2
-- recentDocumentsActionV2
-- searchDocumentsActionV2
-- recallDocumentActionV2
+- recall_memories
+- remember
+- undo_save
+- recent_documents
+- search_documents
+- recall_document
 
 Rules:
-1) Call recallMemoriesV2 only when prior-session context is needed.
-2) recallMemoriesV2 provides docs-lite context only; include_doc_refs returns brief metadata only.
-3) Use recentDocumentsActionV2 first (latest 5 docs). If doc isn't there, use searchDocumentsActionV2.
-4) Use recallDocumentActionV2 only when full document content is explicitly needed.
-5) Use rememberActionV2 as the unified save endpoint (fact/preference/document-note/document-blob).
-6) For new structured content, auto-save with rememberActionV2 kind="document-note".
-7) If the user says "undo"/"delete", call undoSaveActionV2 with the saved @doc ref.
-8) Do not mention tool calls in user-facing responses (except required auto-save footer if configured).`;
+1) Before replying on every user turn, call recall_memories(query=user message, limit=8, types=["fact","preference"]).
+2) If a question is referential (e.g., "the first activity", "that catalogue", "according to the spec", "in the line"), treat it as document-grounded even without the words "pdf" or "document".
+3) For document-grounded questions, call recent_documents(limit=5) first.
+4) If needed, call search_documents(query=user message, limit=5).
+5) If a likely match exists, call recall_document(ref=best match) before answering.
+6) Only ask clarification if no match after steps 3-5; never skip these and give a generic answer.
+7) recall_memories provides docs-lite context only; include_doc_refs returns brief metadata only.
+8) Use remember as the unified save endpoint (fact/preference/document-note/document-blob).
+9) For new structured content, auto-save with remember kind="document-note".
+10) If the user says "undo"/"delete", call undo_save with the saved @doc ref.
+11) Do not mention tool calls in user-facing responses (except required auto-save footer if configured).`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);
@@ -78,8 +83,8 @@ async function main() {
     : rawAccessToken;
 
   const healthUrl = `${baseUrl}/health`;
-  const openApiUrl = `${baseUrl}/api/chatgpt/actions/openapi.json`;
-  const recallUrl = `${baseUrl}/api/chatgpt/actions/recall`;
+  const openApiUrl = `${baseUrl}/api/chatgpt/actions/openapi.json?spec=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_TAG)}`;
+  const recallUrl = `${baseUrl}/api/chatgpt/actions/recall_memories`;
   const rememberUrl = `${baseUrl}/api/chatgpt/actions/remember`;
 
   console.log("Tallei ChatGPT Actions Setup");
@@ -127,8 +132,8 @@ async function main() {
       const data = await safeJson(res);
       if (!data || typeof data !== "object") throw new Error("Invalid OpenAPI JSON");
       if (typeof data.openapi !== "string") throw new Error("Missing openapi version");
-      if (!data.paths?.["/api/chatgpt/actions/recall"]) {
-        throw new Error("Missing /api/chatgpt/actions/recall path");
+      if (!data.paths?.["/api/chatgpt/actions/recall_memories"]) {
+        throw new Error("Missing /api/chatgpt/actions/recall_memories path");
       }
       if (!data.paths?.["/api/chatgpt/actions/remember"]) {
         throw new Error("Missing /api/chatgpt/actions/remember path");

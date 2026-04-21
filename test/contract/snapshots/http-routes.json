@@ -65,33 +65,33 @@
     "source": "src/routes/billing.ts"
   },
   {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/documents/recall",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/documents/recent",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/documents/search",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
     "method": "GET",
     "path": "/api/chatgpt/actions/openapi.json",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/recall",
+    "path": "/api/chatgpt/actions/recall_document",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/recall_memories",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/recent_documents",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
     "path": "/api/chatgpt/actions/remember",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/search_documents",
     "source": "src/routes/chatgpt.ts"
   },
   {

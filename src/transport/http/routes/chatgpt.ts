@@ -26,7 +26,7 @@ const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "not
 const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);
 
 const recallSchema = z.object({
-  query: z.string().min(1, "query is required"),
+  query: z.string().trim().optional().default("latest user context, goals, preferences, and relevant prior facts"),
   limit: z.coerce.number().int().min(1).max(20).optional().default(5),
   types: z.array(memoryTypeSchema).optional(),
   include_doc_refs: z.array(z.string()).max(20).optional(),
@@ -83,12 +83,12 @@ function recallTypesOrDefault(types?: Array<z.infer<typeof memoryTypeSchema>>): 
 async function logChatGptAction(input: {
   auth: AuthRequest["authContext"];
   method:
-    | "chatgpt/actions/recall"
+    | "chatgpt/actions/recall_memories"
     | "chatgpt/actions/remember"
     | "chatgpt/actions/undo_save"
-    | "chatgpt/actions/documents/recent"
-    | "chatgpt/actions/documents/search"
-    | "chatgpt/actions/documents/recall";
+    | "chatgpt/actions/recent_documents"
+    | "chatgpt/actions/search_documents"
+    | "chatgpt/actions/recall_document";
   ok: boolean;
   error?: string | null;
 }): Promise<void> {
@@ -340,7 +340,7 @@ function buildOpenApiSpec(serverUrl: string) {
     openapi: "3.1.0",
     info: {
       title: "Tallei ChatGPT Actions API",
-      version: "4.0.0",
+      version: "2026-04-21",
       description: "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key).",
     },
     servers: [
@@ -360,26 +360,27 @@ function buildOpenApiSpec(serverUrl: string) {
       },
     },
     paths: {
-      "/api/chatgpt/actions/recall": {
+      "/api/chatgpt/actions/recall_memories": {
         post: {
-          operationId: "recallMemoriesV2",
-          summary: "Recall relevant memories with docs-lite briefs",
+          operationId: "recall_memories",
+          summary: "Load memory context before answering referential questions",
           description:
-            "Call when prior context is needed. Returns memory context plus recent/referenced document briefs. " +
+            "Call at the start of turns that may depend on prior context or references (for example: 'the first activity', 'that spec', 'in the catalogue'). " +
+            "Returns memory context plus recent/referenced document briefs. " +
             "Full document content is never inlined here.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
-            required: true,
+            required: false,
             content: {
               "application/json": {
                 schema: {
                   type: "object",
-                  required: ["query"],
                   properties: {
                     query: {
                       type: "string",
-                      description: "Memory lookup query derived from the current user prompt.",
+                      description:
+                        "Lookup query derived from the current user prompt. If omitted, the service uses a generic context-loading query.",
                     },
                     limit: { type: "integer", minimum: 1, maximum: 20, default: 5 },
                     types: {
@@ -416,7 +417,7 @@ function buildOpenApiSpec(serverUrl: string) {
       },
       "/api/chatgpt/actions/remember": {
         post: {
-          operationId: "rememberActionV2",
+          operationId: "remember",
           summary: "Unified save endpoint for memory and documents",
           "x-openai-isConsequential": true,
           security: [{ bearerAuth: [] }],
@@ -458,7 +459,7 @@ function buildOpenApiSpec(serverUrl: string) {
       },
       "/api/chatgpt/actions/undo_save": {
         post: {
-          operationId: "undoSaveActionV2",
+          operationId: "undo_save",
           summary: "Delete an auto-saved document by @doc/@lot ref",
           "x-openai-isConsequential": true,
           security: [{ bearerAuth: [] }],
@@ -496,10 +497,12 @@ function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
-      "/api/chatgpt/actions/documents/recent": {
+      "/api/chatgpt/actions/recent_documents": {
         post: {
-          operationId: "recentDocumentsActionV2",
-          summary: "Return recent document briefs",
+          operationId: "recent_documents",
+          summary: "Step 1 for document-grounded questions: fetch latest doc briefs",
+          description:
+            "Use first when the question may reference prior uploads, even if the user does not explicitly say 'PDF' or 'document'.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -537,10 +540,12 @@ function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
-      "/api/chatgpt/actions/documents/search": {
+      "/api/chatgpt/actions/search_documents": {
         post: {
-          operationId: "searchDocumentsActionV2",
-          summary: "Search document briefs by query",
+          operationId: "search_documents",
+          summary: "Step 2 for document-grounded questions: search older docs",
+          description:
+            "Use when recent_documents is insufficient or no obvious match. Query should be the raw user question.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -589,10 +594,12 @@ function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
-      "/api/chatgpt/actions/documents/recall": {
+      "/api/chatgpt/actions/recall_document": {
         post: {
-          operationId: "recallDocumentActionV2",
-          summary: "Recall full content for a document or lot",
+          operationId: "recall_document",
+          summary: "Step 3 for document-grounded questions: fetch full matching content",
+          description:
+            "Use after recent_documents/search_documents finds a likely match. Do not skip lookup and answer generically.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -647,9 +654,9 @@ router.get("/actions/openapi.json", (_req, res: Response) => {
   sendOpenApiSpec(res);
 });
 
-router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = recallSchema.parse(req.body);
+    const body = recallSchema.parse(req.body ?? {});
     const result = await recallMemories(body.query, req.authContext!, body.limit, req.ip, {
       types: recallTypesOrDefault(body.types),
     });
@@ -662,7 +669,7 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
 
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/recall",
+      method: "chatgpt/actions/recall_memories",
       ok: true,
     });
     res.json({
@@ -678,7 +685,7 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
     if (isTransientMemoryInfraError(error)) {
       logChatGptActionAsync({
         auth: req.authContext,
-        method: "chatgpt/actions/recall",
+        method: "chatgpt/actions/recall_memories",
         ok: false,
         error: error instanceof Error ? error.message : "Transient memory infra error",
       });
@@ -687,7 +694,7 @@ router.post("/actions/recall", chatGptActionAuthMiddleware, requireScopes(["memo
     }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/recall",
+      method: "chatgpt/actions/recall_memories",
       ok: false,
       error: error instanceof Error ? error.message : "Failed to recall memories",
     });
@@ -821,11 +828,11 @@ router.post("/actions/undo_save", chatGptActionAuthMiddleware, requireScopes(["m
   }
 });
 
-router.post("/actions/documents/recent", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/recent_documents", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recentDocumentsSchema.parse(req.body ?? {});
     const documents = await recentDocumentBriefs(req.authContext!, body.limit);
-    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/documents/recent", ok: true });
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/recent_documents", ok: true });
     res.json({ documents, count: documents.length });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -834,7 +841,7 @@ router.post("/actions/documents/recent", chatGptActionAuthMiddleware, requireSco
     }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/documents/recent",
+      method: "chatgpt/actions/recent_documents",
       ok: false,
       error: error instanceof Error ? error.message : "Failed to load recent documents",
     });
@@ -843,11 +850,11 @@ router.post("/actions/documents/recent", chatGptActionAuthMiddleware, requireSco
   }
 });
 
-router.post("/actions/documents/search", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/search_documents", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = searchDocumentsSchema.parse(req.body);
     const matches = await searchDocuments(body.query, req.authContext!, body.limit);
-    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/documents/search", ok: true });
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/search_documents", ok: true });
     res.json({ matches, count: matches.length });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -860,7 +867,7 @@ router.post("/actions/documents/search", chatGptActionAuthMiddleware, requireSco
     }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/documents/search",
+      method: "chatgpt/actions/search_documents",
       ok: false,
       error: error instanceof Error ? error.message : "Failed to search documents",
     });
@@ -869,11 +876,11 @@ router.post("/actions/documents/search", chatGptActionAuthMiddleware, requireSco
   }
 });
 
-router.post("/actions/documents/recall", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+router.post("/actions/recall_document", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallDocumentSchema.parse(req.body);
     const document = await recallDocument(body.ref, req.authContext!);
-    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/documents/recall", ok: true });
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/recall_document", ok: true });
     res.json(document);
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -890,7 +897,7 @@ router.post("/actions/documents/recall", chatGptActionAuthMiddleware, requireSco
     }
     logChatGptActionAsync({
       auth: req.authContext,
-      method: "chatgpt/actions/documents/recall",
+      method: "chatgpt/actions/recall_document",
       ok: false,
       error: error instanceof Error ? error.message : "Failed to recall document",
     });

@@ -156,7 +156,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
   const handleMcp = async (req: any, res: any) => {
     const rpcMethod = typeof req?.body?.method === "string" ? req.body.method.slice(0, 128) : null;
     const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name.slice(0, 128) : null;
-    const isRecallToolCall = toolName === "recall_memories" || toolName === "recall_memories_v2";
+    const isRecallToolCall = toolName === "recall_memories";
     const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
     const authStartedAt = process.hrtime.bigint();
 

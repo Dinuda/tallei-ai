@@ -42,7 +42,7 @@ function inferChatGptActionTarget(req: Request): TimingTarget | null {
     };
   }
 
-  if (path === "/api/chatgpt/actions/recall") {
+  if (path === "/api/chatgpt/actions/recall_memories") {
     return {
       surface: "chatgpt_actions",
       operation: "recall_v1",
@@ -51,9 +51,9 @@ function inferChatGptActionTarget(req: Request): TimingTarget | null {
   }
 
   if (
-    path === "/api/chatgpt/actions/documents/recent" ||
-    path === "/api/chatgpt/actions/documents/search" ||
-    path === "/api/chatgpt/actions/documents/recall"
+    path === "/api/chatgpt/actions/recent_documents" ||
+    path === "/api/chatgpt/actions/search_documents" ||
+    path === "/api/chatgpt/actions/recall_document"
   ) {
     return {
       surface: "chatgpt_actions",
