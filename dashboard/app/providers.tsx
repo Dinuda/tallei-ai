@@ -9,13 +9,14 @@ import { useEffect } from "react";
 
 const isPostHogEnabled =
   process.env.NODE_ENV === "production" &&
-  Boolean(process.env.NEXT_PUBLIC_POSTHOG_KEY);
+  Boolean(process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN);
 
 function PostHogTracker() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { data: session, status } = useSession();
 
+  // Capture page views
   useEffect(() => {
     if (!isPostHogEnabled || !pathname) return;
 
@@ -27,6 +28,7 @@ function PostHogTracker() {
     });
   }, [pathname, searchParams]);
 
+  // Identify user when authenticated
   useEffect(() => {
     if (!isPostHogEnabled || status === "loading") return;
 
