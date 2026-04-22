@@ -24,9 +24,9 @@ const APPS = [
     name: "ChatGPT",
     icon: "/chatgpt.svg",
     memoryVia: "Claude",
-    memoryText: "Project code name is 'Apollo'. We are targeting a Q3 launch. No usage-based billing.",
-    userMsg: "Draft an invite for the kickoff meeting.",
-    botMsg: "Subject: Kickoff: Project Apollo 🚀\n\nHi team,\n\nLet's align on our Q3 launch for Project Apollo. As discussed, we'll be moving forward with flat-rate pricing only.",
+    memoryText: "I have a severe peanut allergy and travel with my 5-year-old daughter. We prefer quiet, family-friendly spots.",
+    userMsg: "Can you suggest 2 places for lunch near Central Park?",
+    botMsg: "1. **Friedman's:** 100% peanut-free kitchen and very kid-friendly.\n2. **Bistango:** Awesome allergy protocols and a dedicated kids' menu.\n\nBoth are quiet and just a short walk from the park!",
     placeholder: "Message ChatGPT..."
   },
   {
@@ -34,9 +34,9 @@ const APPS = [
     name: "Claude",
     icon: "/claude.svg",
     memoryVia: "Gemini",
-    memoryText: "I prefer concise, bulleted responses. No conversational fluff or disclaimers.",
-    userMsg: "How do MCP servers work?",
-    botMsg: "• **MCP (Model Context Protocol)** standardizes how AI models connect to local data sources.\n• **Architecture:** Client (Claude) ↔️ MCP Server ↔️ Local Data.\n• **Benefit:** Secure, local tool execution without exposing credentials to the cloud.",
+    memoryText: "I run a small bakery. My tone is always warm, friendly, and includes a pastry pun.",
+    userMsg: "Reply to an angry customer whose cake was 30 mins late.",
+    botMsg: "Hi Sarah,\n\nI am so incredibly sorry for the delay with your cake today! That's certainly not the experience we want to bake into your special day.\n\nI'd love to offer you a full refund—we really want to make this right.",
     placeholder: "Message Claude..."
   },
   {
@@ -44,9 +44,9 @@ const APPS = [
     name: "Gemini",
     icon: "/gemini.svg",
     memoryVia: "ChatGPT",
-    memoryText: "I'm a frontend developer. Default to React (TypeScript) and Tailwind CSS code snippets.",
-    userMsg: "How to create a sticky header?",
-    botMsg: "```tsx\nexport default function Header() {\n  return (\n    <header className=\"sticky top-0 w-full bg-white/80 backdrop-blur-md border-b z-50\">\n      <nav className=\"flex items-center justify-between p-4\">\n        {/* Nav content */}\n      </nav>\n    </header>\n  );\n}\n```",
+    memoryText: "I'm a beginner runner training for a 5K. I only have time to run on Tuesdays, Thursdays, and Sundays.",
+    userMsg: "Adjust my plan for this week, I'm feeling really sore.",
+    botMsg: "No problem! Let's swap Thursday's run for a light 20-minute walk to help you recover. We'll keep Tuesday and Sunday as your main running days. \n\nListen to your body—rest is just as important as running!",
     placeholder: "Ask Gemini..."
   }
 ];
@@ -133,8 +133,14 @@ export function IntegrationsSection() {
             
             <div className="integrations-window-badge-wrap">
               <div className="integrations-window-badge">
-                <span className="integrations-badge-dot" />
-                Tallei syncing
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="tallei-tally-anim">
+                  <line x1="5" y1="4" x2="5" y2="20" className="tally-line t-1" />
+                  <line x1="9" y1="4" x2="9" y2="20" className="tally-line t-2" />
+                  <line x1="13" y1="4" x2="13" y2="20" className="tally-line t-3" />
+                  <line x1="17" y1="4" x2="17" y2="20" className="tally-line t-4" />
+                  <line x1="2" y1="16" x2="20" y2="8" className="tally-line t-5" />
+                </svg>
+                Memory synced
               </div>
             </div>
           </div>
