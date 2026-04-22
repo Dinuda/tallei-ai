@@ -461,6 +461,16 @@
   color: #e5e5e5; /* Slightly muted white for the user's prompt */
 }
 
+/* Quick fade in for sequenced elements */
+.integrations-fade-in {
+  animation: quickFade 0.4s ease-out forwards;
+}
+
+@keyframes quickFade {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Typing cursor effect */
 .integrations-typing-cursor {
   display: inline-block;
