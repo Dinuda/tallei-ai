@@ -106,6 +106,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/chatgpt/actions/upload_status",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/chatgpt/openapi.json",
     "source": "src/routes/chatgpt.ts"
   },

@@ -6,7 +6,6 @@ import type { AuthContext } from "../../../domain/auth/index.js";
 import {
   saveMemory,
   savePreference,
-  recallMemories,
   listMemories,
   listPreferences,
   forgetPreference,
@@ -15,40 +14,25 @@ import {
 } from "../../../services/memory.js";
 import {
   stashDocument,
-  stashDocumentNote,
   createLot,
-  recallDocument,
-  searchDocuments,
-  deleteDocumentByRef,
   DocumentSizeExceededError,
-  recentDocumentBriefs,
-  documentBriefsByRefs,
-  type DocumentBrief,
-  type DocumentRefBrief,
 } from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { PlatformSchema } from "../schemas.js";
+import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
+import {
+  executeRecallAction,
+  executeRecallDocumentAction,
+  executeRecentDocumentsAction,
+  executeRememberAction,
+  executeSearchDocumentsAction,
+  executeUndoSaveAction,
+  executeUploadBlobAction,
+  executeUploadStatusAction,
+} from "../../shared/chat-actions.js";
 
 type ToolResult = { content: [{ type: "text"; text: string }]; isError?: true };
 const MemoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
-
-function formatDocumentBriefLine(doc: DocumentBrief): string {
-  const parts = [`• ${doc.ref}`, doc.title];
-  if (doc.preview) parts.push(doc.preview);
-  return parts.join(" | ");
-}
-
-function formatReferencedBriefLine(item: DocumentRefBrief): string {
-  if (item.kind === "document") {
-    return formatDocumentBriefLine(item);
-  }
-  if (item.kind === "lot") {
-    const docSummary = item.documents.map((doc) => doc.title).join(", ");
-    const suffix = docSummary ? ` | docs: ${docSummary}` : "";
-    return `• ${item.ref} | ${item.title} | count=${item.documentCount}${suffix}`;
-  }
-  return `• ${item.ref} | ${item.error}`;
-}
 
 function onQuotaError(err: unknown): ToolResult {
   if (err instanceof QuotaExceededError) {
@@ -76,6 +60,13 @@ function onKnownError(err: unknown): ToolResult {
   } catch (planErr) {
     return onQuotaError(planErr);
   }
+}
+
+function toJsonToolResult(body: unknown, isError = false): ToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
+    ...(isError ? { isError: true as const } : {}),
+  };
 }
 
 export function registerTools(server: McpServer, auth: AuthContext): void {
@@ -150,30 +141,31 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           .array(z.string())
           .max(20)
           .optional()
-          .describe("Optional @doc/@lot refs to append brief document metadata (no full content)."),
+          .describe("Optional @doc/@lot refs to append brief document metadata."),
+        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+        conversation_id: conversationIdSchema,
       },
     },
-    async ({ query, limit, types, include_doc_refs }) => {
+    async (args) => {
       try {
-        const scopedTypes: Array<z.infer<typeof MemoryTypeSchema>> =
-          types && types.length > 0 ? types : ["fact", "preference"];
-        const result = await recallMemories(query, auth, limit ?? 5, undefined, { types: scopedTypes });
-        const sections: string[] = [result.contextBlock];
+        const parsed = z.object({
+          query: z.string(),
+          limit: z.number().int().min(1).max(20).optional().default(5),
+          types: z.array(MemoryTypeSchema).optional(),
+          include_doc_refs: z.array(z.string()).max(20).optional(),
+          openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+          conversation_id: conversationIdSchema,
+        }).parse(normalizeUploadedFileRequestBody(args));
 
-        const recentDocs = await recentDocumentBriefs(auth, 5);
-        if (recentDocs.length > 0) {
-          sections.push(`Recent Documents (latest 5)\n${recentDocs.map(formatDocumentBriefLine).join("\n")}`);
-        }
-
-        const refs = [...new Set((include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
-        if (refs.length > 0) {
-          const referenced = await documentBriefsByRefs(refs, auth, { maxLotDocs: 5 });
-          if (referenced.length > 0) {
-            sections.push(`Referenced Documents (brief)\n${referenced.map(formatReferencedBriefLine).join("\n")}`);
-          }
-        }
-
-        return { content: [{ type: "text", text: sections.join("\n\n---\n") }] };
+        const result = await executeRecallAction(auth, {
+          query: parsed.query,
+          limit: parsed.limit,
+          types: parsed.types,
+          include_doc_refs: parsed.include_doc_refs,
+          openaiFileIdRefs: parsed.openaiFileIdRefs,
+          conversation_id: parsed.conversation_id ?? null,
+        });
+        return toJsonToolResult(result.body, result.status >= 400);
       } catch (err) {
         return onKnownError(err);
       }
@@ -322,37 +314,8 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     },
     async ({ ref }) => {
       try {
-        const recalled = await recallDocument(ref, auth);
-
-        if (recalled.kind === "lot") {
-          const lotText = recalled.docs
-            .map((doc) => {
-              const header = [
-                `ref: ${doc.ref}`,
-                `title: ${doc.title ?? "Untitled"}`,
-                `filename: ${doc.filename ?? "-"}`,
-                `status: ${doc.status}`,
-              ].join("\n");
-              return `${header}\n\n${doc.content}`;
-            })
-            .join("\n\n====================\n\n");
-
-          return {
-            content: [{
-              type: "text",
-              text: `lot: ${recalled.ref}\ntitle: ${recalled.title ?? "Untitled lot"}\ncount: ${recalled.docs.length}\n\n${lotText}`,
-            }],
-          };
-        }
-
-        const header = [
-          `ref: ${recalled.ref}`,
-          `title: ${recalled.title ?? "Untitled"}`,
-          `filename: ${recalled.filename ?? "-"}`,
-          `status: ${recalled.status}`,
-        ].join("\n");
-
-        return { content: [{ type: "text", text: `${header}\n\n${recalled.content}` }] };
+        const result = await executeRecallDocumentAction(auth, ref);
+        return toJsonToolResult(result.body);
       } catch (err) {
         return onKnownError(err);
       }
@@ -373,17 +336,8 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     },
     async ({ query, limit }) => {
       try {
-        const hits = await searchDocuments(query, auth, limit ?? 5);
-        if (hits.length === 0) {
-          return { content: [{ type: "text", text: "No matching documents found." }] };
-        }
-        const text = hits
-          .map((hit) => {
-            const preview = hit.preview ? ` — ${hit.preview.slice(0, 140)}` : "";
-            return `• ${hit.ref} | ${hit.title} | score=${hit.score.toFixed(3)}${preview}`;
-          })
-          .join("\n");
-        return { content: [{ type: "text", text }] };
+        const result = await executeSearchDocumentsAction(auth, query, limit ?? 5);
+        return toJsonToolResult(result.body);
       } catch (err) {
         return onKnownError(err);
       }
@@ -433,45 +387,100 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         category: z.string().optional().describe("Preference category (preference kind only)."),
         preference_key: z.string().optional().describe("Stable conflict key for preferences, e.g. favorite_color."),
         platform: PlatformSchema.optional().default("claude"),
+        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+        conversation_id: conversationIdSchema,
       },
     },
-    async ({ kind, content, title, key_points, summary, source_hint, category, preference_key, platform }) => {
+    async (args) => {
       try {
-        if (kind === "fact") {
-          if (!content) return { content: [{ type: "text", text: "⚠️ content is required for kind=fact" }], isError: true };
-          const saved = await saveMemory(content, auth, platform ?? "claude");
-          return { content: [{ type: "text", text: `✅ Fact saved (${saved.memoryId}).` }] };
-        }
+        const parsed = z.object({
+          kind: z.enum(["fact", "preference", "document-note", "document-blob"]),
+          content: z.string().optional(),
+          title: z.string().optional(),
+          key_points: z.array(z.string()).max(10).optional(),
+          summary: z.string().optional(),
+          source_hint: z.string().optional(),
+          category: z.string().optional(),
+          preference_key: z.string().optional(),
+          platform: PlatformSchema.optional().default("claude"),
+          openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+          conversation_id: conversationIdSchema,
+        }).parse(normalizeUploadedFileRequestBody(args));
 
-        if (kind === "preference") {
-          if (!content) return { content: [{ type: "text", text: "⚠️ content is required for kind=preference" }], isError: true };
-          const saved = await savePreference(content, auth, platform ?? "claude", undefined, {
-            category: category ?? null,
-            preferenceKey: preference_key ?? null,
-          });
-          return { content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }] };
-        }
-
-        if (kind === "document-note") {
-          const noteTitle = title ?? "Untitled Note";
-          const stashed = await stashDocumentNote({
-            title: noteTitle,
-            key_points: key_points ?? [],
-            summary: summary ?? "",
-            source_hint: source_hint ?? "",
-          }, auth);
-          return { content: [{ type: "text", text: `✅ Document note saved as ${stashed.refHandle}.` }] };
-        }
-
-        // document-blob
-        if (!content) return { content: [{ type: "text", text: "⚠️ content is required for kind=document-blob" }], isError: true };
-        const stashed = await stashDocument(content, auth, { title: title ?? undefined });
-        const lotSuffix = stashed.lotRef ? ` Auto-lot: ${stashed.lotRef}.` : "";
-        return { content: [{ type: "text", text: `✅ Document archived as ${stashed.refHandle}.${lotSuffix}` }] };
+        const result = await executeRememberAction(auth, {
+          ...parsed,
+          platform: parsed.platform ?? "claude",
+          conversation_id: parsed.conversation_id ?? null,
+        });
+        return toJsonToolResult(result.body, result.status >= 400);
       } catch (err) {
         if (err instanceof DocumentSizeExceededError) {
           return { content: [{ type: "text", text: `⚠️ ${err.message}` }], isError: true };
         }
+        return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "upload_blob",
+    {
+      title: "Upload Blob",
+      description: "Queue uploaded file refs for background ingest. Parity with ChatGPT upload_blob action.",
+      inputSchema: {
+        openaiFileIdRefs: z.array(openAiFileRefSchema).min(1).max(10),
+        conversation_id: conversationIdSchema,
+        title: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const parsed = z.object({
+          openaiFileIdRefs: z.array(openAiFileRefSchema).min(1).max(10),
+          conversation_id: conversationIdSchema,
+          title: z.string().optional(),
+        }).parse(normalizeUploadedFileRequestBody(args));
+        const result = await executeUploadBlobAction(auth, parsed);
+        return toJsonToolResult(result.body, result.status >= 400);
+      } catch (err) {
+        return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "upload_status",
+    {
+      title: "Upload Status",
+      description: "Check status for a queued upload ingest job.",
+      inputSchema: {
+        ref: z.string().trim().min(1).describe("Upload ingest job ref"),
+      },
+    },
+    async ({ ref }) => {
+      try {
+        const result = await executeUploadStatusAction(auth, ref);
+        return toJsonToolResult(result.body, result.status >= 400);
+      } catch (err) {
+        return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "recent_documents",
+    {
+      title: "Recent Documents",
+      description: "Return latest document briefs for this user.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(20).optional().default(5),
+      },
+    },
+    async ({ limit }) => {
+      try {
+        const result = await executeRecentDocumentsAction(auth, limit ?? 5);
+        return toJsonToolResult(result.body);
+      } catch (err) {
         return onKnownError(err);
       }
     }
@@ -492,8 +501,8 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     },
     async ({ ref }) => {
       try {
-        const result = await deleteDocumentByRef(ref, auth);
-        return { content: [{ type: "text", text: result.success ? `🗑️ Deleted ${ref}.` : `⚠️ Could not delete ${ref}.` }] };
+        const result = await executeUndoSaveAction(auth, ref);
+        return toJsonToolResult(result.body);
       } catch (err) {
         return onKnownError(err);
       }

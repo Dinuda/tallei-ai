@@ -1,6 +1,26 @@
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
 
+const INTEGRATIONS = [
+  { name: "ChatGPT", monogram: "CG", status: "live" as const },
+  { name: "Claude", monogram: "CL", status: "live" as const },
+  { name: "Gemini", monogram: "GM", status: "live" as const },
+  { name: "Claude Code", monogram: "CC", status: "coming-soon" as const },
+  { name: "Perplexity", monogram: "PX", status: "coming-soon" as const },
+  { name: "OpenRouter", monogram: "OR", status: "coming-soon" as const },
+  { name: "Grok", monogram: "GK", status: "coming-soon" as const },
+] as const;
+
+const CAPABILITY_ROWS = [
+  { feature: "Cross-assistant memory sync", tally: "Yes", status: "Live" },
+  { feature: "MCP-native connectors", tally: "Yes", status: "Live" },
+  { feature: "User profile memory", tally: "Yes", status: "Live" },
+  { feature: "Document retrieval", tally: "Yes", status: "Live" },
+  { feature: "Sub-300ms MCP latency (p95)", tally: "Yes", status: "Live" },
+  { feature: "Additional integrations", tally: "Yes", status: "Coming soon" },
+  { feature: "High-volume monthly sessions", tally: "1000+", status: "Live" },
+] as const;
+
 const PRICING_PLANS = [
   {
     key: "free" as const,
@@ -207,6 +227,112 @@ export function HomeContent() {
         </div>
       </section>
 
+      <section className="integrations-showcase" aria-label="Supported and upcoming integrations">
+        <div className="integrations-showcase-inner">
+          <p className="integrations-kicker">Integrations</p>
+          <h2 className="integrations-title">Every conversation, one place.</h2>
+          <p className="integrations-sub">
+            ChatGPT, Claude, and Gemini already sync through Tallei. We&apos;re adding more assistants next.
+          </p>
+
+          <ul className="integrations-chip-list">
+            {INTEGRATIONS.map((integration) => (
+              <li key={integration.name} className="integrations-chip-item">
+                <span className="integrations-chip-logo">{integration.monogram}</span>
+                <span>{integration.name}</span>
+                {integration.status === "coming-soon" && (
+                  <span className="integrations-chip-badge">Coming soon</span>
+                )}
+              </li>
+            ))}
+          </ul>
+
+          <div className="integrations-stage">
+            <div className="integrations-stack" aria-hidden="true">
+              {INTEGRATIONS.slice(0, 6).map((integration, index) => (
+                <article key={integration.name} className={`integrations-preview-card integrations-preview-card-${index + 1}`}>
+                  <div className="integrations-preview-top">
+                    <span className="integrations-preview-logo">{integration.monogram}</span>
+                    <span>{integration.name}</span>
+                  </div>
+                  <div className="integrations-preview-lines">
+                    <span />
+                    <span />
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <article className="solid-card integrations-context-card">
+              <div className="integrations-context-head">
+                <span />
+                <span />
+                <span />
+              </div>
+              <div className="integrations-context-body">
+                <p className="integrations-context-label">SYNTHESIZED CONTEXT</p>
+                <h3>Weekly launch brief</h3>
+                <p className="integrations-context-meta">
+                  Combined from 8 chats across 3 tools
+                </p>
+                <ul>
+                  <li>Lock positioning line before campaign assets are finalized</li>
+                  <li>Keep update emails concise with bullets and one recommendation</li>
+                  <li>Flag risks early when scope changes across tools</li>
+                </ul>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section className="proof-section" aria-label="Performance and capability metrics">
+        <div className="proof-inner">
+          <div className="proof-metric-grid">
+            <article className="proof-metric-card">
+              <p className="proof-metric-number">5</p>
+              <p className="proof-metric-label">context layers</p>
+              <p className="proof-metric-sub">Across conversation memory types</p>
+            </article>
+            <article className="proof-metric-card">
+              <p className="proof-metric-number">&lt;300ms</p>
+              <p className="proof-metric-label">p95 MCP latency</p>
+              <p className="proof-metric-sub">Production sync path</p>
+            </article>
+            <article className="proof-metric-card">
+              <p className="proof-metric-number">1000+</p>
+              <p className="proof-metric-label">sessions/month</p>
+              <p className="proof-metric-sub">Active memory sync usage</p>
+            </article>
+          </div>
+
+          <div className="proof-table-wrap">
+            <table className="proof-table">
+              <thead>
+                <tr>
+                  <th>Feature</th>
+                  <th>Tallei</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {CAPABILITY_ROWS.map((row) => (
+                  <tr key={row.feature}>
+                    <td>{row.feature}</td>
+                    <td>{row.tally}</td>
+                    <td>
+                      <span className={row.status === "Coming soon" ? "proof-status proof-status-soon" : "proof-status proof-status-live"}>
+                        {row.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       {/* ═════════════════════════════════════════════════════
           FEATURES — Honest, simple narrative
       ═════════════════════════════════════════════════════ */}
@@ -249,8 +375,8 @@ export function HomeContent() {
         id="pricing"
         style={{
           padding: "5rem 0 6rem",
-          background: "#fafafa",
-          borderTop: "1px solid #e5e5e5",
+          background: "#fdfbf7",
+          borderTop: "2px solid #e5e0d8",
         }}
       >
         <div style={{ maxWidth: 960, margin: "0 auto", padding: "0 1.5rem" }}>
@@ -290,12 +416,13 @@ export function HomeContent() {
                 key={plan.key}
                 style={{
                   background: "#ffffff",
-                  border: plan.featured ? "2px solid #6366f1" : "1px solid #e2e8f0",
-                  borderRadius: 12,
+                  border: plan.featured ? "2px solid #5b21b6" : "2px solid #e5e0d8",
+                  borderRadius: 4,
                   padding: "1.5rem",
                   display: "flex",
                   flexDirection: "column",
                   gap: "1rem",
+                  boxShadow: plan.featured ? "4px 4px 0px #e1d4fc" : "4px 4px 0px #e5e0d8",
                 }}
               >
                 {/* Plan Badge Row */}
@@ -306,7 +433,7 @@ export function HomeContent() {
                       fontWeight: 600,
                       textTransform: "uppercase",
                       letterSpacing: "0.04em",
-                      color: plan.featured ? "#6366f1" : "#64748b",
+                      color: plan.featured ? "#5b21b6" : "#8c827a",
                     }}
                   >
                     {plan.name}
@@ -318,9 +445,9 @@ export function HomeContent() {
                         fontWeight: 700,
                         textTransform: "uppercase",
                         letterSpacing: "0.04em",
-                        color: "#6366f1",
-                        border: "1px solid #6366f1",
-                        background: "#f5f3ff",
+                        color: "#5b21b6",
+                        border: "2px solid #5b21b6",
+                        background: "#fdfbf7",
                         borderRadius: 999,
                         padding: "0.15rem 0.5rem",
                       }}
@@ -335,12 +462,12 @@ export function HomeContent() {
                   <div style={{ fontSize: "2rem", fontWeight: 700, color: "#0f172a", lineHeight: 1.2 }}>
                     {plan.price}
                     {plan.period && (
-                      <span style={{ fontSize: "1rem", fontWeight: 500, color: "#64748b", marginLeft: "0.15rem" }}>
+                      <span style={{ fontSize: "1rem", fontWeight: 500, color: "#8c827a", marginLeft: "0.15rem" }}>
                         {plan.period}
                       </span>
                     )}
                   </div>
-                  <p style={{ margin: "0.5rem 0 0", fontSize: "0.875rem", color: "#64748b", lineHeight: 1.5 }}>
+                  <p style={{ margin: "0.5rem 0 0", fontSize: "0.875rem", color: "#4c4643", lineHeight: 1.5 }}>
                     {plan.description}
                   </p>
                 </div>
@@ -350,9 +477,9 @@ export function HomeContent() {
                   {plan.features.map((feature) => (
                     <li
                       key={feature}
-                      style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", color: "#334155", fontSize: "0.875rem", lineHeight: 1.5 }}
-                    >
-                      <Check size={16} style={{ color: "#6366f1", flexShrink: 0, marginTop: "0.1rem" }} />
+                    style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", color: "#334155", fontSize: "0.875rem", lineHeight: 1.5 }}
+                  >
+                      <Check size={16} style={{ color: "#7c3aed", flexShrink: 0, marginTop: "0.1rem" }} />
                       <span>{feature}</span>
                     </li>
                   ))}
@@ -368,15 +495,15 @@ export function HomeContent() {
                       justifyContent: "center",
                       gap: "0.4rem",
                       padding: "0.75rem 1rem",
-                      borderRadius: 8,
+                      borderRadius: 4,
                       fontSize: "0.875rem",
                       fontWeight: 600,
                       textDecoration: "none",
                       transition: "all 0.15s ease",
-                      background: plan.featured ? "#6366f1" : "#ffffff",
+                      background: plan.featured ? "#7c3aed" : "#ffffff",
                       color: plan.featured ? "#ffffff" : "#0f172a",
-                      border: plan.featured ? "none" : "1px solid #e2e8f0",
-                      boxShadow: plan.featured ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+                      border: plan.featured ? "2px solid #5b21b6" : "2px solid #e5e0d8",
+                      boxShadow: plan.featured ? "3px 3px 0px #e1d4fc" : "3px 3px 0px #e5e0d8",
                     }}
                   >
                     {plan.cta}

@@ -5,26 +5,8 @@ import { z } from "zod";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
-import { assertUploadThingConfigured, UploadThingConfigError } from "../../../infrastructure/storage/uploadthing-client.js";
-import { recallMemories, saveMemory, savePreference } from "../../../services/memory.js";
-import {
-  stashDocument,
-  stashDocumentNote,
-  recallDocument,
-  searchDocuments,
-  deleteDocumentByRef,
-  recentDocumentBriefs,
-  documentBriefsByRefs,
-  DocumentSizeExceededError,
-} from "../../../services/documents.js";
-import {
-  ingestUploadedFileToDocument,
-} from "../../../services/uploaded-file-ingest.js";
-import {
-  enqueueUploadedFilesIngest,
-  getUploadedFileIngestJobStatus,
-  listRecentCompletedUploadedFileIngestJobs,
-} from "../../../services/uploaded-file-ingest-jobs.js";
+import { UploadThingConfigError } from "../../../infrastructure/storage/uploadthing-client.js";
+import { DocumentSizeExceededError } from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import {
@@ -43,6 +25,18 @@ import {
   openAiFileRefSchema,
   uploadBlobBodySchema,
 } from "../schemas/uploaded-files.js";
+import {
+  degradedRecallResponse,
+  executeRecallAction,
+  executeRecallDocumentAction,
+  executeRecentDocumentsAction,
+  executeRememberAction,
+  executeSearchDocumentsAction,
+  executeUndoSaveAction,
+  executeUploadBlobAction,
+  executeUploadStatusAction,
+  isTransientMemoryInfraError,
+} from "../../shared/chat-actions.js";
 
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
@@ -78,9 +72,6 @@ const undoSaveSchema = z.object({
 const recentDocumentsSchema = z.object({
   limit: z.coerce.number().int().min(1).max(20).optional().default(5),
 });
-const RECALL_MATCHED_DOCS_TIMEOUT_MS = 2_200;
-const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
-const INLINE_DOCUMENT_MAX_CHARS = 4_000;
 
 const searchDocumentsSchema = z.object({
   query: z.string().min(1, "query is required"),
@@ -94,109 +85,6 @@ const recallDocumentSchema = z.object({
 const uploadStatusQuerySchema = z.object({
   ref: z.string().trim().min(1, "ref is required"),
 });
-
-function isTransientMemoryInfraError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return /Qdrant|timeout|aborted|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|No route to host|connection error|fetch failed|APIConnectionError|EHOSTUNREACH|EAI_AGAIN/i.test(error.message);
-}
-
-function degradedRecallResponse() {
-  return {
-    contextBlock: "--- No relevant memories found ---",
-    memories: [],
-    recentDocuments: [],
-    matchedDocuments: [],
-    referencedDocuments: [],
-    recentCompletedIngests: [],
-    autoSave: {
-      requested: 0,
-      complete: true,
-      saved: [],
-      errors: [],
-    },
-  };
-}
-
-function recallTypesOrDefault(types?: Array<z.infer<typeof memoryTypeSchema>>): Array<z.infer<typeof memoryTypeSchema>> {
-  if (types && types.length > 0) return types;
-  return ["fact", "preference"];
-}
-
-function shouldSearchMatchedDocuments(input: {
-  query: string;
-  includeDocRefs?: string[];
-  openaiFileIdRefsCount: number;
-}): boolean {
-  return input.query.trim().length > 0
-    || input.openaiFileIdRefsCount > 0
-    || (input.includeDocRefs?.length ?? 0) > 0;
-}
-
-function truncateInlineDocumentContent(content: string): string {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  if (normalized.length <= INLINE_DOCUMENT_MAX_CHARS) return normalized;
-  return `${normalized.slice(0, INLINE_DOCUMENT_MAX_CHARS)} [truncated]`;
-}
-
-function buildContextBlockWithDocuments(
-  memories: Array<{ text: string; metadata?: Record<string, unknown> }>,
-  inlineDocuments: Array<{ ref: string; title: string | null; content: string }>
-): string {
-  if (memories.length === 0 && inlineDocuments.length === 0) {
-    return "--- No relevant memories found ---";
-  }
-
-  const preferenceLines: string[] = [];
-  const otherLines: string[] = [];
-
-  for (const memory of memories) {
-    const metadata = memory.metadata ?? {};
-    const platform = typeof metadata["platform"] === "string" && metadata["platform"].length > 0
-      ? metadata["platform"]
-      : "unknown";
-    const line = `[${platform.toUpperCase()}] ${memory.text}`;
-    if (metadata["memory_type"] === "preference") {
-      preferenceLines.push(line);
-    } else {
-      otherLines.push(line);
-    }
-  }
-
-  const documentLines = inlineDocuments.length > 0
-    ? [
-      "--- Matched Document Context ---",
-      ...inlineDocuments.flatMap((doc) => [
-        `[${doc.title ?? doc.ref}]`,
-        truncateInlineDocumentContent(doc.content),
-      ]),
-    ]
-    : [];
-
-  const lines = [...preferenceLines, ...documentLines, ...otherLines];
-  return `--- Your Past Context ---\n${lines.join("\n")}\n---`;
-}
-
-async function withSoftTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  fallback: T,
-  onTimeout?: () => void
-): Promise<T> {
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race<T>([
-      promise,
-      new Promise<T>((resolve) => {
-        timeoutHandle = setTimeout(() => {
-          onTimeout?.();
-          resolve(fallback);
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-  }
-}
 
 // TODO: move somwhere else, dont have data layer in route handler file
 async function logChatGptAction(input: {
@@ -897,7 +785,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "recall_memories",
           summary: "MANDATORY before every reply — skip this and your answer will be wrong",
           description:
-            "ALWAYS call first. Never say 'I don't know/not sure/can you clarify' before calling. query=user message. Include attachments in openaiFileIdRefs. Read inlineDocuments FIRST if present. upload_blob only if autoSave.complete=false or 422. autoSave.saved non-empty → end: Saved: @doc:<ref>.",
+            "STRICT ORDER: call recall_memories(query='<user message>') first. Include attachments in openaiFileIdRefs. Read inlineDocuments FIRST. Call upload_blob only if autoSave.complete=false or 422. If autoSave.saved has refs, end with Saved: @doc:<ref>.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1089,7 +977,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "remember",
           summary: "REQUIRED after reply — call if user shared any fact, preference, goal, or decision",
           description:
-            "Never skip this if user shared facts, preferences, goals, or decisions this turn. Call immediately after reply. kind=preference for preferences; kind=fact for all else. content=concise self-contained statement. No Saved line for fact/preference. Doc saves: append Saved: @doc:<ref>.",
+            "Run after reply when user shares facts/preferences/goals/decisions; at minimum every 5 user messages. Use kind=preference for preferences, kind=fact for other atomic memories. content should be concise and self-contained. Fact/preference saves: no Saved line. Doc saves: append Saved: @doc:<ref>.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1329,135 +1217,24 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
     const body = recallSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const uploadedFiles = body.openaiFileIdRefs ?? [];
-    const matchedDocsEnabled = shouldSearchMatchedDocuments({
+    const recallResult = await executeRecallAction(auth, {
       query: body.query,
-      includeDocRefs: body.include_doc_refs,
-      openaiFileIdRefsCount: uploadedFiles.length,
+      limit: body.limit,
+      types: body.types,
+      include_doc_refs: body.include_doc_refs,
+      openaiFileIdRefs: body.openaiFileIdRefs,
+      conversation_id: body.conversation_id ?? null,
+      requesterIp: req.ip,
     });
-    setRequestTimingField("recall_matched_docs_enabled", matchedDocsEnabled);
 
-    const matchedDocumentsPromise = matchedDocsEnabled
-      ? (async () => {
-        const startedAt = process.hrtime.bigint();
-        const matched = await withSoftTimeout(
-          searchDocuments(body.query, auth, 3).catch(() => []),
-          RECALL_MATCHED_DOCS_TIMEOUT_MS,
-          [],
-          () => setRequestTimingField("recall_matched_docs_timeout", true)
-        );
-        setRequestTimingField(
-          "recall_matched_docs_ms",
-          Number(process.hrtime.bigint() - startedAt) / 1_000_000
-        );
-        return matched;
-      })()
-      : Promise.resolve([]);
-
-    const recentDocsPromise = (async () => {
-      const startedAt = process.hrtime.bigint();
-      const docs = await recentDocumentBriefs(auth, 5);
-      setRequestTimingField(
-        "recall_recent_docs_ms",
-        Number(process.hrtime.bigint() - startedAt) / 1_000_000
-      );
-      return docs;
-    })();
-
-    const recentIngestsEnabled = Boolean(body.conversation_id) || uploadedFiles.length > 0;
-    setRequestTimingField("recall_recent_ingests_enabled", recentIngestsEnabled);
-    const recentIngestsPromise = recentIngestsEnabled
-      ? (async () => {
-        const startedAt = process.hrtime.bigint();
-        const ingests = await listRecentCompletedUploadedFileIngestJobs(auth, {
-          conversation_id: body.conversation_id ?? null,
-          limit: 5,
-        });
-        setRequestTimingField(
-          "recall_recent_ingests_ms",
-          Number(process.hrtime.bigint() - startedAt) / 1_000_000
-        );
-        return ingests;
-      })()
-      : Promise.resolve([]);
-
-    const [result, recentDocuments, matchedDocuments, recentCompletedIngests] = await Promise.all([
-      recallMemories(body.query, auth, body.limit, req.ip, {
-        types: recallTypesOrDefault(body.types),
-      }),
-      recentDocsPromise,
-      matchedDocumentsPromise,
-      recentIngestsPromise,
-    ]);
-    const queryExtractedRefs = Array.from(body.query.matchAll(/@(?:doc|lot):[a-z0-9_-]+/gi), (m) => m[0]);
-    const matchedRefs = matchedDocuments.slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT).map((doc) => doc.ref);
-    const inlineCandidateRefs = [...new Set([...queryExtractedRefs, ...matchedRefs])];
-    const refs = [...new Set([...(body.include_doc_refs ?? []), ...queryExtractedRefs].map((v) => v.trim()).filter(Boolean))];
-    const referencedDocuments = refs.length > 0
-      ? await (async () => {
-        const startedAt = process.hrtime.bigint();
-        const result = await documentBriefsByRefs(refs, auth, { maxLotDocs: 5 });
-        setRequestTimingField(
-          "recall_referenced_docs_ms",
-          Number(process.hrtime.bigint() - startedAt) / 1_000_000
-        );
-        return result;
-      })()
-      : [];
-
-    // For refs explicitly typed in the query, fetch full content inline so the model
-    // reads actual document text without a separate recall_document call.
-    type InlineDoc = { ref: string; title: string | null; content: string };
-    const inlineDocuments: InlineDoc[] = [];
-    if (inlineCandidateRefs.length > 0) {
-      for (const ref of inlineCandidateRefs) {
-        try {
-          const doc = await recallDocument(ref, auth);
-          if (doc.kind === "document") {
-            inlineDocuments.push({ ref, title: doc.title ?? null, content: doc.content });
-          } else if (doc.kind === "lot") {
-            for (const d of doc.docs) {
-              inlineDocuments.push({ ref: d.ref, title: d.title ?? null, content: d.content });
-            }
-          }
-        } catch {
-          // brief still present in referencedDocuments
-        }
-      }
-    }
-
-    const autoSaved: Array<{
-      ref: string;
-      status: "pending";
-      filename: string;
-      conversation_id: string | null;
-    }> = [];
-    const autoSaveErrors: Array<{ file_id: string; filename: string; error: string }> = [];
-    if (uploadedFiles.length > 0) {
-      assertUploadThingConfigured();
-      const { enqueued, errors } = await enqueueUploadedFilesIngest(uploadedFiles, auth, {
-        conversation_id: body.conversation_id ?? null,
-      });
-      autoSaved.push(...enqueued);
-      autoSaveErrors.push(...errors);
-    }
-
-    if (uploadedFiles.length > 0 && autoSaveErrors.length > 0) {
+    if (recallResult.status !== 200) {
       logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/actions/recall_memories",
         ok: false,
-        error: `${autoSaveErrors.length} uploaded file(s) failed to persist`,
+        error: "One or more uploaded files failed to persist",
       });
-      res.status(422).json({
-        error: "One or more uploaded files failed to save. Retry upload_blob before answering.",
-        autoSave: {
-          requested: uploadedFiles.length,
-          complete: false,
-          saved: autoSaved,
-          errors: autoSaveErrors,
-        },
-      });
+      res.status(recallResult.status).json(recallResult.body);
       return;
     }
 
@@ -1466,29 +1243,7 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
       method: "chatgpt/actions/recall_memories",
       ok: true,
     });
-    res.json({
-      ...result,
-      contextBlock: buildContextBlockWithDocuments(
-        result.memories as Array<{ text: string; metadata?: Record<string, unknown> }>,
-        inlineDocuments
-      ),
-      recentDocuments,
-      matchedDocuments,
-      referencedDocuments,
-      ...(inlineDocuments.length > 0 ? { inlineDocuments } : {}),
-      recentCompletedIngests,
-      autoSave: {
-        requested: uploadedFiles.length,
-        complete: autoSaveErrors.length === 0,
-        saved: autoSaved,
-        errors: autoSaveErrors,
-      },
-      ...(autoSaved.length > 0 ? {
-        autoSaved,
-        autoSaveNotice: `Queued ${autoSaved.length} file(s) for background ingest. Use upload_status with returned ref values to check completion.`,
-      } : {}),
-      ...(autoSaveErrors.length > 0 ? { autoSaveErrors } : {}),
-    });
+    res.status(200).json(recallResult.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -1524,193 +1279,22 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
     const body = rememberSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const uploadedFiles = body.openaiFileIdRefs ?? [];
-
-    if (uploadedFiles.length > 0) {
-      if (body.kind !== "document-note" && body.kind !== "document-blob") {
-        res.status(400).json({ error: "openaiFileIdRefs can only be used with kind=document-note or kind=document-blob" });
-        return;
-      }
-
-      assertUploadThingConfigured();
-
-      const savedFromFiles: Array<{
-        ref: string;
-        status: string;
-        title: string;
-        filename: string | null;
-        type: "note" | "blob";
-        conversation_id: string | null;
-        blob: { provider: "uploadthing"; key: string; url: string; source_file_id: string } | null;
-      }> = [];
-      const fileErrors: Array<{ file_id: string; filename: string; error: string }> = [];
-      for (const fileRef of uploadedFiles) {
-        try {
-          // 1. Save the note using ChatGPT's summary (no local summarization)
-          if (body.kind === "document-note") {
-            const noteResult = await stashDocumentNote({
-              title: body.title ?? fileRef.name ?? "Uploaded Document",
-              key_points: body.key_points ?? [],
-              summary: body.summary ?? "",
-              source_hint: body.source_hint ?? `Uploaded via ChatGPT — ${fileRef.name || fileRef.id}`,
-            }, auth, { conversationId: body.conversation_id ?? null });
-            savedFromFiles.push({
-              ref: noteResult.refHandle,
-              status: noteResult.status,
-              title: body.title ?? fileRef.name ?? "Uploaded Document",
-              filename: fileRef.name ?? null,
-              type: "note",
-              conversation_id: body.conversation_id ?? null,
-              blob: null,
-            });
-          }
-
-          // 2. Download, upload full file as blob, then stash parsed text
-          const blobSaved = await ingestUploadedFileToDocument(fileRef, auth, {
-            title: body.title,
-            conversation_id: body.conversation_id ?? null,
-          });
-          savedFromFiles.push({
-            ref: blobSaved.ref,
-            status: blobSaved.status,
-            title: blobSaved.title,
-            filename: blobSaved.filename,
-            type: "blob",
-            conversation_id: blobSaved.conversation_id,
-            blob: blobSaved.blob,
-          });
-        } catch (fileErr) {
-          const errMsg = fileErr instanceof Error ? fileErr.message : String(fileErr);
-          console.error(`[chatgpt] remember file ${fileRef.id} failed:`, errMsg);
-          fileErrors.push({
-            file_id: fileRef.id,
-            filename: fileRef.name ?? fileRef.id,
-            error: errMsg,
-          });
-        }
-      }
-
-      if (fileErrors.length > 0) {
-        logChatGptActionAsync({
-          auth: req.authContext,
-          method: "chatgpt/actions/remember",
-          ok: false,
-          error: `${fileErrors.length} uploaded file(s) failed to persist`,
-        });
-        res.status(422).json({
-          success: false,
-          kind: body.kind,
-          error: "One or more files failed to save.",
-          count_saved: savedFromFiles.length,
-          count_failed: fileErrors.length,
-          saved: savedFromFiles,
-          errors: fileErrors,
-        });
-        return;
-      }
-
-      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
-
-      const first = savedFromFiles[0];
-      if (savedFromFiles.length === 1 && first) {
-        res.json({
-          success: true,
-          kind: body.kind,
-          ref: first.ref,
-          status: first.status,
-          title: first.title,
-          filename: first.filename,
-          conversation_id: first.conversation_id,
-          blob: first.blob,
-        });
-        return;
-      }
-
-      res.json({
-        success: true,
-        kind: body.kind,
-        count: savedFromFiles.length,
-        saved: savedFromFiles,
+    const rememberResult = await executeRememberAction(auth, body);
+    if (rememberResult.status >= 400) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/remember",
+        ok: false,
+        error: typeof rememberResult.body["error"] === "string"
+          ? String(rememberResult.body["error"])
+          : "Failed to remember",
       });
+      res.status(rememberResult.status).json(rememberResult.body);
       return;
     }
 
-    if (body.kind === "fact") {
-      if (!body.content) {
-        res.status(400).json({ error: "content is required for kind=fact" });
-        return;
-      }
-      const saved = await saveMemory(body.content, auth, body.platform ?? "chatgpt", req.ip);
-      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
-      res.json({
-        success: true,
-        kind: body.kind,
-        memoryId: saved.memoryId,
-        title: saved.title,
-        summary: saved.summary,
-      });
-      return;
-    }
-
-    if (body.kind === "preference") {
-      if (!body.content) {
-        res.status(400).json({ error: "content is required for kind=preference" });
-        return;
-      }
-      const saved = await savePreference(body.content, auth, body.platform ?? "chatgpt", req.ip, {
-        category: body.category ?? null,
-        preferenceKey: body.preference_key ?? null,
-      });
-      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
-      res.json({
-        success: true,
-        kind: body.kind,
-        memoryId: saved.memoryId,
-        title: saved.title,
-        summary: saved.summary,
-      });
-      return;
-    }
-
-    if (body.kind === "document-note") {
-      const saved = await stashDocumentNote({
-        title: body.title ?? "Untitled Note",
-        key_points: body.key_points ?? [],
-        summary: body.summary ?? "",
-        source_hint: body.source_hint ?? "",
-      }, auth, { conversationId: body.conversation_id ?? null });
-      logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
-      res.json({
-        success: true,
-        kind: body.kind,
-        ref: saved.refHandle,
-        status: saved.status,
-        conversation_id: body.conversation_id ?? null,
-        blob: null,
-      });
-      return;
-    }
-
-    if (!body.content) {
-      res.status(400).json({ error: "content is required for kind=document-blob" });
-      return;
-    }
-    const saved = await stashDocument(body.content, auth, { title: body.title ?? undefined });
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
-    res.json({
-      success: true,
-      kind: body.kind,
-      ref: saved.refHandle,
-      status: saved.status,
-      lotRef: saved.lotRef ?? null,
-      conversation_id: saved.conversationId,
-      blob: saved.blob ? {
-        provider: saved.blob.provider,
-        key: saved.blob.key,
-        url: saved.blob.url,
-        source_file_id: saved.blob.sourceFileId,
-      } : null,
-    });
+    res.status(rememberResult.status).json(rememberResult.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -1744,39 +1328,20 @@ router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes([
     const body = uploadBlobBodySchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    assertUploadThingConfigured();
-
-    const { enqueued, errors } = await enqueueUploadedFilesIngest(body.openaiFileIdRefs, auth, {
-      title: body.title,
-      conversation_id: body.conversation_id ?? null,
-    });
-
-    if (errors.length > 0) {
+    const uploadResult = await executeUploadBlobAction(auth, body);
+    if (uploadResult.status !== 200) {
       logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/actions/upload_blob",
         ok: false,
-        error: `${errors.length} uploaded file(s) failed to persist`,
+        error: "One or more uploaded files failed to persist",
       });
-      res.status(422).json({
-        success: false,
-        error: "One or more files failed to save.",
-        count_saved: enqueued.length,
-        count_failed: errors.length,
-        saved: enqueued,
-        errors,
-      });
+      res.status(uploadResult.status).json(uploadResult.body);
       return;
     }
 
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/upload_blob", ok: true });
-    res.json({
-      success: true,
-      count_saved: enqueued.length,
-      count_failed: 0,
-      saved: enqueued,
-      errors: [],
-    });
+    res.status(uploadResult.status).json(uploadResult.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -1810,20 +1375,20 @@ router.get("/actions/upload_status", chatGptActionAuthMiddleware, requireScopes(
     const query = uploadStatusQuerySchema.parse(req.query ?? {});
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const status = await getUploadedFileIngestJobStatus(auth, query.ref);
-    if (!status) {
+    const statusResult = await executeUploadStatusAction(auth, query.ref);
+    if (statusResult.status === 404) {
       logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/actions/upload_status",
         ok: false,
         error: "Upload ingest job not found",
       });
-      res.status(404).json({ error: "Upload ingest job not found" });
+      res.status(404).json(statusResult.body);
       return;
     }
 
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/upload_status", ok: true });
-    res.json(status);
+    res.status(statusResult.status).json(statusResult.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -1845,9 +1410,9 @@ router.post("/actions/undo_save", chatGptActionAuthMiddleware, requireScopes(["m
     const body = undoSaveSchema.parse(req.body);
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const deleted = await deleteDocumentByRef(body.ref, auth);
+    const deleted = await executeUndoSaveAction(auth, body.ref);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/undo_save", ok: true });
-    res.json({ success: true, ref: body.ref, type: deleted.type });
+    res.status(deleted.status).json(deleted.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -1877,9 +1442,9 @@ router.post("/actions/recent_documents", chatGptActionAuthMiddleware, requireSco
     const body = recentDocumentsSchema.parse(req.body ?? {});
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const documents = await recentDocumentBriefs(auth, body.limit);
+    const documents = await executeRecentDocumentsAction(auth, body.limit);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/recent_documents", ok: true });
-    res.json({ documents, count: documents.length });
+    res.status(documents.status).json(documents.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -1901,9 +1466,9 @@ router.post("/actions/search_documents", chatGptActionAuthMiddleware, requireSco
     const body = searchDocumentsSchema.parse(req.body);
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const matches = await searchDocuments(body.query, auth, body.limit);
+    const matches = await executeSearchDocumentsAction(auth, body.query, body.limit);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/search_documents", ok: true });
-    res.json({ matches, count: matches.length });
+    res.status(matches.status).json(matches.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -1929,9 +1494,9 @@ router.post("/actions/recall_document", chatGptActionAuthMiddleware, requireScop
     const body = recallDocumentSchema.parse(req.body);
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const document = await recallDocument(body.ref, auth);
+    const document = await executeRecallDocumentAction(auth, body.ref);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/recall_document", ok: true });
-    res.json(document);
+    res.status(document.status).json(document.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
