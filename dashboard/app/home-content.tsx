@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
+import { IntegrationsSection } from "./components/integrations-section";
 
 const INTEGRATIONS = [
   { name: "ChatGPT", monogram: "CG", status: "live" as const },
@@ -227,64 +228,7 @@ export function HomeContent() {
         </div>
       </section>
 
-      <section className="integrations-showcase" aria-label="Supported and upcoming integrations">
-        <div className="integrations-showcase-inner">
-          <p className="integrations-kicker">Integrations</p>
-          <h2 className="integrations-title">Every conversation, one place.</h2>
-          <p className="integrations-sub">
-            ChatGPT, Claude, and Gemini already sync through Tallei. We&apos;re adding more assistants next.
-          </p>
-
-          <ul className="integrations-chip-list">
-            {INTEGRATIONS.map((integration) => (
-              <li key={integration.name} className="integrations-chip-item">
-                <span className="integrations-chip-logo">{integration.monogram}</span>
-                <span>{integration.name}</span>
-                {integration.status === "coming-soon" && (
-                  <span className="integrations-chip-badge">Coming soon</span>
-                )}
-              </li>
-            ))}
-          </ul>
-
-          <div className="integrations-stage">
-            <div className="integrations-stack" aria-hidden="true">
-              {INTEGRATIONS.slice(0, 6).map((integration, index) => (
-                <article key={integration.name} className={`integrations-preview-card integrations-preview-card-${index + 1}`}>
-                  <div className="integrations-preview-top">
-                    <span className="integrations-preview-logo">{integration.monogram}</span>
-                    <span>{integration.name}</span>
-                  </div>
-                  <div className="integrations-preview-lines">
-                    <span />
-                    <span />
-                  </div>
-                </article>
-              ))}
-            </div>
-
-            <article className="solid-card integrations-context-card">
-              <div className="integrations-context-head">
-                <span />
-                <span />
-                <span />
-              </div>
-              <div className="integrations-context-body">
-                <p className="integrations-context-label">SYNTHESIZED CONTEXT</p>
-                <h3>Weekly launch brief</h3>
-                <p className="integrations-context-meta">
-                  Combined from 8 chats across 3 tools
-                </p>
-                <ul>
-                  <li>Lock positioning line before campaign assets are finalized</li>
-                  <li>Keep update emails concise with bullets and one recommendation</li>
-                  <li>Flag risks early when scope changes across tools</li>
-                </ul>
-              </div>
-            </article>
-          </div>
-        </div>
-      </section>
+      <IntegrationsSection />
 
       <section className="proof-section" aria-label="Performance and capability metrics">
         <div className="proof-inner">
