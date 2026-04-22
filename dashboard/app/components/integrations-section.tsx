@@ -1,30 +1,25 @@
 "use client";
 
-import React, { useState } from "react";
+import Image from "next/image";
 import "../styles/integrations-section.css";
 
 interface Integration {
   id: string;
   name: string;
-  color: string;
+  icon: string;
 }
 
-const LIVE_INTEGRATIONS: Integration[] = [
-  { id: "chatgpt", name: "ChatGPT", color: "#10a37f" },
-  { id: "claude", name: "Claude", color: "#9b87f5" },
-  { id: "gemini", name: "Gemini", color: "#4285f4" },
-];
-
-const COMING_SOON: Integration[] = [
-  { id: "claude-code", name: "Claude Code", color: "#7c3aed" },
-  { id: "perplexity", name: "Perplexity", color: "#000000" },
-  { id: "openrouter", name: "OpenRouter", color: "#ff6b35" },
-  { id: "grok", name: "Grok", color: "#000000" },
+const INTEGRATIONS = [
+  { id: "chatgpt", name: "ChatGPT", icon: "/chatgpt.svg" },
+  { id: "claude", name: "Claude", icon: "/claude.svg" },
+  { id: "gemini", name: "Gemini", icon: "/gemini.svg" },
+  { id: "claude-code", name: "Claude Code", icon: "/claude-code.svg" },
+  { id: "perplexity", name: "Perplexity", icon: "/perplexity.svg" },
+  { id: "openrouter", name: "OpenRouter", icon: "/openrouter.svg" },
+  { id: "grok", name: "Grok", icon: "/grok.svg" },
 ];
 
 export function IntegrationsSection() {
-  const [activeIntegration] = useState<string>("chatgpt");
-
   return (
     <section className="integrations-hero" aria-label="AI Integrations">
       {/* Left Column */}
@@ -45,14 +40,15 @@ export function IntegrationsSection() {
           <p className="integrations-works-label">Works with</p>
           
           <div className="integrations-logos">
-            {LIVE_INTEGRATIONS.map((integration) => (
+            {INTEGRATIONS.map((integration) => (
               <div key={integration.id} className="integrations-logo" title={integration.name}>
-                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <circle cx="12" cy="12" r="11" fill={integration.color} opacity="0.1" stroke={integration.color} strokeWidth="2" />
-                  <text x="12" y="15" textAnchor="middle" fontSize="8" fontWeight="bold" fill={integration.color}>
-                    {integration.name.substring(0, 1)}
-                  </text>
-                </svg>
+                <Image 
+                  src={integration.icon} 
+                  alt={`${integration.name} logo`} 
+                  width={24} 
+                  height={24} 
+                  className="integrations-logo-img" 
+                />
               </div>
             ))}
           </div>

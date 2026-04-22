@@ -111,14 +111,15 @@
 
 .integrations-logos {
   display: flex;
-  gap: 1.5rem;
+  gap: 0.75rem;
   margin-bottom: 1.5rem;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .integrations-logo {
-  width: 56px;
-  height: 56px;
+  width: 52px;
+  height: 52px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -132,11 +133,13 @@
 .integrations-logo:hover {
   border-color: #7eb71b;
   box-shadow: 0 4px 12px rgba(126, 183, 27, 0.1);
+  transform: translateY(-2px);
 }
 
-.integrations-logo svg {
-  width: 32px;
-  height: 32px;
+.integrations-logo-img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
 }
 
 .integrations-more-coming {
