@@ -219,14 +219,13 @@ async function cachedPlan(tenantId: string): Promise<AuthContext["plan"]> {
 }
 
 function toApiKeyContext(
-  validation: { keyId: string; userId: string; tenantId: string; connectorType: string | null },
-  plan: AuthContext["plan"]
+  validation: { keyId: string; userId: string; tenantId: string; connectorType: string | null; plan: AuthContext["plan"] }
 ): AuthContext {
   return {
     userId: validation.userId,
     tenantId: validation.tenantId,
     authMode: "api_key",
-    plan,
+    plan: validation.plan,
     keyId: validation.keyId,
     connectorType: validation.connectorType,
   };
@@ -398,39 +397,23 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
     req.authModeHint = "api_key";
     const localValidation = peekLocalApiKeyValidation(token, req.ip);
     if (localValidation) {
-      const localPlan = getCachedPlanSync(localValidation.tenantId);
-      if (localPlan) {
-        const localContext = toApiKeyContext(localValidation, localPlan);
-        if (localContext.connectorType && localContext.connectorType !== "chatgpt") {
-          noteAuthTiming();
-          res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
-          return;
-        }
-        req.userId = localContext.userId;
-        req.authContext = localContext;
-        attachContinuationHeader(res, localContext);
+      const localContext = toApiKeyContext(localValidation);
+      if (localContext.connectorType && localContext.connectorType !== "chatgpt") {
         noteAuthTiming();
-        next();
+        res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
         return;
       }
-      req.authPromise = cachedPlan(localValidation.tenantId).then((plan) => {
-        const context = toApiKeyContext(localValidation, plan);
-        if (context.connectorType && context.connectorType !== "chatgpt") {
-          req.authFailure = { status: 403, error: "API key is not valid for ChatGPT actions" };
-          return null;
-        }
-        return context;
-      });
-      setRequestTimingField("auth_deferred", true);
+      req.userId = localContext.userId;
+      req.authContext = localContext;
+      attachContinuationHeader(res, localContext);
       noteAuthTiming();
       next();
       return;
     }
 
-    req.authPromise = validateApiKeyContext(token, req.ip).then(async (validation) => {
+    req.authPromise = validateApiKeyContext(token, req.ip).then((validation) => {
       if (!validation) return null;
-      const plan = await cachedPlan(validation.tenantId);
-      const context = toApiKeyContext(validation, plan);
+      const context = toApiKeyContext(validation);
       if (context.connectorType && context.connectorType !== "chatgpt") {
         req.authFailure = { status: 403, error: "API key is not valid for ChatGPT actions" };
         return null;
@@ -1298,34 +1281,69 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
     });
     setRequestTimingField("recall_matched_docs_enabled", matchedDocsEnabled);
 
-    const matchedSearchStartedAt = process.hrtime.bigint();
     const matchedDocumentsPromise = matchedDocsEnabled
-      ? withSoftTimeout(
-        searchDocuments(body.query, auth, 3).catch(() => []),
-        600,
-        [],
-        () => setRequestTimingField("recall_matched_docs_timeout", true)
-      )
+      ? (async () => {
+        const startedAt = process.hrtime.bigint();
+        const matched = await withSoftTimeout(
+          searchDocuments(body.query, auth, 3).catch(() => []),
+          600,
+          [],
+          () => setRequestTimingField("recall_matched_docs_timeout", true)
+        );
+        setRequestTimingField(
+          "recall_matched_docs_ms",
+          Number(process.hrtime.bigint() - startedAt) / 1_000_000
+        );
+        return matched;
+      })()
+      : Promise.resolve([]);
+
+    const recentDocsPromise = (async () => {
+      const startedAt = process.hrtime.bigint();
+      const docs = await recentDocumentBriefs(auth, 5);
+      setRequestTimingField(
+        "recall_recent_docs_ms",
+        Number(process.hrtime.bigint() - startedAt) / 1_000_000
+      );
+      return docs;
+    })();
+
+    const recentIngestsEnabled = Boolean(body.conversation_id) || uploadedFiles.length > 0;
+    setRequestTimingField("recall_recent_ingests_enabled", recentIngestsEnabled);
+    const recentIngestsPromise = recentIngestsEnabled
+      ? (async () => {
+        const startedAt = process.hrtime.bigint();
+        const ingests = await listRecentCompletedUploadedFileIngestJobs(auth, {
+          conversation_id: body.conversation_id ?? null,
+          limit: 5,
+        });
+        setRequestTimingField(
+          "recall_recent_ingests_ms",
+          Number(process.hrtime.bigint() - startedAt) / 1_000_000
+        );
+        return ingests;
+      })()
       : Promise.resolve([]);
 
     const [result, recentDocuments, matchedDocuments, recentCompletedIngests] = await Promise.all([
       recallMemories(body.query, auth, body.limit, req.ip, {
         types: recallTypesOrDefault(body.types),
       }),
-      recentDocumentBriefs(auth, 5),
+      recentDocsPromise,
       matchedDocumentsPromise,
-      listRecentCompletedUploadedFileIngestJobs(auth, {
-        conversation_id: body.conversation_id ?? null,
-        limit: 5,
-      }),
+      recentIngestsPromise,
     ]);
-    setRequestTimingField(
-      "recall_matched_docs_ms",
-      Number(process.hrtime.bigint() - matchedSearchStartedAt) / 1_000_000
-    );
     const refs = [...new Set((body.include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
     const referencedDocuments = refs.length > 0
-      ? await documentBriefsByRefs(refs, auth, { maxLotDocs: 5 })
+      ? await (async () => {
+        const startedAt = process.hrtime.bigint();
+        const result = await documentBriefsByRefs(refs, auth, { maxLotDocs: 5 });
+        setRequestTimingField(
+          "recall_referenced_docs_ms",
+          Number(process.hrtime.bigint() - startedAt) / 1_000_000
+        );
+        return result;
+      })()
       : [];
 
     const autoSaved: Array<{

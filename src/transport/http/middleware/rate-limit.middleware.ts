@@ -15,6 +15,7 @@ interface LocalRateLimitEntry {
 }
 
 const LOCAL_RATE_LIMIT_SAMPLE_RATIO = 0.8;
+const MEMORY_API_RATE_LIMIT_SOFT_TIMEOUT_MS = 40;
 const localRateLimit = new Map<string, LocalRateLimitEntry>();
 
 function requestIp(req: Request): string {
@@ -76,6 +77,26 @@ function isRecallRequest(req: Request): boolean {
   return toolName === "recall_memories";
 }
 
+function shouldUseSoftTimeout(options: RateLimitOptions): boolean {
+  return options.namespace === "memory-api";
+}
+
+async function incrementWithSoftTimeout(
+  key: string,
+  ttlSeconds: number,
+  timeoutMs: number
+): Promise<{ status: "ok"; count: number } | { status: "timeout" } | { status: "error" }> {
+  const wrappedIncrement = incrementWithTtl(key, ttlSeconds)
+    .then((count) => ({ status: "ok" as const, count }))
+    .catch(() => ({ status: "error" as const }));
+  const timeoutResult = new Promise<{ status: "timeout" }>((resolve) => {
+    const timer = setTimeout(() => resolve({ status: "timeout" }), timeoutMs);
+    timer.unref?.();
+  });
+
+  return Promise.race([wrappedIncrement, timeoutResult]);
+}
+
 export function createRateLimitMiddleware(options: RateLimitOptions) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const startedAt = process.hrtime.bigint();
@@ -89,7 +110,7 @@ export function createRateLimitMiddleware(options: RateLimitOptions) {
       authFingerprint(req),
     ].join(":");
 
-    let source: "redis" | "local_sampled" = "redis";
+    let source: "redis" | "local_sampled" | "redis_timeout_fail_open" | "redis_error_fail_open" = "redis";
     let count: number;
     if (canUseLocalSampling(options)) {
       const sampled = tryLocalSample(key, options.maxRequests);
@@ -97,8 +118,30 @@ export function createRateLimitMiddleware(options: RateLimitOptions) {
         source = "local_sampled";
         count = sampled;
       } else {
-        count = await incrementWithTtl(key, ttlSeconds);
-        syncLocalSample(key, count, ttlSeconds);
+        if (shouldUseSoftTimeout(options)) {
+          const startedRedisAt = process.hrtime.bigint();
+          const incrementResult = await incrementWithSoftTimeout(
+            key,
+            ttlSeconds,
+            MEMORY_API_RATE_LIMIT_SOFT_TIMEOUT_MS
+          );
+          const redisMs = Number(process.hrtime.bigint() - startedRedisAt) / 1_000_000;
+          setRequestTimingField("rate_limit_redis_ms", redisMs);
+          if (incrementResult.status === "ok") {
+            count = incrementResult.count;
+            syncLocalSample(key, count, ttlSeconds);
+          } else {
+            source = incrementResult.status === "timeout"
+              ? "redis_timeout_fail_open"
+              : "redis_error_fail_open";
+            setRequestTimingField("rate_limit_fail_open", true);
+            count = 1;
+            syncLocalSample(key, count, ttlSeconds);
+          }
+        } else {
+          count = await incrementWithTtl(key, ttlSeconds);
+          syncLocalSample(key, count, ttlSeconds);
+        }
       }
     } else {
       count = await incrementWithTtl(key, ttlSeconds);

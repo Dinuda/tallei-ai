@@ -760,6 +760,9 @@ export async function initDb() {
         ON uploaded_file_ingest_jobs(tenant_id, user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_tenant_user_status
         ON uploaded_file_ingest_jobs(tenant_id, user_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_status_completed
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, status, completed_at DESC)
+        WHERE status = 'done' AND completed_at IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_conversation
         ON uploaded_file_ingest_jobs(tenant_id, user_id, conversation_id, created_at DESC)
         WHERE conversation_id IS NOT NULL;

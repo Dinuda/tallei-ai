@@ -69,6 +69,7 @@ let activeUsageUpdateFlushes = 0;
 const LOCAL_API_KEY_CACHE_TTL_MS = 60_000;
 const LOCAL_API_KEY_CACHE_MAX = 256;
 const localApiKeyCache = new Map<string, { value: ApiKeyValidation; exp: number }>();
+const API_KEY_CACHE_READ_SOFT_TIMEOUT_MS = 40;
 
 function isDbConnectivityError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -567,10 +568,24 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
   const hash = hashApiKey(rawKey);
 
   const local = peekLocalApiKeyValidation(rawKey, requesterIp);
-  if (local) return local;
+  if (local) {
+    setRequestTimingField("auth_api_key_cache_source", "local");
+    return local;
+  }
 
   const cacheKey = apiKeyCacheKey(hash);
-  const cached = await getCacheJson<ApiKeyValidation>(cacheKey);
+  const redisStartedAt = process.hrtime.bigint();
+  const cached = await Promise.race<ApiKeyValidation | null>([
+    getCacheJson<ApiKeyValidation>(cacheKey).catch(() => null),
+    new Promise<ApiKeyValidation | null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), API_KEY_CACHE_READ_SOFT_TIMEOUT_MS);
+      timer.unref?.();
+    }),
+  ]);
+  setRequestTimingField(
+    "auth_api_key_redis_ms",
+    Number(process.hrtime.bigint() - redisStartedAt) / 1_000_000
+  );
 
   if (cached) {
     if (!cached.plan) {
@@ -581,11 +596,13 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
       );
     }
     enqueueApiKeyUsageUpdate(cached.keyId, requesterIp);
+    setRequestTimingField("auth_api_key_cache_source", "redis");
     return cached;
   }
 
   const ephemeral = ephemeralApiKeysByHash.get(hash);
   if (ephemeral && ephemeral.revokedAt === null) {
+    setRequestTimingField("auth_api_key_cache_source", "ephemeral");
     return {
       keyId: ephemeral.id,
       userId: ephemeral.userId,
@@ -600,6 +617,7 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
   }
 
   let result;
+  const dbStartedAt = process.hrtime.bigint();
   try {
     result = await withTimeout(
       pool.query<{
@@ -613,13 +631,16 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
         `SELECT
             ak.id AS key_id,
             ak.user_id,
-            tm.tenant_id,
+            COALESCE(ak.tenant_id, tm.tenant_id) AS tenant_id,
             ak.connector_type,
             s.plan,
             s.status
          FROM api_keys ak
-         JOIN tenant_memberships tm ON tm.user_id = ak.user_id
-         LEFT JOIN subscriptions s ON s.tenant_id = tm.tenant_id
+         LEFT JOIN tenant_memberships tm
+           ON tm.user_id = ak.user_id
+          AND ak.tenant_id IS NULL
+         LEFT JOIN subscriptions s
+           ON s.tenant_id = COALESCE(ak.tenant_id, tm.tenant_id)
          WHERE ak.key_hash = $1
            AND ak.revoked_at IS NULL
            AND (ak.created_at + (ak.rotation_days || ' days')::interval) > NOW()
@@ -633,6 +654,10 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
     noteApiKeyDbFailure(error, "[auth] validateApiKeyContext DB path failed:");
     return null;
   }
+  setRequestTimingField(
+    "auth_api_key_db_ms",
+    Number(process.hrtime.bigint() - dbStartedAt) / 1_000_000
+  );
   if (result.rows.length === 0) return null;
 
   const row = result.rows[0];
@@ -656,6 +681,7 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
   localApiKeyCache.set(hash, { value, exp: Date.now() + LOCAL_API_KEY_CACHE_TTL_MS });
 
   enqueueApiKeyUsageUpdate(row.key_id, requesterIp);
+  setRequestTimingField("auth_api_key_cache_source", "db");
 
   return value;
 }
