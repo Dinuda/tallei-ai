@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from "express";
-import { createHmac } from "crypto";
+import { randomUUID } from "crypto";
+import jwt from "jsonwebtoken";
 import { z } from "zod";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
@@ -24,7 +25,12 @@ import {
 import { ingestUploadedFileToDocument } from "../../../services/uploaded-file-ingest.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
-import { authContextFromUserId, peekLocalApiKeyValidation, validateApiKeyContext } from "../../../infrastructure/auth/auth.js";
+import {
+  authContextFromUserId,
+  isJwtRevokedJti,
+  peekLocalApiKeyValidation,
+  validateApiKeyContext,
+} from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
 import { validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
 import { setRequestTimingField } from "../../../observability/request-timing.js";
@@ -201,7 +207,9 @@ function logChatGptActionAsync(input: Parameters<typeof logChatGptAction>[0]): v
 
 const PLAN_CACHE_TTL_MS = 5 * 60_000;
 const AUTH_CONTINUATION_HEADER = "X-Tallei-Auth-Continuation";
-const AUTH_CONTINUATION_TTL_MS = 120_000;
+const AUTH_CONTINUATION_TTL_SECONDS = Math.max(60, config.authContinuationTtlSeconds);
+const AUTH_CONTINUATION_ISSUER = "tallei-chatgpt-actions";
+const AUTH_CONTINUATION_AUDIENCE = "chatgpt-actions";
 const planCache = new Map<string, { plan: AuthContext["plan"]; exp: number }>();
 
 function getCachedPlanSync(tenantId: string): AuthContext["plan"] | null {
@@ -240,10 +248,26 @@ type ContinuationPayload = {
   connectorType?: string | null;
   clientId?: string;
   scopes?: string[];
-  exp: number;
 };
 
-function continuationSecret(): string {
+function normalizePem(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return "";
+  return trimmed.replace(/\\n/g, "\n");
+}
+
+const AUTH_CONTINUATION_PRIVATE_KEY = normalizePem(config.authContinuationPrivateKey);
+const AUTH_CONTINUATION_PUBLIC_KEY = normalizePem(config.authContinuationPublicKey);
+const AUTH_CONTINUATION_USE_ES256 =
+  AUTH_CONTINUATION_PRIVATE_KEY.length > 0 && AUTH_CONTINUATION_PUBLIC_KEY.length > 0;
+
+function continuationSignKey(): jwt.Secret {
+  if (AUTH_CONTINUATION_USE_ES256) return AUTH_CONTINUATION_PRIVATE_KEY;
+  return config.apiKeyPepper || config.internalApiSecret;
+}
+
+function continuationVerifyKey(): jwt.Secret {
+  if (AUTH_CONTINUATION_USE_ES256) return AUTH_CONTINUATION_PUBLIC_KEY;
   return config.apiKeyPepper || config.internalApiSecret;
 }
 
@@ -257,40 +281,53 @@ function encodeAuthContinuation(auth: AuthContext): string {
     connectorType: auth.connectorType ?? null,
     clientId: auth.clientId,
     scopes: auth.scopes ?? [],
-    exp: Date.now() + AUTH_CONTINUATION_TTL_MS,
   };
-  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const signature = createHmac("sha256", continuationSecret()).update(body).digest("base64url");
-  return `${body}.${signature}`;
+  return jwt.sign(payload, continuationSignKey(), {
+    algorithm: AUTH_CONTINUATION_USE_ES256 ? "ES256" : "HS256",
+    expiresIn: AUTH_CONTINUATION_TTL_SECONDS,
+    issuer: AUTH_CONTINUATION_ISSUER,
+    audience: AUTH_CONTINUATION_AUDIENCE,
+    jwtid: randomUUID(),
+  });
 }
 
-function decodeAuthContinuation(raw: string): AuthContext | null {
+async function decodeAuthContinuation(raw: string): Promise<AuthContext | null> {
   const token = raw.trim();
-  const dot = token.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const body = token.slice(0, dot);
-  const signature = token.slice(dot + 1);
-  const expected = createHmac("sha256", continuationSecret()).update(body).digest("base64url");
-  if (!safeSecretEqual(signature, expected)) return null;
+  if (!token) return null;
 
-  let parsed: ContinuationPayload;
+  let parsed: jwt.JwtPayload;
   try {
-    parsed = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as ContinuationPayload;
+    const verified = jwt.verify(token, continuationVerifyKey(), {
+      algorithms: AUTH_CONTINUATION_USE_ES256 ? ["ES256"] : ["HS256"],
+      issuer: AUTH_CONTINUATION_ISSUER,
+      audience: AUTH_CONTINUATION_AUDIENCE,
+    });
+    if (!verified || typeof verified === "string") return null;
+    parsed = verified;
   } catch {
     return null;
   }
 
-  if (typeof parsed.exp !== "number" || parsed.exp <= Date.now()) return null;
-  if (!parsed.userId || !parsed.tenantId || !parsed.authMode || !parsed.plan) return null;
+  const jti = typeof parsed.jti === "string" ? parsed.jti : null;
+  if (jti) {
+    const revoked = await isJwtRevokedJti(jti);
+    if (revoked) return null;
+  }
+
+  const userId = typeof parsed.userId === "string" ? parsed.userId : "";
+  const tenantId = typeof parsed.tenantId === "string" ? parsed.tenantId : "";
+  const authMode = typeof parsed.authMode === "string" ? parsed.authMode : "";
+  const plan = typeof parsed.plan === "string" ? parsed.plan : "";
+  if (!userId || !tenantId || !authMode || !plan) return null;
 
   return {
-    userId: parsed.userId,
-    tenantId: parsed.tenantId,
-    authMode: parsed.authMode,
-    plan: parsed.plan,
-    keyId: parsed.keyId,
-    connectorType: parsed.connectorType ?? null,
-    clientId: parsed.clientId,
+    userId,
+    tenantId,
+    authMode: authMode as AuthContext["authMode"],
+    plan: plan as AuthContext["plan"],
+    keyId: typeof parsed.keyId === "string" ? parsed.keyId : undefined,
+    connectorType: typeof parsed.connectorType === "string" ? parsed.connectorType : null,
+    clientId: typeof parsed.clientId === "string" ? parsed.clientId : undefined,
     scopes: Array.isArray(parsed.scopes) ? parsed.scopes : [],
   };
 }
@@ -298,10 +335,32 @@ function decodeAuthContinuation(raw: string): AuthContext | null {
 function attachContinuationHeader(res: Response, auth: AuthContext): void {
   res.setHeader(AUTH_CONTINUATION_HEADER, encodeAuthContinuation(auth));
   setRequestTimingField("auth_continuation_issued", true);
+  setRequestTimingField("auth_continuation_alg", AUTH_CONTINUATION_USE_ES256 ? "ES256" : "HS256");
 }
 
 async function resolveChatGptActionAuth(req: AuthRequest, res: Response): Promise<AuthContext | null> {
   if (req.authContext) return req.authContext;
+  if (req.authModeHint === "api_key") {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      const token = authHeader.slice("Bearer ".length).trim();
+      if (token) {
+        const localValidation = peekLocalApiKeyValidation(token, req.ip);
+        if (localValidation) {
+          const localContext = toApiKeyContext(localValidation);
+          if (localContext.connectorType && localContext.connectorType !== "chatgpt") {
+            res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
+            return null;
+          }
+          req.userId = localContext.userId;
+          req.authContext = localContext;
+          attachContinuationHeader(res, localContext);
+          setRequestTimingField("auth_deferred_wait_ms", 0);
+          return localContext;
+        }
+      }
+    }
+  }
   if (!req.authPromise) {
     res.status(401).json({ error: "Unauthorized" });
     return null;
@@ -365,7 +424,7 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
 
   const continuationHeader = req.headers["x-tallei-auth-continuation"];
   if (typeof continuationHeader === "string" && continuationHeader.trim().length > 0) {
-    const continued = decodeAuthContinuation(continuationHeader);
+    const continued = await decodeAuthContinuation(continuationHeader);
     if (continued) {
       setRequestTimingField("auth_continuation_hit", true);
       req.userId = continued.userId;
@@ -996,7 +1055,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "remember",
           summary: "Unified save endpoint for memory and documents (supports uploaded files)",
           description:
-            "Use for explicit saves and cadence: every 3 user messages, save a concise fact summary unless user opts out. " +
+            "Use for explicit saves and cadence: every 5 user messages, save a concise fact summary unless user opts out. " +
             "For files, upload_blob must run first and complete. If persistence fails, return failure and never claim success.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],

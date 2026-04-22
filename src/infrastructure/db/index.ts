@@ -7,11 +7,13 @@ const { Pool } = pg;
 function createPool(connectionString: string): pg.Pool {
   const dbPool = new Pool({
     connectionString,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 2000,
     query_timeout: 30000,
-    max: 5,
+    max: 30,
     idleTimeoutMillis: 30000,
     keepAlive: true,
+    statement_timeout: 5000,
+    idle_in_transaction_session_timeout: 5000,
   });
 
   dbPool.on("error", (error: Error & { code?: string }) => {
@@ -862,6 +864,72 @@ export async function initDb() {
     await client.query(`
       ALTER TABLE subscriptions
         ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP WITH TIME ZONE;
+    `);
+
+    // Materialized auth context for low-latency API key validation.
+    await client.query(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS api_key_contexts AS
+      SELECT
+        ak.key_hash,
+        ak.id AS key_id,
+        ak.user_id,
+        COALESCE(ak.tenant_id, tm.tenant_id) AS tenant_id,
+        ak.connector_type,
+        s.plan,
+        s.status,
+        ak.revoked_at,
+        (ak.created_at + (ak.rotation_days || ' days')::interval) AS rotation_expires_at
+      FROM api_keys ak
+      LEFT JOIN tenant_memberships tm
+        ON tm.user_id = ak.user_id
+       AND ak.tenant_id IS NULL
+      LEFT JOIN subscriptions s
+        ON s.tenant_id = COALESCE(ak.tenant_id, tm.tenant_id);
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_api_key_contexts_key_hash
+        ON api_key_contexts(key_hash);
+      CREATE INDEX IF NOT EXISTS idx_api_key_contexts_tenant_user
+        ON api_key_contexts(tenant_id, user_id);
+    `);
+
+    await client.query(`REFRESH MATERIALIZED VIEW api_key_contexts`);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION refresh_api_key_contexts_mv()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        REFRESH MATERIALIZED VIEW api_key_contexts;
+        RETURN NULL;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_api_keys ON api_keys;
+      CREATE TRIGGER trg_refresh_api_key_contexts_api_keys
+      AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON api_keys
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION refresh_api_key_contexts_mv();
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_memberships ON tenant_memberships;
+      CREATE TRIGGER trg_refresh_api_key_contexts_memberships
+      AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON tenant_memberships
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION refresh_api_key_contexts_mv();
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_subscriptions ON subscriptions;
+      CREATE TRIGGER trg_refresh_api_key_contexts_subscriptions
+      AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON subscriptions
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION refresh_api_key_contexts_mv();
     `);
 
     // #13 + #9: Hash-only token storage + family-based rotation

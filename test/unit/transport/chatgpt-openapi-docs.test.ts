@@ -21,10 +21,10 @@ test("ChatGPT OpenAPI documents strict upload/recall/save non-negotiables", () =
   const remember = postOperation(spec, "/api/chatgpt/actions/remember");
 
   assert.match(recall.description ?? "", /first user turn must call this/i);
-  assert.match(recall.description ?? "", /upload_blob \(wait\)/i);
-  assert.match(upload.description ?? "", /I'm saving "<file_name>"/);
-  assert.match(upload.description ?? "", /end with saved @doc\/@lot link/i);
-  assert.match(remember.description ?? "", /every 3 user messages/i);
+  assert.match(recall.description ?? "", /upload_blob/i);
+  assert.match(upload.description ?? "", /supports PDF and Word/i);
+  assert.match(upload.description ?? "", /poll upload_status/i);
+  assert.match(remember.description ?? "", /every 5 user messages/i);
   assert.match(spec.info.description ?? "", /canonical execution contract/i);
 });
 

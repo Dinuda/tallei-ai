@@ -2,6 +2,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import type { MemoryType } from "./memory-types.js";
 import type { RecallSource } from "./fallback-policy.js";
 import type { BucketRecallResult } from "../../infrastructure/recall/bucket-recall.js";
+import type { RecallCacheLookupTimings } from "../../infrastructure/recall/fast-recall.js";
 
 export interface RecallResult {
   contextBlock: string;
@@ -17,7 +18,12 @@ interface RecallMemoryUseCaseDeps {
   readonly recallCacheKey: (auth: AuthContext, query: string, limit: number, types?: MemoryType[]) => string;
   readonly getCachedRecall: (key: string) => RecallResult | null;
   readonly setCachedRecall: (key: string, result: RecallResult) => void;
-  readonly readExactRecallPayload: <T>(auth: AuthContext, query: string, slot: "v1" | "v2") => Promise<T | null>;
+  readonly readExactRecallPayload: <T>(
+    auth: AuthContext,
+    query: string,
+    slot: "v1" | "v2",
+    timings?: Partial<RecallCacheLookupTimings>
+  ) => Promise<T | null>;
   readonly writeRecallPayload: <T>(auth: AuthContext, query: string, slot: "v1" | "v2", payload: T) => Promise<void>;
   readonly withTimeout: <T>(promise: Promise<T>, ms: number, label: string) => Promise<T>;
   readonly totalTimeoutMs: number;
@@ -72,35 +78,41 @@ export class RecallMemoryUseCase {
     // 1. LRU in-process cache
     const localCacheStartedAt = elapsedMs();
     const cached = this.deps.getCachedRecall(cacheKey);
-    const cacheLocalMs = elapsedMs() - localCacheStartedAt;
+    const processLocalMs = elapsedMs() - localCacheStartedAt;
     if (cached) {
       this.deps.logRecallEvent(
         input.query, boundedLimit, input.auth, input.requesterIp,
         cached, "exact_cache", {
-          cache_local_ms: cacheLocalMs,
-          cache_redis_ms: 0,
-          bucket_ms: 0,
-          cache_lookup_ms: cacheLocalMs,
+          recall_local_ms: processLocalMs,
+          recall_stamp_ms: 0,
+          recall_redis_ms: 0,
+          recall_bucket_ms: 0,
+          cache_lookup_ms: processLocalMs,
         }
       );
       return cached;
     }
 
     // 2. Redis exact cache (survives restarts, shared across instances)
+    const recallLookupTimings: Partial<RecallCacheLookupTimings> = {};
     const redisCacheStartedAt = elapsedMs();
     const redisHit = await this.deps.readExactRecallPayload<RecallResult>(
-      input.auth, normalizedQuery, "v1"
+      input.auth, normalizedQuery, "v1", recallLookupTimings
     );
-    const cacheRedisMs = elapsedMs() - redisCacheStartedAt;
+    const cacheLookupMs = elapsedMs() - redisCacheStartedAt;
+    const recallLocalMs = processLocalMs + (recallLookupTimings.recall_local_ms ?? 0);
+    const recallStampMs = recallLookupTimings.recall_stamp_ms ?? 0;
+    const recallRedisMs = recallLookupTimings.recall_redis_ms ?? 0;
     if (redisHit) {
       this.deps.setCachedRecall(cacheKey, redisHit);
       this.deps.logRecallEvent(
         input.query, boundedLimit, input.auth, input.requesterIp,
         redisHit, "exact_cache", {
-          cache_local_ms: cacheLocalMs,
-          cache_redis_ms: cacheRedisMs,
-          bucket_ms: 0,
-          cache_lookup_ms: cacheLocalMs + cacheRedisMs,
+          recall_local_ms: recallLocalMs,
+          recall_stamp_ms: recallStampMs,
+          recall_redis_ms: recallRedisMs,
+          recall_bucket_ms: 0,
+          cache_lookup_ms: processLocalMs + cacheLookupMs,
         }
       );
       this.deps.runRecallShadowChecks(input.query, input.auth, boundedLimit, redisHit);
@@ -123,20 +135,22 @@ export class RecallMemoryUseCase {
       result = { contextBlock: bucketResult.contextBlock, memories: bucketResult.memories };
       timingsMs = {
         ...bucketResult.timingsMs,
-        cache_local_ms: cacheLocalMs,
-        cache_redis_ms: cacheRedisMs,
-        bucket_ms: bucketMs,
-        cache_lookup_ms: cacheLocalMs + cacheRedisMs + bucketMs,
+        recall_local_ms: recallLocalMs,
+        recall_stamp_ms: recallStampMs,
+        recall_redis_ms: recallRedisMs,
+        recall_bucket_ms: bucketMs,
+        cache_lookup_ms: processLocalMs + cacheLookupMs + bucketMs,
       };
     } catch {
       // Total timeout — return empty rather than wrong memories
       result = { contextBlock: "--- No relevant memories found ---", memories: [] };
       source = "recent_fallback";
       timingsMs = {
-        cache_local_ms: cacheLocalMs,
-        cache_redis_ms: cacheRedisMs,
-        bucket_ms: this.deps.totalTimeoutMs,
-        cache_lookup_ms: cacheLocalMs + cacheRedisMs + this.deps.totalTimeoutMs,
+        recall_local_ms: recallLocalMs,
+        recall_stamp_ms: recallStampMs,
+        recall_redis_ms: recallRedisMs,
+        recall_bucket_ms: this.deps.totalTimeoutMs,
+        cache_lookup_ms: processLocalMs + cacheLookupMs + this.deps.totalTimeoutMs,
         total_ms: this.deps.totalTimeoutMs,
       };
     }

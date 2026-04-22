@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 import { MemoryRepository } from "../repositories/memory.repository.js";
-import { getCacheJson, incrementWithTtl, setCacheJson } from "../cache/redis-cache.js";
+import { getCacheJson, getCacheJsonMany, incrementWithTtl, setCacheJson } from "../cache/redis-cache.js";
 import { config } from "../../config/index.js";
 import type { MemoryType } from "../../orchestration/memory/memory-types.js";
 
@@ -28,6 +28,12 @@ interface RecallCacheEnvelope {
   payloads: RecallCachedPayloads;
 }
 
+export interface RecallCacheLookupTimings {
+  recall_local_ms: number;
+  recall_stamp_ms: number;
+  recall_redis_ms: number;
+}
+
 type RecallCacheSlot = "v1" | "v2";
 type RecallCacheKind = "exact" | "warm";
 
@@ -37,11 +43,14 @@ const FAST_RECALL_EXACT_TTL_SECONDS = 120;
 const FAST_RECALL_WARM_TTL_SECONDS = 45;
 const FAST_RECALL_STAMP_TTL_SECONDS = 60 * 60 * 24 * 30;
 const FAST_RECALL_STAMP_SYNC_MS = 10_000;
+const FAST_RECALL_SWR_MULTIPLIER = 2;
 
 const localCache = new Map<string, LocalCacheEntry<RecallCacheEnvelope>>();
 const localStampByScope = new Map<string, number>();
 const localStampSyncedAtByScope = new Map<string, number>();
 const localEnrichmentInFlight = new Map<string, Promise<void>>();
+const inflightStampByScope = new Map<string, Promise<number>>();
+const inflightEnvelopeByKey = new Map<string, Promise<RecallCacheEnvelope | null>>();
 
 function scopeKey(auth: AuthContext): string {
   return `${auth.tenantId}:${auth.userId}`;
@@ -104,14 +113,82 @@ function getLocalCache<T>(key: string): T | null {
 }
 
 function setLocalCache<T>(key: string, value: T, ttlSeconds: number): void {
-  localCache.set(key, { exp: Date.now() + ttlSeconds * 1000, value: value as RecallCacheEnvelope });
+  localCache.set(key, {
+    exp: Date.now() + ttlSeconds * FAST_RECALL_SWR_MULTIPLIER * 1000,
+    value: value as RecallCacheEnvelope,
+  });
 }
 
-async function readCacheEnvelope(key: string, ttlSeconds: number): Promise<RecallCacheEnvelope | null> {
-  const local = getLocalCache<RecallCacheEnvelope>(key);
-  if (local) return local;
+function isRecallCacheEnvelope(value: unknown): value is RecallCacheEnvelope {
+  if (!value || typeof value !== "object") return false;
+  const parsed = value as Partial<RecallCacheEnvelope>;
+  return typeof parsed.createdAt === "string" && typeof parsed.payloads === "object" && parsed.payloads !== null;
+}
 
-  const cached = await getCacheJson<RecallCacheEnvelope>(key);
+function envelopeAgeMs(envelope: RecallCacheEnvelope): number {
+  const createdAtMs = Date.parse(envelope.createdAt);
+  if (!Number.isFinite(createdAtMs)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, Date.now() - createdAtMs);
+}
+
+function isWithinSwrWindow(envelope: RecallCacheEnvelope, ttlSeconds: number): boolean {
+  return envelopeAgeMs(envelope) < ttlSeconds * FAST_RECALL_SWR_MULTIPLIER * 1000;
+}
+
+function isStale(envelope: RecallCacheEnvelope, ttlSeconds: number): boolean {
+  return envelopeAgeMs(envelope) >= ttlSeconds * 1000;
+}
+
+async function fetchEnvelopeFromRedis(key: string): Promise<RecallCacheEnvelope | null> {
+  let pending = inflightEnvelopeByKey.get(key);
+  if (!pending) {
+    pending = getCacheJson<RecallCacheEnvelope>(key).catch(() => null).finally(() => {
+      const active = inflightEnvelopeByKey.get(key);
+      if (active === pending) inflightEnvelopeByKey.delete(key);
+    });
+    inflightEnvelopeByKey.set(key, pending);
+  }
+  return pending;
+}
+
+function addLookupTiming(
+  timings: Partial<RecallCacheLookupTimings> | undefined,
+  key: keyof RecallCacheLookupTimings,
+  deltaMs: number
+): void {
+  if (!timings) return;
+  timings[key] = (timings[key] ?? 0) + deltaMs;
+}
+
+async function readCacheEnvelope(
+  key: string,
+  ttlSeconds: number,
+  timings?: Partial<RecallCacheLookupTimings>
+): Promise<RecallCacheEnvelope | null> {
+  const localStartedAt = process.hrtime.bigint();
+  const local = getLocalCache<RecallCacheEnvelope>(key);
+  addLookupTiming(
+    timings,
+    "recall_local_ms",
+    Number(process.hrtime.bigint() - localStartedAt) / 1_000_000
+  );
+  if (local) {
+    if (isStale(local, ttlSeconds) && isWithinSwrWindow(local, ttlSeconds)) {
+      // SWR: return stale data immediately and refresh Redis value in the background.
+      void fetchEnvelopeFromRedis(key).then((fresh) => {
+        if (fresh) setLocalCache(key, fresh, ttlSeconds);
+      }).catch(() => {});
+    }
+    return local;
+  }
+
+  const redisStartedAt = process.hrtime.bigint();
+  const cached = await fetchEnvelopeFromRedis(key);
+  addLookupTiming(
+    timings,
+    "recall_redis_ms",
+    Number(process.hrtime.bigint() - redisStartedAt) / 1_000_000
+  );
   if (cached) {
     setLocalCache(key, cached, ttlSeconds);
   }
@@ -123,7 +200,10 @@ async function writeCacheEnvelope(key: string, value: RecallCacheEnvelope, ttlSe
   await setCacheJson(key, value, ttlSeconds);
 }
 
-export async function readRecallStamp(auth: AuthContext): Promise<number> {
+export async function readRecallStamp(
+  auth: AuthContext,
+  timings?: Partial<RecallCacheLookupTimings>
+): Promise<number> {
   const scope = scopeKey(auth);
   const localStamp = localStampByScope.get(scope);
   if (typeof localStamp === "number") {
@@ -141,15 +221,31 @@ export async function readRecallStamp(auth: AuthContext): Promise<number> {
     return localStamp;
   }
 
-  let initialStamp = 0;
-  try {
-    const remoteStamp = await getCacheJson<number>(stampCacheKey(auth));
-    if (typeof remoteStamp === "number" && Number.isFinite(remoteStamp)) {
-      initialStamp = Math.max(0, remoteStamp);
-    }
-  } catch {
-    initialStamp = 0;
+  let pending = inflightStampByScope.get(scope);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const remoteStamp = await getCacheJson<number>(stampCacheKey(auth));
+        if (typeof remoteStamp === "number" && Number.isFinite(remoteStamp)) {
+          return Math.max(0, remoteStamp);
+        }
+        return 0;
+      } catch {
+        return 0;
+      }
+    })().finally(() => {
+      const active = inflightStampByScope.get(scope);
+      if (active === pending) inflightStampByScope.delete(scope);
+    });
+    inflightStampByScope.set(scope, pending);
   }
+  const stampStartedAt = process.hrtime.bigint();
+  const initialStamp = await pending;
+  addLookupTiming(
+    timings,
+    "recall_stamp_ms",
+    Number(process.hrtime.bigint() - stampStartedAt) / 1_000_000
+  );
 
   localStampByScope.set(scope, initialStamp);
   localStampSyncedAtByScope.set(scope, Date.now());
@@ -168,12 +264,65 @@ async function readPayload<T>(
   auth: AuthContext,
   query: string,
   slot: RecallCacheSlot,
-  kind: RecallCacheKind
+  kind: RecallCacheKind,
+  timings?: Partial<RecallCacheLookupTimings>
 ): Promise<{ payload: T; createdAt: string } | null> {
-  const stamp = await readRecallStamp(auth);
-  const key = kind === "exact" ? exactCacheKey(auth, query, stamp) : warmCacheKey(auth, stamp);
+  const scope = scopeKey(auth);
+  const localStamp = localStampByScope.get(scope);
   const ttl = kind === "exact" ? FAST_RECALL_EXACT_TTL_SECONDS : FAST_RECALL_WARM_TTL_SECONDS;
-  const envelope = await readCacheEnvelope(key, ttl);
+  if (typeof localStamp === "number") {
+    const key = kind === "exact" ? exactCacheKey(auth, query, localStamp) : warmCacheKey(auth, localStamp);
+    const localStartedAt = process.hrtime.bigint();
+    const localEnvelope = getLocalCache<RecallCacheEnvelope>(key);
+    addLookupTiming(
+      timings,
+      "recall_local_ms",
+      Number(process.hrtime.bigint() - localStartedAt) / 1_000_000
+    );
+    if (localEnvelope) {
+      const localPayload = localEnvelope.payloads?.[slot];
+      if (localPayload) return { payload: localPayload as T, createdAt: localEnvelope.createdAt };
+    }
+
+    const pipelineStartedAt = process.hrtime.bigint();
+    const [remoteStampValue, remoteEnvelopeValue] = await getCacheJsonMany<unknown>([
+      stampCacheKey(auth),
+      key,
+    ]);
+    const pipelineMs = Number(process.hrtime.bigint() - pipelineStartedAt) / 1_000_000;
+    addLookupTiming(timings, "recall_stamp_ms", pipelineMs);
+    addLookupTiming(timings, "recall_redis_ms", pipelineMs);
+
+    let effectiveStamp = localStamp;
+    if (typeof remoteStampValue === "number" && Number.isFinite(remoteStampValue)) {
+      effectiveStamp = Math.max(localStamp, remoteStampValue);
+      localStampByScope.set(scope, effectiveStamp);
+      localStampSyncedAtByScope.set(scope, Date.now());
+    }
+
+    const remoteEnvelope = isRecallCacheEnvelope(remoteEnvelopeValue) ? remoteEnvelopeValue : null;
+    if (remoteEnvelope && effectiveStamp === localStamp) {
+      setLocalCache(key, remoteEnvelope, ttl);
+      const remotePayload = remoteEnvelope.payloads?.[slot];
+      if (remotePayload) return { payload: remotePayload as T, createdAt: remoteEnvelope.createdAt };
+      return null;
+    }
+
+    if (effectiveStamp !== localStamp) {
+      const nextKey = kind === "exact"
+        ? exactCacheKey(auth, query, effectiveStamp)
+        : warmCacheKey(auth, effectiveStamp);
+      const nextEnvelope = await readCacheEnvelope(nextKey, ttl, timings);
+      const nextPayload = nextEnvelope?.payloads?.[slot];
+      if (!nextPayload) return null;
+      return { payload: nextPayload as T, createdAt: nextEnvelope.createdAt };
+    }
+    return null;
+  }
+
+  const stamp = await readRecallStamp(auth, timings);
+  const key = kind === "exact" ? exactCacheKey(auth, query, stamp) : warmCacheKey(auth, stamp);
+  const envelope = await readCacheEnvelope(key, ttl, timings);
   const payload = envelope?.payloads?.[slot];
   if (!payload) return null;
   return { payload: payload as T, createdAt: envelope.createdAt };
@@ -206,18 +355,20 @@ async function writePayload<T>(
 export async function readExactRecallPayload<T>(
   auth: AuthContext,
   query: string,
-  slot: RecallCacheSlot
+  slot: RecallCacheSlot,
+  timings?: Partial<RecallCacheLookupTimings>
 ): Promise<T | null> {
-  const hit = await readPayload<T>(auth, query, slot, "exact");
+  const hit = await readPayload<T>(auth, query, slot, "exact", timings);
   return hit?.payload ?? null;
 }
 
 export async function readWarmRecallPayload<T>(
   auth: AuthContext,
   query: string,
-  slot: RecallCacheSlot
+  slot: RecallCacheSlot,
+  timings?: Partial<RecallCacheLookupTimings>
 ): Promise<T | null> {
-  const hit = await readPayload<T>(auth, query, slot, "warm");
+  const hit = await readPayload<T>(auth, query, slot, "warm", timings);
   return hit?.payload ?? null;
 }
 

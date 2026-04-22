@@ -201,10 +201,20 @@ function logRecallEvent(
   timingsMs: Record<string, number> = {}
 ): void {
   const cacheHit = source === "exact_cache" || source === "warm_cache";
+  const recallLocalMs = timingsMs.recall_local_ms ?? 0;
+  const recallStampMs = timingsMs.recall_stamp_ms ?? 0;
+  const recallRedisMs = timingsMs.recall_redis_ms ?? 0;
+  const recallBucketMs = timingsMs.recall_bucket_ms ?? 0;
+  const recallLookupMs = timingsMs.cache_lookup_ms
+    ?? (recallLocalMs + recallStampMs + recallRedisMs + recallBucketMs);
   setRequestTimingFields({
     recall_source: source,
     recall_cache_hit: cacheHit,
-    recall_cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
+    recall_local_ms: recallLocalMs,
+    recall_stamp_ms: recallStampMs,
+    recall_redis_ms: recallRedisMs,
+    recall_bucket_ms: recallBucketMs,
+    recall_cache_lookup_ms: recallLookupMs,
     recall_embed_ms: timingsMs.embed_ms ?? 0,
     recall_vector_ms: timingsMs.vector_ms ?? 0,
     recall_total_ms: timingsMs.total_ms ?? 0,
@@ -215,7 +225,11 @@ function logRecallEvent(
     ipHash: ipHash(requesterIp),
     metadata: {
       query, limit, hits: result.memories.length, source, cache_hit: cacheHit,
-      cache_lookup_ms: timingsMs.cache_lookup_ms ?? 0,
+      recall_local_ms: recallLocalMs,
+      recall_stamp_ms: recallStampMs,
+      recall_redis_ms: recallRedisMs,
+      recall_bucket_ms: recallBucketMs,
+      cache_lookup_ms: recallLookupMs,
       embed_ms: timingsMs.embed_ms ?? 0,
       vector_ms: timingsMs.vector_ms ?? 0,
       total_ms: timingsMs.total_ms ?? 0,
