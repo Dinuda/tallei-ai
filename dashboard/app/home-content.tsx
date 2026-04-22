@@ -130,73 +130,84 @@ export function HomeContent() {
       />
 
       {/* ═════════════════════════════════════════════════════
-          HERO — Grounded, straightforward, human
+          HERO — Two-column layout with illustration
       ═════════════════════════════════════════════════════ */}
       <header className="hero">
         <div className="hero-inner">
           <div className="hero-pill">
-            Sync memory between ChatGPT and Claude
+            ✦ Sync memory between ChatGPT and Claude
           </div>
           <h1 className="hero-h1">
-            Make ChatGPT and Claude actually talk to each other.
+            Make your AI tools <em>actually</em> talk <em>to each other.</em>
           </h1>
           <p className="hero-sub">
-            Tallei gives your AI tools a shared memory. Teach ChatGPT how you like things, and Claude automatically knows. Stop repeating yourself.
+            Tallei gives your AI tools a shared memory. Teach ChatGPT how you like things — Claude automatically knows. Stop repeating yourself.
           </p>
           <div className="hero-actions">
             <Link href="/login" className="landing-btn landing-btn-base">
               Try it for free
               <ArrowRight size={16} />
             </Link>
-            <p className="hero-guarantee">Takes 2 minutes. No credit card required.</p>
+            <p className="hero-guarantee">Takes 2 minutes · No credit card required</p>
+          </div>
+
+          {/* ─ Demo Box ─ */}
+          <section className="demo-visual" aria-label="Tallei memory sync preview">
+            <div className="demo-visual-inner">
+              <div className="solid-card hero-mockup">
+                <div className="mockup-header">
+                  <div className="mockup-dots">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <div className="mockup-title">TALLEI MEMORY LOG</div>
+                </div>
+                <div className="mockup-body">
+                  <div className="mockup-row" style={{ alignItems: 'center' }}>
+                    <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
+                      <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
+                    </div>
+                    <div className="mockup-value">&ldquo;Always keep my emails short, punchy, and use bullet points.&rdquo;</div>
+                  </div>
+                  <div className="mockup-row" style={{ alignItems: 'center' }}>
+                    <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
+                      <img src="/claude.svg" alt="Claude" width={28} height={28} />
+                    </div>
+                    <div className="mockup-value">&ldquo;Draft a project update for the team.&rdquo;</div>
+                  </div>
+                  <div className="mockup-row" style={{ alignItems: 'center' }}>
+                    <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center', position: 'relative' }}>
+                      <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} style={{ position: 'relative', zIndex: 1 }} />
+                      <img src="/claude.svg" alt="Claude" width={28} height={28} style={{ position: 'absolute', left: '16px', zIndex: 2, borderRadius: '50%', border: '2px solid #ffffff' }} />
+                    </div>
+                    <div className="mockup-value">
+                      Claude automatically writes a concise, bulleted email — without being told twice.
+                    </div>
+                  </div>
+                </div>
+                <div className="mockup-footer">
+                  <Check size={14} className="text-purple" />
+                  <span>✓ Synced instantly</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        {/* ─ Right Panel ─ */}
+        <div className="hero-right">
+          <div className="hero-right-inner">
+            <div className="hero-illustration">
+              <div className="hero-illustration-placeholder">
+                <p>Illustration coming soon</p>
+                <p style={{ fontSize: '0.8rem', marginTop: '0.5rem', color: 'rgba(255, 255, 255, 0.3)' }}>Person at desk with floating AI cards</p>
+              </div>
+            </div>
+            <div className="hero-caption">Before Tallei — Every tool, isolated</div>
           </div>
         </div>
       </header>
-
-      {/* ═════════════════════════════════════════════════════
-          VISUAL / UI MOCKUP — Honest, solid, no glowing orbs
-      ═════════════════════════════════════════════════════ */}
-      <section className="demo-visual" aria-label="Tallei memory sync preview">
-        <div className="demo-visual-inner">
-          <div className="solid-card hero-mockup">
-            <div className="mockup-header">
-              <div className="mockup-dots">
-                <span />
-                <span />
-                <span />
-              </div>
-              <div className="mockup-title">Tallei Memory Log</div>
-            </div>
-            <div className="mockup-body">
-              <div className="mockup-row" style={{ alignItems: 'center' }}>
-                <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
-                  <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
-                </div>
-                <div className="mockup-value">&ldquo;Always keep my emails short, punchy, and use bullet points.&rdquo;</div>
-              </div>
-              <div className="mockup-row" style={{ alignItems: 'center' }}>
-                <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
-                  <img src="/claude.svg" alt="Claude" width={28} height={28} />
-                </div>
-                <div className="mockup-value">&ldquo;Draft a project update for the team.&rdquo;</div>
-              </div>
-              <div className="mockup-row" style={{ alignItems: 'center' }}>
-                <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center', position: 'relative' }}>
-                  <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} style={{ position: 'relative', zIndex: 1 }} />
-                  <img src="/claude.svg" alt="Claude" width={28} height={28} style={{ position: 'absolute', left: '16px', zIndex: 2, borderRadius: '50%', border: '2px solid #ffffff' }} />
-                </div>
-                <div className="mockup-value">
-                  Claude automatically writes a concise, bulleted email without you having to remind it how you sound.
-                </div>
-              </div>
-            </div>
-            <div className="mockup-footer">
-              <Check size={14} className="text-purple" />
-              <span>Synced instantly</span>
-            </div>
-          </div>
-        </div>
-      </section>
 
       {/* ═════════════════════════════════════════════════════
           FEATURES — Honest, simple narrative

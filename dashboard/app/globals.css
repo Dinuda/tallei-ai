@@ -1574,13 +1574,15 @@ pre {
 .landing-btn-base {
   padding: 0.8rem 1.75rem;
   font-size: 1.05rem;
-  background: #7c3aed;
+  background: #5b21b6;
   color: #fff;
   border-color: #5b21b6;
-  box-shadow: 3px 3px 0px #e1d4fc;
+  box-shadow: none;
+  transition: background 0.2s ease;
 }
 .landing-btn-base:hover {
-  box-shadow: 5px 5px 0px #e1d4fc;
+  background: #6d28d9;
+  box-shadow: none;
 }
 
 .landing-btn-large {
@@ -1614,87 +1616,173 @@ pre {
 /* ── Hero ──────────────────────────────────────────────────── */
 .hero {
   position: relative;
-  padding: 7rem 0 8rem;
+  padding: 4rem 0;
   background-color: #fdfbf7;
-  /* Organic dot grid */
-  background-image: radial-gradient(#d4cfc6 1px, transparent 1px);
-  background-size: 24px 24px;
-  background-position: 50% 50%;
-  border-bottom: 2px solid #e5e0d8;
+  border-bottom: none;
   overflow: hidden;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 600px;
+  gap: 0;
 }
 
-/* Fade out grid at the bottom gradient */
-.hero::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 150px;
-  background: linear-gradient(to top, #fdfbf7, transparent);
-  pointer-events: none;
+@media (max-width: 1024px) {
+  .hero {
+    grid-template-columns: 1fr;
+    min-height: auto;
+    padding: 4rem 0 0;
+  }
 }
 
 .hero-inner {
   position: relative;
   z-index: 1;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 0 2rem;
-  text-align: center;
+  padding: 3rem 2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  max-width: 560px;
+  text-align: left;
+}
+
+@media (max-width: 1024px) {
+  .hero-inner {
+    text-align: center;
+    max-width: none;
+    align-items: center;
+  }
 }
 .hero-pill {
-  display: inline-block;
-  padding: 0.4rem 1rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
   font-size: 0.85rem;
   font-weight: 600;
   color: #5b21b6;
-  background: #fdfbf7;
+  background: #ede9fe;
   border: 2px solid #5b21b6;
-  border-radius: 4px;
+  border-radius: 8px;
   margin-bottom: 2rem;
-  box-shadow: 2px 2px 0px #e1d4fc;
+  box-shadow: none;
 }
+
+@media (max-width: 1024px) {
+  .hero-pill {
+    justify-content: center;
+  }
+}
+
 .hero-h1 {
-  font-size: clamp(2.8rem, 5vw, 4.5rem);
+  font-size: clamp(2.2rem, 4vw, 3.5rem);
   font-weight: 700;
-  line-height: 1.05;
+  line-height: 1.15;
   letter-spacing: -0.02em;
   margin-bottom: 1.5rem;
   text-wrap: balance;
+  color: #1a1816;
 }
+
+.hero-h1 em {
+  font-style: italic;
+}
+
 .hero-sub {
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   line-height: 1.6;
   color: #4c4643;
-  max-width: 620px;
-  margin: 0 auto 2.5rem;
+  max-width: none;
+  margin: 0 0 2.5rem 0;
   text-wrap: balance;
 }
+
 .hero-actions {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   gap: 1rem;
+}
+
+@media (max-width: 1024px) {
+  .hero-actions {
+    align-items: center;
+  }
 }
 .hero-guarantee {
   font-size: 0.85rem;
   color: #8c827a;
 }
 
-/* ── Demo Visual (Overlapping Hero) ────────────────────────── */
+.hero-right {
+  background-color: #0a0a0a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2rem;
+  position: relative;
+}
+
+.hero-right-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.hero-illustration {
+  width: 100%;
+  max-width: 500px;
+  aspect-ratio: 1;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 2rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.hero-illustration-placeholder {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.hero-illustration-placeholder p {
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.hero-caption {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  text-align: center;
+}
+
+@media (max-width: 1024px) {
+  .hero-right {
+    grid-column: 1;
+    padding: 3rem 2rem;
+    min-height: 400px;
+  }
+}
+
+/* ── Demo Visual (In Left Column) ────────────────────────── */
 .demo-visual {
   position: relative;
   z-index: 5;
-  margin-top: -6rem; /* Pull up into the hero */
-  padding-bottom: 5rem;
+  margin-top: 0;
+  padding-bottom: 0;
   background: transparent;
+  width: 100%;
 }
 .demo-visual-inner {
-  max-width: 860px;
-  margin: 0 auto;
-  padding: 0 2rem;
+  max-width: none;
+  margin: 0;
+  padding: 0;
 }
 .hero-mockup {
   border-color: #1a1816;
