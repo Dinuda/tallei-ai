@@ -1,10 +1,11 @@
-import React, { useState, useCallback, useEffect, useMemo } from "react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Check, Copy, ExternalLink, Zap, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X } from "lucide-react";
 import { Button } from "../../../components/ui/button";
 
 export type SaveMode = "instant" | "on_request";
 export type Provider = "claude" | "chatgpt";
 const CHATGPT_ACTIONS_SPEC_TAG = "stable";
+const CLAUDE_AUTOMATION_ENABLED = false;
 
 type McpEvent = {
   authMode?: string | null;
@@ -86,6 +87,16 @@ function getCheckpointActionUrl(
   return null;
 }
 
+function getSessionLiveUrl(
+  session: ClaudeOnboardingSession | null | undefined
+): string | null {
+  const candidate = session?.metadata?.["liveSessionUrl"];
+  if (typeof candidate === "string" && candidate.trim().length > 0) {
+    return candidate;
+  }
+  return null;
+}
+
 async function verifyConnectivityEvent(
   provider: Provider,
   sinceMs: number,
@@ -150,10 +161,8 @@ async function verifyConnectivityEvent(
 
 // --- Shared Utilities (Copied from page.tsx) ---
 export function getClaudeInstructions(mode: SaveMode): string {
-  if (mode === "instant") {
-    return `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.\n\n=== TURN PROTOCOL ===\n\nSTEP A — RECALL WHEN NEEDED:\n- Do NOT call recall_memories reflexively.\n- Call recall_memories only when prior-session context is required.\n- recall_memories defaults to facts + preferences and returns docs-lite context only.\n- include_doc_refs returns brief metadata only (no full document text).\n- recall_memories also includes a brief list of the latest 5 uploaded docs.\n- If the user references an older doc by name, call search_documents first and then include matching refs.\n- Use recall_document only when full document text is explicitly needed.\n\nSTEP B — ANSWER:\n- Answer the user directly.\n\nSTEP C — AUTO-SAVE NEW STRUCTURED CONTENT (required):\n- If this turn includes new structured content (file upload, pasted doc/spec/transcript, extracted PDF text, list/table/data), call remember(kind=\"document-note\", title, key_points, summary, source_hint) in the same turn, without asking permission.\n- Then append exactly this footer on its own line:\n  📎 Auto-saved as @doc:<ref> · reply **undo** to delete\n- Skip auto-save only if the user explicitly said not to save, the turn is purely conversational, or the same content was already saved.\n\nSTEP D — UNDO:\n- If the user replies \"undo\", \"del\", or \"delete\" after that footer, call undo_save with that @doc ref immediately.\n\n=== ONGOING ===\n- Use remember(kind=\"preference\") for stable preferences and identity facts.\n- Use remember(kind=\"fact\") for non-preference facts, decisions, events, notes, and corrections.\n- Use remember(kind=\"document-blob\") only when the user explicitly asks for full archive/full stash of complete text.\n\n=== HARD RULE ===\n- Never mention tool internals in user-facing text, except the required auto-save footer.`;
-  }
-  return `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.\n\n=== TURN PROTOCOL ===\n\nSTEP A — RECALL WHEN NEEDED:\n- Do NOT call recall_memories reflexively.\n- Call recall_memories only when prior-session context is required.\n- recall_memories returns docs-lite context only; include_doc_refs gives brief metadata only.\n- It includes the latest 5 uploaded docs automatically.\n- If the user references an older doc by name, call search_documents first.\n- Use recall_document only when full document text is explicitly needed.\n\nSTEP B — ANSWER:\n- Answer the user directly.\n\nSTEP C — SAVE ON REQUEST ONLY:\n- Use remember only when the user explicitly asks to save/remember/store/archive something.\n- For docs/files/PDFs use remember(kind=\"document-note\", title, key_points, summary, source_hint).\n- For full archive requests use remember(kind=\"document-blob\", content, title).\n\nSTEP D — UNDO:\n- If the user replies \"undo\", \"del\", or \"delete\" after an auto-save footer from a previous turn, call undo_save with that @doc ref.\n\n=== ONGOING ===\n- Use remember(kind=\"preference\") for stable preferences and identity facts.\n- Use remember(kind=\"fact\") only when the user asks to remember non-preference details.\n- If the user corrects prior information and asks to remember it, save the corrected value.\n\n=== HARD RULE ===\n- Never mention tool internals in user-facing text.`;
+  void mode;
+  return `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.\n\n=== TURN PROTOCOL ===\n\nSTEP A — RECALL WHEN NEEDED:\n- Do NOT call recall_memories reflexively.\n- Call recall_memories only when prior-session context is required.\n- recall_memories defaults to facts + preferences and returns docs-lite context only.\n- include_doc_refs returns brief metadata only (no full document text).\n- recall_memories also includes a brief list of the latest 5 uploaded docs.\n- If the user references an older doc by name, call search_documents first and then include matching refs.\n- Use recall_document only when full document text is explicitly needed.\n\nSTEP B — ANSWER:\n- Answer the user directly.\n\nSTEP C — AUTO-SAVE NEW STRUCTURED CONTENT (required):\n- If this turn includes new structured content (file upload, pasted doc/spec/transcript, extracted PDF text, list/table/data), call remember(kind=\"document-note\", title, key_points, summary, source_hint) in the same turn, without asking permission.\n- Then append exactly this footer on its own line:\n  📎 Auto-saved as @doc:<ref> · reply **undo** to delete\n- Skip auto-save only if the user explicitly said not to save, the turn is purely conversational, or the same content was already saved.\n\nSTEP D — UNDO:\n- If the user replies \"undo\", \"del\", or \"delete\" after that footer, call undo_save with that @doc ref immediately.\n\n=== ONGOING ===\n- Use remember(kind=\"preference\") for stable preferences and identity facts.\n- Use remember(kind=\"fact\") for non-preference facts, decisions, events, notes, and corrections.\n- Use remember(kind=\"document-blob\") only when the user explicitly asks for full archive/full stash of complete text.\n\n=== HARD RULE ===\n- Never mention tool internals in user-facing text, except the required auto-save footer.`;
 }
 
 export function getChatGptInstructions(mode: SaveMode): string {
@@ -568,7 +577,7 @@ export function TwoColumnStep({ media, content }: { media: React.ReactNode, cont
 
 export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onClose: () => void; mcpUrl: string }) {
   const [step, setStep] = useState(1);
-  const [saveMode, setSaveMode] = useState<SaveMode>("instant");
+  const saveMode: SaveMode = "instant";
   const [step1Verified, setStep1Verified] = useState(false);
   const [step2Verified, setStep2Verified] = useState(false);
   const [verificationStartedAt, setVerificationStartedAt] = useState<number | null>(null);
@@ -579,10 +588,25 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   const [onboardingEvents, setOnboardingEvents] = useState<ClaudeOnboardingEvent[]>([]);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const autoResumeAttemptRef = useRef<{ signature: string; at: number } | null>(null);
   const checkpointActionUrl = useMemo(
     () => getCheckpointActionUrl(onboardingSession?.checkpoint),
     [onboardingSession?.checkpoint]
   );
+  const sessionLiveUrl = useMemo(
+    () => getSessionLiveUrl(onboardingSession),
+    [onboardingSession]
+  );
+  const liveSessionUrl = checkpointActionUrl || sessionLiveUrl;
+  const liveInputRequired =
+    onboardingSession?.status === "checkpoint_required" ||
+    (onboardingSession?.status === "running" &&
+      (onboardingSession?.currentState === "browser_started" ||
+        onboardingSession?.currentState === "claude_authenticated"));
+  const displayState =
+    onboardingSession?.status === "checkpoint_required" && onboardingSession?.checkpoint
+      ? onboardingSession.checkpoint.blockedState
+      : onboardingSession?.currentState;
 
   const totalSteps = 4;
 
@@ -674,7 +698,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
         body: JSON.stringify({
           projectName: "Tallei Memory",
           applyProjectInstructions: true,
-          projectInstructions: getClaudeInstructions(saveMode),
+          projectInstructions: getClaudeInstructions("instant"),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -694,17 +718,27 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     } finally {
       setOnboardingBusy(false);
     }
-  }, [saveMode]);
+  }, []);
 
-  const resumeAutomatedSetup = useCallback(async () => {
-    if (!onboardingSession) return;
-    setOnboardingBusy(true);
-    setOnboardingError(null);
+  const resumeAutomatedSetup = useCallback(async (options?: {
+    authCompleted?: boolean;
+    setBusy?: boolean;
+    sessionId?: string;
+  }) => {
+    const sessionId = options?.sessionId ?? onboardingSession?.id;
+    if (!sessionId) return;
+    const setBusy = options?.setBusy ?? true;
+    if (setBusy) {
+      setOnboardingBusy(true);
+      setOnboardingError(null);
+    }
+
     try {
-      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${onboardingSession.id}/resume`, {
+      const payload = options?.authCompleted === true ? { authCompleted: true } : {};
+      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ authCompleted: true }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -719,7 +753,9 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     } catch (error) {
       setOnboardingError(error instanceof Error ? error.message : "Failed to resume automated setup.");
     } finally {
-      setOnboardingBusy(false);
+      if (setBusy) {
+        setOnboardingBusy(false);
+      }
     }
   }, [onboardingSession, refreshOnboardingSession]);
 
@@ -776,6 +812,28 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           setConnectionVerified(true);
           setConnectionVerificationMessage("Automated setup completed successfully.");
         }
+        if (session.status === "checkpoint_required" && session.checkpoint) {
+          const checkpointType = session.checkpoint.type;
+          if (checkpointType === "auth" || checkpointType === "manual_review") {
+            const signature =
+              `${session.id}:${session.checkpoint.blockedState}:${checkpointType}:${session.updatedAt}`;
+            const nowMs = Date.now();
+            const lastAttempt = autoResumeAttemptRef.current;
+            const shouldAttempt =
+              !lastAttempt ||
+              lastAttempt.signature !== signature ||
+              nowMs - lastAttempt.at >= 10_000;
+
+            if (shouldAttempt) {
+              autoResumeAttemptRef.current = { signature, at: nowMs };
+              void resumeAutomatedSetup({
+                sessionId: session.id,
+                authCompleted: checkpointType === "auth",
+                setBusy: false,
+              });
+            }
+          }
+        }
       } catch (error) {
         if (!stopped) {
           setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
@@ -792,7 +850,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       stopped = true;
       clearInterval(timer);
     };
-  }, [isOpen, onboardingSession, refreshOnboardingSession]);
+  }, [isOpen, onboardingSession, refreshOnboardingSession, resumeAutomatedSetup]);
 
   async function handleVerifyConnection() {
     setVerifyingConnection(true);
@@ -820,71 +878,81 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           media={<StepMedia src="/add-mcp.mp4" alt="Add Custom Connector" caption="Creating the custom connector" />}
           content={
             <>
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", background: "#f8fafc", padding: "1rem", borderRadius: "12px", border: "1px solid #e5e7eb" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
-                  <div>
-                    <div style={{ fontSize: "0.9rem", fontWeight: 700, color: "#111827" }}>Automated setup (beta)</div>
-                    <div style={{ fontSize: "0.82rem", color: "#6b7280", marginTop: "0.15rem" }}>
-                      We can configure Claude for you. You must still complete login/MFA in a live browser session.
+              {CLAUDE_AUTOMATION_ENABLED && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", background: "#f8fafc", padding: "1rem", borderRadius: "12px", border: "1px solid #e5e7eb" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontSize: "0.9rem", fontWeight: 700, color: "#111827" }}>Automated setup (beta)</div>
+                      <div style={{ fontSize: "0.82rem", color: "#6b7280", marginTop: "0.15rem" }}>
+                        We can configure Claude for you. You must still complete login/MFA in a live browser session.
+                      </div>
                     </div>
+                    <Button onClick={() => void startAutomatedSetup()} disabled={onboardingBusy}>
+                      {onboardingBusy ? "Starting..." : onboardingSession ? "Run Repair" : "Run Automated Setup"}
+                    </Button>
                   </div>
-                  <Button onClick={() => void startAutomatedSetup()} disabled={onboardingBusy}>
-                    {onboardingBusy ? "Starting..." : onboardingSession ? "Run Repair" : "Run Auto Setup"}
-                  </Button>
-                </div>
 
-                {onboardingSession && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", borderTop: "1px solid #e5e7eb", paddingTop: "0.75rem" }}>
-                    <div style={{ fontSize: "0.82rem", color: "#374151" }}>
-                      <strong>Status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(onboardingSession.currentState)}
-                    </div>
-                    {onboardingSession.checkpoint && (
-                      <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#9a3412" }}>
-                        <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>{onboardingSession.checkpoint.message}</div>
-                        <div>{onboardingSession.checkpoint.resumeHint}</div>
-                        {checkpointActionUrl && (
-                          <div style={{ marginTop: "0.55rem" }}>
-                            <Button
-                              variant="outline"
-                              onClick={() => window.open(checkpointActionUrl, "_blank", "noopener,noreferrer")}
-                            >
-                              Open Live Session <ExternalLink size={12} style={{ marginLeft: "6px" }} />
-                            </Button>
-                          </div>
+                  {onboardingSession && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", borderTop: "1px solid #e5e7eb", paddingTop: "0.75rem" }}>
+                      <div style={{ fontSize: "0.82rem", color: "#374151" }}>
+                        <strong>Status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(displayState ?? onboardingSession.currentState)}
+                      </div>
+                      {onboardingSession.checkpoint && (
+                        <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#9a3412" }}>
+                          <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>{onboardingSession.checkpoint.message}</div>
+                          <div>{onboardingSession.checkpoint.resumeHint}</div>
+                          {checkpointActionUrl && (
+                            <div style={{ marginTop: "0.55rem" }}>
+                              <Button
+                                variant="outline"
+                                onClick={() => window.open(checkpointActionUrl, "_blank", "noopener,noreferrer")}
+                              >
+                                Open Live Session <ExternalLink size={12} style={{ marginLeft: "6px" }} />
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {onboardingSession.lastError && (
+                        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#991b1b" }}>
+                          {onboardingSession.lastError}
+                        </div>
+                      )}
+                      {onboardingEvents.length > 0 && (
+                        <div style={{ fontSize: "0.78rem", color: "#6b7280" }}>
+                          Latest event: {onboardingEvents[onboardingEvents.length - 1].eventType}
+                        </div>
+                      )}
+                      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                        {onboardingSession.status === "checkpoint_required" && (
+                          <Button
+                            variant="outline"
+                            onClick={() =>
+                              void resumeAutomatedSetup({
+                                authCompleted: onboardingSession.checkpoint?.type === "auth",
+                              })
+                            }
+                            disabled={onboardingBusy}
+                          >
+                            {onboardingBusy ? "Resuming..." : "Resume"}
+                          </Button>
                         )}
-                      </div>
-                    )}
-                    {onboardingSession.lastError && (
-                      <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#991b1b" }}>
-                        {onboardingSession.lastError}
-                      </div>
-                    )}
-                    {onboardingEvents.length > 0 && (
-                      <div style={{ fontSize: "0.78rem", color: "#6b7280" }}>
-                        Latest event: {onboardingEvents[onboardingEvents.length - 1].eventType}
-                      </div>
-                    )}
-                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                      {onboardingSession.status === "checkpoint_required" && (
-                        <Button variant="outline" onClick={() => void resumeAutomatedSetup()} disabled={onboardingBusy}>
-                          {onboardingBusy ? "Resuming..." : "Resume"}
+                        {!isTerminal(onboardingSession.status) && (
+                          <Button variant="outline" onClick={() => void cancelAutomatedSetup()} disabled={onboardingBusy}>
+                            {onboardingBusy ? "Canceling..." : "Cancel"}
+                          </Button>
+                        )}
+                        <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
+                          Refresh
                         </Button>
-                      )}
-                      {!isTerminal(onboardingSession.status) && (
-                        <Button variant="outline" onClick={() => void cancelAutomatedSetup()} disabled={onboardingBusy}>
-                          {onboardingBusy ? "Canceling..." : "Cancel"}
-                        </Button>
-                      )}
-                      <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
-                        Refresh
-                      </Button>
+                      </div>
                     </div>
-                  </div>
-                )}
-                {onboardingError && (
-                  <div style={{ fontSize: "0.82rem", color: "#b91c1c" }}>{onboardingError}</div>
-                )}
-              </div>
+                  )}
+                  {onboardingError && (
+                    <div style={{ fontSize: "0.82rem", color: "#b91c1c" }}>{onboardingError}</div>
+                  )}
+                </div>
+              )}
 
               <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6 }}>
                 First, link Tallei to your Claude account. Open your Claude Connectors page and create a new custom connector with these exact values:
@@ -934,12 +1002,9 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                 <div>2. In the project settings, enable the <strong>Tallei Memory</strong> connector.</div>
               </div>
 
-              <div>
-                <h4 style={{ fontSize: "0.95rem", fontWeight: 600, margin: "0 0 0.75rem 0", color: "#111827" }}>
-                  How should memories be saved?
-                </h4>
-                <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
-              </div>
+              <InfoCallout>
+                Save mode for Claude is enforced to <strong>Save Instantly</strong> in this onboarding flow.
+              </InfoCallout>
 
               <div>
                 <h4 style={{ fontSize: "0.95rem", fontWeight: 600, margin: "0 0 0.75rem 0", color: "#111827" }}>
@@ -949,7 +1014,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
               </div>
 
               <InfoCallout>
-                Browser-use automation handles this when possible; keep this manual block as fallback if Claude UI changes.
+                Automation is disabled in this release; follow these manual steps exactly.
               </InfoCallout>
             </>
           }
@@ -964,10 +1029,10 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
             </h3>
           </div>
 
-          {onboardingSession && (
+          {CLAUDE_AUTOMATION_ENABLED && onboardingSession && (
             <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "10px", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
               <div style={{ color: "#374151" }}>
-                <strong>Automation status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(onboardingSession.currentState)}
+                <strong>Automation status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(displayState ?? onboardingSession.currentState)}
               </div>
               {onboardingSession.checkpoint && (
                 <div style={{ marginTop: "0.55rem", color: "#9a3412" }}>
@@ -987,7 +1052,15 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
               )}
               <div style={{ marginTop: "0.6rem", display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
                 {onboardingSession.status === "checkpoint_required" && (
-                  <Button variant="outline" onClick={() => void resumeAutomatedSetup()} disabled={onboardingBusy}>
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void resumeAutomatedSetup({
+                        authCompleted: onboardingSession.checkpoint?.type === "auth",
+                      })
+                    }
+                    disabled={onboardingBusy}
+                  >
                     {onboardingBusy ? "Resuming..." : "Resume"}
                   </Button>
                 )}
@@ -1004,14 +1077,12 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                 <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
                   Refresh
                 </Button>
-                {!checkpointActionUrl && (
-                  <Button
-                    variant="outline"
-                    onClick={() => window.open("https://claude.ai/settings/connectors", "_blank", "noopener,noreferrer")}
-                  >
-                    Open Claude Connectors <ExternalLink size={12} style={{ marginLeft: "6px" }} />
-                  </Button>
-                )}
+                <Button
+                  variant="outline"
+                  onClick={() => window.open("https://claude.ai/settings/connectors", "_blank", "noopener,noreferrer")}
+                >
+                  Open Claude Connectors <ExternalLink size={12} style={{ marginLeft: "6px" }} />
+                </Button>
               </div>
               {onboardingSession.lastError && (
                 <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingSession.lastError}</div>
@@ -1027,12 +1098,38 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
             </div>
           )}
 
+          {CLAUDE_AUTOMATION_ENABLED && liveSessionUrl && (
+            <div style={{ width: "100%", maxWidth: "720px", textAlign: "left" }}>
+              <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#111827", marginBottom: "0.45rem" }}>
+                Live automation session
+              </div>
+              <div style={{ position: "relative", borderRadius: "10px", overflow: "hidden", border: "1px solid #e5e7eb", background: "#111827" }}>
+                <iframe
+                  src={liveSessionUrl}
+                  title="Claude live automation session"
+                  style={{ width: "100%", height: "420px", border: "none", display: "block", pointerEvents: liveInputRequired ? "auto" : "none" }}
+                  allow="clipboard-read; clipboard-write"
+                />
+                {!liveInputRequired && (
+                  <div style={{ position: "absolute", inset: 0, background: "rgba(17, 24, 39, 0.56)", color: "#f3f4f6", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: "0.85rem", padding: "1rem" }}>
+                    Automation is running. Input is locked until user action is required.
+                  </div>
+                )}
+              </div>
+              <div style={{ marginTop: "0.45rem", fontSize: "0.78rem", color: "#6b7280" }}>
+                {liveInputRequired
+                  ? "User input is needed now. Complete login/approval in the live session. The flow auto-resumes; Resume remains available as fallback."
+                  : "Live view only. Controls unlock automatically if a checkpoint requires your input."}
+              </div>
+            </div>
+          )}
+
           <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6, maxWidth: "400px" }}>
             Try it out: inside your new Claude project, send this test message:
           </p>
 
           <div style={{ width: "100%", maxWidth: "500px", textAlign: "left", marginTop: "1rem" }}>
-            <CodeBlock value={saveMode === "instant" ? "My favorite programming language is Rust." : "Remember this: my favorite programming language is Rust."} language="txt" label="Test Prompt" />
+            <CodeBlock value="My favorite programming language is Rust." language="txt" label="Test Prompt" />
           </div>
 
           <Button onClick={() => void handleVerifyConnection()} disabled={verifyingConnection} style={{ marginTop: "0.75rem" }}>

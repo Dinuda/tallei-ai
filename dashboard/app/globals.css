@@ -1,5 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
+@source "./components";
 
 @theme {
   --color-border: var(--border);
@@ -2442,4 +2443,265 @@ pre {
   font-size: 0.85rem;
   color: #8c827a;
   line-height: 1.5;
+}
+
+/* ============================================================
+   PERFORMANCE / WHY TALLEI SECTION
+   ============================================================ */
+
+.perf-section {
+  width: 100%;
+  background: #fdfcf9;
+  padding: 6rem 0;
+  border-top: 1px solid #e5e0d8;
+  border-bottom: 1px solid #e5e0d8;
+}
+
+.perf-inner {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+/* ── Header ─── */
+.perf-eyebrow {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #7c3aed;
+  margin-bottom: 1rem;
+}
+
+.perf-h2 {
+  font-family: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  font-size: clamp(2.8rem, 6vw, 4.5rem);
+  font-weight: 700;
+  color: #1c1917;
+  margin-bottom: 1.25rem;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+
+.perf-h2 span {
+  font-style: italic;
+  font-weight: 300;
+  color: #4c4643;
+}
+
+.perf-sub {
+  font-size: 1.1rem;
+  color: #4c4643;
+  font-weight: 500;
+  max-width: 600px;
+  margin-bottom: 3.5rem;
+}
+
+/* ── 3-column stat cards ─── */
+.perf-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  margin-bottom: 2.5rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+
+@media (max-width: 767px) {
+  .perf-cards {
+    grid-template-columns: 1fr;
+  }
+  .perf-card {
+    border-right: none !important;
+    border-bottom: 1px solid #e5e7eb !important;
+  }
+  .perf-card:last-child {
+    border-bottom: none !important;
+  }
+}
+
+.perf-card {
+  padding: 2rem;
+  border-right: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.perf-card:last-child {
+  border-right: none;
+}
+
+.perf-card-num {
+  font-family: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  font-size: 2.75rem;
+  color: #1c1917;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  margin-bottom: 0.5rem;
+}
+
+.perf-card-label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #1c1917;
+  margin-bottom: 0.35rem;
+}
+
+.perf-card-desc {
+  font-size: 0.84rem;
+  color: #6b7280;
+  line-height: 1.55;
+  flex: 1;
+}
+
+.perf-card-logos {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.perf-card-logos span {
+  color: #d1d5db;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.perf-card-logos .perf-more {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  font-weight: 500;
+}
+
+/* ── Comparison table ─── */
+.perf-compare {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+
+@media (max-width: 767px) {
+  .perf-compare {
+    grid-template-columns: 1fr;
+  }
+}
+
+.perf-col-without {
+  background: #f4f4f5;
+  border-right: 1px solid #e5e7eb;
+}
+
+.perf-col-with {
+  background: #eff4ff;
+}
+
+.perf-col-head {
+  padding: 1.75rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.perf-col-with .perf-col-head {
+  border-bottom-color: #c7d2fe;
+}
+
+.perf-col-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #1c1917;
+  margin-bottom: 0.35rem;
+}
+
+.perf-col-with .perf-col-title {
+  color: #5b21b6;
+}
+
+.perf-col-subtitle {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #9ca3af;
+  margin-bottom: 1rem;
+}
+
+.perf-col-with .perf-col-subtitle {
+  color: #a5b4fc;
+}
+
+.perf-col-logos {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.perf-col-logos span {
+  font-weight: 700;
+  font-size: 0.75rem;
+  color: #d1d5db;
+}
+
+.perf-col-with .perf-col-logos span {
+  color: #a5b4fc;
+}
+
+.perf-col-logos .perf-isolated {
+  font-size: 0.7rem;
+  color: #9ca3af;
+  font-weight: 500;
+  margin-left: 0.25rem;
+}
+
+.perf-col-with .perf-col-logos .perf-isolated {
+  color: #818cf8;
+}
+
+/* Row items */
+.perf-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1.25rem 1.75rem;
+  border-bottom: 1px solid rgba(229, 231, 235, 0.6);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #6b7280;
+}
+
+.perf-col-with .perf-row {
+  color: #1c1917;
+  border-bottom-color: #c7d2fe;
+}
+
+.perf-row:last-child {
+  border-bottom: none;
+}
+
+.perf-row-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  width: 16px;
+  height: 16px;
+}
+
+.perf-row-icon-x {
+  color: #9ca3af;
+  stroke-width: 2.5;
+}
+
+.perf-row-icon-check {
+  color: #4f46e5;
+  stroke-width: 2.5;
+}
+
+.perf-row-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  margin-left: 1.6rem;
 }

@@ -10,7 +10,7 @@ const createSessionSchema = z.object({
 });
 
 const resumeSchema = z.object({
-  authCompleted: z.boolean().optional().default(true),
+  authCompleted: z.boolean().optional(),
 });
 
 const router = Router();

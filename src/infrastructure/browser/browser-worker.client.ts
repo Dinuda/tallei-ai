@@ -1,12 +1,8 @@
 import { createHash } from "node:crypto";
 import { config } from "../../config/index.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
-import { browserFallbackCache } from "./browser-fallback-cache.js";
-import { flowTemplateStore } from "./flow-template-store.js";
-import type { OnboardingActionState } from "./flow-template-store.types.js";
 import type { OnboardingCheckpoint, OnboardingSession, OnboardingState } from "../../orchestration/browser/claude-onboarding.types.js";
 
-type ExecutionMode = "student" | "llm_fallback";
+type ExecutionMode = "student";
 
 type WorkerStatus = "ok" | "checkpoint" | "error";
 
@@ -44,7 +40,8 @@ const STUDENT_POLICY: Record<Exclude<OnboardingState, "queued">, StudentPolicyIn
   },
   connector_connected: {
     state: "connector_connected",
-    objective: "Ensure Tallei connector is added and connected in Claude connectors settings.",
+    objective:
+      "Ensure Tallei connector is added and connected only on claude.ai/settings/connectors. Follow steps exactly and do not click anything if the page, button text, or fields do not match expected connector UI.",
     selectors: ["a[href*='/settings/connectors']", "button", "input[type='url']"],
     expectedSignal: "Tallei connector shows connected/active state",
   },
@@ -89,6 +86,14 @@ function getExpectedInstructionsHash(session: OnboardingSession): string | undef
   const instructions = getProjectInstructions(session) ?? config.claudeProjectInstructionsTemplate;
   const normalized = instructions.trim();
   return normalized.length > 0 ? sha256(normalized) : undefined;
+}
+
+function getHyperAgentActionCacheByState(
+  session: OnboardingSession,
+): Record<string, unknown> | undefined {
+  const raw = session.metadata["hyperAgentActionCacheByState"];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  return raw as Record<string, unknown>;
 }
 
 function normalizeCheckpoint(value: unknown): OnboardingCheckpoint | null {
@@ -138,64 +143,7 @@ function normalizeCheckpoint(value: unknown): OnboardingCheckpoint | null {
   };
 }
 
-class LlmFallbackPlanner {
-  async buildInstruction(input: {
-    state: Exclude<OnboardingState, "queued">;
-    lastError: string;
-    sessionId: string;
-    objective: string;
-    expectedSignal: string;
-    useCheapModel?: boolean;
-  }): Promise<{ instruction: string; source: "cache" | "llm"; errorSignature: string }> {
-    const cached = await browserFallbackCache.get(input.state, input.lastError);
-    if (cached) {
-      await browserFallbackCache.recordHit(input.state, cached.signature);
-      return {
-        instruction: cached.instruction,
-        source: "cache",
-        errorSignature: cached.signature,
-      };
-    }
-
-    const prompt = [
-      "You are a browser automation recovery planner.",
-      "Return a concise fallback instruction for a Playwright-like worker.",
-      "Keep under 90 words.",
-      `State: ${input.state}`,
-      `Objective: ${input.objective}`,
-      `Expected signal: ${input.expectedSignal}`,
-      `Last error: ${input.lastError}`,
-      `Session: ${input.sessionId}`,
-      "Instruction:",
-    ].join("\n");
-
-    const response = await aiProviderRegistry.chat({
-      model: input.useCheapModel
-        ? "gpt-4o-mini"
-        : aiProviderRegistry.chatModelName(),
-      messages: [
-        { role: "system", content: "You are a browser automation recovery planner." },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.2,
-      maxTokens: 140,
-    });
-
-    const text = response.text.trim();
-    const instruction = text || `Recover ${input.state}: navigate to the relevant Claude page, re-run objective, verify expected signal.`;
-    const { signature } = await browserFallbackCache.put(input.state, input.lastError, instruction);
-
-    return {
-      instruction,
-      source: "llm",
-      errorSignature: signature,
-    };
-  }
-}
-
 class CloudBrowserWorkerClient {
-  private readonly planner = new LlmFallbackPlanner();
-
   private get enabled(): boolean {
     return config.browserWorkerBaseUrl.length > 0;
   }
@@ -206,10 +154,6 @@ class CloudBrowserWorkerClient {
   ): Promise<BrowserExecutionResult> {
     const policy = STUDENT_POLICY[state];
     const retries = Math.max(1, config.browserMaxStudentRetries);
-    const isLearned = await flowTemplateStore
-      .getLearnedPolicy(state as OnboardingActionState)
-      .then(t => t?.isLearned ?? false)
-      .catch(() => false);
 
     const attemptErrors: string[] = [];
     for (let attempt = 1; attempt <= retries; attempt += 1) {
@@ -238,75 +182,41 @@ class CloudBrowserWorkerClient {
         };
       }
 
+      if (this.isUnstructuredOutputError(workerResult.error)) {
+        const liveSessionUrl =
+          typeof workerResult.output?.["liveSessionUrl"] === "string"
+            ? (workerResult.output["liveSessionUrl"] as string)
+            : undefined;
+        return {
+          kind: "checkpoint",
+          checkpoint: {
+            type: "manual_review",
+            blockedState: state,
+            message: "Browser automation completed without structured output.",
+            resumeHint:
+              "Open the live browser session, verify progress for this step, then resume onboarding.",
+            ...(liveSessionUrl ? { actionUrl: liveSessionUrl } : {}),
+          },
+          metadataPatch: workerResult.output,
+          diagnostics: {
+            mode: "student",
+            attempts: attempt,
+            errors: [workerResult.error],
+            recovery: "manual_review_checkpoint",
+          },
+        };
+      }
+
       attemptErrors.push(workerResult.error || "Unknown student execution error");
-    }
-
-    if (!config.browserLlmFallbackEnabled) {
-      return {
-        kind: "error",
-        message: `Student policy failed after ${retries} attempts: ${attemptErrors.join(" | ")}`,
-        diagnostics: { mode: "student", attempts: retries, errors: attemptErrors },
-      };
-    }
-
-    const fallbackPlan = await this.planner.buildInstruction({
-      state,
-      lastError: attemptErrors[attemptErrors.length - 1] || "Unknown error",
-      sessionId: session.id,
-      objective: policy.objective,
-      expectedSignal: policy.expectedSignal,
-      useCheapModel: isLearned,
-    });
-
-    const fallbackResult = await this.dispatch({
-      mode: "llm_fallback",
-      session,
-      state,
-      instruction: {
-        state,
-        objective: fallbackPlan.instruction,
-        selectors: [],
-        expectedSignal: policy.expectedSignal,
-      },
-      attempt: 1,
-    });
-
-    if (fallbackResult.status === "ok") {
-      return {
-        kind: "ok",
-        metadataPatch: fallbackResult.output,
-        diagnostics: {
-          mode: "llm_fallback",
-          studentErrors: attemptErrors,
-          fallbackSource: fallbackPlan.source,
-          fallbackErrorSignature: fallbackPlan.errorSignature,
-        },
-      };
-    }
-
-    if (fallbackResult.status === "checkpoint" && fallbackResult.checkpoint) {
-      return {
-        kind: "checkpoint",
-        checkpoint: fallbackResult.checkpoint,
-        metadataPatch: fallbackResult.output,
-        diagnostics: {
-          mode: "llm_fallback",
-          studentErrors: attemptErrors,
-          fallbackSource: fallbackPlan.source,
-          fallbackErrorSignature: fallbackPlan.errorSignature,
-        },
-      };
     }
 
     return {
       kind: "error",
-      message: `Fallback failed: ${fallbackResult.error || "Unknown fallback error"}`,
+      message: `Student policy failed after ${retries} attempts: ${attemptErrors.join(" | ")}`,
       diagnostics: {
-        mode: "llm_fallback",
-        studentErrors: attemptErrors,
-        fallbackSource: fallbackPlan.source,
-        fallbackErrorSignature: fallbackPlan.errorSignature,
-        fallbackError: fallbackResult.error || "Unknown fallback error",
+        mode: "student",
+        attempts: retries,
+        errors: attemptErrors,
       },
     };
   }
@@ -343,7 +253,10 @@ class CloudBrowserWorkerClient {
         applyProjectInstructions: shouldApplyProjectInstructions(input.session),
         projectInstructions: getProjectInstructions(input.session),
         expectedInstructionsHash: shouldApplyProjectInstructions(input.session) ? getExpectedInstructionsHash(input.session) : undefined,
-        expectedInstructionSnippet: shouldApplyProjectInstructions(input.session) ? "tallei memory + document tools|remember" : undefined,
+        expectedInstructionSnippet: shouldApplyProjectInstructions(input.session)
+          ? "tallei-connected claude|auto-save new structured content|auto-saved as @doc:<ref>|remember(kind=\"document-note\""
+          : undefined,
+        hyperAgentActionCacheByState: getHyperAgentActionCacheByState(input.session),
         instruction: input.instruction,
         attempt: input.attempt,
       }),
@@ -369,9 +282,24 @@ class CloudBrowserWorkerClient {
 
     if (!res.ok) {
       let detail = "";
+      let responseOutput: Record<string, unknown> | undefined;
       try {
-        const parsed = await res.json() as { error?: string };
+        const parsed = await res.json() as {
+          status?: string;
+          error?: string;
+          output?: Record<string, unknown>;
+        };
         detail = parsed?.error ? `: ${parsed.error}` : "";
+        if (parsed?.output && typeof parsed.output === "object" && !Array.isArray(parsed.output)) {
+          responseOutput = parsed.output;
+        }
+        if (parsed?.status === "error" && typeof parsed.error === "string") {
+          return {
+            status: "error",
+            error: parsed.error,
+            output: responseOutput,
+          };
+        }
       } catch {
         try {
           const txt = await res.text();
@@ -381,6 +309,7 @@ class CloudBrowserWorkerClient {
       return {
         status: "error",
         error: `Worker HTTP ${res.status}${detail}`,
+        output: responseOutput,
       };
     }
 
@@ -396,6 +325,11 @@ class CloudBrowserWorkerClient {
       return { ...data, checkpoint };
     }
     return data;
+  }
+
+  private isUnstructuredOutputError(message?: string): boolean {
+    if (!message) return false;
+    return /returned no structured output/i.test(message);
   }
 
   private simulate(input: {

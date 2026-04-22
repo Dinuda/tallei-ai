@@ -53,8 +53,10 @@ const APPS = [
 
 export function IntegrationsSection() {
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [displayedBotMsg, setDisplayedBotMsg] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
+  const [displayedUserMsg, setDisplayedUserMsg] = useState("");
+  const [isTypingUser, setIsTypingUser] = useState(false);
+  const [showMemoryBanner, setShowMemoryBanner] = useState(false);
+  const [showBotMsg, setShowBotMsg] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -69,26 +71,37 @@ export function IntegrationsSection() {
 
   const currentApp = APPS[currentIndex];
 
-  // Typing effect for the bot message
+  // Typing effect for the user message, then show memory banner and bot message
   useEffect(() => {
-    setDisplayedBotMsg("");
-    setIsTyping(true);
+    setDisplayedUserMsg("");
+    setIsTypingUser(true);
+    setShowMemoryBanner(false);
+    setShowBotMsg(false);
 
-    const fullText = currentApp.botMsg;
+    const fullText = currentApp.userMsg;
     let i = 0;
 
-    // Small delay before starting to type to simulate "thinking"
+    // Small delay before starting to type
     const startDelay = setTimeout(() => {
       const typeInterval = setInterval(() => {
-        i += 2; // Type 2 chars at a time for snappiness
+        i += 1; 
         if (i >= fullText.length) {
-          setDisplayedBotMsg(fullText);
-          setIsTyping(false);
+          setDisplayedUserMsg(fullText);
+          setIsTypingUser(false);
           clearInterval(typeInterval);
+          
+          // Show memory banner and bot message slightly after user finishes typing
+          setTimeout(() => {
+            setShowMemoryBanner(true);
+            setTimeout(() => {
+              setShowBotMsg(true);
+            }, 400); // small delay between banner and bot message
+          }, 300);
+          
         } else {
-          setDisplayedBotMsg(fullText.slice(0, i));
+          setDisplayedUserMsg(fullText.slice(0, i));
         }
-      }, 15); // Fast typing speed
+      }, 30); // Fast typing speed
 
       return () => clearInterval(typeInterval);
     }, 600);
@@ -124,20 +137,6 @@ export function IntegrationsSection() {
         <div className="integrations-works-with">
           <p className="integrations-works-label">Works with</p>
           
-          <div className="integrations-logos">
-            {INTEGRATIONS.map((integration) => (
-              <div key={integration.id} className="integrations-logo" title={integration.name}>
-                <Image 
-                  src={integration.icon} 
-                  alt={`${integration.name} logo`} 
-                  width={24} 
-                  height={24} 
-                  className="integrations-logo-img" 
-                />
-              </div>
-            ))}
-          </div>
-
           <p className="integrations-more-coming">More coming soon</p>
         </div>
       </div>
@@ -191,54 +190,60 @@ export function IntegrationsSection() {
             {/* Chat Area */}
             <div className="integrations-chat">
               <div className="integrations-chat-content" ref={contentRef}>
-                {/* Memory Alert Banner */}
-                <div className="integrations-memory-banner">
-                  <div className="integrations-memory-icon">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a48ed4" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="tallei-tally-anim">
-                      <line x1="5" y1="4" x2="5" y2="20" className="tally-line t-1" />
-                      <line x1="9" y1="4" x2="9" y2="20" className="tally-line t-2" />
-                      <line x1="13" y1="4" x2="13" y2="20" className="tally-line t-3" />
-                      <line x1="17" y1="4" x2="17" y2="20" className="tally-line t-4" />
-                      <line x1="2" y1="16" x2="20" y2="8" className="tally-line t-5" />
-                    </svg>
-                  </div>
-                  <div className="integrations-memory-content">
-                    <p className="integrations-memory-title">Memory from your last session</p>
-                    <p className="integrations-memory-text">
-                      <span className="integrations-memory-via" style={{ display: "inline-flex", alignItems: "center", gap: "6px", paddingBottom: "4px" }}>
-                        Synced from 
-                        <Image 
-                          src={currentApp.memoryVia === "Claude" ? "/claude.svg" : currentApp.memoryVia === "ChatGPT" ? "/chatgpt.svg" : "/gemini.svg"} 
-                          alt={currentApp.memoryVia} 
-                          width={14} 
-                          height={14} 
-                        />
-                        {currentApp.memoryVia}
-                      </span><br />
-                      {currentApp.memoryText}
-                    </p>
-                  </div>
-                </div>
-
                 {/* Messages */}
                 <div className="integrations-message user">
                   <div className="integrations-message-avatar">Y</div>
                   <div className="integrations-message-body">
-                    <p>{currentApp.userMsg}</p>
-                  </div>
-                </div>
-
-                <div className="integrations-message bot">
-                  <div className="integrations-message-avatar">
-                    <Image src={currentApp.icon} alt={currentApp.name} width={24} height={24} />
-                  </div>
-                  <div className="integrations-message-body">
-                    <p style={{ whiteSpace: "pre-wrap" }}>
-                      {displayedBotMsg}
-                      {isTyping && <span className="integrations-typing-cursor" />}
+                    <p>
+                      {displayedUserMsg}
+                      {isTypingUser && <span className="integrations-typing-cursor" />}
                     </p>
                   </div>
                 </div>
+
+                {/* Memory Alert Banner */}
+                {showMemoryBanner && (
+                  <div className="integrations-memory-banner">
+                    <div className="integrations-memory-icon">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a48ed4" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="tallei-tally-anim">
+                        <line x1="5" y1="4" x2="5" y2="20" className="tally-line t-1" />
+                        <line x1="9" y1="4" x2="9" y2="20" className="tally-line t-2" />
+                        <line x1="13" y1="4" x2="13" y2="20" className="tally-line t-3" />
+                        <line x1="17" y1="4" x2="17" y2="20" className="tally-line t-4" />
+                        <line x1="2" y1="16" x2="20" y2="8" className="tally-line t-5" />
+                      </svg>
+                    </div>
+                    <div className="integrations-memory-content">
+                      <p className="integrations-memory-title">Memory from your last session</p>
+                      <p className="integrations-memory-text">
+                        <span className="integrations-memory-via" style={{ display: "inline-flex", alignItems: "center", gap: "6px", paddingBottom: "4px" }}>
+                          Synced from 
+                          <Image 
+                            src={currentApp.memoryVia === "Claude" ? "/claude.svg" : currentApp.memoryVia === "ChatGPT" ? "/chatgpt.svg" : "/gemini.svg"} 
+                            alt={currentApp.memoryVia} 
+                            width={14} 
+                            height={14} 
+                          />
+                          {currentApp.memoryVia}
+                        </span><br />
+                        {currentApp.memoryText}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {showBotMsg && (
+                  <div className="integrations-message bot">
+                    <div className="integrations-message-avatar">
+                      <Image src={currentApp.icon} alt={currentApp.name} width={24} height={24} />
+                    </div>
+                    <div className="integrations-message-body">
+                      <p style={{ whiteSpace: "pre-wrap" }}>
+                        {currentApp.botMsg}
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Input */}

@@ -23,6 +23,7 @@
     "@azure/identity": "^4.13.1",
     "@azure/search-documents": "^12.2.0",
     "@google/genai": "^1.50.1",
+    "@hyperbrowser/agent": "^1.1.2",
     "@hyperbrowser/sdk": "^0.89.5",
     "@langchain/core": "^1.1.40",
     "@mistralai/mistralai": "^2.2.0",
@@ -50,7 +51,8 @@
     "redis": "^5.11.0",
     "uploadthing": "^7.7.4",
     "uuid": "^11.1.0",
-    "zod": "^3.24.2"
+    "zod": "^3.24.2",
+    "zod4": "npm:zod@^4.3.6"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",

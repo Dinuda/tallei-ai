@@ -64,7 +64,7 @@ export async function createHyperbrowserSession(): Promise<HyperbrowserSessionRu
 export async function stopHyperbrowserSession(id: string): Promise<void> {
   try {
     const client = getClient();
-    await client.sessions.stop(id);
+  await client.sessions.stop(id);
   } catch {
     // best-effort shutdown
   }

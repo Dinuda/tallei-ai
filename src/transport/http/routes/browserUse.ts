@@ -7,7 +7,7 @@ import {
 } from "../../../infrastructure/browser/claude-browser-worker.js";
 
 const executeSchema = z.object({
-  mode: z.enum(["student", "llm_fallback"]),
+  mode: z.enum(["student"]),
   sessionId: z.string().uuid(),
   state: z.enum([
     "browser_started",
@@ -22,7 +22,8 @@ const executeSchema = z.object({
   applyProjectInstructions: z.boolean().optional(),
   projectInstructions: z.string().trim().min(1).max(20000).optional(),
   expectedInstructionsHash: z.string().trim().length(64).optional(),
-  expectedInstructionSnippet: z.string().trim().min(1).max(120).optional(),
+  expectedInstructionSnippet: z.string().trim().min(1).max(240).optional(),
+  hyperAgentActionCacheByState: z.record(z.string(), z.unknown()).optional(),
   attempt: z.number().int().min(1).max(10),
   instruction: z.object({
     state: z.enum([
