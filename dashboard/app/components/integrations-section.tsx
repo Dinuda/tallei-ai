@@ -24,9 +24,9 @@ const APPS = [
     name: "ChatGPT",
     icon: "/chatgpt.svg",
     memoryVia: "Claude",
-    memoryText: "You decided on tiered pricing starting at $49/mo and ruled out usage-based billing until year two. The enterprise tier was left open pending legal review.",
-    userMsg: "Given that decision, should we launch with annual-only for the enterprise tier?",
-    botMsg: "Given what you've already worked through, annual-only for enterprise makes sense — it avoids the legal complexity of month-to-month cancellation clauses and gives you predictable ARR from day one. I'd add a 14-day trial with a credit card hold so you're not blocking conversions at the top.",
+    memoryText: "Project code name is 'Apollo'. We are targeting a Q3 launch. No usage-based billing.",
+    userMsg: "Draft an invite for the kickoff meeting.",
+    botMsg: "Subject: Kickoff: Project Apollo 🚀\n\nHi team,\n\nLet's align on our Q3 launch for Project Apollo. As discussed, we'll be moving forward with flat-rate pricing only.",
     placeholder: "Message ChatGPT..."
   },
   {
@@ -34,9 +34,9 @@ const APPS = [
     name: "Claude",
     icon: "/claude.svg",
     memoryVia: "Gemini",
-    memoryText: "The user prefers to structure all analytical responses with a bolded TL;DR followed by three distinct bullet points. No conversational filler.",
-    userMsg: "Summarize the competitor feature matrix I uploaded.",
-    botMsg: "**TL;DR:** Competitors lack deep integrations but beat us on pricing.\n\n• **Integrations:** Competitor A only supports basic webhooks.\n• **Pricing:** Average market rate is 30% below our entry tier.\n• **UX:** Their onboarding flow is highly friction-filled.",
+    memoryText: "I prefer concise, bulleted responses. No conversational fluff or disclaimers.",
+    userMsg: "How do MCP servers work?",
+    botMsg: "• **MCP (Model Context Protocol)** standardizes how AI models connect to local data sources.\n• **Architecture:** Client (Claude) ↔️ MCP Server ↔️ Local Data.\n• **Benefit:** Secure, local tool execution without exposing credentials to the cloud.",
     placeholder: "Message Claude..."
   },
   {
@@ -44,9 +44,9 @@ const APPS = [
     name: "Gemini",
     icon: "/gemini.svg",
     memoryVia: "ChatGPT",
-    memoryText: "The primary audience for this documentation is non-technical marketing managers. Always use accessible language and analogical examples.",
-    userMsg: "Draft the introductory paragraph for the new API connector feature.",
-    botMsg: "Think of our new API connector like a universal translator for your favorite tools. Instead of hiring a developer to connect your marketing stack, our connector simply plugs in and lets your platforms speak to each other automatically, saving you hours of manual data entry.",
+    memoryText: "I'm a frontend developer. Default to React (TypeScript) and Tailwind CSS code snippets.",
+    userMsg: "How to create a sticky header?",
+    botMsg: "```tsx\nexport default function Header() {\n  return (\n    <header className=\"sticky top-0 w-full bg-white/80 backdrop-blur-md border-b z-50\">\n      <nav className=\"flex items-center justify-between p-4\">\n        {/* Nav content */}\n      </nav>\n    </header>\n  );\n}\n```",
     placeholder: "Ask Gemini..."
   }
 ];
@@ -159,9 +159,12 @@ export function IntegrationsSection() {
                 {/* Memory Alert Banner */}
                 <div className="integrations-memory-banner">
                   <div className="integrations-memory-icon">
-                    <div className="integrations-pulse" />
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a48ed4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a48ed4" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="tallei-tally-anim">
+                      <line x1="5" y1="4" x2="5" y2="20" className="tally-line t-1" />
+                      <line x1="9" y1="4" x2="9" y2="20" className="tally-line t-2" />
+                      <line x1="13" y1="4" x2="13" y2="20" className="tally-line t-3" />
+                      <line x1="17" y1="4" x2="17" y2="20" className="tally-line t-4" />
+                      <line x1="2" y1="16" x2="20" y2="8" className="tally-line t-5" />
                     </svg>
                   </div>
                   <div className="integrations-memory-content">

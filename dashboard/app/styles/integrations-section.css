@@ -356,24 +356,33 @@
 }
 
 .integrations-memory-icon {
-  position: relative;
-  width: 24px;
-  height: 24px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #473e66;
-  border-radius: 50%;
+  margin-top: 2px;
 }
 
-.integrations-pulse {
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  background: #a48ed4;
-  border-radius: 50%;
-  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+.tallei-tally-anim {
+  overflow: visible;
+}
+
+.tally-line {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: drawTally 3s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.t-1 { animation-delay: 0s; }
+.t-2 { animation-delay: 0.15s; }
+.t-3 { animation-delay: 0.3s; }
+.t-4 { animation-delay: 0.45s; }
+.t-5 { animation-delay: 0.7s; } /* The cross stroke comes slightly later */
+
+@keyframes drawTally {
+  0%, 10% { stroke-dashoffset: 24; }
+  25%, 85% { stroke-dashoffset: 0; }
+  100% { stroke-dashoffset: 24; }
 }
 
 .integrations-memory-content {
