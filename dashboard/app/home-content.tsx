@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
 
@@ -166,20 +167,20 @@ export function HomeContent() {
                 <div className="mockup-body">
                   <div className="mockup-row" style={{ alignItems: 'center' }}>
                     <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
-                      <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
+                      <Image src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
                     </div>
                     <div className="mockup-value">&ldquo;Always keep my emails short, punchy, and use bullet points.&rdquo;</div>
                   </div>
                   <div className="mockup-row" style={{ alignItems: 'center' }}>
                     <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
-                      <img src="/claude.svg" alt="Claude" width={28} height={28} />
+                      <Image src="/claude.svg" alt="Claude" width={28} height={28} />
                     </div>
                     <div className="mockup-value">&ldquo;Draft a project update for the team.&rdquo;</div>
                   </div>
                   <div className="mockup-row" style={{ alignItems: 'center' }}>
                     <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center', position: 'relative' }}>
-                      <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} style={{ position: 'relative', zIndex: 1 }} />
-                      <img src="/claude.svg" alt="Claude" width={28} height={28} style={{ position: 'absolute', left: '16px', zIndex: 2, borderRadius: '50%', border: '2px solid #ffffff' }} />
+                      <Image src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} style={{ position: 'relative', zIndex: 1 }} />
+                      <Image src="/claude.svg" alt="Claude" width={28} height={28} style={{ position: 'absolute', left: '16px', zIndex: 2, borderRadius: '50%', border: '2px solid #ffffff' }} />
                     </div>
                     <div className="mockup-value">
                       Claude automatically writes a concise, bulleted email — without being told twice.
@@ -417,7 +418,7 @@ export function HomeContent() {
       <footer className="footer-section">
         <div className="footer-inner">
           <div className="footer-brand">
-            <img src="/tallei.svg" alt="Tallei logo" width={24} height={24} />
+            <Image src="/tallei.svg" alt="Tallei logo" width={24} height={24} />
           </div>
           <div className="footer-links">
             <Link href="/privacy">Privacy</Link>
