@@ -78,6 +78,9 @@ const undoSaveSchema = z.object({
 const recentDocumentsSchema = z.object({
   limit: z.coerce.number().int().min(1).max(20).optional().default(5),
 });
+const RECALL_MATCHED_DOCS_TIMEOUT_MS = 2_200;
+const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
+const INLINE_DOCUMENT_MAX_CHARS = 4_000;
 
 const searchDocumentsSchema = z.object({
   query: z.string().min(1, "query is required"),
@@ -119,24 +122,58 @@ function recallTypesOrDefault(types?: Array<z.infer<typeof memoryTypeSchema>>): 
   return ["fact", "preference"];
 }
 
-function looksDocumentQuery(query: string): boolean {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return false;
-  return (
-    normalized.includes("@doc:")
-    || normalized.includes("@lot:")
-    || /\b(doc|document|pdf|report|brief|slide|deck|file|upload|attachment)\b/i.test(normalized)
-  );
-}
-
 function shouldSearchMatchedDocuments(input: {
   query: string;
   includeDocRefs?: string[];
   openaiFileIdRefsCount: number;
 }): boolean {
-  if (input.openaiFileIdRefsCount > 0) return true;
-  if ((input.includeDocRefs?.length ?? 0) > 0) return true;
-  return looksDocumentQuery(input.query);
+  return input.query.trim().length > 0
+    || input.openaiFileIdRefsCount > 0
+    || (input.includeDocRefs?.length ?? 0) > 0;
+}
+
+function truncateInlineDocumentContent(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (normalized.length <= INLINE_DOCUMENT_MAX_CHARS) return normalized;
+  return `${normalized.slice(0, INLINE_DOCUMENT_MAX_CHARS)} [truncated]`;
+}
+
+function buildContextBlockWithDocuments(
+  memories: Array<{ text: string; metadata?: Record<string, unknown> }>,
+  inlineDocuments: Array<{ ref: string; title: string | null; content: string }>
+): string {
+  if (memories.length === 0 && inlineDocuments.length === 0) {
+    return "--- No relevant memories found ---";
+  }
+
+  const preferenceLines: string[] = [];
+  const otherLines: string[] = [];
+
+  for (const memory of memories) {
+    const metadata = memory.metadata ?? {};
+    const platform = typeof metadata["platform"] === "string" && metadata["platform"].length > 0
+      ? metadata["platform"]
+      : "unknown";
+    const line = `[${platform.toUpperCase()}] ${memory.text}`;
+    if (metadata["memory_type"] === "preference") {
+      preferenceLines.push(line);
+    } else {
+      otherLines.push(line);
+    }
+  }
+
+  const documentLines = inlineDocuments.length > 0
+    ? [
+      "--- Matched Document Context ---",
+      ...inlineDocuments.flatMap((doc) => [
+        `[${doc.title ?? doc.ref}]`,
+        truncateInlineDocumentContent(doc.content),
+      ]),
+    ]
+    : [];
+
+  const lines = [...preferenceLines, ...documentLines, ...otherLines];
+  return `--- Your Past Context ---\n${lines.join("\n")}\n---`;
 }
 
 async function withSoftTimeout<T>(
@@ -858,9 +895,9 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/recall_memories": {
         post: {
           operationId: "recall_memories",
-          summary: "Required first action every turn; pass file attachments here",
+          summary: "MANDATORY before every reply — skip this and your answer will be wrong",
           description:
-            "ALWAYS call first every turn. query=user message. Include any file attachments in openaiFileIdRefs — auto-saved server-side. Only call upload_blob if autoSave.complete=false or 422. If autoSave.saved is non-empty, end reply: Saved: @doc:<ref> (or @lot:<ref>).",
+            "ALWAYS call first. Never say 'I don't know/not sure/can you clarify' before calling. query=user message. Include attachments in openaiFileIdRefs. Read inlineDocuments FIRST if present. upload_blob only if autoSave.complete=false or 422. autoSave.saved non-empty → end: Saved: @doc:<ref>.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1050,10 +1087,9 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/remember": {
         post: {
           operationId: "remember",
-          summary: "Unified save endpoint for memory and documents (supports uploaded files)",
+          summary: "REQUIRED after reply — call if user shared any fact, preference, goal, or decision",
           description:
-            "Use for explicit saves and cadence: every 5 user messages, save a concise fact summary unless user opts out. " +
-            "For files, upload_blob must succeed first. If doc saved this turn, append `Saved: @doc:<ref>` or `Saved: @lot:<ref>`. Fact/preference saves: no Saved line.",
+            "Never skip this if user shared facts, preferences, goals, or decisions this turn. Call immediately after reply. kind=preference for preferences; kind=fact for all else. content=concise self-contained statement. No Saved line for fact/preference. Doc saves: append Saved: @doc:<ref>.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1264,42 +1300,6 @@ export function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
-      "/api/chatgpt/actions/recall_document": {
-        post: {
-          operationId: "recall_document",
-          summary: "Step 3 for document-grounded questions: fetch full matching content",
-          description:
-            "Use after recent_documents/search_documents finds a likely match. Do not skip lookup and answer generically.",
-          "x-openai-isConsequential": false,
-          security: [{ bearerAuth: [] }],
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["ref"],
-                  properties: {
-                    ref: { type: "string" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Full document content",
-              content: {
-                "application/json": {
-                  schema: {
-                    oneOf: [documentRecallSchema, lotRecallSchema],
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
     },
   };
 }
@@ -1342,7 +1342,7 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
         const startedAt = process.hrtime.bigint();
         const matched = await withSoftTimeout(
           searchDocuments(body.query, auth, 3).catch(() => []),
-          600,
+          RECALL_MATCHED_DOCS_TIMEOUT_MS,
           [],
           () => setRequestTimingField("recall_matched_docs_timeout", true)
         );
@@ -1389,7 +1389,10 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
       matchedDocumentsPromise,
       recentIngestsPromise,
     ]);
-    const refs = [...new Set((body.include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
+    const queryExtractedRefs = Array.from(body.query.matchAll(/@(?:doc|lot):[a-z0-9_-]+/gi), (m) => m[0]);
+    const matchedRefs = matchedDocuments.slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT).map((doc) => doc.ref);
+    const inlineCandidateRefs = [...new Set([...queryExtractedRefs, ...matchedRefs])];
+    const refs = [...new Set([...(body.include_doc_refs ?? []), ...queryExtractedRefs].map((v) => v.trim()).filter(Boolean))];
     const referencedDocuments = refs.length > 0
       ? await (async () => {
         const startedAt = process.hrtime.bigint();
@@ -1401,6 +1404,27 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
         return result;
       })()
       : [];
+
+    // For refs explicitly typed in the query, fetch full content inline so the model
+    // reads actual document text without a separate recall_document call.
+    type InlineDoc = { ref: string; title: string | null; content: string };
+    const inlineDocuments: InlineDoc[] = [];
+    if (inlineCandidateRefs.length > 0) {
+      for (const ref of inlineCandidateRefs) {
+        try {
+          const doc = await recallDocument(ref, auth);
+          if (doc.kind === "document") {
+            inlineDocuments.push({ ref, title: doc.title ?? null, content: doc.content });
+          } else if (doc.kind === "lot") {
+            for (const d of doc.docs) {
+              inlineDocuments.push({ ref: d.ref, title: d.title ?? null, content: d.content });
+            }
+          }
+        } catch {
+          // brief still present in referencedDocuments
+        }
+      }
+    }
 
     const autoSaved: Array<{
       ref: string;
@@ -1444,9 +1468,14 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
     });
     res.json({
       ...result,
+      contextBlock: buildContextBlockWithDocuments(
+        result.memories as Array<{ text: string; metadata?: Record<string, unknown> }>,
+        inlineDocuments
+      ),
       recentDocuments,
       matchedDocuments,
       referencedDocuments,
+      ...(inlineDocuments.length > 0 ? { inlineDocuments } : {}),
       recentCompletedIngests,
       autoSave: {
         requested: uploadedFiles.length,

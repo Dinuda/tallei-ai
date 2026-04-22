@@ -19,6 +19,8 @@ const DOCUMENT_VECTOR_PLATFORM = "document";
 const MAX_REF_HANDLE_RETRIES = 12;
 const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 const DOCUMENT_LEXICAL_CANDIDATE_LIMIT = 250;
+const DOCUMENT_CONTENT_CANDIDATE_LIMIT = 40;
+const SEARCH_DOCUMENT_VECTOR_TIMEOUT_MS = 1_200;
 
 const vectorRepository = new VectorRepository();
 
@@ -317,6 +319,116 @@ async function lexicalSearchDocuments(
     })
     .slice(0, limit)
     .map(({ ref, title, score, preview }) => ({ ref, title, score, preview }));
+}
+
+function truncateWhitespace(value: string, max = 220): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function contentPreview(content: string, queryTokens: string[]): string {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  const lower = compact.toLowerCase();
+  for (const token of queryTokens) {
+    const index = lower.indexOf(token);
+    if (index >= 0) {
+      const start = Math.max(0, index - 80);
+      const end = Math.min(compact.length, index + 140);
+      return truncateWhitespace(compact.slice(start, end));
+    }
+  }
+  return truncateWhitespace(compact);
+}
+
+async function lexicalSearchDocumentsByContent(
+  query: string,
+  auth: AuthContext,
+  limit: number
+): Promise<Array<{ ref: string; title: string; score: number; preview: string }>> {
+  const queryTokens = tokenizeLexicalQuery(query);
+  if (queryTokens.length === 0) return [];
+
+  const rows = await pool.query<{
+    ref_handle: string;
+    title: string | null;
+    summary_json: unknown;
+    content_ciphertext: string;
+    created_at: string;
+  }>(
+    `SELECT ref_handle, title, summary_json, content_ciphertext, created_at
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT $3`,
+    [auth.tenantId, auth.userId, DOCUMENT_CONTENT_CANDIDATE_LIMIT]
+  );
+
+  const normalizedQuery = query.toLowerCase();
+
+  return rows.rows
+    .map((row) => {
+      const summary = summaryPreview(row.summary_json);
+      let content = "";
+      try {
+        content = decryptMemoryContent(row.content_ciphertext);
+      } catch {
+        content = "";
+      }
+
+      const summaryHaystack = `${row.ref_handle} ${row.title ?? ""} ${summary}`.toLowerCase();
+      const contentHaystack = content.toLowerCase();
+      let tokenMatches = 0;
+      for (const token of queryTokens) {
+        if (summaryHaystack.includes(token) || contentHaystack.includes(token)) {
+          tokenMatches += 1;
+        }
+      }
+
+      const tokenScore = queryTokens.length > 0 ? tokenMatches / queryTokens.length : 0;
+      const phraseBoost =
+        normalizedQuery.length > 0 &&
+        (summaryHaystack.includes(normalizedQuery) || contentHaystack.includes(normalizedQuery))
+          ? 0.35
+          : 0;
+
+      const createdAtMs = new Date(row.created_at).getTime();
+      const ageDays = Number.isFinite(createdAtMs)
+        ? Math.max(0, (Date.now() - createdAtMs) / 86_400_000)
+        : 365;
+      const recencyBoost = Math.max(0, 0.2 - Math.min(0.2, ageDays / 365));
+      const score = Number((tokenScore + phraseBoost + recencyBoost).toFixed(4));
+
+      return {
+        ref: row.ref_handle,
+        title: row.title ?? "Untitled Document",
+        score,
+        preview: summary || contentPreview(content, queryTokens),
+        createdAt: row.created_at,
+      };
+    })
+    .filter((row) => row.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+    })
+    .slice(0, limit)
+    .map(({ ref, title, score, preview }) => ({ ref, title, score, preview }));
+}
+
+async function withTimeoutFallback<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race<T>([
+      promise,
+      new Promise<T>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
 async function generateUniqueLotRef(auth: AuthContext, title: string | null): Promise<string> {
@@ -908,6 +1020,7 @@ export async function searchDocuments(
   if (!normalizedQuery) return [];
 
   const normalizedLimit = Math.min(20, Math.max(1, Math.floor(limit)));
+  const queryTokens = tokenizeLexicalQuery(normalizedQuery);
 
   if (isDocumentRef(normalizedQuery)) {
     const doc = await pool.query<{ ref_handle: string; title: string | null; summary_json: unknown }>(
@@ -931,51 +1044,78 @@ export async function searchDocuments(
     }
   }
 
-  try {
-    const vector = await embedText(normalizedQuery);
-    const hits = await vectorRepository.searchVectorsByPlatform(
-      auth,
-      vector,
-      normalizedLimit,
-      DOCUMENT_VECTOR_PLATFORM
-    );
-
-    if (hits.length > 0) {
-      const uniqueIds = [...new Set(hits.map((hit) => hit.memoryId))];
-      const rows = await pool.query<{ id: string; ref_handle: string; title: string | null; summary_json: unknown }>(
-        `SELECT id, ref_handle, title, summary_json
-         FROM documents
-         WHERE tenant_id = $1
-           AND user_id = $2
-           AND deleted_at IS NULL
-           AND id = ANY($3::uuid[])`,
-        [auth.tenantId, auth.userId, uniqueIds]
-      );
-
-      const byId = new Map(rows.rows.map((row) => [row.id, row]));
-
-      const mapped = hits
-        .map((hit) => {
-          const row = byId.get(hit.memoryId);
-          if (!row) return null;
-          return {
-            ref: row.ref_handle,
-            title: row.title ?? "Untitled Document",
-            score: hit.score,
-            preview: summaryPreview(row.summary_json),
-          };
-        })
-        .filter((item): item is { ref: string; title: string; score: number; preview: string } => Boolean(item));
-
-      if (mapped.length > 0) {
-        return mapped;
-      }
-    }
-  } catch {
-    // Embedding/vector infra is unavailable; fall back to lexical summary matching.
+  const lexicalMatches = await lexicalSearchDocuments(normalizedQuery, auth, normalizedLimit);
+  if (lexicalMatches.length > 0 && lexicalMatches[0].score >= 0.65) {
+    return lexicalMatches;
   }
 
-  return lexicalSearchDocuments(normalizedQuery, auth, normalizedLimit);
+  const vectorMatches = await withTimeoutFallback(
+    (async (): Promise<Array<{ ref: string; title: string; score: number; preview: string }>> => {
+      try {
+        const vector = await embedText(normalizedQuery);
+        const hits = await vectorRepository.searchVectorsByPlatform(
+          auth,
+          vector,
+          normalizedLimit,
+          DOCUMENT_VECTOR_PLATFORM
+        );
+
+        if (hits.length === 0) return [];
+
+        const uniqueIds = [...new Set(hits.map((hit) => hit.memoryId))];
+        const rows = await pool.query<{
+          id: string;
+          ref_handle: string;
+          title: string | null;
+          summary_json: unknown;
+          content_ciphertext: string;
+        }>(
+          `SELECT id, ref_handle, title, summary_json, content_ciphertext
+           FROM documents
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND deleted_at IS NULL
+             AND id = ANY($3::uuid[])`,
+          [auth.tenantId, auth.userId, uniqueIds]
+        );
+
+        const byId = new Map(rows.rows.map((row) => [row.id, row]));
+        return hits
+          .map((hit) => {
+            const row = byId.get(hit.memoryId);
+            if (!row) return null;
+            let preview = summaryPreview(row.summary_json);
+            if (!preview) {
+              try {
+                preview = contentPreview(decryptMemoryContent(row.content_ciphertext), queryTokens);
+              } catch {
+                preview = "";
+              }
+            }
+            return {
+              ref: row.ref_handle,
+              title: row.title ?? "Untitled Document",
+              score: hit.score,
+              preview,
+            };
+          })
+          .filter((item): item is { ref: string; title: string; score: number; preview: string } => Boolean(item));
+      } catch {
+        return [];
+      }
+    })(),
+    SEARCH_DOCUMENT_VECTOR_TIMEOUT_MS,
+    []
+  );
+
+  if (vectorMatches.length > 0) {
+    return vectorMatches;
+  }
+  if (lexicalMatches.length > 0) {
+    return lexicalMatches;
+  }
+
+  return lexicalSearchDocumentsByContent(normalizedQuery, auth, normalizedLimit);
 }
 
 export async function recentDocumentBriefs(
