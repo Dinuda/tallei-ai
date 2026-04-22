@@ -451,10 +451,31 @@
 
 .integrations-message-body p {
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-  font-size: 0.9375rem;
-  line-height: 1.6;
-  color: #ececec;
+  font-size: 0.95rem; /* Larger font size for better readability */
+  line-height: 1.65;
+  color: #f9f9f9; /* Brighter, high-contrast white for prominence */
   margin: 0;
+}
+
+.integrations-message.user .integrations-message-body p {
+  color: #e5e5e5; /* Slightly muted white for the user's prompt */
+}
+
+/* Typing cursor effect */
+.integrations-typing-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.1em;
+  background-color: #fff;
+  vertical-align: text-bottom;
+  margin-left: 4px;
+  border-radius: 2px;
+  animation: typingBlink 1s step-end infinite;
+}
+
+@keyframes typingBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
 /* Input Area */

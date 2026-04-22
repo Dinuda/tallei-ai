@@ -53,19 +53,48 @@ const APPS = [
 
 export function IntegrationsSection() {
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [displayedBotMsg, setDisplayedBotMsg] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
-  // Auto-cycle through apps
+  // Auto-cycle through apps (resets when currentIndex changes manually)
   useEffect(() => {
     const timer = setInterval(() => {
       setCurrentIndex((prev) => (prev + 1) % APPS.length);
-    }, 10000); // 10 seconds per app to allow reading time
+    }, 12000); // 12 seconds per app to allow reading time and typing
 
     return () => clearInterval(timer);
-  }, []);
+  }, [currentIndex]);
 
   const currentApp = APPS[currentIndex];
+
+  // Typing effect for the bot message
+  useEffect(() => {
+    setDisplayedBotMsg("");
+    setIsTyping(true);
+
+    const fullText = currentApp.botMsg;
+    let i = 0;
+
+    // Small delay before starting to type to simulate "thinking"
+    const startDelay = setTimeout(() => {
+      const typeInterval = setInterval(() => {
+        i += 2; // Type 2 chars at a time for snappiness
+        if (i >= fullText.length) {
+          setDisplayedBotMsg(fullText);
+          setIsTyping(false);
+          clearInterval(typeInterval);
+        } else {
+          setDisplayedBotMsg(fullText.slice(0, i));
+        }
+      }, 15); // Fast typing speed
+
+      return () => clearInterval(typeInterval);
+    }, 600);
+
+    return () => clearTimeout(startDelay);
+  }, [currentIndex]);
 
   useGSAP(() => {
     // Fade content in when index changes
@@ -204,7 +233,10 @@ export function IntegrationsSection() {
                     <Image src={currentApp.icon} alt={currentApp.name} width={24} height={24} />
                   </div>
                   <div className="integrations-message-body">
-                    <p style={{ whiteSpace: "pre-wrap" }}>{currentApp.botMsg}</p>
+                    <p style={{ whiteSpace: "pre-wrap" }}>
+                      {displayedBotMsg}
+                      {isTyping && <span className="integrations-typing-cursor" />}
+                    </p>
                   </div>
                 </div>
               </div>
