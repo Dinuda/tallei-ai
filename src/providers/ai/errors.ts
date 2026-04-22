@@ -39,6 +39,35 @@ function parseMessage(error: unknown): string {
   return String(error ?? "Unknown provider error");
 }
 
+function parseType(error: unknown): string {
+  const type = asRecord(error)["type"];
+  return typeof type === "string" ? type : "";
+}
+
+function parseCause(error: unknown): unknown {
+  return asRecord(error)["cause"];
+}
+
+function chainHas(
+  error: unknown,
+  predicate: (input: { message: string; name: string; code: string; type: string }) => boolean
+): boolean {
+  let current: unknown = error;
+  let depth = 0;
+
+  while (current && depth < 6) {
+    const message = parseMessage(current).toLowerCase();
+    const name = parseName(current).toLowerCase();
+    const code = parseCode(current).toLowerCase();
+    const type = parseType(current).toLowerCase();
+    if (predicate({ message, name, code, type })) return true;
+    current = parseCause(current);
+    depth += 1;
+  }
+
+  return false;
+}
+
 export function mapProviderError(provider: ProviderName, error: unknown): Error {
   if (error instanceof AppError) {
     return error;
@@ -51,13 +80,16 @@ export function mapProviderError(provider: ProviderName, error: unknown): Error 
   const message = parseMessage(error);
   const status = parseStatus(error);
   const code = parseCode(error).toLowerCase();
+  const type = parseType(error).toLowerCase();
   const name = parseName(error).toLowerCase();
 
-  const timeoutLike =
-    code.includes("timeout") ||
-    name.includes("abort") ||
-    name.includes("timeout") ||
-    /timed out|etimedout|aborted|timeout/i.test(message);
+  const timeoutLike = chainHas(error, ({ message: chainMessage, name: chainName, code: chainCode, type: chainType }) =>
+    chainCode.includes("timeout") ||
+    chainType.includes("timeout") ||
+    chainName.includes("abort") ||
+    chainName.includes("timeout") ||
+    /timed out|etimedout|aborted|timeout/i.test(chainMessage)
+  );
 
   if (timeoutLike) {
     return new ProviderTimeoutError(provider, message, { cause: error });
@@ -79,7 +111,15 @@ export function mapProviderError(provider: ProviderName, error: unknown): Error 
     return new ProviderTransientError(provider, message, { cause: error });
   }
 
-  if (code === "api_connection_error" || code === "internal_server_error") {
+  const connectionLike = chainHas(error, ({ message: chainMessage, name: chainName, code: chainCode, type: chainType }) =>
+    chainCode === "api_connection_error" ||
+    chainType === "api_connection_error" ||
+    chainCode === "internal_server_error" ||
+    chainName.includes("apiconnectionerror") ||
+    /connection error|fetch failed|network|socket|econn|enotfound|no route to host|ehostunreach|eai_again|temporar/i.test(chainMessage)
+  );
+
+  if (connectionLike || code === "api_connection_error" || type === "api_connection_error" || code === "internal_server_error") {
     return new ProviderTransientError(provider, message, { cause: error });
   }
 

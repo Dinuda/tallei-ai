@@ -1,36 +1,46 @@
 import Image from "next/image";
 import Link from "next/link";
-import { ArrowRight, Check } from "lucide-react";
+import { ArrowRight, Check, X } from "lucide-react";
+import { IntegrationsSection } from "./components/integrations-section";
+
+
 
 const PRICING_PLANS = [
   {
+    key: "free" as const,
     name: "Free",
-    price: "Free",
-    description: "For trying Tallei and syncing your first memories.",
+    price: "$0",
+    period: "",
+    description: "Get started with basic memory features",
     features: ["50 saves/month", "200 recalls/month", "All 3 AI platforms"],
     href: "/login",
-    cta: "Start free",
+    cta: "Get Tallei",
     featured: false,
   },
   {
+    key: "pro" as const,
     name: "Pro",
     price: "$9",
-    description: "For daily workflows where memory should just work.",
-    features: ["Unlimited saves", "Unlimited recalls", "All 3 AI platforms", "Graph insights"],
+    period: "/mo",
+    description: "For developers building with AI memory",
+    features: ["5,000 saves/month included", "100,000 recalls/month included", "All 3 AI platforms", "Link memories to PDFs"],
     href: "/login?plan=pro",
-    cta: "Choose Pro",
+    cta: "Get Tallei Pro",
     featured: true,
   },
   {
+    key: "power" as const,
     name: "Power",
     price: "$19",
-    description: "For teams and advanced automations with API access.",
-    features: ["Everything in Pro", "API access", "Memory export", "Priority support"],
+    period: "/mo",
+    description: "For teams and production workloads",
+    features: ["25,000 saves/month included", "500,000 recalls/month included", "API access + export", "Priority support"],
     href: "/login?plan=power",
-    cta: "Choose Power",
+    cta: "Get Tallei Power",
     featured: false,
   },
 ] as const;
+
 
 /* ─── Component ─────────────────────────────────────────────── */
 
@@ -76,7 +86,7 @@ export function HomeContent() {
                 "Sync memory across ChatGPT, Claude, and Gemini",
                 "MCP protocol support for Claude Desktop",
                 "Encrypted private memory storage",
-                "Unlimited memory entries",
+                "High-volume memory allowances",
                 "Automatic context retrieval",
               ],
             },
@@ -108,7 +118,7 @@ export function HomeContent() {
                   "acceptedAnswer": {
                     "@type": "Answer",
                     "text":
-                      "No. Save as many facts, preferences, and details as you need. Tallei automatically retrieves only what's relevant to your current conversation.",
+                      "Tallei plans include high monthly allowances designed for normal daily and team workflows, with fair-use protections in place.",
                   },
                 },
               ],
@@ -192,6 +202,8 @@ export function HomeContent() {
                   <span>✓ Synced instantly</span>
                 </div>
               </div>
+              <div style={{ fontFamily: 'Georgia, serif', fontSize: "1.5rem", color: "oklch(90% 0.008 265)", marginBottom: "0.5rem", fontWeight: 400 }}>Talk to everything you&apos;ve saved</div>
+              <div style={{ fontSize: "0.85rem", color: "oklch(55% 0.010 265)", lineHeight: 1.55, maxWidth: "340px" }}>Ask questions across all your memories. Instant answers from past decisions.</div>
             </div>
           </section>
         </div>
@@ -207,6 +219,7 @@ export function HomeContent() {
             </div>
             <div className="hero-caption">Before Tallei — Every tool, isolated</div>
           </div>
+
         </div>
       </header>
 
@@ -245,55 +258,76 @@ export function HomeContent() {
         </div>
       </section>
 
-      {/* ═════════════════════════════════════════════════════
+{/* ═════════════════════════════════════════════════════
           PRICING
       ═════════════════════════════════════════════════════ */}
       <section
         id="pricing"
         style={{
-          padding: "6rem 0",
+          padding: "5rem 0 6rem",
           background: "#fdfbf7",
           borderTop: "2px solid #e5e0d8",
         }}
       >
-        <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 2rem" }}>
-          <h2 className="section-h2 text-center">Pricing</h2>
-          <p
-            className="text-center"
+        <div style={{ maxWidth: 960, margin: "0 auto", padding: "0 1.5rem" }}>
+          <h2
             style={{
-              maxWidth: 640,
-              margin: "-1rem auto 2.5rem",
-              color: "#4c4643",
-              fontSize: "1.05rem",
-              lineHeight: 1.6,
+              fontSize: "2rem",
+              fontWeight: 700,
+              textAlign: "center",
+              color: "#0f172a",
+              marginBottom: "0.75rem",
             }}
           >
-            Built from the same plans you see in billing. Start free, then upgrade when you need more.
+            Simple, transparent pricing
+          </h2>
+          <p
+            style={{
+              maxWidth: 500,
+              margin: "0 auto 2.5rem",
+              color: "#64748b",
+              fontSize: "1rem",
+              lineHeight: 1.6,
+              textAlign: "center",
+            }}
+          >
+            Start free, upgrade when you need more. All paid plans include a 14-day free trial.
           </p>
 
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-              gap: "1.25rem",
+              gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+              gap: "1rem",
             }}
           >
             {PRICING_PLANS.map((plan) => (
               <article
-                key={plan.name}
-                className="solid-card"
+                key={plan.key}
                 style={{
-                  padding: "2rem 1.5rem",
+                  background: "#ffffff",
+                  border: plan.featured ? "2px solid #5b21b6" : "2px solid #e5e0d8",
+                  borderRadius: 4,
+                  padding: "1.5rem",
                   display: "flex",
                   flexDirection: "column",
                   gap: "1rem",
-                  ...(plan.featured
-                    ? { borderColor: "#5b21b6", boxShadow: "6px 6px 0px #e1d4fc" }
-                    : {}),
+                  boxShadow: plan.featured ? "4px 4px 0px #e1d4fc" : "4px 4px 0px #e5e0d8",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
-                  <h3 style={{ fontSize: "1.25rem", fontWeight: 700, margin: 0, color: "#1a1816" }}>{plan.name}</h3>
+                {/* Plan Badge Row */}
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <span
+                    style={{
+                      fontSize: "0.75rem",
+                      fontWeight: 600,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      color: plan.featured ? "#5b21b6" : "#8c827a",
+                    }}
+                  >
+                    {plan.name}
+                  </span>
                   {plan.featured && (
                     <span
                       style={{
@@ -302,11 +336,10 @@ export function HomeContent() {
                         textTransform: "uppercase",
                         letterSpacing: "0.04em",
                         color: "#5b21b6",
-                        border: "1px solid #5b21b6",
-                        background: "#f6f0ff",
+                        border: "2px solid #5b21b6",
+                        background: "#fdfbf7",
                         borderRadius: 999,
-                        padding: "0.2rem 0.55rem",
-                        whiteSpace: "nowrap",
+                        padding: "0.15rem 0.5rem",
                       }}
                     >
                       Most popular
@@ -314,49 +347,69 @@ export function HomeContent() {
                   )}
                 </div>
 
-                <p style={{ margin: 0, fontSize: "2rem", fontWeight: 700, color: "#1a1816", lineHeight: 1.1 }}>
-                  {plan.price}
-                  {plan.price !== "Free" && (
-                    <span style={{ fontSize: "0.95rem", fontWeight: 500, color: "#8c827a", marginLeft: "0.2rem" }}>
-                      /mo
-                    </span>
-                  )}
-                </p>
-                <p style={{ margin: 0, fontSize: "0.98rem", color: "#4c4643", lineHeight: 1.5 }}>{plan.description}</p>
+                {/* Price */}
+                <div>
+                  <div style={{ fontSize: "2rem", fontWeight: 700, color: "#0f172a", lineHeight: 1.2 }}>
+                    {plan.price}
+                    {plan.period && (
+                      <span style={{ fontSize: "1rem", fontWeight: 500, color: "#8c827a", marginLeft: "0.15rem" }}>
+                        {plan.period}
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ margin: "0.5rem 0 0", fontSize: "0.875rem", color: "#4c4643", lineHeight: 1.5 }}>
+                    {plan.description}
+                  </p>
+                </div>
 
+                {/* Features */}
                 <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
                   {plan.features.map((feature) => (
                     <li
                       key={feature}
-                      style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", color: "#3d3733", fontSize: "0.92rem", lineHeight: 1.45 }}
-                    >
-                      <Check size={14} style={{ color: "#5b21b6", marginTop: "0.12rem", flexShrink: 0 }} />
+                    style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", color: "#334155", fontSize: "0.875rem", lineHeight: 1.5 }}
+                  >
+                      <Check size={16} style={{ color: "#7c3aed", flexShrink: 0, marginTop: "0.1rem" }} />
                       <span>{feature}</span>
                     </li>
                   ))}
                 </ul>
 
-                <Link
-                  href={plan.href}
-                  style={{
-                    marginTop: "auto",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: "0.45rem",
-                    padding: "0.7rem 1rem",
-                    border: `2px solid ${plan.featured ? "#5b21b6" : "#1a1816"}`,
-                    background: plan.featured ? "#7c3aed" : "#ffffff",
-                    color: plan.featured ? "#ffffff" : "#1a1816",
-                    textDecoration: "none",
-                    fontWeight: 600,
-                    fontSize: "0.92rem",
-                    boxShadow: plan.featured ? "3px 3px 0px #e1d4fc" : "3px 3px 0px rgba(0,0,0,0.1)",
-                  }}
-                >
-                  {plan.cta}
-                  <ArrowRight size={14} />
-                </Link>
+                {/* CTA */}
+                <div style={{ marginTop: "auto", paddingTop: "0.5rem" }}>
+                  <Link
+                    href={plan.href}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "0.4rem",
+                      padding: "0.75rem 1rem",
+                      borderRadius: 4,
+                      fontSize: "0.875rem",
+                      fontWeight: 600,
+                      textDecoration: "none",
+                      transition: "all 0.15s ease",
+                      background: plan.featured ? "#7c3aed" : "#ffffff",
+                      color: plan.featured ? "#ffffff" : "#0f172a",
+                      border: plan.featured ? "2px solid #5b21b6" : "2px solid #e5e0d8",
+                      boxShadow: plan.featured ? "3px 3px 0px #e1d4fc" : "3px 3px 0px #e5e0d8",
+                    }}
+                  >
+                    {plan.cta}
+                    <ArrowRight size={14} />
+                  </Link>
+                  {!plan.featured && plan.key !== "free" && (
+                    <p style={{ marginTop: "0.5rem", fontSize: "0.75rem", color: "#94a3b8", textAlign: "center" }}>
+                      14-day free trial
+                    </p>
+                  )}
+                  {plan.featured && (
+                    <p style={{ marginTop: "0.5rem", fontSize: "0.75rem", color: "#94a3b8", textAlign: "center" }}>
+                      14-day free trial
+                    </p>
+                  )}
+                </div>
               </article>
             ))}
           </div>

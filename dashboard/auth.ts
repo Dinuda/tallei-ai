@@ -1,6 +1,8 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 
+type UserPlan = "free" | "pro" | "power";
+
 declare module "next-auth" {
   interface Session {
     user: {
@@ -8,6 +10,7 @@ declare module "next-auth" {
       email: string;
       name: string;
       image: string;
+      plan?: UserPlan;
     };
   }
 }
@@ -52,10 +55,11 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           return false;
         }
 
-        const { userId } = (await res.json()) as { userId: string };
+        const { userId, plan } = (await res.json()) as { userId: string; plan?: UserPlan };
         // Attach our internal userId to the user object so the jwt callback
         // can pick it up.
-        (user as { backendId?: string }).backendId = userId;
+        (user as { backendId?: string; backendPlan?: UserPlan }).backendId = userId;
+        (user as { backendId?: string; backendPlan?: UserPlan }).backendPlan = plan ?? "free";
         return true;
       } catch (err) {
         console.error("[auth] User sync error:", err);
@@ -67,6 +71,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // On first sign-in, user is populated — persist our backendId.
       if (user) {
         token.backendId = (user as { backendId?: string }).backendId;
+        token.backendPlan = (user as { backendPlan?: UserPlan }).backendPlan ?? "free";
       }
       return token;
     },
@@ -76,6 +81,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       if (token.backendId) {
         session.user.id = token.backendId as string;
       }
+      session.user.plan = token.backendPlan as UserPlan | undefined;
       return session;
     },
   },

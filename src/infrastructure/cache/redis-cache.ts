@@ -112,7 +112,11 @@ async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
       url: config.redisUrl,
       socket: {
         connectTimeout: config.redisConnectTimeoutMs,
-        reconnectStrategy: () => false,
+        reconnectStrategy: (retries) => {
+          if (retries > 3) return false;
+          return Math.min(retries * 200, 1000);
+        },
+        keepAlive: true,
       },
     });
     client.on("error", (error) => {
@@ -150,6 +154,32 @@ export async function getCacheJson<T>(key: string): Promise<T | null> {
     lastRedisError = "redis.get failed";
     disableRedisTemporarily();
     return null;
+  }
+}
+
+export async function getCacheJsonMany<T>(keys: string[]): Promise<Array<T | null>> {
+  if (keys.length === 0) return [];
+  const client = await initRedis();
+  if (!client) return keys.map(() => null);
+
+  try {
+    const values = await withTimeout(
+      client.mGet(keys),
+      config.redisCommandTimeoutMs,
+      "redis.mget"
+    );
+    return values.map((value) => {
+      if (!value) return null;
+      try {
+        return JSON.parse(value) as T;
+      } catch {
+        return null;
+      }
+    });
+  } catch {
+    lastRedisError = "redis.mget failed";
+    disableRedisTemporarily();
+    return keys.map(() => null);
   }
 }
 

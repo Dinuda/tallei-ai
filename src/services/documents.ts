@@ -1,0 +1,1471 @@
+import { randomBytes, randomUUID } from "crypto";
+
+import { config } from "../config/index.js";
+import type { AuthContext } from "../domain/auth/index.js";
+import { embedText } from "../infrastructure/cache/embedding-cache.js";
+import {
+  decryptMemoryContent,
+  encryptMemoryContent,
+  hashMemoryContent,
+} from "../infrastructure/crypto/memory-crypto.js";
+import { pool } from "../infrastructure/db/index.js";
+import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
+import { summarizeConversation } from "../orchestration/ai/summarize.usecase.js";
+import { PlanRequiredError } from "../shared/errors/index.js";
+
+const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
+const AUTO_LOT_WINDOW_MS = 60_000;
+const DOCUMENT_VECTOR_PLATFORM = "document";
+const MAX_REF_HANDLE_RETRIES = 12;
+const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+const DOCUMENT_LEXICAL_CANDIDATE_LIMIT = 250;
+const DOCUMENT_CONTENT_CANDIDATE_LIMIT = 40;
+const SEARCH_DOCUMENT_VECTOR_TIMEOUT_MS = 1_200;
+
+const vectorRepository = new VectorRepository();
+
+export interface DocumentBlobMetadata {
+  provider: "uploadthing";
+  key: string;
+  url: string;
+  sourceFileId: string;
+}
+
+interface DocumentRow {
+  id: string;
+  ref_handle: string;
+  lot_id: string | null;
+  filename: string | null;
+  title: string | null;
+  byte_size: number;
+  content_ciphertext: string;
+  summary_json: unknown;
+  status: "pending" | "ready" | "failed";
+  kind: "blob" | "note";
+  conversation_id: string | null;
+  blob_provider: string | null;
+  blob_key: string | null;
+  blob_url: string | null;
+  blob_source_file_id: string | null;
+  created_at: string;
+}
+
+interface LotRow {
+  id: string;
+  ref_handle: string;
+  title: string | null;
+  created_at: string;
+}
+
+interface DocumentBriefRow {
+  ref_handle: string;
+  filename: string | null;
+  title: string | null;
+  status: "pending" | "ready" | "failed";
+  created_at: string;
+  summary_json: unknown;
+  lot_id: string | null;
+  lot_ref: string | null;
+  lot_title: string | null;
+  blob_provider: string | null;
+  blob_key: string | null;
+  blob_url: string | null;
+  blob_source_file_id: string | null;
+}
+
+interface LotBriefRow {
+  id: string;
+  ref_handle: string;
+  title: string | null;
+  created_at: string;
+}
+
+interface AutoLotWindow {
+  docIds: string[];
+  docRefs: string[];
+  lotId: string | null;
+  lotRef: string | null;
+  lastAt: number;
+}
+
+const autoLotByActor = new Map<string, AutoLotWindow>();
+
+export interface DocumentBrief {
+  kind: "document";
+  ref: string;
+  title: string;
+  filename: string | null;
+  status: "pending" | "ready" | "failed";
+  createdAt: string;
+  preview: string;
+  lotRef: string | null;
+  lotTitle: string | null;
+  blob: {
+    provider: "uploadthing";
+    key: string;
+    url: string;
+    source_file_id: string;
+  } | null;
+}
+
+export interface LotBrief {
+  kind: "lot";
+  ref: string;
+  title: string;
+  createdAt: string;
+  documentCount: number;
+  documents: DocumentBrief[];
+}
+
+export interface MissingDocumentBrief {
+  kind: "missing";
+  ref: string;
+  error: string;
+}
+
+export type DocumentRefBrief = DocumentBrief | LotBrief | MissingDocumentBrief;
+
+function actorKey(auth: AuthContext): string {
+  return `${auth.tenantId}:${auth.userId}`;
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: string }).code === "23505"
+  );
+}
+
+function normalizeRef(value: string): string {
+  return value.trim();
+}
+
+function isDocumentRef(value: string): boolean {
+  return /^@doc:/.test(value.trim());
+}
+
+function isLotRef(value: string): boolean {
+  return /^@lot:/.test(value.trim());
+}
+
+function toSlug(value: string | null | undefined, fallback: string): string {
+  const raw = (value ?? "").trim().toLowerCase();
+  const withoutExt = raw.replace(/\.[a-z0-9]{1,8}$/i, "");
+  const slug = withoutExt
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  return slug || fallback;
+}
+
+function randomBase32(length: number): string {
+  const bytes = randomBytes(length);
+  let out = "";
+  for (let i = 0; i < length; i += 1) {
+    out += BASE32_ALPHABET[bytes[i] % BASE32_ALPHABET.length];
+  }
+  return out;
+}
+
+function buildRefHandle(kind: "doc" | "lot", source: string): string {
+  return `@${kind}:${source}-${randomBase32(4)}`;
+}
+
+function fallbackSummary(content: string): Record<string, unknown> {
+  const compact = content.replace(/\s+/g, " ").trim();
+  const snippet = compact.slice(0, 220);
+  return {
+    title: snippet.slice(0, 80) || "Untitled Document",
+    keyPoints: snippet ? [snippet] : [],
+    decisions: [],
+    summary: snippet || "No summary available.",
+  };
+}
+
+function summaryPreview(summaryJson: unknown): string {
+  if (!summaryJson || typeof summaryJson !== "object") return "";
+  const record = summaryJson as Record<string, unknown>;
+  if (typeof record["summary"] === "string") return record["summary"];
+  if (Array.isArray(record["keyPoints"])) {
+    const first = record["keyPoints"].find((value) => typeof value === "string");
+    if (typeof first === "string") return first;
+  }
+  return "";
+}
+
+function displayTitle(input: { title: string | null; filename: string | null; ref: string }): string {
+  return input.title ?? input.filename ?? input.ref;
+}
+
+function toDocumentBrief(row: DocumentBriefRow): DocumentBrief {
+  const hasBlob =
+    row.blob_provider === "uploadthing" &&
+    typeof row.blob_key === "string" &&
+    typeof row.blob_url === "string" &&
+    typeof row.blob_source_file_id === "string";
+
+  return {
+    kind: "document",
+    ref: row.ref_handle,
+    title: displayTitle({ title: row.title, filename: row.filename, ref: row.ref_handle }),
+    filename: row.filename,
+    status: row.status,
+    createdAt: row.created_at,
+    preview: summaryPreview(row.summary_json).slice(0, 220),
+    lotRef: row.lot_ref,
+    lotTitle: row.lot_title,
+    blob: hasBlob
+      ? {
+        provider: "uploadthing",
+        key: row.blob_key!,
+        url: row.blob_url!,
+        source_file_id: row.blob_source_file_id!,
+      }
+      : null,
+  };
+}
+
+function embeddingInputFromSummary(summaryJson: Record<string, unknown>): string {
+  const title = typeof summaryJson["title"] === "string" ? summaryJson["title"] : "";
+  const summary = typeof summaryJson["summary"] === "string" ? summaryJson["summary"] : "";
+  const points = Array.isArray(summaryJson["keyPoints"])
+    ? summaryJson["keyPoints"].filter((v): v is string => typeof v === "string").join("\n")
+    : "";
+  return [title, summary, points].filter(Boolean).join("\n");
+}
+
+function tokenizeLexicalQuery(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+}
+
+function lexicalScoreDocument(
+  query: string,
+  queryTokens: string[],
+  doc: { ref: string; title: string | null; preview: string; createdAt: string }
+): number {
+  const normalizedQuery = query.toLowerCase();
+  const haystack = `${doc.ref} ${doc.title ?? ""} ${doc.preview}`.toLowerCase();
+  if (!haystack) return 0;
+
+  let tokenMatches = 0;
+  for (const token of queryTokens) {
+    if (haystack.includes(token)) tokenMatches += 1;
+  }
+
+  const tokenScore = queryTokens.length > 0 ? tokenMatches / queryTokens.length : 0;
+  const phraseBoost = normalizedQuery.length > 0 && haystack.includes(normalizedQuery) ? 0.35 : 0;
+
+  const createdAtMs = new Date(doc.createdAt).getTime();
+  const ageDays = Number.isFinite(createdAtMs)
+    ? Math.max(0, (Date.now() - createdAtMs) / 86_400_000)
+    : 365;
+  const recencyBoost = Math.max(0, 0.2 - Math.min(0.2, ageDays / 365));
+
+  return Number((tokenScore + phraseBoost + recencyBoost).toFixed(4));
+}
+
+async function lexicalSearchDocuments(
+  query: string,
+  auth: AuthContext,
+  limit: number
+): Promise<Array<{ ref: string; title: string; score: number; preview: string }>> {
+  const queryTokens = tokenizeLexicalQuery(query);
+  if (queryTokens.length === 0) return [];
+
+  const rows = await pool.query<{
+    ref_handle: string;
+    title: string | null;
+    summary_json: unknown;
+    created_at: string;
+  }>(
+    `SELECT ref_handle, title, summary_json, created_at
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT $3`,
+    [auth.tenantId, auth.userId, DOCUMENT_LEXICAL_CANDIDATE_LIMIT]
+  );
+
+  return rows.rows
+    .map((row) => {
+      const preview = summaryPreview(row.summary_json);
+      const score = lexicalScoreDocument(query, queryTokens, {
+        ref: row.ref_handle,
+        title: row.title,
+        preview,
+        createdAt: row.created_at,
+      });
+      return {
+        ref: row.ref_handle,
+        title: row.title ?? "Untitled Document",
+        score,
+        preview,
+        createdAt: row.created_at,
+      };
+    })
+    .filter((row) => row.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+    })
+    .slice(0, limit)
+    .map(({ ref, title, score, preview }) => ({ ref, title, score, preview }));
+}
+
+function truncateWhitespace(value: string, max = 220): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function contentPreview(content: string, queryTokens: string[]): string {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  const lower = compact.toLowerCase();
+  for (const token of queryTokens) {
+    const index = lower.indexOf(token);
+    if (index >= 0) {
+      const start = Math.max(0, index - 80);
+      const end = Math.min(compact.length, index + 140);
+      return truncateWhitespace(compact.slice(start, end));
+    }
+  }
+  return truncateWhitespace(compact);
+}
+
+async function lexicalSearchDocumentsByContent(
+  query: string,
+  auth: AuthContext,
+  limit: number
+): Promise<Array<{ ref: string; title: string; score: number; preview: string }>> {
+  const queryTokens = tokenizeLexicalQuery(query);
+  if (queryTokens.length === 0) return [];
+
+  const rows = await pool.query<{
+    ref_handle: string;
+    title: string | null;
+    summary_json: unknown;
+    content_ciphertext: string;
+    created_at: string;
+  }>(
+    `SELECT ref_handle, title, summary_json, content_ciphertext, created_at
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT $3`,
+    [auth.tenantId, auth.userId, DOCUMENT_CONTENT_CANDIDATE_LIMIT]
+  );
+
+  const normalizedQuery = query.toLowerCase();
+
+  return rows.rows
+    .map((row) => {
+      const summary = summaryPreview(row.summary_json);
+      let content = "";
+      try {
+        content = decryptMemoryContent(row.content_ciphertext);
+      } catch {
+        content = "";
+      }
+
+      const summaryHaystack = `${row.ref_handle} ${row.title ?? ""} ${summary}`.toLowerCase();
+      const contentHaystack = content.toLowerCase();
+      let tokenMatches = 0;
+      for (const token of queryTokens) {
+        if (summaryHaystack.includes(token) || contentHaystack.includes(token)) {
+          tokenMatches += 1;
+        }
+      }
+
+      const tokenScore = queryTokens.length > 0 ? tokenMatches / queryTokens.length : 0;
+      const phraseBoost =
+        normalizedQuery.length > 0 &&
+        (summaryHaystack.includes(normalizedQuery) || contentHaystack.includes(normalizedQuery))
+          ? 0.35
+          : 0;
+
+      const createdAtMs = new Date(row.created_at).getTime();
+      const ageDays = Number.isFinite(createdAtMs)
+        ? Math.max(0, (Date.now() - createdAtMs) / 86_400_000)
+        : 365;
+      const recencyBoost = Math.max(0, 0.2 - Math.min(0.2, ageDays / 365));
+      const score = Number((tokenScore + phraseBoost + recencyBoost).toFixed(4));
+
+      return {
+        ref: row.ref_handle,
+        title: row.title ?? "Untitled Document",
+        score,
+        preview: summary || contentPreview(content, queryTokens),
+        createdAt: row.created_at,
+      };
+    })
+    .filter((row) => row.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+    })
+    .slice(0, limit)
+    .map(({ ref, title, score, preview }) => ({ ref, title, score, preview }));
+}
+
+async function withTimeoutFallback<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race<T>([
+      promise,
+      new Promise<T>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+async function generateUniqueLotRef(auth: AuthContext, title: string | null): Promise<string> {
+  const slug = toSlug(title, "lot");
+
+  for (let attempt = 0; attempt < MAX_REF_HANDLE_RETRIES; attempt += 1) {
+    const candidate = buildRefHandle("lot", slug);
+    const exists = await pool.query<{ id: string }>(
+      `SELECT id
+       FROM document_lots
+       WHERE tenant_id = $1 AND ref_handle = $2
+       LIMIT 1`,
+      [auth.tenantId, candidate]
+    );
+    if (!exists.rows[0]) {
+      return candidate;
+    }
+  }
+
+  throw new Error("Failed to generate a unique lot reference");
+}
+
+async function createLotRecord(auth: AuthContext, title: string | null): Promise<{ lotId: string; lotRef: string }> {
+  for (let attempt = 0; attempt < MAX_REF_HANDLE_RETRIES; attempt += 1) {
+    const lotRef = await generateUniqueLotRef(auth, title);
+    const lotId = randomUUID();
+
+    try {
+      await pool.query(
+        `INSERT INTO document_lots (id, tenant_id, user_id, ref_handle, title)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [lotId, auth.tenantId, auth.userId, lotRef, title]
+      );
+      return { lotId, lotRef };
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error("Failed to create lot record");
+}
+
+async function assignDocumentsToLot(auth: AuthContext, lotId: string, docIds: string[]): Promise<void> {
+  if (docIds.length === 0) return;
+  await pool.query(
+    `UPDATE documents
+     SET lot_id = $1
+     WHERE tenant_id = $2
+       AND user_id = $3
+       AND deleted_at IS NULL
+       AND id = ANY($4::uuid[])`,
+    [lotId, auth.tenantId, auth.userId, docIds]
+  );
+}
+
+async function maybeAutoCreateLot(
+  auth: AuthContext,
+  docId: string,
+  docRef: string,
+  titleHint: string | null
+): Promise<string | null> {
+  const key = actorKey(auth);
+  const now = Date.now();
+  const current = autoLotByActor.get(key);
+
+  if (!current || now - current.lastAt > AUTO_LOT_WINDOW_MS) {
+    autoLotByActor.set(key, {
+      docIds: [docId],
+      docRefs: [docRef],
+      lotId: null,
+      lotRef: null,
+      lastAt: now,
+    });
+    return null;
+  }
+
+  current.docIds.push(docId);
+  current.docRefs.push(docRef);
+  current.lastAt = now;
+
+  if (current.lotId && current.lotRef) {
+    await assignDocumentsToLot(auth, current.lotId, [docId]);
+    return current.lotRef;
+  }
+
+  if (current.docIds.length < 2) {
+    return null;
+  }
+
+  const autoTitle = titleHint ? `Lot: ${titleHint}` : "Auto document lot";
+  const createdLot = await createLotRecord(auth, autoTitle);
+  await assignDocumentsToLot(auth, createdLot.lotId, current.docIds);
+
+  current.lotId = createdLot.lotId;
+  current.lotRef = createdLot.lotRef;
+  return createdLot.lotRef;
+}
+
+function normalizeContent(content: string): string {
+  if (typeof content !== "string") return "";
+  return content;
+}
+
+async function runBackgroundIndexing(input: {
+  auth: AuthContext;
+  documentId: string;
+  content: string;
+  createdAt: string;
+}): Promise<void> {
+  const fallback = fallbackSummary(input.content);
+
+  let summaryJson: Record<string, unknown> = fallback;
+  try {
+    const summary = await summarizeConversation(input.content);
+    summaryJson = { ...summary };
+  } catch {
+    summaryJson = fallback;
+  }
+
+  let pointId: string | null = null;
+  let vectorErrorMessage: string | null = null;
+
+  try {
+    const embeddingInput = embeddingInputFromSummary(summaryJson).trim()
+      || input.content.replace(/\s+/g, " ").trim().slice(0, 1200)
+      || "document";
+    const vector = await embedText(embeddingInput);
+    const upserted = await vectorRepository.upsertMemoryVector({
+      auth: input.auth,
+      memoryId: input.documentId,
+      pointId: input.documentId,
+      vector,
+      platform: DOCUMENT_VECTOR_PLATFORM,
+      createdAt: input.createdAt,
+    });
+    pointId = upserted.pointId;
+  } catch (error) {
+    vectorErrorMessage = error instanceof Error ? error.message.slice(0, 300) : "unknown";
+  }
+
+  const summaryForStorage = vectorErrorMessage
+    ? {
+      ...summaryJson,
+      index_degraded: "vector_unavailable",
+      index_error: vectorErrorMessage,
+    }
+    : summaryJson;
+
+  await pool.query(
+    `UPDATE documents
+     SET summary_json = $1::jsonb,
+         qdrant_point_id = $2,
+         status = 'ready'
+     WHERE id = $3
+       AND tenant_id = $4
+       AND user_id = $5
+       AND deleted_at IS NULL`,
+    [JSON.stringify(summaryForStorage), pointId, input.documentId, input.auth.tenantId, input.auth.userId]
+  );
+}
+
+export class DocumentSizeExceededError extends Error {
+  override readonly name = "DocumentSizeExceededError";
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+export function assertPro(auth: AuthContext): void {
+  if (auth.plan === "pro" || auth.plan === "power") return;
+  throw new PlanRequiredError(
+    `PDF stash is a Pro feature. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`
+  );
+}
+
+export async function stashDocument(
+  content: string,
+  auth: AuthContext,
+  opts?: {
+    filename?: string;
+    title?: string;
+    mimeType?: string;
+    conversationId?: string | null;
+    blob?: DocumentBlobMetadata;
+  }
+): Promise<{
+  refHandle: string;
+  status: "pending";
+  lotRef?: string;
+  conversationId: string | null;
+  blob: DocumentBlobMetadata | null;
+}> {
+  assertPro(auth);
+
+  const rawContent = normalizeContent(content);
+  const byteSize = Buffer.byteLength(rawContent, "utf8");
+
+  if (byteSize < 1) {
+    throw new Error("Document content is required");
+  }
+  if (rawContent.trim().length === 0) {
+    throw new Error("Document content cannot be blank");
+  }
+  if (byteSize > MAX_DOCUMENT_BYTES) {
+    throw new DocumentSizeExceededError("Document exceeds the 2MB size limit for v1 stash uploads.");
+  }
+
+  const sourceName = opts?.title ?? opts?.filename ?? "document";
+  const slug = toSlug(sourceName, "document");
+
+  const documentId = randomUUID();
+  const contentHash = hashMemoryContent(rawContent);
+  const encrypted = encryptMemoryContent(rawContent);
+  const createdAt = new Date().toISOString();
+  const conversationId = opts?.conversationId?.trim() || null;
+  const blob = opts?.blob ?? null;
+
+  let refHandle = "";
+  for (let attempt = 0; attempt < MAX_REF_HANDLE_RETRIES; attempt += 1) {
+    const candidate = buildRefHandle("doc", slug);
+    try {
+      await pool.query(
+        `INSERT INTO documents
+         (id, tenant_id, user_id, ref_handle, lot_id, filename, title, mime_type, byte_size, content_ciphertext, content_hash, summary_json, status, conversation_id, blob_provider, blob_key, blob_url, blob_source_file_id, created_at)
+         VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, '{}'::jsonb, 'pending', $11, $12, $13, $14, $15, $16)`,
+        [
+          documentId,
+          auth.tenantId,
+          auth.userId,
+          candidate,
+          opts?.filename ?? null,
+          opts?.title ?? null,
+          opts?.mimeType ?? "text/markdown",
+          byteSize,
+          encrypted,
+          contentHash,
+          conversationId,
+          blob?.provider ?? null,
+          blob?.key ?? null,
+          blob?.url ?? null,
+          blob?.sourceFileId ?? null,
+          createdAt,
+        ]
+      );
+      refHandle = candidate;
+      break;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (!refHandle) {
+    throw new Error("Failed to generate a unique document reference");
+  }
+
+  const lotRef = await maybeAutoCreateLot(auth, documentId, refHandle, opts?.title ?? null);
+
+  void runBackgroundIndexing({
+    auth,
+    documentId,
+    content: rawContent,
+    createdAt,
+  }).catch((error) => {
+    if (config.nodeEnv !== "production") {
+      console.warn("[documents] background indexing failed", error);
+    }
+  });
+
+  const base = { refHandle, status: "pending" as const, conversationId, blob };
+  return lotRef ? { ...base, lotRef } : base;
+}
+
+export async function stashDocumentNote(
+  note: {
+    title: string;
+    key_points: string[];
+    summary: string;
+    source_hint: string;
+  },
+  auth: AuthContext,
+  opts?: {
+    conversationId?: string | null;
+  }
+): Promise<{ refHandle: string; status: "ready" }> {
+  assertPro(auth);
+
+  const noteJson = JSON.stringify({
+    title: note.title,
+    key_points: note.key_points,
+    summary: note.summary,
+    source_hint: note.source_hint,
+  });
+
+  const byteSize = Buffer.byteLength(noteJson, "utf8");
+  const slug = toSlug(note.title, "note");
+  const documentId = randomUUID();
+  const contentHash = hashMemoryContent(noteJson);
+  const encrypted = encryptMemoryContent(noteJson);
+  const createdAt = new Date().toISOString();
+  const conversationId = opts?.conversationId?.trim() || null;
+
+  let refHandle = "";
+  for (let attempt = 0; attempt < MAX_REF_HANDLE_RETRIES; attempt += 1) {
+    const candidate = buildRefHandle("doc", slug);
+    try {
+      await pool.query(
+        `INSERT INTO documents
+         (id, tenant_id, user_id, ref_handle, lot_id, filename, title, mime_type, byte_size, content_ciphertext, content_hash, summary_json, status, kind, conversation_id, created_at)
+         VALUES ($1, $2, $3, $4, NULL, NULL, $5, 'application/json', $6, $7, $8, '{}'::jsonb, 'ready', 'note', $9, $10)`,
+        [documentId, auth.tenantId, auth.userId, candidate, note.title || null, byteSize, encrypted, contentHash, conversationId, createdAt]
+      );
+      refHandle = candidate;
+      break;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (!refHandle) {
+    throw new Error("Failed to generate a unique document reference");
+  }
+
+  return { refHandle, status: "ready" };
+}
+
+export async function createLot(
+  refHandles: string[],
+  auth: AuthContext,
+  title?: string
+): Promise<{ lotRef: string; docRefs: string[] }> {
+  assertPro(auth);
+
+  const uniqueRefs = [...new Set(refHandles.map((value) => normalizeRef(value)).filter(Boolean))];
+  if (uniqueRefs.length === 0) {
+    throw new Error("At least one document ref is required");
+  }
+  if (uniqueRefs.some((ref) => !isDocumentRef(ref))) {
+    throw new Error("create_lot only accepts @doc references");
+  }
+
+  const rows = await pool.query<{ id: string; ref_handle: string }>(
+    `SELECT id, ref_handle
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+       AND ref_handle = ANY($3::text[])`,
+    [auth.tenantId, auth.userId, uniqueRefs]
+  );
+
+  if (rows.rows.length !== uniqueRefs.length) {
+    throw new Error("One or more document refs were not found for this account");
+  }
+
+  const createdLot = await createLotRecord(auth, title ?? null);
+  await assignDocumentsToLot(auth, createdLot.lotId, rows.rows.map((row) => row.id));
+
+  return { lotRef: createdLot.lotRef, docRefs: uniqueRefs };
+}
+
+function decodeDocumentRow(row: DocumentRow): {
+  ref: string;
+  filename: string | null;
+  title: string | null;
+  content: string;
+  kind: "blob" | "note";
+  status: "ready" | "pending_embedding" | "failed_indexing";
+  conversation_id: string | null;
+  blob: {
+    provider: "uploadthing";
+    key: string;
+    url: string;
+    source_file_id: string;
+  } | null;
+} {
+  let content = "";
+  try {
+    const raw = decryptMemoryContent(row.content_ciphertext);
+    if (row.kind === "note") {
+      // Note rows store JSON; render as readable summary block.
+      try {
+        const note = JSON.parse(raw) as { title?: string; key_points?: string[]; summary?: string; source_hint?: string };
+        const lines: string[] = [];
+        if (note.title) lines.push(`**${note.title}**`);
+        if (note.source_hint) lines.push(`_Source: ${note.source_hint}_`);
+        if (note.summary) lines.push(`\n${note.summary}`);
+        if (note.key_points && note.key_points.length > 0) {
+          lines.push("\nKey points:");
+          note.key_points.forEach((kp) => lines.push(`- ${kp}`));
+        }
+        lines.push("\n⚠️ Summary-only note. Full document was not stored. Ask the user to re-attach the file if full contents are needed.");
+        content = lines.join("\n");
+      } catch {
+        content = raw;
+      }
+    } else {
+      content = raw;
+    }
+  } catch {
+    content = "[Encrypted document unavailable]";
+  }
+
+  const status = row.status === "ready"
+    ? "ready"
+    : row.status === "pending"
+      ? "pending_embedding"
+      : "failed_indexing";
+
+  return {
+    ref: row.ref_handle,
+    filename: row.filename,
+    title: row.title,
+    content,
+    kind: row.kind ?? "blob",
+    status,
+    conversation_id: row.conversation_id ?? null,
+    blob:
+      row.blob_provider === "uploadthing" &&
+        typeof row.blob_key === "string" &&
+        typeof row.blob_url === "string" &&
+        typeof row.blob_source_file_id === "string"
+        ? {
+          provider: "uploadthing",
+          key: row.blob_key,
+          url: row.blob_url,
+          source_file_id: row.blob_source_file_id,
+        }
+        : null,
+  };
+}
+
+export async function recallDocument(
+  refHandle: string,
+  auth: AuthContext
+): Promise<
+  | {
+    kind: "document";
+    ref: string;
+    filename: string | null;
+    title: string | null;
+    content: string;
+    status: "ready" | "pending_embedding" | "failed_indexing";
+    conversation_id: string | null;
+    blob: {
+      provider: "uploadthing";
+      key: string;
+      url: string;
+      source_file_id: string;
+    } | null;
+  }
+  | {
+    kind: "lot";
+    ref: string;
+    title: string | null;
+    docs: Array<{
+      ref: string;
+      filename: string | null;
+      title: string | null;
+      content: string;
+      status: "ready" | "pending_embedding" | "failed_indexing";
+      conversation_id: string | null;
+      blob: {
+        provider: "uploadthing";
+        key: string;
+        url: string;
+        source_file_id: string;
+      } | null;
+    }>;
+  }
+> {
+  assertPro(auth);
+
+  const normalized = normalizeRef(refHandle);
+
+  if (isLotRef(normalized)) {
+    const lot = await recallLot(normalized, auth);
+    return {
+      kind: "lot",
+      ref: lot.ref,
+      title: lot.title,
+      docs: lot.docs,
+    };
+  }
+
+  const documentResult = await pool.query<DocumentRow>(
+    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, conversation_id, blob_provider, blob_key, blob_url, blob_source_file_id, created_at
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+       AND ref_handle = $3
+     LIMIT 1`,
+    [auth.tenantId, auth.userId, normalized]
+  );
+
+  const row = documentResult.rows[0];
+  if (!row) {
+    throw new Error("Document not found");
+  }
+
+  const decoded = decodeDocumentRow(row);
+  return {
+    kind: "document",
+    ref: decoded.ref,
+    filename: decoded.filename,
+    title: decoded.title,
+    content: decoded.content,
+    status: decoded.status,
+    conversation_id: decoded.conversation_id,
+    blob: decoded.blob,
+  };
+}
+
+export async function recallLot(
+  refHandle: string,
+  auth: AuthContext
+): Promise<{
+  ref: string;
+  title: string | null;
+  docs: Array<{
+    ref: string;
+    filename: string | null;
+    title: string | null;
+    content: string;
+    status: "ready" | "pending_embedding" | "failed_indexing";
+    conversation_id: string | null;
+    blob: {
+      provider: "uploadthing";
+      key: string;
+      url: string;
+      source_file_id: string;
+    } | null;
+  }>;
+}> {
+  assertPro(auth);
+
+  const lotResult = await pool.query<LotRow>(
+    `SELECT id, ref_handle, title, created_at
+     FROM document_lots
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+       AND ref_handle = $3
+     LIMIT 1`,
+    [auth.tenantId, auth.userId, normalizeRef(refHandle)]
+  );
+
+  const lot = lotResult.rows[0];
+  if (!lot) {
+    throw new Error("Lot not found");
+  }
+
+  const docsResult = await pool.query<DocumentRow>(
+    `SELECT id, ref_handle, lot_id, filename, title, byte_size, content_ciphertext, summary_json, status, kind, conversation_id, blob_provider, blob_key, blob_url, blob_source_file_id, created_at
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+       AND lot_id = $3
+     ORDER BY created_at ASC`,
+    [auth.tenantId, auth.userId, lot.id]
+  );
+
+  return {
+    ref: lot.ref_handle,
+    title: lot.title,
+    docs: docsResult.rows.map((row) => decodeDocumentRow(row)),
+  };
+}
+
+export async function searchDocuments(
+  query: string,
+  auth: AuthContext,
+  limit = 5
+): Promise<Array<{ ref: string; title: string; score: number; preview: string }>> {
+  assertPro(auth);
+
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return [];
+
+  const normalizedLimit = Math.min(20, Math.max(1, Math.floor(limit)));
+  const queryTokens = tokenizeLexicalQuery(normalizedQuery);
+
+  if (isDocumentRef(normalizedQuery)) {
+    const doc = await pool.query<{ ref_handle: string; title: string | null; summary_json: unknown }>(
+      `SELECT ref_handle, title, summary_json
+       FROM documents
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND ref_handle = $3
+       LIMIT 1`,
+      [auth.tenantId, auth.userId, normalizedQuery]
+    );
+
+    if (doc.rows[0]) {
+      return [{
+        ref: doc.rows[0].ref_handle,
+        title: doc.rows[0].title ?? "Untitled Document",
+        score: 1,
+        preview: summaryPreview(doc.rows[0].summary_json),
+      }];
+    }
+  }
+
+  const lexicalMatches = await lexicalSearchDocuments(normalizedQuery, auth, normalizedLimit);
+  if (lexicalMatches.length > 0 && lexicalMatches[0].score >= 0.65) {
+    return lexicalMatches;
+  }
+
+  const vectorMatches = await withTimeoutFallback(
+    (async (): Promise<Array<{ ref: string; title: string; score: number; preview: string }>> => {
+      try {
+        const vector = await embedText(normalizedQuery);
+        const hits = await vectorRepository.searchVectorsByPlatform(
+          auth,
+          vector,
+          normalizedLimit,
+          DOCUMENT_VECTOR_PLATFORM
+        );
+
+        if (hits.length === 0) return [];
+
+        const uniqueIds = [...new Set(hits.map((hit) => hit.memoryId))];
+        const rows = await pool.query<{
+          id: string;
+          ref_handle: string;
+          title: string | null;
+          summary_json: unknown;
+          content_ciphertext: string;
+        }>(
+          `SELECT id, ref_handle, title, summary_json, content_ciphertext
+           FROM documents
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND deleted_at IS NULL
+             AND id = ANY($3::uuid[])`,
+          [auth.tenantId, auth.userId, uniqueIds]
+        );
+
+        const byId = new Map(rows.rows.map((row) => [row.id, row]));
+        return hits
+          .map((hit) => {
+            const row = byId.get(hit.memoryId);
+            if (!row) return null;
+            let preview = summaryPreview(row.summary_json);
+            if (!preview) {
+              try {
+                preview = contentPreview(decryptMemoryContent(row.content_ciphertext), queryTokens);
+              } catch {
+                preview = "";
+              }
+            }
+            return {
+              ref: row.ref_handle,
+              title: row.title ?? "Untitled Document",
+              score: hit.score,
+              preview,
+            };
+          })
+          .filter((item): item is { ref: string; title: string; score: number; preview: string } => Boolean(item));
+      } catch {
+        return [];
+      }
+    })(),
+    SEARCH_DOCUMENT_VECTOR_TIMEOUT_MS,
+    []
+  );
+
+  if (vectorMatches.length > 0) {
+    return vectorMatches;
+  }
+  if (lexicalMatches.length > 0) {
+    return lexicalMatches;
+  }
+
+  return lexicalSearchDocumentsByContent(normalizedQuery, auth, normalizedLimit);
+}
+
+export async function recentDocumentBriefs(
+  auth: AuthContext,
+  limit = 5
+): Promise<DocumentBrief[]> {
+  const normalizedLimit = Math.min(20, Math.max(1, Math.floor(limit)));
+  const rows = await pool.query<DocumentBriefRow>(
+    `SELECT d.ref_handle,
+            d.filename,
+            d.title,
+            d.status,
+            d.created_at,
+            d.summary_json,
+            d.lot_id,
+            l.ref_handle AS lot_ref,
+            l.title AS lot_title,
+            d.blob_provider,
+            d.blob_key,
+            d.blob_url,
+            d.blob_source_file_id
+     FROM documents d
+     LEFT JOIN document_lots l
+       ON l.id = d.lot_id
+      AND l.deleted_at IS NULL
+     WHERE d.tenant_id = $1
+       AND d.user_id = $2
+       AND d.deleted_at IS NULL
+     ORDER BY d.created_at DESC
+     LIMIT $3`,
+    [auth.tenantId, auth.userId, normalizedLimit]
+  );
+
+  return rows.rows.map((row) => toDocumentBrief(row));
+}
+
+export async function documentBriefsByRefs(
+  refHandles: string[],
+  auth: AuthContext,
+  options?: { maxLotDocs?: number }
+): Promise<DocumentRefBrief[]> {
+  const uniqueRefs = [...new Set(refHandles.map((value) => normalizeRef(value)).filter(Boolean))];
+  if (uniqueRefs.length === 0) return [];
+
+  const maxLotDocs = Math.min(20, Math.max(1, Math.floor(options?.maxLotDocs ?? 5)));
+  const docRefs = uniqueRefs.filter((ref) => isDocumentRef(ref));
+  const lotRefs = uniqueRefs.filter((ref) => isLotRef(ref));
+
+  const documentsResult = docRefs.length > 0
+    ? await pool.query<DocumentBriefRow>(
+      `SELECT d.ref_handle,
+              d.filename,
+              d.title,
+              d.status,
+              d.created_at,
+              d.summary_json,
+              d.lot_id,
+              l.ref_handle AS lot_ref,
+              l.title AS lot_title,
+              d.blob_provider,
+              d.blob_key,
+              d.blob_url,
+              d.blob_source_file_id
+       FROM documents d
+       LEFT JOIN document_lots l
+         ON l.id = d.lot_id
+        AND l.deleted_at IS NULL
+       WHERE d.tenant_id = $1
+         AND d.user_id = $2
+         AND d.deleted_at IS NULL
+         AND d.ref_handle = ANY($3::text[])`,
+      [auth.tenantId, auth.userId, docRefs]
+    )
+    : { rows: [] as DocumentBriefRow[] };
+
+  const lotsResult = lotRefs.length > 0
+    ? await pool.query<LotBriefRow>(
+      `SELECT id, ref_handle, title, created_at
+       FROM document_lots
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND ref_handle = ANY($3::text[])`,
+      [auth.tenantId, auth.userId, lotRefs]
+    )
+    : { rows: [] as LotBriefRow[] };
+
+  const lotIds = lotsResult.rows.map((row) => row.id);
+  const lotDocsResult = lotIds.length > 0
+    ? await pool.query<DocumentBriefRow>(
+      `SELECT d.ref_handle,
+              d.filename,
+              d.title,
+              d.status,
+              d.created_at,
+              d.summary_json,
+              d.lot_id,
+              l.ref_handle AS lot_ref,
+              l.title AS lot_title,
+              d.blob_provider,
+              d.blob_key,
+              d.blob_url,
+              d.blob_source_file_id
+       FROM documents d
+       LEFT JOIN document_lots l
+         ON l.id = d.lot_id
+        AND l.deleted_at IS NULL
+       WHERE d.tenant_id = $1
+         AND d.user_id = $2
+         AND d.deleted_at IS NULL
+         AND d.lot_id = ANY($3::uuid[])
+       ORDER BY d.created_at DESC`,
+      [auth.tenantId, auth.userId, lotIds]
+    )
+    : { rows: [] as DocumentBriefRow[] };
+
+  const docByRef = new Map(documentsResult.rows.map((row) => [row.ref_handle, toDocumentBrief(row)]));
+  const lotByRef = new Map(lotsResult.rows.map((row) => [row.ref_handle, row]));
+  const lotDocs = new Map<string, DocumentBrief[]>();
+  for (const row of lotDocsResult.rows) {
+    if (!row.lot_id) continue;
+    const docs = lotDocs.get(row.lot_id) ?? [];
+    docs.push(toDocumentBrief(row));
+    lotDocs.set(row.lot_id, docs);
+  }
+
+  return uniqueRefs.map((ref): DocumentRefBrief => {
+    const doc = docByRef.get(ref);
+    if (doc) return doc;
+
+    const lot = lotByRef.get(ref);
+    if (lot) {
+      const docs = (lotDocs.get(lot.id) ?? []).slice(0, maxLotDocs);
+      return {
+        kind: "lot",
+        ref: lot.ref_handle,
+        title: lot.title ?? lot.ref_handle,
+        createdAt: lot.created_at,
+        documentCount: lotDocs.get(lot.id)?.length ?? 0,
+        documents: docs,
+      };
+    }
+
+    return {
+      kind: "missing",
+      ref,
+      error: "Document or lot not found",
+    };
+  });
+}
+
+export async function listDocuments(auth: AuthContext): Promise<{
+  docs: Array<{
+    ref: string;
+    filename: string | null;
+    title: string | null;
+    preview: string;
+    byteSize: number;
+    status: "pending" | "ready" | "failed";
+    createdAt: string;
+    lotRef: string | null;
+    lotTitle: string | null;
+    blob: {
+      provider: "uploadthing";
+      key: string;
+      url: string;
+      source_file_id: string;
+    } | null;
+  }>;
+  lots: Array<{
+    ref: string;
+    title: string | null;
+    createdAt: string;
+    documentCount: number;
+  }>;
+}> {
+  assertPro(auth);
+
+  const docsResult = await pool.query<{
+    ref_handle: string;
+    filename: string | null;
+    title: string | null;
+    summary_json: unknown;
+    byte_size: number;
+    status: "pending" | "ready" | "failed";
+    created_at: string;
+    lot_ref: string | null;
+    lot_title: string | null;
+    blob_provider: string | null;
+    blob_key: string | null;
+    blob_url: string | null;
+    blob_source_file_id: string | null;
+  }>(
+    `SELECT d.ref_handle,
+            d.filename,
+            d.title,
+            d.summary_json,
+            d.byte_size,
+            d.status,
+            d.created_at,
+            l.ref_handle AS lot_ref,
+            l.title AS lot_title,
+            d.blob_provider,
+            d.blob_key,
+            d.blob_url,
+            d.blob_source_file_id
+     FROM documents d
+     LEFT JOIN document_lots l
+       ON l.id = d.lot_id
+      AND l.deleted_at IS NULL
+     WHERE d.tenant_id = $1
+       AND d.user_id = $2
+       AND d.deleted_at IS NULL
+     ORDER BY d.created_at DESC`,
+    [auth.tenantId, auth.userId]
+  );
+
+  const lotsResult = await pool.query<{
+    ref_handle: string;
+    title: string | null;
+    created_at: string;
+    document_count: number;
+  }>(
+    `SELECT l.ref_handle,
+            l.title,
+            l.created_at,
+            COUNT(d.id)::int AS document_count
+     FROM document_lots l
+     LEFT JOIN documents d
+       ON d.lot_id = l.id
+      AND d.deleted_at IS NULL
+     WHERE l.tenant_id = $1
+       AND l.user_id = $2
+       AND l.deleted_at IS NULL
+     GROUP BY l.id
+     ORDER BY l.created_at DESC`,
+    [auth.tenantId, auth.userId]
+  );
+
+  return {
+    docs: docsResult.rows.map((row) => ({
+      ref: row.ref_handle,
+      filename: row.filename,
+      title: row.title,
+      preview: summaryPreview(row.summary_json).slice(0, 220),
+      byteSize: row.byte_size,
+      status: row.status,
+      createdAt: row.created_at,
+      lotRef: row.lot_ref,
+      lotTitle: row.lot_title,
+      blob:
+        row.blob_provider === "uploadthing" &&
+          typeof row.blob_key === "string" &&
+          typeof row.blob_url === "string" &&
+          typeof row.blob_source_file_id === "string"
+          ? {
+            provider: "uploadthing",
+            key: row.blob_key,
+            url: row.blob_url,
+            source_file_id: row.blob_source_file_id,
+          }
+          : null,
+    })),
+    lots: lotsResult.rows.map((row) => ({
+      ref: row.ref_handle,
+      title: row.title,
+      createdAt: row.created_at,
+      documentCount: row.document_count,
+    })),
+  };
+}
+
+export async function deleteDocumentByRef(
+  refHandle: string,
+  auth: AuthContext
+): Promise<{ success: true; type: "document" | "lot" }> {
+  assertPro(auth);
+
+  const normalized = normalizeRef(refHandle);
+
+  if (isLotRef(normalized)) {
+    const lotDeleted = await pool.query<{ id: string }>(
+      `UPDATE document_lots
+       SET deleted_at = NOW()
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND ref_handle = $3
+       RETURNING id`,
+      [auth.tenantId, auth.userId, normalized]
+    );
+
+    const lot = lotDeleted.rows[0];
+    if (!lot) {
+      throw new Error("Lot not found");
+    }
+
+    await pool.query(
+      `UPDATE documents
+       SET lot_id = NULL
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND lot_id = $3`,
+      [auth.tenantId, auth.userId, lot.id]
+    );
+
+    return { success: true, type: "lot" };
+  }
+
+  const deleted = await pool.query<{ id: string; lot_id: string | null }>(
+    `UPDATE documents
+     SET deleted_at = NOW()
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+       AND ref_handle = $3
+     RETURNING id, lot_id`,
+    [auth.tenantId, auth.userId, normalized]
+  );
+
+  const row = deleted.rows[0];
+  if (!row) {
+    throw new Error("Document not found");
+  }
+
+  void vectorRepository.deleteMemoryVector(auth, row.id).catch(() => {});
+
+  if (row.lot_id) {
+    const count = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count
+       FROM documents
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND lot_id = $3`,
+      [auth.tenantId, auth.userId, row.lot_id]
+    );
+    if ((count.rows[0]?.count ?? 0) === 0) {
+      await pool.query(
+        `UPDATE document_lots
+         SET deleted_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+           AND deleted_at IS NULL`,
+        [row.lot_id, auth.tenantId, auth.userId]
+      );
+    }
+  }
+
+  return { success: true, type: "document" };
+}

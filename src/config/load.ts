@@ -58,34 +58,52 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   // Auth / crypto
   { newKey: "TALLEI_AUTH__JWT_SECRET",          oldKey: "JWT_SECRET" },
   { newKey: "TALLEI_AUTH__API_KEY_PEPPER",      oldKey: "API_KEY_PEPPER" },
+  { newKey: "TALLEI_AUTH__CONTINUATION_PRIVATE_KEY", oldKey: "AUTH_CONTINUATION_PRIVATE_KEY" },
+  { newKey: "TALLEI_AUTH__CONTINUATION_PUBLIC_KEY", oldKey: "AUTH_CONTINUATION_PUBLIC_KEY" },
+  { newKey: "TALLEI_AUTH__CONTINUATION_TTL_SECONDS", oldKey: "AUTH_CONTINUATION_TTL_SECONDS" },
   { newKey: "TALLEI_AUTH__SUPABASE_URL",        oldKey: "SUPABASE_URL" },
   { newKey: "TALLEI_AUTH__SUPABASE_SERVICE_ROLE_KEY", oldKey: "SUPABASE_SERVICE_ROLE_KEY" },
   { newKey: "TALLEI_AUTH__MEMORY_MASTER_KEY",   oldKey: "MEMORY_MASTER_KEY" },
   { newKey: "TALLEI_AUTH__KMS_KEY_ID",          oldKey: "KMS_KEY_ID" },
+  // Storage
+  { newKey: "TALLEI_STORAGE__UPLOADTHING_TOKEN", oldKey: "UPLOADTHING_TOKEN" },
   // Billing
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_API_KEY",        oldKey: "LEMONSQUEEZY_API_KEY" },
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_WEBHOOK_SECRET", oldKey: "LEMONSQUEEZY_WEBHOOK_SECRET" },
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_PRO_VARIANT_ID", oldKey: "LEMONSQUEEZY_PRO_VARIANT_ID" },
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID", oldKey: "LEMONSQUEEZY_POWER_VARIANT_ID" },
+  { newKey: "TALLEI_BILLING__TRIAL_DAYS",                  oldKey: "LEMONSQUEEZY_TRIAL_DAYS" },
   // Browser automation
   { newKey: "TALLEI_BROWSER__WORKER_BASE_URL",  oldKey: "BROWSER_WORKER_BASE_URL" },
   { newKey: "TALLEI_BROWSER__WORKER_API_KEY",   oldKey: "BROWSER_WORKER_API_KEY" },
   { newKey: "TALLEI_BROWSER__WORKER_WS_ENDPOINT",oldKey: "BROWSER_WORKER_WS_ENDPOINT" },
+  { newKey: "TALLEI_BROWSER__HYPERBROWSER_API_KEY", oldKey: "HYPERBROWSER_API_KEY" },
   { newKey: "TALLEI_BROWSER__SESSION_TTL_MS",   oldKey: "BROWSER_SESSION_TTL_MS" },
   { newKey: "TALLEI_BROWSER__HEADLESS",         oldKey: "BROWSER_HEADLESS" },
+  { newKey: "TALLEI_BROWSER__TEACHER_THRESHOLD",    oldKey: "BROWSER_TEACHER_THRESHOLD" },
   { newKey: "TALLEI_BROWSER__MAX_RETRIES",      oldKey: "BROWSER_MAX_STUDENT_RETRIES" },
   { newKey: "TALLEI_BROWSER__LLM_FALLBACK",     oldKey: "BROWSER_LLM_FALLBACK_ENABLED" },
+  { newKey: "TALLEI_BROWSER__REQUEST_TIMEOUT_MS", oldKey: "BROWSER_WORKER_REQUEST_TIMEOUT_MS" },
+  // Worker runtime
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_ENABLED", oldKey: "UPLOAD_INGEST_WORKER_ENABLED" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", oldKey: "UPLOAD_INGEST_WORKER_POLL_MS" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", oldKey: "UPLOAD_INGEST_WORKER_BATCH_SIZE" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_CONCURRENCY", oldKey: "UPLOAD_INGEST_WORKER_CONCURRENCY" },
   // Feature flags
   { newKey: "TALLEI_FEATURE__RERANK",           oldKey: "RERANK_ENABLED" },
   { newKey: "TALLEI_FEATURE__USE_NEW_SAVE",     oldKey: "USE_NEW_SAVE_USECASE" },
   { newKey: "TALLEI_FEATURE__USE_NEW_RECALL",   oldKey: "USE_NEW_RECALL_USECASE" },
   { newKey: "TALLEI_FEATURE__USE_NEW_LIST",     oldKey: "USE_NEW_LIST_USECASE" },
   { newKey: "TALLEI_FEATURE__USE_NEW_DELETE",   oldKey: "USE_NEW_DELETE_USECASE" },
+  { newKey: "TALLEI_FEATURE__AUTH_API_KEY_VIEW", oldKey: "AUTH_API_KEY_VIEW_ENABLED" },
+  { newKey: "TALLEI_FEATURE__AUTH_API_KEY_VIEW_SHADOW", oldKey: "AUTH_API_KEY_VIEW_SHADOW_ENABLED" },
   // Resilience tunables
   { newKey: "TALLEI_RESILIENCE__VECTOR_UPSERT_TIMEOUT_MS", oldKey: "MEMORY_VECTOR_UPSERT_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_EMBED_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_EMBED_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_VECTOR_TIMEOUT_MS", oldKey: "MEMORY_RECALL_VECTOR_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_TOTAL_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_TOTAL_TIMEOUT_MS" },
+  { newKey: "TALLEI_RESILIENCE__RECALL_REDIS_HEDGE_ENABLED", oldKey: "RECALL_REDIS_HEDGE_ENABLED" },
+  { newKey: "TALLEI_RESILIENCE__RECALL_REDIS_HEDGE_DELAY_MS", oldKey: "RECALL_REDIS_HEDGE_DELAY_MS" },
   // Rate limits
   { newKey: "TALLEI_RATE__MEMORY_API_PER_MINUTE", oldKey: "MEMORY_API_RATE_LIMIT_PER_MINUTE" },
   { newKey: "TALLEI_RATE__MCP_PER_MINUTE",         oldKey: "MCP_RATE_LIMIT_PER_MINUTE" },
@@ -170,6 +188,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     openaiApiKey: readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
     jwtSecret: requireEnv(e, "TALLEI_AUTH__JWT_SECRET"),
     apiKeyPepper: readStringEnv(e, "TALLEI_AUTH__API_KEY_PEPPER"),
+    authContinuationPrivateKey: readStringEnv(e, "TALLEI_AUTH__CONTINUATION_PRIVATE_KEY"),
+    authContinuationPublicKey: readStringEnv(e, "TALLEI_AUTH__CONTINUATION_PUBLIC_KEY"),
+    authContinuationTtlSeconds: readIntEnv(e, "TALLEI_AUTH__CONTINUATION_TTL_SECONDS", 600),
     supabaseUrl: readStringEnv(e, "TALLEI_AUTH__SUPABASE_URL"),
     supabaseServiceRoleKey: readStringEnv(e, "TALLEI_AUTH__SUPABASE_SERVICE_ROLE_KEY"),
     redisUrl: readStringEnv(e, "TALLEI_REDIS__URL"),
@@ -215,17 +236,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     memoryRecallEmbedTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__RECALL_EMBED_TIMEOUT_MS",
-      nodeEnv === "production" ? 5_000 : 6_000
+      nodeEnv === "production" ? 15_000 : 15_000
     ),
     memoryRecallVectorTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__RECALL_VECTOR_TIMEOUT_MS",
-      nodeEnv === "production" ? 8_000 : 12_000
+      nodeEnv === "production" ? 20_000 : 20_000
     ),
     memoryRecallTotalTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__RECALL_TOTAL_TIMEOUT_MS",
-      nodeEnv === "production" ? 12_000 : 20_000
+      nodeEnv === "production" ? 30_000 : 30_000
     ),
     // Qdrant JS client expects timeout in milliseconds.
     qdrantTimeoutMs:
@@ -244,6 +265,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ollamaModel: readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen2.5:7b"),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
     kmsKeyId: readStringEnv(e, "TALLEI_AUTH__KMS_KEY_ID", "local-dev"),
+    uploadthingToken: readStringEnv(e, "TALLEI_STORAGE__UPLOADTHING_TOKEN"),
     enableSupabaseRlsPolicies: readBooleanEnv(e, "ENABLE_SUPABASE_RLS_POLICIES", true),
     // Phase 3 feature flags — shadow cutover for memory.ts extraction (ADR-007)
     memoryDualWriteEnabled: readBooleanEnv(e, "MEMORY_DUAL_WRITE_ENABLED", false),
@@ -261,20 +283,59 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     rerankMinScore: readFloatEnv(e, "TALLEI_MISC__RERANK_MIN_SCORE", 0.4),
     browserWorkerBaseUrl: e.TALLEI_BROWSER__WORKER_BASE_URL || "",
     browserWorkerApiKey: e.TALLEI_BROWSER__WORKER_API_KEY || "",
+    browserWorkerRequestTimeoutMs: readIntEnv(e, "TALLEI_BROWSER__REQUEST_TIMEOUT_MS", 45_000),
     browserMaxStudentRetries: readIntEnv(e, "TALLEI_BROWSER__MAX_RETRIES", 2),
     browserLlmFallbackEnabled: readBooleanEnv(e, "TALLEI_BROWSER__LLM_FALLBACK", true),
     browserWorkerWsEndpoint: e.TALLEI_BROWSER__WORKER_WS_ENDPOINT || "",
     browserSessionTtlMs: readIntEnv(e, "TALLEI_BROWSER__SESSION_TTL_MS", 900000),
     browserHeadless: readBooleanEnv(e, "TALLEI_BROWSER__HEADLESS", true),
+    hyperbrowserApiKey: readStringEnv(e, "TALLEI_BROWSER__HYPERBROWSER_API_KEY", ""),
+    browserTeacherThreshold: readIntEnv(e, "TALLEI_BROWSER__TEACHER_THRESHOLD", 3),
+    uploadIngestWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_ENABLED", true),
+    uploadIngestWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", 150),
+    uploadIngestWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", 4),
+    uploadIngestWorkerConcurrency: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_CONCURRENCY", 2),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),
     lemonSqueezyWebhookSecret: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_WEBHOOK_SECRET"),
     lemonSqueezyProVariantId: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_PRO_VARIANT_ID"),
     lemonSqueezyPowerVariantId: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID"),
+    lemonSqueezyTrialDays: readIntEnv(e, "TALLEI_BILLING__TRIAL_DAYS", 7),
     claudeProjectInstructionsTemplate:
       e.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
-      "You have Tallei memory tools. Use them silently. Rules: (1) On the first user turn in a new conversation, call recall_memories with types=['preference'] before replying. (2) Before personal/contextual answers, call recall_memories with focused query + relevant types. (3) Use save_preference for stable preferences and identity facts. (4) Use save_memory for non-preference facts/events/decisions/notes. (5) If the user corrects prior information, save the corrected value. (6) Never mention tool calls or saves in user-facing text.",
+      `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.
+
+=== TURN PROTOCOL ===
+
+STEP A — RECALL WHEN NEEDED:
+- Do NOT call recall_memories reflexively.
+- Call recall_memories only when prior-session context is required.
+- recall_memories defaults to facts + preferences and returns docs-lite context only.
+- include_doc_refs returns brief metadata only (no full document text).
+- recall_memories also includes a brief list of the latest 5 uploaded docs.
+- If the user references an older doc by name, call search_documents first and then include matching refs.
+- Use recall_document only when full document text is explicitly needed.
+
+STEP B — ANSWER:
+- Answer the user directly.
+
+STEP C — AUTO-SAVE NEW STRUCTURED CONTENT (required):
+- If this turn includes new structured content (file upload, pasted doc/spec/transcript, extracted PDF text, list/table/data), call remember(kind="document-note", title, key_points, summary, source_hint) in the same turn, without asking permission.
+- Then append exactly this footer on its own line:
+  📎 Auto-saved as @doc:<ref> · reply **undo** to delete
+- Skip auto-save only if the user explicitly said not to save, the turn is purely conversational, or the same content was already saved.
+
+STEP D — UNDO:
+- If the user replies "undo", "del", or "delete" after that footer, call undo_save with that @doc ref immediately.
+
+=== ONGOING ===
+- Use remember(kind="preference") for stable preferences and identity facts.
+- Use remember(kind="fact") for non-preference facts, decisions, events, notes, and corrections.
+- Use remember(kind="document-blob") only when the user explicitly asks for full archive/full stash of complete text.
+
+=== HARD RULE ===
+- Never mention tool internals in user-facing text, except the required auto-save footer.`,
   } as const;
 }
 

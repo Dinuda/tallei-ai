@@ -16,3 +16,11 @@ export class QuotaExceededError extends Error {
     super(message);
   }
 }
+
+export class PlanRequiredError extends Error {
+  override readonly name = "PlanRequiredError";
+
+  constructor(message: string) {
+    super(message);
+  }
+}

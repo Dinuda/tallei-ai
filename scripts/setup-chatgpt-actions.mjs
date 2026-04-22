@@ -1,17 +1,41 @@
 #!/usr/bin/env node
 import process from "node:process";
 
-const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory tools.
+const CHATGPT_ACTIONS_SPEC_TAG = "stable";
+
+const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory + documents tools.
+
+Available actions:
+- recall_memories
+- upload_blob
+- remember
+- undo_save
+- recent_documents
+- search_documents
+- recall_document
 
 Rules:
-1) On the first user message in each new chat, immediately call recallMemories with query="find tallei" before replying, even if context is not strictly needed.
-2) On every user turn, preload once by calling recallMemories before replying.
-3) If you do not know something, are uncertain, or detect missing personal/contextual information, call recallMemories before answering.
-4) Do not run repeated recall searches in the same turn unless the user explicitly asks for a deeper memory search.
-5) Before answering personal/contextual questions, ensure the preload recallMemories call has already happened in that turn.
-6) Only call saveMemory when the user explicitly asks you to remember something, or explicitly asks to remember a correction.
-7) If the user corrects a prior fact and asks to remember it, call saveMemory with the corrected fact.
-8) Do not mention tool calls in the final user-facing response.`;
+1) On the first user turn in a chat, always call recall_memories(query=user message, limit=8, types=["fact","preference"]).
+2) After first turn, call recall_memories only when asked or when prior memory/docs are needed to answer confidently.
+3) If uploaded files exist, strict tool order is required: start user-facing text with "I'm saving <file_name>" -> upload_blob(openaiFileIdRefs=[...]) -> recall_memories(if needed) -> answer.
+4) Never answer before upload_blob returns.
+5) If upload_blob returns failures, retry upload_blob and do not continue with final answer until files are saved or user explicitly says to skip saving.
+6) End the final answer with saved refs (for example: Saved: @doc:... or Saved: @lot:...).
+7) Uploads are not PDF-only; Word files (.docx/.docm) are supported too.
+8) If a question is referential (e.g., "the first activity", "that catalogue", "according to the spec", "in the line"), treat it as document-grounded even without the words "pdf" or "document".
+9) For document-grounded questions, call recent_documents(limit=5) first.
+10) If needed, call search_documents(query=user message, limit=5).
+11) If a likely match exists, call recall_document(ref=best match) before answering.
+12) Only ask clarification if no match after steps 9-11; never skip these and give a generic answer.
+13) recall_memories provides docs-lite context only; include_doc_refs returns brief metadata only.
+14) Every 3 user messages, save a concise fact summary with remember(kind="fact"), unless user opted out.
+15) Use remember as the unified save endpoint (fact/preference/document-note/document-blob) for explicit user save requests.
+16) If the user says "undo"/"delete", call undo_save with the saved @doc ref.
+17) Do not mention tool calls in user-facing responses (except the required save line + saved-ref footer on file turns).
+18) STRICT MODE for GPT-5.3 / GPT-5.3-instant / auto:
+    - Before final answer, check: first-turn recall done; file upload (if any) succeeded; needed doc lookup done; save line + saved refs included.
+    - If any check fails, call required tools now and do not finalize answer yet.
+19) OpenAPI operation descriptions are the canonical execution contract.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);
@@ -70,9 +94,9 @@ async function main() {
     : rawAccessToken;
 
   const healthUrl = `${baseUrl}/health`;
-  const openApiUrl = `${baseUrl}/api/chatgpt/openapi.json`;
-  const recallUrl = `${baseUrl}/api/chatgpt/actions/recall`;
-  const saveUrl = `${baseUrl}/api/chatgpt/actions/save`;
+  const openApiUrl = `${baseUrl}/api/chatgpt/actions/openapi.json?spec=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_TAG)}`;
+  const recallUrl = `${baseUrl}/api/chatgpt/actions/recall_memories`;
+  const rememberUrl = `${baseUrl}/api/chatgpt/actions/remember`;
 
   console.log("Tallei ChatGPT Actions Setup");
   console.log("============================");
@@ -119,11 +143,11 @@ async function main() {
       const data = await safeJson(res);
       if (!data || typeof data !== "object") throw new Error("Invalid OpenAPI JSON");
       if (typeof data.openapi !== "string") throw new Error("Missing openapi version");
-      if (!data.paths?.["/api/chatgpt/actions/recall"]) {
-        throw new Error("Missing /api/chatgpt/actions/recall path");
+      if (!data.paths?.["/api/chatgpt/actions/recall_memories"]) {
+        throw new Error("Missing /api/chatgpt/actions/recall_memories path");
       }
-      if (!data.paths?.["/api/chatgpt/actions/save"]) {
-        throw new Error("Missing /api/chatgpt/actions/save path");
+      if (!data.paths?.["/api/chatgpt/actions/remember"]) {
+        throw new Error("Missing /api/chatgpt/actions/remember path");
       }
     })
   );
@@ -152,18 +176,19 @@ async function main() {
     );
 
     checks.push(
-      await runCheck("Authenticated save smoke check", async () => {
-        const res = await fetch(saveUrl, {
+      await runCheck("Authenticated remember smoke check", async () => {
+        const res = await fetch(rememberUrl, {
           method: "POST",
           headers: authHeaders,
           body: JSON.stringify({
+            kind: "fact",
             content: `Setup verification memory (${new Date().toISOString()})`,
           }),
         });
         if (!res.ok) throw new Error(`Expected 200, got ${res.status}`);
         const data = await safeJson(res);
-        if (!data || data.success !== true || typeof data.memoryId !== "string") {
-          throw new Error("Invalid save response shape");
+        if (!data || data.success !== true) {
+          throw new Error("Invalid remember response shape");
         }
       })
     );
