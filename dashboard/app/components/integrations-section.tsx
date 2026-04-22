@@ -73,13 +73,14 @@ export function IntegrationsSection() {
 
   // Typing effect for the user message, then show memory banner and bot message
   useEffect(() => {
-    setDisplayedUserMsg("");
-    setIsTypingUser(true);
-    setShowMemoryBanner(false);
-    setShowBotMsg(false);
-
     const fullText = currentApp.userMsg;
     let i = 0;
+    const resetFrame = requestAnimationFrame(() => {
+      setDisplayedUserMsg("");
+      setIsTypingUser(true);
+      setShowMemoryBanner(false);
+      setShowBotMsg(false);
+    });
 
     // Small delay before starting to type
     const startDelay = setTimeout(() => {
@@ -106,8 +107,11 @@ export function IntegrationsSection() {
       return () => clearInterval(typeInterval);
     }, 600);
 
-    return () => clearTimeout(startDelay);
-  }, [currentIndex]);
+    return () => {
+      cancelAnimationFrame(resetFrame);
+      clearTimeout(startDelay);
+    };
+  }, [currentApp.userMsg]);
 
   useGSAP(() => {
     // Fade content in when index changes
@@ -136,7 +140,21 @@ export function IntegrationsSection() {
         {/* Works With Section */}
         <div className="integrations-works-with">
           <p className="integrations-works-label">Works with</p>
-          
+
+          <div className="integrations-logos">
+            {INTEGRATIONS.map((integration) => (
+              <div key={integration.id} className="integrations-logo" title={integration.name}>
+                <Image
+                  src={integration.icon}
+                  alt={`${integration.name} logo`}
+                  width={24}
+                  height={24}
+                  className="integrations-logo-img"
+                />
+              </div>
+            ))}
+          </div>
+
           <p className="integrations-more-coming">More coming soon</p>
         </div>
       </div>
@@ -216,7 +234,7 @@ export function IntegrationsSection() {
                     <div className="integrations-memory-content">
                       <p className="integrations-memory-title">Memory from your last session</p>
                       <p className="integrations-memory-text">
-                        <span className="integrations-memory-via" style={{ display: "inline-flex", alignItems: "center", gap: "6px", paddingBottom: "4px" }}>
+                        <span className="integrations-memory-via integrations-memory-via-row">
                           Synced from 
                           <Image 
                             src={currentApp.memoryVia === "Claude" ? "/claude.svg" : currentApp.memoryVia === "ChatGPT" ? "/chatgpt.svg" : "/gemini.svg"} 
@@ -238,7 +256,7 @@ export function IntegrationsSection() {
                       <Image src={currentApp.icon} alt={currentApp.name} width={24} height={24} />
                     </div>
                     <div className="integrations-message-body">
-                      <p style={{ whiteSpace: "pre-wrap" }}>
+                      <p className="integrations-message-prewrap">
                         {currentApp.botMsg}
                       </p>
                     </div>

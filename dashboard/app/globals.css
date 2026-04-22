@@ -1508,7 +1508,7 @@ pre {
   overflow-x: hidden;
   background-color: #fdfbf7;
   color: #2b2826;
-  font-family: 'DM Sans', sans-serif;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   line-height: 1.6;
 }
 
@@ -1517,8 +1517,9 @@ pre {
 .landing-root h2, 
 .landing-root h3, 
 .landing-root h4 {
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  font-family: 'DM Sans', sans-serif;
   color: #1a1816;
+  letter-spacing: -0.02em;
 }
 
 /* ── Navbar ────────────────────────────────────────────────── */
@@ -1615,43 +1616,45 @@ pre {
 .mt-0 { margin-top: 0; }
 
 .section-h2 {
-  font-size: clamp(2rem, 4vw, 2.8rem);
+  font-size: clamp(2rem, 4vw, 2.65rem);
   font-weight: 700;
-  line-height: 1.2;
-  margin-bottom: 2.5rem;
+  line-height: 1.15;
+  margin-bottom: 2.25rem;
   color: #1a1816;
 }
 
 /* ── Hero ──────────────────────────────────────────────────── */
 .hero {
   position: relative;
-  padding: 4rem 0;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 4.5rem 2rem 3.5rem;
   background-color: #fdfbf7;
   border-bottom: none;
   overflow: hidden;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  min-height: 600px;
-  gap: 0;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.9fr);
+  min-height: 560px;
+  gap: clamp(1.75rem, 3vw, 3rem);
 }
 
 @media (max-width: 1024px) {
   .hero {
     grid-template-columns: 1fr;
     min-height: auto;
-    padding: 4rem 0 0;
+    padding: 4rem 1.2rem 0;
   }
 }
 
 .hero-inner {
   position: relative;
   z-index: 1;
-  padding: 3rem 2rem;
+  padding: 1rem 0 2rem;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  max-width: 560px;
   text-align: left;
+  max-width: 760px;
 }
 
 @media (max-width: 1024px) {
@@ -1672,7 +1675,7 @@ pre {
   background: #ede9fe;
   border: 2px solid #5b21b6;
   border-radius: 8px;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
   box-shadow: none;
 }
 
@@ -1683,11 +1686,11 @@ pre {
 }
 
 .hero-h1 {
-  font-size: clamp(2.2rem, 4vw, 3.5rem);
+  font-size: clamp(2.35rem, 5vw, 4.9rem);
   font-weight: 700;
-  line-height: 1.15;
+  line-height: 1.04;
   letter-spacing: -0.02em;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.35rem;
   text-wrap: balance;
   color: #1a1816;
 }
@@ -1697,11 +1700,11 @@ pre {
 }
 
 .hero-sub {
-  font-size: 1.05rem;
-  line-height: 1.6;
+  font-size: clamp(1rem, 1.6vw, 1.2rem);
+  line-height: 1.62;
   color: #4c4643;
-  max-width: none;
-  margin: 0 0 2.5rem 0;
+  max-width: 64ch;
+  margin: 0 0 2rem 0;
   text-wrap: balance;
 }
 
@@ -1718,16 +1721,15 @@ pre {
   }
 }
 .hero-guarantee {
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   color: #8c827a;
 }
 
 .hero-right {
-  background-color: #0a0a0a;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 3rem 2rem;
+  padding: 1rem 0;
   position: relative;
 }
 
@@ -1741,9 +1743,9 @@ pre {
 
 .hero-illustration {
   width: 100%;
-  max-width: 500px;
+  max-width: 560px;
   aspect-ratio: 1;
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: transparent;
   border-radius: 12px;
   display: flex;
   align-items: center;
@@ -1764,8 +1766,8 @@ pre {
 }
 
 .hero-caption {
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 0.75rem;
+  color: #8c827a;
+  font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.15em;
   text-align: center;
@@ -1834,16 +1836,40 @@ pre {
   margin-bottom: 1.5rem;
 }
 .mockup-row:last-child { margin-bottom: 0; }
+.mockup-row-icon {
+  align-items: center;
+}
 .mockup-label {
   font-weight: 600;
   color: #4c4643;
   width: 140px;
   flex-shrink: 0;
-  font-family: ui-serif, Georgia, serif;
+  font-family: 'DM Sans', sans-serif;
+}
+.mockup-label-icon {
+  width: 60px;
+  display: flex;
+  align-items: center;
+}
+.mockup-label-icon-stack {
+  position: relative;
+}
+.mockup-stack-primary {
+  position: relative;
+  z-index: 1;
+}
+.mockup-stack-secondary {
+  position: absolute;
+  left: 16px;
+  z-index: 2;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
 }
 .mockup-value {
   color: #1a1816;
-  font-family: 'DM Sans', sans-serif;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 0.98rem;
+  line-height: 1.55;
 }
 @media (max-width: 600px) {
   .mockup-row { flex-direction: column; gap: 0.25rem; }
@@ -1859,6 +1885,20 @@ pre {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+.demo-caption-title {
+  margin-top: 1.1rem;
+  margin-bottom: 0.45rem;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #1a1816;
+}
+.demo-caption-sub {
+  max-width: 360px;
+  font-size: 0.92rem;
+  line-height: 1.58;
+  color: #6f655d;
 }
 
 /* ── Integrations showcase ────────────────────────────────── */
@@ -2305,8 +2345,8 @@ pre {
 .story-grid {
   display: flex;
   flex-direction: column;
-  gap: 4rem;
-  max-width: 700px;
+  gap: 2.8rem;
+  max-width: 760px;
 }
 .story-card {
   position: relative;
@@ -2320,20 +2360,167 @@ pre {
   background: #fdfbf7;
   padding: 0.25rem 0;
   color: #8c827a;
-  font-family: ui-serif, Georgia, serif;
+  font-family: 'DM Sans', sans-serif;
   font-weight: 700;
-  font-style: italic;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
 }
 .story-h3 {
-  font-size: 1.6rem;
+  font-size: clamp(1.4rem, 2.2vw, 1.8rem);
   font-weight: 700;
-  margin-bottom: 1rem;
+  margin-bottom: 0.75rem;
 }
 .story-p {
-  font-size: 1.15rem;
+  font-size: clamp(1rem, 1.5vw, 1.08rem);
   color: #4c4643;
-  line-height: 1.7;
+  line-height: 1.66;
+}
+
+/* ── Pricing ───────────────────────────────────────────────── */
+.pricing-section {
+  padding: 5rem 0 6rem;
+  background: #fdfbf7;
+  border-top: 2px solid #e5e0d8;
+}
+.pricing-inner {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+.pricing-heading {
+  margin-bottom: 0.65rem;
+}
+.pricing-sub {
+  max-width: 560px;
+  margin: 0 auto 2.4rem;
+  color: #5f5853;
+  font-size: 1rem;
+  line-height: 1.62;
+  text-align: center;
+}
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+.pricing-card {
+  background: #ffffff;
+  border: 2px solid #e5e0d8;
+  border-radius: 4px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  box-shadow: 4px 4px 0 #e5e0d8;
+}
+.pricing-card-featured {
+  border-color: #5b21b6;
+  box-shadow: 4px 4px 0 #e1d4fc;
+}
+.pricing-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.pricing-plan-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8c827a;
+}
+.pricing-plan-label-featured {
+  color: #5b21b6;
+}
+.pricing-popular-pill {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #5b21b6;
+  border: 2px solid #5b21b6;
+  background: #fdfbf7;
+  border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+}
+.pricing-price-wrap {
+  display: grid;
+  gap: 0.35rem;
+}
+.pricing-price {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #1a1816;
+  line-height: 1.2;
+}
+.pricing-period {
+  font-size: 1rem;
+  font-weight: 500;
+  color: #8c827a;
+  margin-left: 0.15rem;
+}
+.pricing-description {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #4c4643;
+  line-height: 1.52;
+}
+.pricing-features {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.62rem;
+}
+.pricing-feature-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  color: #3d3936;
+  font-size: 0.89rem;
+  line-height: 1.5;
+}
+.pricing-feature-check {
+  color: #7c3aed;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+.pricing-cta-wrap {
+  margin-top: auto;
+  padding-top: 0.5rem;
+}
+.pricing-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: all 0.15s ease;
+  background: #ffffff;
+  color: #1a1816;
+  border: 2px solid #e5e0d8;
+  box-shadow: 3px 3px 0 #e5e0d8;
+}
+.pricing-cta-featured {
+  background: #7c3aed;
+  color: #ffffff;
+  border-color: #5b21b6;
+  box-shadow: 3px 3px 0 #e1d4fc;
+}
+.pricing-trial {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: #8c827a;
+  text-align: center;
+}
+@media (max-width: 980px) {
+  .pricing-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── FAQ Details ───────────────────────────────────────────── */
@@ -2349,6 +2536,9 @@ pre {
   padding: 0 2rem;
 }
 .faq-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 1.5rem;
@@ -2408,9 +2598,8 @@ pre {
   align-items: center;
 }
 .footer-brand {
-  font-family: ui-serif, Georgia, Cambria, serif;
+  font-family: 'DM Sans', sans-serif;
   font-weight: 700;
-  font-style: italic;
   color: #1a1816;
 }
 .footer-links {

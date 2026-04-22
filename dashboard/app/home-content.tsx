@@ -1,7 +1,8 @@
 import Image from "next/image";
 import Link from "next/link";
-import { ArrowRight, Check, X } from "lucide-react";
+import { ArrowRight, Check } from "lucide-react";
 import { IntegrationsSection } from "./components/integrations-section";
+import { PerformanceSection } from "./components/performance-section";
 
 
 
@@ -175,22 +176,22 @@ export function HomeContent() {
                   <div className="mockup-title">TALLEI MEMORY LOG</div>
                 </div>
                 <div className="mockup-body">
-                  <div className="mockup-row" style={{ alignItems: 'center' }}>
-                    <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
+                  <div className="mockup-row mockup-row-icon">
+                    <div className="mockup-label mockup-label-icon">
                       <Image src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
                     </div>
                     <div className="mockup-value">&ldquo;Always keep my emails short, punchy, and use bullet points.&rdquo;</div>
                   </div>
-                  <div className="mockup-row" style={{ alignItems: 'center' }}>
-                    <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
+                  <div className="mockup-row mockup-row-icon">
+                    <div className="mockup-label mockup-label-icon">
                       <Image src="/claude.svg" alt="Claude" width={28} height={28} />
                     </div>
                     <div className="mockup-value">&ldquo;Draft a project update for the team.&rdquo;</div>
                   </div>
-                  <div className="mockup-row" style={{ alignItems: 'center' }}>
-                    <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center', position: 'relative' }}>
-                      <Image src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} style={{ position: 'relative', zIndex: 1 }} />
-                      <Image src="/claude.svg" alt="Claude" width={28} height={28} style={{ position: 'absolute', left: '16px', zIndex: 2, borderRadius: '50%', border: '2px solid #ffffff' }} />
+                  <div className="mockup-row mockup-row-icon">
+                    <div className="mockup-label mockup-label-icon mockup-label-icon-stack">
+                      <Image src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} className="mockup-stack-primary" />
+                      <Image src="/claude.svg" alt="Claude" width={28} height={28} className="mockup-stack-secondary" />
                     </div>
                     <div className="mockup-value">
                       Claude automatically writes a concise, bulleted email — without being told twice.
@@ -202,8 +203,8 @@ export function HomeContent() {
                   <span>✓ Synced instantly</span>
                 </div>
               </div>
-              <div style={{ fontFamily: 'Georgia, serif', fontSize: "1.5rem", color: "oklch(90% 0.008 265)", marginBottom: "0.5rem", fontWeight: 400 }}>Talk to everything you&apos;ve saved</div>
-              <div style={{ fontSize: "0.85rem", color: "oklch(55% 0.010 265)", lineHeight: 1.55, maxWidth: "340px" }}>Ask questions across all your memories. Instant answers from past decisions.</div>
+              <div className="demo-caption-title">Talk to everything you&apos;ve saved</div>
+              <div className="demo-caption-sub">Ask questions across all your memories. Instant answers from past decisions.</div>
             </div>
           </section>
         </div>
@@ -212,10 +213,14 @@ export function HomeContent() {
         <div className="hero-right">
           <div className="hero-right-inner">
             <div className="hero-illustration">
-              <div className="hero-illustration-placeholder">
-                <p>Illustration coming soon</p>
-                <p style={{ fontSize: '0.8rem', marginTop: '0.5rem', color: 'rgba(255, 255, 255, 0.3)' }}>Person at desk with floating AI cards</p>
-              </div>
+              <Image
+                src="/hero-image-bg.png"
+                alt="Person at desk with floating AI cards"
+                width={720}
+                height={720}
+                style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                priority
+              />
             </div>
             <div className="hero-caption">Before Tallei — Every tool, isolated</div>
           </div>
@@ -258,154 +263,78 @@ export function HomeContent() {
         </div>
       </section>
 
+      <IntegrationsSection />
+      <PerformanceSection />
+
 {/* ═════════════════════════════════════════════════════
           PRICING
       ═════════════════════════════════════════════════════ */}
-      <section
-        id="pricing"
-        style={{
-          padding: "5rem 0 6rem",
-          background: "#fdfbf7",
-          borderTop: "2px solid #e5e0d8",
-        }}
-      >
-        <div style={{ maxWidth: 960, margin: "0 auto", padding: "0 1.5rem" }}>
-          <h2
-            style={{
-              fontSize: "2rem",
-              fontWeight: 700,
-              textAlign: "center",
-              color: "#0f172a",
-              marginBottom: "0.75rem",
-            }}
-          >
-            Simple, transparent pricing
-          </h2>
-          <p
-            style={{
-              maxWidth: 500,
-              margin: "0 auto 2.5rem",
-              color: "#64748b",
-              fontSize: "1rem",
-              lineHeight: 1.6,
-              textAlign: "center",
-            }}
-          >
+      <section id="pricing" className="pricing-section">
+        <div className="pricing-inner">
+          <h2 className="section-h2 text-center pricing-heading">Simple, transparent pricing</h2>
+          <p className="pricing-sub">
             Start free, upgrade when you need more. All paid plans include a 14-day free trial.
           </p>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-              gap: "1rem",
-            }}
-          >
+          <div className="pricing-grid">
             {PRICING_PLANS.map((plan) => (
               <article
                 key={plan.key}
-                style={{
-                  background: "#ffffff",
-                  border: plan.featured ? "2px solid #5b21b6" : "2px solid #e5e0d8",
-                  borderRadius: 4,
-                  padding: "1.5rem",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "1rem",
-                  boxShadow: plan.featured ? "4px 4px 0px #e1d4fc" : "4px 4px 0px #e5e0d8",
-                }}
+                className={`pricing-card ${plan.featured ? "pricing-card-featured" : ""}`}
               >
                 {/* Plan Badge Row */}
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                  <span
-                    style={{
-                      fontSize: "0.75rem",
-                      fontWeight: 600,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.04em",
-                      color: plan.featured ? "#5b21b6" : "#8c827a",
-                    }}
-                  >
+                <div className="pricing-plan-row">
+                  <span className={`pricing-plan-label ${plan.featured ? "pricing-plan-label-featured" : ""}`}>
                     {plan.name}
                   </span>
                   {plan.featured && (
-                    <span
-                      style={{
-                        fontSize: "0.7rem",
-                        fontWeight: 700,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.04em",
-                        color: "#5b21b6",
-                        border: "2px solid #5b21b6",
-                        background: "#fdfbf7",
-                        borderRadius: 999,
-                        padding: "0.15rem 0.5rem",
-                      }}
-                    >
+                    <span className="pricing-popular-pill">
                       Most popular
                     </span>
                   )}
                 </div>
 
                 {/* Price */}
-                <div>
-                  <div style={{ fontSize: "2rem", fontWeight: 700, color: "#0f172a", lineHeight: 1.2 }}>
+                <div className="pricing-price-wrap">
+                  <div className="pricing-price">
                     {plan.price}
                     {plan.period && (
-                      <span style={{ fontSize: "1rem", fontWeight: 500, color: "#8c827a", marginLeft: "0.15rem" }}>
+                      <span className="pricing-period">
                         {plan.period}
                       </span>
                     )}
                   </div>
-                  <p style={{ margin: "0.5rem 0 0", fontSize: "0.875rem", color: "#4c4643", lineHeight: 1.5 }}>
+                  <p className="pricing-description">
                     {plan.description}
                   </p>
                 </div>
 
                 {/* Features */}
-                <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                <ul className="pricing-features">
                   {plan.features.map((feature) => (
-                    <li
-                      key={feature}
-                    style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", color: "#334155", fontSize: "0.875rem", lineHeight: 1.5 }}
-                  >
-                      <Check size={16} style={{ color: "#7c3aed", flexShrink: 0, marginTop: "0.1rem" }} />
+                    <li key={feature} className="pricing-feature-item">
+                      <Check size={16} className="pricing-feature-check" />
                       <span>{feature}</span>
                     </li>
                   ))}
                 </ul>
 
                 {/* CTA */}
-                <div style={{ marginTop: "auto", paddingTop: "0.5rem" }}>
+                <div className="pricing-cta-wrap">
                   <Link
                     href={plan.href}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: "0.4rem",
-                      padding: "0.75rem 1rem",
-                      borderRadius: 4,
-                      fontSize: "0.875rem",
-                      fontWeight: 600,
-                      textDecoration: "none",
-                      transition: "all 0.15s ease",
-                      background: plan.featured ? "#7c3aed" : "#ffffff",
-                      color: plan.featured ? "#ffffff" : "#0f172a",
-                      border: plan.featured ? "2px solid #5b21b6" : "2px solid #e5e0d8",
-                      boxShadow: plan.featured ? "3px 3px 0px #e1d4fc" : "3px 3px 0px #e5e0d8",
-                    }}
+                    className={`pricing-cta ${plan.featured ? "pricing-cta-featured" : ""}`}
                   >
                     {plan.cta}
                     <ArrowRight size={14} />
                   </Link>
                   {!plan.featured && plan.key !== "free" && (
-                    <p style={{ marginTop: "0.5rem", fontSize: "0.75rem", color: "#94a3b8", textAlign: "center" }}>
+                    <p className="pricing-trial">
                       14-day free trial
                     </p>
                   )}
                   {plan.featured && (
-                    <p style={{ marginTop: "0.5rem", fontSize: "0.75rem", color: "#94a3b8", textAlign: "center" }}>
+                    <p className="pricing-trial">
                       14-day free trial
                     </p>
                   )}
@@ -422,7 +351,7 @@ export function HomeContent() {
       <section className="faq-section">
         <div className="faq-inner">
           <h2 className="section-h2 text-center">The details</h2>
-          <ul className="faq-grid" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          <ul className="faq-grid">
             <li className="solid-card detail-card">
               <h3 className="detail-h4">Is it secure?</h3>
               <p className="detail-p">
