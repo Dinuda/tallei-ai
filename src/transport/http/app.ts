@@ -11,6 +11,8 @@ import mcpCodeRouter from "./routes/mcp.js";
 import chatgptRouter from "./routes/chatgpt.js";
 import integrationsRouter from "./routes/integrations.js";
 import billingRouter from "./routes/billing.js";
+import claudeOnboardingRouter from "./routes/claudeOnboarding.js";
+import browserUseRouter from "./routes/browserUse.js";
 import { createMcpRouter } from "../mcp/server.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requestTimingMiddleware } from "./middleware/request-timing.middleware.js";
@@ -92,6 +94,8 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/documents", deps.memoryRateLimit, documentsRouter);
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
+  app.use("/api/claude-onboarding", claudeOnboardingRouter);
+  app.use("/api/browser-use", browserUseRouter);
   app.use("/api/billing", billingRouter);
   app.use("/api/mcp/events", mcpEventsRouter);
   app.use("/api/mcp", mcpCodeRouter);

@@ -855,6 +855,20 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS browser_flow_templates (
+        state              TEXT        NOT NULL PRIMARY KEY,
+        actions            JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        success_count      INTEGER     NOT NULL DEFAULT 0,
+        is_learned         BOOLEAN     NOT NULL DEFAULT FALSE,
+        last_succeeded_at  TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_browser_flow_templates_learned
+        ON browser_flow_templates(state, is_learned) WHERE is_learned = TRUE;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id            UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

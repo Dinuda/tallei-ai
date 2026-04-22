@@ -62,16 +62,48 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isCheckpoint(value: unknown): value is OnboardingCheckpoint {
-  if (!isObject(value)) return false;
-  const actionUrlValid = value.actionUrl === undefined || typeof value.actionUrl === "string";
-  return (
-    typeof value.type === "string" &&
-    typeof value.blockedState === "string" &&
-    typeof value.message === "string" &&
-    typeof value.resumeHint === "string" &&
-    actionUrlValid
-  );
+function normalizeCheckpoint(value: unknown): OnboardingCheckpoint | null {
+  if (!isObject(value)) return null;
+
+  const typeRaw = value.type;
+  const blockedStateRaw = value.blockedState ?? value.blocked_state;
+  const messageRaw = value.message;
+  const resumeHintRaw = value.resumeHint ?? value.resume_hint;
+  const actionUrlRaw = value.actionUrl ?? value.action_url;
+
+  if (
+    typeRaw !== "auth" &&
+    typeRaw !== "captcha" &&
+    typeRaw !== "manual_review"
+  ) {
+    return null;
+  }
+
+  if (
+    blockedStateRaw !== "browser_started" &&
+    blockedStateRaw !== "claude_authenticated" &&
+    blockedStateRaw !== "connector_connected" &&
+    blockedStateRaw !== "project_upserted" &&
+    blockedStateRaw !== "instructions_applied" &&
+    blockedStateRaw !== "verified"
+  ) {
+    return null;
+  }
+
+  if (typeof messageRaw !== "string" || typeof resumeHintRaw !== "string") return null;
+
+  const normalized: OnboardingCheckpoint = {
+    type: typeRaw,
+    blockedState: blockedStateRaw,
+    message: messageRaw,
+    resumeHint: resumeHintRaw,
+  };
+
+  if (typeof actionUrlRaw === "string") {
+    normalized.actionUrl = actionUrlRaw;
+  }
+
+  return normalized;
 }
 
 function toIso(value: Date | null): string | null {
@@ -85,7 +117,7 @@ function mapSessionRow(row: SessionRow): OnboardingSession {
     status: row.status,
     currentState: row.current_state,
     projectName: row.project_name,
-    checkpoint: isCheckpoint(row.checkpoint) ? row.checkpoint : null,
+    checkpoint: normalizeCheckpoint(row.checkpoint),
     metadata: isObject(row.metadata) ? row.metadata : {},
     lastError: row.last_error,
     completedAt: toIso(row.completed_at),

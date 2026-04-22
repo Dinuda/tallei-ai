@@ -1,26 +1,9 @@
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
 import { IntegrationsSection } from "./components/integrations-section";
+import { PerformanceSection } from "./components/performance-section";
 
-const INTEGRATIONS = [
-  { name: "ChatGPT", monogram: "CG", status: "live" as const },
-  { name: "Claude", monogram: "CL", status: "live" as const },
-  { name: "Gemini", monogram: "GM", status: "live" as const },
-  { name: "Claude Code", monogram: "CC", status: "coming-soon" as const },
-  { name: "Perplexity", monogram: "PX", status: "coming-soon" as const },
-  { name: "OpenRouter", monogram: "OR", status: "coming-soon" as const },
-  { name: "Grok", monogram: "GK", status: "coming-soon" as const },
-] as const;
 
-const CAPABILITY_ROWS = [
-  { feature: "Cross-assistant memory sync", tally: "Yes", status: "Live" },
-  { feature: "MCP-native connectors", tally: "Yes", status: "Live" },
-  { feature: "User profile memory", tally: "Yes", status: "Live" },
-  { feature: "Document retrieval", tally: "Yes", status: "Live" },
-  { feature: "Sub-300ms MCP latency (p95)", tally: "Yes", status: "Live" },
-  { feature: "Additional integrations", tally: "Yes", status: "Coming soon" },
-  { feature: "High-volume monthly sessions", tally: "1000+", status: "Live" },
-] as const;
 
 const PRICING_PLANS = [
   {
@@ -229,53 +212,7 @@ export function HomeContent() {
       </section>
 
       <IntegrationsSection />
-
-      <section className="proof-section" aria-label="Performance and capability metrics">
-        <div className="proof-inner">
-          <div className="proof-metric-grid">
-            <article className="proof-metric-card">
-              <p className="proof-metric-number">5</p>
-              <p className="proof-metric-label">context layers</p>
-              <p className="proof-metric-sub">Across conversation memory types</p>
-            </article>
-            <article className="proof-metric-card">
-              <p className="proof-metric-number">&lt;300ms</p>
-              <p className="proof-metric-label">p95 MCP latency</p>
-              <p className="proof-metric-sub">Production sync path</p>
-            </article>
-            <article className="proof-metric-card">
-              <p className="proof-metric-number">1000+</p>
-              <p className="proof-metric-label">sessions/month</p>
-              <p className="proof-metric-sub">Active memory sync usage</p>
-            </article>
-          </div>
-
-          <div className="proof-table-wrap">
-            <table className="proof-table">
-              <thead>
-                <tr>
-                  <th>Feature</th>
-                  <th>Tallei</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {CAPABILITY_ROWS.map((row) => (
-                  <tr key={row.feature}>
-                    <td>{row.feature}</td>
-                    <td>{row.tally}</td>
-                    <td>
-                      <span className={row.status === "Coming soon" ? "proof-status proof-status-soon" : "proof-status proof-status-live"}>
-                        {row.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
+      <PerformanceSection />
 
       {/* ═════════════════════════════════════════════════════
           FEATURES — Honest, simple narrative

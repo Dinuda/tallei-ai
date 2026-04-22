@@ -25,6 +25,67 @@ type ChatGptTokenStatus = {
   lastTokenUsedAt: string | null;
 };
 
+type ClaudeOnboardingState =
+  | "queued"
+  | "browser_started"
+  | "claude_authenticated"
+  | "connector_connected"
+  | "project_upserted"
+  | "instructions_applied"
+  | "verified";
+
+type ClaudeOnboardingStatus =
+  | "queued"
+  | "running"
+  | "checkpoint_required"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+type ClaudeOnboardingCheckpoint = {
+  type: "auth" | "captcha" | "manual_review";
+  blockedState: Exclude<ClaudeOnboardingState, "queued">;
+  message: string;
+  resumeHint: string;
+  actionUrl?: string;
+  action_url?: string;
+};
+
+type ClaudeOnboardingSession = {
+  id: string;
+  status: ClaudeOnboardingStatus;
+  currentState: ClaudeOnboardingState;
+  projectName: string;
+  checkpoint: ClaudeOnboardingCheckpoint | null;
+  metadata?: Record<string, unknown>;
+  lastError: string | null;
+  completedAt: string | null;
+  canceledAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ClaudeOnboardingEvent = {
+  id: number;
+  eventType: string;
+  state: string | null;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+};
+
+function getCheckpointActionUrl(
+  checkpoint: ClaudeOnboardingCheckpoint | null | undefined
+): string | null {
+  if (!checkpoint) return null;
+  if (typeof checkpoint.actionUrl === "string" && checkpoint.actionUrl.trim().length > 0) {
+    return checkpoint.actionUrl;
+  }
+  if (typeof checkpoint.action_url === "string" && checkpoint.action_url.trim().length > 0) {
+    return checkpoint.action_url;
+  }
+  return null;
+}
+
 async function verifyConnectivityEvent(
   provider: Provider,
   sinceMs: number,
@@ -508,13 +569,20 @@ export function TwoColumnStep({ media, content }: { media: React.ReactNode, cont
 export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onClose: () => void; mcpUrl: string }) {
   const [step, setStep] = useState(1);
   const [saveMode, setSaveMode] = useState<SaveMode>("instant");
-  // Each step requires verification to proceed, except step 1 and 4 which we might just allow.
   const [step1Verified, setStep1Verified] = useState(false);
   const [step2Verified, setStep2Verified] = useState(false);
   const [verificationStartedAt, setVerificationStartedAt] = useState<number | null>(null);
   const [verifyingConnection, setVerifyingConnection] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
   const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
+  const [onboardingSession, setOnboardingSession] = useState<ClaudeOnboardingSession | null>(null);
+  const [onboardingEvents, setOnboardingEvents] = useState<ClaudeOnboardingEvent[]>([]);
+  const [onboardingBusy, setOnboardingBusy] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const checkpointActionUrl = useMemo(
+    () => getCheckpointActionUrl(onboardingSession?.checkpoint),
+    [onboardingSession?.checkpoint]
+  );
 
   const totalSteps = 4;
 
@@ -523,6 +591,28 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     setConnectionVerified(false);
     setConnectionVerificationMessage(null);
   }, []);
+
+  const isTerminal = (status: ClaudeOnboardingStatus) =>
+    status === "completed" || status === "failed" || status === "canceled";
+
+  const stateLabel = (state: ClaudeOnboardingState) => {
+    switch (state) {
+      case "browser_started":
+        return "Browser Started";
+      case "claude_authenticated":
+        return "Claude Authenticated";
+      case "connector_connected":
+        return "Connector Connected";
+      case "project_upserted":
+        return "Project Ready";
+      case "instructions_applied":
+        return "Instructions Applied";
+      case "verified":
+        return "Verified";
+      default:
+        return "Queued";
+    }
+  };
 
   const handleNext = () => {
     if (step < totalSteps) {
@@ -537,15 +627,172 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   };
 
   const handleBack = () => {
-    if (step > 1) setStep(s => s - 1);
+    if (step > 1) setStep((s) => s - 1);
   };
 
   const canNext = () => {
-    if (step === 1) return step1Verified;
-    if (step === 2) return step2Verified;
-    if (step === 4) return connectionVerified;
-    return true; // Step 3 & 4 don't block
+    const autoCompleted = onboardingSession?.status === "completed";
+    if (step === 1) return step1Verified || autoCompleted;
+    if (step === 2) return step2Verified || autoCompleted;
+    if (step === 4) return connectionVerified || autoCompleted;
+    return true;
   };
+
+  const refreshOnboardingSession = useCallback(async (sessionId: string) => {
+    const [sessionRes, eventsRes] = await Promise.all([
+      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}`, { cache: "no-store" }),
+      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/events`, { cache: "no-store" }),
+    ]);
+    const sessionData = await sessionRes.json().catch(() => ({}));
+    const eventsData = await eventsRes.json().catch(() => ({}));
+
+    if (!sessionRes.ok) {
+      throw new Error(
+        typeof sessionData?.error === "string"
+          ? sessionData.error
+          : "Failed to fetch onboarding session"
+      );
+    }
+
+    const session = sessionData?.session as ClaudeOnboardingSession | undefined;
+    if (!session || typeof session.id !== "string") {
+      throw new Error("Malformed onboarding session response");
+    }
+
+    setOnboardingSession(session);
+    setOnboardingEvents(Array.isArray(eventsData?.events) ? (eventsData.events as ClaudeOnboardingEvent[]) : []);
+    return session;
+  }, []);
+
+  const startAutomatedSetup = useCallback(async () => {
+    setOnboardingBusy(true);
+    setOnboardingError(null);
+    try {
+      const res = await fetch("/api/integrations/claude-onboarding/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectName: "Tallei Memory",
+          applyProjectInstructions: true,
+          projectInstructions: getClaudeInstructions(saveMode),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data?.error === "string" ? data.error : "Failed to start automated setup.");
+      }
+      const session = data?.session as ClaudeOnboardingSession | undefined;
+      if (!session || typeof session.id !== "string") {
+        throw new Error("Malformed onboarding start response.");
+      }
+      setOnboardingSession(session);
+      setOnboardingEvents([]);
+      setConnectionVerificationMessage("Automated setup started.");
+      setStep(4);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to start automated setup.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [saveMode]);
+
+  const resumeAutomatedSetup = useCallback(async () => {
+    if (!onboardingSession) return;
+    setOnboardingBusy(true);
+    setOnboardingError(null);
+    try {
+      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${onboardingSession.id}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authCompleted: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data?.error === "string" ? data.error : "Failed to resume automated setup.");
+      }
+      const session = data?.session as ClaudeOnboardingSession | undefined;
+      if (!session || typeof session.id !== "string") {
+        throw new Error("Malformed onboarding resume response.");
+      }
+      setOnboardingSession(session);
+      await refreshOnboardingSession(session.id);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to resume automated setup.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [onboardingSession, refreshOnboardingSession]);
+
+  const cancelAutomatedSetup = useCallback(async () => {
+    if (!onboardingSession) return;
+    setOnboardingBusy(true);
+    setOnboardingError(null);
+    try {
+      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${onboardingSession.id}/cancel`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data?.error === "string" ? data.error : "Failed to cancel automated setup.");
+      }
+      const session = data?.session as ClaudeOnboardingSession | undefined;
+      if (!session || typeof session.id !== "string") {
+        throw new Error("Malformed onboarding cancel response.");
+      }
+      setOnboardingSession(session);
+      await refreshOnboardingSession(session.id);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to cancel automated setup.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [onboardingSession, refreshOnboardingSession]);
+
+  const manualRefreshOnboarding = useCallback(async () => {
+    if (!onboardingSession) return;
+    setOnboardingBusy(true);
+    setOnboardingError(null);
+    try {
+      await refreshOnboardingSession(onboardingSession.id);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [onboardingSession, refreshOnboardingSession]);
+
+  useEffect(() => {
+    if (!isOpen || !onboardingSession) return;
+    if (isTerminal(onboardingSession.status)) return;
+
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const session = await refreshOnboardingSession(onboardingSession.id);
+        if (stopped) return;
+        if (session.status === "completed") {
+          setStep1Verified(true);
+          setStep2Verified(true);
+          setConnectionVerified(true);
+          setConnectionVerificationMessage("Automated setup completed successfully.");
+        }
+      } catch (error) {
+        if (!stopped) {
+          setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
+        }
+      }
+    };
+
+    void tick();
+    const timer = setInterval(() => {
+      void tick();
+    }, 2000);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [isOpen, onboardingSession, refreshOnboardingSession]);
 
   async function handleVerifyConnection() {
     setVerifyingConnection(true);
@@ -557,25 +804,102 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   }
 
   return (
-    <WizardModal isOpen={isOpen} onClose={onClose} title="Connect Claude" providerIcon={<img src="/claude.svg" width={24} height={24} alt="Claude" />} step={step} totalSteps={totalSteps} onNext={handleNext} onBack={handleBack} canNext={canNext()}>
-      
+    <WizardModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Connect Claude"
+      providerIcon={<img src="/claude.svg" width={24} height={24} alt="Claude" />}
+      step={step}
+      totalSteps={totalSteps}
+      onNext={handleNext}
+      onBack={handleBack}
+      canNext={canNext()}
+    >
       {step === 1 && (
         <TwoColumnStep
           media={<StepMedia src="/add-mcp.mp4" alt="Add Custom Connector" caption="Creating the custom connector" />}
           content={
             <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>First, link Tallei to your Claude account. Open your Claude Connectors page and create a new custom connector with these exact values:</p>
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.5rem', borderRadius: '16px', border: '1px solid #e5e7eb', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.02)' }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", background: "#f8fafc", padding: "1rem", borderRadius: "12px", border: "1px solid #e5e7eb" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: "0.9rem", fontWeight: 700, color: "#111827" }}>Automated setup (beta)</div>
+                    <div style={{ fontSize: "0.82rem", color: "#6b7280", marginTop: "0.15rem" }}>
+                      We can configure Claude for you. You must still complete login/MFA in a live browser session.
+                    </div>
+                  </div>
+                  <Button onClick={() => void startAutomatedSetup()} disabled={onboardingBusy}>
+                    {onboardingBusy ? "Starting..." : onboardingSession ? "Run Repair" : "Run Auto Setup"}
+                  </Button>
+                </div>
+
+                {onboardingSession && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", borderTop: "1px solid #e5e7eb", paddingTop: "0.75rem" }}>
+                    <div style={{ fontSize: "0.82rem", color: "#374151" }}>
+                      <strong>Status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(onboardingSession.currentState)}
+                    </div>
+                    {onboardingSession.checkpoint && (
+                      <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#9a3412" }}>
+                        <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>{onboardingSession.checkpoint.message}</div>
+                        <div>{onboardingSession.checkpoint.resumeHint}</div>
+                        {checkpointActionUrl && (
+                          <div style={{ marginTop: "0.55rem" }}>
+                            <Button
+                              variant="outline"
+                              onClick={() => window.open(checkpointActionUrl, "_blank", "noopener,noreferrer")}
+                            >
+                              Open Live Session <ExternalLink size={12} style={{ marginLeft: "6px" }} />
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {onboardingSession.lastError && (
+                      <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#991b1b" }}>
+                        {onboardingSession.lastError}
+                      </div>
+                    )}
+                    {onboardingEvents.length > 0 && (
+                      <div style={{ fontSize: "0.78rem", color: "#6b7280" }}>
+                        Latest event: {onboardingEvents[onboardingEvents.length - 1].eventType}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                      {onboardingSession.status === "checkpoint_required" && (
+                        <Button variant="outline" onClick={() => void resumeAutomatedSetup()} disabled={onboardingBusy}>
+                          {onboardingBusy ? "Resuming..." : "Resume"}
+                        </Button>
+                      )}
+                      {!isTerminal(onboardingSession.status) && (
+                        <Button variant="outline" onClick={() => void cancelAutomatedSetup()} disabled={onboardingBusy}>
+                          {onboardingBusy ? "Canceling..." : "Cancel"}
+                        </Button>
+                      )}
+                      <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
+                        Refresh
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {onboardingError && (
+                  <div style={{ fontSize: "0.82rem", color: "#b91c1c" }}>{onboardingError}</div>
+                )}
+              </div>
+
+              <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6 }}>
+                First, link Tallei to your Claude account. Open your Claude Connectors page and create a new custom connector with these exact values:
+              </p>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem", background: "#f8fafc", padding: "1.5rem", borderRadius: "16px", border: "1px solid #e5e7eb", boxShadow: "inset 0 2px 4px rgba(0,0,0,0.02)" }}>
                 <CopyField value="Tallei Memory" label="Name" />
                 <CopyField value={mcpUrl} label="Remote MCP server URL" />
-                
-                <Button variant="default" onClick={() => window.open("https://claude.ai/settings/connectors", "_blank")} style={{ width: '100%', marginTop: '0.5rem', fontWeight: 600 }}>
+
+                <Button variant="default" onClick={() => window.open("https://claude.ai/settings/connectors", "_blank")} style={{ width: "100%", marginTop: "0.5rem", fontWeight: 600 }}>
                   Open Claude Connectors <ExternalLink size={14} style={{ marginLeft: "8px" }} />
                 </Button>
               </div>
 
-              <VerifyChecklist items={['I clicked "Add custom connector"', 'I pasted the Name: Tallei Memory', 'I pasted the MCP URL']} onVerified={setStep1Verified} />
+              <VerifyChecklist items={['I clicked "Add custom connector"', "I pasted the Name: Tallei Memory", "I pasted the MCP URL"]} onVerified={setStep1Verified} />
             </>
           }
         />
@@ -586,9 +910,11 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           media={<StepMedia src="/mcp-connect.mp4" alt="Connect Connector" caption="Connecting and authorizing" />}
           content={
             <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>Now click <strong>Connect</strong> inside Claude and approve the OAuth window that appears.</p>
+              <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6 }}>
+                Now click <strong>Connect</strong> inside Claude and approve the OAuth window that appears.
+              </p>
               <InfoCallout>This allows Claude to read and write memories to your secure Tallei vault.</InfoCallout>
-              <VerifyChecklist items={['I clicked Connect', 'I approved the OAuth access', 'The connector status inside Claude now shows "Connected"']} onVerified={setStep2Verified} />
+              <VerifyChecklist items={["I clicked Connect", "I approved the OAuth access", 'The connector status inside Claude now shows "Connected"']} onVerified={setStep2Verified} />
             </>
           }
         />
@@ -599,25 +925,31 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           media={<StepMedia src="/add-instructions.mp4" alt="Add Instructions" caption="Adding project instructions" />}
           content={
             <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>A Project lets all your chats share the same Tallei memory context.</p>
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: '#f8fafc', padding: '1rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem', color: '#374151' }}>
+              <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6 }}>
+                A Project lets all your chats share the same Tallei memory context.
+              </p>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", background: "#f8fafc", padding: "1rem", borderRadius: "12px", border: "1px solid #e5e7eb", fontSize: "0.95rem", color: "#374151" }}>
                 <div>1. Go to <strong>Claude → Projects</strong> and create a new project.</div>
                 <div>2. In the project settings, enable the <strong>Tallei Memory</strong> connector.</div>
               </div>
 
               <div>
-                <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 0.75rem 0', color: '#111827' }}>How should memories be saved?</h4>
+                <h4 style={{ fontSize: "0.95rem", fontWeight: 600, margin: "0 0 0.75rem 0", color: "#111827" }}>
+                  How should memories be saved?
+                </h4>
                 <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
               </div>
 
               <div>
-                <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 0.75rem 0', color: '#111827' }}>Paste this into your Project&apos;s <code>Custom Instructions</code>:</h4>
+                <h4 style={{ fontSize: "0.95rem", fontWeight: 600, margin: "0 0 0.75rem 0", color: "#111827" }}>
+                  Paste this into your Project&apos;s <code>Custom Instructions</code>:
+                </h4>
                 <CodeBlock value={getClaudeInstructions(saveMode)} language="txt" />
               </div>
 
               <InfoCallout>
-                Browser-use automation is currently hidden. For reliable behavior in Claude right now, keep the project custom instructions set.
+                Browser-use automation handles this when possible; keep this manual block as fallback if Claude UI changes.
               </InfoCallout>
             </>
           }
@@ -625,30 +957,99 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       )}
 
       {step === 4 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', alignItems: 'center', textAlign: 'center', padding: '2rem 1rem', animation: 'fadeIn 0.4s ease-out' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: '#16a34a', marginBottom: '0.5rem' }}>
-            <h3 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#111827', margin: 0, letterSpacing: '-0.02em' }}>You&apos;re all set!</h3>
-          </div>
-          <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6, maxWidth: '400px' }}>Try it out: inside your new Claude project, send this test message:</p>
-          
-          <div style={{ width: '100%', maxWidth: '500px', textAlign: 'left', marginTop: '1rem' }}>
-            <CodeBlock value={saveMode === 'instant' ? "My favorite programming language is Rust." : "Remember this: my favorite programming language is Rust."} language="txt" label="Test Prompt" />
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem", alignItems: "center", textAlign: "center", padding: "2rem 1rem", animation: "fadeIn 0.4s ease-out" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", color: "#16a34a", marginBottom: "0.5rem" }}>
+            <h3 style={{ fontSize: "1.4rem", fontWeight: 700, color: "#111827", margin: 0, letterSpacing: "-0.02em" }}>
+              You&apos;re all set!
+            </h3>
           </div>
 
-          <Button onClick={() => void handleVerifyConnection()} disabled={verifyingConnection} style={{ marginTop: '0.75rem' }}>
+          {onboardingSession && (
+            <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "10px", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
+              <div style={{ color: "#374151" }}>
+                <strong>Automation status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(onboardingSession.currentState)}
+              </div>
+              {onboardingSession.checkpoint && (
+                <div style={{ marginTop: "0.55rem", color: "#9a3412" }}>
+                  {onboardingSession.checkpoint.message}
+                  <div style={{ marginTop: "0.35rem" }}>{onboardingSession.checkpoint.resumeHint}</div>
+                  {checkpointActionUrl && (
+                    <div style={{ marginTop: "0.5rem" }}>
+                      <Button
+                        variant="outline"
+                        onClick={() => window.open(checkpointActionUrl, "_blank", "noopener,noreferrer")}
+                      >
+                        Open Live Session <ExternalLink size={12} style={{ marginLeft: "6px" }} />
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div style={{ marginTop: "0.6rem", display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+                {onboardingSession.status === "checkpoint_required" && (
+                  <Button variant="outline" onClick={() => void resumeAutomatedSetup()} disabled={onboardingBusy}>
+                    {onboardingBusy ? "Resuming..." : "Resume"}
+                  </Button>
+                )}
+                {!isTerminal(onboardingSession.status) && (
+                  <Button variant="outline" onClick={() => void cancelAutomatedSetup()} disabled={onboardingBusy}>
+                    {onboardingBusy ? "Canceling..." : "Cancel"}
+                  </Button>
+                )}
+                {isTerminal(onboardingSession.status) && onboardingSession.status !== "completed" && (
+                  <Button variant="outline" onClick={() => void startAutomatedSetup()} disabled={onboardingBusy}>
+                    {onboardingBusy ? "Starting..." : "Run Repair"}
+                  </Button>
+                )}
+                <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
+                  Refresh
+                </Button>
+                {!checkpointActionUrl && (
+                  <Button
+                    variant="outline"
+                    onClick={() => window.open("https://claude.ai/settings/connectors", "_blank", "noopener,noreferrer")}
+                  >
+                    Open Claude Connectors <ExternalLink size={12} style={{ marginLeft: "6px" }} />
+                  </Button>
+                )}
+              </div>
+              {onboardingSession.lastError && (
+                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingSession.lastError}</div>
+              )}
+              {onboardingEvents.length > 0 && (
+                <div style={{ marginTop: "0.35rem", fontSize: "0.78rem", color: "#6b7280" }}>
+                  Latest event: {onboardingEvents[onboardingEvents.length - 1].eventType}
+                </div>
+              )}
+              {onboardingError && (
+                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingError}</div>
+              )}
+            </div>
+          )}
+
+          <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6, maxWidth: "400px" }}>
+            Try it out: inside your new Claude project, send this test message:
+          </p>
+
+          <div style={{ width: "100%", maxWidth: "500px", textAlign: "left", marginTop: "1rem" }}>
+            <CodeBlock value={saveMode === "instant" ? "My favorite programming language is Rust." : "Remember this: my favorite programming language is Rust."} language="txt" label="Test Prompt" />
+          </div>
+
+          <Button onClick={() => void handleVerifyConnection()} disabled={verifyingConnection} style={{ marginTop: "0.75rem" }}>
             {verifyingConnection ? "Verifying..." : "Verify Connection Event"}
           </Button>
 
           {connectionVerificationMessage && (
-            <p style={{ color: connectionVerified ? '#16a34a' : '#b45309', fontSize: '0.85rem', marginTop: '0.25rem' }}>
+            <p style={{ color: connectionVerified ? "#16a34a" : "#b45309", fontSize: "0.85rem", marginTop: "0.25rem" }}>
               {connectionVerificationMessage}
             </p>
           )}
 
-          <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: '1rem' }}>Finish is enabled only after a fresh Claude event is detected.</p>
+          <p style={{ color: "#6b7280", fontSize: "0.85rem", marginTop: "1rem" }}>
+            Finish is enabled only after a fresh Claude event is detected.
+          </p>
         </div>
       )}
-
     </WizardModal>
   );
 }

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { config } from "../../config/index.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
 import { browserFallbackCache } from "./browser-fallback-cache.js";
+import { flowTemplateStore } from "./flow-template-store.js";
+import type { OnboardingActionState } from "./flow-template-store.types.js";
 import type { OnboardingCheckpoint, OnboardingSession, OnboardingState } from "../../orchestration/browser/claude-onboarding.types.js";
 
 type ExecutionMode = "student" | "llm_fallback";
@@ -89,6 +91,53 @@ function getExpectedInstructionsHash(session: OnboardingSession): string | undef
   return normalized.length > 0 ? sha256(normalized) : undefined;
 }
 
+function normalizeCheckpoint(value: unknown): OnboardingCheckpoint | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+
+  const type = typeof raw.type === "string" ? raw.type : null;
+  const blockedState =
+    typeof raw.blockedState === "string"
+      ? raw.blockedState
+      : typeof raw.blocked_state === "string"
+      ? raw.blocked_state
+      : null;
+  const message = typeof raw.message === "string" ? raw.message : null;
+  const resumeHint =
+    typeof raw.resumeHint === "string"
+      ? raw.resumeHint
+      : typeof raw.resume_hint === "string"
+      ? raw.resume_hint
+      : null;
+  const actionUrl =
+    typeof raw.actionUrl === "string"
+      ? raw.actionUrl
+      : typeof raw.action_url === "string"
+      ? raw.action_url
+      : undefined;
+
+  if (!type || !blockedState || !message || !resumeHint) return null;
+  if (type !== "auth" && type !== "captcha" && type !== "manual_review") return null;
+  if (
+    blockedState !== "browser_started" &&
+    blockedState !== "claude_authenticated" &&
+    blockedState !== "connector_connected" &&
+    blockedState !== "project_upserted" &&
+    blockedState !== "instructions_applied" &&
+    blockedState !== "verified"
+  ) {
+    return null;
+  }
+
+  return {
+    type,
+    blockedState,
+    message,
+    resumeHint,
+    ...(actionUrl ? { actionUrl } : {}),
+  };
+}
+
 class LlmFallbackPlanner {
   async buildInstruction(input: {
     state: Exclude<OnboardingState, "queued">;
@@ -96,6 +145,7 @@ class LlmFallbackPlanner {
     sessionId: string;
     objective: string;
     expectedSignal: string;
+    useCheapModel?: boolean;
   }): Promise<{ instruction: string; source: "cache" | "llm"; errorSignature: string }> {
     const cached = await browserFallbackCache.get(input.state, input.lastError);
     if (cached) {
@@ -120,7 +170,9 @@ class LlmFallbackPlanner {
     ].join("\n");
 
     const response = await aiProviderRegistry.chat({
-      model: aiProviderRegistry.chatModelName(),
+      model: input.useCheapModel
+        ? "gpt-4o-mini"
+        : aiProviderRegistry.chatModelName(),
       messages: [
         { role: "system", content: "You are a browser automation recovery planner." },
         { role: "user", content: prompt },
@@ -154,6 +206,10 @@ class CloudBrowserWorkerClient {
   ): Promise<BrowserExecutionResult> {
     const policy = STUDENT_POLICY[state];
     const retries = Math.max(1, config.browserMaxStudentRetries);
+    const isLearned = await flowTemplateStore
+      .getLearnedPolicy(state as OnboardingActionState)
+      .then(t => t?.isLearned ?? false)
+      .catch(() => false);
 
     const attemptErrors: string[] = [];
     for (let attempt = 1; attempt <= retries; attempt += 1) {
@@ -199,6 +255,7 @@ class CloudBrowserWorkerClient {
       sessionId: session.id,
       objective: policy.objective,
       expectedSignal: policy.expectedSignal,
+      useCheapModel: isLearned,
     });
 
     const fallbackResult = await this.dispatch({
@@ -266,6 +323,8 @@ class CloudBrowserWorkerClient {
     }
 
     const url = new URL("/api/browser-use/claude-onboarding/execute", config.browserWorkerBaseUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(5_000, config.browserWorkerRequestTimeoutMs));
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -274,11 +333,13 @@ class CloudBrowserWorkerClient {
           ? { Authorization: `Bearer ${config.browserWorkerApiKey}` }
           : {}),
       },
+      signal: controller.signal,
       body: JSON.stringify({
         mode: input.mode,
         sessionId: input.session.id,
         state: input.state,
         projectName: input.session.projectName,
+        authCompleted: input.session.metadata.authCompleted === true,
         applyProjectInstructions: shouldApplyProjectInstructions(input.session),
         projectInstructions: getProjectInstructions(input.session),
         expectedInstructionsHash: shouldApplyProjectInstructions(input.session) ? getExpectedInstructionsHash(input.session) : undefined,
@@ -286,6 +347,24 @@ class CloudBrowserWorkerClient {
         instruction: input.instruction,
         attempt: input.attempt,
       }),
+    }).catch((error) => {
+      const isAbort =
+        error instanceof Error && (error.name === "AbortError" || /aborted|timeout/i.test(error.message));
+      if (isAbort) {
+        return {
+          ok: false,
+          status: 504,
+          async json() {
+            return { error: "Worker request timed out" };
+          },
+          async text() {
+            return "Worker request timed out";
+          },
+        } as Response;
+      }
+      throw error;
+    }).finally(() => {
+      clearTimeout(timeout);
     });
 
     if (!res.ok) {
@@ -309,6 +388,13 @@ class CloudBrowserWorkerClient {
     if (!data?.status) {
       return { status: "error", error: "Malformed worker response" };
     }
+    if (data.status === "checkpoint") {
+      const checkpoint = normalizeCheckpoint(data.checkpoint);
+      if (!checkpoint) {
+        return { status: "error", error: "Malformed checkpoint response from worker" };
+      }
+      return { ...data, checkpoint };
+    }
     return data;
   }
 
@@ -319,18 +405,13 @@ class CloudBrowserWorkerClient {
     instruction: StudentPolicyInstruction;
     attempt: number;
   }): WorkerResponse {
-    if (input.state === "claude_authenticated" && input.session.metadata.authCompleted !== true) {
-      return {
-        status: "checkpoint",
-        checkpoint: {
-          type: "auth",
-          blockedState: "claude_authenticated",
-          message: "Cloud browser session requires user login confirmation in Claude.",
-          resumeHint: "Complete login/MFA in checkpoint UI, then call resume.",
-        },
-      };
-    }
+    return {
+      status: "error",
+      error:
+        "Browser worker is not configured (TALLEI_BROWSER__WORKER_BASE_URL missing). Live user-visible browser sessions are required for onboarding checkpoints.",
+    };
 
+    // Unreachable in strict mode; kept for compatibility if simulation is reintroduced.
     return {
       status: "ok",
       output: {

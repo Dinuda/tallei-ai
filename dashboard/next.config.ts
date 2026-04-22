@@ -66,7 +66,7 @@ const nextConfig: NextConfig = {
           // Keep local dashboard API handlers (e.g. /api/documents) in Next.js.
           // Proxy all other API routes to the backend.
           source:
-            "/api/:path((?!(?:documents|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
+            "/api/:path((?!(?:documents|integrations|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
           destination: `${BACKEND}/api/:path`,
         },
         {
