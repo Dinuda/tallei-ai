@@ -7,8 +7,6 @@ export interface FeatureFlags {
   readonly useNewRecallUseCase: boolean;
   readonly useNewListUseCase: boolean;
   readonly useNewDeleteUseCase: boolean;
-  readonly authApiKeyViewEnabled: boolean;
-  readonly authApiKeyViewShadowEnabled: boolean;
   readonly rerankEnabled: boolean;
   readonly browserLlmFallbackEnabled: boolean;
 }
@@ -21,8 +19,6 @@ export function getFeatureFlags(config: Config): FeatureFlags {
     useNewRecallUseCase: config.useNewRecallUseCase,
     useNewListUseCase: config.useNewListUseCase,
     useNewDeleteUseCase: config.useNewDeleteUseCase,
-    authApiKeyViewEnabled: config.authApiKeyViewEnabled,
-    authApiKeyViewShadowEnabled: config.authApiKeyViewShadowEnabled,
     rerankEnabled: config.rerankEnabled,
     browserLlmFallbackEnabled: config.browserLlmFallbackEnabled,
   };

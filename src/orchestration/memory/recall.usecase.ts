@@ -57,6 +57,7 @@ interface RecallMemoryUseCaseInput {
 
 export class RecallMemoryUseCase {
   private readonly deps: RecallMemoryUseCaseDeps;
+  private static readonly SPECULATIVE_BUCKET_DELAY_MS = 35;
 
   constructor(deps: RecallMemoryUseCaseDeps) {
     this.deps = deps;
@@ -94,7 +95,25 @@ export class RecallMemoryUseCase {
     }
 
     // 2. Redis exact cache (survives restarts, shared across instances)
+    // Start semantic fallback speculatively after a small delay to overlap tail latency.
     const recallLookupTimings: Partial<RecallCacheLookupTimings> = {};
+    let bucketStartedAt = 0;
+    let bucketPromise: Promise<BucketRecallResult> | null = null;
+    const startBucket = (): Promise<BucketRecallResult> => {
+      if (bucketPromise) return bucketPromise;
+      bucketStartedAt = elapsedMs();
+      bucketPromise = this.deps.withTimeout(
+        this.deps.bucketRecall(normalizedQuery, input.auth),
+        this.deps.totalTimeoutMs,
+        "recall.bucket"
+      );
+      return bucketPromise;
+    };
+    const speculativeTimer = setTimeout(() => {
+      void startBucket().catch(() => {});
+    }, RecallMemoryUseCase.SPECULATIVE_BUCKET_DELAY_MS);
+    speculativeTimer.unref?.();
+
     const redisCacheStartedAt = elapsedMs();
     const redisHit = await this.deps.readExactRecallPayload<RecallResult>(
       input.auth, normalizedQuery, "v1", recallLookupTimings
@@ -104,6 +123,7 @@ export class RecallMemoryUseCase {
     const recallStampMs = recallLookupTimings.recall_stamp_ms ?? 0;
     const recallRedisMs = recallLookupTimings.recall_redis_ms ?? 0;
     if (redisHit) {
+      clearTimeout(speculativeTimer);
       this.deps.setCachedRecall(cacheKey, redisHit);
       this.deps.logRecallEvent(
         input.query, boundedLimit, input.auth, input.requesterIp,
@@ -119,19 +139,17 @@ export class RecallMemoryUseCase {
       return redisHit;
     }
 
-    // 3. Bucket recall — synchronous, always returns semantically correct result
+    clearTimeout(speculativeTimer);
+
+    // 3. Bucket recall — overlap with cache lookup when cache path is slow.
     let result: RecallResult;
     let source: RecallSource = "semantic_enriched";
     let timingsMs: Record<string, number> = {};
 
     try {
-      const bucketStartedAt = elapsedMs();
-      const bucketResult = await this.deps.withTimeout(
-        this.deps.bucketRecall(normalizedQuery, input.auth),
-        this.deps.totalTimeoutMs,
-        "recall.bucket"
-      );
-      const bucketMs = elapsedMs() - bucketStartedAt;
+      const bucketResult = await startBucket();
+      const bucketMs = Math.max(0, elapsedMs() - bucketStartedAt);
+      const lookupWallMs = processLocalMs + (elapsedMs() - redisCacheStartedAt);
       result = { contextBlock: bucketResult.contextBlock, memories: bucketResult.memories };
       timingsMs = {
         ...bucketResult.timingsMs,
@@ -139,19 +157,23 @@ export class RecallMemoryUseCase {
         recall_stamp_ms: recallStampMs,
         recall_redis_ms: recallRedisMs,
         recall_bucket_ms: bucketMs,
-        cache_lookup_ms: processLocalMs + cacheLookupMs + bucketMs,
+        cache_lookup_ms: lookupWallMs,
       };
     } catch {
       // Total timeout — return empty rather than wrong memories
+      const bucketMs = bucketStartedAt > 0
+        ? Math.max(this.deps.totalTimeoutMs, elapsedMs() - bucketStartedAt)
+        : this.deps.totalTimeoutMs;
+      const lookupWallMs = processLocalMs + (elapsedMs() - redisCacheStartedAt);
       result = { contextBlock: "--- No relevant memories found ---", memories: [] };
       source = "recent_fallback";
       timingsMs = {
         recall_local_ms: recallLocalMs,
         recall_stamp_ms: recallStampMs,
         recall_redis_ms: recallRedisMs,
-        recall_bucket_ms: this.deps.totalTimeoutMs,
-        cache_lookup_ms: processLocalMs + cacheLookupMs + this.deps.totalTimeoutMs,
-        total_ms: this.deps.totalTimeoutMs,
+        recall_bucket_ms: bucketMs,
+        cache_lookup_ms: lookupWallMs,
+        total_ms: bucketMs,
       };
     }
 

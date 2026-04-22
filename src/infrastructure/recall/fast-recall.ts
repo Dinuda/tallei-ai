@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 import { MemoryRepository } from "../repositories/memory.repository.js";
-import { getCacheJson, getCacheJsonMany, incrementWithTtl, setCacheJson } from "../cache/redis-cache.js";
+import { getCacheJson, incrementWithTtl, setCacheJson } from "../cache/redis-cache.js";
 import { config } from "../../config/index.js";
 import type { MemoryType } from "../../orchestration/memory/memory-types.js";
 
@@ -142,7 +142,9 @@ function isStale(envelope: RecallCacheEnvelope, ttlSeconds: number): boolean {
 async function fetchEnvelopeFromRedis(key: string): Promise<RecallCacheEnvelope | null> {
   let pending = inflightEnvelopeByKey.get(key);
   if (!pending) {
-    pending = getCacheJson<RecallCacheEnvelope>(key).catch(() => null).finally(() => {
+    pending = getCacheJson<RecallCacheEnvelope>(key)
+      .catch(() => null)
+      .finally(() => {
       const active = inflightEnvelopeByKey.get(key);
       if (active === pending) inflightEnvelopeByKey.delete(key);
     });
@@ -284,14 +286,29 @@ async function readPayload<T>(
       if (localPayload) return { payload: localPayload as T, createdAt: localEnvelope.createdAt };
     }
 
-    const pipelineStartedAt = process.hrtime.bigint();
-    const [remoteStampValue, remoteEnvelopeValue] = await getCacheJsonMany<unknown>([
-      stampCacheKey(auth),
-      key,
+    const stampStartedAt = process.hrtime.bigint();
+    const remoteStampPromise = getCacheJson<number>(stampCacheKey(auth))
+      .catch(() => null)
+      .finally(() => {
+        addLookupTiming(
+          timings,
+          "recall_stamp_ms",
+          Number(process.hrtime.bigint() - stampStartedAt) / 1_000_000
+        );
+      });
+    const envelopeStartedAt = process.hrtime.bigint();
+    const remoteEnvelopePromise = fetchEnvelopeFromRedis(key)
+      .finally(() => {
+        addLookupTiming(
+          timings,
+          "recall_redis_ms",
+          Number(process.hrtime.bigint() - envelopeStartedAt) / 1_000_000
+        );
+      });
+    const [remoteStampValue, remoteEnvelope] = await Promise.all([
+      remoteStampPromise,
+      remoteEnvelopePromise,
     ]);
-    const pipelineMs = Number(process.hrtime.bigint() - pipelineStartedAt) / 1_000_000;
-    addLookupTiming(timings, "recall_stamp_ms", pipelineMs);
-    addLookupTiming(timings, "recall_redis_ms", pipelineMs);
 
     let effectiveStamp = localStamp;
     if (typeof remoteStampValue === "number" && Number.isFinite(remoteStampValue)) {
@@ -300,7 +317,6 @@ async function readPayload<T>(
       localStampSyncedAtByScope.set(scope, Date.now());
     }
 
-    const remoteEnvelope = isRecallCacheEnvelope(remoteEnvelopeValue) ? remoteEnvelopeValue : null;
     if (remoteEnvelope && effectiveStamp === localStamp) {
       setLocalCache(key, remoteEnvelope, ttl);
       const remotePayload = remoteEnvelope.payloads?.[slot];

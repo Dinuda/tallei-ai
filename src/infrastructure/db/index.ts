@@ -747,10 +747,12 @@ export async function initDb() {
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         openai_file_id TEXT NOT NULL,
+        download_link TEXT NOT NULL,
         filename TEXT NOT NULL,
+        title TEXT,
         mime_type TEXT,
         status TEXT NOT NULL
-          CHECK (status IN ('pending', 'done', 'failed')),
+          CHECK (status IN ('pending', 'processing', 'done', 'failed')),
         document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
         conversation_id TEXT,
         error TEXT,
@@ -768,6 +770,26 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_conversation
         ON uploaded_file_ingest_jobs(tenant_id, user_id, conversation_id, created_at DESC)
         WHERE conversation_id IS NOT NULL;
+    `);
+
+    await client.query(`
+      ALTER TABLE uploaded_file_ingest_jobs
+      ADD COLUMN IF NOT EXISTS title TEXT,
+      ADD COLUMN IF NOT EXISTS download_link TEXT;
+
+      ALTER TABLE uploaded_file_ingest_jobs
+      DROP CONSTRAINT IF EXISTS uploaded_file_ingest_jobs_status_check;
+      ALTER TABLE uploaded_file_ingest_jobs
+      ADD CONSTRAINT uploaded_file_ingest_jobs_status_check
+        CHECK (status IN ('pending', 'processing', 'done', 'failed'));
+
+      UPDATE uploaded_file_ingest_jobs
+      SET status = 'pending'
+      WHERE status = 'processing';
+
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_pending
+        ON uploaded_file_ingest_jobs(status, created_at ASC)
+        WHERE status = 'pending';
     `);
 
     await client.query(`
@@ -866,9 +888,268 @@ export async function initDb() {
         ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP WITH TIME ZONE;
     `);
 
-    // Materialized auth context for low-latency API key validation.
+    // Replace the old materialized auth context with a deterministic derived cache table.
     await client.query(`
-      CREATE MATERIALIZED VIEW IF NOT EXISTS api_key_contexts AS
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_api_keys ON api_keys;
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_memberships ON tenant_memberships;
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_subscriptions ON subscriptions;
+      DROP FUNCTION IF EXISTS refresh_api_key_contexts_mv();
+      DROP MATERIALIZED VIEW IF EXISTS api_key_contexts;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS api_key_context_cache (
+        key_hash TEXT PRIMARY KEY,
+        key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        connector_type TEXT,
+        plan TEXT,
+        status TEXT,
+        revoked_at TIMESTAMP WITH TIME ZONE,
+        rotation_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_api_key_context_cache_tenant_user
+        ON api_key_context_cache(tenant_id, user_id);
+      CREATE INDEX IF NOT EXISTS idx_api_key_context_cache_active
+        ON api_key_context_cache(user_id, revoked_at, rotation_expires_at);
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION refresh_api_key_context_cache_by_hash(p_key_hash TEXT)
+      RETURNS VOID
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        WITH source AS (
+          SELECT
+            ak.key_hash,
+            ak.id AS key_id,
+            ak.user_id,
+            COALESCE(ak.tenant_id, tm.tenant_id) AS tenant_id,
+            ak.connector_type,
+            s.plan,
+            s.status,
+            ak.revoked_at,
+            (ak.created_at + (ak.rotation_days || ' days')::interval) AS rotation_expires_at
+          FROM api_keys ak
+          LEFT JOIN tenant_memberships tm
+            ON tm.user_id = ak.user_id
+           AND ak.tenant_id IS NULL
+          LEFT JOIN subscriptions s
+            ON s.tenant_id = COALESCE(ak.tenant_id, tm.tenant_id)
+          WHERE ak.key_hash = p_key_hash
+          LIMIT 1
+        )
+        INSERT INTO api_key_context_cache (
+          key_hash,
+          key_id,
+          user_id,
+          tenant_id,
+          connector_type,
+          plan,
+          status,
+          revoked_at,
+          rotation_expires_at,
+          updated_at
+        )
+        SELECT
+          source.key_hash,
+          source.key_id,
+          source.user_id,
+          source.tenant_id,
+          source.connector_type,
+          source.plan,
+          source.status,
+          source.revoked_at,
+          source.rotation_expires_at,
+          NOW()
+        FROM source
+        ON CONFLICT (key_hash) DO UPDATE SET
+          key_id = EXCLUDED.key_id,
+          user_id = EXCLUDED.user_id,
+          tenant_id = EXCLUDED.tenant_id,
+          connector_type = EXCLUDED.connector_type,
+          plan = EXCLUDED.plan,
+          status = EXCLUDED.status,
+          revoked_at = EXCLUDED.revoked_at,
+          rotation_expires_at = EXCLUDED.rotation_expires_at,
+          updated_at = NOW();
+
+        IF NOT FOUND THEN
+          DELETE FROM api_key_context_cache
+          WHERE key_hash = p_key_hash;
+        END IF;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION refresh_api_key_context_cache_by_user_id(p_user_id UUID)
+      RETURNS VOID
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        key_row RECORD;
+      BEGIN
+        FOR key_row IN
+          SELECT key_hash
+          FROM api_keys
+          WHERE user_id = p_user_id
+        LOOP
+          PERFORM refresh_api_key_context_cache_by_hash(key_row.key_hash);
+        END LOOP;
+
+        DELETE FROM api_key_context_cache c
+        WHERE c.user_id = p_user_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM api_keys ak
+            WHERE ak.key_hash = c.key_hash
+          );
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION refresh_api_key_context_cache_by_tenant_id(p_tenant_id UUID)
+      RETURNS VOID
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        key_row RECORD;
+      BEGIN
+        FOR key_row IN
+          SELECT DISTINCT ak.key_hash
+          FROM api_keys ak
+          LEFT JOIN tenant_memberships tm
+            ON tm.user_id = ak.user_id
+           AND ak.tenant_id IS NULL
+          WHERE COALESCE(ak.tenant_id, tm.tenant_id) = p_tenant_id
+        LOOP
+          PERFORM refresh_api_key_context_cache_by_hash(key_row.key_hash);
+        END LOOP;
+
+        DELETE FROM api_key_context_cache c
+        WHERE c.tenant_id = p_tenant_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM api_keys ak
+            LEFT JOIN tenant_memberships tm
+              ON tm.user_id = ak.user_id
+             AND ak.tenant_id IS NULL
+            WHERE ak.key_hash = c.key_hash
+              AND COALESCE(ak.tenant_id, tm.tenant_id) = p_tenant_id
+          );
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION trg_refresh_api_key_context_cache_api_keys()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          PERFORM refresh_api_key_context_cache_by_hash(OLD.key_hash);
+          RETURN OLD;
+        END IF;
+
+        PERFORM refresh_api_key_context_cache_by_hash(NEW.key_hash);
+
+        IF TG_OP = 'UPDATE' AND OLD.key_hash IS DISTINCT FROM NEW.key_hash THEN
+          PERFORM refresh_api_key_context_cache_by_hash(OLD.key_hash);
+        END IF;
+
+        RETURN NEW;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION trg_refresh_api_key_context_cache_memberships()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          PERFORM refresh_api_key_context_cache_by_user_id(OLD.user_id);
+          RETURN OLD;
+        END IF;
+
+        PERFORM refresh_api_key_context_cache_by_user_id(NEW.user_id);
+
+        IF TG_OP = 'UPDATE' AND OLD.user_id IS DISTINCT FROM NEW.user_id THEN
+          PERFORM refresh_api_key_context_cache_by_user_id(OLD.user_id);
+        END IF;
+
+        RETURN NEW;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION trg_refresh_api_key_context_cache_subscriptions()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          PERFORM refresh_api_key_context_cache_by_tenant_id(OLD.tenant_id);
+          RETURN OLD;
+        END IF;
+
+        PERFORM refresh_api_key_context_cache_by_tenant_id(NEW.tenant_id);
+
+        IF TG_OP = 'UPDATE' AND OLD.tenant_id IS DISTINCT FROM NEW.tenant_id THEN
+          PERFORM refresh_api_key_context_cache_by_tenant_id(OLD.tenant_id);
+        END IF;
+
+        RETURN NEW;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_context_cache_api_keys ON api_keys;
+      CREATE TRIGGER trg_refresh_api_key_context_cache_api_keys
+      AFTER INSERT OR UPDATE OR DELETE ON api_keys
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_refresh_api_key_context_cache_api_keys();
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_context_cache_memberships ON tenant_memberships;
+      CREATE TRIGGER trg_refresh_api_key_context_cache_memberships
+      AFTER INSERT OR UPDATE OR DELETE ON tenant_memberships
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_refresh_api_key_context_cache_memberships();
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_context_cache_subscriptions ON subscriptions;
+      CREATE TRIGGER trg_refresh_api_key_context_cache_subscriptions
+      AFTER INSERT OR UPDATE OR DELETE ON subscriptions
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_refresh_api_key_context_cache_subscriptions();
+    `);
+
+    await client.query(`
+      INSERT INTO api_key_context_cache (
+        key_hash,
+        key_id,
+        user_id,
+        tenant_id,
+        connector_type,
+        plan,
+        status,
+        revoked_at,
+        rotation_expires_at,
+        updated_at
+      )
       SELECT
         ak.key_hash,
         ak.id AS key_id,
@@ -878,58 +1159,33 @@ export async function initDb() {
         s.plan,
         s.status,
         ak.revoked_at,
-        (ak.created_at + (ak.rotation_days || ' days')::interval) AS rotation_expires_at
+        (ak.created_at + (ak.rotation_days || ' days')::interval) AS rotation_expires_at,
+        NOW()
       FROM api_keys ak
       LEFT JOIN tenant_memberships tm
         ON tm.user_id = ak.user_id
        AND ak.tenant_id IS NULL
       LEFT JOIN subscriptions s
-        ON s.tenant_id = COALESCE(ak.tenant_id, tm.tenant_id);
+        ON s.tenant_id = COALESCE(ak.tenant_id, tm.tenant_id)
+      ON CONFLICT (key_hash) DO UPDATE SET
+        key_id = EXCLUDED.key_id,
+        user_id = EXCLUDED.user_id,
+        tenant_id = EXCLUDED.tenant_id,
+        connector_type = EXCLUDED.connector_type,
+        plan = EXCLUDED.plan,
+        status = EXCLUDED.status,
+        revoked_at = EXCLUDED.revoked_at,
+        rotation_expires_at = EXCLUDED.rotation_expires_at,
+        updated_at = NOW();
     `);
 
     await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_api_key_contexts_key_hash
-        ON api_key_contexts(key_hash);
-      CREATE INDEX IF NOT EXISTS idx_api_key_contexts_tenant_user
-        ON api_key_contexts(tenant_id, user_id);
-    `);
-
-    await client.query(`REFRESH MATERIALIZED VIEW api_key_contexts`);
-
-    await client.query(`
-      CREATE OR REPLACE FUNCTION refresh_api_key_contexts_mv()
-      RETURNS trigger
-      LANGUAGE plpgsql
-      AS $$
-      BEGIN
-        REFRESH MATERIALIZED VIEW api_key_contexts;
-        RETURN NULL;
-      END;
-      $$;
-    `);
-
-    await client.query(`
-      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_api_keys ON api_keys;
-      CREATE TRIGGER trg_refresh_api_key_contexts_api_keys
-      AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON api_keys
-      FOR EACH STATEMENT
-      EXECUTE FUNCTION refresh_api_key_contexts_mv();
-    `);
-
-    await client.query(`
-      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_memberships ON tenant_memberships;
-      CREATE TRIGGER trg_refresh_api_key_contexts_memberships
-      AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON tenant_memberships
-      FOR EACH STATEMENT
-      EXECUTE FUNCTION refresh_api_key_contexts_mv();
-    `);
-
-    await client.query(`
-      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_subscriptions ON subscriptions;
-      CREATE TRIGGER trg_refresh_api_key_contexts_subscriptions
-      AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON subscriptions
-      FOR EACH STATEMENT
-      EXECUTE FUNCTION refresh_api_key_contexts_mv();
+      DELETE FROM api_key_context_cache c
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM api_keys ak
+        WHERE ak.key_hash = c.key_hash
+      );
     `);
 
     // #13 + #9: Hash-only token storage + family-based rotation

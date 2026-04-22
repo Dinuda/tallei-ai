@@ -18,11 +18,13 @@ import {
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
 import {
+  ingestUploadedFileToDocument,
+} from "../../../services/uploaded-file-ingest.js";
+import {
   enqueueUploadedFilesIngest,
   getUploadedFileIngestJobStatus,
   listRecentCompletedUploadedFileIngestJobs,
 } from "../../../services/uploaded-file-ingest-jobs.js";
-import { ingestUploadedFileToDocument } from "../../../services/uploaded-file-ingest.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import {
@@ -787,7 +789,6 @@ export function buildOpenApiSpec(serverUrl: string) {
           errors: uploadBlobResultSchema.properties.errors,
         },
       },
-      autoSaveNotice: { type: "string" },
     },
   };
 
@@ -857,11 +858,9 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/recall_memories": {
         post: {
           operationId: "recall_memories",
-          summary: "First turn required; later turns conditional recall",
+          summary: "Required first action every turn; pass file attachments here",
           description:
-            "NON-NEGOTIABLE: first user turn must call this. Later turns call only when asked or context is missing. " +
-            "If files exist, call upload_blob to enqueue ingest, then poll upload_status as needed before relying on file content. " +
-            "Mini/auto guard: if unsure, call tools before answering.",
+            "ALWAYS call first every turn. query=user message. Include any file attachments in openaiFileIdRefs — auto-saved server-side. Only call upload_blob if autoSave.complete=false or 422. If autoSave.saved is non-empty, end reply: Saved: @doc:<ref> (or @lot:<ref>).",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -954,11 +953,9 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/upload_blob": {
         post: {
           operationId: "upload_blob",
-          summary: "REQUIRED first step for uploaded files: save full files before answering",
+          summary: "Fallback upload retry — only if recall_memories autoSave failed",
           description:
-            "NON-NEGOTIABLE for file turns: call first to enqueue ingest. Supports PDF and Word (.docx/.docm). " +
-            "Do not use direct attachment text before save. After enqueue, poll upload_status before claiming file content is available. " +
-            "Retry/report any failure.",
+            "FALLBACK ONLY — call this only when recall_memories returns autoSave.complete=false or a 422 for specific files. Pass those files in openaiFileIdRefs, wait for success. Retry once on failure; if retry fails, report and stop. Supports PDF and Word (.docx/.docm).",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1021,9 +1018,9 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/upload_status": {
         get: {
           operationId: "upload_status",
-          summary: "Poll status for an async uploaded file ingest job",
+          summary: "Poll status for an uploaded file ingest job",
           description:
-            "Use this to check whether an upload_blob or recall_memories auto-save job has completed.",
+            "Use this after upload_blob handoff to check pending/done/failed for a ref.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           parameters: [
@@ -1056,7 +1053,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           summary: "Unified save endpoint for memory and documents (supports uploaded files)",
           description:
             "Use for explicit saves and cadence: every 5 user messages, save a concise fact summary unless user opts out. " +
-            "For files, upload_blob must run first and complete. If persistence fails, return failure and never claim success.",
+            "For files, upload_blob must succeed first. If doc saved this turn, append `Saved: @doc:<ref>` or `Saved: @lot:<ref>`. Fact/preference saves: no Saved line.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {

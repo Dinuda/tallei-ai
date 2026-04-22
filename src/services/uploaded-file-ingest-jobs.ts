@@ -1,11 +1,14 @@
 import { randomUUID } from "crypto";
 
+import { config } from "../config/index.js";
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
 import { runAsyncSafe } from "../shared/async-safe.js";
 import { assertPro } from "./documents.js";
+import { getPlanForTenant } from "../infrastructure/auth/tenancy.js";
 import { ingestUploadedFileToDocument, type UploadedFileRef } from "./uploaded-file-ingest.js";
 
+type UploadedFileIngestJobDbStatus = "pending" | "processing" | "done" | "failed";
 export type UploadedFileIngestJobStatus = "pending" | "done" | "failed";
 
 export interface UploadedFileIngestJobPending {
@@ -49,10 +52,12 @@ export interface UploadedFileIngestJobState {
 
 interface UploadIngestJobRow {
   ref: string;
-  status: UploadedFileIngestJobStatus;
+  status: UploadedFileIngestJobDbStatus;
   filename: string;
   openai_file_id: string;
+  download_link: string | null;
   mime_type: string | null;
+  title: string | null;
   conversation_id: string | null;
   created_at: string;
   completed_at: string | null;
@@ -67,7 +72,28 @@ interface UploadIngestJobRow {
   blob_source_file_id: string | null;
 }
 
+interface ClaimedUploadIngestJobRow {
+  ref: string;
+  tenant_id: string;
+  user_id: string;
+  openai_file_id: string;
+  download_link: string | null;
+  filename: string;
+  mime_type: string | null;
+  title: string | null;
+  conversation_id: string | null;
+}
+
+const UPLOAD_INGEST_WORKER_ENABLED = config.uploadIngestWorkerEnabled;
+const UPLOAD_INGEST_WORKER_POLL_MS = Math.max(50, config.uploadIngestWorkerPollMs);
+const UPLOAD_INGEST_WORKER_BATCH_SIZE = Math.max(1, config.uploadIngestWorkerBatchSize);
+const UPLOAD_INGEST_WORKER_CONCURRENCY = Math.max(1, config.uploadIngestWorkerConcurrency);
+let uploadIngestWorkerRunning = false;
+let uploadIngestWorkerTimer: ReturnType<typeof setInterval> | null = null;
+let uploadIngestPollInFlight = false;
+
 function mapJobRow(row: UploadIngestJobRow): UploadedFileIngestJobState {
+  const status: UploadedFileIngestJobStatus = row.status === "processing" ? "pending" : row.status;
   const hasBlob =
     row.blob_provider === "uploadthing"
     && typeof row.blob_key === "string"
@@ -93,7 +119,7 @@ function mapJobRow(row: UploadIngestJobRow): UploadedFileIngestJobState {
 
   return {
     ref: row.ref,
-    status: row.status,
+    status,
     filename: row.filename,
     openai_file_id: row.openai_file_id,
     mime_type: row.mime_type,
@@ -106,7 +132,8 @@ function mapJobRow(row: UploadIngestJobRow): UploadedFileIngestJobState {
 }
 
 async function setJobDone(input: {
-  auth: AuthContext;
+  tenantId: string;
+  userId: string;
   ref: string;
   documentRef: string;
 }): Promise<void> {
@@ -119,7 +146,7 @@ async function setJobDone(input: {
        AND deleted_at IS NULL
      ORDER BY created_at DESC
      LIMIT 1`,
-    [input.auth.tenantId, input.auth.userId, input.documentRef]
+    [input.tenantId, input.userId, input.documentRef]
   );
 
   await pool.query(
@@ -131,12 +158,13 @@ async function setJobDone(input: {
      WHERE tenant_id = $2
        AND user_id = $3
        AND ref = $4`,
-    [documentResult.rows[0]?.id ?? null, input.auth.tenantId, input.auth.userId, input.ref]
+    [documentResult.rows[0]?.id ?? null, input.tenantId, input.userId, input.ref]
   );
 }
 
 async function setJobFailed(input: {
-  auth: AuthContext;
+  tenantId: string;
+  userId: string;
   ref: string;
   error: string;
 }): Promise<void> {
@@ -148,39 +176,122 @@ async function setJobFailed(input: {
      WHERE tenant_id = $2
        AND user_id = $3
        AND ref = $4`,
-    [input.error, input.auth.tenantId, input.auth.userId, input.ref]
+    [input.error, input.tenantId, input.userId, input.ref]
   );
 }
 
-function ingestUploadedFileInBackground(input: {
-  auth: AuthContext;
-  fileRef: UploadedFileRef;
-  title?: string;
-  conversation_id?: string | null;
-  jobRef: string;
-}): void {
-  setImmediate(() => {
-    runAsyncSafe(async () => {
-      try {
-        const saved = await ingestUploadedFileToDocument(input.fileRef, input.auth, {
-          title: input.title,
-          conversation_id: input.conversation_id ?? null,
-        });
-        await setJobDone({
-          auth: input.auth,
-          ref: input.jobRef,
-          documentRef: saved.ref,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await setJobFailed({
-          auth: input.auth,
-          ref: input.jobRef,
-          error: message,
-        });
-      }
-    }, "uploaded file ingest job");
-  });
+async function claimNextPendingJob(): Promise<ClaimedUploadIngestJobRow | null> {
+  const result = await pool.query<ClaimedUploadIngestJobRow>(
+    `WITH next_job AS (
+       SELECT ref
+       FROM uploaded_file_ingest_jobs
+       WHERE status = 'pending'
+       ORDER BY created_at ASC
+       FOR UPDATE SKIP LOCKED
+       LIMIT 1
+     )
+     UPDATE uploaded_file_ingest_jobs j
+     SET status = 'processing',
+         error = NULL
+     FROM next_job
+     WHERE j.ref = next_job.ref
+     RETURNING
+       j.ref,
+       j.tenant_id,
+       j.user_id,
+       j.openai_file_id,
+       j.download_link,
+       j.filename,
+       j.mime_type,
+       j.title,
+       j.conversation_id`
+  );
+  return result.rows[0] ?? null;
+}
+
+async function processClaimedJob(job: ClaimedUploadIngestJobRow): Promise<void> {
+  try {
+    if (!job.download_link) {
+      throw new Error("Missing download_link for uploaded file ingest job");
+    }
+    const plan = await getPlanForTenant(job.tenant_id);
+    const auth: AuthContext = {
+      userId: job.user_id,
+      tenantId: job.tenant_id,
+      authMode: "internal",
+      plan,
+    };
+    const fileRef: UploadedFileRef = {
+      id: job.openai_file_id,
+      name: job.filename,
+      mime_type: job.mime_type,
+      download_link: job.download_link,
+    };
+    const saved = await ingestUploadedFileToDocument(fileRef, auth, {
+      title: job.title ?? undefined,
+      conversation_id: job.conversation_id ?? null,
+    });
+    await setJobDone({
+      tenantId: job.tenant_id,
+      userId: job.user_id,
+      ref: job.ref,
+      documentRef: saved.ref,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await setJobFailed({
+      tenantId: job.tenant_id,
+      userId: job.user_id,
+      ref: job.ref,
+      error: message,
+    });
+  }
+}
+
+async function pollUploadIngestQueueOnce(): Promise<void> {
+  if (!uploadIngestWorkerRunning || uploadIngestPollInFlight) return;
+  uploadIngestPollInFlight = true;
+  try {
+    await Promise.all(
+      Array.from({ length: UPLOAD_INGEST_WORKER_CONCURRENCY }, async () => {
+        for (let i = 0; i < UPLOAD_INGEST_WORKER_BATCH_SIZE; i += 1) {
+          const job = await claimNextPendingJob();
+          if (!job) break;
+          await processClaimedJob(job);
+        }
+      })
+    );
+  } finally {
+    uploadIngestPollInFlight = false;
+  }
+}
+
+export function startUploadedFileIngestWorker(): void {
+  if (!UPLOAD_INGEST_WORKER_ENABLED) {
+    console.log("[workers] upload ingest worker disabled by config");
+    return;
+  }
+  if (uploadIngestWorkerRunning) return;
+  uploadIngestWorkerRunning = true;
+  uploadIngestWorkerTimer = setInterval(() => {
+    runAsyncSafe(
+      () => pollUploadIngestQueueOnce(),
+      "upload ingest worker poll"
+    );
+  }, UPLOAD_INGEST_WORKER_POLL_MS);
+  uploadIngestWorkerTimer.unref?.();
+  runAsyncSafe(() => pollUploadIngestQueueOnce(), "upload ingest worker initial poll");
+  console.log(
+    `[workers] upload ingest worker started poll_ms=${UPLOAD_INGEST_WORKER_POLL_MS} batch=${UPLOAD_INGEST_WORKER_BATCH_SIZE} concurrency=${UPLOAD_INGEST_WORKER_CONCURRENCY}`
+  );
+}
+
+export function stopUploadedFileIngestWorker(): void {
+  uploadIngestWorkerRunning = false;
+  if (uploadIngestWorkerTimer) {
+    clearInterval(uploadIngestWorkerTimer);
+    uploadIngestWorkerTimer = null;
+  }
 }
 
 export async function enqueueUploadedFileIngest(
@@ -199,18 +310,21 @@ export async function enqueueUploadedFileIngest(
 
   await pool.query(
     `INSERT INTO uploaded_file_ingest_jobs
-     (ref, tenant_id, user_id, openai_file_id, filename, mime_type, status, conversation_id)
-     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)`,
-    [ref, auth.tenantId, auth.userId, fileRef.id, filename, fileRef.mime_type ?? null, conversationId]
+     (ref, tenant_id, user_id, openai_file_id, download_link, filename, title, mime_type, status, conversation_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)`,
+    [
+      ref,
+      auth.tenantId,
+      auth.userId,
+      fileRef.id,
+      fileRef.download_link,
+      filename,
+      input?.title ?? null,
+      fileRef.mime_type ?? null,
+      conversationId,
+    ]
   );
-
-  ingestUploadedFileInBackground({
-    auth,
-    fileRef,
-    title: input?.title,
-    conversation_id: conversationId,
-    jobRef: ref,
-  });
+  runAsyncSafe(() => pollUploadIngestQueueOnce(), "upload ingest worker nudge");
 
   return {
     ref,
@@ -262,6 +376,7 @@ export async function getUploadedFileIngestJobStatus(
        j.status,
        j.filename,
        j.openai_file_id,
+       j.download_link,
        j.mime_type,
        j.conversation_id,
        j.created_at::text AS created_at,
@@ -307,6 +422,7 @@ export async function listRecentCompletedUploadedFileIngestJobs(
        j.status,
        j.filename,
        j.openai_file_id,
+       j.download_link,
        j.mime_type,
        j.conversation_id,
        j.created_at::text AS created_at,

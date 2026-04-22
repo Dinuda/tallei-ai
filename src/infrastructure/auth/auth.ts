@@ -44,8 +44,6 @@ const AUTH_USAGE_UPDATE_DEBOUNCE_MS = 100;
 const AUTH_USAGE_UPDATE_RETRY_MS = Math.max(250, config.authUsageUpdateRetryMs);
 const AUTH_USAGE_UPDATE_MAX_CONCURRENCY = Math.max(1, config.authUsageUpdateMaxConcurrency);
 const SESSION_JWT_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const AUTH_API_KEY_VIEW_ENABLED = config.authApiKeyViewEnabled;
-const AUTH_API_KEY_VIEW_SHADOW_ENABLED = config.authApiKeyViewShadowEnabled;
 const JWT_REVOCATION_CACHE_TTL_FALLBACK_SECONDS = 60 * 60 * 24 * 7;
 
 interface EphemeralApiKey {
@@ -168,9 +166,8 @@ function mapApiKeyContextRow(row: ApiKeyContextRow): ApiKeyValidation {
 
 async function queryApiKeyContextJoin(hash: string): Promise<ApiKeyValidation | null> {
   const result = await withTimeout(
-    pool.query<ApiKeyContextRow>({
-      name: "auth_api_key_lookup_join_v1",
-      text: `SELECT
+    pool.query<ApiKeyContextRow>(
+      `SELECT
           ak.id AS key_id,
           ak.user_id,
           COALESCE(ak.tenant_id, tm.tenant_id) AS tenant_id,
@@ -187,8 +184,8 @@ async function queryApiKeyContextJoin(hash: string): Promise<ApiKeyValidation | 
          AND ak.revoked_at IS NULL
          AND (ak.created_at + (ak.rotation_days || ' days')::interval) > NOW()
        LIMIT 1`,
-      values: [hash],
-    }),
+      [hash]
+    ),
     API_KEY_DB_TIMEOUT_MS,
     "validateApiKeyContext.join"
   );
@@ -196,41 +193,32 @@ async function queryApiKeyContextJoin(hash: string): Promise<ApiKeyValidation | 
   return mapApiKeyContextRow(result.rows[0]);
 }
 
-async function queryApiKeyContextView(hash: string): Promise<ApiKeyValidation | null> {
+async function queryApiKeyContextCacheTable(hash: string): Promise<ApiKeyValidation | null> {
   const result = await withTimeout(
-    pool.query<ApiKeyContextRow>({
-      name: "auth_api_key_lookup_view_v1",
-      text: `SELECT
+    pool.query<ApiKeyContextRow>(
+      `SELECT
           key_id,
           user_id,
           tenant_id,
           connector_type,
           plan,
           status
-       FROM api_key_contexts
+       FROM api_key_context_cache
        WHERE key_hash = $1
          AND revoked_at IS NULL
          AND rotation_expires_at > NOW()
        LIMIT 1`,
-      values: [hash],
-    }),
+      [hash]
+    ),
     API_KEY_DB_TIMEOUT_MS,
-    "validateApiKeyContext.view"
+    "validateApiKeyContext.cache_table"
   );
   if (result.rows.length === 0) return null;
   return mapApiKeyContextRow(result.rows[0]);
 }
 
-function sameValidation(a: ApiKeyValidation | null, b: ApiKeyValidation | null): boolean {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  return (
-    a.keyId === b.keyId &&
-    a.userId === b.userId &&
-    a.tenantId === b.tenantId &&
-    a.connectorType === b.connectorType &&
-    a.plan === b.plan
-  );
+async function refreshApiKeyContextCacheByHash(hash: string): Promise<void> {
+  await pool.query("SELECT refresh_api_key_context_cache_by_hash($1)", [hash]);
 }
 
 function storeEphemeralApiKey(input: {
@@ -701,6 +689,10 @@ export async function revokeApiKey(
     const cacheKey = apiKeyCacheKey(result.rows[0].key_hash);
     localApiKeyCache.delete(result.rows[0].key_hash);
     await deleteCacheKey(cacheKey);
+    runAsyncSafe(
+      () => refreshApiKeyContextCacheByHash(result.rows[0].key_hash),
+      "api key context cache refresh after revoke"
+    );
     return true;
   }
 
@@ -768,67 +760,53 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
   let dbValidationPromise = inflightApiKeyValidationByHash.get(hash);
   if (!dbValidationPromise) {
     dbValidationPromise = (async (): Promise<ApiKeyValidation | null> => {
+      let value: ApiKeyValidation | null = null;
       try {
-        let value: ApiKeyValidation | null;
-        if (AUTH_API_KEY_VIEW_ENABLED) {
-          const viewStartedAt = process.hrtime.bigint();
-          value = await queryApiKeyContextView(hash);
-          setRequestTimingField(
-            "auth_api_key_view_ms",
-            Number(process.hrtime.bigint() - viewStartedAt) / 1_000_000
-          );
-          setRequestTimingField("auth_api_key_db_path", "view");
-        } else {
-          value = await queryApiKeyContextJoin(hash);
-          setRequestTimingField("auth_api_key_db_path", "join");
-        }
+        const tableStartedAt = process.hrtime.bigint();
+        value = await queryApiKeyContextCacheTable(hash);
+        setRequestTimingField(
+          "auth_api_key_cache_table_ms",
+          Number(process.hrtime.bigint() - tableStartedAt) / 1_000_000
+        );
+        setRequestTimingField("auth_api_key_db_path", value ? "cache_table" : "cache_table_miss");
+      } catch (tableError) {
+        noteApiKeyDbFailure(tableError, "[auth] validateApiKeyContext cache-table lookup failed:");
+        setRequestTimingField("auth_api_key_db_path", "cache_table_error");
+      }
 
-        if (AUTH_API_KEY_VIEW_SHADOW_ENABLED) {
-          runAsyncSafe(async () => {
-            const primary = value;
-            const shadow = AUTH_API_KEY_VIEW_ENABLED
-              ? await queryApiKeyContextJoin(hash)
-              : await queryApiKeyContextView(hash);
-            if (!sameValidation(primary, shadow)) {
-              console.warn("[auth] api_key_context shadow mismatch", {
-                keyHashPrefix: hash.slice(0, 12),
-                primary,
-                shadow,
-                primaryPath: AUTH_API_KEY_VIEW_ENABLED ? "view" : "join",
-              });
-            }
-          }, "api key context shadow compare");
-        }
-        if (!value) return null;
+      if (value) {
         runAsyncSafe(
           () => setCacheJson(cacheKey, value, API_KEY_CACHE_TTL_SECONDS),
           "api key cache write"
         );
         setLocalApiKeyValidation(hash, value);
         return value;
-      } catch (error) {
-        if (AUTH_API_KEY_VIEW_ENABLED) {
-          try {
-            const fallbackStartedAt = process.hrtime.bigint();
-            const fallback = await queryApiKeyContextJoin(hash);
-            setRequestTimingField(
-              "auth_api_key_join_fallback_ms",
-              Number(process.hrtime.bigint() - fallbackStartedAt) / 1_000_000
-            );
-            setRequestTimingField("auth_api_key_db_path", "join_fallback");
-            if (!fallback) return null;
-            runAsyncSafe(
-              () => setCacheJson(cacheKey, fallback, API_KEY_CACHE_TTL_SECONDS),
-              "api key cache write"
-            );
-            setLocalApiKeyValidation(hash, fallback);
-            return fallback;
-          } catch (fallbackError) {
-            noteApiKeyDbFailure(fallbackError, "[auth] validateApiKeyContext JOIN fallback failed:");
-            return null;
-          }
-        }
-        noteApiKeyDbFailure(error, "[auth] validateApiKeyContext DB path failed:");
+      }
+
+      try {
+        const fallbackStartedAt = process.hrtime.bigint();
+        const fallback = await queryApiKeyContextJoin(hash);
+        setRequestTimingField(
+          "auth_api_key_join_fallback_ms",
+          Number(process.hrtime.bigint() - fallbackStartedAt) / 1_000_000
+        );
+        setRequestTimingField("auth_api_key_db_path", "join_fallback");
+
+        // Repair the derived cache table in the background for both hit/miss.
+        runAsyncSafe(
+          () => refreshApiKeyContextCacheByHash(hash),
+          "api key context cache repair"
+        );
+
+        if (!fallback) return null;
+        runAsyncSafe(
+          () => setCacheJson(cacheKey, fallback, API_KEY_CACHE_TTL_SECONDS),
+          "api key cache write"
+        );
+        setLocalApiKeyValidation(hash, fallback);
+        return fallback;
+      } catch (fallbackError) {
+        noteApiKeyDbFailure(fallbackError, "[auth] validateApiKeyContext JOIN fallback failed:");
         return null;
       }
     })().finally(() => {

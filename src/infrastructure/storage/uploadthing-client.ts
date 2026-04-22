@@ -52,8 +52,8 @@ export async function uploadBufferToUploadThing(input: {
 
   const uploaded = await utApi.uploadFiles(file);
   const result = Array.isArray(uploaded) ? uploaded[0] : uploaded;
-  const data = result?.data as { key?: string; ufsUrl?: string; url?: string; appUrl?: string } | undefined;
-  const blobUrl = data?.ufsUrl ?? data?.url ?? data?.appUrl;
+  const data = result?.data as { key?: string; ufsUrl?: string; url?: string } | undefined;
+  const blobUrl = data?.ufsUrl ?? data?.url;
 
   if (!result || result.error || !data?.key || !blobUrl) {
     const reason = result?.error?.message ?? "Unknown UploadThing upload error";

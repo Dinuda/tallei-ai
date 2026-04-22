@@ -81,6 +81,11 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_BROWSER__HEADLESS",         oldKey: "BROWSER_HEADLESS" },
   { newKey: "TALLEI_BROWSER__MAX_RETRIES",      oldKey: "BROWSER_MAX_STUDENT_RETRIES" },
   { newKey: "TALLEI_BROWSER__LLM_FALLBACK",     oldKey: "BROWSER_LLM_FALLBACK_ENABLED" },
+  // Worker runtime
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_ENABLED", oldKey: "UPLOAD_INGEST_WORKER_ENABLED" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", oldKey: "UPLOAD_INGEST_WORKER_POLL_MS" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", oldKey: "UPLOAD_INGEST_WORKER_BATCH_SIZE" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_CONCURRENCY", oldKey: "UPLOAD_INGEST_WORKER_CONCURRENCY" },
   // Feature flags
   { newKey: "TALLEI_FEATURE__RERANK",           oldKey: "RERANK_ENABLED" },
   { newKey: "TALLEI_FEATURE__USE_NEW_SAVE",     oldKey: "USE_NEW_SAVE_USECASE" },
@@ -94,6 +99,8 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_RESILIENCE__RECALL_EMBED_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_EMBED_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_VECTOR_TIMEOUT_MS", oldKey: "MEMORY_RECALL_VECTOR_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_TOTAL_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_TOTAL_TIMEOUT_MS" },
+  { newKey: "TALLEI_RESILIENCE__RECALL_REDIS_HEDGE_ENABLED", oldKey: "RECALL_REDIS_HEDGE_ENABLED" },
+  { newKey: "TALLEI_RESILIENCE__RECALL_REDIS_HEDGE_DELAY_MS", oldKey: "RECALL_REDIS_HEDGE_DELAY_MS" },
   // Rate limits
   { newKey: "TALLEI_RATE__MEMORY_API_PER_MINUTE", oldKey: "MEMORY_API_RATE_LIMIT_PER_MINUTE" },
   { newKey: "TALLEI_RATE__MCP_PER_MINUTE",         oldKey: "MCP_RATE_LIMIT_PER_MINUTE" },
@@ -264,8 +271,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     useNewRecallUseCase: readBooleanEnv(e, "TALLEI_FEATURE__USE_NEW_RECALL", false),
     useNewListUseCase: readBooleanEnv(e, "TALLEI_FEATURE__USE_NEW_LIST", false),
     useNewDeleteUseCase: readBooleanEnv(e, "TALLEI_FEATURE__USE_NEW_DELETE", false),
-    authApiKeyViewEnabled: readBooleanEnv(e, "TALLEI_FEATURE__AUTH_API_KEY_VIEW", false),
-    authApiKeyViewShadowEnabled: readBooleanEnv(e, "TALLEI_FEATURE__AUTH_API_KEY_VIEW_SHADOW", false),
     memoryApiRateLimitPerMinute: readIntEnv(e, "TALLEI_RATE__MEMORY_API_PER_MINUTE", 180),
     mcpRateLimitPerMinute: readIntEnv(e, "TALLEI_RATE__MCP_PER_MINUTE", 240),
     recallMinVectorScore: readFloatEnv(e, "TALLEI_MISC__RECALL_MIN_VECTOR_SCORE", 0.30),
@@ -280,6 +285,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     browserWorkerWsEndpoint: e.TALLEI_BROWSER__WORKER_WS_ENDPOINT || "",
     browserSessionTtlMs: readIntEnv(e, "TALLEI_BROWSER__SESSION_TTL_MS", 900000),
     browserHeadless: readBooleanEnv(e, "TALLEI_BROWSER__HEADLESS", true),
+    uploadIngestWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_ENABLED", true),
+    uploadIngestWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", 150),
+    uploadIngestWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", 4),
+    uploadIngestWorkerConcurrency: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_CONCURRENCY", 2),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),
