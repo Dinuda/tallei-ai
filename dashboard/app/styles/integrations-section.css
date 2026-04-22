@@ -8,8 +8,7 @@
   grid-template-columns: 1fr 1.2fr;
   gap: 4rem;
   align-items: center;
-  background: #f5f3f0;
-  padding: 5rem 3rem;
+  padding: 6rem 3rem;
   margin: 0 auto;
   max-width: 1400px;
 }

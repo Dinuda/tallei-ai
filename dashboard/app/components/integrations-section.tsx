@@ -60,7 +60,7 @@ export function IntegrationsSection() {
   useEffect(() => {
     const timer = setInterval(() => {
       setCurrentIndex((prev) => (prev + 1) % APPS.length);
-    }, 5000); // 5 seconds per app
+    }, 10000); // 10 seconds per app to allow reading time
 
     return () => clearInterval(timer);
   }, []);
@@ -176,7 +176,16 @@ export function IntegrationsSection() {
                   <div className="integrations-memory-content">
                     <p className="integrations-memory-title">Memory from your last session</p>
                     <p className="integrations-memory-text">
-                      <span className="integrations-memory-via">A via {currentApp.memoryVia}</span><br />
+                      <span className="integrations-memory-via" style={{ display: "inline-flex", alignItems: "center", gap: "6px", paddingBottom: "4px" }}>
+                        Synced from 
+                        <Image 
+                          src={currentApp.memoryVia === "Claude" ? "/claude.svg" : currentApp.memoryVia === "ChatGPT" ? "/chatgpt.svg" : "/gemini.svg"} 
+                          alt={currentApp.memoryVia} 
+                          width={14} 
+                          height={14} 
+                        />
+                        {currentApp.memoryVia}
+                      </span><br />
                       {currentApp.memoryText}
                     </p>
                   </div>
