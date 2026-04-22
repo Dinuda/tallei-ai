@@ -218,17 +218,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     memoryRecallEmbedTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__RECALL_EMBED_TIMEOUT_MS",
-      nodeEnv === "production" ? 5_000 : 6_000
+      nodeEnv === "production" ? 15_000 : 15_000
     ),
     memoryRecallVectorTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__RECALL_VECTOR_TIMEOUT_MS",
-      nodeEnv === "production" ? 8_000 : 12_000
+      nodeEnv === "production" ? 20_000 : 20_000
     ),
     memoryRecallTotalTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__RECALL_TOTAL_TIMEOUT_MS",
-      nodeEnv === "production" ? 12_000 : 20_000
+      nodeEnv === "production" ? 30_000 : 30_000
     ),
     // Qdrant JS client expects timeout in milliseconds.
     qdrantTimeoutMs:

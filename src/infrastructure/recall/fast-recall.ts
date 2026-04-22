@@ -141,16 +141,19 @@ export async function readRecallStamp(auth: AuthContext): Promise<number> {
     return localStamp;
   }
 
-  localStampByScope.set(scope, 0);
+  let initialStamp = 0;
+  try {
+    const remoteStamp = await getCacheJson<number>(stampCacheKey(auth));
+    if (typeof remoteStamp === "number" && Number.isFinite(remoteStamp)) {
+      initialStamp = Math.max(0, remoteStamp);
+    }
+  } catch {
+    initialStamp = 0;
+  }
+
+  localStampByScope.set(scope, initialStamp);
   localStampSyncedAtByScope.set(scope, Date.now());
-  void getCacheJson<number>(stampCacheKey(auth))
-    .then((remoteStamp) => {
-      if (typeof remoteStamp !== "number") return;
-      const next = Math.max(localStampByScope.get(scope) ?? 0, remoteStamp);
-      localStampByScope.set(scope, next);
-    })
-    .catch(() => {});
-  return 0;
+  return initialStamp;
 }
 
 export async function bumpRecallStamp(auth: AuthContext): Promise<void> {

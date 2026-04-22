@@ -740,6 +740,32 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS uploaded_file_ingest_jobs (
+        ref TEXT PRIMARY KEY,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        openai_file_id TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        mime_type TEXT,
+        status TEXT NOT NULL
+          CHECK (status IN ('pending', 'done', 'failed')),
+        document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
+        conversation_id TEXT,
+        error TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP WITH TIME ZONE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_tenant_user_created
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_tenant_user_status
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_conversation
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, conversation_id, created_at DESC)
+        WHERE conversation_id IS NOT NULL;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS claude_onboarding_sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,

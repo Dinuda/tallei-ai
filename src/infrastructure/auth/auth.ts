@@ -5,7 +5,7 @@ import { pool } from "../db/index.js";
 import { config } from "../../config/index.js";
 import { ensurePrimaryTenantForUser, resolveAuthContext, getPlanForTenant } from "./tenancy.js";
 import { getCacheJson, setCacheJson, deleteCacheKey } from "../cache/redis-cache.js";
-import type { AuthContext } from "../../domain/auth/index.js";
+import type { AuthContext, Plan } from "../../domain/auth/index.js";
 import { setRequestTimingField } from "../../observability/request-timing.js";
 import { runAsyncSafe } from "../../shared/async-safe.js";
 
@@ -21,11 +21,12 @@ export interface SessionPayload {
   tenantId?: string;
 }
 
-interface ApiKeyValidation {
+export interface ApiKeyValidation {
   keyId: string;
   userId: string;
   tenantId: string;
   connectorType: string | null;
+  plan: Plan;
 }
 
 const DEFAULT_NEXT_PATH = "/dashboard/setup";
@@ -565,16 +566,20 @@ export async function revokeApiKey(
 export async function validateApiKeyContext(rawKey: string, requesterIp?: string): Promise<ApiKeyValidation | null> {
   const hash = hashApiKey(rawKey);
 
-  const localHit = localApiKeyCache.get(hash);
-  if (localHit && localHit.exp > Date.now()) {
-    enqueueApiKeyUsageUpdate(localHit.value.keyId, requesterIp);
-    return localHit.value;
-  }
+  const local = peekLocalApiKeyValidation(rawKey, requesterIp);
+  if (local) return local;
 
   const cacheKey = apiKeyCacheKey(hash);
   const cached = await getCacheJson<ApiKeyValidation>(cacheKey);
 
   if (cached) {
+    if (!cached.plan) {
+      cached.plan = await getPlanForTenant(cached.tenantId);
+      runAsyncSafe(
+        () => setCacheJson(cacheKey, cached, API_KEY_CACHE_TTL_SECONDS),
+        "api key cache write"
+      );
+    }
     enqueueApiKeyUsageUpdate(cached.keyId, requesterIp);
     return cached;
   }
@@ -586,6 +591,7 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
       userId: ephemeral.userId,
       tenantId: ephemeral.tenantId,
       connectorType: ephemeral.connectorType,
+      plan: "free",
     };
   }
 
@@ -601,10 +607,19 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
         user_id: string;
         tenant_id: string;
         connector_type: string | null;
+        plan: string | null;
+        status: string | null;
       }>(
-        `SELECT ak.id AS key_id, ak.user_id, tm.tenant_id, ak.connector_type
+        `SELECT
+            ak.id AS key_id,
+            ak.user_id,
+            tm.tenant_id,
+            ak.connector_type,
+            s.plan,
+            s.status
          FROM api_keys ak
          JOIN tenant_memberships tm ON tm.user_id = ak.user_id
+         LEFT JOIN subscriptions s ON s.tenant_id = tm.tenant_id
          WHERE ak.key_hash = $1
            AND ak.revoked_at IS NULL
            AND (ak.created_at + (ak.rotation_days || ' days')::interval) > NOW()
@@ -626,6 +641,7 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
     userId: row.user_id,
     tenantId: row.tenant_id,
     connectorType: row.connector_type ?? null,
+    plan: (!row.plan || row.status === "expired") ? "free" : (row.plan as Plan),
   };
 
   runAsyncSafe(
@@ -644,6 +660,18 @@ export async function validateApiKeyContext(rawKey: string, requesterIp?: string
   return value;
 }
 
+export function peekLocalApiKeyValidation(rawKey: string, requesterIp?: string): ApiKeyValidation | null {
+  const hash = hashApiKey(rawKey);
+  const localHit = localApiKeyCache.get(hash);
+  if (!localHit) return null;
+  if (localHit.exp <= Date.now()) {
+    localApiKeyCache.delete(hash);
+    return null;
+  }
+  enqueueApiKeyUsageUpdate(localHit.value.keyId, requesterIp);
+  return localHit.value;
+}
+
 export async function validateApiKey(rawKey: string): Promise<string | null> {
   const context = await validateApiKeyContext(rawKey);
   return context?.userId ?? null;
@@ -652,12 +680,11 @@ export async function validateApiKey(rawKey: string): Promise<string | null> {
 export async function authContextFromApiKey(rawKey: string, requesterIp?: string): Promise<AuthContext | null> {
   const validation = await validateApiKeyContext(rawKey, requesterIp);
   if (!validation) return null;
-  const plan = await getPlanForTenant(validation.tenantId);
   return {
     userId: validation.userId,
     tenantId: validation.tenantId,
     authMode: "api_key",
-    plan,
+    plan: validation.plan,
     keyId: validation.keyId,
     connectorType: validation.connectorType,
   };

@@ -1,5 +1,7 @@
 import { Router, Response, NextFunction } from "express";
+import { createHmac } from "crypto";
 import { z } from "zod";
+import type { AuthContext } from "../../../domain/auth/index.js";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
 import { assertUploadThingConfigured, UploadThingConfigError } from "../../../infrastructure/storage/uploadthing-client.js";
@@ -14,10 +16,15 @@ import {
   documentBriefsByRefs,
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
-import { ingestUploadedFileToDocument, ingestUploadedFilesToDocuments } from "../../../services/uploaded-file-ingest.js";
+import {
+  enqueueUploadedFilesIngest,
+  getUploadedFileIngestJobStatus,
+  listRecentCompletedUploadedFileIngestJobs,
+} from "../../../services/uploaded-file-ingest-jobs.js";
+import { ingestUploadedFileToDocument } from "../../../services/uploaded-file-ingest.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
-import { authContextFromApiKey, authContextFromUserId } from "../../../infrastructure/auth/auth.js";
+import { authContextFromUserId, peekLocalApiKeyValidation, validateApiKeyContext } from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
 import { validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
 import { setRequestTimingField } from "../../../observability/request-timing.js";
@@ -73,6 +80,10 @@ const recallDocumentSchema = z.object({
   ref: z.string().min(1, "ref is required"),
 });
 
+const uploadStatusQuerySchema = z.object({
+  ref: z.string().trim().min(1, "ref is required"),
+});
+
 function isTransientMemoryInfraError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /Qdrant|timeout|aborted|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|No route to host|connection error|fetch failed|APIConnectionError|EHOSTUNREACH|EAI_AGAIN/i.test(error.message);
@@ -85,6 +96,7 @@ function degradedRecallResponse() {
     recentDocuments: [],
     matchedDocuments: [],
     referencedDocuments: [],
+    recentCompletedIngests: [],
     autoSave: {
       requested: 0,
       complete: true,
@@ -99,6 +111,48 @@ function recallTypesOrDefault(types?: Array<z.infer<typeof memoryTypeSchema>>): 
   return ["fact", "preference"];
 }
 
+function looksDocumentQuery(query: string): boolean {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes("@doc:")
+    || normalized.includes("@lot:")
+    || /\b(doc|document|pdf|report|brief|slide|deck|file|upload|attachment)\b/i.test(normalized)
+  );
+}
+
+function shouldSearchMatchedDocuments(input: {
+  query: string;
+  includeDocRefs?: string[];
+  openaiFileIdRefsCount: number;
+}): boolean {
+  if (input.openaiFileIdRefsCount > 0) return true;
+  if ((input.includeDocRefs?.length ?? 0) > 0) return true;
+  return looksDocumentQuery(input.query);
+}
+
+async function withSoftTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+  onTimeout?: () => void
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race<T>([
+      promise,
+      new Promise<T>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          onTimeout?.();
+          resolve(fallback);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
 // TODO: move somwhere else, dont have data layer in route handler file
 async function logChatGptAction(input: {
   auth: AuthRequest["authContext"];
@@ -106,6 +160,7 @@ async function logChatGptAction(input: {
     | "chatgpt/actions/recall_memories"
     | "chatgpt/actions/remember"
     | "chatgpt/actions/upload_blob"
+    | "chatgpt/actions/upload_status"
     | "chatgpt/actions/undo_save"
     | "chatgpt/actions/recent_documents"
     | "chatgpt/actions/search_documents"
@@ -144,6 +199,138 @@ function logChatGptActionAsync(input: Parameters<typeof logChatGptAction>[0]): v
   runAsyncSafe(() => logChatGptAction(input), "chatgpt action event");
 }
 
+const PLAN_CACHE_TTL_MS = 5 * 60_000;
+const AUTH_CONTINUATION_HEADER = "X-Tallei-Auth-Continuation";
+const AUTH_CONTINUATION_TTL_MS = 120_000;
+const planCache = new Map<string, { plan: AuthContext["plan"]; exp: number }>();
+
+function getCachedPlanSync(tenantId: string): AuthContext["plan"] | null {
+  const cached = planCache.get(tenantId);
+  if (!cached || cached.exp <= Date.now()) return null;
+  return cached.plan;
+}
+
+async function cachedPlan(tenantId: string): Promise<AuthContext["plan"]> {
+  const cached = getCachedPlanSync(tenantId);
+  if (cached) return cached;
+  const plan = await getPlanForTenant(tenantId);
+  planCache.set(tenantId, { plan, exp: Date.now() + PLAN_CACHE_TTL_MS });
+  return plan;
+}
+
+function toApiKeyContext(
+  validation: { keyId: string; userId: string; tenantId: string; connectorType: string | null },
+  plan: AuthContext["plan"]
+): AuthContext {
+  return {
+    userId: validation.userId,
+    tenantId: validation.tenantId,
+    authMode: "api_key",
+    plan,
+    keyId: validation.keyId,
+    connectorType: validation.connectorType,
+  };
+}
+
+type ContinuationPayload = {
+  userId: string;
+  tenantId: string;
+  authMode: AuthContext["authMode"];
+  plan: AuthContext["plan"];
+  keyId?: string;
+  connectorType?: string | null;
+  clientId?: string;
+  scopes?: string[];
+  exp: number;
+};
+
+function continuationSecret(): string {
+  return config.apiKeyPepper || config.internalApiSecret;
+}
+
+function encodeAuthContinuation(auth: AuthContext): string {
+  const payload: ContinuationPayload = {
+    userId: auth.userId,
+    tenantId: auth.tenantId,
+    authMode: auth.authMode,
+    plan: auth.plan,
+    keyId: auth.keyId,
+    connectorType: auth.connectorType ?? null,
+    clientId: auth.clientId,
+    scopes: auth.scopes ?? [],
+    exp: Date.now() + AUTH_CONTINUATION_TTL_MS,
+  };
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", continuationSecret()).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function decodeAuthContinuation(raw: string): AuthContext | null {
+  const token = raw.trim();
+  const dot = token.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const body = token.slice(0, dot);
+  const signature = token.slice(dot + 1);
+  const expected = createHmac("sha256", continuationSecret()).update(body).digest("base64url");
+  if (!safeSecretEqual(signature, expected)) return null;
+
+  let parsed: ContinuationPayload;
+  try {
+    parsed = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as ContinuationPayload;
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed.exp !== "number" || parsed.exp <= Date.now()) return null;
+  if (!parsed.userId || !parsed.tenantId || !parsed.authMode || !parsed.plan) return null;
+
+  return {
+    userId: parsed.userId,
+    tenantId: parsed.tenantId,
+    authMode: parsed.authMode,
+    plan: parsed.plan,
+    keyId: parsed.keyId,
+    connectorType: parsed.connectorType ?? null,
+    clientId: parsed.clientId,
+    scopes: Array.isArray(parsed.scopes) ? parsed.scopes : [],
+  };
+}
+
+function attachContinuationHeader(res: Response, auth: AuthContext): void {
+  res.setHeader(AUTH_CONTINUATION_HEADER, encodeAuthContinuation(auth));
+  setRequestTimingField("auth_continuation_issued", true);
+}
+
+async function resolveChatGptActionAuth(req: AuthRequest, res: Response): Promise<AuthContext | null> {
+  if (req.authContext) return req.authContext;
+  if (!req.authPromise) {
+    res.status(401).json({ error: "Unauthorized" });
+    return null;
+  }
+  try {
+    const waitStartedAt = process.hrtime.bigint();
+    const resolved = await req.authPromise;
+    const waitedMs = Number(process.hrtime.bigint() - waitStartedAt) / 1_000_000;
+    setRequestTimingField("auth_deferred_wait_ms", waitedMs);
+    if (!resolved) {
+      if (req.authFailure) {
+        res.status(req.authFailure.status).json({ error: req.authFailure.error });
+      } else {
+        res.status(401).json({ error: "Unauthorized" });
+      }
+      return null;
+    }
+    req.userId = resolved.userId;
+    req.authContext = resolved;
+    attachContinuationHeader(res, resolved);
+    return resolved;
+  } catch (error) {
+    console.error("ChatGPT deferred auth resolution failed:", error);
+    res.status(500).json({ error: "Server error validating bearer token" });
+    return null;
+  }
+}
+
 async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const authStartedAt = process.hrtime.bigint();
   // TODO: consider moving this to the observability layer as a general "auth timing" middleware since we will want to track auth performance for all endpoints, not just chatgpt actions. For now its only on chatgpt actions so its here.
@@ -171,9 +358,24 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
     req.authContext = tenantId
       ? { userId, tenantId, authMode: "internal", plan: "free" as const }
       : await authContextFromUserId(userId, "internal");
+    attachContinuationHeader(res, req.authContext);
     noteAuthTiming();
     next();
     return;
+  }
+
+  const continuationHeader = req.headers["x-tallei-auth-continuation"];
+  if (typeof continuationHeader === "string" && continuationHeader.trim().length > 0) {
+    const continued = decodeAuthContinuation(continuationHeader);
+    if (continued) {
+      setRequestTimingField("auth_continuation_hit", true);
+      req.userId = continued.userId;
+      req.authContext = continued;
+      noteAuthTiming();
+      next();
+      return;
+    }
+    setRequestTimingField("auth_continuation_hit", false);
   }
 
   const authHeader = req.headers.authorization;
@@ -193,19 +395,56 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
   const isLikelyApiKey = token.startsWith("tly_") || token.startsWith("gm_");
 
   if (isLikelyApiKey) {
-    const apiKeyContext = await authContextFromApiKey(token, req.ip);
-    if (apiKeyContext) {
-      if (apiKeyContext.connectorType && apiKeyContext.connectorType !== "chatgpt") {
+    req.authModeHint = "api_key";
+    const localValidation = peekLocalApiKeyValidation(token, req.ip);
+    if (localValidation) {
+      const localPlan = getCachedPlanSync(localValidation.tenantId);
+      if (localPlan) {
+        const localContext = toApiKeyContext(localValidation, localPlan);
+        if (localContext.connectorType && localContext.connectorType !== "chatgpt") {
+          noteAuthTiming();
+          res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
+          return;
+        }
+        req.userId = localContext.userId;
+        req.authContext = localContext;
+        attachContinuationHeader(res, localContext);
         noteAuthTiming();
-        res.status(403).json({ error: "API key is not valid for ChatGPT actions" });
+        next();
         return;
       }
-      req.userId = apiKeyContext.userId;
-      req.authContext = apiKeyContext;
+      req.authPromise = cachedPlan(localValidation.tenantId).then((plan) => {
+        const context = toApiKeyContext(localValidation, plan);
+        if (context.connectorType && context.connectorType !== "chatgpt") {
+          req.authFailure = { status: 403, error: "API key is not valid for ChatGPT actions" };
+          return null;
+        }
+        return context;
+      });
+      setRequestTimingField("auth_deferred", true);
       noteAuthTiming();
       next();
       return;
     }
+
+    req.authPromise = validateApiKeyContext(token, req.ip).then(async (validation) => {
+      if (!validation) return null;
+      const plan = await cachedPlan(validation.tenantId);
+      const context = toApiKeyContext(validation, plan);
+      if (context.connectorType && context.connectorType !== "chatgpt") {
+        req.authFailure = { status: 403, error: "API key is not valid for ChatGPT actions" };
+        return null;
+      }
+      return context;
+    }).catch((error) => {
+      console.error("ChatGPT deferred API key auth failed:", error);
+      req.authFailure = { status: 500, error: "Server error validating bearer token" };
+      return null;
+    });
+    setRequestTimingField("auth_deferred", true);
+    noteAuthTiming();
+    next();
+    return;
   }
 
   try {
@@ -216,7 +455,7 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
       return;
     }
 
-    const plan = await getPlanForTenant(tokenContext.tenantId);
+    const plan = await cachedPlan(tokenContext.tenantId);
     req.userId = tokenContext.userId;
     req.authContext = {
       userId: tokenContext.userId,
@@ -226,6 +465,7 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
       clientId: tokenContext.clientId,
       scopes: tokenContext.scopes,
     };
+    attachContinuationHeader(res, req.authContext);
     noteAuthTiming();
     next();
   } catch (error) {
@@ -342,9 +582,66 @@ export function buildOpenApiSpec(serverUrl: string) {
       success: { type: "boolean" },
       count_saved: { type: "integer" },
       count_failed: { type: "integer" },
-      saved: memoryResultSchema.properties.saved,
-      errors: memoryResultSchema.properties.errors,
+      saved: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["ref", "status", "filename", "conversation_id"],
+          properties: {
+            ref: { type: "string" },
+            status: { type: "string", enum: ["pending"] },
+            filename: { type: "string" },
+            conversation_id: { type: ["string", "null"] },
+          },
+        },
+      },
+      errors: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["file_id", "filename", "error"],
+          properties: {
+            file_id: { type: "string" },
+            filename: { type: "string" },
+            error: { type: "string" },
+          },
+        },
+      },
       error: { type: "string" },
+    },
+  };
+
+  const uploadIngestJobStatusSchema = {
+    type: "object",
+    required: ["ref", "status", "filename", "openai_file_id", "created_at"],
+    properties: {
+      ref: { type: "string" },
+      status: { type: "string", enum: ["pending", "done", "failed"] },
+      filename: { type: "string" },
+      openai_file_id: { type: "string" },
+      mime_type: { type: ["string", "null"] },
+      conversation_id: { type: ["string", "null"] },
+      created_at: { type: "string" },
+      completed_at: { type: ["string", "null"] },
+      error: { type: ["string", "null"] },
+      document: {
+        type: ["object", "null"],
+        properties: {
+          ref: { type: "string" },
+          title: { type: "string" },
+          filename: { type: ["string", "null"] },
+          conversation_id: { type: ["string", "null"] },
+          blob: {
+            type: ["object", "null"],
+            properties: {
+              provider: { type: "string", enum: ["uploadthing"] },
+              key: { type: "string" },
+              url: { type: "string" },
+              source_file_id: { type: "string" },
+            },
+          },
+        },
+      },
     },
   };
 
@@ -392,7 +689,7 @@ export function buildOpenApiSpec(serverUrl: string) {
 
   const recallResultSchema = {
     type: "object",
-    required: ["contextBlock", "memories", "recentDocuments", "matchedDocuments", "referencedDocuments", "autoSave"],
+    required: ["contextBlock", "memories", "recentDocuments", "matchedDocuments", "referencedDocuments", "recentCompletedIngests", "autoSave"],
     properties: {
       contextBlock: { type: "string" },
       memories: {
@@ -434,48 +731,18 @@ export function buildOpenApiSpec(serverUrl: string) {
           oneOf: [documentBriefSchema, lotBriefSchema, missingRefSchema],
         },
       },
+      recentCompletedIngests: {
+        type: "array",
+        items: uploadIngestJobStatusSchema,
+      },
       autoSave: {
         type: "object",
         required: ["requested", "complete", "saved", "errors"],
         properties: {
           requested: { type: "integer" },
           complete: { type: "boolean" },
-          saved: {
-            type: "array",
-            items: {
-              type: "object",
-              required: ["ref", "status", "title", "filename", "conversation_id", "blob"],
-              properties: {
-                ref: { type: "string" },
-                status: { type: "string" },
-                title: { type: "string" },
-                filename: { type: ["string", "null"] },
-                conversation_id: { type: ["string", "null"] },
-                blob: {
-                  type: "object",
-                  required: ["provider", "key", "url", "source_file_id"],
-                  properties: {
-                    provider: { type: "string", enum: ["uploadthing"] },
-                    key: { type: "string" },
-                    url: { type: "string" },
-                    source_file_id: { type: "string" },
-                  },
-                },
-              },
-            },
-          },
-          errors: {
-            type: "array",
-            items: {
-              type: "object",
-              required: ["file_id", "filename", "error"],
-              properties: {
-                file_id: { type: "string" },
-                filename: { type: "string" },
-                error: { type: "string" },
-              },
-            },
-          },
+          saved: uploadBlobResultSchema.properties.saved,
+          errors: uploadBlobResultSchema.properties.errors,
         },
       },
       autoSaveNotice: { type: "string" },
@@ -551,7 +818,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           summary: "First turn required; later turns conditional recall",
           description:
             "NON-NEGOTIABLE: first user turn must call this. Later turns call only when asked or context is missing. " +
-            "If files exist, do not answer yet: upload_blob (wait), then recall_memories if needed, then answer. " +
+            "If files exist, call upload_blob to enqueue ingest, then poll upload_status as needed before relying on file content. " +
             "Mini/auto guard: if unsure, call tools before answering.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
@@ -647,8 +914,8 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "upload_blob",
           summary: "REQUIRED first step for uploaded files: save full files before answering",
           description:
-            "NON-NEGOTIABLE for file turns: call first and wait before any answer. Supports PDF and Word (.docx/.docm). " +
-            "Do not use direct attachment text before save. User text rule: start with I'm saving \"<file_name>\" and end with saved @doc/@lot link. " +
+            "NON-NEGOTIABLE for file turns: call first to enqueue ingest. Supports PDF and Word (.docx/.docm). " +
+            "Do not use direct attachment text before save. After enqueue, poll upload_status before claiming file content is available. " +
             "Retry/report any failure.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
@@ -704,6 +971,38 @@ export function buildOpenApiSpec(serverUrl: string) {
                 },
               },
             },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/actions/upload_status": {
+        get: {
+          operationId: "upload_status",
+          summary: "Poll status for an async uploaded file ingest job",
+          description:
+            "Use this to check whether an upload_blob or recall_memories auto-save job has completed.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              in: "query",
+              name: "ref",
+              required: true,
+              schema: { type: "string" },
+              description: "Ingest job ref returned from upload_blob/recall_memories autoSave.saved[].ref",
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Current ingest status for the requested job ref.",
+              content: {
+                "application/json": {
+                  schema: uploadIngestJobStatusSchema,
+                },
+              },
+            },
+            "404": { description: "Upload ingest job not found." },
             "401": { description: "Unauthorized" },
             "403": { description: "Insufficient scope" },
           },
@@ -989,50 +1288,60 @@ router.get("/actions/openapi.json", (_req, res: Response) => {
 router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
-    const [result, recentDocuments, matchedDocuments] = await Promise.all([
-      recallMemories(body.query, req.authContext!, body.limit, req.ip, {
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const uploadedFiles = body.openaiFileIdRefs ?? [];
+    const matchedDocsEnabled = shouldSearchMatchedDocuments({
+      query: body.query,
+      includeDocRefs: body.include_doc_refs,
+      openaiFileIdRefsCount: uploadedFiles.length,
+    });
+    setRequestTimingField("recall_matched_docs_enabled", matchedDocsEnabled);
+
+    const matchedSearchStartedAt = process.hrtime.bigint();
+    const matchedDocumentsPromise = matchedDocsEnabled
+      ? withSoftTimeout(
+        searchDocuments(body.query, auth, 3).catch(() => []),
+        600,
+        [],
+        () => setRequestTimingField("recall_matched_docs_timeout", true)
+      )
+      : Promise.resolve([]);
+
+    const [result, recentDocuments, matchedDocuments, recentCompletedIngests] = await Promise.all([
+      recallMemories(body.query, auth, body.limit, req.ip, {
         types: recallTypesOrDefault(body.types),
       }),
-      recentDocumentBriefs(req.authContext!, 5),
-      searchDocuments(body.query, req.authContext!, 3).catch(() => []),
+      recentDocumentBriefs(auth, 5),
+      matchedDocumentsPromise,
+      listRecentCompletedUploadedFileIngestJobs(auth, {
+        conversation_id: body.conversation_id ?? null,
+        limit: 5,
+      }),
     ]);
+    setRequestTimingField(
+      "recall_matched_docs_ms",
+      Number(process.hrtime.bigint() - matchedSearchStartedAt) / 1_000_000
+    );
     const refs = [...new Set((body.include_doc_refs ?? []).map((value) => value.trim()).filter(Boolean))];
     const referencedDocuments = refs.length > 0
-      ? await documentBriefsByRefs(refs, req.authContext!, { maxLotDocs: 5 })
+      ? await documentBriefsByRefs(refs, auth, { maxLotDocs: 5 })
       : [];
 
-    // --- Server-side auto-save of uploaded files ---
-    const uploadedFiles = body.openaiFileIdRefs ?? [];
     const autoSaved: Array<{
       ref: string;
-      status: string;
-      title: string;
-      filename: string | null;
+      status: "pending";
+      filename: string;
       conversation_id: string | null;
-      blob: { provider: "uploadthing"; key: string; url: string; source_file_id: string };
     }> = [];
     const autoSaveErrors: Array<{ file_id: string; filename: string; error: string }> = [];
-    if (uploadedFiles.length > 0 && req.authContext) {
+    if (uploadedFiles.length > 0) {
       assertUploadThingConfigured();
-      for (const fileRef of uploadedFiles) {
-        try {
-          const saved = await ingestUploadedFileToDocument(fileRef, req.authContext!, {
-            conversation_id: body.conversation_id ?? null,
-          });
-          autoSaved.push({
-            ref: saved.ref,
-            status: saved.status,
-            title: saved.title,
-            filename: saved.filename,
-            conversation_id: saved.conversation_id,
-            blob: saved.blob,
-          });
-        } catch (fileErr) {
-          const errMsg = fileErr instanceof Error ? fileErr.message : String(fileErr);
-          console.error(`[chatgpt] auto-save file ${fileRef.id} failed:`, errMsg);
-          autoSaveErrors.push({ file_id: fileRef.id, filename: fileRef.name ?? fileRef.id, error: errMsg });
-        }
-      }
+      const { enqueued, errors } = await enqueueUploadedFilesIngest(uploadedFiles, auth, {
+        conversation_id: body.conversation_id ?? null,
+      });
+      autoSaved.push(...enqueued);
+      autoSaveErrors.push(...errors);
     }
 
     if (uploadedFiles.length > 0 && autoSaveErrors.length > 0) {
@@ -1064,6 +1373,7 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
       recentDocuments,
       matchedDocuments,
       referencedDocuments,
+      recentCompletedIngests,
       autoSave: {
         requested: uploadedFiles.length,
         complete: autoSaveErrors.length === 0,
@@ -1072,7 +1382,7 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
       },
       ...(autoSaved.length > 0 ? {
         autoSaved,
-        autoSaveNotice: `📎 Auto-saved ${autoSaved.length} file(s) to Tallei: ${autoSaved.map(s => `${s.title} → ${s.ref}`).join(", ")}. User can reply "undo" to delete.`,
+        autoSaveNotice: `Queued ${autoSaved.length} file(s) for background ingest. Use upload_status with returned ref values to check completion.`,
       } : {}),
       ...(autoSaveErrors.length > 0 ? { autoSaveErrors } : {}),
     });
@@ -1109,6 +1419,8 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
 router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = rememberSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
     const uploadedFiles = body.openaiFileIdRefs ?? [];
 
     if (uploadedFiles.length > 0) {
@@ -1138,7 +1450,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
               key_points: body.key_points ?? [],
               summary: body.summary ?? "",
               source_hint: body.source_hint ?? `Uploaded via ChatGPT — ${fileRef.name || fileRef.id}`,
-            }, req.authContext!, { conversationId: body.conversation_id ?? null });
+            }, auth, { conversationId: body.conversation_id ?? null });
             savedFromFiles.push({
               ref: noteResult.refHandle,
               status: noteResult.status,
@@ -1151,7 +1463,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
           }
 
           // 2. Download, upload full file as blob, then stash parsed text
-          const blobSaved = await ingestUploadedFileToDocument(fileRef, req.authContext!, {
+          const blobSaved = await ingestUploadedFileToDocument(fileRef, auth, {
             title: body.title,
             conversation_id: body.conversation_id ?? null,
           });
@@ -1225,7 +1537,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
         res.status(400).json({ error: "content is required for kind=fact" });
         return;
       }
-      const saved = await saveMemory(body.content, req.authContext!, body.platform ?? "chatgpt", req.ip);
+      const saved = await saveMemory(body.content, auth, body.platform ?? "chatgpt", req.ip);
       logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
       res.json({
         success: true,
@@ -1242,7 +1554,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
         res.status(400).json({ error: "content is required for kind=preference" });
         return;
       }
-      const saved = await savePreference(body.content, req.authContext!, body.platform ?? "chatgpt", req.ip, {
+      const saved = await savePreference(body.content, auth, body.platform ?? "chatgpt", req.ip, {
         category: body.category ?? null,
         preferenceKey: body.preference_key ?? null,
       });
@@ -1263,7 +1575,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
         key_points: body.key_points ?? [],
         summary: body.summary ?? "",
         source_hint: body.source_hint ?? "",
-      }, req.authContext!, { conversationId: body.conversation_id ?? null });
+      }, auth, { conversationId: body.conversation_id ?? null });
       logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
       res.json({
         success: true,
@@ -1280,7 +1592,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
       res.status(400).json({ error: "content is required for kind=document-blob" });
       return;
     }
-    const saved = await stashDocument(body.content, req.authContext!, { title: body.title ?? undefined });
+    const saved = await stashDocument(body.content, auth, { title: body.title ?? undefined });
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/remember", ok: true });
     res.json({
       success: true,
@@ -1327,9 +1639,11 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
 router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = uploadBlobBodySchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
     assertUploadThingConfigured();
 
-    const { saved, errors } = await ingestUploadedFilesToDocuments(body.openaiFileIdRefs, req.authContext!, {
+    const { enqueued, errors } = await enqueueUploadedFilesIngest(body.openaiFileIdRefs, auth, {
       title: body.title,
       conversation_id: body.conversation_id ?? null,
     });
@@ -1344,9 +1658,9 @@ router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes([
       res.status(422).json({
         success: false,
         error: "One or more files failed to save.",
-        count_saved: saved.length,
+        count_saved: enqueued.length,
         count_failed: errors.length,
-        saved,
+        saved: enqueued,
         errors,
       });
       return;
@@ -1355,9 +1669,9 @@ router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes([
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/upload_blob", ok: true });
     res.json({
       success: true,
-      count_saved: saved.length,
+      count_saved: enqueued.length,
       count_failed: 0,
-      saved,
+      saved: enqueued,
       errors: [],
     });
   } catch (error) {
@@ -1388,10 +1702,47 @@ router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes([
   }
 });
 
+router.get("/actions/upload_status", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const query = uploadStatusQuerySchema.parse(req.query ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const status = await getUploadedFileIngestJobStatus(auth, query.ref);
+    if (!status) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/upload_status",
+        ok: false,
+        error: "Upload ingest job not found",
+      });
+      res.status(404).json({ error: "Upload ingest job not found" });
+      return;
+    }
+
+    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/upload_status", ok: true });
+    res.json(status);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/upload_status",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to query upload status",
+    });
+    console.error("Error checking ChatGPT upload ingest status:", error);
+    res.status(500).json({ error: "Failed to check upload status" });
+  }
+});
+
 router.post("/actions/undo_save", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = undoSaveSchema.parse(req.body);
-    const deleted = await deleteDocumentByRef(body.ref, req.authContext!);
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const deleted = await deleteDocumentByRef(body.ref, auth);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/undo_save", ok: true });
     res.json({ success: true, ref: body.ref, type: deleted.type });
   } catch (error) {
@@ -1421,7 +1772,9 @@ router.post("/actions/undo_save", chatGptActionAuthMiddleware, requireScopes(["m
 router.post("/actions/recent_documents", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recentDocumentsSchema.parse(req.body ?? {});
-    const documents = await recentDocumentBriefs(req.authContext!, body.limit);
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const documents = await recentDocumentBriefs(auth, body.limit);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/recent_documents", ok: true });
     res.json({ documents, count: documents.length });
   } catch (error) {
@@ -1443,7 +1796,9 @@ router.post("/actions/recent_documents", chatGptActionAuthMiddleware, requireSco
 router.post("/actions/search_documents", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = searchDocumentsSchema.parse(req.body);
-    const matches = await searchDocuments(body.query, req.authContext!, body.limit);
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const matches = await searchDocuments(body.query, auth, body.limit);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/search_documents", ok: true });
     res.json({ matches, count: matches.length });
   } catch (error) {
@@ -1469,7 +1824,9 @@ router.post("/actions/search_documents", chatGptActionAuthMiddleware, requireSco
 router.post("/actions/recall_document", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = recallDocumentSchema.parse(req.body);
-    const document = await recallDocument(body.ref, req.authContext!);
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const document = await recallDocument(body.ref, auth);
     logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/actions/recall_document", ok: true });
     res.json(document);
   } catch (error) {
