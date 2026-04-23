@@ -9,7 +9,9 @@ import { useEffect } from "react";
 
 const isPostHogEnabled =
   process.env.NODE_ENV === "production" &&
-  Boolean(process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN);
+  Boolean(
+    process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN ?? process.env.NEXT_PUBLIC_POSTHOG_KEY,
+  );
 
 function PostHogTracker() {
   const pathname = usePathname();

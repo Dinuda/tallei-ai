@@ -1836,7 +1836,7 @@ pre {
   position: relative;
   max-width: 1240px;
   margin: 0 auto;
-  padding: 9.5rem 2rem 5.5rem;
+  padding: 9.5rem 2rem 3.25rem;
   background-color: #fdfbf7;
   border-bottom: none;
   overflow: hidden;
@@ -1851,22 +1851,24 @@ pre {
 
 @media (max-width: 640px) {
   .hero {
-    padding: 4.5rem 2rem 0;
+    padding: 5.25rem 2rem 0;
   }
 }
 
 .hero-inner {
   position: relative;
   z-index: 1;
-  padding: 1rem 0 2rem;
+  padding: 1rem 0 0.75rem;
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.9fr);
   grid-template-rows: auto auto auto auto;
   justify-content: center;
   text-align: left;
-  gap: clamp(2rem, 4vw, 4rem);
+  column-gap: clamp(2rem, 4vw, 4rem);
+  row-gap: clamp(0.75rem, 1.2vw, 1.25rem);
   align-items: start;
-  min-height: 60vh;
+  align-content: start;
+  min-height: 52vh;
 }
 
 .hero-pill {
@@ -1976,7 +1978,7 @@ pre {
   line-height: 1.68;
   color: #4c4643;
   max-width: 60ch;
-  margin: 0 0 2.4rem 0;
+  margin: 0 0 0.5rem 0;
   text-wrap: balance;
 }
 
@@ -1995,7 +1997,7 @@ pre {
 
 @media (max-width: 640px) {
   .hero-inner {
-    padding: 0.25rem 0 1rem;
+    padding: 0.75rem 0 1rem;
   }
 
   .hero-pill {
@@ -2019,12 +2021,12 @@ pre {
 
   .hero-right {
     min-height: auto;
-    padding: 1.5rem 0 0;
+    padding: 0;
   }
 
   .hero-illustration {
-    max-width: 420px;
-    margin-bottom: 1rem;
+    max-width: none;
+    margin-bottom: 0;
   }
 
   .hero-caption {
@@ -2117,19 +2119,21 @@ pre {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 100%;
+  width: min(100%, 560px);
+  margin: 0;
+  gap: 0.55rem;
 }
 
 .hero-illustration {
   width: 100%;
   max-width: 560px;
-  aspect-ratio: 1;
+  aspect-ratio: 1540 / 1021;
   background-color: transparent;
   border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 2rem;
+  margin-bottom: 0;
   position: relative;
   overflow: hidden;
 }
@@ -2150,11 +2154,32 @@ pre {
   text-transform: uppercase;
   letter-spacing: 0.15em;
   text-align: center;
+  margin: 0 0 0.85rem;
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1024px) and (min-width: 641px) {
   .hero-right {
     padding: 1.5rem 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero-h1 {
+    margin-bottom: 0.8rem;
+  }
+
+  .hero-right {
+    padding: 0.25rem 0 0;
+  }
+
+  .hero-illustration {
+    width: min(100%, 330px);
+    max-width: 330px;
+    margin-bottom: 0;
+  }
+
+  .hero-caption {
+    margin: 0 0 0.85rem;
   }
 }
 
@@ -2710,7 +2735,7 @@ pre {
 
 /* ── Features narrative ────────────────────────────────────── */
 .features-section {
-  padding: 5.5rem 0;
+  padding: 3.75rem 0 5.5rem;
   background: #fdfbf7;
 }
 .features-inner {
@@ -2998,7 +3023,7 @@ pre {
 
 @media (max-width: 480px) {
   .hero {
-    padding-top: 4rem;
+    padding-top: 5rem;
   }
 
   .hero-h1 {

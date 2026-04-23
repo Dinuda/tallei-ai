@@ -1429,7 +1429,7 @@ export function ChatGPTWizard({
       {step === 3 && (
         <VerticalVideoStep
           intro={
-           <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>Open{" "}<a href="https://chatgpt.com/gpts/editor" target="_blank" rel="noopener noreferrer" style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem", whiteSpace: "nowrap" }}>GPT Builder <ExternalLink size={14} /></a>{" "}then scroll down to <strong>Actions</strong>, click <strong>Create new action</strong>, and set bearer authentication.</p>
+           <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>Scroll down to <strong>Actions</strong>, click <strong>Create new action</strong>, and set bearer authentication.</p>
           }
           details={
             <div style={{ display: "flex", flexDirection: "column", gap: "0.8rem" }}>
@@ -1439,7 +1439,7 @@ export function ChatGPTWizard({
               </div>
             </div>
           }
-          media={<StepMedia src="/auth-bearer.mp4" alt="Set bearer authentication" caption="Set Authentication to Bearer" />}
+          media={<StepMedia src="/api-auth.mp4" alt="Set bearer authentication" caption="Set Authentication to Bearer" />}
         />
       )}
 
@@ -1453,10 +1453,9 @@ export function ChatGPTWizard({
           details={
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
               <CodeBlock value={openApiUrl} language="url" label="OpenAPI URL" />
-              <InlineInfoHint>This registers recall + remember + undo + docs-lite search/recall actions for ChatGPT.</InlineInfoHint>
             </div>
           }
-          media={<StepMedia src="/openapi-json.mp4" alt="Import from URL in Actions" caption="Import OpenAPI URL in Actions" />}
+          media={<StepMedia src="/import-openapi-spec.mp4" alt="Import from URL in Actions" caption="Import OpenAPI URL in Actions" />}
         />
       )}
 
@@ -1489,7 +1488,7 @@ export function ChatGPTWizard({
               </div>
             </div>
           }
-          media={<StepMedia src="/custom-instructions.png" alt="Create project and add instructions" caption="Create project and paste instructions" />}
+          media={<StepMedia src="/create-gpt.mp4" alt="Create project and add instructions" caption="Create project and paste instructions" />}
         />
       )}
 
@@ -1497,7 +1496,7 @@ export function ChatGPTWizard({
         <VerticalVideoStep
           intro={
             <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
-              Go into your GPT and paste this prompt to test memory.
+              Go into your <strong>GPT chat</strong> and paste this prompt to test memory.
             </p>
           }
           details={
@@ -1505,7 +1504,7 @@ export function ChatGPTWizard({
               <CodeBlock value={testPrompt} language="txt" label="Test Prompt" />
             </div>
           }
-          media={<StepMedia src="/claude-demo.mp4" alt="Test in your GPT" caption="Send the test prompt inside your GPT" />}
+          media={<StepMedia src="/final-demo.mp4" alt="Test in your GPT" caption="Send the test prompt inside your GPT" />}
         />
       )}
 

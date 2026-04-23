@@ -10,7 +10,7 @@ const spaceGrotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-title
 const fustat = Fustat({ subsets: ["latin"], variable: "--font-fustat", weight: ["400", "500", "600", "700"] });
 
 const metadataDescription =
-  "Tallei syncs persistent memory across ChatGPT, Claude, and Gemini. Write your preferences once — every AI assistant already knows them.";
+  "Tired of repeating yourself to every AI? Tallei syncs persistent memory across ChatGPT, Claude, and Gemini. Write your preferences once — every AI assistant already knows them.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://tallei.com"),
@@ -25,28 +25,46 @@ export const metadata: Metadata = {
   description: metadataDescription,
 
   keywords: [
-    "sync ChatGPT and Claude memory",
+    // brand
+    "tallei",
+    "tallei ai",
+    "tallei memory",
+    "tallei mcp",
+    // problem-aware: frustration searches
+    "AI forgets my preferences",
+    "AI doesn't remember context",
+    "how to make AI remember me",
+    "why does ChatGPT keep forgetting",
+    "keep AI memory across sessions",
+    "AI memory across sessions",
+    "stop repeating yourself to AI",
+    "AI forgets context every conversation",
+    // solution-aware searches
+    "sync AI memory between tools",
     "shared AI memory",
     "persistent memory for AI assistants",
-    "ChatGPT Claude memory bridge",
     "AI memory sync tool",
     "cross-AI context sharing",
-    "ChatGPT memory sync",
-    "Claude persistent memory",
-    "Gemini memory",
-    "AI assistant context manager",
-    "memory layer for AI",
+    "memory layer for AI assistants",
     "universal AI memory",
-    "shared context AI tools",
-    "stop repeating yourself to AI",
-    "MCP memory protocol",
-    "AI workflow tool",
+    "AI assistant memory manager",
+    // platform-specific
+    "ChatGPT memory sync",
+    "ChatGPT and Claude memory bridge",
+    "sync ChatGPT and Claude memory",
+    "Claude persistent memory",
+    "Gemini memory sync",
     "ChatGPT Claude Gemini integration",
+    // technical / developer
+    "MCP memory protocol",
+    "MCP server memory",
+    "Claude MCP memory tool",
+    "AI memory API",
+    // general
+    "AI productivity tool",
     "persistent AI preferences",
     "AI context synchronization",
-    "AI productivity tool",
     "cross-platform AI memory",
-    "AI shared notebook",
   ],
 
   openGraph: {
@@ -77,9 +95,9 @@ export const metadata: Metadata = {
   },
 
   icons: {
-    shortcut: "/favicon.ico",
-    icon: [{ url: "/icon.png", type: "image/png", sizes: "32x32" }],
-    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }],
+    shortcut: "/icon",
+    icon: [{ url: "/icon", type: "image/png", sizes: "32x32" }],
+    apple: [{ url: "/apple-icon", sizes: "180x180", type: "image/png" }],
   },
 
   manifest: "/manifest.webmanifest",
@@ -101,15 +119,13 @@ export const metadata: Metadata = {
     canonical: "https://tallei.com",
   },
 
-  verification: {
-    google: "REPLACE_WITH_GOOGLE_SEARCH_CONSOLE_TOKEN",
-  },
+  // verification: { google: "ADD_GOOGLE_SEARCH_CONSOLE_TOKEN_HERE" },
 };
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#111827" },
+    { media: "(prefers-color-scheme: light)", color: "#f8fdf2" },
+    { media: "(prefers-color-scheme: dark)", color: "#182506" },
   ],
   width: "device-width",
   initialScale: 1,

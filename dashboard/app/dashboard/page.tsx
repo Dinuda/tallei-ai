@@ -683,14 +683,6 @@ export default function DashboardMemoriesPage() {
             <RefreshCw size={14} className={refreshing ? styles.spin : ""} />
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
-          <button
-            type="button"
-            className={styles.actionBtn}
-            onClick={() => setImportOpen(true)}
-          >
-            <FileText size={14} />
-            Import preferences
-          </button>
         </div>
       </header>
 
