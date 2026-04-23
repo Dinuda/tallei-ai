@@ -89,12 +89,14 @@ export async function POST(req: NextRequest) {
   }
 
   const backend = resolveBackendUrl(req);
+  const body = await req.json().catch(() => ({} as Record<string, unknown>));
+  const rotate = body && typeof body === "object" && body.rotate === true;
 
   try {
     const res = await fetchWithTimeout(`${backend}/api/integrations/chatgpt/token`, {
       method: "POST",
       headers: backendHeaders(session.user.id, true),
-      body: JSON.stringify({}),
+      body: JSON.stringify({ rotate }),
     });
     const data = await safeJson(res);
     return Response.json(data, { status: res.status });

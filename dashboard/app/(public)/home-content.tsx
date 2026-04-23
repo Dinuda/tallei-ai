@@ -1,35 +1,47 @@
+import Image from "next/image";
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
+import { IntegrationsSection } from "../components/integrations-section";
+import { PerformanceSection } from "../components/performance-section";
+
+
 
 const PRICING_PLANS = [
   {
+    key: "free" as const,
     name: "Free",
-    price: "Free",
-    description: "For trying Tallei and syncing your first memories.",
+    price: "$0",
+    period: "",
+    description: "Get started with basic memory features",
     features: ["50 saves/month", "200 recalls/month", "All 3 AI platforms"],
     href: "/login",
-    cta: "Start free",
+    cta: "Get Tallei",
     featured: false,
   },
   {
+    key: "pro" as const,
     name: "Pro",
     price: "$9",
-    description: "For daily workflows where memory should just work.",
-    features: ["Unlimited saves", "Unlimited recalls", "All 3 AI platforms", "Graph insights"],
+    period: "/mo",
+    description: "For developers building with AI memory",
+    features: ["5,000 saves/month included", "100,000 recalls/month included", "All 3 AI platforms", "Link memories to PDFs"],
     href: "/login?plan=pro",
-    cta: "Choose Pro",
+    cta: "Get Tallei Pro",
     featured: true,
   },
   {
+    key: "power" as const,
     name: "Power",
     price: "$19",
-    description: "For teams and advanced automations with API access.",
-    features: ["Everything in Pro", "API access", "Memory export", "Priority support"],
+    period: "/mo",
+    description: "For teams and production workloads",
+    features: ["25,000 saves/month included", "500,000 recalls/month included", "API access + export", "Priority support"],
     href: "/login?plan=power",
-    cta: "Choose Power",
+    cta: "Get Tallei Power",
     featured: false,
   },
 ] as const;
+
 
 /* ─── Component ─────────────────────────────────────────────── */
 
@@ -75,7 +87,7 @@ export function HomeContent() {
                 "Sync memory across ChatGPT, Claude, and Gemini",
                 "MCP protocol support for Claude Desktop",
                 "Encrypted private memory storage",
-                "Unlimited memory entries",
+                "High-volume memory allowances",
                 "Automatic context retrieval",
               ],
             },
@@ -107,7 +119,7 @@ export function HomeContent() {
                   "acceptedAnswer": {
                     "@type": "Answer",
                     "text":
-                      "No. Save as many facts, preferences, and details as you need. Tallei automatically retrieves only what's relevant to your current conversation.",
+                      "Tallei plans include high monthly allowances designed for normal daily and team workflows, with fair-use protections in place.",
                   },
                 },
               ],
@@ -130,79 +142,52 @@ export function HomeContent() {
       />
 
       {/* ═════════════════════════════════════════════════════
-          HERO — Grounded, straightforward, human
+          HERO — Two-column layout with illustration
       ═════════════════════════════════════════════════════ */}
       <header className="hero">
         <div className="hero-inner">
-          <div className="hero-pill">
-            Sync memory between ChatGPT and Claude
-          </div>
           <h1 className="hero-h1">
-            Make ChatGPT and Claude actually talk to each other.
+            Make your AI tools<br/>
+            <em>actually</em> talk<br/>
+            <em>to each other.</em>
           </h1>
+
+          {/* ─ Right Panel ─ */}
+          <div className="hero-right">
+            <div className="hero-right-inner">
+              <div className="hero-illustration">
+                <Image
+                  src="/hero-image-bg.png"
+                  alt="Person at desk with floating AI cards"
+                  width={720}
+                  height={720}
+                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                  priority
+                />
+              </div>
+              <div className="hero-caption">Before Tallei — Every tool, isolated</div>
+            </div>
+          </div>
+
           <p className="hero-sub">
-            Tallei gives your AI tools a shared memory. Teach ChatGPT how you like things, and Claude automatically knows. Stop repeating yourself.
+            Tallei gives your AI tools a shared memory. Teach ChatGPT how you like things — Claude automatically knows. Stop repeating yourself.
           </p>
           <div className="hero-actions">
             <Link href="/login" className="landing-btn landing-btn-base">
               Try it for free
               <ArrowRight size={16} />
             </Link>
-            <p className="hero-guarantee">Takes 2 minutes. No credit card required.</p>
+            <p className="hero-guarantee">Takes 2 minutes · No credit card required</p>
           </div>
         </div>
       </header>
-
-      {/* ═════════════════════════════════════════════════════
-          VISUAL / UI MOCKUP — Honest, solid, no glowing orbs
-      ═════════════════════════════════════════════════════ */}
-      <section className="demo-visual" aria-label="Tallei memory sync preview">
-        <div className="demo-visual-inner">
-          <div className="solid-card hero-mockup">
-            <div className="mockup-header">
-              <div className="mockup-dots">
-                <span />
-                <span />
-                <span />
-              </div>
-              <div className="mockup-title">Tallei Memory Log</div>
-            </div>
-            <div className="mockup-body">
-              <div className="mockup-row" style={{ alignItems: 'center' }}>
-                <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
-                  <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
-                </div>
-                <div className="mockup-value">&ldquo;Always keep my emails short, punchy, and use bullet points.&rdquo;</div>
-              </div>
-              <div className="mockup-row" style={{ alignItems: 'center' }}>
-                <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center' }}>
-                  <img src="/claude.svg" alt="Claude" width={28} height={28} />
-                </div>
-                <div className="mockup-value">&ldquo;Draft a project update for the team.&rdquo;</div>
-              </div>
-              <div className="mockup-row" style={{ alignItems: 'center' }}>
-                <div className="mockup-label" style={{ width: '60px', display: 'flex', alignItems: 'center', position: 'relative' }}>
-                  <img src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} style={{ position: 'relative', zIndex: 1 }} />
-                  <img src="/claude.svg" alt="Claude" width={28} height={28} style={{ position: 'absolute', left: '16px', zIndex: 2, borderRadius: '50%', border: '2px solid #ffffff' }} />
-                </div>
-                <div className="mockup-value">
-                  Claude automatically writes a concise, bulleted email without you having to remind it how you sound.
-                </div>
-              </div>
-            </div>
-            <div className="mockup-footer">
-              <Check size={14} className="text-purple" />
-              <span>Synced instantly</span>
-            </div>
-          </div>
-        </div>
-      </section>
 
       {/* ═════════════════════════════════════════════════════
           FEATURES — Honest, simple narrative
       ═════════════════════════════════════════════════════ */}
       <section className="features-section">
         <div className="features-inner">
+          <span className="section-eyebrow">WHY WE BUILT THIS</span>
           <h2 className="section-h2">Why we built this</h2>
 
           <div className="story-grid">
@@ -233,131 +218,98 @@ export function HomeContent() {
         </div>
       </section>
 
-      {/* ═════════════════════════════════════════════════════
+      <IntegrationsSection />
+
+{/* ═════════════════════════════════════════════════════
           PRICING
       ═════════════════════════════════════════════════════ */}
-      <section
-        id="pricing"
-        style={{
-          padding: "6rem 0",
-          background: "#fdfbf7",
-          borderTop: "2px solid #e5e0d8",
-        }}
-      >
-        <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 2rem" }}>
-          <h2 className="section-h2 text-center">Pricing</h2>
-          <p
-            className="text-center"
-            style={{
-              maxWidth: 640,
-              margin: "-1rem auto 2.5rem",
-              color: "#4c4643",
-              fontSize: "1.05rem",
-              lineHeight: 1.6,
-            }}
-          >
-            Built from the same plans you see in billing. Start free, then upgrade when you need more.
+      <section id="pricing" className="pricing-section">
+        <div className="pricing-inner">
+          <span className="section-eyebrow">PRICING</span>
+          <h2 className="section-h2 pricing-heading">Simple, transparent pricing</h2>
+          <p className="pricing-sub">
+            Start free, upgrade when you need more. All paid plans include a 14-day free trial.
           </p>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-              gap: "1.25rem",
-            }}
-          >
+          <div className="pricing-grid">
             {PRICING_PLANS.map((plan) => (
               <article
-                key={plan.name}
-                className="solid-card"
-                style={{
-                  padding: "2rem 1.5rem",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "1rem",
-                  ...(plan.featured
-                    ? { borderColor: "#5b21b6", boxShadow: "6px 6px 0px #e1d4fc" }
-                    : {}),
-                }}
+                key={plan.key}
+                className={`pricing-card ${plan.featured ? "pricing-card-featured" : ""}`}
               >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
-                  <h3 style={{ fontSize: "1.25rem", fontWeight: 700, margin: 0, color: "#1a1816" }}>{plan.name}</h3>
+                {/* Plan Badge Row */}
+                <div className="pricing-plan-row">
+                  <span className={`pricing-plan-label ${plan.featured ? "pricing-plan-label-featured" : ""}`}>
+                    {plan.name}
+                  </span>
                   {plan.featured && (
-                    <span
-                      style={{
-                        fontSize: "0.7rem",
-                        fontWeight: 700,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.04em",
-                        color: "#5b21b6",
-                        border: "1px solid #5b21b6",
-                        background: "#f6f0ff",
-                        borderRadius: 999,
-                        padding: "0.2rem 0.55rem",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
+                    <span className="pricing-popular-pill">
                       Most popular
                     </span>
                   )}
                 </div>
 
-                <p style={{ margin: 0, fontSize: "2rem", fontWeight: 700, color: "#1a1816", lineHeight: 1.1 }}>
-                  {plan.price}
-                  {plan.price !== "Free" && (
-                    <span style={{ fontSize: "0.95rem", fontWeight: 500, color: "#8c827a", marginLeft: "0.2rem" }}>
-                      /mo
-                    </span>
-                  )}
-                </p>
-                <p style={{ margin: 0, fontSize: "0.98rem", color: "#4c4643", lineHeight: 1.5 }}>{plan.description}</p>
+                {/* Price */}
+                <div className="pricing-price-wrap">
+                  <div className="pricing-price">
+                    {plan.price}
+                    {plan.period && (
+                      <span className="pricing-period">
+                        {plan.period}
+                      </span>
+                    )}
+                  </div>
+                  <p className="pricing-description">
+                    {plan.description}
+                  </p>
+                </div>
 
-                <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                {/* Features */}
+                <ul className="pricing-features">
                   {plan.features.map((feature) => (
-                    <li
-                      key={feature}
-                      style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", color: "#3d3733", fontSize: "0.92rem", lineHeight: 1.45 }}
-                    >
-                      <Check size={14} style={{ color: "#5b21b6", marginTop: "0.12rem", flexShrink: 0 }} />
+                    <li key={feature} className="pricing-feature-item">
+                      <Check size={16} className="pricing-feature-check" />
                       <span>{feature}</span>
                     </li>
                   ))}
                 </ul>
 
-                <Link
-                  href={plan.href}
-                  style={{
-                    marginTop: "auto",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: "0.45rem",
-                    padding: "0.7rem 1rem",
-                    border: `2px solid ${plan.featured ? "#5b21b6" : "#1a1816"}`,
-                    background: plan.featured ? "#7c3aed" : "#ffffff",
-                    color: plan.featured ? "#ffffff" : "#1a1816",
-                    textDecoration: "none",
-                    fontWeight: 600,
-                    fontSize: "0.92rem",
-                    boxShadow: plan.featured ? "3px 3px 0px #e1d4fc" : "3px 3px 0px rgba(0,0,0,0.1)",
-                  }}
-                >
-                  {plan.cta}
-                  <ArrowRight size={14} />
-                </Link>
+                {/* CTA */}
+                <div className="pricing-cta-wrap">
+                  <Link
+                    href={plan.href}
+                    className={`pricing-cta ${plan.featured ? "pricing-cta-featured" : ""}`}
+                  >
+                    {plan.cta}
+                    <ArrowRight size={14} />
+                  </Link>
+                  {!plan.featured && plan.key !== "free" && (
+                    <p className="pricing-trial">
+                      14-day free trial
+                    </p>
+                  )}
+                  {plan.featured && (
+                    <p className="pricing-trial">
+                      14-day free trial
+                    </p>
+                  )}
+                </div>
               </article>
             ))}
           </div>
         </div>
       </section>
 
+      <PerformanceSection />
+
       {/* ═════════════════════════════════════════════════════
           FAQ / DETAILS
       ═════════════════════════════════════════════════════ */}
       <section className="faq-section">
         <div className="faq-inner">
-          <h2 className="section-h2 text-center">The details</h2>
-          <ul className="faq-grid" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          <span className="section-eyebrow">FAQ</span>
+          <h2 className="section-h2">The details</h2>
+          <ul className="faq-grid">
             <li className="solid-card detail-card">
               <h3 className="detail-h4">Is it secure?</h3>
               <p className="detail-p">
@@ -406,7 +358,7 @@ export function HomeContent() {
       <footer className="footer-section">
         <div className="footer-inner">
           <div className="footer-brand">
-            <img src="/tallei.svg" alt="Tallei logo" width={24} height={24} />
+            <Image src="/tallei.svg" alt="Tallei logo" width={24} height={24} style={{ width: "auto", height: "auto" }} />
           </div>
           <div className="footer-links">
             <Link href="/privacy">Privacy</Link>

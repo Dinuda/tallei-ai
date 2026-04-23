@@ -25,6 +25,9 @@ export function safeSecretEqual(a: string, b: string): boolean {
 export interface AuthRequest extends Request {
   userId?: string;
   authContext?: AuthContext;
+  authPromise?: Promise<AuthContext | null>;
+  authModeHint?: AuthContext["authMode"];
+  authFailure?: { status: number; error: string };
 }
 
 const PLAN_CACHE_TTL_MS = 5 * 60_000;
@@ -150,6 +153,15 @@ export function requireScopes(requiredScopes: string[]) {
 
     const auth = req.authContext;
     if (!auth) {
+      if (req.authModeHint === "api_key" && req.authPromise) {
+        // API keys are scope-agnostic; allow handler to resolve deferred auth lazily.
+        next();
+        return;
+      }
+      if (req.authFailure) {
+        res.status(req.authFailure.status).json({ error: req.authFailure.error });
+        return;
+      }
       res.status(401).json({ error: "Unauthorized" });
       return;
     }

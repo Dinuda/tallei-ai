@@ -1,0 +1,16 @@
+.logged-in-shell-light h1,
+.logged-in-shell-light h2,
+.logged-in-shell-light h3,
+.logged-in-shell-light h4,
+.logged-in-shell-light h5,
+.logged-in-shell-light h6,
+.logged-in-shell-light [data-slot="card-title"],
+.logged-in-shell-light [data-slot="dialog-title"],
+.logged-in-shell-light [data-slot="alert-dialog-title"] {
+  font-family: var(--font-title), var(--font-sans), sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.logged-in-shell-light .title-font {
+  font-family: var(--font-title), var(--font-sans), sans-serif;
+}

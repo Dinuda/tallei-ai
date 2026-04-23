@@ -47,6 +47,10 @@ const nextConfig: NextConfig = {
       // and redirected to /login, breaking dynamic client registration.
       beforeFiles: [
         {
+          source: "/.well-known/appspecific/:path*",
+          destination: "/404",
+        },
+        {
           source: "/.well-known/:path*",
           destination: `${BACKEND}/.well-known/:path*`,
         },
@@ -63,9 +67,10 @@ const nextConfig: NextConfig = {
         // ── Backend API & MCP (proxied transparently) ────────────────────────
         {
           // Keep NextAuth's own /api/auth/* handlers in Next.js.
+          // Keep local dashboard API handlers (e.g. /api/documents) in Next.js.
           // Proxy all other API routes to the backend.
           source:
-            "/api/:path((?!auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options)(?:/|$)).*)",
+            "/api/:path((?!(?:documents|integrations|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
           destination: `${BACKEND}/api/:path`,
         },
         {

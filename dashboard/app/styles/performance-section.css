@@ -1,0 +1,259 @@
+.performance-section {
+  width: 100%;
+  background: #fdfcf9;
+  padding: 5.5rem 0;
+  font-family: "Inter", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.performance-inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+.performance-header {
+  margin-bottom: 2.5rem;
+}
+
+.performance-eyebrow {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #7c3aed;
+  margin-bottom: 0.8rem;
+}
+
+.performance-heading {
+  font-family: "DM Sans", "Inter", sans-serif;
+  font-size: clamp(2rem, 4vw, 3.25rem);
+  line-height: 1.08;
+  font-weight: 500;
+  color: #1c1917;
+  margin: 0 0 1rem;
+}
+
+.performance-heading span {
+  font-style: italic;
+  font-weight: 500;
+  color: #4c4643;
+}
+
+.performance-sub {
+  color: #4c4643;
+  font-size: 1.05rem;
+  max-width: 620px;
+}
+
+.performance-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 2px solid #e5e0d8;
+  background: #ffffff;
+  margin-bottom: 1.2rem;
+}
+
+.performance-metric-card {
+  padding: 1.8rem;
+  border-right: 2px solid #e5e0d8;
+}
+
+.performance-metric-card:last-child {
+  border-right: 0;
+}
+
+.performance-metric-card h3 {
+  font-family: "DM Sans", "Inter", sans-serif;
+  font-size: clamp(2rem, 4vw, 2.8rem);
+  line-height: 1;
+  font-weight: 500;
+  margin-bottom: 0.6rem;
+}
+
+.performance-metric-title {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: #1c1917;
+  margin-bottom: 0.45rem;
+}
+
+.performance-metric-copy {
+  font-size: 0.9rem;
+  color: #6b6360;
+  line-height: 1.55;
+}
+
+.performance-metric-card-icons {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.performance-logo-row {
+  margin-top: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #a8a29e;
+  font-weight: 700;
+}
+
+.performance-logo-row small {
+  font-size: 0.72rem;
+  margin-left: 0.1rem;
+  color: #78716c;
+}
+
+.performance-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 2px solid #e5e0d8;
+  overflow: hidden;
+}
+
+.performance-column {
+  background: #fff;
+}
+
+.performance-column-muted {
+  border-right: 2px solid #e5e0d8;
+  background: #f7f6f4;
+}
+
+.performance-column-accent {
+  background: #f3f4ff;
+}
+
+.performance-column-head {
+  padding: 1.2rem 1.4rem;
+  border-bottom: 1px solid #e5e0d8;
+}
+
+.performance-column-head h4 {
+  font-size: 0.95rem;
+  margin-bottom: 0.2rem;
+  font-family: "DM Sans", "Inter", sans-serif;
+}
+
+.performance-column-head p {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #8b8682;
+  font-weight: 700;
+}
+
+.performance-column ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.performance-column li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 1rem 1.4rem;
+  border-bottom: 1px solid #e5e0d8;
+  font-size: 0.9rem;
+  color: #3f3a37;
+}
+
+.performance-column li:last-child {
+  border-bottom: 0;
+}
+
+.performance-column li svg {
+  margin-top: 0.1rem;
+  flex-shrink: 0;
+}
+
+.performance-column-muted li svg {
+  color: #a8a29e;
+}
+
+.performance-column-accent li svg {
+  color: #5b21b6;
+}
+
+@media (max-width: 980px) {
+  .performance-metrics,
+  .performance-compare {
+    grid-template-columns: 1fr;
+  }
+
+  .performance-metric-card {
+    border-right: 0;
+    border-bottom: 2px solid #e5e0d8;
+  }
+
+  .performance-metric-card:last-child {
+    border-bottom: 0;
+  }
+
+  .performance-column-muted {
+    border-right: 0;
+    border-bottom: 2px solid #e5e0d8;
+  }
+}
+
+@media (max-width: 640px) {
+  .performance-section {
+    padding: 4rem 0;
+  }
+
+  .performance-inner {
+    padding: 0 1.2rem;
+  }
+
+  .performance-header {
+    margin-bottom: 1.75rem;
+  }
+
+  .performance-sub {
+    font-size: 0.98rem;
+  }
+
+  .performance-metrics {
+    margin-bottom: 1rem;
+  }
+
+  .performance-metric-card {
+    padding: 1.25rem;
+  }
+
+  .performance-metric-card h3 {
+    font-size: clamp(1.75rem, 10vw, 2.25rem);
+  }
+
+  .performance-column-head {
+    padding: 1rem 1.1rem;
+  }
+
+  .performance-column li {
+    padding: 0.85rem 1.1rem;
+    font-size: 0.85rem;
+  }
+
+  .performance-logo-row {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .performance-heading {
+    font-size: clamp(1.8rem, 10vw, 2.4rem);
+  }
+
+  .performance-sub,
+  .performance-metric-copy {
+    font-size: 0.9rem;
+  }
+
+  .performance-column-head p {
+    font-size: 0.62rem;
+  }
+}

@@ -1,17 +1,18 @@
 "use client";
 
 import {
+  ChevronDown,
+  Clock,
   Copy,
-  FilterX,
+  FileText,
   RefreshCw,
-  Search,
+  Tag,
   Trash2,
-  Upload,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../components/ui/button";
-import { Card } from "../../components/ui/card";
+import { EmptyCollectionState } from "./components/empty-collection-state";
 import styles from "./page.module.css";
 
 type MemoryItem = {
@@ -32,6 +33,7 @@ type UIMemory = MemoryItem & {
   importance: number;
 };
 
+type TimeFilter = "all" | "1d" | "7d" | "30d";
 type MessageKind = "success" | "error" | "info";
 
 type ModalMessage = {
@@ -39,10 +41,27 @@ type ModalMessage = {
   text: string;
 };
 
+type PaginationState = {
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
+};
+
+type MemoriesResponsePayload = {
+  memories?: MemoryItem[];
+  pagination?: {
+    limit?: number;
+    offset?: number;
+    total?: number;
+    hasMore?: boolean;
+  };
+  error?: string;
+};
+
 const CHATGPT_PREFERENCE_EXPORT_PROMPT = `Extract my stable preferences from this chat and return ONLY a JSON array of strings.\n\nRules:\n- Include writing style, tone, formatting rules, language preferences, tooling habits, and recurring constraints.\n- Keep each item short, explicit, and actionable.\n- Skip temporary requests or one-off tasks.\n- Output valid JSON only.\n\nExample output:\n[\n  "Use concise, direct explanations.",\n  "Prefer TypeScript over JavaScript when both are possible.",\n  "Show final answers with short bullet lists."\n]`;
 
-const TYPE_BUCKETS: MemoryType[] = ["preference", "fact", "event", "decision", "note", "unknown"];
-const PLATFORM_BUCKETS: Platform[] = ["claude", "chatgpt", "gemini", "other"];
+const PAGE_SIZE = 20;
 
 const STOPWORDS = new Set([
   "the", "and", "for", "that", "with", "this", "from", "your", "have", "what", "when", "where", "which", "into",
@@ -130,7 +149,8 @@ function relativeDate(iso: string): string {
   if (days === 1) return "Yesterday";
   if (days < 7) return `${days}d ago`;
   if (days < 30) return `${Math.floor(days / 7)}w ago`;
-  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
 }
 
 function normalizePreferenceKey(value: string): string | null {
@@ -236,42 +256,174 @@ function formatMemoryText(value: string): string {
   return value.replace(/^\[.*?\]\s*/, "").trim();
 }
 
+const PLATFORM_COLORS: Record<Platform, string> = {
+  claude: "#D97757",
+  chatgpt: "#10a37f",
+  gemini: "#8E75B2",
+  other: "#6b7280",
+};
+
+const PLATFORM_LABELS: Record<Platform, string> = {
+  claude: "Claude",
+  chatgpt: "ChatGPT",
+  gemini: "Gemini",
+  other: "Other",
+};
+
+const PLATFORM_ICONS: Record<Platform, string> = {
+  claude: "/claude.svg",
+  chatgpt: "/chatgpt.svg",
+  gemini: "/gemini.svg",
+  other: "",
+};
+
+const MEMORIES_EMPTY_IMAGE = "/memory-i.png";
+
+function MemoryCard({ memory, isExpanded, onToggle, onDelete, isDeleting }: {
+  memory: UIMemory;
+  isExpanded: boolean;
+  onToggle: () => void;
+  onDelete: () => void;
+  isDeleting: boolean;
+}) {
+  const cleanText = formatMemoryText(memory.text);
+  const truncLen = 120;
+  const isLong = cleanText.length > truncLen;
+  const previewText = isLong ? cleanText.slice(0, truncLen) + "..." : cleanText;
+  const platformColor = PLATFORM_COLORS[memory.platform];
+
+  return (
+    <div className={`${styles.memoryCard} ${isExpanded ? styles.memoryCardExpanded : ""}`}>
+      <button className={styles.memoryCardHeader} onClick={onToggle} aria-expanded={isExpanded}>
+        <div className={styles.memoryCardLeft}>
+          <span className={styles.platformBadge} style={{ background: platformColor }}>
+            {PLATFORM_ICONS[memory.platform] && (
+              <img src={PLATFORM_ICONS[memory.platform]} alt="" className={styles.platformIcon} />
+            )}
+            {PLATFORM_LABELS[memory.platform]}
+          </span>
+          <span className={styles.memoryPreviewText}>{isExpanded ? cleanText : previewText}</span>
+        </div>
+        <div className={styles.memoryCardRight}>
+          <span className={styles.memoryDate}>
+            <Clock size={13} />
+            {relativeDate(memory.createdAt)}
+          </span>
+          <span className={styles.categoryBadge}>{titleCase(memory.category)}</span>
+          <ChevronDown size={16} className={`${styles.chevron} ${isExpanded ? styles.chevronOpen : ""}`} />
+        </div>
+      </button>
+
+      {isExpanded && (
+        <div className={styles.memoryCardBody}>
+          <div className={styles.memoryFullText}>{cleanText}</div>
+          <div className={styles.memoryMeta}>
+            {memory.keywords.length > 0 && (
+              <div className={styles.keywordsRow}>
+                {memory.keywords.map((kw) => (
+                  <span key={kw} className={styles.keywordTag}>
+                    <Tag size={10} />
+                    {kw}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className={styles.memoryMetaRow}>
+              <span className={styles.metaLabel}>Type</span>
+              <span className={styles.metaValue}>{titleCase(memory.memoryType)}</span>
+              <span className={styles.metaLabel}>Importance</span>
+              <span className={styles.metaValue}>{memory.importance}</span>
+              <span className={styles.metaLabel}>Created</span>
+              <span className={styles.metaValue}>{new Date(memory.createdAt).toLocaleString()}</span>
+            </div>
+          </div>
+          <div className={styles.memoryCardActions}>
+            <button
+              className={styles.deleteBtn}
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              disabled={isDeleting}
+              title="Remove memory"
+            >
+              <Trash2 size={15} />
+              Delete
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DashboardMemoriesPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pagination, setPagination] = useState<PaginationState>({
+    limit: PAGE_SIZE,
+    offset: 0,
+    total: 0,
+    hasMore: false,
+  });
 
-  const [query, setQuery] = useState("");
-  const [selectedType, setSelectedType] = useState<MemoryType | null>(null);
-  const [selectedPlatform, setSelectedPlatform] = useState<Platform | null>(null);
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const timeFilter: TimeFilter = "all";
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const [isImportOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const [quickPreference, setQuickPreference] = useState("");
-  const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
   const [copyLabel, setCopyLabel] = useState("Copy prompt");
   const [importBusy, setImportBusy] = useState(false);
   const [modalMessage, setModalMessage] = useState<ModalMessage | null>(null);
   const modalRef = useRef<HTMLDivElement | null>(null);
 
-  const fetchMemories = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
+  const fetchMemories = useCallback(async (params?: {
+    mode?: "initial" | "refresh";
+    offset?: number;
+  }) => {
+    const mode = params?.mode ?? "refresh";
+    const offset = Math.max(0, params?.offset ?? 0);
     if (mode === "initial") setLoading(true);
     if (mode === "refresh") setRefreshing(true);
 
     try {
-      const response = await fetch("/api/memories");
-      const data = await response.json();
+      const query = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(offset),
+      });
+      const response = await fetch(`/api/memories?${query.toString()}`);
+      const data = (await response.json()) as MemoriesResponsePayload;
 
       if (!response.ok) {
         const message = typeof data?.error === "string" ? data.error : "Failed to load memories.";
         throw new Error(message);
       }
 
-      setMemories(Array.isArray(data?.memories) ? data.memories : []);
+      const memoriesPayload = Array.isArray(data?.memories) ? data.memories : [];
+      const paginationPayload = data?.pagination;
+      const parsedLimit = typeof paginationPayload?.limit === "number" && paginationPayload.limit > 0
+        ? paginationPayload.limit
+        : PAGE_SIZE;
+      const parsedOffset = typeof paginationPayload?.offset === "number" && paginationPayload.offset >= 0
+        ? paginationPayload.offset
+        : offset;
+      const parsedTotal = typeof paginationPayload?.total === "number" && paginationPayload.total >= 0
+        ? paginationPayload.total
+        : parsedOffset + memoriesPayload.length;
+      const parsedHasMore = typeof paginationPayload?.hasMore === "boolean"
+        ? paginationPayload.hasMore
+        : memoriesPayload.length === parsedLimit;
+
+      setMemories(memoriesPayload);
+      setExpandedIds(new Set());
+      setPagination({
+        limit: parsedLimit,
+        offset: parsedOffset,
+        total: parsedTotal,
+        hasMore: parsedHasMore,
+      });
       setError(null);
     } catch (fetchError) {
       const message = fetchError instanceof Error ? fetchError.message : "Failed to load memories.";
@@ -283,7 +435,7 @@ export default function DashboardMemoriesPage() {
   }, []);
 
   useEffect(() => {
-    void fetchMemories("initial");
+    void fetchMemories({ mode: "initial", offset: 0 });
   }, [fetchMemories]);
 
   useEffect(() => {
@@ -357,53 +509,30 @@ export default function DashboardMemoriesPage() {
       .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   }, [memories]);
 
+  const filteredByTime = useMemo(() => {
+    if (timeFilter === "all") return enriched;
+
+    const now = Date.now();
+    const msPerDay = 1000 * 60 * 60 * 24;
+
+    let days = 0;
+    switch (timeFilter) {
+      case "1d":
+        days = 1;
+        break;
+      case "7d":
+        days = 7;
+        break;
+      case "30d":
+        days = 30;
+        break;
+    }
+
+    const cutoff = now - days * msPerDay;
+    return enriched.filter((memory) => new Date(memory.createdAt).getTime() >= cutoff);
+  }, [enriched, timeFilter]);
+
   const parsedImportItems = useMemo(() => parsePastedPreferences(importText), [importText]);
-
-  const typeCounts = useMemo(() => {
-    const map = new Map<MemoryType, number>();
-    TYPE_BUCKETS.forEach((type) => map.set(type, 0));
-    enriched.forEach((memory) => {
-      map.set(memory.memoryType, (map.get(memory.memoryType) || 0) + 1);
-    });
-    return map;
-  }, [enriched]);
-
-  const platformCounts = useMemo(() => {
-    const map = new Map<Platform, number>();
-    PLATFORM_BUCKETS.forEach((platform) => map.set(platform, 0));
-    enriched.forEach((memory) => {
-      map.set(memory.platform, (map.get(memory.platform) || 0) + 1);
-    });
-    return map;
-  }, [enriched]);
-
-  const categoryCounts = useMemo(() => {
-    const map = new Map<string, number>();
-    enriched.forEach((memory) => {
-      map.set(memory.category, (map.get(memory.category) || 0) + 1);
-    });
-
-    return [...map.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, 14);
-  }, [enriched]);
-
-  const filtered = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-
-    return enriched.filter((memory) => {
-      if (selectedType && memory.memoryType !== selectedType) return false;
-      if (selectedPlatform && memory.platform !== selectedPlatform) return false;
-      if (selectedCategory && memory.category !== selectedCategory) return false;
-
-      if (!normalizedQuery) return true;
-
-      const haystack = `${memory.text} ${memory.platform} ${memory.memoryType} ${memory.category} ${memory.keywords.join(" ")}`.toLowerCase();
-      return haystack.includes(normalizedQuery);
-    });
-  }, [enriched, query, selectedType, selectedPlatform, selectedCategory]);
-
-  const hasActiveFilters = Boolean(selectedType || selectedPlatform || selectedCategory);
 
   const savePreference = useCallback(async (content: string, platform: Platform | "other", category: string) => {
     const preferenceKey = normalizePreferenceKey(content);
@@ -447,7 +576,7 @@ export default function DashboardMemoriesPage() {
       }
     }
 
-    await fetchMemories("refresh");
+    await fetchMemories({ mode: "refresh", offset: 0 });
     setImportBusy(false);
 
     if (failed === 0) {
@@ -475,7 +604,7 @@ export default function DashboardMemoriesPage() {
     try {
       await savePreference(content, "other", "manual");
       setQuickPreference("");
-      await fetchMemories("refresh");
+      await fetchMemories({ mode: "refresh", offset: 0 });
       setModalMessage({ kind: "success", text: "Preference saved." });
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Failed to save preference.";
@@ -501,187 +630,141 @@ export default function DashboardMemoriesPage() {
     try {
       const response = await fetch(`/api/memories/${id}`, { method: "DELETE" });
       if (!response.ok) return;
-      setMemories((current) => current.filter((item) => item.id !== id));
+      const backOnePage = memories.length === 1 && pagination.offset > 0;
+      const nextOffset = backOnePage
+        ? Math.max(0, pagination.offset - pagination.limit)
+        : pagination.offset;
+      await fetchMemories({ mode: "refresh", offset: nextOffset });
     } finally {
       setDeletingId(null);
     }
+  }, [fetchMemories, memories.length, pagination.limit, pagination.offset]);
+
+  const toggleExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   }, []);
+
+  const handleRefresh = useCallback(() => {
+    void fetchMemories({ mode: "refresh", offset: pagination.offset });
+  }, [fetchMemories, pagination.offset]);
+
+  const handleNextPage = useCallback(() => {
+    if (!pagination.hasMore) return;
+    void fetchMemories({ mode: "refresh", offset: pagination.offset + pagination.limit });
+  }, [fetchMemories, pagination.hasMore, pagination.limit, pagination.offset]);
+
+  const handlePrevPage = useCallback(() => {
+    if (pagination.offset <= 0) return;
+    void fetchMemories({ mode: "refresh", offset: Math.max(0, pagination.offset - pagination.limit) });
+  }, [fetchMemories, pagination.limit, pagination.offset]);
+
+  const rangeStart = filteredByTime.length > 0 ? pagination.offset + 1 : 0;
+  const rangeEnd = pagination.offset + filteredByTime.length;
 
   return (
     <div className={styles.page}>
-      <div className={styles.toolbarRow}>
-        <div className={styles.headerActions}>
-          <Button
-            variant="secondary"
-            className={styles.headerSecondaryAction}
-            onClick={() => void fetchMemories("refresh")}
+      <header className={styles.pageHeader}>
+        <h1 className={styles.pageTitle}>Memories</h1>
+        <div className={styles.actionButtons}>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={handleRefresh}
             disabled={loading || refreshing}
           >
-            <RefreshCw size={15} className={refreshing ? styles.spin : ""} />
-            Refresh
-          </Button>
-
-          <Button
-            variant="secondary"
-            className={styles.headerPrimaryAction}
-            onClick={() => {
-              setModalMessage(null);
-              setImportOpen(true);
-            }}
+            <RefreshCw size={14} className={refreshing ? styles.spin : ""} />
+            {refreshing ? "Refreshing..." : "Refresh"}
+          </button>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={() => setImportOpen(true)}
           >
-            <Upload size={15} />
-            Import Preferences
-          </Button>
+            <FileText size={14} />
+            Import preferences
+          </button>
         </div>
+      </header>
 
-        {error && <div className={`${styles.banner} ${styles.bannerError}`}>{error}</div>}
+      <div className={styles.listMeta}>
+        {pagination.total > 0
+          ? `Showing ${rangeStart}-${rangeEnd} of ${pagination.total} memories`
+          : "No memories yet"}
       </div>
 
-      <section className={styles.filterBar}>
-        <label className={styles.searchWrap}>
-          <Search size={16} className={styles.searchIcon} aria-hidden />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search text, platform, type, category..."
-            className={styles.searchInput}
-          />
-        </label>
+      {error && <div className={`${styles.banner} ${styles.bannerError}`}>{error}</div>}
 
-        <label className={styles.filterGroup}>
-          <select
-            className={styles.filterSelect}
-            value={selectedType || ""}
-            onChange={(e) => setSelectedType((e.target.value as MemoryType) || null)}
-          >
-            <option value="">All Types</option>
-            {TYPE_BUCKETS.map((type) => (
-              <option key={type} value={type}>{titleCase(type)} ({typeCounts.get(type) || 0})</option>
-            ))}
-          </select>
-        </label>
-
-        <label className={styles.filterGroup}>
-          <select
-            className={styles.filterSelect}
-            value={selectedPlatform || ""}
-            onChange={(e) => setSelectedPlatform((e.target.value as Platform) || null)}
-          >
-            <option value="">All Platforms</option>
-            {PLATFORM_BUCKETS.map((platform) => (
-              <option key={platform} value={platform}>{titleCase(platform)} ({platformCounts.get(platform) || 0})</option>
-            ))}
-          </select>
-        </label>
-
-        <label className={styles.filterGroup}>
-          <select
-            className={styles.filterSelect}
-            value={selectedCategory || ""}
-            onChange={(e) => setSelectedCategory(e.target.value || null)}
-          >
-            <option value="">All Categories</option>
-            {categoryCounts.map(([category, count]) => (
-              <option key={category} value={category}>{titleCase(category)} ({count})</option>
-            ))}
-          </select>
-        </label>
-
-        {hasActiveFilters && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className={styles.clearButton}
-            onClick={() => {
-              setSelectedType(null);
-              setSelectedPlatform(null);
-              setSelectedCategory(null);
-            }}
-          >
-            <FilterX size={14} />
-            Clear
-          </Button>
-        )}
-      </section>
-
-      <section className={styles.listPanel}>
-        <div className={styles.listHeader}>
-          <p className={styles.deckMeta}>
-            {filtered.length} {filtered.length === 1 ? "memory" : "memories"}
-          </p>
-        </div>
-
+      <div className={styles.cardList}>
         {loading ? (
-          <div className={styles.skeletonStack}>
-            <div className={styles.skeleton} />
-            <div className={styles.skeleton} />
-            <div className={styles.skeleton} />
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className={styles.emptyState}>
-            <h2 className={styles.emptyTitle}>No memories match</h2>
-            <p className={styles.emptyText}>
-              {query || hasActiveFilters
-                ? "Try a different search term or clear active filters."
-                : "No memories yet. Add memories from your connected assistants or import preferences."}
-            </p>
-          </div>
+          <>
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className={styles.skeletonCard}>
+                <div className={styles.skeletonCardHeader}>
+                  <div className={`${styles.skeleton} ${styles.skeletonBadge}`} />
+                  <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+                </div>
+                <div className={styles.skeletonCardMeta}>
+                  <div className={`${styles.skeleton} ${styles.skeletonShort}`} />
+                  <div className={`${styles.skeleton} ${styles.skeletonTag}`} />
+                </div>
+              </div>
+            ))}
+          </>
+        ) : filteredByTime.length === 0 ? (
+          <EmptyCollectionState
+            title="No memories found"
+            description={
+              timeFilter !== "all"
+                ? "Try a different time range."
+                : "Connect Tallei to your AI assistants to automatically capture and organize your preferences, facts, and important information."
+            }
+            actionLabel={timeFilter === "all" ? "" : undefined}
+            actionHref={timeFilter === "all" ? "/dashboard/setup" : undefined}
+            imageSrc={MEMORIES_EMPTY_IMAGE || undefined}
+            illustration="none"
+          />
         ) : (
-          <ul className={styles.memoryList}>
-            {filtered.map((memory) => {
-              const isDeleting = deletingId === memory.id;
-              const cleanText = formatMemoryText(memory.text);
-              const canExpand = cleanText.length > 260;
-              const isExpanded = Boolean(expandedById[memory.id]);
-              return (
-                <Card key={memory.id} variant="flat" className={styles.memoryCard}>
-                  <div className={styles.memoryBody}>
-                    <p className={`${styles.memoryText} ${!isExpanded ? styles.memoryTextClamped : ""}`}>
-                      {cleanText}
-                    </p>
-                    {canExpand && (
-                      <button
-                        type="button"
-                        className={styles.expandButton}
-                        onClick={() =>
-                          setExpandedById((current) => ({
-                            ...current,
-                            [memory.id]: !current[memory.id],
-                          }))
-                        }
-                      >
-                        {isExpanded ? "Show less" : "Show more"}
-                      </button>
-                    )}
-                  </div>
-
-                  <div className={styles.memoryFooter}>
-                    <div className={styles.memoryMeta}>
-                      <span className={styles.metaPill}>{titleCase(memory.platform)}</span>
-                      <span className={styles.metaPill}>{titleCase(memory.memoryType)}</span>
-                      <span className={styles.metaPill}>{titleCase(memory.category)}</span>
-                      <span className={styles.metaDate}>{relativeDate(memory.createdAt)}</span>
-                    </div>
-
-                    <div className={styles.memoryActions}>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className={styles.deleteButton}
-                        onClick={() => void handleDeleteMemory(memory.id)}
-                        disabled={isDeleting}
-                        title="Remove memory"
-                      >
-                        <Trash2 size={14} />
-                      </Button>
-                    </div>
-                  </div>
-                </Card>
-              );
-            })}
-          </ul>
+          filteredByTime.map((memory) => (
+            <MemoryCard
+              key={memory.id}
+              memory={memory}
+              isExpanded={expandedIds.has(memory.id)}
+              onToggle={() => toggleExpand(memory.id)}
+              onDelete={() => void handleDeleteMemory(memory.id)}
+              isDeleting={deletingId === memory.id}
+            />
+          ))
         )}
-      </section>
+      </div>
+
+      {!loading && filteredByTime.length > 0 && (
+        <div className={styles.paginationBar}>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={handlePrevPage}
+            disabled={refreshing || pagination.offset <= 0}
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={handleNextPage}
+            disabled={refreshing || !pagination.hasMore}
+          >
+            Next
+          </button>
+        </div>
+      )}
 
       {isImportOpen && (
         <div

@@ -65,6 +65,7 @@ require_env GOOGLE_CLIENT_ID
 require_env GOOGLE_CLIENT_SECRET
 require_env INTERNAL_API_SECRET
 require_env NEXTAUTH_SECRET
+require_env UPLOADTHING_TOKEN
 
 AUTH_URL="${AUTH_URL:-$NEXTAUTH_URL}"
 
@@ -81,9 +82,11 @@ fi
 validate_secret_id INTERNAL_API_SECRET
 validate_secret_id NEXTAUTH_SECRET
 validate_secret_id GOOGLE_CLIENT_SECRET
+validate_secret_id UPLOADTHING_TOKEN
 ensure_secret_access INTERNAL_API_SECRET
 ensure_secret_access NEXTAUTH_SECRET
 ensure_secret_access GOOGLE_CLIENT_SECRET
+ensure_secret_access UPLOADTHING_TOKEN
 
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${IMAGE_TAG}"
 
@@ -142,6 +145,7 @@ secret_vars=(
   "INTERNAL_API_SECRET=${INTERNAL_API_SECRET}:latest"
   "NEXTAUTH_SECRET=${NEXTAUTH_SECRET}:latest"
   "GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}:latest"
+  "UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}:latest"
 )
 
 env_csv="$(IFS=,; echo "${env_vars[*]}")"

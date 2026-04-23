@@ -215,6 +215,43 @@ export class VectorRepository {
       .filter((point) => point.memoryId.length > 0);
   }
 
+  async searchVectorsByPlatform(
+    auth: AuthContext,
+    queryVector: number[],
+    limit: number,
+    platform: string
+  ): Promise<VectorSearchResult[]> {
+    await ensureCollection();
+    const client = getQdrantClient();
+
+    const points = await client.search(config.qdrantCollectionName, {
+      vector: queryVector,
+      limit,
+      filter: {
+        must: [
+          { key: "tenant_id", match: { value: auth.tenantId } },
+          { key: "user_id", match: { value: auth.userId } },
+          { key: "platform", match: { value: platform } },
+        ],
+      },
+      with_payload: ["memory_id"],
+      with_vector: false,
+    });
+
+    return points
+      .map((point) => {
+        const payload = (point.payload ?? {}) as Record<string, unknown>;
+        const memoryId = typeof payload.memory_id === "string" ? payload.memory_id : "";
+        const pointId = typeof point.id === "string" ? point.id : String(point.id);
+        return {
+          pointId,
+          memoryId,
+          score: typeof point.score === "number" ? point.score : 0,
+        };
+      })
+      .filter((point) => point.memoryId.length > 0);
+  }
+
   async deleteMemoryVector(auth: AuthContext, memoryId: string): Promise<void> {
     await ensureCollection();
     const client = getQdrantClient();

@@ -64,6 +64,10 @@ function sanitizeRedisError(error: unknown): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
+function isSocketClosedUnexpectedlyError(error: unknown): boolean {
+  return sanitizeRedisError(error).toLowerCase().includes("socket closed unexpectedly");
+}
+
 function maybeWarnProtocolMismatch(error: unknown): void {
   if (hasWarnedProtocolMismatch || config.nodeEnv === "production") return;
   const message = sanitizeRedisError(error).toLowerCase();
@@ -95,6 +99,15 @@ function logRedisWarning(message: string, error: unknown): void {
   console.error(message, error);
 }
 
+function logRedisTransient(message: string, error: unknown): void {
+  lastRedisError = sanitizeRedisError(error);
+  if (config.nodeEnv === "production") return;
+  const now = Date.now();
+  if (now - lastRedisLogAt < REDIS_LOG_INTERVAL_MS) return;
+  lastRedisLogAt = now;
+  console.warn(`${message}: ${lastRedisError}`);
+}
+
 async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
   if (!isRedisConfigured()) return null;
   if (shouldSkipRedis()) return null;
@@ -112,11 +125,20 @@ async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
       url: config.redisUrl,
       socket: {
         connectTimeout: config.redisConnectTimeoutMs,
-        reconnectStrategy: () => false,
+        reconnectStrategy: (retries) => {
+          if (retries > 3) return false;
+          return Math.min(retries * 200, 1000);
+        },
+        keepAlive: true,
       },
     });
     client.on("error", (error) => {
       if (shouldSkipRedis()) return;
+      if (isSocketClosedUnexpectedlyError(error)) {
+        logRedisTransient("[redis] socket closed unexpectedly; entering cooldown", error);
+        disableRedisTemporarily();
+        return;
+      }
       logRedisWarning("[redis] client error", error);
     });
 
@@ -150,6 +172,32 @@ export async function getCacheJson<T>(key: string): Promise<T | null> {
     lastRedisError = "redis.get failed";
     disableRedisTemporarily();
     return null;
+  }
+}
+
+export async function getCacheJsonMany<T>(keys: string[]): Promise<Array<T | null>> {
+  if (keys.length === 0) return [];
+  const client = await initRedis();
+  if (!client) return keys.map(() => null);
+
+  try {
+    const values = await withTimeout(
+      client.mGet(keys),
+      config.redisCommandTimeoutMs,
+      "redis.mget"
+    );
+    return values.map((value) => {
+      if (!value) return null;
+      try {
+        return JSON.parse(value) as T;
+      } catch {
+        return null;
+      }
+    });
+  } catch {
+    lastRedisError = "redis.mget failed";
+    disableRedisTemporarily();
+    return keys.map(() => null);
   }
 }
 

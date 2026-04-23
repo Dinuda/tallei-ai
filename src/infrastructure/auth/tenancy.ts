@@ -1,6 +1,10 @@
 import { pool } from "../db/index.js";
 import type { AuthContext, AuthMode, Plan } from "../../domain/auth/index.js";
 
+const PLAN_CACHE_TTL_MS = 5 * 60_000;
+const planCache = new Map<string, { plan: Plan; exp: number }>();
+const tenantIdCache = new Map<string, { tenantId: string; exp: number }>();
+
 function defaultTenantName(userId: string, email?: string): string {
   if (email && email.includes("@")) {
     const prefix = email.split("@")[0].replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 36);
@@ -10,6 +14,11 @@ function defaultTenantName(userId: string, email?: string): string {
 }
 
 export async function getPrimaryTenantId(userId: string): Promise<string | null> {
+  const localHit = tenantIdCache.get(userId);
+  if (localHit && localHit.exp > Date.now()) {
+    return localHit.tenantId;
+  }
+
   const result = await pool.query<{ tenant_id: string }>(
     `SELECT tenant_id
      FROM tenant_memberships
@@ -18,7 +27,12 @@ export async function getPrimaryTenantId(userId: string): Promise<string | null>
      LIMIT 1`,
     [userId]
   );
-  return result.rows[0]?.tenant_id ?? null;
+  
+  const tenantId = result.rows[0]?.tenant_id ?? null;
+  if (tenantId) {
+    tenantIdCache.set(userId, { tenantId, exp: Date.now() + PLAN_CACHE_TTL_MS });
+  }
+  return tenantId;
 }
 
 export async function ensurePrimaryTenantForUser(userId: string, email?: string): Promise<string> {
@@ -77,7 +91,9 @@ export async function ensurePrimaryTenantForUser(userId: string, email?: string)
     }
 
     await client.query("COMMIT");
-    return resolvedMembership.rows[0].tenant_id;
+    const newTenantId = resolvedMembership.rows[0].tenant_id;
+    tenantIdCache.set(userId, { tenantId: newTenantId, exp: Date.now() + PLAN_CACHE_TTL_MS });
+    return newTenantId;
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -87,13 +103,19 @@ export async function ensurePrimaryTenantForUser(userId: string, email?: string)
 }
 
 export async function getPlanForTenant(tenantId: string): Promise<Plan> {
+  const localHit = planCache.get(tenantId);
+  if (localHit && localHit.exp > Date.now()) {
+    return localHit.plan;
+  }
+
   const result = await pool.query<{ plan: string; status: string }>(
     `SELECT plan, status FROM subscriptions WHERE tenant_id = $1 LIMIT 1`,
     [tenantId]
   );
   const row = result.rows[0];
-  if (!row || row.status === "expired") return "free";
-  return row.plan as Plan;
+  const plan = (!row || row.status === "expired") ? "free" : (row.plan as Plan);
+  planCache.set(tenantId, { plan, exp: Date.now() + PLAN_CACHE_TTL_MS });
+  return plan;
 }
 
 export async function resolveAuthContext(userId: string, authMode: AuthMode, keyId?: string): Promise<AuthContext> {

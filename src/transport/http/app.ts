@@ -1,12 +1,11 @@
-import express, { type Express, type RequestHandler } from "express";
+import express, { type Express, type Request, type RequestHandler } from "express";
 import cors from "cors";
 import helmet from "helmet";
 
 import authRouter from "./routes/auth.js";
-import browserUseRouter from "./routes/browserUse.js";
-import claudeOnboardingRouter from "./routes/claudeOnboarding.js";
 import keysRouter from "./routes/keys.js";
 import memoriesRouter from "./routes/memories.js";
+import documentsRouter from "./routes/documents.js";
 import mcpEventsRouter from "./routes/mcpEvents.js";
 import mcpCodeRouter from "./routes/mcp.js";
 import chatgptRouter from "./routes/chatgpt.js";
@@ -49,7 +48,16 @@ export function createApp(deps: AppFactoryDeps): Express {
     credentials: true,
   }));
 
-  app.use(express.json({ limit: "1mb", strict: true, type: ["application/json"] }));
+  app.use(
+    express.json({
+      limit: "3mb",
+      strict: true,
+      type: ["application/json"],
+      verify: (req, _res, buf) => {
+        (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+      },
+    })
+  );
   app.use(requestTimingMiddleware);
 
   app.use(mcpAuthRouter({
@@ -81,13 +89,15 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/oauth", createOauthExtensionsRouter());
   app.use("/api/keys", keysRouter);
   app.use("/api/memories", deps.memoryRateLimit, memoriesRouter);
+  app.use("/api/documents", deps.memoryRateLimit, documentsRouter);
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
+  // Browser automation is intentionally disabled for production rollout.
+  // app.use("/api/claude-onboarding", claudeOnboardingRouter);
+  // app.use("/api/browser-use", browserUseRouter);
   app.use("/api/billing", billingRouter);
   app.use("/api/mcp/events", mcpEventsRouter);
   app.use("/api/mcp", mcpCodeRouter);
-  app.use("/api/claude-onboarding", claudeOnboardingRouter);
-  app.use("/api/browser-use", browserUseRouter);
 
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(deps.mcpPublicUrl);
   app.use("/mcp", deps.mcpRateLimit, createMcpRouter(deps.oauthProvider, resourceMetadataUrl));

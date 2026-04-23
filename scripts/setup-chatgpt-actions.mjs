@@ -1,17 +1,31 @@
 #!/usr/bin/env node
 import process from "node:process";
 
-const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory tools.
+const CHATGPT_ACTIONS_SPEC_TAG = "stable";
+
+const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory + documents tools.
+
+Available actions:
+- recall_memories
+- upload_blob
+- remember
+- undo_save
+- recent_documents
+- search_documents
+- recall_document
 
 Rules:
-1) On the first user message in each new chat, immediately call recallMemories with query="find tallei" before replying, even if context is not strictly needed.
-2) On every user turn, preload once by calling recallMemories before replying.
-3) If you do not know something, are uncertain, or detect missing personal/contextual information, call recallMemories before answering.
-4) Do not run repeated recall searches in the same turn unless the user explicitly asks for a deeper memory search.
-5) Before answering personal/contextual questions, ensure the preload recallMemories call has already happened in that turn.
-6) Only call saveMemory when the user explicitly asks you to remember something, or explicitly asks to remember a correction.
-7) If the user corrects a prior fact and asks to remember it, call saveMemory with the corrected fact.
-8) Do not mention tool calls in the final user-facing response.`;
+1) STEP 1 (always first): call recall_memories(query="<exact user message>", openaiFileIdRefs=[...any attachments...]) on every turn, including greetings and simple follow-ups.
+2) Never write reply text before recall_memories completes.
+3) STEP 2: read recall response.
+   - If inlineDocuments exists, read it first and use it.
+   - If autoSave.complete=false or HTTP 422, say "Upload failed, retrying…", call upload_blob(openaiFileIdRefs=[...]), retry once.
+   - If HTTP 402 and code=plan_required, do not retry. Tell the user document sharing is a Pro feature on Tallei and ask payment at https://tallei.com/dashboard/billing.
+4) STEP 3: write answer from contextBlock + inlineDocuments. Do not ask "which document?" when recall already returned relevant context.
+5) STEP 4 (always after reply): if user shared fact/preference/goal/decision, call remember(kind="fact"|"preference", content="<concise>") for each.
+6) STEP 5: if autoSave.saved is non-empty, end with Saved: @doc:<ref>. For fact/preference saves, no Saved line.
+7) Never mention tool calls in user-facing text.
+8) OpenAPI operation descriptions are the canonical execution contract.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);
@@ -70,9 +84,9 @@ async function main() {
     : rawAccessToken;
 
   const healthUrl = `${baseUrl}/health`;
-  const openApiUrl = `${baseUrl}/api/chatgpt/openapi.json`;
-  const recallUrl = `${baseUrl}/api/chatgpt/actions/recall`;
-  const saveUrl = `${baseUrl}/api/chatgpt/actions/save`;
+  const openApiUrl = `${baseUrl}/api/chatgpt/actions/openapi.json?spec=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_TAG)}`;
+  const recallUrl = `${baseUrl}/api/chatgpt/actions/recall_memories`;
+  const rememberUrl = `${baseUrl}/api/chatgpt/actions/remember`;
 
   console.log("Tallei ChatGPT Actions Setup");
   console.log("============================");
@@ -119,11 +133,11 @@ async function main() {
       const data = await safeJson(res);
       if (!data || typeof data !== "object") throw new Error("Invalid OpenAPI JSON");
       if (typeof data.openapi !== "string") throw new Error("Missing openapi version");
-      if (!data.paths?.["/api/chatgpt/actions/recall"]) {
-        throw new Error("Missing /api/chatgpt/actions/recall path");
+      if (!data.paths?.["/api/chatgpt/actions/recall_memories"]) {
+        throw new Error("Missing /api/chatgpt/actions/recall_memories path");
       }
-      if (!data.paths?.["/api/chatgpt/actions/save"]) {
-        throw new Error("Missing /api/chatgpt/actions/save path");
+      if (!data.paths?.["/api/chatgpt/actions/remember"]) {
+        throw new Error("Missing /api/chatgpt/actions/remember path");
       }
     })
   );
@@ -152,18 +166,19 @@ async function main() {
     );
 
     checks.push(
-      await runCheck("Authenticated save smoke check", async () => {
-        const res = await fetch(saveUrl, {
+      await runCheck("Authenticated remember smoke check", async () => {
+        const res = await fetch(rememberUrl, {
           method: "POST",
           headers: authHeaders,
           body: JSON.stringify({
+            kind: "fact",
             content: `Setup verification memory (${new Date().toISOString()})`,
           }),
         });
         if (!res.ok) throw new Error(`Expected 200, got ${res.status}`);
         const data = await safeJson(res);
-        if (!data || data.success !== true || typeof data.memoryId !== "string") {
-          throw new Error("Invalid save response shape");
+        if (!data || data.success !== true) {
+          throw new Error("Invalid remember response shape");
         }
       })
     );

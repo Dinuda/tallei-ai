@@ -7,8 +7,13 @@ const { Pool } = pg;
 function createPool(connectionString: string): pg.Pool {
   const dbPool = new Pool({
     connectionString,
-    connectionTimeoutMillis: 5000,
-    query_timeout: 45000,
+    connectionTimeoutMillis: 2000,
+    query_timeout: 30000,
+    max: 30,
+    idleTimeoutMillis: 30000,
+    keepAlive: true,
+    statement_timeout: 5000,
+    idle_in_transaction_session_timeout: 5000,
   });
 
   dbPool.on("error", (error: Error & { code?: string }) => {
@@ -279,6 +284,16 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
     },
     {
+      table: "document_lots",
+      policy: "document_lots_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "documents",
+      policy: "documents_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
       table: "api_keys",
       policy: "api_keys_tenant_user_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
@@ -446,6 +461,76 @@ export async function initDb() {
         WHERE deleted_at IS NULL;
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS document_lots (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ref_handle TEXT NOT NULL,
+        title TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        deleted_at TIMESTAMPTZ,
+        UNIQUE (tenant_id, ref_handle)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_document_lots_tenant_user_created
+        ON document_lots(tenant_id, user_id, created_at DESC)
+        WHERE deleted_at IS NULL;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ref_handle TEXT NOT NULL,
+        lot_id UUID NULL REFERENCES document_lots(id) ON DELETE SET NULL,
+        filename TEXT,
+        title TEXT,
+        mime_type TEXT,
+        byte_size INTEGER NOT NULL,
+        content_ciphertext TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        qdrant_point_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'ready', 'failed')),
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        deleted_at TIMESTAMPTZ,
+        UNIQUE (tenant_id, ref_handle)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_documents_tenant_user_created
+        ON documents(tenant_id, user_id, created_at DESC)
+        WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_documents_lot
+        ON documents(lot_id)
+        WHERE lot_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_documents_content_hash_active
+        ON documents(tenant_id, user_id, content_hash)
+        WHERE deleted_at IS NULL;
+    `);
+
+    await client.query(`
+      ALTER TABLE documents
+      ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'blob';
+    `);
+
+    await client.query(`
+      ALTER TABLE documents
+      ADD COLUMN IF NOT EXISTS conversation_id TEXT,
+      ADD COLUMN IF NOT EXISTS blob_provider TEXT,
+      ADD COLUMN IF NOT EXISTS blob_key TEXT,
+      ADD COLUMN IF NOT EXISTS blob_url TEXT,
+      ADD COLUMN IF NOT EXISTS blob_source_file_id TEXT;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_documents_conversation_id
+        ON documents(tenant_id, user_id, conversation_id, created_at DESC)
+        WHERE deleted_at IS NULL AND conversation_id IS NOT NULL;
+    `);
+
     const hadMemoryTypeColumn = await hasColumn(client, "memory_records", "memory_type");
     const hadCategoryColumn = await hasColumn(client, "memory_records", "category");
     const hadPinnedColumn = await hasColumn(client, "memory_records", "is_pinned");
@@ -535,6 +620,8 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_memory_events_tenant_user_created
         ON memory_events(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_events_tenant_action_created
+        ON memory_events(tenant_id, action, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id
         ON memory_events(memory_id, created_at DESC);
     `);
@@ -655,13 +742,64 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS uploaded_file_ingest_jobs (
+        ref TEXT PRIMARY KEY,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        openai_file_id TEXT NOT NULL,
+        download_link TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        title TEXT,
+        mime_type TEXT,
+        status TEXT NOT NULL
+          CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+        document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
+        conversation_id TEXT,
+        error TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP WITH TIME ZONE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_tenant_user_created
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_tenant_user_status
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_status_completed
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, status, completed_at DESC)
+        WHERE status = 'done' AND completed_at IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_conversation
+        ON uploaded_file_ingest_jobs(tenant_id, user_id, conversation_id, created_at DESC)
+        WHERE conversation_id IS NOT NULL;
+    `);
+
+    await client.query(`
+      ALTER TABLE uploaded_file_ingest_jobs
+      ADD COLUMN IF NOT EXISTS title TEXT,
+      ADD COLUMN IF NOT EXISTS download_link TEXT;
+
+      ALTER TABLE uploaded_file_ingest_jobs
+      DROP CONSTRAINT IF EXISTS uploaded_file_ingest_jobs_status_check;
+      ALTER TABLE uploaded_file_ingest_jobs
+      ADD CONSTRAINT uploaded_file_ingest_jobs_status_check
+        CHECK (status IN ('pending', 'processing', 'done', 'failed'));
+
+      UPDATE uploaded_file_ingest_jobs
+      SET status = 'pending'
+      WHERE status = 'processing';
+
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_pending
+        ON uploaded_file_ingest_jobs(status, created_at ASC)
+        WHERE status = 'pending';
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS claude_onboarding_sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         status TEXT NOT NULL,
         current_state TEXT NOT NULL,
-        project_name TEXT NOT NULL DEFAULT 'chatgpt memory',
+        project_name TEXT NOT NULL DEFAULT 'Tallei Memory',
         checkpoint JSONB,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         last_error TEXT,
@@ -673,6 +811,9 @@ export async function initDb() {
 
       ALTER TABLE claude_onboarding_sessions
       ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE;
+
+      ALTER TABLE claude_onboarding_sessions
+      ALTER COLUMN project_name SET DEFAULT 'Tallei Memory';
 
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_user_created ON claude_onboarding_sessions(user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_tenant_created ON claude_onboarding_sessions(tenant_id, created_at DESC);
@@ -714,6 +855,20 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS browser_flow_templates (
+        state              TEXT        NOT NULL PRIMARY KEY,
+        actions            JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        success_count      INTEGER     NOT NULL DEFAULT 0,
+        is_learned         BOOLEAN     NOT NULL DEFAULT FALSE,
+        last_succeeded_at  TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_browser_flow_templates_learned
+        ON browser_flow_templates(state, is_learned) WHERE is_learned = TRUE;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id            UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -724,6 +879,7 @@ export async function initDb() {
         status               TEXT NOT NULL DEFAULT 'active',
         cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
         current_period_end   TIMESTAMP WITH TIME ZONE,
+        trial_ends_at        TIMESTAMP WITH TIME ZONE,
         created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
@@ -738,6 +894,312 @@ export async function initDb() {
       INSERT INTO subscriptions (tenant_id, plan, status)
       SELECT id, 'free', 'active' FROM tenants
       ON CONFLICT (tenant_id) DO NOTHING
+    `);
+
+    // Add trial_ends_at column for free-trial promotions
+    await client.query(`
+      ALTER TABLE subscriptions
+        ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP WITH TIME ZONE;
+    `);
+
+    // Replace the old materialized auth context with a deterministic derived cache table.
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_api_keys ON api_keys;
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_memberships ON tenant_memberships;
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_contexts_subscriptions ON subscriptions;
+      DROP FUNCTION IF EXISTS refresh_api_key_contexts_mv();
+      DROP MATERIALIZED VIEW IF EXISTS api_key_contexts;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS api_key_context_cache (
+        key_hash TEXT PRIMARY KEY,
+        key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        connector_type TEXT,
+        plan TEXT,
+        status TEXT,
+        revoked_at TIMESTAMP WITH TIME ZONE,
+        rotation_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_api_key_context_cache_tenant_user
+        ON api_key_context_cache(tenant_id, user_id);
+      CREATE INDEX IF NOT EXISTS idx_api_key_context_cache_active
+        ON api_key_context_cache(user_id, revoked_at, rotation_expires_at);
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION refresh_api_key_context_cache_by_hash(p_key_hash TEXT)
+      RETURNS VOID
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        WITH source AS (
+          SELECT
+            ak.key_hash,
+            ak.id AS key_id,
+            ak.user_id,
+            COALESCE(ak.tenant_id, tm.tenant_id) AS tenant_id,
+            ak.connector_type,
+            s.plan,
+            s.status,
+            ak.revoked_at,
+            (ak.created_at + (ak.rotation_days || ' days')::interval) AS rotation_expires_at
+          FROM api_keys ak
+          LEFT JOIN tenant_memberships tm
+            ON tm.user_id = ak.user_id
+           AND ak.tenant_id IS NULL
+          LEFT JOIN subscriptions s
+            ON s.tenant_id = COALESCE(ak.tenant_id, tm.tenant_id)
+          WHERE ak.key_hash = p_key_hash
+          LIMIT 1
+        )
+        INSERT INTO api_key_context_cache (
+          key_hash,
+          key_id,
+          user_id,
+          tenant_id,
+          connector_type,
+          plan,
+          status,
+          revoked_at,
+          rotation_expires_at,
+          updated_at
+        )
+        SELECT
+          source.key_hash,
+          source.key_id,
+          source.user_id,
+          source.tenant_id,
+          source.connector_type,
+          source.plan,
+          source.status,
+          source.revoked_at,
+          source.rotation_expires_at,
+          NOW()
+        FROM source
+        ON CONFLICT (key_hash) DO UPDATE SET
+          key_id = EXCLUDED.key_id,
+          user_id = EXCLUDED.user_id,
+          tenant_id = EXCLUDED.tenant_id,
+          connector_type = EXCLUDED.connector_type,
+          plan = EXCLUDED.plan,
+          status = EXCLUDED.status,
+          revoked_at = EXCLUDED.revoked_at,
+          rotation_expires_at = EXCLUDED.rotation_expires_at,
+          updated_at = NOW();
+
+        IF NOT FOUND THEN
+          DELETE FROM api_key_context_cache
+          WHERE key_hash = p_key_hash;
+        END IF;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION refresh_api_key_context_cache_by_user_id(p_user_id UUID)
+      RETURNS VOID
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        key_row RECORD;
+      BEGIN
+        FOR key_row IN
+          SELECT key_hash
+          FROM api_keys
+          WHERE user_id = p_user_id
+        LOOP
+          PERFORM refresh_api_key_context_cache_by_hash(key_row.key_hash);
+        END LOOP;
+
+        DELETE FROM api_key_context_cache c
+        WHERE c.user_id = p_user_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM api_keys ak
+            WHERE ak.key_hash = c.key_hash
+          );
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION refresh_api_key_context_cache_by_tenant_id(p_tenant_id UUID)
+      RETURNS VOID
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        key_row RECORD;
+      BEGIN
+        FOR key_row IN
+          SELECT DISTINCT ak.key_hash
+          FROM api_keys ak
+          LEFT JOIN tenant_memberships tm
+            ON tm.user_id = ak.user_id
+           AND ak.tenant_id IS NULL
+          WHERE COALESCE(ak.tenant_id, tm.tenant_id) = p_tenant_id
+        LOOP
+          PERFORM refresh_api_key_context_cache_by_hash(key_row.key_hash);
+        END LOOP;
+
+        DELETE FROM api_key_context_cache c
+        WHERE c.tenant_id = p_tenant_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM api_keys ak
+            LEFT JOIN tenant_memberships tm
+              ON tm.user_id = ak.user_id
+             AND ak.tenant_id IS NULL
+            WHERE ak.key_hash = c.key_hash
+              AND COALESCE(ak.tenant_id, tm.tenant_id) = p_tenant_id
+          );
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION trg_refresh_api_key_context_cache_api_keys()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          PERFORM refresh_api_key_context_cache_by_hash(OLD.key_hash);
+          RETURN OLD;
+        END IF;
+
+        PERFORM refresh_api_key_context_cache_by_hash(NEW.key_hash);
+
+        IF TG_OP = 'UPDATE' AND OLD.key_hash IS DISTINCT FROM NEW.key_hash THEN
+          PERFORM refresh_api_key_context_cache_by_hash(OLD.key_hash);
+        END IF;
+
+        RETURN NEW;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION trg_refresh_api_key_context_cache_memberships()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          PERFORM refresh_api_key_context_cache_by_user_id(OLD.user_id);
+          RETURN OLD;
+        END IF;
+
+        PERFORM refresh_api_key_context_cache_by_user_id(NEW.user_id);
+
+        IF TG_OP = 'UPDATE' AND OLD.user_id IS DISTINCT FROM NEW.user_id THEN
+          PERFORM refresh_api_key_context_cache_by_user_id(OLD.user_id);
+        END IF;
+
+        RETURN NEW;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION trg_refresh_api_key_context_cache_subscriptions()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          PERFORM refresh_api_key_context_cache_by_tenant_id(OLD.tenant_id);
+          RETURN OLD;
+        END IF;
+
+        PERFORM refresh_api_key_context_cache_by_tenant_id(NEW.tenant_id);
+
+        IF TG_OP = 'UPDATE' AND OLD.tenant_id IS DISTINCT FROM NEW.tenant_id THEN
+          PERFORM refresh_api_key_context_cache_by_tenant_id(OLD.tenant_id);
+        END IF;
+
+        RETURN NEW;
+      END;
+      $$;
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_context_cache_api_keys ON api_keys;
+      CREATE TRIGGER trg_refresh_api_key_context_cache_api_keys
+      AFTER INSERT OR UPDATE OR DELETE ON api_keys
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_refresh_api_key_context_cache_api_keys();
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_context_cache_memberships ON tenant_memberships;
+      CREATE TRIGGER trg_refresh_api_key_context_cache_memberships
+      AFTER INSERT OR UPDATE OR DELETE ON tenant_memberships
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_refresh_api_key_context_cache_memberships();
+    `);
+
+    await client.query(`
+      DROP TRIGGER IF EXISTS trg_refresh_api_key_context_cache_subscriptions ON subscriptions;
+      CREATE TRIGGER trg_refresh_api_key_context_cache_subscriptions
+      AFTER INSERT OR UPDATE OR DELETE ON subscriptions
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_refresh_api_key_context_cache_subscriptions();
+    `);
+
+    await client.query(`
+      INSERT INTO api_key_context_cache (
+        key_hash,
+        key_id,
+        user_id,
+        tenant_id,
+        connector_type,
+        plan,
+        status,
+        revoked_at,
+        rotation_expires_at,
+        updated_at
+      )
+      SELECT
+        ak.key_hash,
+        ak.id AS key_id,
+        ak.user_id,
+        COALESCE(ak.tenant_id, tm.tenant_id) AS tenant_id,
+        ak.connector_type,
+        s.plan,
+        s.status,
+        ak.revoked_at,
+        (ak.created_at + (ak.rotation_days || ' days')::interval) AS rotation_expires_at,
+        NOW()
+      FROM api_keys ak
+      LEFT JOIN tenant_memberships tm
+        ON tm.user_id = ak.user_id
+       AND ak.tenant_id IS NULL
+      LEFT JOIN subscriptions s
+        ON s.tenant_id = COALESCE(ak.tenant_id, tm.tenant_id)
+      ON CONFLICT (key_hash) DO UPDATE SET
+        key_id = EXCLUDED.key_id,
+        user_id = EXCLUDED.user_id,
+        tenant_id = EXCLUDED.tenant_id,
+        connector_type = EXCLUDED.connector_type,
+        plan = EXCLUDED.plan,
+        status = EXCLUDED.status,
+        revoked_at = EXCLUDED.revoked_at,
+        rotation_expires_at = EXCLUDED.rotation_expires_at,
+        updated_at = NOW();
+    `);
+
+    await client.query(`
+      DELETE FROM api_key_context_cache c
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM api_keys ak
+        WHERE ak.key_hash = c.key_hash
+      );
     `);
 
     // #13 + #9: Hash-only token storage + family-based rotation

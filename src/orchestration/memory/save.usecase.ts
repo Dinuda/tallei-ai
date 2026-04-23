@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import { config } from "../../config/index.js";
 import { embedText } from "../../infrastructure/cache/embedding-cache.js";
 import { encryptMemoryContent, hashMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
-import { extractFacts } from "../../orchestration/ai/fact-extract.usecase.js";
+import type { ExtractedFact } from "../../orchestration/ai/fact-extract.usecase.js";
 import { summarizeConversation, type ConversationSummary } from "../../orchestration/ai/summarize.usecase.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { classifyMemory } from "./memory-classification.js";
@@ -88,6 +88,7 @@ interface SaveMemoryUseCaseDeps {
   readonly bumpRecallStamp: (auth: AuthContext) => Promise<void>;
   readonly ipHash: (ip?: string) => string | null;
   readonly createQuotaExceededError: (message: string) => Error;
+  readonly extractFacts: (content: string) => Promise<ExtractedFact[]>;
   readonly isEvalMode: boolean;
   readonly freeSaveLimit: number;
 }
@@ -101,13 +102,16 @@ export interface SaveMemoryUseCaseInput {
   readonly category?: string | null;
   readonly isPinned?: boolean;
   readonly preferenceKey?: string | null;
+  readonly runFactExtraction?: boolean;
 }
 
-const MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
+const DEFAULT_MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
+const MEMORY_EMBED_TIMEOUT_MS = Math.max(DEFAULT_MEMORY_EMBED_TIMEOUT_MS, config.memoryRecallEmbedTimeoutMs);
 const MEMORY_VECTOR_UPSERT_TIMEOUT_MS = config.memoryVectorUpsertTimeoutMs;
 const SUMMARY_TIMEOUT_MS = config.nodeEnv === "production" ? 3_200 : 2_000;
 const DEDUP_VECTOR_LIMIT = 8;
 const DEDUP_VECTOR_SIMILARITY_THRESHOLD = 0.92;
+const MEMORY_EMBED_MAX_CHARS = 2_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -182,7 +186,11 @@ function buildMemoryText(
 }
 
 function buildEmbeddingText(platform: string, rawContent: string): string {
-  return `[${platform.toUpperCase()}]\n${rawContent.trim()}`;
+  const compact = rawContent.trim().replace(/\s+/g, " ");
+  const clipped = compact.length > MEMORY_EMBED_MAX_CHARS
+    ? compact.slice(0, MEMORY_EMBED_MAX_CHARS)
+    : compact;
+  return `[${platform.toUpperCase()}]\n${clipped}`;
 }
 
 export class SaveMemoryUseCase {
@@ -282,12 +290,16 @@ export class SaveMemoryUseCase {
       : (classified.isPinned || memoryType === "preference");
     const preferenceKey = input.preferenceKey ?? summary.preference_key ?? classified.preferenceKey;
 
-    const summaryForStorage: ConversationSummary = {
+    const summaryForStorage: ConversationSummary & { provenance?: { platform: string; written_at: string } } = {
       ...summary,
       memory_type: memoryType,
       category,
       is_pinned_suggested: isPinned,
       preference_key: preferenceKey,
+      provenance: {
+        platform: input.platform,
+        written_at: createdAt,
+      },
     };
 
     const vectorDuplicate = await this.dedupeByVector(input, memoryType);
@@ -408,8 +420,9 @@ export class SaveMemoryUseCase {
       };
 
       const extractAndSaveFacts = async () => {
+        if (input.runFactExtraction === false) return;
         try {
-          const facts = await extractFacts(normalizedContent);
+          const facts = await this.deps.extractFacts(normalizedContent);
           for (const fact of facts) {
             try {
               const factText = `[FACT] ${fact.text}${fact.temporal_context ? ` (${fact.temporal_context})` : ""}`;

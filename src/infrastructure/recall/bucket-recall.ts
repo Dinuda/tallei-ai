@@ -18,6 +18,7 @@ import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 import { embedText } from "../cache/embedding-cache.js";
 import { MemoryRepository, type MemoryRecordRow } from "../repositories/memory.repository.js";
 import { VectorRepository } from "../repositories/vector.repository.js";
+import { activitySignal, confidenceTier, detectConflicts, type ConflictHint } from "./scoring-utils.js";
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -66,6 +67,7 @@ export interface BucketRecallResult {
   contextBlock: string;
   memories: BucketMemory[];
   timingsMs: Record<string, number>;
+  conflictHints?: ConflictHint[];
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -140,7 +142,8 @@ function buildContextBlock(memories: BucketMemory[]): string {
   const lines = memories.map((m) => {
     const platform =
       typeof m.metadata.platform === "string" ? m.metadata.platform : "unknown";
-    return `[${platform.toUpperCase()}] ${m.text}`;
+    const tier = confidenceTier(m.metadata.reference_count);
+    return `[${platform.toUpperCase()}:${tier}] ${m.text}`;
   });
   return `--- Your Past Context ---\n${lines.join("\n")}\n---`;
 }
@@ -244,8 +247,8 @@ async function recallFirstHybrid(
       const vRank = vectorRank.get(id);
       const vScore = vRank !== undefined ? 1 / (60 + vRank + 1) : 0;
       const bScore = maxBm25 > 0 ? (bm25.get(id) ?? 0) / maxBm25 : 0;
-      const refBoost = 1 + Math.log1p(Math.max(1, item.row.reference_count ?? 1));
-      return { ...item, score: (vScore * 0.7 + bScore * 0.3) * refBoost };
+      const activity = activitySignal(item.row.reference_count ?? 1, item.row.last_referenced_at ?? null);
+      return { ...item, score: (vScore * 0.7 + bScore * 0.3) * activity };
     })
     .sort((a, b) => b.score - a.score);
 
@@ -274,7 +277,11 @@ export async function bucketRecall(
   // Split into buckets
   const prefRows = decrypted.filter((d) => d.row.memory_type === "preference");
   const longtermRows = decrypted.filter(
-    (d) => d.row.memory_type === "fact" || d.row.memory_type === "decision"
+    (d) =>
+      d.row.memory_type === "fact" ||
+      d.row.memory_type === "decision" ||
+      d.row.memory_type === "lesson" ||
+      d.row.memory_type === "failure"
   );
   const shorttermRows = decrypted.filter(
     (d) => d.row.memory_type === "event" || d.row.memory_type === "note"
@@ -288,7 +295,7 @@ export async function bucketRecall(
   const prefMemories = packUnderBudget(
     prefSorted.map((r) => ({
       ...r,
-      score: 10 + Math.log1p(r.row.reference_count ?? 0),
+      score: 10 + activitySignal(r.row.reference_count ?? 1, r.row.last_referenced_at ?? null),
     })),
     PREF_BUDGET
   );
@@ -309,7 +316,7 @@ export async function bucketRecall(
         .sort((a, b) => (b.row.reference_count ?? 0) - (a.row.reference_count ?? 0))
         .map((r) => ({
           ...r,
-          score: 1 + Math.log1p(r.row.reference_count ?? 0),
+          score: activitySignal(r.row.reference_count ?? 1, r.row.last_referenced_at ?? null),
         })),
       LONGTERM_BUDGET
     );
@@ -336,9 +343,12 @@ export async function bucketRecall(
   const memories = [...prefMemories, ...longtermMemories, ...shorttermMemories];
   timingsMs.total_ms = Date.now() - t0;
 
+  const conflictHints = detectConflicts(memories);
+
   return {
     contextBlock: buildContextBlock(memories),
     memories,
     timingsMs,
+    ...(conflictHints.length > 0 ? { conflictHints } : {}),
   };
 }

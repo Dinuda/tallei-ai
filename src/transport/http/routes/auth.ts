@@ -5,6 +5,9 @@ import {
   upsertGoogleUser,
   verifySessionToken,
 } from "../../../infrastructure/auth/auth.js";
+import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
+import { notifyUserSignup } from "../../../services/signup-notifications.js";
+import { runAsyncSafe } from "../../../shared/async-safe.js";
 import { internalSecretMiddleware } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -47,8 +50,20 @@ router.post("/sync", internalSecretMiddleware, async (req, res) => {
     return;
   }
   try {
-    const user = await upsertGoogleUser({ sub, email });
-    res.json({ userId: user.id, tenantId: user.tenantId });
+    const { user, isNewUser } = await upsertGoogleUser({ sub, email });
+    const plan = await getPlanForTenant(user.tenantId);
+    if (isNewUser) {
+      runAsyncSafe(
+        () =>
+          notifyUserSignup({
+            userId: user.id,
+            tenantId: user.tenantId,
+            email: user.email,
+          }),
+        "signup notifications"
+      );
+    }
+    res.json({ userId: user.id, tenantId: user.tenantId, plan });
   } catch (error) {
     console.error("User sync failed:", error);
     res.status(500).json({ error: "Failed to sync user" });

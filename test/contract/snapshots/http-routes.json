@@ -25,13 +25,33 @@
     "source": "src/routes/auth.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/billing/cancel",
+    "source": "src/routes/billing.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/billing/checkout",
     "source": "src/routes/billing.ts"
   },
   {
     "method": "GET",
+    "path": "/api/billing/invoices",
+    "source": "src/routes/billing.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/billing/payment-method",
+    "source": "src/routes/billing.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/billing/portal",
+    "source": "src/routes/billing.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/billing/resume",
     "source": "src/routes/billing.ts"
   },
   {
@@ -45,38 +65,48 @@
     "source": "src/routes/billing.ts"
   },
   {
-    "method": "POST",
-    "path": "/api/browser-use/claude-onboarding/execute",
-    "source": "src/routes/browserUse.ts"
-  },
-  {
     "method": "GET",
     "path": "/api/chatgpt/actions/openapi.json",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/recall",
+    "path": "/api/chatgpt/actions/recall_document",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/run",
+    "path": "/api/chatgpt/actions/recall_memories",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/save",
+    "path": "/api/chatgpt/actions/recent_documents",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/save_memory",
+    "path": "/api/chatgpt/actions/remember",
     "source": "src/routes/chatgpt.ts"
   },
   {
     "method": "POST",
-    "path": "/api/chatgpt/actions/save_preference",
+    "path": "/api/chatgpt/actions/search_documents",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/undo_save",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/upload_blob",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chatgpt/actions/upload_status",
     "source": "src/routes/chatgpt.ts"
   },
   {
@@ -85,29 +115,29 @@
     "source": "src/routes/chatgpt.ts"
   },
   {
-    "method": "POST",
-    "path": "/api/claude-onboarding/sessions",
-    "source": "src/routes/claudeOnboarding.ts"
+    "method": "GET",
+    "path": "/api/documents",
+    "source": "src/routes/documents.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/documents/:ref",
+    "source": "src/routes/documents.ts"
   },
   {
     "method": "GET",
-    "path": "/api/claude-onboarding/sessions/:id",
-    "source": "src/routes/claudeOnboarding.ts"
+    "path": "/api/documents/:ref",
+    "source": "src/routes/documents.ts"
   },
   {
     "method": "POST",
-    "path": "/api/claude-onboarding/sessions/:id/cancel",
-    "source": "src/routes/claudeOnboarding.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/claude-onboarding/sessions/:id/events",
-    "source": "src/routes/claudeOnboarding.ts"
+    "path": "/api/documents/upload",
+    "source": "src/routes/documents.ts"
   },
   {
     "method": "POST",
-    "path": "/api/claude-onboarding/sessions/:id/resume",
-    "source": "src/routes/claudeOnboarding.ts"
+    "path": "/api/documents/upload-blob",
+    "source": "src/routes/documents.ts"
   },
   {
     "method": "GET",

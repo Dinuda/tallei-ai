@@ -5,7 +5,7 @@ import { pool } from "../../../infrastructure/db/index.js";
 import { config } from "../../../config/index.js";
 import { parseScopes } from "../../../infrastructure/auth/oauth-tokens.js";
 import { deleteCacheKey } from "../../../infrastructure/cache/redis-cache.js";
-import { generateApiKey, listEphemeralApiKeys } from "../../../infrastructure/auth/auth.js";
+import { generateApiKey } from "../../../infrastructure/auth/auth.js";
 
 const router = Router();
 
@@ -153,33 +153,7 @@ async function getActiveChatGptApiKeys(userId: string): Promise<ActiveChatGptApi
      LIMIT 20`,
     [userId]
   );
-
-  const ephemeralRows = listEphemeralApiKeys(userId)
-    .filter((key) => key.connectorType === "chatgpt")
-    .filter((key) => key.revokedAt === null)
-    .filter((key) => {
-      const createdAtMs = Date.parse(key.createdAt);
-      if (!Number.isFinite(createdAtMs)) return false;
-      const expiresAtMs = createdAtMs + key.rotationDays * 24 * 60 * 60 * 1000;
-      return expiresAtMs > Date.now();
-    })
-    .map((key) => ({
-      id: key.id,
-      key_hash: "",
-      created_at: new Date(key.createdAt),
-      last_used_at: key.lastUsedAt ? new Date(key.lastUsedAt) : null,
-    }));
-
-  const merged = [...result.rows];
-  const seenIds = new Set(merged.map((row) => row.id));
-  for (const row of ephemeralRows) {
-    if (!seenIds.has(row.id)) {
-      merged.push(row);
-    }
-  }
-
-  merged.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
-  return merged.slice(0, 20);
+  return result.rows;
 }
 
 function deriveClaudeStatus(events: IntegrationEventRow[], hasActiveToken: boolean): IntegrationStatus {
@@ -441,6 +415,8 @@ router.get("/chatgpt/token", requireScopes(["memory:read"]), async (req: AuthReq
       activeTokenCount: keys.length,
       lastTokenCreatedAt: newest?.created_at ?? null,
       lastTokenUsedAt: newest?.last_used_at ?? null,
+      maskedToken: keys.length > 0 ? "****************" : null,
+      rawToken: null,
     });
   } catch (error) {
     console.error("Error fetching ChatGPT token status:", error);
@@ -455,14 +431,39 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    const rotateRequested = Boolean(
+      req.body &&
+      typeof req.body === "object" &&
+      "rotate" in (req.body as Record<string, unknown>) &&
+      (req.body as Record<string, unknown>).rotate === true
+    );
+
+    const activeKeys = await getActiveChatGptApiKeys(userId);
+    const activeKey = activeKeys[0] ?? null;
+    if (activeKey && !rotateRequested) {
+      res.json({
+        success: true,
+        created: false,
+        hasActiveToken: true,
+        activeTokenCount: activeKeys.length,
+        lastTokenCreatedAt: activeKey.created_at,
+        lastTokenUsedAt: activeKey.last_used_at ?? null,
+        maskedToken: "****************",
+        rawToken: null,
+        message: "A ChatGPT bearer token already exists. Using the existing token.",
+      });
+      return;
+    }
+
     if (config.nodeEnv !== "production") {
-      console.warn("[integrations] chatgpt token rotation requested", {
+      console.warn("[integrations] chatgpt token creation requested", {
         userId,
+        rotateRequested,
         userAgent: req.get("user-agent") ?? null,
       });
     }
 
-    const revokeExisting = await pool.query<{ key_hash: string }>(
+    const revokeExistingBeforeCreate = await pool.query<{ key_hash: string }>(
       `UPDATE api_keys
        SET revoked_at = NOW()
        WHERE user_id = $1
@@ -471,46 +472,33 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
        RETURNING key_hash`,
       [userId]
     );
-    const revokedKeyHashes = revokeExisting.rows.map((row) => row.key_hash);
-    let generated;
-    try {
-      generated = await generateApiKey(
-        userId,
-        "ChatGPT Action Bearer",
-        365,
-        req.authContext?.tenantId ?? null,
-        "chatgpt",
-        "tly"
-      );
-    } catch (error) {
-      if (revokedKeyHashes.length > 0) {
-        try {
-          await pool.query(
-            `UPDATE api_keys
-             SET revoked_at = NULL
-             WHERE user_id = $1
-               AND connector_type = 'chatgpt'
-               AND key_hash = ANY($2::text[])`,
-            [userId, revokedKeyHashes]
-          );
-        } catch (restoreError) {
-          console.error("Failed to restore previously-active ChatGPT keys after generation failure:", restoreError);
-        }
-      }
-      throw error;
-    }
-    await invalidateApiKeyValidationCaches(revokedKeyHashes);
+    await invalidateApiKeyValidationCaches(revokeExistingBeforeCreate.rows.map((row) => row.key_hash));
 
-    const key = generated.key;
-    const tokenPreview = `${key.slice(0, 10)}...${key.slice(-6)}`;
+    const generated = await generateApiKey(
+      userId,
+      "ChatGPT Action Bearer",
+      365,
+      req.authContext?.tenantId ?? null,
+      "chatgpt",
+      "tly",
+      { allowEphemeralFallback: false }
+    );
 
+    const createdAt = new Date().toISOString();
     res.status(201).json({
       success: true,
-      token: key,
-      tokenPreview,
+      created: true,
+      hasActiveToken: true,
+      activeTokenCount: 1,
       keyId: generated.id,
-      createdAt: new Date().toISOString(),
-      message: "ChatGPT bearer token created. Store it now; this is the only time it is shown.",
+      createdAt,
+      lastTokenCreatedAt: createdAt,
+      lastTokenUsedAt: null,
+      maskedToken: "****************",
+      rawToken: generated.key,
+      message: rotateRequested
+        ? "ChatGPT bearer token rotated and stored securely."
+        : "ChatGPT bearer token created and stored securely.",
     });
   } catch (error) {
     console.error("Error creating ChatGPT bearer token:", error);

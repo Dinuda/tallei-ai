@@ -1,10 +1,28 @@
-import React, { useState, useCallback, useEffect, useMemo } from "react";
-import { Check, Copy, ExternalLink, Zap, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X } from "lucide-react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
+import { Check, Copy, ExternalLink, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X, Clock3, RefreshCw } from "lucide-react";
 import { Button } from "../../../components/ui/button";
+import { AspectRatio } from "../../../components/ui/aspect-ratio";
 
 export type SaveMode = "instant" | "on_request";
 export type Provider = "claude" | "chatgpt";
-const CHATGPT_ACTIONS_SPEC_VERSION = "3.1.0";
+const CHATGPT_ACTIONS_SPEC_TAG = "stable";
+const CLAUDE_AUTOMATION_ENABLED = false;
+const PURPOSE_BUTTON_STYLE: React.CSSProperties = {
+  width: "100%",
+  minHeight: "46px",
+  borderRadius: "0",
+  background: "#4742BC",
+  color: "#ffffff",
+  border: "1px solid #4338ca",
+  fontWeight: 700,
+  letterSpacing: "0.01em",
+  boxShadow: "0 6px 18px rgba(71, 66, 188, 0.28)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "0.55rem",
+};
 
 type McpEvent = {
   authMode?: string | null;
@@ -23,7 +41,80 @@ type ChatGptTokenStatus = {
   activeTokenCount: number;
   lastTokenCreatedAt: string | null;
   lastTokenUsedAt: string | null;
+  maskedToken: string | null;
+  rawToken: string | null;
 };
+
+type ClaudeOnboardingState =
+  | "queued"
+  | "browser_started"
+  | "claude_authenticated"
+  | "connector_connected"
+  | "project_upserted"
+  | "instructions_applied"
+  | "verified";
+
+type ClaudeOnboardingStatus =
+  | "queued"
+  | "running"
+  | "checkpoint_required"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+type ClaudeOnboardingCheckpoint = {
+  type: "auth" | "captcha" | "manual_review";
+  blockedState: Exclude<ClaudeOnboardingState, "queued">;
+  message: string;
+  resumeHint: string;
+  actionUrl?: string;
+  action_url?: string;
+};
+
+type ClaudeOnboardingSession = {
+  id: string;
+  status: ClaudeOnboardingStatus;
+  currentState: ClaudeOnboardingState;
+  projectName: string;
+  checkpoint: ClaudeOnboardingCheckpoint | null;
+  metadata?: Record<string, unknown>;
+  lastError: string | null;
+  completedAt: string | null;
+  canceledAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ClaudeOnboardingEvent = {
+  id: number;
+  eventType: string;
+  state: string | null;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+};
+
+function getCheckpointActionUrl(
+  checkpoint: ClaudeOnboardingCheckpoint | null | undefined
+): string | null {
+  if (!checkpoint) return null;
+  if (typeof checkpoint.actionUrl === "string" && checkpoint.actionUrl.trim().length > 0) {
+    return checkpoint.actionUrl;
+  }
+  if (typeof checkpoint.action_url === "string" && checkpoint.action_url.trim().length > 0) {
+    return checkpoint.action_url;
+  }
+  return null;
+}
+
+function getSessionLiveUrl(
+  session: ClaudeOnboardingSession | null | undefined
+): string | null {
+  const candidate = session?.metadata?.["liveSessionUrl"];
+  if (typeof candidate === "string" && candidate.trim().length > 0) {
+    return candidate;
+  }
+  return null;
+}
 
 async function verifyConnectivityEvent(
   provider: Provider,
@@ -79,7 +170,7 @@ async function verifyConnectivityEvent(
       ok: false,
       message:
         provider === "chatgpt"
-          ? "No ChatGPT action event found yet. Send the test prompt, click Confirm on the action permission card, then verify again."
+          ? ""
           : "No new Claude connector event found yet. Send the test prompt in Claude, then verify again.",
     };
   } catch {
@@ -89,22 +180,59 @@ async function verifyConnectivityEvent(
 
 // --- Shared Utilities (Copied from page.tsx) ---
 export function getClaudeInstructions(mode: SaveMode): string {
-  if (mode === "instant") {
-    return `You have Tallei memory tools. Use them silently.\n\nRules:\n1) On the first user turn in a new conversation, call recall_memories with types=[\"preference\"].\n2) Before personal/contextual answers, call recall_memories with focused query + relevant types.\n3) Use save_preference for stable preferences and identity facts.\n4) Use save_memory for non-preference facts, decisions, events, and notes.\n5) If the user corrects prior information, save the corrected value immediately.\n6) Never mention tool calls or saves in user-facing text.`;
-  }
-  return `You have Tallei memory tools. Use them silently.\n\nRules:\n1) On the first user turn in a new conversation, call recall_memories with types=[\"preference\"].\n2) Before personal/contextual answers, call recall_memories with focused query + relevant types.\n3) Use save_preference for stable preferences and identity facts.\n4) Use save_memory only when the user explicitly asks to remember non-preference details.\n5) If the user corrects prior information and asks to remember it, save the corrected value.\n6) Never mention tool calls or saves in user-facing text.`;
+  void mode;
+  return `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.\n\n=== TURN PROTOCOL ===\n\nSTEP A — RECALL WHEN NEEDED:\n- Do NOT call recall_memories reflexively.\n- Call recall_memories only when prior-session context is required.\n- recall_memories defaults to facts + preferences and returns docs-lite context only.\n- include_doc_refs returns brief metadata only (no full document text).\n- recall_memories also includes a brief list of the latest 5 uploaded docs.\n- If the user references an older doc by name, call search_documents first and then include matching refs.\n- Use recall_document only when full document text is explicitly needed.\n\nSTEP B — ANSWER:\n- Answer the user directly.\n\nSTEP C — AUTO-SAVE NEW STRUCTURED CONTENT (required):\n- If this turn includes new structured content (file upload, pasted doc/spec/transcript, extracted PDF text, list/table/data), call remember(kind=\"document-note\", title, key_points, summary, source_hint) in the same turn, without asking permission.\n- Then append exactly this footer on its own line:\n  📎 Auto-saved as @doc:<ref> · reply **undo** to delete\n- Skip auto-save only if the user explicitly said not to save, the turn is purely conversational, or the same content was already saved.\n\nSTEP D — UNDO:\n- If the user replies \"undo\", \"del\", or \"delete\" after that footer, call undo_save with that @doc ref immediately.\n\n=== ONGOING ===\n- Use remember(kind=\"preference\") for stable preferences and identity facts.\n- Use remember(kind=\"fact\") for non-preference facts, decisions, events, notes, and corrections.\n- Use remember(kind=\"document-blob\") only when the user explicitly asks for full archive/full stash of complete text.\n- If document save/upload returns plan-required (\`402\`, \`code=plan_required\`, or \"Document sharing is a Pro feature\"), do NOT retry. Prompt the user to complete payment/upgrade at the returned billing URL, then continue after upgrade.\n\n=== HARD RULE ===\n- Never mention tool internals in user-facing text, except the required auto-save footer.`;
 }
 
 export function getChatGptInstructions(mode: SaveMode): string {
-  if (mode === "instant") {
-    return `You have Tallei Actions tools.\n\nAvailable actions:\n- recallMemories\n- saveMemoryAction\n- savePreferenceAction\n\nRules:\n1) On every user turn, call recallMemories exactly once before writing any answer.\n2) Set recallMemories.query from the latest user message. Prefer using the user message verbatim (or a short faithful rewrite). Never use a fixed generic query.\n3) Use types based on intent: preferences/identity -> [\"preference\"], ongoing plans/projects -> [\"fact\",\"decision\",\"preference\"], otherwise omit types.\n4) Do not chain multiple recall calls in one turn unless the user explicitly asks for deeper memory search.\n5) Use savePreferenceAction for stable preferences and identity.\n6) Use saveMemoryAction for non-preference facts/events/decisions/notes.\n7) Never mention tool calls in user-facing text.`;
-  }
-  return `You have Tallei Actions tools.\n\nAvailable actions:\n- recallMemories\n- saveMemoryAction\n- savePreferenceAction\n\nRules:\n1) On every user turn, call recallMemories exactly once before writing any answer.\n2) Set recallMemories.query from the latest user message. Prefer using the user message verbatim (or a short faithful rewrite). Never use a fixed generic query.\n3) Use types based on intent: preferences/identity -> [\"preference\"], ongoing plans/projects -> [\"fact\",\"decision\",\"preference\"], otherwise omit types.\n4) Do not chain multiple recall calls in one turn unless the user explicitly asks for deeper memory search.\n5) Use savePreferenceAction for stable preferences and identity.\n6) Call saveMemoryAction only when the user explicitly asks to remember non-preference details.\n7) Never mention tool calls in user-facing text.`;
+  void mode;
+  return `You are a Tallei-connected GPT.
+
+=== RESPONSE PROTOCOL — exact sequence, every single turn ===
+
+STEP 1 ← ALWAYS THE FIRST THING YOU DO, NO EXCEPTIONS:
+  Call \`recall_memories(query="<exact user message>", openaiFileIdRefs=[...any attachments...])\`.
+  Do this for: simple questions, follow-ups, greetings, document questions, everything.
+  Do NOT assume you already have document context.
+  Do NOT write any reply text before this call completes.
+
+STEP 2 — Read the recall response:
+  - \`inlineDocuments\` present → read it FIRST (this is uploaded file content — use it).
+  - \`autoSave.complete=false\` or \`422\` → say "Upload failed, retrying…", call \`upload_blob(openaiFileIdRefs=[...])\`, retry once.
+  - \`402\` with \`code=plan_required\` → do NOT retry. Tell the user document sharing is a Pro feature on Tallei and ask them to complete payment at \`https://tallei.com/dashboard/billing\`.
+
+STEP 3 — Write your reply:
+  Use \`contextBlock\` + \`inlineDocuments\` as your source of truth.
+  Never say "I don't know", "I'm not sure", or "which one?" when recall returned relevant context/documents.
+
+STEP 4 ← ALWAYS AFTER YOUR REPLY:
+  Did the user share a fact, preference, goal, or decision this turn?
+  - YES: call \`remember(kind="fact"|"preference", content="<concise>")\` for each one.
+  - NO: skip.
+
+STEP 5 — End:
+  - \`autoSave.saved\` non-empty → end reply with: \`Saved: @doc:<ref>\`
+  - Fact/preference saves → no \`Saved\` line.
+
+RULES:
+- Never mention tools in chat.
+- OpenAPI operation descriptions are the canonical execution contract.`;
 }
 
-export function CopyField({ value, label, onCopy }: { value: string; label?: string; onCopy?: () => void }) {
+export function CopyField({
+  value,
+  label,
+  onCopy,
+  copyable = true,
+}: {
+  value: string;
+  label?: string;
+  onCopy?: () => void;
+  copyable?: boolean;
+}) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
+    if (!copyable) return;
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
@@ -114,12 +242,16 @@ export function CopyField({ value, label, onCopy }: { value: string; label?: str
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-      {label && <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</label>}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.65rem 0.85rem', background: '#fafafa', border: '1px solid #e5e7eb', borderRadius: '8px', transition: 'all 0.2s', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.01)', gap: '0.75rem' }}>
+      {label && <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "#111827" }}>
+                    {label}
+                  </h4>}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.65rem 0.85rem', background: '#fafafa', border: '1px solid #e5e7eb', borderRadius: "0", transition: 'all 0.2s', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.01)', gap: '0.75rem' }}>
         <code style={{ flex: 1, minWidth: 0, fontSize: '0.85rem', color: '#111827', fontFamily: 'SFMono-Regular, Consolas, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</code>
-        <button onClick={handleCopy} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', background: copied ? '#dcfce7' : '#ffffff', cursor: 'pointer', color: copied ? '#16a34a' : '#6b7280', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', border: '1px solid #e5e7eb', transition: 'all 0.2s', flexShrink: 0 }}>
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
+        {copyable && (
+          <button onClick={handleCopy} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: "0", background: copied ? '#dcfce7' : '#ffffff', cursor: 'pointer', color: copied ? '#16a34a' : '#6b7280', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', border: '1px solid #e5e7eb', transition: 'all 0.2s', flexShrink: 0 }}>
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -139,6 +271,7 @@ export function CodeBlock({
   maxHeight?: string | number;
 }) {
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(value);
@@ -153,23 +286,41 @@ export function CodeBlock({
     if (lang === 'json') return 'JSON';
     return null;
   };
+  
+  const lines = value.split('\n');
+  const firstLine = lines[0];
+  const isMultiLine = lines.length > 1;
+  const displayValue = expanded ? value : firstLine;
+  
   return (
-    <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', overflow: 'hidden' }}>
-      <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
+    <div style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: "0", overflow: 'hidden' }}>
+      <div style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
         <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, color: '#374151'}}>
           {getLanguageIcon(language) && <span style={{ fontSize: '0.9rem' }}>{getLanguageIcon(language)}</span>}
           <span>{label || language}</span>
+          {isMultiLine && !expanded && <span style={{ fontSize: '0.75rem', color: '#9ca3af', marginLeft: '0.25rem' }}>...</span>}
         </div>
-        <button
-          type="button"
-          onClick={handleCopy}
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'rgba(0, 0, 0, 0.05)', cursor: 'pointer', color: copied ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
-        >
-          {copied ? <Check size={16} /> : <Copy size={16} />}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          {isMultiLine && (
+            <button
+              type="button"
+              onClick={() => setExpanded(!expanded)}
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: "0", border: 'none', background: 'rgba(0, 0, 0, 0.05)', cursor: 'pointer', color: '#6b7280', transition: 'all 0.2s' }}
+            >
+              {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleCopy}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: "0", border: 'none', background: 'rgba(0, 0, 0, 0.05)', cursor: 'pointer', color: copied ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
+          >
+            {copied ? <Check size={16} /> : <Copy size={16} />}
+          </button>
+        </div>
       </div>
-      <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto', overflowY: maxHeight ? 'auto' : 'visible', maxHeight }}>
-        <code className="cnn-code-text" style={{ whiteSpace: 'pre-wrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, monospace', color: '#1f2937' }}>{value}</code>
+      <div style={{ padding: '1rem', overflowX: 'auto', overflowY: expanded && maxHeight ? 'auto' : 'visible', maxHeight: expanded ? maxHeight : 'auto' }}>
+        <code style={{ whiteSpace: expanded ? 'pre-wrap' : 'nowrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, monospace', color: '#1f2937', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayValue}</code>
       </div>
     </div>
   );
@@ -180,7 +331,7 @@ export function GuideImage({ src, alt, caption, defaultExpanded = false }: { src
   const isVideo = src.endsWith('.mp4');
 
   return (
-    <div style={{ borderRadius: '12px', overflow: 'hidden', border: '1px solid #e5e7eb', background: '#fafafa' }}>
+    <div style={{ borderRadius: "0", overflow: 'hidden', border: '1px solid #e5e7eb', background: '#fafafa' }}>
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
@@ -193,7 +344,7 @@ export function GuideImage({ src, alt, caption, defaultExpanded = false }: { src
         {expanded ? <ChevronUp size={14} style={{ color: '#6b7280' }} /> : <ChevronDown size={14} style={{ color: '#6b7280' }} />}
       </button>
       <div style={{ display: expanded ? 'block' : 'none', padding: '0 0.75rem 0.75rem', animation: expanded ? 'fadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1)' : 'none' }}>
-        <div style={{ background: '#ffffff', borderRadius: '8px', border: '1px solid #e5e7eb', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+        <div style={{ background: '#ffffff', borderRadius: "0", border: '1px solid #e5e7eb', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
           <div style={{ height: '24px', background: '#f3f4f6', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', padding: '0 8px', gap: '6px' }}>
             <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ff5f56' }} />
             <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ffbd2e' }} />
@@ -235,14 +386,14 @@ export function VerifyChecklist({ items, onVerified, autoCheck, onToggle }: { it
   }, [effectiveChecked, onToggle]);
 
   return (
-    <div style={{ borderRadius: '12px', border: allDone ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid #f3f4f6', background: allDone ? 'rgba(240, 253, 244, 0.5)' : '#ffffff', padding: '1rem', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', boxShadow: allDone ? '0 0 16px rgba(34, 197, 94, 0.1)' : '0 1px 3px rgba(0,0,0,0.02)' }}>
+    <div style={{ borderRadius: "0", border: allDone ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid #f3f4f6', background: allDone ? 'rgba(240, 253, 244, 0.5)' : '#ffffff', padding: '1rem', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', boxShadow: allDone ? '0 0 16px rgba(34, 197, 94, 0.1)' : '0 1px 3px rgba(0,0,0,0.02)' }}>
       <div style={{ fontSize: '0.75rem', fontWeight: 700, color: allDone ? '#16a34a' : '#9ca3af', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em', transition: 'color 0.3s' }}>
         {allDone ? <><CheckCircle2 size={13} style={{ animation: 'bounceIn 0.4s ease' }} /> Verified!</> : <>Verify before continuing</>}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
         {items.map((item, i) => (
           <label key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: effectiveChecked[i] ? '#16a34a' : '#4b5563', lineHeight: 1.45, transition: 'all 0.2s', transform: effectiveChecked[i] ? 'translateX(2px)' : 'none' }}>
-            <input type="checkbox" checked={effectiveChecked[i]} onChange={() => toggle(i)} style={{ accentColor: '#16a34a', width: '16px', height: '16px', marginTop: '2px', flexShrink: 0, cursor: 'pointer', borderRadius: '4px' }} />
+            <input type="checkbox" checked={effectiveChecked[i]} onChange={() => toggle(i)} style={{ accentColor: '#16a34a', width: '16px', height: '16px', marginTop: '2px', flexShrink: 0, cursor: 'pointer', borderRadius: "0" }} />
             <span style={{ textDecoration: effectiveChecked[i] ? 'line-through' : 'none', opacity: effectiveChecked[i] ? 0.8 : 1 }}>{item}</span>
           </label>
         ))}
@@ -253,9 +404,18 @@ export function VerifyChecklist({ items, onVerified, autoCheck, onToggle }: { it
 
 export function InfoCallout({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', gap: '0.75rem', padding: '0.85rem 1rem', borderRadius: '10px', background: 'rgba(59, 130, 246, 0.05)', border: '1px solid rgba(59, 130, 246, 0.15)', fontSize: '0.85rem', color: '#374151', lineHeight: 1.55 }}>
+    <div style={{ display: 'flex', gap: '0.75rem', padding: '0.85rem 1rem', borderRadius: "0", background: 'rgba(59, 130, 246, 0.05)', border: '1px solid rgba(59, 130, 246, 0.15)', fontSize: '0.85rem', color: '#374151', lineHeight: 1.55 }}>
       <Info size={16} style={{ flexShrink: 0, color: '#3b82f6', marginTop: '2px' }} />
       <div>{children}</div>
+    </div>
+  );
+}
+
+export function InlineInfoHint({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.8rem", color: "#6b7280", lineHeight: 1.4 }}>
+      <Info size={14} style={{ flexShrink: 0, color: "#3b82f6" }} />
+      <span>{children}</span>
     </div>
   );
 }
@@ -263,14 +423,11 @@ export function InfoCallout({ children }: { children: React.ReactNode }) {
 export function SaveModeToggle({ mode, onChange }: { mode: SaveMode; onChange: (m: SaveMode) => void }) {
   return (
     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-      <button type="button" onClick={() => onChange("instant")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: '12px', border: mode === 'instant' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'instant' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
+      <button type="button" onClick={() => onChange("instant")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: "0", border: mode === 'instant' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'instant' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
         <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: mode === 'instant' ? '6px solid #111827' : '2px solid #d1d5db', background: '#ffffff' }} />
-        <div>
-          <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#111827' }}><Zap size={14} style={{display: 'inline', marginRight: '4px'}} /> Save Instantly</div>
-          <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.25rem' }}>Memories are saved automatically.</div>
-        </div>
+     
       </button>
-      <button type="button" onClick={() => onChange("on_request")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: '12px', border: mode === 'on_request' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'on_request' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
+      <button type="button" onClick={() => onChange("on_request")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: "0", border: mode === 'on_request' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'on_request' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
         <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: mode === 'on_request' ? '6px solid #111827' : '2px solid #d1d5db', background: '#ffffff' }} />
         <div>
           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#111827' }}><Hand size={14} style={{display: 'inline', marginRight: '4px'}} /> Save on Request</div>
@@ -283,28 +440,29 @@ export function SaveModeToggle({ mode, onChange }: { mode: SaveMode; onChange: (
 
 // --- Wizard Modal Shell ---
 
-export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalSteps, onNext, onBack, canNext, children }: { isOpen: boolean; onClose: () => void; title: string; providerIcon: React.ReactNode; step: number; totalSteps: number; onNext: () => void; onBack: () => void; canNext: boolean; children: React.ReactNode }) {
+export function WizardModal({ isOpen, onClose, title, stepTitle, providerIcon, step, totalSteps, onNext, onBack, canNext, children }: { isOpen: boolean; onClose: () => void; title: string; stepTitle?: string; providerIcon: React.ReactNode; step: number; totalSteps: number; onNext: () => void; onBack: () => void; canNext: boolean; children: React.ReactNode }) {
   if (!isOpen) return null;
   const progress = (step / totalSteps) * 100;
+  const modalFrameHeight = "min(860px, calc(100vh - 2rem))";
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 100000, display: 'flex', flexDirection: 'column', alignItems: 'center', background: 'rgba(0, 0, 0, 0.05)', animation: 'fadeIn 0.2s ease', padding: '5vh 1rem', overflowY: 'auto' }}>
-      <div style={{ background: '#ffffff', width: '100%', maxWidth: '900px', borderRadius: '16px', overflow: 'hidden', display: 'flex', flexDirection: 'column', margin: 'auto', flexShrink: 0, boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25), 0 0 1px rgba(0,0,0,0.1)', animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}>
+    <div style={{ position: 'fixed', inset: 0, zIndex: 100000, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0, 0, 0, 0.05)', animation: 'fadeIn 0.2s ease', padding: '1rem', overflowY: 'auto' }}>
+      <div style={{ background: '#ffffff', width: '100%', maxWidth: '900px', borderRadius: "0", overflow: 'hidden', display: 'flex', flexDirection: 'column', margin: 'auto', flexShrink: 0, boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25), 0 0 1px rgba(0,0,0,0.1)', animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)', height: modalFrameHeight, minHeight: modalFrameHeight, maxHeight: modalFrameHeight }}>
         
         {/* Header */}
         <div style={{ position: 'relative', padding: '1.25rem 1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#ffffff' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: '#f8fafc', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ width: '32px', height: '32px', borderRadius: "0", background: '#f8fafc', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               {providerIcon}
             </div>
             <div>
               <h2 style={{ fontSize: '1rem', fontWeight: 600, margin: 0, color: '#111827', letterSpacing: '-0.01em' }}>{title}</h2>
               <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.1rem', fontWeight: 500 }}>
-                Step {step} of {totalSteps}
+                Step {step} of {totalSteps}{stepTitle ? ` · ${stepTitle}` : ""}
               </div>
             </div>
           </div>
-          <button onClick={onClose} style={{ background: 'rgba(0, 0, 0, 0.05)', border: 'none', cursor: 'pointer', width: '28px', height: '28px', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', transition: 'all 0.2s' }} onMouseOver={(e) => { e.currentTarget.style.background = '#f3f4f6'; e.currentTarget.style.color = '#374151'; }} onMouseOut={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#9ca3af'; }}><X size={16} /></button>
+          <button onClick={onClose} style={{ background: 'rgba(0, 0, 0, 0.05)', border: 'none', cursor: 'pointer', width: '28px', height: '28px', borderRadius: "0", display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', transition: 'all 0.2s' }} onMouseOver={(e) => { e.currentTarget.style.background = '#f3f4f6'; e.currentTarget.style.color = '#374151'; }} onMouseOut={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#9ca3af'; }}><X size={16} /></button>
           
           {/* Edge-to-edge Progress Bar */}
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '2px', background: '#f3f4f6' }}>
@@ -313,7 +471,7 @@ export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalS
         </div>
 
         {/* Content Area */}
-        <div style={{ padding: '2rem 2.5rem', display: 'flex', flexDirection: 'column', background: '#ffffff' }}>
+        <div style={{ padding: '1.5rem 2rem', display: 'flex', flexDirection: 'column', background: '#ffffff', flex: 1, minHeight: 0, overflowY: 'auto' }}>
           <div style={{ animation: 'fadeIn 0.3s ease' }}>
             {children}
           </div>
@@ -321,8 +479,8 @@ export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalS
 
         {/* Footer */}
         <div style={{ padding: '1.25rem 2rem', borderTop: '1px solid #f3f4f6', background: '#ffffff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Button variant="ghost" onClick={onBack} disabled={step === 1} style={{ borderRadius: '8px', padding: '0.5rem 1rem', opacity: step === 1 ? 0 : 1, transition: 'opacity 0.2s' }}>Back</Button>
-          <Button onClick={onNext} disabled={!canNext} style={{ borderRadius: '8px', padding: '0.5rem 2rem', background: canNext ? '#111827' : '#e5e7eb', color: canNext ? '#ffffff' : '#9ca3af', border: 'none', boxShadow: canNext ? '0 4px 12px rgba(0,0,0,0.1)' : 'none', transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)', fontWeight: 600 }}>{step === totalSteps ? "Finish Setup" : "Continue"}</Button>
+          <Button variant="ghost" onClick={onBack} disabled={step === 1} style={{ borderRadius: "0", padding: '0.5rem 1rem', opacity: step === 1 ? 0 : 1, transition: 'opacity 0.2s' }}>Back</Button>
+           <Button onClick={onNext} disabled={!canNext} style={{ borderRadius: "0", padding: '0.5rem 2rem', background: canNext ? '#111827' : '#9ca3af', color: '#ffffff', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)', fontWeight: 600 }}>{step === totalSteps ? "Finish Setup" : "Continue"}</Button>
         </div>
       </div>
     </div>
@@ -332,34 +490,54 @@ export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalS
 // --- Specific Wizards ---
 
 
-export function StepMedia({ src, alt, caption }: { src: string; alt: string; caption?: string }) {
+export function StepMedia({
+  src,
+  alt,
+}: {
+  src: string;
+  alt: string;
+  caption?: string;
+}) {
   const isVideo = src.endsWith('.mp4');
   return (
-    <div style={{ borderRadius: '14px', border: '1px solid #e5e7eb', background: '#ffffff', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+    <div style={{ borderRadius: "0", border: '1px solid #e5e7eb', background: '#ffffff', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
        <div style={{ height: '32px', background: '#f8fafc', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', padding: '0 12px', gap: '8px' }}>
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ff5f56' }} />
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ffbd2e' }} />
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#27c93f' }} />
        </div>
-       <div style={{ background: '#ffffff', display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '200px' }}>
-          {isVideo ? (
-            <video src={src} autoPlay loop muted playsInline preload="auto" style={{ width: '100%', display: 'block', pointerEvents: 'none' }} />
-          ) : (
-            <img src={src} alt={alt} style={{ width: '100%', display: 'block' }} />
-          )}
+       <div style={{ background: '#f8fafc' }}>
+         <AspectRatio ratio={16 / 9}>
+           {isVideo ? (
+             <video
+               src={src}
+               autoPlay
+               loop
+               muted
+               playsInline
+               preload="auto"
+               style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', pointerEvents: 'none' }}
+             />
+           ) : (
+             <img src={src} alt={alt} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+           )}
+         </AspectRatio>
        </div>
-       {caption && (
-         <div style={{ padding: '0.85rem 1rem', fontSize: '0.85rem', color: '#6b7280', borderTop: '1px solid #f3f4f6', background: '#fafafa', textAlign: 'center', fontWeight: 500 }}>
-           {caption}
-         </div>
-       )}
     </div>
   );
 }
 
-export function TwoColumnStep({ media, content }: { media: React.ReactNode, content: React.ReactNode }) {
+export function TwoColumnStep({
+  media,
+  content,
+  mobileContentFirst = false,
+}: {
+  media: React.ReactNode;
+  content: React.ReactNode;
+  mobileContentFirst?: boolean;
+}) {
   return (
-    <div className="two-column-step" style={{ animation: 'fadeIn 0.3s ease-out' }}>
+    <div className={`two-column-step${mobileContentFirst ? " mobile-content-first" : ""}`} style={{ animation: 'fadeIn 0.3s ease-out' }}>
       
 <style dangerouslySetInnerHTML={{ __html: `
   .two-column-step {
@@ -389,6 +567,12 @@ export function TwoColumnStep({ media, content }: { media: React.ReactNode, cont
       position: static;
       width: 100%;
     }
+    .two-column-step.mobile-content-first .step-content-col {
+      order: 1;
+    }
+    .two-column-step.mobile-content-first .step-media-col {
+      order: 2;
+    }
   }
 ` }} />
 
@@ -402,18 +586,267 @@ export function TwoColumnStep({ media, content }: { media: React.ReactNode, cont
   );
 }
 
+export function VerticalVideoStep({
+  intro,
+  details,
+  media,
+}: {
+  intro: React.ReactNode;
+  details?: React.ReactNode;
+  media: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem", maxWidth: "760px", margin: "0 auto", width: "100%" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+        {intro}
+      </div>
+      {details}
+      <div>{media}</div>
+    </div>
+  );
+}
+
+function ConfettiBurst({ active }: { active: boolean }) {
+  const pieces = useMemo(
+    () =>
+      Array.from({ length: 50 }, (_, index) => ({
+        id: index,
+        left: (index * 19) % 110 - 5,
+        delay: (index % 15) * 0.08,
+        duration: 3.5 + (index % 10) * 0.25,
+        rotate: -180 + ((index * 41) % 360),
+        direction: index % 2 === 0 ? "right" : "left",
+        size: 6 + (index % 4) * 2,
+        opacity: 0.4 + (index % 4) * 0.15,
+      })),
+    []
+  );
+
+  if (!active || typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      aria-hidden
+      style={{
+        position: "fixed",
+        inset: 0,
+        pointerEvents: "none",
+        overflow: "hidden",
+        zIndex: 120000,
+      }}
+    >
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
+          @keyframes confetti-sweep-right {
+            0% { transform: translate3d(0, -12%, 0) rotate(0deg); opacity: 0; }
+            8% { opacity: var(--piece-opacity); }
+            85% { opacity: var(--piece-opacity); }
+            100% { transform: translate3d(38vw, 118vh, 0) rotate(540deg); opacity: 0; }
+          }
+          @keyframes confetti-sweep-left {
+            0% { transform: translate3d(0, -12%, 0) rotate(0deg); opacity: 0; }
+            8% { opacity: var(--piece-opacity); }
+            85% { opacity: var(--piece-opacity); }
+            100% { transform: translate3d(-38vw, 118vh, 0) rotate(-540deg); opacity: 0; }
+          }
+          `,
+        }}
+      />
+      {pieces.map((piece) => (
+        <span
+          key={piece.id}
+          style={{
+            position: "absolute",
+            top: "-12%",
+            left: `${piece.left}%`,
+            width: `${piece.size}px`,
+            height: `${piece.size}px`,
+            borderRadius: "50%",
+            background: "radial-gradient(circle at 30% 30%, rgba(255,255,255,0.8), rgba(126,183,27,0.6), rgba(126,183,27,0.3))",
+            boxShadow: "0 0 12px rgba(126,183,27,0.3), 0 0 24px rgba(126,183,27,0.15)",
+            opacity: 0,
+            "--piece-opacity": piece.opacity,
+            transform: `rotate(${piece.rotate}deg)`,
+            animation:
+              piece.direction === "right"
+                ? `confetti-sweep-right ${piece.duration}s cubic-bezier(0.25, 0.46, 0.45, 0.94) ${piece.delay}s forwards`
+                : `confetti-sweep-left ${piece.duration}s cubic-bezier(0.25, 0.46, 0.45, 0.94) ${piece.delay}s forwards`,
+          } as React.CSSProperties}
+        />
+      ))}
+    </div>,
+    document.body
+  );
+}
+
+function VerifySection({
+  verifyingConnection,
+  step3Verified,
+  onVerify,
+  headline = "Make sure to operate your memory within your Claude project.",
+  desktopHint = "Send a test message in your project to verify the connection.",
+  mobileHint = "Send a test message in your Claude project to verify the connection is working properly.",
+}: {
+  verifyingConnection: boolean;
+  step3Verified: boolean;
+  onVerify: () => void;
+  headline?: string;
+  desktopHint?: string;
+  mobileHint?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth <= 640);
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  return (
+    <div
+      className="verify-section"
+      style={{
+        display: "flex",
+        flexDirection: isMobile ? ("column" as const) : ("row" as const),
+        alignItems: isMobile ? ("stretch" as const) : ("center" as const),
+        gap: isMobile ? "0.75rem" : "1rem",
+        padding: "1rem",
+        background: "#f8fafc",
+        border: "1px solid #e5e7eb",
+        borderRadius: "0",
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p
+          style={{
+            color: "#4b5563",
+            margin: 0,
+            fontSize: isMobile ? "0.9rem" : "0.95rem",
+            lineHeight: 1.5,
+          }}
+        >
+          <strong>{headline}</strong>
+          {!isMobile && <> {desktopHint}</>}
+        </p>
+
+        {isMobile && (
+          <>
+            <button
+              onClick={() => setExpanded(!expanded)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.35rem",
+                marginTop: "0.5rem",
+                fontSize: "0.8rem",
+                color: "#4742BC",
+                background: "none",
+                border: "none",
+                padding: 0,
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              {expanded ? (
+                <>
+                  <ChevronUp size={14} /> Hide instructions
+                </>
+              ) : (
+                <>
+                  <ChevronDown size={14} /> Show instructions
+                </>
+              )}
+            </button>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateRows: expanded ? "1fr" : "0fr",
+                transition: "grid-template-rows 0.3s ease-out",
+                marginTop: expanded ? "0.75rem" : 0,
+              }}
+            >
+              <div style={{ overflow: "hidden" }}>
+                <div
+                  style={{
+                    padding: "0.75rem",
+                    background: "#ffffff",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: "0",
+                    fontSize: "0.85rem",
+                    color: "#4b5563",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {mobileHint}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      <Button
+        onClick={onVerify}
+        disabled={verifyingConnection || step3Verified}
+        style={{
+          ...PURPOSE_BUTTON_STYLE,
+          width: isMobile ? "100%" : "auto",
+          minWidth: isMobile ? "auto" : "140px",
+          marginTop: 0,
+          background: verifyingConnection || step3Verified ? "#8b88d3" : PURPOSE_BUTTON_STYLE.background,
+          borderColor: verifyingConnection || step3Verified ? "#8b88d3" : "#4338ca",
+        }}
+      >
+        {verifyingConnection ? "Verifying..." : step3Verified ? "Verified" : "Verify"}
+      </Button>
+    </div>
+  );
+}
+
 export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onClose: () => void; mcpUrl: string }) {
   const [step, setStep] = useState(1);
-  const [saveMode, setSaveMode] = useState<SaveMode>("instant");
-  // Each step requires verification to proceed, except step 1 and 4 which we might just allow.
-  const [step1Verified, setStep1Verified] = useState(false);
-  const [step2Verified, setStep2Verified] = useState(false);
+  const saveMode: SaveMode = "instant";
   const [verificationStartedAt, setVerificationStartedAt] = useState<number | null>(null);
   const [verifyingConnection, setVerifyingConnection] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
   const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
+  const [showConfetti, setShowConfetti] = useState(false);
+  const [onboardingSession, setOnboardingSession] = useState<ClaudeOnboardingSession | null>(null);
+  const [onboardingEvents, setOnboardingEvents] = useState<ClaudeOnboardingEvent[]>([]);
+  const [onboardingBusy, setOnboardingBusy] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const autoResumeAttemptRef = useRef<{ signature: string; at: number } | null>(null);
+  const previousVerifiedRef = useRef(false);
+  const checkpointActionUrl = useMemo(
+    () => getCheckpointActionUrl(onboardingSession?.checkpoint),
+    [onboardingSession?.checkpoint]
+  );
+  const sessionLiveUrl = useMemo(
+    () => getSessionLiveUrl(onboardingSession),
+    [onboardingSession]
+  );
+  const liveSessionUrl = checkpointActionUrl || sessionLiveUrl;
+  const liveInputRequired =
+    onboardingSession?.status === "checkpoint_required" ||
+    (onboardingSession?.status === "running" &&
+      (onboardingSession?.currentState === "browser_started" ||
+        onboardingSession?.currentState === "claude_authenticated"));
+  const displayState =
+    onboardingSession?.status === "checkpoint_required" && onboardingSession?.checkpoint
+      ? onboardingSession.checkpoint.blockedState
+      : onboardingSession?.currentState;
 
-  const totalSteps = 4;
+  const totalSteps = 3;
+  const step3Verified = connectionVerified || onboardingSession?.status === "completed";
+  const stepTitles = [
+    "Create a Claude connector",
+    "Set up your Claude project",
+    step3Verified ? "You're all set!" : "Verify your setup",
+  ];
 
   const resetConnectionVerification = useCallback(() => {
     setVerificationStartedAt(Date.now());
@@ -421,10 +854,32 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     setConnectionVerificationMessage(null);
   }, []);
 
+  const isTerminal = (status: ClaudeOnboardingStatus) =>
+    status === "completed" || status === "failed" || status === "canceled";
+
+  const stateLabel = (state: ClaudeOnboardingState) => {
+    switch (state) {
+      case "browser_started":
+        return "Browser Started";
+      case "claude_authenticated":
+        return "Claude Authenticated";
+      case "connector_connected":
+        return "Connector Connected";
+      case "project_upserted":
+        return "Project Ready";
+      case "instructions_applied":
+        return "Instructions Applied";
+      case "verified":
+        return "Verified";
+      default:
+        return "Queued";
+    }
+  };
+
   const handleNext = () => {
     if (step < totalSteps) {
       const nextStep = step + 1;
-      if (nextStep === 4) {
+      if (nextStep === 3) {
         resetConnectionVerification();
       }
       setStep(nextStep);
@@ -434,15 +889,218 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   };
 
   const handleBack = () => {
-    if (step > 1) setStep(s => s - 1);
+    if (step > 1) setStep((s) => s - 1);
   };
 
   const canNext = () => {
-    if (step === 1) return step1Verified;
-    if (step === 2) return step2Verified;
-    if (step === 4) return connectionVerified;
-    return true; // Step 3 & 4 don't block
+    if (step === 3) return step3Verified;
+    return true;
   };
+
+  const refreshOnboardingSession = useCallback(async (sessionId: string) => {
+    const [sessionRes, eventsRes] = await Promise.all([
+      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}`, { cache: "no-store" }),
+      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/events`, { cache: "no-store" }),
+    ]);
+    const sessionData = await sessionRes.json().catch(() => ({}));
+    const eventsData = await eventsRes.json().catch(() => ({}));
+
+    if (!sessionRes.ok) {
+      throw new Error(
+        typeof sessionData?.error === "string"
+          ? sessionData.error
+          : "Failed to fetch onboarding session"
+      );
+    }
+
+    const session = sessionData?.session as ClaudeOnboardingSession | undefined;
+    if (!session || typeof session.id !== "string") {
+      throw new Error("Malformed onboarding session response");
+    }
+
+    setOnboardingSession(session);
+    setOnboardingEvents(Array.isArray(eventsData?.events) ? (eventsData.events as ClaudeOnboardingEvent[]) : []);
+    return session;
+  }, []);
+
+  const startAutomatedSetup = useCallback(async () => {
+    setOnboardingBusy(true);
+    setOnboardingError(null);
+    try {
+      const res = await fetch("/api/integrations/claude-onboarding/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectName: "Tallei Memory",
+          applyProjectInstructions: true,
+          projectInstructions: getClaudeInstructions("instant"),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data?.error === "string" ? data.error : "Failed to start automated setup.");
+      }
+      const session = data?.session as ClaudeOnboardingSession | undefined;
+      if (!session || typeof session.id !== "string") {
+        throw new Error("Malformed onboarding start response.");
+      }
+      setOnboardingSession(session);
+      setOnboardingEvents([]);
+      setConnectionVerificationMessage("Automated setup started.");
+      setStep(4);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to start automated setup.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, []);
+
+  const resumeAutomatedSetup = useCallback(async (options?: {
+    authCompleted?: boolean;
+    setBusy?: boolean;
+    sessionId?: string;
+  }) => {
+    const sessionId = options?.sessionId ?? onboardingSession?.id;
+    if (!sessionId) return;
+    const setBusy = options?.setBusy ?? true;
+    if (setBusy) {
+      setOnboardingBusy(true);
+      setOnboardingError(null);
+    }
+
+    try {
+      const payload = options?.authCompleted === true ? { authCompleted: true } : {};
+      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data?.error === "string" ? data.error : "Failed to resume automated setup.");
+      }
+      const session = data?.session as ClaudeOnboardingSession | undefined;
+      if (!session || typeof session.id !== "string") {
+        throw new Error("Malformed onboarding resume response.");
+      }
+      setOnboardingSession(session);
+      await refreshOnboardingSession(session.id);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to resume automated setup.");
+    } finally {
+      if (setBusy) {
+        setOnboardingBusy(false);
+      }
+    }
+  }, [onboardingSession, refreshOnboardingSession]);
+
+  const cancelAutomatedSetup = useCallback(async () => {
+    if (!onboardingSession) return;
+    setOnboardingBusy(true);
+    setOnboardingError(null);
+    try {
+      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${onboardingSession.id}/cancel`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data?.error === "string" ? data.error : "Failed to cancel automated setup.");
+      }
+      const session = data?.session as ClaudeOnboardingSession | undefined;
+      if (!session || typeof session.id !== "string") {
+        throw new Error("Malformed onboarding cancel response.");
+      }
+      setOnboardingSession(session);
+      await refreshOnboardingSession(session.id);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to cancel automated setup.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [onboardingSession, refreshOnboardingSession]);
+
+  const manualRefreshOnboarding = useCallback(async () => {
+    if (!onboardingSession) return;
+    setOnboardingBusy(true);
+    setOnboardingError(null);
+    try {
+      await refreshOnboardingSession(onboardingSession.id);
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [onboardingSession, refreshOnboardingSession]);
+
+  useEffect(() => {
+    if (!isOpen || !onboardingSession) return;
+    if (isTerminal(onboardingSession.status)) return;
+
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const session = await refreshOnboardingSession(onboardingSession.id);
+        if (stopped) return;
+        if (session.status === "completed") {
+          setConnectionVerified(true);
+          setConnectionVerificationMessage("Automated setup completed successfully.");
+        }
+        if (session.status === "checkpoint_required" && session.checkpoint) {
+          const checkpointType = session.checkpoint.type;
+          if (checkpointType === "auth" || checkpointType === "manual_review") {
+            const signature =
+              `${session.id}:${session.checkpoint.blockedState}:${checkpointType}:${session.updatedAt}`;
+            const nowMs = Date.now();
+            const lastAttempt = autoResumeAttemptRef.current;
+            const shouldAttempt =
+              !lastAttempt ||
+              lastAttempt.signature !== signature ||
+              nowMs - lastAttempt.at >= 10_000;
+
+            if (shouldAttempt) {
+              autoResumeAttemptRef.current = { signature, at: nowMs };
+              void resumeAutomatedSetup({
+                sessionId: session.id,
+                authCompleted: checkpointType === "auth",
+                setBusy: false,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        if (!stopped) {
+          setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
+        }
+      }
+    };
+
+    void tick();
+    const timer = setInterval(() => {
+      void tick();
+    }, 2000);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [isOpen, onboardingSession, refreshOnboardingSession, resumeAutomatedSetup]);
+
+  useEffect(() => {
+    if (!isOpen || step !== 3) {
+      setShowConfetti(false);
+      previousVerifiedRef.current = false;
+      return;
+    }
+
+    const justVerified = step3Verified && !previousVerifiedRef.current;
+    previousVerifiedRef.current = Boolean(step3Verified);
+
+    if (!justVerified) return;
+
+    setShowConfetti(true);
+    const timer = setTimeout(() => setShowConfetti(false), 3200);
+    return () => clearTimeout(timer);
+  }, [isOpen, step, step3Verified]);
 
   async function handleVerifyConnection() {
     setVerifyingConnection(true);
@@ -454,94 +1112,226 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   }
 
   return (
-    <WizardModal isOpen={isOpen} onClose={onClose} title="Connect Claude" providerIcon={<img src="/claude.svg" width={24} height={24} alt="Claude" />} step={step} totalSteps={totalSteps} onNext={handleNext} onBack={handleBack} canNext={canNext()}>
-      
+    <WizardModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Connect Claude"
+      stepTitle={stepTitles[step - 1]}
+      providerIcon={<img src="/claude.svg" width={24} height={24} alt="Claude" />}
+      step={step}
+      totalSteps={totalSteps}
+      onNext={handleNext}
+      onBack={handleBack}
+      canNext={canNext()}
+    >
       {step === 1 && (
-        <TwoColumnStep
-          media={<StepMedia src="/add-mcp.mp4" alt="Add Custom Connector" caption="Creating the custom connector" />}
-          content={
-            <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>First, link Tallei to your Claude account. Open your Claude Connectors page and create a new custom connector with these exact values:</p>
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.5rem', borderRadius: '16px', border: '1px solid #e5e7eb', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.02)' }}>
-                <CopyField value="Tallei Memory" label="Name" />
-                <CopyField value={mcpUrl} label="Remote MCP server URL" />
-                
-                <Button variant="default" onClick={() => window.open("https://claude.ai/settings/connectors", "_blank")} style={{ width: '100%', marginTop: '0.5rem', fontWeight: 600 }}>
-                  Open Claude Connectors <ExternalLink size={14} style={{ marginLeft: "8px" }} />
-                </Button>
-              </div>
-
-              <VerifyChecklist items={['I clicked "Add custom connector"', 'I pasted the Name: Tallei Memory', 'I pasted the MCP URL']} onVerified={setStep1Verified} />
-            </>
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Open{" "}
+              <a
+                href="https://claude.ai/customize/connectors"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem" }}
+              >
+                Claude Connectors <ExternalLink size={14} />
+              </a>{" "}
+              and create a custom connector using these exact values and click <span style={{ color: "#4742BC", fontWeight: 700 }}>Connect</span>. Optionally enable <b>{"'Always allow'"}</b> to skip approval prompts in chat.
+            </p>
           }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.7rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb" }}>
+              <div className="claude-step1-grid" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.45fr)", gap: "0.75rem" }}>
+                <style
+                  dangerouslySetInnerHTML={{
+                    __html: `
+                      @media (max-width: 860px) {
+                        .claude-step1-grid {
+                          grid-template-columns: 1fr !important;
+                        }
+                      }
+                    `,
+                  }}
+                />
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+                  <CopyField value="Tallei Memory" label="Name" />
+                  <InlineInfoHint>Use this exact connector name.</InlineInfoHint>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+                  <CopyField value={mcpUrl} label="Remote MCP server URL" />
+                  <InlineInfoHint>Paste the full MCP URL exactly as shown.</InlineInfoHint>
+                </div>
+              </div>
+            </div>
+          }
+          media={<StepMedia src="/add-mcp.mp4" alt="Add Custom Connector" caption="Create the custom connector in Claude" />}
         />
       )}
 
       {step === 2 && (
-        <TwoColumnStep
-          media={<StepMedia src="/mcp-connect.mp4" alt="Connect Connector" caption="Connecting and authorizing" />}
-          content={
-            <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>Now click <strong>Connect</strong> inside Claude and approve the OAuth window that appears.</p>
-              <InfoCallout>This allows Claude to read and write memories to your secure Tallei vault.</InfoCallout>
-              <VerifyChecklist items={['I clicked Connect', 'I approved the OAuth access', 'The connector status inside Claude now shows "Connected"']} onVerified={setStep2Verified} />
-            </>
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Open{" "}
+              <a
+                href="https://claude.ai/projects/create"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem" }}
+              >
+                Claude Projects <ExternalLink size={14} />
+              </a>{" "}
+              and create a new project. Enable the connector, then paste the instructions below.
+            </p>
           }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+      
+              <div className="claude-step3-grid" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.35fr)", gap: "0.9rem" }}>
+                <style
+                  dangerouslySetInnerHTML={{
+                    __html: `
+                      @media (max-width: 860px) {
+                        .claude-step3-grid {
+                          grid-template-columns: 1fr !important;
+                        }
+                      }
+                    `,
+                  }}
+                />
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.55rem" }}>
+                  <CopyField value="Tallei Memory" label="Connector Name" />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "#111827" }}>
+                    Project <code>Custom Instructions</code>
+                  </h4>
+                  <CodeBlock value={getClaudeInstructions(saveMode)} language="txt" maxHeight={180} />
+                </div>
+              </div>
+            </div>
+          }
+          media={<StepMedia src="/add-instructions.mp4" alt="Add Instructions" caption="Create project and add instructions" />}
         />
       )}
 
       {step === 3 && (
-        <TwoColumnStep
-          media={<StepMedia src="/add-instructions.mp4" alt="Add Instructions" caption="Adding project instructions" />}
-          content={
-            <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>A Project lets all your chats share the same Tallei memory context.</p>
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: '#f8fafc', padding: '1rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem', color: '#374151' }}>
-                <div>1. Go to <strong>Claude → Projects</strong> and create a new project.</div>
-                <div>2. In the project settings, enable the <strong>Tallei Memory</strong> connector.</div>
+        <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "1.25rem", padding: "1rem", animation: "fadeIn 0.4s ease-out", minHeight: "100%", boxSizing: "border-box" }}>
+          <ConfettiBurst active={showConfetti} />
+
+          {CLAUDE_AUTOMATION_ENABLED && onboardingSession && (
+            <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "0", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
+              <div style={{ color: "#374151" }}>
+                <strong>Automation status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(displayState ?? onboardingSession.currentState)}
               </div>
-
-              <div>
-                <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 0.75rem 0', color: '#111827' }}>How should memories be saved?</h4>
-                <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
+              {onboardingSession.checkpoint && (
+                <div style={{ marginTop: "0.55rem", color: "#9a3412" }}>
+                  {onboardingSession.checkpoint.message}
+                  <div style={{ marginTop: "0.35rem" }}>{onboardingSession.checkpoint.resumeHint}</div>
+                  {checkpointActionUrl && (
+                    <div style={{ marginTop: "0.5rem" }}>
+                      <Button
+                        variant="outline"
+                        onClick={() => window.open(checkpointActionUrl, "_blank", "noopener,noreferrer")}
+                      >
+                        Open Live Session <ExternalLink size={12} style={{ marginLeft: "6px" }} />
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div style={{ marginTop: "0.6rem", display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+                {onboardingSession.status === "checkpoint_required" && (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void resumeAutomatedSetup({
+                        authCompleted: onboardingSession.checkpoint?.type === "auth",
+                      })
+                    }
+                    disabled={onboardingBusy}
+                  >
+                    {onboardingBusy ? "Resuming..." : "Resume"}
+                  </Button>
+                )}
+                {!isTerminal(onboardingSession.status) && (
+                  <Button variant="outline" onClick={() => void cancelAutomatedSetup()} disabled={onboardingBusy}>
+                    {onboardingBusy ? "Canceling..." : "Cancel"}
+                  </Button>
+                )}
+                {isTerminal(onboardingSession.status) && onboardingSession.status !== "completed" && (
+                  <Button variant="outline" onClick={() => void startAutomatedSetup()} disabled={onboardingBusy}>
+                    {onboardingBusy ? "Starting..." : "Run Repair"}
+                  </Button>
+                )}
+                <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
+                  Refresh
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => window.open("https://claude.ai/settings/connectors", "_blank", "noopener,noreferrer")}
+                >
+                  Open Claude Connectors <ExternalLink size={12} style={{ marginLeft: "6px" }} />
+                </Button>
               </div>
+              {onboardingSession.lastError && (
+                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingSession.lastError}</div>
+              )}
+              {onboardingEvents.length > 0 && (
+                <div style={{ marginTop: "0.35rem", fontSize: "0.78rem", color: "#6b7280" }}>
+                  Latest event: {onboardingEvents[onboardingEvents.length - 1].eventType}
+                </div>
+              )}
+              {onboardingError && (
+                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingError}</div>
+              )}
+            </div>
+          )}
 
-              <div>
-                <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 0.75rem 0', color: '#111827' }}>Paste this into your Project&apos;s <code>Custom Instructions</code>:</h4>
-                <CodeBlock value={getClaudeInstructions(saveMode)} language="txt" />
+          {CLAUDE_AUTOMATION_ENABLED && liveSessionUrl && (
+            <div style={{ width: "100%", maxWidth: "720px", textAlign: "left" }}>
+              <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#111827", marginBottom: "0.45rem" }}>
+                Live automation session
               </div>
-            </>
-          }
-        />
-      )}
+              <div style={{ position: "relative", borderRadius: "0", overflow: "hidden", border: "1px solid #e5e7eb", background: "#111827" }}>
+                <iframe
+                  src={liveSessionUrl}
+                  title="Claude live automation session"
+                  style={{ width: "100%", height: "420px", border: "none", display: "block", pointerEvents: liveInputRequired ? "auto" : "none" }}
+                  allow="clipboard-read; clipboard-write"
+                />
+                {!liveInputRequired && (
+                  <div style={{ position: "absolute", inset: 0, background: "rgba(17, 24, 39, 0.56)", color: "#f3f4f6", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: "0.85rem", padding: "1rem" }}>
+                    Automation is running. Input is locked until user action is required.
+                  </div>
+                )}
+              </div>
+              <div style={{ marginTop: "0.45rem", fontSize: "0.78rem", color: "#6b7280" }}>
+                {liveInputRequired
+                  ? "User input is needed now. Complete login/approval in the live session. The flow auto-resumes; Resume remains available as fallback."
+                  : "Live view only. Controls unlock automatically if a checkpoint requires your input."}
+              </div>
+            </div>
+          )}
 
-      {step === 4 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', alignItems: 'center', textAlign: 'center', padding: '2rem 1rem', animation: 'fadeIn 0.4s ease-out' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: '#16a34a', marginBottom: '0.5rem' }}>
-            <h3 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#111827', margin: 0, letterSpacing: '-0.02em' }}>You&apos;re all set!</h3>
-          </div>
-          <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6, maxWidth: '400px' }}>Try it out: inside your new Claude project, send this test message:</p>
-          
-          <div style={{ width: '100%', maxWidth: '500px', textAlign: 'left', marginTop: '1rem' }}>
-            <CodeBlock value={saveMode === 'instant' ? "My favorite programming language is Rust." : "Remember this: my favorite programming language is Rust."} language="txt" label="Test Prompt" />
-          </div>
-
-          <Button onClick={() => void handleVerifyConnection()} disabled={verifyingConnection} style={{ marginTop: '0.75rem' }}>
-            {verifyingConnection ? "Verifying..." : "Verify Connection Event"}
-          </Button>
+          <VerifySection
+            verifyingConnection={verifyingConnection}
+            step3Verified={step3Verified}
+            onVerify={() => void handleVerifyConnection()}
+          />
 
           {connectionVerificationMessage && (
-            <p style={{ color: connectionVerified ? '#16a34a' : '#b45309', fontSize: '0.85rem', marginTop: '0.25rem' }}>
+            <p style={{ color: connectionVerified ? "#16a34a" : "#b45309", fontSize: "0.85rem", margin: 0, textAlign: "center" }}>
               {connectionVerificationMessage}
             </p>
           )}
 
-          <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: '1rem' }}>Finish is enabled only after a fresh Claude event is detected.</p>
+          <div style={{ marginTop: "0.5rem" }}>
+            <StepMedia src="/claude-demo.mp4" alt="Verify Connection" caption="Send a test message in your project to verify" />
+          </div>
         </div>
       )}
-
     </WizardModal>
   );
 }
@@ -550,47 +1340,33 @@ export function ChatGPTWizard({
   isOpen,
   onClose,
   tokenStatus,
-  issuedToken,
   generatingToken,
   onGenerateToken,
 }: {
   isOpen: boolean;
   onClose: () => void;
   tokenStatus: ChatGptTokenStatus;
-  issuedToken: string | null;
   generatingToken: boolean;
-  onGenerateToken: () => Promise<void>;
+  onGenerateToken: (rotate?: boolean) => Promise<void>;
 }) {
   const [step, setStep] = useState(1);
-  const [saveMode, setSaveMode] = useState<SaveMode>("instant");
-  // Verification states
-  const [step1Verified, setStep1Verified] = useState(false);
-  const [step2Verified, setStep2Verified] = useState(false);
-  const [step3Verified, setStep3Verified] = useState(false);
-  const [verificationStartedAt, setVerificationStartedAt] = useState<number | null>(null);
-  const [verifyingConnection, setVerifyingConnection] = useState(false);
-  const [connectionVerified, setConnectionVerified] = useState(false);
-  const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
+  const saveMode: SaveMode = "instant";
 
-  const [tokenCopied, setTokenCopied] = useState(false);
   const openApiBase = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? window.location.origin : "");
-  const openApiUrl = `${openApiBase.replace(/\/$/, "")}/chatgpt/actions/openapi.json?v=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_VERSION)}`;
+  const openApiUrl = `${openApiBase.replace(/\/$/, "")}/chatgpt/actions/openapi.json?spec=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_TAG)}`;
 
-  const totalSteps = 4;
-
-  const resetConnectionVerification = useCallback(() => {
-    setVerificationStartedAt(Date.now());
-    setConnectionVerified(false);
-    setConnectionVerificationMessage(null);
-  }, []);
+  const totalSteps = 5;
+  const stepTitles = [
+    "Set up your ChatGPT project",
+    "Create bearer token",
+    "Set bearer authentication",
+    "Import from URL",
+    "Test in your GPT",
+  ];
 
   const handleNext = () => {
     if (step < totalSteps) {
-      const nextStep = step + 1;
-      if (nextStep === 4) {
-        resetConnectionVerification();
-      }
-      setStep(nextStep);
+      setStep(step + 1);
       return;
     }
     onClose();
@@ -598,131 +1374,139 @@ export function ChatGPTWizard({
   const handleBack = () => {
     if (step > 1) setStep(s => s - 1);
   };
-  const canNext = () => {
-    if (step === 1) return step1Verified;
-    if (step === 2) return step2Verified;
-    if (step === 3) return step3Verified;
-    if (step === 4) return connectionVerified;
-    return true;
-  };
 
-  async function handleVerifyConnection() {
-    setVerifyingConnection(true);
-    const since = verificationStartedAt ?? Date.now() - 2 * 60 * 1000;
-    const result = await verifyConnectivityEvent("chatgpt", since, {
-      lastTokenUsedAt: tokenStatus.lastTokenUsedAt,
-    });
-    setConnectionVerified(result.ok);
-    setConnectionVerificationMessage(result.message);
-    setVerifyingConnection(false);
-  }
+  const testPrompt = "My favorite programming language is Rust.";
 
   return (
-    <WizardModal isOpen={isOpen} onClose={onClose} title="Connect ChatGPT Actions" providerIcon={<img src="/chatgpt.svg" width={24} height={24} alt="ChatGPT" />} step={step} totalSteps={totalSteps} onNext={handleNext} onBack={handleBack} canNext={canNext()}>
+    <WizardModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Connect ChatGPT Actions"
+      stepTitle={stepTitles[step - 1]}
+      providerIcon={<img src="/chatgpt.svg" width={24} height={24} alt="ChatGPT" />}
+      step={step}
+      totalSteps={totalSteps}
+      onNext={handleNext}
+      onBack={handleBack}
+      canNext={true}
+    >
       
-      {step === 1 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', animation: 'fadeIn 0.2s ease-out' }}>
-          <p style={{ color: '#4b5563', margin: 0, fontSize: '0.95rem', lineHeight: 1.6 }}>First, generate an API token that ChatGPT will use to securely talk to Tallei. Keep it secret.</p>
-          
-          <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb' }}>
-             <Button variant="default" onClick={() => void onGenerateToken()} disabled={generatingToken} style={{ marginBottom: issuedToken ? '1rem' : '0', width: 'fit-content' }}>
-               {generatingToken ? "Generating..." : "Generate Bearer Token"}
-             </Button>
-             {issuedToken && (
-               <div style={{ marginTop: '1rem' }}>
-                  <CopyField value={issuedToken} label="Bearer Token (Copy this!)" onCopy={() => setTokenCopied(true)} />
-               </div>
-             )}
+      {step === 2 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1rem", animation: "fadeIn 0.2s ease-out", maxWidth: "760px", margin: "0 auto", width: "100%" }}>
+          <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+            First, ensure there is an active bearer token that ChatGPT can use to securely talk to Tallei.
+          </p>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.8rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", justifyContent: "space-between", flexWrap: "wrap" }}>
+              <div style={{ display: "inline-flex", width: "fit-content", alignItems: "center", gap: "0.4rem", border: `1px solid ${tokenStatus.hasActiveToken ? "#bbf7d0" : "#e5e7eb"}`, background: tokenStatus.hasActiveToken ? "#f0fdf4" : "#ffffff", color: tokenStatus.hasActiveToken ? "#15803d" : "#6b7280", fontSize: "0.78rem", fontWeight: 600, padding: "0.28rem 0.55rem", borderRadius: "999px" }}>
+                {tokenStatus.hasActiveToken ? <CheckCircle2 size={12} /> : <Clock3 size={12} />}
+                {tokenStatus.hasActiveToken ? "Active token detected" : "No active token yet"}
+              </div>
+              <Button
+                variant="default"
+                onClick={() => void onGenerateToken(Boolean(tokenStatus.hasActiveToken))}
+                disabled={generatingToken}
+                style={{ ...PURPOSE_BUTTON_STYLE, width: "fit-content", minWidth: "200px" }}
+              >
+                {generatingToken ? "Saving..." : (tokenStatus.hasActiveToken ? <><RefreshCw size={14} style={{ marginRight: "0.35rem" }} /> Rotate token</> : "Create Bearer Token")}
+              </Button>
+            </div>
+            {tokenStatus.hasActiveToken && (
+              <CopyField value={tokenStatus.maskedToken || "****************"} label="Bearer Token (Hidden)" copyable={false} />
+            )}
+            {tokenStatus.rawToken && (
+              <CopyField value={tokenStatus.rawToken} label="New Bearer Token (Copy Now)" />
+            )}
           </div>
-          
-          <InfoCallout>This token is shown only once. Make sure to copy it before continuing.</InfoCallout>
-          <VerifyChecklist
-            items={['I generated the bearer token', 'I copied the token to my clipboard']}
-            onVerified={setStep1Verified}
-            autoCheck={[Boolean(issuedToken || tokenStatus.hasActiveToken), tokenCopied]}
-            onToggle={(i, checked) => { if (i === 1 && checked && issuedToken) { navigator.clipboard.writeText(issuedToken).catch(()=>{}); setTokenCopied(true); } }}
-          />
+
+          <InlineInfoHint>
+            Raw bearer token is shown once right after create/rotate. Copy and store it now. Later, only the hidden placeholder is shown.
+          </InlineInfoHint>
         </div>
       )}
 
-      {step === 2 && (
-        <TwoColumnStep
-          media={<StepMedia src="/auth-bearer.mp4" alt="Import OpenAPI" caption="Importing Actions schema" />}
-          content={
-            <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>
-                In GPT Builder, open <strong>Actions</strong> and import this OpenAPI URL.
-              </p>
-              <Button
-                variant="default"
-                onClick={() => window.open("https://chatgpt.com/gpts/editor", "_blank")}
-                style={{ width: 'fit-content' }}
-              >
-                Open GPT Builder <ExternalLink size={14} style={{ marginLeft: "8px" }} />
-              </Button>
-              <CodeBlock value={openApiUrl} language="url" label="OpenAPI URL" />
-              <InfoCallout>This registers only recall + save memory + save preference actions for ChatGPT.</InfoCallout>
-              <VerifyChecklist
-                items={['I opened GPT Builder → Actions', 'I imported the OpenAPI URL', 'The actions loaded without schema errors']}
-                onVerified={setStep2Verified}
-              />
-            </>
-          }
-        />
-      )}
-
       {step === 3 && (
-        <TwoColumnStep
-          media={
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-              <StepMedia src="/auth-bearer.mp4" alt="ChatGPT Auth" caption="1. Set Authentication" />
-              <StepMedia src="/custom-instructions.png" alt="ChatGPT Instructions" caption="2. Instructions" />
+        <VerticalVideoStep
+          intro={
+           <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>Open{" "}<a href="https://chatgpt.com/gpts/editor" target="_blank" rel="noopener noreferrer" style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem", whiteSpace: "nowrap" }}>GPT Builder <ExternalLink size={14} /></a>{" "}then scroll down to <strong>Actions</strong>, click <strong>Create new action</strong>, and set bearer authentication.</p>
+          }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.8rem" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb", color: "#374151", fontSize: "0.92rem", lineHeight: 1.55 }}>
+                <div>1. Click ⚙️ to open <strong className="size-18">Authentication</strong>.</div>
+                <div>2. Click <strong>API key</strong> → select <span className="size-20 font-bold text-orange-700">Bearer</span>, paste your stored token value, then close.</div>
+              </div>
             </div>
           }
-          content={
-            <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>Almost done. We just need to give the GPT your token and its instructions.</p>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
-                <div>Click the ⚙️ gear icon next to <code>API Key</code> in Actions. Set Auth Type to <strong>Bearer</strong>, and paste the token from Step 1. Click Save.</div>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
-                <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
-                <div>Paste these instructions into the GPT&apos;s <strong>Instructions</strong> box:</div>
-                <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" maxHeight={260} />
-                <div style={{ marginTop: '0.25rem', fontWeight: 600, color: '#111827' }}>Save the GPT (set visibility to <code>Only me</code>) and add it to a ChatGPT Project.</div>
-              </div>
-
-              <VerifyChecklist items={['I set the Auth to Bearer with my token', 'I pasted the custom instructions', 'I saved the GPT and added it to my Project']} onVerified={setStep3Verified} />
-            </>
-          }
+          media={<StepMedia src="/auth-bearer.mp4" alt="Set bearer authentication" caption="Set Authentication to Bearer" />}
         />
       )}
 
       {step === 4 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', alignItems: 'center', textAlign: 'center', padding: '2rem 1rem', animation: 'fadeIn 0.4s ease-out' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: '#16a34a', marginBottom: '0.5rem' }}>
-            <h3 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#111827', margin: 0, letterSpacing: '-0.02em' }}>You&apos;re connected!</h3>
-          </div>
-          <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6, maxWidth: '400px' }}>Try it out: inside your new ChatGPT project, send this test message:</p>
-          
-          <div style={{ width: '100%', maxWidth: '500px', textAlign: 'left', marginTop: '1rem' }}>
-            <CodeBlock value={saveMode === 'instant' ? "My favorite programming language is Rust." : "Remember this: my favorite programming language is Rust."} language="txt" label="Test Prompt" />
-          </div>
-
-          <Button onClick={() => void handleVerifyConnection()} disabled={verifyingConnection} style={{ marginTop: '0.75rem' }}>
-            {verifyingConnection ? "Verifying..." : "Verify Connection Event"}
-          </Button>
-
-          {connectionVerificationMessage && (
-            <p style={{ color: connectionVerified ? '#16a34a' : '#b45309', fontSize: '0.85rem', marginTop: '0.25rem' }}>
-              {connectionVerificationMessage}
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Click <strong>Import from URL</strong>, then paste this OpenAPI URL and click <strong>Import</strong>. After that, click <strong>Update</strong>.
             </p>
-          )}
+          }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              <CodeBlock value={openApiUrl} language="url" label="OpenAPI URL" />
+              <InlineInfoHint>This registers recall + remember + undo + docs-lite search/recall actions for ChatGPT.</InlineInfoHint>
+            </div>
+          }
+          media={<StepMedia src="/openapi-json.mp4" alt="Import from URL in Actions" caption="Import OpenAPI URL in Actions" />}
+        />
+      )}
 
-          <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: '1rem' }}>Finish is enabled only after a fresh ChatGPT action event is detected.</p>
-        </div>
+      {step === 1 && (
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Create a new GPT in{" "}
+              <a
+                href="https://chatgpt.com/gpts/editor"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem" }}
+              >
+                GPT Builder <ExternalLink size={14} />
+              </a>{" "}
+              . Click <strong>Config</strong> set the project instructions and project name.
+            </p>
+          }
+          details={
+            <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start", flexWrap: "nowrap", overflowX: "auto" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", flex: "1 1 auto", minWidth: "420px" }}>
+                <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "#111827" }}>
+                  Project <code>Custom Instructions</code>
+                </h4>
+                <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" maxHeight={220} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", flex: "0 0 280px", minWidth: "280px" }}>
+                <CopyField value="Tallei Memory" label="Project Name" />
+              </div>
+            </div>
+          }
+          media={<StepMedia src="/custom-instructions.png" alt="Create project and add instructions" caption="Create project and paste instructions" />}
+        />
+      )}
+
+      {step === 5 && (
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Go into your GPT and paste this prompt to test memory.
+            </p>
+          }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              <CodeBlock value={testPrompt} language="txt" label="Test Prompt" />
+            </div>
+          }
+          media={<StepMedia src="/claude-demo.mp4" alt="Test in your GPT" caption="Send the test prompt inside your GPT" />}
+        />
       )}
 
     </WizardModal>

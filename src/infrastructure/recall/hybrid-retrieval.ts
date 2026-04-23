@@ -21,6 +21,7 @@ import { MemoryRepository, type MemoryRecordRow } from "../repositories/memory.r
 import { VectorRepository } from "../repositories/vector.repository.js";
 import { config } from "../../config/index.js";
 import type { MemoryType } from "../../orchestration/memory/memory-types.js";
+import { activitySignal, confidenceTier } from "./scoring-utils.js";
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -273,8 +274,14 @@ function memoryDecay(memoryTypeRaw: string, createdAtIso: string): number {
   if (memoryType === "fact") {
     return Math.max(0.5, Math.exp(-ageDays / 365));
   }
+  if (memoryType === "lesson") {
+    return Math.max(0.65, Math.exp(-ageDays / 540));
+  }
   if (memoryType === "decision") {
     return Math.max(0.45, Math.exp(-ageDays / 220));
+  }
+  if (memoryType === "failure") {
+    return Math.max(0.3, Math.exp(-ageDays / 90));
   }
   if (memoryType === "event" || memoryType === "note") {
     return Math.max(0.1, Math.exp(-ageDays / 45));
@@ -290,9 +297,6 @@ function isEventLikeQuery(query: string): boolean {
   return /\b(event|happened|yesterday|today|tomorrow|last\s+week|last\s+month|when)\b/i.test(query);
 }
 
-function referenceBoost(referenceCount: number): number {
-  return 1 + Math.log1p(Math.max(1, referenceCount));
-}
 
 function topReason(
   vectorNorm: number,
@@ -353,7 +357,8 @@ function buildContextBlock(memories: Array<{ text: string; metadata: Record<stri
   if (memories.length === 0) return "--- No relevant memories found ---";
   const lines = memories.map((memory) => {
     const platform = typeof memory.metadata.platform === "string" ? memory.metadata.platform : "unknown";
-    return `[${platform.toUpperCase()}] ${memory.text}`;
+    const tier = confidenceTier(memory.metadata.reference_count);
+    return `[${platform.toUpperCase()}:${tier}] ${memory.text}`;
   });
   return `--- Your Past Context ---\n${lines.join("\n")}\n---`;
 }
@@ -478,7 +483,7 @@ export async function hybridRecall(
     const score = Number((
       rrfScore *
       memoryDecay(doc.row.memory_type, doc.row.created_at) *
-      referenceBoost(doc.row.reference_count ?? 1)
+      activitySignal(doc.row.reference_count ?? 1, doc.row.last_referenced_at ?? null)
     ).toFixed(6));
 
     return [{
@@ -497,7 +502,7 @@ export async function hybridRecall(
     pinnedPreferenceDocs.map((doc) => ({
       id: doc.id,
       displayText: extractRawPreferenceText(doc.text),
-      score: Number((10 + referenceBoost(doc.row.reference_count ?? 1)).toFixed(6)),
+      score: Number((10 + activitySignal(doc.row.reference_count ?? 1, doc.row.last_referenced_at ?? null)).toFixed(6)),
       metadata: {
         ...((doc.row.summary_json && typeof doc.row.summary_json === "object")
           ? doc.row.summary_json as Record<string, unknown>
