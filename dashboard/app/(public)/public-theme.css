@@ -1142,7 +1142,7 @@ pre {
 }
 
 .cnn-provider-card.cnn-provider-card-gemini {
-  --cnn-accent: #4f46e5;
+  --cnn-accent: #4742BC;
   --cnn-accent-soft: rgba(79, 70, 229, 0.14);
   --cnn-glow: rgba(79, 70, 229, 0.2);
 }
@@ -3466,7 +3466,7 @@ pre {
 }
 
 .perf-row-icon-check {
-  color: #4f46e5;
+  color: #4742BC;
   stroke-width: 2.5;
 }
 

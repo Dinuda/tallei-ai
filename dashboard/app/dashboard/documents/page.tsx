@@ -392,7 +392,7 @@ export default function DocumentsPage() {
         <EmptyCollectionState
           title="No documents found"
           description="Upgrade to Pro or Power to monitor documents here."
-          actionLabel="View plans"
+          actionLabel="Upgrade"
           actionHref="/dashboard/billing"
           imageSrc={DOCUMENTS_EMPTY_IMAGE || undefined}
           illustration="none"

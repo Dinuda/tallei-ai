@@ -167,11 +167,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [mobileOpen]);
 
   const initials = getInitials(session?.user?.name, session?.user?.email);
-
   return (
-    <div className="logged-in-shell-light min-h-screen bg-white text-slate-900">
-      <header className="fixed inset-x-0 top-0 z-40 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-[1400px] items-center justify-between px-4 sm:px-6">
+    <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900">
+      <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
+        <div className="flex h-14 w-full items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-2">
             <Button
               type="button"
@@ -242,7 +241,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       <aside
         className={cn(
-          "fixed bottom-0 left-0 top-14 z-40 w-[248px] bg-white px-3 py-3 transition-transform md:translate-x-0",
+          "fixed bottom-0 left-0 top-14 z-40 w-[248px] border-r border-slate-200 bg-white px-3 py-3 transition-transform md:translate-x-0",
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         )}
         aria-label="Navigation"
@@ -250,8 +249,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <NavSectionContent pathname={pathname} onNavigate={() => setMobileOpen(false)} />
       </aside>
 
-      <main className="min-h-screen rounded-tl-3xl bg-[#f4f4f4] pt-14 md:pl-[248px] rounded-xl">
-        {children}
+      <main className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
+        <div className="mx-auto w-full max-w-7xl">
+          {children}
+        </div>
       </main>
     </div>
   );
