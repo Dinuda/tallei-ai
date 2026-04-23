@@ -107,7 +107,6 @@
 .public-root h4,
 .public-root h5,
 .public-root h6 {
-  font-family: 'DM Sans', sans-serif;
   color: var(--text);
   line-height: 1.2;
   letter-spacing: -0.02em;
@@ -862,7 +861,6 @@
 
 .page-title {
   margin-bottom: 0.24rem;
-  font-family: 'DM Sans', sans-serif;
   font-size: 1.65rem;
   font-weight: 700;
   color: var(--text);
@@ -1703,7 +1701,6 @@
 .landing-root h2, 
 .landing-root h3, 
 .landing-root h4 {
-  font-family: 'DM Sans', sans-serif;
   color: #1a1816;
   letter-spacing: -0.02em;
 }
@@ -1825,7 +1822,6 @@
 }
 
 .section-h2 {
-  font-family: 'DM Sans', 'Inter', sans-serif;
   font-size: clamp(2rem, 4vw, 3.25rem);
   font-weight: 500;
   line-height: 1.1;
