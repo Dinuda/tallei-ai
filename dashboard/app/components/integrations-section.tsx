@@ -1,12 +1,8 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Image from "next/image";
-import gsap from "gsap";
-import { useGSAP } from "@gsap/react";
 import "../styles/integrations-section.css";
-
-gsap.registerPlugin(useGSAP);
 
 const INTEGRATIONS = [
   { id: "chatgpt", name: "ChatGPT", icon: "/chatgpt.svg" },
@@ -53,18 +49,22 @@ const APPS = [
 
 export function IntegrationsSection() {
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [isStreamingMode, setIsStreamingMode] = useState(true);
   const [displayedUserMsg, setDisplayedUserMsg] = useState("");
   const [isTypingUser, setIsTypingUser] = useState(false);
   const [showMemoryBanner, setShowMemoryBanner] = useState(false);
   const [showBotMsg, setShowBotMsg] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
   const typeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const memoryDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const botDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resetDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runIdRef = useRef(0);
+  const currentApp = APPS[currentIndex];
+  const effectiveDisplayedUserMsg = isStreamingMode ? displayedUserMsg : currentApp.userMsg;
+  const effectiveIsTypingUser = isStreamingMode ? isTypingUser : false;
+  const effectiveShowMemoryBanner = isStreamingMode ? showMemoryBanner : true;
+  const effectiveShowBotMsg = isStreamingMode ? showBotMsg : true;
 
   const clearAnimationTimers = () => {
     if (typeIntervalRef.current) {
@@ -89,22 +89,25 @@ export function IntegrationsSection() {
     }
   };
 
-  // Auto-cycle through apps
   useEffect(() => {
-    const timer = setInterval(() => {
+    if (!isStreamingMode) return;
+
+    const autoCycleTimer = setInterval(() => {
       setCurrentIndex((prev) => (prev + 1) % APPS.length);
-    }, 12000); // 12 seconds per app to allow reading time and typing
+    }, 12000);
 
-    return () => clearInterval(timer);
-  }, []);
+    return () => clearInterval(autoCycleTimer);
+  }, [isStreamingMode]);
 
-  const currentApp = APPS[currentIndex];
-
-  // Typing effect for the user message, then show memory banner and bot message
   useEffect(() => {
     clearAnimationTimers();
     runIdRef.current += 1;
     const runId = runIdRef.current;
+
+    if (!isStreamingMode) {
+      return;
+    }
+
     const fullText = currentApp.userMsg;
     let i = 0;
 
@@ -116,11 +119,10 @@ export function IntegrationsSection() {
       setShowBotMsg(false);
     }, 0);
 
-    // Small delay before starting to type
     startDelayRef.current = setTimeout(() => {
       typeIntervalRef.current = setInterval(() => {
         if (runId !== runIdRef.current) return;
-        i += 1; 
+        i += 1;
         if (i >= fullText.length) {
           setDisplayedUserMsg(fullText);
           setIsTypingUser(false);
@@ -128,39 +130,33 @@ export function IntegrationsSection() {
             clearInterval(typeIntervalRef.current);
             typeIntervalRef.current = null;
           }
-          
-          // Show memory banner and bot message slightly after user finishes typing
+
           memoryDelayRef.current = setTimeout(() => {
             if (runId !== runIdRef.current) return;
             setShowMemoryBanner(true);
             botDelayRef.current = setTimeout(() => {
               if (runId !== runIdRef.current) return;
               setShowBotMsg(true);
-            }, 400); // small delay between banner and bot message
+            }, 400);
           }, 300);
-          
         } else {
           setDisplayedUserMsg(fullText.slice(0, i));
         }
-      }, 30); // Fast typing speed
+      }, 30);
     }, 600);
 
-    return () => {
-      clearAnimationTimers();
-    };
-  }, [currentApp.userMsg]);
+    return () => clearAnimationTimers();
+  }, [currentApp.userMsg, isStreamingMode]);
 
-  useGSAP(() => {
-    // Fade content in when index changes
-    gsap.fromTo(
-      contentRef.current,
-      { opacity: 0, y: 10 },
-      { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }
-    );
-  }, { dependencies: [currentIndex], scope: containerRef });
+  const handleTabClick = (index: number) => {
+    if (isStreamingMode) {
+      setIsStreamingMode(false);
+    }
+    setCurrentIndex(index);
+  };
 
   return (
-    <section className="integrations-hero" aria-label="AI Integrations" ref={containerRef}>
+    <section className="integrations-hero" aria-label="AI Integrations">
       {/* Left Column */}
       <div className="integrations-left">
         <span className="integrations-eyebrow">INTEGRATIONS</span>
@@ -205,7 +201,7 @@ export function IntegrationsSection() {
               <div 
                 key={app.id} 
                 className={`integrations-tab ${idx === currentIndex ? "active" : ""}`}
-                onClick={() => setCurrentIndex(idx)}
+                onClick={() => handleTabClick(idx)}
               >
                 <div className="integrations-tab-icon">
                   <Image src={app.icon} alt={app.name} width={16} height={16} />
@@ -244,20 +240,20 @@ export function IntegrationsSection() {
 
             {/* Chat Area */}
             <div className="integrations-chat">
-              <div className="integrations-chat-content" ref={contentRef}>
+              <div className="integrations-chat-content">
                 {/* Messages */}
                 <div className="integrations-message user">
                   <div className="integrations-message-avatar">Y</div>
                   <div className="integrations-message-body">
                     <p>
-                      {displayedUserMsg}
-                      {isTypingUser && <span className="integrations-typing-cursor" />}
+                      {effectiveDisplayedUserMsg}
+                      {effectiveIsTypingUser && <span className="integrations-typing-cursor" />}
                     </p>
                   </div>
                 </div>
 
                 {/* Memory Alert Banner */}
-                {showMemoryBanner && (
+                {effectiveShowMemoryBanner && (
                   <div className="integrations-memory-banner">
                     <div className="integrations-memory-icon">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a48ed4" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="tallei-tally-anim">
@@ -273,11 +269,11 @@ export function IntegrationsSection() {
                       <p className="integrations-memory-text">
                         <span className="integrations-memory-via integrations-memory-via-row">
                           <span className="integrations-memory-via-prefix">Synced from</span>
-                          <Image 
-                            src={currentApp.memoryVia === "Claude" ? "/claude.svg" : currentApp.memoryVia === "ChatGPT" ? "/chatgpt.svg" : "/gemini.svg"} 
-                            alt={currentApp.memoryVia} 
-                            width={14} 
-                            height={14} 
+                          <Image
+                            src={currentApp.memoryVia === "Claude" ? "/claude.svg" : currentApp.memoryVia === "ChatGPT" ? "/chatgpt.svg" : "/gemini.svg"}
+                            alt={currentApp.memoryVia}
+                            width={14}
+                            height={14}
                           />
                           <span className="integrations-memory-via-name">{currentApp.memoryVia}</span>
                         </span><br />
@@ -287,7 +283,7 @@ export function IntegrationsSection() {
                   </div>
                 )}
 
-                {showBotMsg && (
+                {effectiveShowBotMsg && (
                   <div className="integrations-message bot">
                     <div className="integrations-message-avatar">
                       <Image src={currentApp.icon} alt={currentApp.name} width={24} height={24} />
