@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import { createPortal } from "react-dom";
 import { Check, Copy, ExternalLink, Zap, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X } from "lucide-react";
 import { Button } from "../../../components/ui/button";
+import { AspectRatio } from "../../../components/ui/aspect-ratio";
 
 export type SaveMode = "instant" | "on_request";
 export type Provider = "claude" | "chatgpt";
@@ -296,7 +297,9 @@ export function CopyField({
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-      {label && <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</label>}
+      {label && <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "#111827" }}>
+                    {label}
+                  </h4>}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.65rem 0.85rem', background: '#fafafa', border: '1px solid #e5e7eb', borderRadius: "0", transition: 'all 0.2s', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.01)', gap: '0.75rem' }}>
         <code style={{ flex: 1, minWidth: 0, fontSize: '0.85rem', color: '#111827', fontFamily: 'SFMono-Regular, Consolas, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</code>
         {copyable && (
@@ -548,13 +551,10 @@ export function WizardModal({ isOpen, onClose, title, stepTitle, providerIcon, s
 export function StepMedia({
   src,
   alt,
-  caption,
-  maxHeight = "clamp(180px, 26vh, 300px)",
 }: {
   src: string;
   alt: string;
   caption?: string;
-  maxHeight?: string;
 }) {
   const isVideo = src.endsWith('.mp4');
   return (
@@ -564,12 +564,22 @@ export function StepMedia({
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ffbd2e' }} />
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#27c93f' }} />
        </div>
-       <div style={{ background: '#f8fafc', display: 'flex', justifyContent: 'center', alignItems: 'center', height: maxHeight, maxHeight, minHeight: '160px' }}>
-          {isVideo ? (
-            <video src={src} autoPlay loop muted playsInline preload="auto" style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', pointerEvents: 'none' }} />
-          ) : (
-            <img src={src} alt={alt} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
-          )}
+       <div style={{ background: '#f8fafc' }}>
+         <AspectRatio ratio={16 / 9}>
+           {isVideo ? (
+             <video
+               src={src}
+               autoPlay
+               loop
+               muted
+               playsInline
+               preload="auto"
+               style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', pointerEvents: 'none' }}
+             />
+           ) : (
+             <img src={src} alt={alt} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+           )}
+         </AspectRatio>
        </div>
     </div>
   );
@@ -742,13 +752,12 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       ? onboardingSession.checkpoint.blockedState
       : onboardingSession?.currentState;
 
-  const totalSteps = 4;
-  const step4Verified = connectionVerified || onboardingSession?.status === "completed";
+  const totalSteps = 3;
+  const step3Verified = connectionVerified || onboardingSession?.status === "completed";
   const stepTitles = [
     "Create a Claude connector",
-    "Connect and approve OAuth",
     "Set up your Claude project",
-    step4Verified ? "You're all set!" : "Verify your setup",
+    step3Verified ? "You're all set!" : "Verify your setup",
   ];
 
   const resetConnectionVerification = useCallback(() => {
@@ -796,7 +805,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   };
 
   const canNext = () => {
-    if (step === 4) return step4Verified;
+    if (step === 3) return step3Verified;
     return true;
   };
 
@@ -995,15 +1004,15 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       return;
     }
 
-    const justVerified = step4Verified && !previousVerifiedRef.current;
-    previousVerifiedRef.current = Boolean(step4Verified);
+    const justVerified = step3Verified && !previousVerifiedRef.current;
+    previousVerifiedRef.current = Boolean(step3Verified);
 
     if (!justVerified) return;
 
     setShowConfetti(true);
     const timer = setTimeout(() => setShowConfetti(false), 3200);
     return () => clearTimeout(timer);
-  }, [isOpen, step, step4Verified]);
+  }, [isOpen, step, step3Verified]);
 
   async function handleVerifyConnection() {
     setVerifyingConnection(true);
@@ -1068,7 +1077,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
               </div>
             </div>
           }
-          media={<StepMedia src="/add-mcp.mp4" alt="Add Custom Connector" caption="Create the custom connector in Claude" maxHeight="clamp(170px, 24vh, 250px)" />}
+          media={<StepMedia src="/add-mcp.mp4" alt="Add Custom Connector" caption="Create the custom connector in Claude" />}
         />
       )}
 
@@ -1082,7 +1091,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           details={
             <InlineInfoHint>This grants Claude access to read and write memories in your secure Tallei vault.</InlineInfoHint>
           }
-          media={<StepMedia src="/mcp-connect.mp4" alt="Connect Connector" caption="Connect the Tallei connector" maxHeight="clamp(180px, 26vh, 260px)" />}
+          media={<StepMedia src="/mcp-connect.mp4" alt="Connect Connector" caption="Connect the Tallei connector" />}
         />
       )}
 
@@ -1090,15 +1099,21 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
         <VerticalVideoStep
           intro={
             <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
-              Create a project, enable the connector, then paste the instructions below.
+              Open{" "}
+              <a
+                href="https://claude.ai/projects/create"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem" }}
+              >
+                Claude Projects <ExternalLink size={14} />
+              </a>{" "}
+              and create a new project. Enable the connector, then paste the instructions below.
             </p>
           }
           details={
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb", fontSize: "0.95rem", color: "#374151" }}>
-                <div>1. Go to <strong>Claude → Projects</strong> and create a new project.</div>
-                <div>2. In project settings, enable this connector.</div>
-              </div>
+      
               <div className="claude-step3-grid" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.35fr)", gap: "0.9rem" }}>
                 <style
                   dangerouslySetInnerHTML={{
@@ -1113,7 +1128,6 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                 />
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.55rem" }}>
                   <CopyField value="Tallei Memory" label="Connector Name" />
-                  <InlineInfoHint>Use Save Instantly mode in this onboarding flow.</InlineInfoHint>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                   <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "#111827" }}>
@@ -1124,7 +1138,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
               </div>
             </div>
           }
-          media={<StepMedia src="/add-instructions.mp4" alt="Add Instructions" caption="Create project and add instructions" maxHeight="clamp(170px, 22vh, 240px)" />}
+          media={<StepMedia src="/add-instructions.mp4" alt="Add Instructions" caption="Create project and add instructions" />}
         />
       )}
 
@@ -1133,7 +1147,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           <ConfettiBurst active={showConfetti} />
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", color: "#16a34a", marginBottom: "0.5rem" }}>
             <h3 style={{ fontSize: "1.4rem", fontWeight: 700, color: "#111827", margin: 0, letterSpacing: "-0.02em" }}>
-              {step4Verified ? "You&apos;re all set!" : "Verify your setup"}
+              {step3Verified ? "You&apos;re all set!" : "Verify your setup"}
             </h3>
           </div>
 
@@ -1233,7 +1247,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           )}
 
           <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6, maxWidth: "520px" }}>
-            {step4Verified
+            {step3Verified
               ? "Connection verified. You can finish setup now."
               : "Inside your new Claude project, send this test message and then verify the connection event."}
           </p>
@@ -1244,17 +1258,17 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
 
           <Button
             onClick={() => void handleVerifyConnection()}
-            disabled={verifyingConnection || step4Verified}
+            disabled={verifyingConnection || step3Verified}
             style={{
               ...PURPOSE_BUTTON_STYLE,
               width: "100%",
               maxWidth: "500px",
               marginTop: "0.35rem",
-              background: (verifyingConnection || step4Verified) ? "#8b88d3" : PURPOSE_BUTTON_STYLE.background,
-              borderColor: (verifyingConnection || step4Verified) ? "#8b88d3" : "#4338ca",
+              background: (verifyingConnection || step3Verified) ? "#8b88d3" : PURPOSE_BUTTON_STYLE.background,
+              borderColor: (verifyingConnection || step3Verified) ? "#8b88d3" : "#4338ca",
             }}
           >
-            {verifyingConnection ? "Verifying..." : step4Verified ? "Verified" : "Verify Connection Event"}
+            {verifyingConnection ? "Verifying..." : step3Verified ? "Verified" : "Verify Connection Event"}
           </Button>
 
           {connectionVerificationMessage && (
@@ -1263,7 +1277,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
             </p>
           )}
 
-          {!step4Verified && (
+          {!step3Verified && (
             <p style={{ color: "#6b7280", fontSize: "0.85rem", marginTop: "0.65rem" }}>
               Finish is enabled only after a fresh Claude event is detected.
             </p>
