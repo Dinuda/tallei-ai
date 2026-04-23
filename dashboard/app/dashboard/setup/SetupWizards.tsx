@@ -653,14 +653,15 @@ export function VerticalVideoStep({
 function ConfettiBurst({ active }: { active: boolean }) {
   const pieces = useMemo(
     () =>
-      Array.from({ length: 70 }, (_, index) => ({
+      Array.from({ length: 50 }, (_, index) => ({
         id: index,
-        left: (index * 17) % 110 - 5,
-        delay: (index % 12) * 0.04,
-        duration: 2.1 + (index % 8) * 0.18,
-        rotate: -160 + ((index * 37) % 320),
+        left: (index * 19) % 110 - 5,
+        delay: (index % 15) * 0.08,
+        duration: 3.5 + (index % 10) * 0.25,
+        rotate: -180 + ((index * 41) % 360),
         direction: index % 2 === 0 ? "right" : "left",
-        color: ["#f97316", "#3b82f6", "#22c55e", "#eab308", "#ef4444", "#a855f7"][index % 6],
+        size: 6 + (index % 4) * 2,
+        opacity: 0.4 + (index % 4) * 0.15,
       })),
     []
   );
@@ -683,13 +684,15 @@ function ConfettiBurst({ active }: { active: boolean }) {
           __html: `
           @keyframes confetti-sweep-right {
             0% { transform: translate3d(0, -12%, 0) rotate(0deg); opacity: 0; }
-            10% { opacity: 1; }
-            100% { transform: translate3d(42vw, 118vh, 0) rotate(720deg); opacity: 0; }
+            8% { opacity: var(--piece-opacity); }
+            85% { opacity: var(--piece-opacity); }
+            100% { transform: translate3d(38vw, 118vh, 0) rotate(540deg); opacity: 0; }
           }
           @keyframes confetti-sweep-left {
             0% { transform: translate3d(0, -12%, 0) rotate(0deg); opacity: 0; }
-            10% { opacity: 1; }
-            100% { transform: translate3d(-42vw, 118vh, 0) rotate(720deg); opacity: 0; }
+            8% { opacity: var(--piece-opacity); }
+            85% { opacity: var(--piece-opacity); }
+            100% { transform: translate3d(-38vw, 118vh, 0) rotate(-540deg); opacity: 0; }
           }
           `,
         }}
@@ -701,21 +704,144 @@ function ConfettiBurst({ active }: { active: boolean }) {
             position: "absolute",
             top: "-12%",
             left: `${piece.left}%`,
-            width: "8px",
-            height: "14px",
-            borderRadius: "1px",
-            background: piece.color,
+            width: `${piece.size}px`,
+            height: `${piece.size}px`,
+            borderRadius: "50%",
+            background: "radial-gradient(circle at 30% 30%, rgba(255,255,255,0.8), rgba(126,183,27,0.6), rgba(126,183,27,0.3))",
+            boxShadow: "0 0 12px rgba(126,183,27,0.3), 0 0 24px rgba(126,183,27,0.15)",
             opacity: 0,
+            "--piece-opacity": piece.opacity,
             transform: `rotate(${piece.rotate}deg)`,
             animation:
               piece.direction === "right"
-                ? `confetti-sweep-right ${piece.duration}s cubic-bezier(0.18, 0.72, 0.29, 1) ${piece.delay}s forwards`
-                : `confetti-sweep-left ${piece.duration}s cubic-bezier(0.18, 0.72, 0.29, 1) ${piece.delay}s forwards`,
-          }}
+                ? `confetti-sweep-right ${piece.duration}s cubic-bezier(0.25, 0.46, 0.45, 0.94) ${piece.delay}s forwards`
+                : `confetti-sweep-left ${piece.duration}s cubic-bezier(0.25, 0.46, 0.45, 0.94) ${piece.delay}s forwards`,
+          } as React.CSSProperties}
         />
       ))}
     </div>,
     document.body
+  );
+}
+
+function VerifySection({
+  verifyingConnection,
+  step3Verified,
+  onVerify,
+}: {
+  verifyingConnection: boolean;
+  step3Verified: boolean;
+  onVerify: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth <= 640);
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  return (
+    <div
+      className="verify-section"
+      style={{
+        display: "flex",
+        flexDirection: isMobile ? ("column" as const) : ("row" as const),
+        alignItems: isMobile ? ("stretch" as const) : ("center" as const),
+        gap: isMobile ? "0.75rem" : "1rem",
+        padding: "1rem",
+        background: "#f8fafc",
+        border: "1px solid #e5e7eb",
+        borderRadius: "0",
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p
+          style={{
+            color: "#4b5563",
+            margin: 0,
+            fontSize: isMobile ? "0.9rem" : "0.95rem",
+            lineHeight: 1.5,
+          }}
+        >
+          <strong>Make sure to operate your memory within your Claude project.</strong>
+          {!isMobile && <> Send a test message in your project to verify the connection.</>}
+        </p>
+
+        {isMobile && (
+          <>
+            <button
+              onClick={() => setExpanded(!expanded)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.35rem",
+                marginTop: "0.5rem",
+                fontSize: "0.8rem",
+                color: "#4742BC",
+                background: "none",
+                border: "none",
+                padding: 0,
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              {expanded ? (
+                <>
+                  <ChevronUp size={14} /> Hide instructions
+                </>
+              ) : (
+                <>
+                  <ChevronDown size={14} /> Show instructions
+                </>
+              )}
+            </button>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateRows: expanded ? "1fr" : "0fr",
+                transition: "grid-template-rows 0.3s ease-out",
+                marginTop: expanded ? "0.75rem" : 0,
+              }}
+            >
+              <div style={{ overflow: "hidden" }}>
+                <div
+                  style={{
+                    padding: "0.75rem",
+                    background: "#ffffff",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: "0",
+                    fontSize: "0.85rem",
+                    color: "#4b5563",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  Send a test message in your Claude project to verify the connection is working properly.
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      <Button
+        onClick={onVerify}
+        disabled={verifyingConnection || step3Verified}
+        style={{
+          ...PURPOSE_BUTTON_STYLE,
+          width: isMobile ? "100%" : "auto",
+          minWidth: isMobile ? "auto" : "140px",
+          marginTop: 0,
+          background: verifyingConnection || step3Verified ? "#8b88d3" : PURPOSE_BUTTON_STYLE.background,
+          borderColor: verifyingConnection || step3Verified ? "#8b88d3" : "#4338ca",
+        }}
+      >
+        {verifyingConnection ? "Verifying..." : step3Verified ? "Verified" : "Verify"}
+      </Button>
+    </div>
   );
 }
 
@@ -791,7 +917,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   const handleNext = () => {
     if (step < totalSteps) {
       const nextStep = step + 1;
-      if (nextStep === 4) {
+      if (nextStep === 3) {
         resetConnectionVerification();
       }
       setStep(nextStep);
@@ -998,7 +1124,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   }, [isOpen, onboardingSession, refreshOnboardingSession, resumeAutomatedSetup]);
 
   useEffect(() => {
-    if (!isOpen || step !== 4) {
+    if (!isOpen || step !== 3) {
       setShowConfetti(false);
       previousVerifiedRef.current = false;
       return;
@@ -1049,7 +1175,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
               >
                 Claude Connectors <ExternalLink size={14} />
               </a>{" "}
-              and create a custom connector using these exact values and click <span style={{ color: "#4742BC", fontWeight: 700 }}>Connect</span>.
+              and create a custom connector using these exact values and click <span style={{ color: "#4742BC", fontWeight: 700 }}>Connect</span>. Optionally enable <b>{"'Always allow'"}</b> to skip approval prompts in chat.
             </p>
           }
           details={
@@ -1082,20 +1208,6 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       )}
 
       {step === 2 && (
-        <VerticalVideoStep
-          intro={
-            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
-              Click <strong>Connect</strong> in Claude, then approve the OAuth window.
-            </p>
-          }
-          details={
-            <InlineInfoHint>This grants Claude access to read and write memories in your secure Tallei vault.</InlineInfoHint>
-          }
-          media={<StepMedia src="/mcp-connect.mp4" alt="Connect Connector" caption="Connect the Tallei connector" />}
-        />
-      )}
-
-      {step === 3 && (
         <VerticalVideoStep
           intro={
             <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
@@ -1142,14 +1254,9 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
         />
       )}
 
-      {step === 4 && (
-        <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "1rem", alignItems: "center", textAlign: "center", padding: "1.75rem 1rem 1rem", animation: "fadeIn 0.4s ease-out", minHeight: "100%", boxSizing: "border-box" }}>
+      {step === 3 && (
+        <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "1.25rem", padding: "1rem", animation: "fadeIn 0.4s ease-out", minHeight: "100%", boxSizing: "border-box" }}>
           <ConfettiBurst active={showConfetti} />
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", color: "#16a34a", marginBottom: "0.5rem" }}>
-            <h3 style={{ fontSize: "1.4rem", fontWeight: 700, color: "#111827", margin: 0, letterSpacing: "-0.02em" }}>
-              {step3Verified ? "You&apos;re all set!" : "Verify your setup"}
-            </h3>
-          </div>
 
           {CLAUDE_AUTOMATION_ENABLED && onboardingSession && (
             <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "0", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
@@ -1246,42 +1353,21 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
             </div>
           )}
 
-          <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.6, maxWidth: "520px" }}>
-            {step3Verified
-              ? "Connection verified. You can finish setup now."
-              : "Inside your new Claude project, send this test message and then verify the connection event."}
-          </p>
-
-          <div style={{ width: "100%", maxWidth: "500px", textAlign: "left", marginTop: "0.65rem" }}>
-            <CodeBlock value="My favorite programming language is Rust." language="txt" label="Test Prompt" />
-          </div>
-
-          <Button
-            onClick={() => void handleVerifyConnection()}
-            disabled={verifyingConnection || step3Verified}
-            style={{
-              ...PURPOSE_BUTTON_STYLE,
-              width: "100%",
-              maxWidth: "500px",
-              marginTop: "0.35rem",
-              background: (verifyingConnection || step3Verified) ? "#8b88d3" : PURPOSE_BUTTON_STYLE.background,
-              borderColor: (verifyingConnection || step3Verified) ? "#8b88d3" : "#4338ca",
-            }}
-          >
-            {verifyingConnection ? "Verifying..." : step3Verified ? "Verified" : "Verify Connection Event"}
-          </Button>
+          <VerifySection
+            verifyingConnection={verifyingConnection}
+            step3Verified={step3Verified}
+            onVerify={() => void handleVerifyConnection()}
+          />
 
           {connectionVerificationMessage && (
-            <p style={{ color: connectionVerified ? "#16a34a" : "#b45309", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+            <p style={{ color: connectionVerified ? "#16a34a" : "#b45309", fontSize: "0.85rem", margin: 0, textAlign: "center" }}>
               {connectionVerificationMessage}
             </p>
           )}
 
-          {!step3Verified && (
-            <p style={{ color: "#6b7280", fontSize: "0.85rem", marginTop: "0.65rem" }}>
-              Finish is enabled only after a fresh Claude event is detected.
-            </p>
-          )}
+          <div style={{ marginTop: "0.5rem" }}>
+            <StepMedia src="/claude-demo.mp4" alt="Verify Connection" caption="Send a test message in your project to verify" />
+          </div>
         </div>
       )}
     </WizardModal>
