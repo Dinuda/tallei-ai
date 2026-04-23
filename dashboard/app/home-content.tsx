@@ -1,8 +1,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
-import { IntegrationsSection } from "../components/integrations-section";
-import { PerformanceSection } from "../components/performance-section";
+import { IntegrationsSection } from "./components/integrations-section";
+import { PerformanceSection } from "./components/performance-section";
 
 
 
@@ -146,6 +146,9 @@ export function HomeContent() {
       ═════════════════════════════════════════════════════ */}
       <header className="hero">
         <div className="hero-inner">
+          <div className="hero-pill">
+            Sync memory between ChatGPT and Claude
+          </div>
           <h1 className="hero-h1">
             Make your AI tools<br/>
             <em>actually</em> talk<br/>
@@ -154,19 +157,19 @@ export function HomeContent() {
 
           {/* ─ Right Panel ─ */}
           <div className="hero-right">
-            <figure className="hero-right-inner">
+            <div className="hero-right-inner">
               <div className="hero-illustration">
                 <Image
                   src="/hero-image-bg.png"
                   alt="Person at desk with floating AI cards"
-                  width={1540}
-                  height={1021}
-                  style={{ width: "100%", height: "auto" }}
+                  width={720}
+                  height={720}
+                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
                   priority
                 />
               </div>
-              <figcaption className="hero-caption">Before Tallei — Every tool, isolated</figcaption>
-            </figure>
+              <div className="hero-caption">Before Tallei — Every tool, isolated</div>
+            </div>
           </div>
 
           <p className="hero-sub">

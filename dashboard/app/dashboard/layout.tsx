@@ -4,7 +4,7 @@ import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Menu, X } from "lucide-react";
+import { Menu, Sparkles, X } from "lucide-react";
 import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -187,45 +187,60 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </Link>
           </div>
 
-          <div className="relative flex items-center gap-3 border-l pl-4">
-            <button
-              type="button"
-              onClick={() => setProfileOpen((v) => !v)}
-              className="rounded-full"
-              aria-label="Toggle profile menu"
-            >
-              <Avatar size="sm">
-                <AvatarImage src={session?.user?.image ?? undefined} alt={session?.user?.name ?? "User"} />
-                <AvatarFallback>{initials}</AvatarFallback>
-              </Avatar>
-            </button>
+          <div className="flex items-center gap-2 pl-3 sm:pl-4">
+            <div className="hidden items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1 text-[12px] font-medium text-amber-900 lg:inline-flex">
+              <Sparkles className="size-3.5" />
+              <span>14 day free trial</span>
+            </div>
 
-            {profileOpen ? (
-              <>
-                <button
-                  type="button"
-                  className="fixed inset-0 z-40 cursor-default"
-                  onClick={() => setProfileOpen(false)}
-                  aria-label="Close profile menu"
-                />
-                <Card className="absolute right-0 top-[calc(100%+10px)] z-50 w-56 border-slate-200 bg-white shadow-lg">
-                  <CardContent className="space-y-3 p-2">
-                    <div className="rounded-md border px-3 py-2">
-                      <p className="text-xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">Signed in as</p>
-                      <p className="truncate text-sm font-medium text-foreground">{session?.user?.email}</p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="w-full justify-start"
-                      onClick={() => signOut({ callbackUrl: "/login" })}
-                    >
-                      Sign out
-                    </Button>
-                  </CardContent>
-                </Card>
-              </>
-            ) : null}
+            <Button
+              asChild
+              size="sm"
+              className="bg-amber-500 text-amber-950 hover:bg-amber-400 focus-visible:border-amber-500 focus-visible:ring-amber-300 rounded-lg"
+            >
+              <Link href="/dashboard/billing">Upgrade</Link>
+            </Button>
+
+            <div className="relative ml-1 border-l border-slate-200 pl-3">
+              <button
+                type="button"
+                onClick={() => setProfileOpen((v) => !v)}
+                className="rounded-full"
+                aria-label="Toggle profile menu"
+              >
+                <Avatar size="sm">
+                  <AvatarImage src={session?.user?.image ?? undefined} alt={session?.user?.name ?? "User"} />
+                  <AvatarFallback>{initials}</AvatarFallback>
+                </Avatar>
+              </button>
+
+              {profileOpen ? (
+                <>
+                  <button
+                    type="button"
+                    className="fixed inset-0 z-40 cursor-default"
+                    onClick={() => setProfileOpen(false)}
+                    aria-label="Close profile menu"
+                  />
+                  <Card className="absolute right-0 top-[calc(100%+10px)] z-50 w-56 border-slate-200 bg-white shadow-lg">
+                    <CardContent className="space-y-3 p-2">
+                      <div className="rounded-md border px-3 py-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">Signed in as</p>
+                        <p className="truncate text-sm font-medium text-foreground">{session?.user?.email}</p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="w-full justify-start"
+                        onClick={() => signOut({ callbackUrl: "/login" })}
+                      >
+                        Sign out
+                      </Button>
+                    </CardContent>
+                  </Card>
+                </>
+              ) : null}
+            </div>
           </div>
         </div>
       </header>

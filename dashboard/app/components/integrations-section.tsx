@@ -27,7 +27,7 @@ const APPS = [
     memoryText: "I have a severe peanut allergy and travel with my 5-year-old daughter. We prefer quiet, family-friendly spots.",
     userMsg: "Can you suggest 2 places for lunch near Central Park?",
     botMsg: "1. **Friedman's:** 100% peanut-free kitchen and very kid-friendly.\n2. **Bistango:** Awesome allergy protocols and a dedicated kids' menu.\n\nBoth are quiet and just a short walk from the park!",
-    placeholder: "Message ChatGPT..."
+    placeholder: "Message..."
   },
   {
     id: "claude",
@@ -37,7 +37,7 @@ const APPS = [
     memoryText: "I run a small bakery. My tone is always warm, friendly, and includes a pastry pun.",
     userMsg: "Reply to an angry customer whose cake was 30 mins late.",
     botMsg: "Hi Sarah,\n\nI am so incredibly sorry for the delay with your cake today! That's certainly not the experience we want to bake into your special day.\n\nI'd love to offer you a full refund—we really want to make this right.",
-    placeholder: "Message Claude..."
+    placeholder: "Message..."
   },
   {
     id: "gemini",
@@ -47,7 +47,7 @@ const APPS = [
     memoryText: "I'm a beginner runner training for a 5K. I only have time to run on Tuesdays, Thursdays, and Sundays.",
     userMsg: "Adjust my plan for this week, I'm feeling really sore.",
     botMsg: "No problem! Let's swap Thursday's run for a light 20-minute walk to help you recover. We'll keep Tuesday and Sunday as your main running days. \n\nListen to your body—rest is just as important as running!",
-    placeholder: "Ask Gemini..."
+    placeholder: "Message..."
   }
 ];
 
@@ -272,14 +272,14 @@ export function IntegrationsSection() {
                       <p className="integrations-memory-title">Memory from your last session</p>
                       <p className="integrations-memory-text">
                         <span className="integrations-memory-via integrations-memory-via-row">
-                          Synced from 
+                          <span className="integrations-memory-via-prefix">Synced from</span>
                           <Image 
                             src={currentApp.memoryVia === "Claude" ? "/claude.svg" : currentApp.memoryVia === "ChatGPT" ? "/chatgpt.svg" : "/gemini.svg"} 
                             alt={currentApp.memoryVia} 
                             width={14} 
                             height={14} 
                           />
-                          {currentApp.memoryVia}
+                          <span className="integrations-memory-via-name">{currentApp.memoryVia}</span>
                         </span><br />
                         {currentApp.memoryText}
                       </p>
