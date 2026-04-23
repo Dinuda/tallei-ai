@@ -3,6 +3,10 @@ import { auth } from "../auth";
 import { Providers } from "./providers";
 import { TopNav } from "./top-nav";
 import "./globals.css";
+import { Geist } from "next/font/google";
+import { cn } from "@/lib/utils";
+
+const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 const metadataDescription =
   "Tallei syncs persistent memory across ChatGPT, Claude, and Gemini. Write your preferences once — every AI assistant already knows them.";
@@ -118,7 +122,7 @@ export default async function RootLayout({
   const session = await auth();
 
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable)}>
       <body suppressHydrationWarning>
         <Providers session={session}>
           <TopNav />

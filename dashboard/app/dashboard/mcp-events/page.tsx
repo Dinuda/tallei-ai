@@ -93,7 +93,7 @@ export default function McpEventsPage() {
   }, []);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem", paddingBottom: "3rem" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem", paddingBottom: "3rem", maxWidth: 1100, width: "100%", margin: "0 auto" }}>
       
       {/* ── Header Area ── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "1rem" }}>
@@ -104,7 +104,7 @@ export default function McpEventsPage() {
           <button style={{
             display: "inline-flex", alignItems: "center", gap: "0.5rem",
             background: "var(--surface)", border: "1px solid var(--border)",
-            padding: "0.4rem 0.8rem", borderRadius: "8px", fontSize: "0.85rem",
+            padding: "0.4rem 0.8rem", borderRadius: "var(--radius-sm)", fontSize: "0.85rem",
             color: "var(--text)", cursor: "pointer", fontWeight: 500
           }}>
             Pick a date range <ChevronDown size={14} />
@@ -113,12 +113,12 @@ export default function McpEventsPage() {
           {/* Segmented control */}
           <div style={{
             display: "flex", alignItems: "center", background: "#f1f5f9",
-            padding: "0.2rem", borderRadius: "8px", border: "1px solid var(--border-light)"
+            padding: "0.2rem", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-light)"
           }}>
             {["All Time", "1d", "7d", "30d"].map((label, idx) => (
               <button key={label} style={{
                 background: idx === 0 ? "#ffffff" : "transparent",
-                border: "none", borderRadius: "6px",
+                border: "none", borderRadius: "var(--radius-sm)",
                 padding: "0.3rem 0.7rem", fontSize: "0.8rem", fontWeight: idx === 0 ? 600 : 500,
                 color: idx === 0 ? "var(--text)" : "var(--text-muted)",
                 cursor: "pointer",
@@ -133,7 +133,7 @@ export default function McpEventsPage() {
           <button style={{
             display: "inline-flex", alignItems: "center", justifyContent: "center",
             background: "var(--surface)", border: "1px solid var(--border)",
-            padding: "0.4rem", borderRadius: "8px", color: "var(--text-2)", cursor: "pointer"
+            padding: "0.4rem", borderRadius: "var(--radius-sm)", color: "var(--text-2)", cursor: "pointer"
           }}>
             <ListFilter size={16} />
           </button>
@@ -145,7 +145,7 @@ export default function McpEventsPage() {
             style={{
               display: "inline-flex", alignItems: "center", justifyContent: "center",
               background: "var(--surface)", border: "1px solid var(--border)",
-              padding: "0.4rem", borderRadius: "8px", color: "var(--text-2)", cursor: loading ? "wait" : "pointer",
+              padding: "0.4rem", borderRadius: "var(--radius-sm)", color: "var(--text-2)", cursor: loading ? "wait" : "pointer",
               opacity: loading ? 0.6 : 1
             }}
           >
@@ -159,7 +159,7 @@ export default function McpEventsPage() {
         <button style={{
           display: "inline-flex", alignItems: "center", gap: "0.4rem",
           background: "#f1f5f9", border: "1px solid #e2e8f0",
-          padding: "0.4rem 0.8rem", borderRadius: "8px", fontSize: "0.85rem",
+          padding: "0.4rem 0.8rem", borderRadius: "var(--radius-sm)", fontSize: "0.85rem",
           color: "var(--text)", cursor: "pointer", fontWeight: 500
         }}>
           <LayoutGrid size={16} style={{ color: "var(--text-muted)" }} /> Overview
@@ -171,7 +171,7 @@ export default function McpEventsPage() {
         <div style={{ display: "flex", flexDirection: "column", gap: "0.55rem" }}>
           {[1, 2, 3].map((i) => (
             <div key={i} style={{
-              height: "64px", borderRadius: "12px",
+              height: "64px", borderRadius: "var(--radius-md)",
               background: "linear-gradient(90deg, var(--surface) 25%, #f1f5f9 50%, var(--surface) 75%)",
               backgroundSize: "200% 100%",
               animation: "shimmer 1.6s infinite",
@@ -186,10 +186,11 @@ export default function McpEventsPage() {
           background: "var(--surface)",
           border: "1px solid var(--border)",
           borderRadius: "var(--radius-lg)",
-          overflow: "hidden",
+          overflowX: "auto",
+          overflowY: "hidden",
           boxShadow: "none"
         }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
+          <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse", textAlign: "left" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border-light)", background: "#fafafa" }}>
                 <th style={{ borderRight: "1px solid var(--border-light)", padding: "0.8rem 1rem", fontSize: "0.8rem", fontWeight: 600, color: "var(--text-muted)", width: "140px" }}>
@@ -226,7 +227,7 @@ export default function McpEventsPage() {
                     <td style={{ borderRight: "1px solid var(--border-light)", padding: "1rem", verticalAlign: "top" }}>
                       <span style={{
                         display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                        padding: "0.2rem 0.5rem", borderRadius: "6px",
+                        padding: "0.2rem 0.5rem", borderRadius: "var(--radius-pill)",
                         fontSize: "0.75rem", fontWeight: 600,
                         background: style.bg, color: style.color, border: `1px solid ${style.border}`
                       }}>
@@ -238,7 +239,7 @@ export default function McpEventsPage() {
                     <td style={{ borderRight: "1px solid var(--border-light)", padding: "1rem", verticalAlign: "top" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.3rem" }}>
                          <span style={{
-                           padding: "0.15rem 0.4rem", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600,
+                           padding: "0.15rem 0.4rem", borderRadius: "var(--radius-pill)", fontSize: "0.75rem", fontWeight: 600,
                            background: isSuccess ? "#e6f5c8" : "#fee2e2",
                            color: isSuccess ? "#3d5c18" : "#ef4444",
                            border: isSuccess ? "1px solid #cce89e" : "1px solid #fecaca"
@@ -246,7 +247,7 @@ export default function McpEventsPage() {
                            {isSuccess ? "200 OK" : "ERROR"}
                          </span>
                       </div>
-                      <div style={{ fontWeight: 600, color: "var(--text)", fontSize: "0.9rem", fontFamily: "monospace", display: "inline-block", padding: "0.2rem 0.4rem", background: "#f1f5f9", borderRadius: "4px", border: "1px solid var(--border-light)" }}>
+                      <div style={{ fontWeight: 600, color: "var(--text)", fontSize: "0.9rem", fontFamily: "monospace", display: "inline-block", padding: "0.2rem 0.4rem", background: "#f1f5f9", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-light)" }}>
                         {event.toolName || event.method}
                       </div>
                     </td>
@@ -256,7 +257,7 @@ export default function McpEventsPage() {
                       {event.error ? (
                         <div style={{
                           color: "#ef4444", background: "#fef2f2",
-                          padding: "0.5rem", borderRadius: "6px",
+                          padding: "0.5rem", borderRadius: "var(--radius-sm)",
                           border: "1px solid #fee2e2",
                           fontSize: "0.8rem", fontFamily: "monospace",
                           maxHeight: "80px", overflowY: "auto",

@@ -47,6 +47,10 @@ const nextConfig: NextConfig = {
       // and redirected to /login, breaking dynamic client registration.
       beforeFiles: [
         {
+          source: "/.well-known/appspecific/:path*",
+          destination: "/404",
+        },
+        {
           source: "/.well-known/:path*",
           destination: `${BACKEND}/.well-known/:path*`,
         },

@@ -1,5 +1,5 @@
 import { Router, Response, NextFunction } from "express";
-import { randomUUID } from "crypto";
+import { createPrivateKey, createPublicKey, randomUUID } from "crypto";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import type { AuthContext } from "../../../domain/auth/index.js";
@@ -180,22 +180,71 @@ type ContinuationPayload = {
 function normalizePem(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return "";
-  return trimmed.replace(/\\n/g, "\n");
+  const unquoted =
+    (trimmed.startsWith("\"") && trimmed.endsWith("\"")) || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+      ? trimmed.slice(1, -1).trim()
+      : trimmed;
+  return unquoted.replace(/\\n/g, "\n");
 }
 
-const AUTH_CONTINUATION_PRIVATE_KEY = normalizePem(config.authContinuationPrivateKey);
-const AUTH_CONTINUATION_PUBLIC_KEY = normalizePem(config.authContinuationPublicKey);
-const AUTH_CONTINUATION_USE_ES256 =
-  AUTH_CONTINUATION_PRIVATE_KEY.length > 0 && AUTH_CONTINUATION_PUBLIC_KEY.length > 0;
+type ContinuationSigningConfig = {
+  useEs256: boolean;
+  signKey: jwt.Secret | Parameters<typeof createPrivateKey>[0];
+  verifyKey: jwt.Secret | Parameters<typeof createPublicKey>[0];
+};
+
+function resolveContinuationSigningConfig(): ContinuationSigningConfig {
+  const fallbackSecret = config.apiKeyPepper || config.internalApiSecret;
+  const privatePem = normalizePem(config.authContinuationPrivateKey);
+  const publicPem = normalizePem(config.authContinuationPublicKey);
+
+  if (!privatePem || !publicPem) {
+    return {
+      useEs256: false,
+      signKey: fallbackSecret,
+      verifyKey: fallbackSecret,
+    };
+  }
+
+  try {
+    const privateKey = createPrivateKey(privatePem);
+    const publicKey = createPublicKey(publicPem);
+
+    if (privateKey.type !== "private" || publicKey.type !== "public") {
+      throw new Error("continuation key pair must include private/public asymmetric keys");
+    }
+
+    if (privateKey.asymmetricKeyType !== "ec" || publicKey.asymmetricKeyType !== "ec") {
+      throw new Error("continuation key pair must be EC keys for ES256");
+    }
+
+    return {
+      useEs256: true,
+      signKey: privateKey,
+      verifyKey: publicKey,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[chatgpt] invalid auth continuation ES256 key configuration; falling back to HS256 (${reason})`
+    );
+    return {
+      useEs256: false,
+      signKey: fallbackSecret,
+      verifyKey: fallbackSecret,
+    };
+  }
+}
+
+const CONTINUATION_SIGNING = resolveContinuationSigningConfig();
+const AUTH_CONTINUATION_USE_ES256 = CONTINUATION_SIGNING.useEs256;
 
 function continuationSignKey(): jwt.Secret {
-  if (AUTH_CONTINUATION_USE_ES256) return AUTH_CONTINUATION_PRIVATE_KEY;
-  return config.apiKeyPepper || config.internalApiSecret;
+  return CONTINUATION_SIGNING.signKey as jwt.Secret;
 }
 
 function continuationVerifyKey(): jwt.Secret {
-  if (AUTH_CONTINUATION_USE_ES256) return AUTH_CONTINUATION_PUBLIC_KEY;
-  return config.apiKeyPepper || config.internalApiSecret;
+  return CONTINUATION_SIGNING.verifyKey as jwt.Secret;
 }
 
 function encodeAuthContinuation(auth: AuthContext): string {
@@ -260,9 +309,15 @@ async function decodeAuthContinuation(raw: string): Promise<AuthContext | null> 
 }
 
 function attachContinuationHeader(res: Response, auth: AuthContext): void {
-  res.setHeader(AUTH_CONTINUATION_HEADER, encodeAuthContinuation(auth));
-  setRequestTimingField("auth_continuation_issued", true);
-  setRequestTimingField("auth_continuation_alg", AUTH_CONTINUATION_USE_ES256 ? "ES256" : "HS256");
+  try {
+    res.setHeader(AUTH_CONTINUATION_HEADER, encodeAuthContinuation(auth));
+    setRequestTimingField("auth_continuation_issued", true);
+    setRequestTimingField("auth_continuation_alg", AUTH_CONTINUATION_USE_ES256 ? "ES256" : "HS256");
+  } catch (error) {
+    setRequestTimingField("auth_continuation_issued", false);
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`[chatgpt] failed to issue auth continuation token (${reason})`);
+  }
 }
 
 async function resolveChatGptActionAuth(req: AuthRequest, res: Response): Promise<AuthContext | null> {

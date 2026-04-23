@@ -1,9 +1,8 @@
 .performance-section {
   width: 100%;
   background: #fdfcf9;
-  border-top: 2px solid #e5e0d8;
-  border-bottom: 2px solid #e5e0d8;
-  padding: 6rem 0;
+  padding: 5.5rem 0;
+  font-family: "Inter", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .performance-inner {
@@ -26,9 +25,10 @@
 }
 
 .performance-heading {
-  font-family: "DM Sans", sans-serif;
-  font-size: clamp(2.2rem, 5vw, 4.2rem);
-  line-height: 1.03;
+  font-family: "DM Sans", "Inter", sans-serif;
+  font-size: clamp(2rem, 4vw, 3.25rem);
+  line-height: 1.08;
+  font-weight: 500;
   color: #1c1917;
   margin: 0 0 1rem;
 }
@@ -63,9 +63,10 @@
 }
 
 .performance-metric-card h3 {
-  font-family: "DM Sans", sans-serif;
+  font-family: "DM Sans", "Inter", sans-serif;
   font-size: clamp(2rem, 4vw, 2.8rem);
   line-height: 1;
+  font-weight: 500;
   margin-bottom: 0.6rem;
 }
 
@@ -133,7 +134,7 @@
 .performance-column-head h4 {
   font-size: 0.95rem;
   margin-bottom: 0.2rem;
-  font-family: "DM Sans", sans-serif;
+  font-family: "DM Sans", "Inter", sans-serif;
 }
 
 .performance-column-head p {
@@ -200,10 +201,59 @@
 
 @media (max-width: 640px) {
   .performance-section {
-    padding: 4.5rem 0;
+    padding: 4rem 0;
   }
 
   .performance-inner {
     padding: 0 1.2rem;
+  }
+
+  .performance-header {
+    margin-bottom: 1.75rem;
+  }
+
+  .performance-sub {
+    font-size: 0.98rem;
+  }
+
+  .performance-metrics {
+    margin-bottom: 1rem;
+  }
+
+  .performance-metric-card {
+    padding: 1.25rem;
+  }
+
+  .performance-metric-card h3 {
+    font-size: clamp(1.75rem, 10vw, 2.25rem);
+  }
+
+  .performance-column-head {
+    padding: 1rem 1.1rem;
+  }
+
+  .performance-column li {
+    padding: 0.85rem 1.1rem;
+    font-size: 0.85rem;
+  }
+
+  .performance-logo-row {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .performance-heading {
+    font-size: clamp(1.8rem, 10vw, 2.4rem);
+  }
+
+  .performance-sub,
+  .performance-metric-copy {
+    font-size: 0.9rem;
+  }
+
+  .performance-column-head p {
+    font-size: 0.62rem;
   }
 }

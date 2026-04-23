@@ -3,9 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Copy, FileText, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { useSession } from "next-auth/react";
-import { Button } from "../../../components/ui/button";
-import { Alert, AlertDescription, AlertTitle } from "../../../components/ui/alert";
-
 type DocStatus = "pending" | "ready" | "failed";
 
 type BlobMeta = {
@@ -221,11 +218,11 @@ export default function DocumentsPage() {
   const lotRangeEnd = Math.min(lotPage * PAGE_SIZE, lots.length);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1rem", maxWidth: 980, margin: "0 auto", paddingBottom: "3rem" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem", maxWidth: 980, margin: "0 auto", paddingBottom: "3rem" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 700, color: "var(--text)" }}>Documents</h1>
-          <p style={{ margin: "0.25rem 0 0", color: "var(--text-muted)", fontSize: "0.9rem" }}>
+          <h1 style={{ margin: 0, fontSize: "1.75rem", fontWeight: 700, color: "#111827", letterSpacing: "-0.02em", fontFamily: "'DM Sans', sans-serif" }}>Documents</h1>
+          <p style={{ margin: "0.25rem 0 0", color: "#9ca3af", fontSize: "0.875rem", fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
             Full document stash references and lots.
           </p>
         </div>
@@ -236,37 +233,66 @@ export default function DocumentsPage() {
           style={{
             display: "inline-flex",
             alignItems: "center",
-            gap: "0.45rem",
-            padding: "0.5rem 0.8rem",
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
+            gap: "0.4rem",
+            padding: "0.45rem 0.875rem",
+            background: "#ffffff",
+            border: "1px solid #e5e7eb",
             borderRadius: "8px",
-            color: "var(--text-2)",
+            color: "#374151",
             cursor: refreshing || loading ? "wait" : "pointer",
+            fontSize: "0.85rem",
+            fontWeight: 600,
+            fontFamily: "'Plus Jakarta Sans', sans-serif",
+            transition: "border-color 0.15s, background 0.15s",
           }}
         >
-          <RefreshCw size={14} /> Refresh
+          <RefreshCw size={13} /> Refresh
         </button>
       </div>
 
-      {error && (
-        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "0.75rem 0.9rem", color: "#991b1b", fontSize: "0.88rem" }}>
-          {error}
+      {error && !proRequired && (
+        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "0.75rem 1rem", color: "#991b1b", fontSize: "0.875rem", fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+          Something went wrong. Please try refreshing.
         </div>
       )}
 
       {proRequired ? (
-        <Alert style={{ boxShadow: "var(--shadow-sm)" }}>
-          <AlertTitle>Documents is a Pro feature</AlertTitle>
-          <AlertDescription style={{ color: "var(--text-muted)" }}>
+        <div style={{
+          border: "1px solid #e5e7eb",
+          borderRadius: 12,
+          background: "#ffffff",
+          padding: "2.5rem 2rem",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "flex-start",
+          gap: "0.5rem",
+        }}>
+          <p style={{ margin: 0, fontSize: "0.95rem", fontWeight: 700, color: "#111827", fontFamily: "'DM Sans', sans-serif" }}>
+            Documents is a Pro feature
+          </p>
+          <p style={{ margin: 0, fontSize: "0.875rem", color: "#9ca3af", fontFamily: "'Plus Jakarta Sans', sans-serif", lineHeight: 1.5, maxWidth: 480 }}>
             Upgrade to Pro or Power to stash full documents, create lots, and recall full markdown by reference.
-          </AlertDescription>
-          <div style={{ marginTop: "0.85rem" }}>
-            <Button asChild>
-              <a href="/dashboard/billing">View plans</a>
-            </Button>
-          </div>
-        </Alert>
+          </p>
+          <a
+            href="/dashboard/billing"
+            style={{
+              marginTop: "0.75rem",
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "0.5rem 1rem",
+              background: "#111827",
+              color: "#ffffff",
+              borderRadius: 8,
+              fontSize: "0.875rem",
+              fontWeight: 600,
+              fontFamily: "'Plus Jakarta Sans', sans-serif",
+              textDecoration: "none",
+              transition: "background 0.15s",
+            }}
+          >
+            View plans
+          </a>
+        </div>
       ) : loading ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
           {[1, 2, 3].map((value) => (
@@ -275,12 +301,14 @@ export default function DocumentsPage() {
         </div>
       ) : !hasItems ? (
         <div style={{
-          border: "1px solid var(--border-light)",
-          borderRadius: 14,
-          background: "var(--surface)",
-          padding: "2rem 1rem",
+          border: "1px solid #e5e7eb",
+          borderRadius: 12,
+          background: "#ffffff",
+          padding: "3rem 1rem",
           textAlign: "center",
-          color: "var(--text-muted)",
+          color: "#9ca3af",
+          fontSize: "0.875rem",
+          fontFamily: "'Plus Jakarta Sans', sans-serif",
         }}>
           No stashed documents yet.
         </div>

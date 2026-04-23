@@ -2,6 +2,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Zap, Check, ArrowRight, RefreshCw, ExternalLink, X, CreditCard, AlertTriangle, Receipt, ChevronRight } from "lucide-react";
 
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+
+
 interface BillingStatus {
   plan: "free" | "pro" | "power";
   status: string;
@@ -83,8 +88,8 @@ function UsageBar({ used, limit, label }: { used: number; limit: number | null; 
           <span style={{ fontSize: 14, color: "var(--text-2)", fontWeight: 500 }}>{label}</span>
           <span style={{ fontSize: 13, color: "var(--text-muted)", fontWeight: 500 }}>High-volume included</span>
         </div>
-        <div style={{ height: 6, background: "#f1f5f9", borderRadius: 999 }}>
-          <div style={{ height: "100%", width: "100%", background: "#6366f1", borderRadius: 999, opacity: 0.15 }} />
+        <div style={{ height: 6, background: "#f1f5f9", borderRadius: "var(--radius-pill)" }}>
+          <div style={{ height: "100%", width: "100%", background: "#6366f1", borderRadius: "var(--radius-pill)", opacity: 0.15 }} />
         </div>
       </div>
     );
@@ -101,13 +106,13 @@ function UsageBar({ used, limit, label }: { used: number; limit: number | null; 
           {used} / {limit}
         </span>
       </div>
-      <div style={{ height: 6, background: "#f1f5f9", borderRadius: 999, overflow: "hidden" }}>
+      <div style={{ height: 6, background: "#f1f5f9", borderRadius: "var(--radius-pill)", overflow: "hidden" }}>
         <div
           style={{
             height: "100%",
             width: `${pct}%`,
             background: isNearLimit ? "#dc2626" : "#6366f1",
-            borderRadius: 999,
+            borderRadius: "var(--radius-pill)",
             transition: "width 0.4s ease",
           }}
         />
@@ -123,73 +128,72 @@ function PlanCard({
   features: string[]; current: boolean; checkoutPlan: string; featured?: boolean;
 }) {
   return (
-    <div
-      style={{
-        background: "#ffffff",
-        border: featured ? "2px solid #6366f1" : "1px solid #e2e8f0",
-        borderRadius: 12,
-        padding: 24,
-        flex: 1,
-        minWidth: 260,
-        display: "flex",
-        flexDirection: "column",
-        gap: 16,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", color: featured ? "#6366f1" : "#64748b" }}>
+    <article className={`pricing-card ${featured ? "pricing-card-featured" : ""}`}>
+      {/* Plan Badge Row */}
+      <div className="pricing-plan-row">
+        <span className={`pricing-plan-label ${featured ? "pricing-plan-label-featured" : ""}`}>
           {name}
         </span>
-        {featured && (
-          <span style={{ fontSize: 11, fontWeight: 600, color: "#6366f1", border: "1px solid #6366f1", background: "#f5f3ff", borderRadius: 999, padding: "2px 7px" }}>
+        {featured && !current && (
+          <span className="pricing-popular-pill">
             Most popular
           </span>
         )}
         {current && (
-          <span style={{ fontSize: 11, fontWeight: 600, background: "#10b981", color: "#fff", borderRadius: 999, padding: "2px 7px" }}>
+          <span className="pricing-popular-pill" style={{ background: "#10b981", color: "#fff", border: "1px solid #10b981" }}>
             Current
           </span>
         )}
       </div>
 
-      <div>
-        <div style={{ fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: 30, color: "#0f172a", lineHeight: 1.2 }}>
+      {/* Price */}
+      <div className="pricing-price-wrap">
+        <div className="pricing-price">
           {price}
-          {period && <span style={{ fontSize: 15, fontWeight: 500, color: "#64748b", marginLeft: 2 }}>{period}</span>}
+          {period && (
+            <span className="pricing-period">
+              {period}
+            </span>
+          )}
         </div>
-        <p style={{ margin: "6px 0 0 0", fontSize: 14, color: "#64748b", lineHeight: 1.5 }}>{description}</p>
+        <p className="pricing-description">
+          {description}
+        </p>
       </div>
 
-      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 9 }}>
+      {/* Features */}
+      <ul className="pricing-features">
         {features.map((f) => (
-          <li key={f} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 14, color: "#334155" }}>
-            <Check size={15} style={{ color: "#6366f1", flexShrink: 0, marginTop: 2 }} />
+          <li key={f} className="pricing-feature-item">
+            <Check size={16} className="pricing-feature-check" />
             <span>{f}</span>
           </li>
         ))}
       </ul>
 
-      <div style={{ marginTop: "auto", paddingTop: 8 }}>
+      {/* CTA */}
+      <div className="pricing-cta-wrap">
         {!current ? (
-          <a
-            href={`/api/billing/checkout?plan=${checkoutPlan}`}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              padding: "11px 18px", background: featured ? "#6366f1" : "#ffffff",
-              color: featured ? "#ffffff" : "#0f172a", borderRadius: 8,
-              border: featured ? "none" : "1px solid #e2e8f0",
-              fontSize: 14, fontWeight: 600, textDecoration: "none",
-            }}
-          >
-            Get Tallei {name} <ArrowRight size={14} />
-          </a>
+          <>
+            <a
+              href={`/api/billing/checkout?plan=${checkoutPlan}`}
+              className={`pricing-cta ${featured ? "pricing-cta-featured" : ""}`}
+            >
+              Get Tallei{name !== "Free" ? ` ${name}` : ""} <ArrowRight size={14} />
+            </a>
+            {checkoutPlan !== "free" && (
+              <p className="pricing-trial">
+                14-day free trial
+              </p>
+            )}
+          </>
         ) : (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "11px 18px", background: "#f1f5f9", color: "#64748b", borderRadius: 8, fontSize: 14, fontWeight: 600 }}>
+          <div className="pricing-cta" style={{ background: "#f8f9fa", color: "#6c757d", border: "1px solid #dee2e6", cursor: "default" }}>
             Current Plan
           </div>
         )}
       </div>
-    </div>
+    </article>
   );
 }
 
@@ -242,7 +246,7 @@ function AlertDialog({
         aria-labelledby="alert-title"
         aria-describedby="alert-desc"
         ref={dialogRef}
-        style={{ width: "min(420px, 100%)", background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 24, display: "flex", flexDirection: "column", gap: 12 }}
+        style={{ width: "min(420px, 100%)", background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: "var(--radius-lg)", padding: 24, display: "flex", flexDirection: "column", gap: 12 }}
       >
         <h3 id="alert-title" style={{ margin: 0, fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: 17, color: "#0f172a" }}>
           {title}
@@ -253,13 +257,13 @@ function AlertDialog({
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button
             onClick={onCancel}
-            style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #e2e8f0", background: "#ffffff", color: "#475569", fontSize: 14, fontWeight: 500, cursor: "pointer" }}
+            style={{ padding: "8px 16px", borderRadius: "var(--radius-sm)", border: "1px solid #e2e8f0", background: "#ffffff", color: "#475569", fontSize: 14, fontWeight: 500, cursor: "pointer" }}
           >
             {cancelLabel}
           </button>
           <button
             onClick={onConfirm}
-            style={{ padding: "8px 16px", borderRadius: 8, border: danger ? "1px solid #fca5a5" : "1px solid #6366f1", background: danger ? "#fff1f2" : "#6366f1", color: danger ? "#b91c1c" : "#ffffff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+            style={{ padding: "8px 16px", borderRadius: "var(--radius-sm)", border: danger ? "1px solid #fca5a5" : "1px solid #6366f1", background: danger ? "#fff1f2" : "#6366f1", color: danger ? "#b91c1c" : "#ffffff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
           >
             {confirmLabel}
           </button>
@@ -270,12 +274,12 @@ function AlertDialog({
 }
 
 function InvoiceStatusBadge({ status, refunded }: { status: string; refunded: boolean }) {
-  if (refunded) return <span style={{ fontSize: 12, fontWeight: 600, color: "#7c3aed", background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 6, padding: "2px 8px" }}>Refunded</span>;
-  if (status === "paid") return <span style={{ fontSize: 12, fontWeight: 600, color: "#166534", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, padding: "2px 8px" }}>Paid</span>;
-  if (status === "failed" || status === "payment_failed") return <span style={{ fontSize: 12, fontWeight: 600, color: "#b91c1c", background: "#fff1f2", border: "1px solid #fecaca", borderRadius: 6, padding: "2px 8px" }}>Failed</span>;
-  if (status === "pending") return <span style={{ fontSize: 12, fontWeight: 600, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, padding: "2px 8px" }}>Pending</span>;
-  if (status === "void") return <span style={{ fontSize: 12, fontWeight: 600, color: "#475569", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px" }}>Void</span>;
-  return <span style={{ fontSize: 12, fontWeight: 600, color: "#475569", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px" }}>{status}</span>;
+  if (refunded) return <span style={{ fontSize: 12, fontWeight: 600, color: "#7c3aed", background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>Refunded</span>;
+  if (status === "paid") return <span style={{ fontSize: 12, fontWeight: 600, color: "#166534", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>Paid</span>;
+  if (status === "failed" || status === "payment_failed") return <span style={{ fontSize: 12, fontWeight: 600, color: "#b91c1c", background: "#fff1f2", border: "1px solid #fecaca", borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>Failed</span>;
+  if (status === "pending") return <span style={{ fontSize: 12, fontWeight: 600, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>Pending</span>;
+  if (status === "void") return <span style={{ fontSize: 12, fontWeight: 600, color: "#475569", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>Void</span>;
+  return <span style={{ fontSize: 12, fontWeight: 600, color: "#475569", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>{status}</span>;
 }
 
 function InvoicesTab() {
@@ -298,7 +302,7 @@ function InvoicesTab() {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {[1, 2, 3].map((i) => (
-          <div key={i} style={{ height: 56, background: "#f1f5f9", borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />
+          <div key={i} style={{ height: 56, background: "#f1f5f9", borderRadius: "var(--radius-md)", animation: "pulse 1.5s ease-in-out infinite" }} />
         ))}
       </div>
     );
@@ -322,7 +326,7 @@ function InvoicesTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {failed.length > 0 && (
-        <div style={{ border: "1px solid #fecaca", borderRadius: 10, padding: "12px 16px", background: "#fff8f8", display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ border: "1px solid #fecaca", borderRadius: "var(--radius-md)", padding: "12px 16px", background: "#fff8f8", display: "flex", alignItems: "flex-start", gap: 10 }}>
           <AlertTriangle size={16} style={{ color: "#dc2626", flexShrink: 0, marginTop: 1 }} />
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: "#991b1b", marginBottom: 2 }}>
@@ -332,63 +336,63 @@ function InvoicesTab() {
               Please update your payment details to keep your subscription active.
             </p>
           </div>
-          <a href="/api/billing/payment-method" style={{ marginLeft: "auto", flexShrink: 0, fontSize: 13, fontWeight: 600, color: "#b91c1c", textDecoration: "none", padding: "6px 12px", border: "1px solid #fca5a5", borderRadius: 8, background: "#ffffff", display: "inline-flex", alignItems: "center", gap: 4 }}>
+          <a href="/api/billing/payment-method" style={{ marginLeft: "auto", flexShrink: 0, fontSize: 13, fontWeight: 600, color: "#b91c1c", textDecoration: "none", padding: "6px 12px", border: "1px solid #fca5a5", borderRadius: "var(--radius-sm)", background: "#ffffff", display: "inline-flex", alignItems: "center", gap: 4 }}>
             Update card <ChevronRight size={13} />
           </a>
         </div>
       )}
 
-      <div style={{ border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-          <thead>
-            <tr style={{ borderBottom: "1px solid #e2e8f0", background: "#f8fafc" }}>
-              <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#475569", fontSize: 12 }}>Invoice</th>
-              <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#475569", fontSize: 12 }}>Date</th>
-              <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#475569", fontSize: 12 }}>Amount</th>
-              <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#475569", fontSize: 12 }}>Status</th>
-              <th style={{ padding: "10px 16px", textAlign: "right", fontWeight: 600, color: "#475569", fontSize: 12 }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {invoices.map((inv, i) => (
-              <tr key={inv.id} style={{ borderBottom: i < invoices.length - 1 ? "1px solid #f1f5f9" : "none" }}>
-                <td style={{ padding: "12px 16px", color: "#0f172a", fontWeight: 500 }}>
+      <Card>
+        <Table>
+          <TableHeader className="bg-slate-50/50">
+            <TableRow>
+              <TableHead className="w-[200px]">Invoice</TableHead>
+              <TableHead>Date</TableHead>
+              <TableHead>Amount</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-right"></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {invoices.map((inv) => (
+              <TableRow key={inv.id}>
+                <TableCell className="font-medium">
                   {inv.invoiceNumber ? `#${inv.invoiceNumber}` : "—"}
                   {inv.billingReason && (
-                    <span style={{ marginLeft: 8, fontSize: 12, color: "#94a3b8" }}>
+                    <span className="ml-2 text-xs text-muted-foreground">
                       {inv.billingReason === "initial" ? "New subscription" : inv.billingReason === "renewal" ? "Renewal" : inv.billingReason}
                     </span>
                   )}
-                </td>
-                <td style={{ padding: "12px 16px", color: "#475569" }}>
+                </TableCell>
+                <TableCell className="text-muted-foreground">
                   {inv.createdAt ? new Date(inv.createdAt).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—"}
-                </td>
-                <td style={{ padding: "12px 16px", color: "#0f172a", fontWeight: 500 }}>
+                </TableCell>
+                <TableCell className="font-medium">
                   {inv.total}
                   {inv.cardLastFour && (
-                    <span style={{ marginLeft: 8, fontSize: 12, color: "#94a3b8" }}>·· {inv.cardLastFour}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">·· {inv.cardLastFour}</span>
                   )}
-                </td>
-                <td style={{ padding: "12px 16px" }}>
+                </TableCell>
+                <TableCell>
                   <InvoiceStatusBadge status={inv.status} refunded={inv.refunded} />
-                </td>
-                <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                </TableCell>
+                <TableCell className="text-right">
                   {(inv.receiptUrl || inv.invoiceUrl) && (
                     <a
                       href={inv.receiptUrl ?? inv.invoiceUrl ?? "#"}
                       target="_blank"
                       rel="noopener noreferrer"
-                      style={{ fontSize: 13, color: "#6366f1", textDecoration: "none", fontWeight: 500, display: "inline-flex", alignItems: "center", gap: 4 }}
+                      className="inline-flex items-center gap-1 text-sm font-medium text-indigo-500 hover:text-indigo-600 hover:underline"
                     >
                       Receipt <ExternalLink size={12} />
                     </a>
                   )}
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
-      </div>
+          </TableBody>
+        </Table>
+      </Card>
     </div>
   );
 }
@@ -492,9 +496,9 @@ export default function BillingPage() {
 
   return (
     <div style={{ minHeight: "100%", display: "flex", flexDirection: "column" }}>
-      <div style={{ maxWidth: 960, width: "100%", margin: "0 auto", padding: "32px 24px", flex: 1, display: "flex", flexDirection: "column" }}>
+      <div style={{ maxWidth: 960, width: "100%", margin: "0 auto", padding: "clamp(1rem, 2.5vw, 2rem) clamp(0.9rem, 2.4vw, 1.5rem)", flex: 1, display: "flex", flexDirection: "column" }}>
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 28 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 28, flexWrap: "wrap", gap: 12 }}>
           <div>
             <h1 style={{ fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: 24, color: "#0f172a", marginBottom: 2 }}>
               Billing
@@ -503,7 +507,7 @@ export default function BillingPage() {
           </div>
           <button
             onClick={() => void fetchStatus()}
-            style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "#ffffff", color: "#475569", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 13, cursor: "pointer", fontWeight: 500 }}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "#ffffff", color: "#475569", border: "1px solid #e2e8f0", borderRadius: "var(--radius-sm)", fontSize: 13, cursor: "pointer", fontWeight: 500 }}
           >
             <RefreshCw size={13} />
             Refresh
@@ -511,34 +515,19 @@ export default function BillingPage() {
         </div>
 
         {/* Tabs */}
-        <div style={{ display: "flex", gap: 2, marginBottom: 24, borderBottom: "1px solid #e2e8f0" }}>
-          {(["subscription", "invoices"] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => {
-                setActiveTab(tab);
-                if (tab === "invoices") setInvoicesLoaded(true);
-              }}
-              style={{
-                padding: "8px 16px",
-                fontSize: 14,
-                fontWeight: activeTab === tab ? 600 : 500,
-                color: activeTab === tab ? "#0f172a" : "#64748b",
-                background: "transparent",
-                border: "none",
-                borderBottom: activeTab === tab ? "2px solid #6366f1" : "2px solid transparent",
-                marginBottom: -1,
-                cursor: "pointer",
-                textTransform: "capitalize",
-              }}
-            >
-              {tab === "subscription" ? "Subscription" : "Invoices"}
-            </button>
-          ))}
-        </div>
+        <Tabs value={activeTab} onValueChange={(v: any) => { setActiveTab(v); if (v === "invoices") setInvoicesLoaded(true); }} className="w-full mb-6">
+          <TabsList variant="line" className="w-full justify-start border-b rounded-none p-0 pb-1 h-auto">
+            <TabsTrigger value="subscription" className="px-4 py-2 text-base">
+              Subscription
+            </TabsTrigger>
+            <TabsTrigger value="invoices" className="px-4 py-2 text-base">
+              Invoices
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
 
         {error && (
-          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: 12, marginBottom: 20, fontSize: 13, color: "#dc2626" }}>
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "var(--radius-md)", padding: 12, marginBottom: 20, fontSize: 13, color: "#dc2626" }}>
             {error}
           </div>
         )}
@@ -548,36 +537,26 @@ export default function BillingPage() {
           loading && !status ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               {[1, 2].map((i) => (
-                <div key={i} style={{ height: 100, background: "#f1f5f9", borderRadius: 10, animation: "pulse 1.5s ease-in-out infinite" }} />
+                <div key={i} style={{ height: 100, background: "#f1f5f9", borderRadius: "var(--radius-md)", animation: "pulse 1.5s ease-in-out infinite" }} />
               ))}
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, flex: 1 }}>
               {/* Current plan banner */}
-              <div
-                style={{
-                  background: planColor.bg,
-                  border: `1px solid ${planColor.border}`,
-                  borderRadius: 10,
-                  padding: "16px 20px",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <div style={{ width: 38, height: 38, borderRadius: 9, background: "#ffffff", display: "flex", alignItems: "center", justifyContent: "center", border: `1px solid ${planColor.border}` }}>
-                    <Zap size={18} style={{ color: planColor.text }} />
+              <Card className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-5 gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg border bg-background text-foreground/80">
+                    <Zap size={18} />
                   </div>
                   <div>
-                    <div style={{ fontSize: 14, color: planColor.text, fontWeight: 600 }}>{PLAN_LABELS[plan]} Plan</div>
+                    <div className="font-semibold">{PLAN_LABELS[plan]} Plan</div>
                     {status?.cancelAtPeriodEnd && status.currentPeriodEnd && (
-                      <div style={{ fontSize: 13, color: "#dc2626", marginTop: 1 }}>
+                      <div className="text-sm text-red-500 mt-0.5">
                         Cancels {new Date(status.currentPeriodEnd).toLocaleDateString()}
                       </div>
                     )}
                     {!status?.cancelAtPeriodEnd && status?.currentPeriodEnd && (
-                      <div style={{ fontSize: 13, color: planColor.text, opacity: 0.7, marginTop: 1 }}>
+                      <div className="text-sm text-muted-foreground mt-0.5">
                         Renews {new Date(status.currentPeriodEnd).toLocaleDateString()}
                       </div>
                     )}
@@ -587,25 +566,27 @@ export default function BillingPage() {
                   <button
                     type="button"
                     onClick={() => setIsManageModalOpen(true)}
-                    style={{ fontSize: 13, color: "#334155", fontWeight: 500, padding: "7px 12px", borderRadius: 8, border: "1px solid #cbd5e1", background: "#ffffff", cursor: "pointer" }}
+                    className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2"
                   >
                     Manage
                   </button>
                 )}
-              </div>
+              </Card>
 
               {/* Usage */}
-              <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 10, padding: "20px 24px" }}>
-                <h2 style={{ fontFamily: "DM Sans, sans-serif", fontWeight: 600, fontSize: 15, color: "#0f172a", marginBottom: 18, marginTop: 0 }}>
-                  This month&apos;s usage
-                </h2>
-                {status && (
-                  <>
-                    <UsageBar used={status.usage.savesUsed} limit={status.usage.savesLimit} label="Memory saves" />
-                    <UsageBar used={status.usage.recallsUsed} limit={status.usage.recallsLimit} label="Memory recalls" />
-                  </>
-                )}
-              </div>
+              <Card>
+                <CardHeader className="pb-4">
+                  <CardTitle className="text-base">This month's usage</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {status && (
+                    <div className="flex flex-col gap-1">
+                      <UsageBar used={status.usage.savesUsed} limit={status.usage.savesLimit} label="Memory saves" />
+                      <UsageBar used={status.usage.recallsUsed} limit={status.usage.recallsLimit} label="Memory recalls" />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
 
               {/* Plan cards */}
               {plan !== "power" && (
@@ -613,7 +594,7 @@ export default function BillingPage() {
                   <h2 style={{ fontFamily: "DM Sans, sans-serif", fontWeight: 600, fontSize: 15, color: "#0f172a", marginBottom: 16, marginTop: 0 }}>
                     {plan === "free" ? "Choose a plan" : "Available upgrade"}
                   </h2>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
+                  <div className="pricing-grid">
                     {visibleCards.map((planCard) => (
                       <PlanCard
                         key={planCard.key}
@@ -653,7 +634,7 @@ export default function BillingPage() {
             aria-modal="true"
             aria-labelledby="billing-manage-title"
             ref={manageModalRef}
-            style={{ width: "min(520px, 100%)", borderRadius: 12, border: "1px solid #e2e8f0", background: "#ffffff", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}
+            style={{ width: "min(520px, 100%)", borderRadius: "var(--radius-lg)", border: "1px solid #e2e8f0", background: "#ffffff", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}
           >
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <div>
@@ -667,14 +648,14 @@ export default function BillingPage() {
               <button
                 type="button"
                 onClick={closeManageModal}
-                style={{ width: 30, height: 30, borderRadius: 7, border: "1px solid #e2e8f0", background: "#ffffff", color: "#64748b", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}
+                style={{ width: 30, height: 30, borderRadius: "var(--radius-sm)", border: "1px solid #e2e8f0", background: "#ffffff", color: "#64748b", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}
                 aria-label="Close"
               >
                 <X size={14} />
               </button>
             </div>
 
-            <div style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ border: "1px solid #e2e8f0", borderRadius: "var(--radius-md)", padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <CreditCard size={15} style={{ color: "#64748b", flexShrink: 0 }} />
                 <div>
@@ -682,18 +663,18 @@ export default function BillingPage() {
                   <p style={{ margin: "2px 0 0 0", fontSize: 13, color: "#64748b" }}>Update your card and billing details.</p>
                 </div>
               </div>
-              <a href="/api/billing/payment-method" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, color: "#0f172a", textDecoration: "none", fontWeight: 600, padding: "7px 12px", borderRadius: 8, border: "1px solid #e2e8f0", background: "#ffffff", whiteSpace: "nowrap" }}>
+              <a href="/api/billing/payment-method" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, color: "#0f172a", textDecoration: "none", fontWeight: 600, padding: "7px 12px", borderRadius: "var(--radius-sm)", border: "1px solid #e2e8f0", background: "#ffffff", whiteSpace: "nowrap" }}>
                 Update details <ExternalLink size={12} />
               </a>
             </div>
 
-            <div style={{ border: "1px solid #fecaca", borderRadius: 10, padding: "14px 16px", background: "#fff8f8" }}>
+            <div style={{ border: "1px solid #fecaca", borderRadius: "var(--radius-md)", padding: "14px 16px", background: "#fff8f8" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: "#991b1b" }}>
                   {status?.cancelAtPeriodEnd ? "Cancellation scheduled" : "Cancel subscription"}
                 </div>
                 {!status?.cancelAtPeriodEnd && (
-                  <span style={{ fontSize: 12, color: "#78350f", background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 6, padding: "2px 8px" }}>
+                  <span style={{ fontSize: 12, color: "#78350f", background: "#fef3c7", border: "1px solid #fde68a", borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>
                     takes effect at period end
                   </span>
                 )}
@@ -708,7 +689,7 @@ export default function BillingPage() {
                 <button
                   onClick={() => void resumeSubscription()}
                   disabled={billingAction !== null}
-                  style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #86efac", background: "#f0fdf4", color: "#166534", fontSize: 13, fontWeight: 600, cursor: billingAction !== null ? "not-allowed" : "pointer", opacity: billingAction !== null ? 0.6 : 1 }}
+                  style={{ padding: "8px 14px", borderRadius: "var(--radius-sm)", border: "1px solid #86efac", background: "#f0fdf4", color: "#166534", fontSize: 13, fontWeight: 600, cursor: billingAction !== null ? "not-allowed" : "pointer", opacity: billingAction !== null ? 0.6 : 1 }}
                 >
                   {billingAction === "resume" ? "Resuming…" : "Resume subscription"}
                 </button>
@@ -716,7 +697,7 @@ export default function BillingPage() {
                 <button
                   onClick={() => setShowCancelAlert(true)}
                   disabled={billingAction !== null}
-                  style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #fca5a5", background: "#ffffff", color: "#b91c1c", fontSize: 13, fontWeight: 600, cursor: billingAction !== null ? "not-allowed" : "pointer", opacity: billingAction !== null ? 0.6 : 1 }}
+                  style={{ padding: "8px 14px", borderRadius: "var(--radius-sm)", border: "1px solid #fca5a5", background: "#ffffff", color: "#b91c1c", fontSize: 13, fontWeight: 600, cursor: billingAction !== null ? "not-allowed" : "pointer", opacity: billingAction !== null ? 0.6 : 1 }}
                 >
                   Cancel subscription
                 </button>

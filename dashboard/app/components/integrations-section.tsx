@@ -59,42 +59,82 @@ export function IntegrationsSection() {
   const [showBotMsg, setShowBotMsg] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const typeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const memoryDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const botDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resetDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const runIdRef = useRef(0);
 
-  // Auto-cycle through apps (resets when currentIndex changes manually)
+  const clearAnimationTimers = () => {
+    if (typeIntervalRef.current) {
+      clearInterval(typeIntervalRef.current);
+      typeIntervalRef.current = null;
+    }
+    if (startDelayRef.current) {
+      clearTimeout(startDelayRef.current);
+      startDelayRef.current = null;
+    }
+    if (memoryDelayRef.current) {
+      clearTimeout(memoryDelayRef.current);
+      memoryDelayRef.current = null;
+    }
+    if (botDelayRef.current) {
+      clearTimeout(botDelayRef.current);
+      botDelayRef.current = null;
+    }
+    if (resetDelayRef.current) {
+      clearTimeout(resetDelayRef.current);
+      resetDelayRef.current = null;
+    }
+  };
+
+  // Auto-cycle through apps
   useEffect(() => {
     const timer = setInterval(() => {
       setCurrentIndex((prev) => (prev + 1) % APPS.length);
     }, 12000); // 12 seconds per app to allow reading time and typing
 
     return () => clearInterval(timer);
-  }, [currentIndex]);
+  }, []);
 
   const currentApp = APPS[currentIndex];
 
   // Typing effect for the user message, then show memory banner and bot message
   useEffect(() => {
+    clearAnimationTimers();
+    runIdRef.current += 1;
+    const runId = runIdRef.current;
     const fullText = currentApp.userMsg;
     let i = 0;
-    const resetFrame = requestAnimationFrame(() => {
+
+    resetDelayRef.current = setTimeout(() => {
+      if (runId !== runIdRef.current) return;
       setDisplayedUserMsg("");
       setIsTypingUser(true);
       setShowMemoryBanner(false);
       setShowBotMsg(false);
-    });
+    }, 0);
 
     // Small delay before starting to type
-    const startDelay = setTimeout(() => {
-      const typeInterval = setInterval(() => {
+    startDelayRef.current = setTimeout(() => {
+      typeIntervalRef.current = setInterval(() => {
+        if (runId !== runIdRef.current) return;
         i += 1; 
         if (i >= fullText.length) {
           setDisplayedUserMsg(fullText);
           setIsTypingUser(false);
-          clearInterval(typeInterval);
+          if (typeIntervalRef.current) {
+            clearInterval(typeIntervalRef.current);
+            typeIntervalRef.current = null;
+          }
           
           // Show memory banner and bot message slightly after user finishes typing
-          setTimeout(() => {
+          memoryDelayRef.current = setTimeout(() => {
+            if (runId !== runIdRef.current) return;
             setShowMemoryBanner(true);
-            setTimeout(() => {
+            botDelayRef.current = setTimeout(() => {
+              if (runId !== runIdRef.current) return;
               setShowBotMsg(true);
             }, 400); // small delay between banner and bot message
           }, 300);
@@ -103,13 +143,10 @@ export function IntegrationsSection() {
           setDisplayedUserMsg(fullText.slice(0, i));
         }
       }, 30); // Fast typing speed
-
-      return () => clearInterval(typeInterval);
     }, 600);
 
     return () => {
-      cancelAnimationFrame(resetFrame);
-      clearTimeout(startDelay);
+      clearAnimationTimers();
     };
   }, [currentApp.userMsg]);
 

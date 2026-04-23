@@ -36,7 +36,7 @@ export default function Image() {
               style={{
                 background: "#f3f4f6",
                 color: "#4b5563",
-                borderRadius: 999,
+                borderRadius: 0,
                 padding: "8px 18px",
                 fontSize: 20,
                 fontWeight: 500,

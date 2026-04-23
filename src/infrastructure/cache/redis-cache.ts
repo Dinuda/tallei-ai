@@ -64,6 +64,10 @@ function sanitizeRedisError(error: unknown): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
+function isSocketClosedUnexpectedlyError(error: unknown): boolean {
+  return sanitizeRedisError(error).toLowerCase().includes("socket closed unexpectedly");
+}
+
 function maybeWarnProtocolMismatch(error: unknown): void {
   if (hasWarnedProtocolMismatch || config.nodeEnv === "production") return;
   const message = sanitizeRedisError(error).toLowerCase();
@@ -95,6 +99,15 @@ function logRedisWarning(message: string, error: unknown): void {
   console.error(message, error);
 }
 
+function logRedisTransient(message: string, error: unknown): void {
+  lastRedisError = sanitizeRedisError(error);
+  if (config.nodeEnv === "production") return;
+  const now = Date.now();
+  if (now - lastRedisLogAt < REDIS_LOG_INTERVAL_MS) return;
+  lastRedisLogAt = now;
+  console.warn(`${message}: ${lastRedisError}`);
+}
+
 async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
   if (!isRedisConfigured()) return null;
   if (shouldSkipRedis()) return null;
@@ -121,6 +134,11 @@ async function initRedis(): Promise<ReturnType<typeof createClient> | null> {
     });
     client.on("error", (error) => {
       if (shouldSkipRedis()) return;
+      if (isSocketClosedUnexpectedlyError(error)) {
+        logRedisTransient("[redis] socket closed unexpectedly; entering cooldown", error);
+        disableRedisTemporarily();
+        return;
+      }
       logRedisWarning("[redis] client error", error);
     });
 

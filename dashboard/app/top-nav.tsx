@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { signOut, useSession } from "next-auth/react";
+import { Menu, X } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
 
 const HIDDEN_PREFIXES = ["/dashboard", "/login", "/register", "/authorize"];
@@ -18,6 +19,7 @@ export function TopNav() {
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || "U";
   const [scrolled, setScrolled] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!isHome) return;
@@ -25,6 +27,31 @@ export function TopNav() {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, [isHome]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setMobileMenuOpen(false);
+      setProfileOpen(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pathname]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileMenuOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    document.body.style.overflow = mobileMenuOpen ? "hidden" : "";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [mobileMenuOpen]);
 
   if (!pathname) return null;
   const isHidden = HIDDEN_PREFIXES.some((prefix) => pathname.startsWith(prefix));
@@ -41,18 +68,24 @@ export function TopNav() {
     >
       <div className="container site-nav-inner">
         <Link href="/" className="site-logo">
-          <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "24px", width: "auto" }} />
+          <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "36px", width: "auto" }} />
         </Link>
 
-        <div className="site-nav-actions">
-          <a
-            href="https://github.com/Dinuda/tallei-ai"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="nav-open-source-link"
-          >
-            Open Source
-          </a>
+        {isHome && (
+          <div className="site-nav-links">
+            <Link href="#how-it-works" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
+              How it works
+            </Link>
+            <Link href="#integrations" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
+              Integrations
+            </Link>
+            <Link href="#pricing" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
+              Pricing
+            </Link>
+          </div>
+        )}
+
+        <div className="site-nav-actions site-nav-actions-desktop">
           {isLoading ? (
             <div style={{ width: "80px" }} aria-hidden="true" />
           ) : isAuthenticated ? (
@@ -89,7 +122,7 @@ export function TopNav() {
                         right: 0,
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
-                        borderRadius: "12px",
+                        borderRadius: "var(--radius-lg)",
                         boxShadow: "var(--shadow-md)",
                         minWidth: "220px",
                         zIndex: 300,
@@ -150,11 +183,73 @@ export function TopNav() {
               </div>
             </>
           ) : (
-            <Link href="/login" className="btn btn-primary btn-sm">
-              Sign in
-            </Link>
+            <div style={{ display: "flex", gap: "1.5rem", alignItems: "center" }}>
+              <Link href="/login" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
+                Sign in
+              </Link>
+              <Link href="/login" className="landing-btn landing-btn-base" style={{ padding: "0.5rem 1rem", fontSize: "0.95rem", borderRadius: "0" }}>
+                Get started
+              </Link>
+            </div>
           )}
         </div>
+
+        <button
+          type="button"
+          className="site-mobile-toggle"
+          onClick={() => setMobileMenuOpen((value) => !value)}
+          aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
+          aria-expanded={mobileMenuOpen}
+        >
+          {mobileMenuOpen ? <X size={18} /> : <Menu size={18} />}
+        </button>
+      </div>
+
+      <button
+        type="button"
+        className={`site-mobile-backdrop ${mobileMenuOpen ? "open" : ""}`}
+        aria-label="Close mobile menu"
+        onClick={() => setMobileMenuOpen(false)}
+      />
+
+      <div className={`site-mobile-menu ${mobileMenuOpen ? "open" : ""}`}>
+        {isHome && (
+          <div className="site-mobile-menu-links">
+            <Link href="#how-it-works" onClick={() => setMobileMenuOpen(false)}>How it works</Link>
+            <Link href="#integrations" onClick={() => setMobileMenuOpen(false)}>Integrations</Link>
+            <Link href="#pricing" onClick={() => setMobileMenuOpen(false)}>Pricing</Link>
+          </div>
+        )}
+
+        {isLoading ? null : isAuthenticated ? (
+          <div className="site-mobile-menu-actions">
+            <Link href="/dashboard/setup" className="btn btn-ghost" onClick={() => setMobileMenuOpen(false)}>
+              Setup
+            </Link>
+            <Link href="/dashboard" className="btn btn-ghost" onClick={() => setMobileMenuOpen(false)}>
+              Dashboard
+            </Link>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => {
+                setMobileMenuOpen(false);
+                void signOut({ callbackUrl: "/login" });
+              }}
+            >
+              Log out
+            </button>
+          </div>
+        ) : (
+          <div className="site-mobile-menu-actions">
+            <Link href="/login" className="btn btn-ghost" onClick={() => setMobileMenuOpen(false)}>
+              Sign in
+            </Link>
+            <Link href="/login" className="landing-btn landing-btn-base" onClick={() => setMobileMenuOpen(false)}>
+              Get started
+            </Link>
+          </div>
+        )}
       </div>
     </nav>
   );

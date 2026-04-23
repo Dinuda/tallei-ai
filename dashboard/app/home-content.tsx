@@ -147,11 +147,31 @@ export function HomeContent() {
       <header className="hero">
         <div className="hero-inner">
           <div className="hero-pill">
-            ✦ Sync memory between ChatGPT and Claude
+            Sync memory between ChatGPT and Claude
           </div>
           <h1 className="hero-h1">
-            Make your AI tools <em>actually</em> talk <em>to each other.</em>
+            Make your AI tools<br/>
+            <em>actually</em> talk<br/>
+            <em>to each other.</em>
           </h1>
+
+          {/* ─ Right Panel ─ */}
+          <div className="hero-right">
+            <div className="hero-right-inner">
+              <div className="hero-illustration">
+                <Image
+                  src="/hero-image-bg.png"
+                  alt="Person at desk with floating AI cards"
+                  width={720}
+                  height={720}
+                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                  priority
+                />
+              </div>
+              <div className="hero-caption">Before Tallei — Every tool, isolated</div>
+            </div>
+          </div>
+
           <p className="hero-sub">
             Tallei gives your AI tools a shared memory. Teach ChatGPT how you like things — Claude automatically knows. Stop repeating yourself.
           </p>
@@ -162,69 +182,6 @@ export function HomeContent() {
             </Link>
             <p className="hero-guarantee">Takes 2 minutes · No credit card required</p>
           </div>
-
-          {/* ─ Demo Box ─ */}
-          <section className="demo-visual" aria-label="Tallei memory sync preview">
-            <div className="demo-visual-inner">
-              <div className="solid-card hero-mockup">
-                <div className="mockup-header">
-                  <div className="mockup-dots">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                  <div className="mockup-title">TALLEI MEMORY LOG</div>
-                </div>
-                <div className="mockup-body">
-                  <div className="mockup-row mockup-row-icon">
-                    <div className="mockup-label mockup-label-icon">
-                      <Image src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} />
-                    </div>
-                    <div className="mockup-value">&ldquo;Always keep my emails short, punchy, and use bullet points.&rdquo;</div>
-                  </div>
-                  <div className="mockup-row mockup-row-icon">
-                    <div className="mockup-label mockup-label-icon">
-                      <Image src="/claude.svg" alt="Claude" width={28} height={28} />
-                    </div>
-                    <div className="mockup-value">&ldquo;Draft a project update for the team.&rdquo;</div>
-                  </div>
-                  <div className="mockup-row mockup-row-icon">
-                    <div className="mockup-label mockup-label-icon mockup-label-icon-stack">
-                      <Image src="/chatgpt.svg" alt="ChatGPT" width={28} height={28} className="mockup-stack-primary" />
-                      <Image src="/claude.svg" alt="Claude" width={28} height={28} className="mockup-stack-secondary" />
-                    </div>
-                    <div className="mockup-value">
-                      Claude automatically writes a concise, bulleted email — without being told twice.
-                    </div>
-                  </div>
-                </div>
-                <div className="mockup-footer">
-                  <Check size={14} className="text-purple" />
-                  <span>✓ Synced instantly</span>
-                </div>
-              </div>
-              <div className="demo-caption-title">Talk to everything you&apos;ve saved</div>
-              <div className="demo-caption-sub">Ask questions across all your memories. Instant answers from past decisions.</div>
-            </div>
-          </section>
-        </div>
-
-        {/* ─ Right Panel ─ */}
-        <div className="hero-right">
-          <div className="hero-right-inner">
-            <div className="hero-illustration">
-              <Image
-                src="/hero-image-bg.png"
-                alt="Person at desk with floating AI cards"
-                width={720}
-                height={720}
-                style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                priority
-              />
-            </div>
-            <div className="hero-caption">Before Tallei — Every tool, isolated</div>
-          </div>
-
         </div>
       </header>
 
@@ -233,6 +190,7 @@ export function HomeContent() {
       ═════════════════════════════════════════════════════ */}
       <section className="features-section">
         <div className="features-inner">
+          <span className="section-eyebrow">WHY WE BUILT THIS</span>
           <h2 className="section-h2">Why we built this</h2>
 
           <div className="story-grid">
@@ -264,14 +222,14 @@ export function HomeContent() {
       </section>
 
       <IntegrationsSection />
-      <PerformanceSection />
 
 {/* ═════════════════════════════════════════════════════
           PRICING
       ═════════════════════════════════════════════════════ */}
       <section id="pricing" className="pricing-section">
         <div className="pricing-inner">
-          <h2 className="section-h2 text-center pricing-heading">Simple, transparent pricing</h2>
+          <span className="section-eyebrow">PRICING</span>
+          <h2 className="section-h2 pricing-heading">Simple, transparent pricing</h2>
           <p className="pricing-sub">
             Start free, upgrade when you need more. All paid plans include a 14-day free trial.
           </p>
@@ -345,12 +303,15 @@ export function HomeContent() {
         </div>
       </section>
 
+      <PerformanceSection />
+
       {/* ═════════════════════════════════════════════════════
           FAQ / DETAILS
       ═════════════════════════════════════════════════════ */}
       <section className="faq-section">
         <div className="faq-inner">
-          <h2 className="section-h2 text-center">The details</h2>
+          <span className="section-eyebrow">FAQ</span>
+          <h2 className="section-h2">The details</h2>
           <ul className="faq-grid">
             <li className="solid-card detail-card">
               <h3 className="detail-h4">Is it secure?</h3>
@@ -400,7 +361,7 @@ export function HomeContent() {
       <footer className="footer-section">
         <div className="footer-inner">
           <div className="footer-brand">
-            <Image src="/tallei.svg" alt="Tallei logo" width={24} height={24} />
+            <Image src="/tallei.svg" alt="Tallei logo" width={24} height={24} style={{ width: "auto", height: "auto" }} />
           </div>
           <div className="footer-links">
             <Link href="/privacy">Privacy</Link>

@@ -107,6 +107,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, []);
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setMobileOpen(false);
+      setProfileOpen(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pathname]);
+
+  useEffect(() => {
     document.body.style.overflow = mobileOpen ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
   }, [mobileOpen]);
@@ -166,7 +174,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   right: 0,
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
-                  borderRadius: "12px",
+                  borderRadius: "var(--radius-lg)",
                   boxShadow: "var(--shadow-md)",
                   minWidth: "220px",
                   zIndex: 300,
@@ -231,6 +239,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <main className="dashboard-main">
         <div className="dashboard-content-wrap animate-fade-up">{children}</div>
       </main>
+
+      <nav
+        className={`dashboard-mobile-nav${mobileOpen ? " hidden" : ""}`}
+        aria-label="Dashboard mobile navigation"
+      >
+        {NAV[0].items.map((item) => {
+          const active = isActive(pathname, item);
+          return (
+            <Link
+              key={item.id}
+              href={item.href}
+              className={`dashboard-mobile-nav-link ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
     </div>
   );
 }

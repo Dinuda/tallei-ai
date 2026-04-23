@@ -24,6 +24,7 @@ type ChatGptTokenStatus = {
   activeTokenCount: number;
   lastTokenCreatedAt: string | null;
   lastTokenUsedAt: string | null;
+  maskedToken: string | null;
 };
 
 type ClaudeOnboardingState =
@@ -256,9 +257,20 @@ Never claim a file was saved unless \`upload_blob\` returned success.
 OpenAPI operation descriptions are the canonical execution contract.`;
 }
 
-export function CopyField({ value, label, onCopy }: { value: string; label?: string; onCopy?: () => void }) {
+export function CopyField({
+  value,
+  label,
+  onCopy,
+  copyable = true,
+}: {
+  value: string;
+  label?: string;
+  onCopy?: () => void;
+  copyable?: boolean;
+}) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
+    if (!copyable) return;
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
@@ -269,11 +281,13 @@ export function CopyField({ value, label, onCopy }: { value: string; label?: str
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
       {label && <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</label>}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.65rem 0.85rem', background: '#fafafa', border: '1px solid #e5e7eb', borderRadius: '8px', transition: 'all 0.2s', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.01)', gap: '0.75rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.65rem 0.85rem', background: '#fafafa', border: '1px solid #e5e7eb', borderRadius: "0", transition: 'all 0.2s', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.01)', gap: '0.75rem' }}>
         <code style={{ flex: 1, minWidth: 0, fontSize: '0.85rem', color: '#111827', fontFamily: 'SFMono-Regular, Consolas, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</code>
-        <button onClick={handleCopy} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', background: copied ? '#dcfce7' : '#ffffff', cursor: 'pointer', color: copied ? '#16a34a' : '#6b7280', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', border: '1px solid #e5e7eb', transition: 'all 0.2s', flexShrink: 0 }}>
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
+        {copyable && (
+          <button onClick={handleCopy} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: "0", background: copied ? '#dcfce7' : '#ffffff', cursor: 'pointer', color: copied ? '#16a34a' : '#6b7280', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', border: '1px solid #e5e7eb', transition: 'all 0.2s', flexShrink: 0 }}>
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -315,7 +329,7 @@ export function CodeBlock({
   const displayValue = expanded ? value : firstLine;
   
   return (
-    <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '12px', overflow: 'hidden' }}>
+    <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: "0", overflow: 'hidden' }}>
       <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
         <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, color: '#374151'}}>
           {getLanguageIcon(language) && <span style={{ fontSize: '0.9rem' }}>{getLanguageIcon(language)}</span>}
@@ -327,7 +341,7 @@ export function CodeBlock({
             <button
               type="button"
               onClick={() => setExpanded(!expanded)}
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'rgba(0, 0, 0, 0.05)', cursor: 'pointer', color: '#6b7280', transition: 'all 0.2s' }}
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: "0", border: 'none', background: 'rgba(0, 0, 0, 0.05)', cursor: 'pointer', color: '#6b7280', transition: 'all 0.2s' }}
             >
               {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
             </button>
@@ -335,7 +349,7 @@ export function CodeBlock({
           <button
             type="button"
             onClick={handleCopy}
-            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: 'none', background: 'rgba(0, 0, 0, 0.05)', cursor: 'pointer', color: copied ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: "0", border: 'none', background: 'rgba(0, 0, 0, 0.05)', cursor: 'pointer', color: copied ? '#10b981' : '#6b7280', transition: 'all 0.2s' }}
           >
             {copied ? <Check size={16} /> : <Copy size={16} />}
           </button>
@@ -353,7 +367,7 @@ export function GuideImage({ src, alt, caption, defaultExpanded = false }: { src
   const isVideo = src.endsWith('.mp4');
 
   return (
-    <div style={{ borderRadius: '12px', overflow: 'hidden', border: '1px solid #e5e7eb', background: '#fafafa' }}>
+    <div style={{ borderRadius: "0", overflow: 'hidden', border: '1px solid #e5e7eb', background: '#fafafa' }}>
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
@@ -366,7 +380,7 @@ export function GuideImage({ src, alt, caption, defaultExpanded = false }: { src
         {expanded ? <ChevronUp size={14} style={{ color: '#6b7280' }} /> : <ChevronDown size={14} style={{ color: '#6b7280' }} />}
       </button>
       <div style={{ display: expanded ? 'block' : 'none', padding: '0 0.75rem 0.75rem', animation: expanded ? 'fadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1)' : 'none' }}>
-        <div style={{ background: '#ffffff', borderRadius: '8px', border: '1px solid #e5e7eb', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+        <div style={{ background: '#ffffff', borderRadius: "0", border: '1px solid #e5e7eb', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
           <div style={{ height: '24px', background: '#f3f4f6', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', padding: '0 8px', gap: '6px' }}>
             <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ff5f56' }} />
             <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ffbd2e' }} />
@@ -408,14 +422,14 @@ export function VerifyChecklist({ items, onVerified, autoCheck, onToggle }: { it
   }, [effectiveChecked, onToggle]);
 
   return (
-    <div style={{ borderRadius: '12px', border: allDone ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid #f3f4f6', background: allDone ? 'rgba(240, 253, 244, 0.5)' : '#ffffff', padding: '1rem', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', boxShadow: allDone ? '0 0 16px rgba(34, 197, 94, 0.1)' : '0 1px 3px rgba(0,0,0,0.02)' }}>
+    <div style={{ borderRadius: "0", border: allDone ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid #f3f4f6', background: allDone ? 'rgba(240, 253, 244, 0.5)' : '#ffffff', padding: '1rem', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', boxShadow: allDone ? '0 0 16px rgba(34, 197, 94, 0.1)' : '0 1px 3px rgba(0,0,0,0.02)' }}>
       <div style={{ fontSize: '0.75rem', fontWeight: 700, color: allDone ? '#16a34a' : '#9ca3af', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em', transition: 'color 0.3s' }}>
         {allDone ? <><CheckCircle2 size={13} style={{ animation: 'bounceIn 0.4s ease' }} /> Verified!</> : <>Verify before continuing</>}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
         {items.map((item, i) => (
           <label key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: effectiveChecked[i] ? '#16a34a' : '#4b5563', lineHeight: 1.45, transition: 'all 0.2s', transform: effectiveChecked[i] ? 'translateX(2px)' : 'none' }}>
-            <input type="checkbox" checked={effectiveChecked[i]} onChange={() => toggle(i)} style={{ accentColor: '#16a34a', width: '16px', height: '16px', marginTop: '2px', flexShrink: 0, cursor: 'pointer', borderRadius: '4px' }} />
+            <input type="checkbox" checked={effectiveChecked[i]} onChange={() => toggle(i)} style={{ accentColor: '#16a34a', width: '16px', height: '16px', marginTop: '2px', flexShrink: 0, cursor: 'pointer', borderRadius: "0" }} />
             <span style={{ textDecoration: effectiveChecked[i] ? 'line-through' : 'none', opacity: effectiveChecked[i] ? 0.8 : 1 }}>{item}</span>
           </label>
         ))}
@@ -426,7 +440,7 @@ export function VerifyChecklist({ items, onVerified, autoCheck, onToggle }: { it
 
 export function InfoCallout({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', gap: '0.75rem', padding: '0.85rem 1rem', borderRadius: '10px', background: 'rgba(59, 130, 246, 0.05)', border: '1px solid rgba(59, 130, 246, 0.15)', fontSize: '0.85rem', color: '#374151', lineHeight: 1.55 }}>
+    <div style={{ display: 'flex', gap: '0.75rem', padding: '0.85rem 1rem', borderRadius: "0", background: 'rgba(59, 130, 246, 0.05)', border: '1px solid rgba(59, 130, 246, 0.15)', fontSize: '0.85rem', color: '#374151', lineHeight: 1.55 }}>
       <Info size={16} style={{ flexShrink: 0, color: '#3b82f6', marginTop: '2px' }} />
       <div>{children}</div>
     </div>
@@ -436,14 +450,14 @@ export function InfoCallout({ children }: { children: React.ReactNode }) {
 export function SaveModeToggle({ mode, onChange }: { mode: SaveMode; onChange: (m: SaveMode) => void }) {
   return (
     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-      <button type="button" onClick={() => onChange("instant")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: '12px', border: mode === 'instant' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'instant' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
+      <button type="button" onClick={() => onChange("instant")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: "0", border: mode === 'instant' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'instant' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
         <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: mode === 'instant' ? '6px solid #111827' : '2px solid #d1d5db', background: '#ffffff' }} />
         <div>
           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#111827' }}><Zap size={14} style={{display: 'inline', marginRight: '4px'}} /> Save Instantly</div>
           <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.25rem' }}>Memories are saved automatically.</div>
         </div>
       </button>
-      <button type="button" onClick={() => onChange("on_request")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: '12px', border: mode === 'on_request' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'on_request' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
+      <button type="button" onClick={() => onChange("on_request")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: "0", border: mode === 'on_request' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'on_request' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
         <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: mode === 'on_request' ? '6px solid #111827' : '2px solid #d1d5db', background: '#ffffff' }} />
         <div>
           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#111827' }}><Hand size={14} style={{display: 'inline', marginRight: '4px'}} /> Save on Request</div>
@@ -462,12 +476,12 @@ export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalS
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 100000, display: 'flex', flexDirection: 'column', alignItems: 'center', background: 'rgba(0, 0, 0, 0.05)', animation: 'fadeIn 0.2s ease', padding: '5vh 1rem', overflowY: 'auto' }}>
-      <div style={{ background: '#ffffff', width: '100%', maxWidth: '900px', borderRadius: '16px', overflow: 'hidden', display: 'flex', flexDirection: 'column', margin: 'auto', flexShrink: 0, boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25), 0 0 1px rgba(0,0,0,0.1)', animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}>
+      <div style={{ background: '#ffffff', width: '100%', maxWidth: '900px', borderRadius: "0", overflow: 'hidden', display: 'flex', flexDirection: 'column', margin: 'auto', flexShrink: 0, boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25), 0 0 1px rgba(0,0,0,0.1)', animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}>
         
         {/* Header */}
         <div style={{ position: 'relative', padding: '1.25rem 1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#ffffff' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: '#f8fafc', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ width: '32px', height: '32px', borderRadius: "0", background: '#f8fafc', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               {providerIcon}
             </div>
             <div>
@@ -477,7 +491,7 @@ export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalS
               </div>
             </div>
           </div>
-          <button onClick={onClose} style={{ background: 'rgba(0, 0, 0, 0.05)', border: 'none', cursor: 'pointer', width: '28px', height: '28px', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', transition: 'all 0.2s' }} onMouseOver={(e) => { e.currentTarget.style.background = '#f3f4f6'; e.currentTarget.style.color = '#374151'; }} onMouseOut={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#9ca3af'; }}><X size={16} /></button>
+          <button onClick={onClose} style={{ background: 'rgba(0, 0, 0, 0.05)', border: 'none', cursor: 'pointer', width: '28px', height: '28px', borderRadius: "0", display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', transition: 'all 0.2s' }} onMouseOver={(e) => { e.currentTarget.style.background = '#f3f4f6'; e.currentTarget.style.color = '#374151'; }} onMouseOut={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#9ca3af'; }}><X size={16} /></button>
           
           {/* Edge-to-edge Progress Bar */}
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '2px', background: '#f3f4f6' }}>
@@ -494,8 +508,8 @@ export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalS
 
         {/* Footer */}
         <div style={{ padding: '1.25rem 2rem', borderTop: '1px solid #f3f4f6', background: '#ffffff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Button variant="ghost" onClick={onBack} disabled={step === 1} style={{ borderRadius: '8px', padding: '0.5rem 1rem', opacity: step === 1 ? 0 : 1, transition: 'opacity 0.2s' }}>Back</Button>
-           <Button onClick={onNext} style={{ borderRadius: '8px', padding: '0.5rem 2rem', background: '#111827', color: '#ffffff', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)', fontWeight: 600 }}>{step === totalSteps ? "Finish Setup" : "Continue"}</Button>
+          <Button variant="ghost" onClick={onBack} disabled={step === 1} style={{ borderRadius: "0", padding: '0.5rem 1rem', opacity: step === 1 ? 0 : 1, transition: 'opacity 0.2s' }}>Back</Button>
+           <Button onClick={onNext} style={{ borderRadius: "0", padding: '0.5rem 2rem', background: '#111827', color: '#ffffff', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)', fontWeight: 600 }}>{step === totalSteps ? "Finish Setup" : "Continue"}</Button>
         </div>
       </div>
     </div>
@@ -508,7 +522,7 @@ export function WizardModal({ isOpen, onClose, title, providerIcon, step, totalS
 export function StepMedia({ src, alt, caption }: { src: string; alt: string; caption?: string }) {
   const isVideo = src.endsWith('.mp4');
   return (
-    <div style={{ borderRadius: '14px', border: '1px solid #e5e7eb', background: '#ffffff', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+    <div style={{ borderRadius: "0", border: '1px solid #e5e7eb', background: '#ffffff', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
        <div style={{ height: '32px', background: '#f8fafc', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', padding: '0 12px', gap: '8px' }}>
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ff5f56' }} />
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#ffbd2e' }} />
@@ -879,7 +893,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           content={
             <>
               {CLAUDE_AUTOMATION_ENABLED && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", background: "#f8fafc", padding: "1rem", borderRadius: "12px", border: "1px solid #e5e7eb" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
                     <div>
                       <div style={{ fontSize: "0.9rem", fontWeight: 700, color: "#111827" }}>Automated setup (beta)</div>
@@ -898,7 +912,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                         <strong>Status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(displayState ?? onboardingSession.currentState)}
                       </div>
                       {onboardingSession.checkpoint && (
-                        <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#9a3412" }}>
+                        <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: "0", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#9a3412" }}>
                           <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>{onboardingSession.checkpoint.message}</div>
                           <div>{onboardingSession.checkpoint.resumeHint}</div>
                           {checkpointActionUrl && (
@@ -914,7 +928,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                         </div>
                       )}
                       {onboardingSession.lastError && (
-                        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "8px", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#991b1b" }}>
+                        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "0", padding: "0.6rem 0.75rem", fontSize: "0.82rem", color: "#991b1b" }}>
                           {onboardingSession.lastError}
                         </div>
                       )}
@@ -958,11 +972,11 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                 First, link Tallei to your Claude account. Open your Claude Connectors page and create a new custom connector with these exact values:
               </p>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: "1rem", background: "#f8fafc", padding: "1.5rem", borderRadius: "16px", border: "1px solid #e5e7eb", boxShadow: "inset 0 2px 4px rgba(0,0,0,0.02)" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem", background: "#f8fafc", padding: "1.5rem", borderRadius: "0", border: "1px solid #e5e7eb", boxShadow: "inset 0 2px 4px rgba(0,0,0,0.02)" }}>
                 <CopyField value="Tallei Memory" label="Name" />
                 <CopyField value={mcpUrl} label="Remote MCP server URL" />
 
-                <Button variant="default" onClick={() => window.open("https://claude.ai/settings/connectors", "_blank")} style={{ width: "100%", marginTop: "0.5rem", fontWeight: 600 }}>
+                <Button variant="default" onClick={() => window.open("https://claude.ai/customize/connectors", "_blank")} style={{ width: "100%", marginTop: "0.5rem", fontWeight: 600 }}>
                   Open Claude Connectors <ExternalLink size={14} style={{ marginLeft: "8px" }} />
                 </Button>
               </div>
@@ -997,7 +1011,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                 A Project lets all your chats share the same Tallei memory context.
               </p>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", background: "#f8fafc", padding: "1rem", borderRadius: "12px", border: "1px solid #e5e7eb", fontSize: "0.95rem", color: "#374151" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb", fontSize: "0.95rem", color: "#374151" }}>
                 <div>1. Go to <strong>Claude → Projects</strong> and create a new project.</div>
                 <div>2. In the project settings, enable the <strong>Tallei Memory</strong> connector.</div>
               </div>
@@ -1030,7 +1044,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
           </div>
 
           {CLAUDE_AUTOMATION_ENABLED && onboardingSession && (
-            <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "10px", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
+            <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "0", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
               <div style={{ color: "#374151" }}>
                 <strong>Automation status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(displayState ?? onboardingSession.currentState)}
               </div>
@@ -1103,7 +1117,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
               <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#111827", marginBottom: "0.45rem" }}>
                 Live automation session
               </div>
-              <div style={{ position: "relative", borderRadius: "10px", overflow: "hidden", border: "1px solid #e5e7eb", background: "#111827" }}>
+              <div style={{ position: "relative", borderRadius: "0", overflow: "hidden", border: "1px solid #e5e7eb", background: "#111827" }}>
                 <iframe
                   src={liveSessionUrl}
                   title="Claude live automation session"
@@ -1155,16 +1169,14 @@ export function ChatGPTWizard({
   isOpen,
   onClose,
   tokenStatus,
-  issuedToken,
   generatingToken,
   onGenerateToken,
 }: {
   isOpen: boolean;
   onClose: () => void;
   tokenStatus: ChatGptTokenStatus;
-  issuedToken: string | null;
   generatingToken: boolean;
-  onGenerateToken: () => Promise<void>;
+  onGenerateToken: (rotate?: boolean) => Promise<void>;
 }) {
   const [step, setStep] = useState(1);
   const [saveMode, setSaveMode] = useState<SaveMode>("instant");
@@ -1177,7 +1189,6 @@ export function ChatGPTWizard({
   const [connectionVerified, setConnectionVerified] = useState(false);
   const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
 
-  const [tokenCopied, setTokenCopied] = useState(false);
   const openApiBase = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? window.location.origin : "");
   const openApiUrl = `${openApiBase.replace(/\/$/, "")}/chatgpt/actions/openapi.json?spec=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_TAG)}`;
 
@@ -1227,25 +1238,24 @@ export function ChatGPTWizard({
       
       {step === 1 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', animation: 'fadeIn 0.2s ease-out' }}>
-          <p style={{ color: '#4b5563', margin: 0, fontSize: '0.95rem', lineHeight: 1.6 }}>First, generate an API token that ChatGPT will use to securely talk to Tallei. Keep it secret.</p>
+          <p style={{ color: '#4b5563', margin: 0, fontSize: '0.95rem', lineHeight: 1.6 }}>First, make sure there is an active bearer token that ChatGPT can use to securely talk to Tallei.</p>
           
-          <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb' }}>
-             <Button variant="default" onClick={() => void onGenerateToken()} disabled={generatingToken} style={{ marginBottom: issuedToken ? '1rem' : '0', width: 'fit-content' }}>
-               {generatingToken ? "Generating..." : "Generate Bearer Token"}
+          <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: "0", border: '1px solid #e5e7eb' }}>
+             <Button variant="default" onClick={() => void onGenerateToken(Boolean(tokenStatus.hasActiveToken))} disabled={generatingToken} style={{ marginBottom: tokenStatus.hasActiveToken ? '1rem' : '0', width: 'fit-content' }}>
+               {generatingToken ? "Saving..." : (tokenStatus.hasActiveToken ? "Rotate Bearer Token" : "Create Bearer Token")}
              </Button>
-             {issuedToken && (
+             {tokenStatus.hasActiveToken && (
                <div style={{ marginTop: '1rem' }}>
-                  <CopyField value={issuedToken} label="Bearer Token (Copy this!)" onCopy={() => setTokenCopied(true)} />
+                  <CopyField value={tokenStatus.maskedToken || "****************"} label="Bearer Token (Hidden)" copyable={false} />
                </div>
              )}
           </div>
           
-          <InfoCallout>This token is shown only once. Make sure to copy it before continuing.</InfoCallout>
+          <InfoCallout>The dashboard shows only a hidden token placeholder and never returns the raw bearer token value.</InfoCallout>
           <VerifyChecklist
-            items={['I generated the bearer token', 'I copied the token to my clipboard']}
+            items={['I confirmed an active bearer token exists']}
             onVerified={setStep1Verified}
-            autoCheck={[Boolean(issuedToken || tokenStatus.hasActiveToken), tokenCopied]}
-            onToggle={(i, checked) => { if (i === 1 && checked && issuedToken) { navigator.clipboard.writeText(issuedToken).catch(()=>{}); setTokenCopied(true); } }}
+            autoCheck={[Boolean(tokenStatus.hasActiveToken)]}
           />
         </div>
       )}
@@ -1288,11 +1298,11 @@ export function ChatGPTWizard({
             <>
               <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>Almost done. We just need to give the GPT your token and its instructions.</p>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
-                <div>Click the ⚙️ gear icon next to <code>API Key</code> in Actions. Set Auth Type to <strong>Bearer</strong>, and paste the token from Step 1. Click Save.</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: '#f8fafc', padding: '1.25rem', borderRadius: "0", border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
+                <div>Click the ⚙️ gear icon next to <code>API Key</code> in Actions. Set Auth Type to <strong>Bearer</strong> and paste your stored token value. Click Save.</div>
               </div>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.25rem', borderRadius: "0", border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
                 <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
                 <div>Paste these instructions into the GPT&apos;s <strong>Instructions</strong> box:</div>
                 <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" maxHeight={260} />

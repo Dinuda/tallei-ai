@@ -574,8 +574,10 @@ export async function generateApiKey(
   rotationDays = 30,
   tenantIdInput?: string | null,
   connectorType?: string | null,
-  keyPrefix = "tly"
+  keyPrefix = "tly",
+  options?: { allowEphemeralFallback?: boolean }
 ): Promise<{ key: string; id: string }> {
+  const allowEphemeralFallback = options?.allowEphemeralFallback ?? true;
   const tenantId =
     tenantIdInput === undefined
       ? (await resolveAuthContext(userId, "internal")).tenantId
@@ -585,7 +587,7 @@ export async function generateApiKey(
   const rawKey = `${normalizedPrefix}_` + randomBytes(32).toString("hex");
   const hash = hashApiKey(rawKey);
 
-  if (config.nodeEnv !== "production" && shouldBypassApiKeyDbPath()) {
+  if (config.nodeEnv !== "production" && allowEphemeralFallback && shouldBypassApiKeyDbPath()) {
     const fallbackId = randomUUID();
     storeEphemeralApiKey({
       id: fallbackId,
@@ -617,7 +619,7 @@ export async function generateApiKey(
 
     return { key: rawKey, id };
   } catch (error) {
-    if (config.nodeEnv === "production") {
+    if (config.nodeEnv === "production" || !allowEphemeralFallback) {
       throw error;
     }
 

@@ -1,0 +1,37 @@
+/* Scope legacy global theme bleed so this route stays shadcn-consistent. */
+.setup-shadcn-scope {
+  --surface: var(--card);
+  --surface-2: color-mix(in oklab, var(--card) 90%, var(--muted) 10%);
+  --text: var(--foreground);
+  --text-2: var(--muted-foreground);
+  --text-muted: var(--muted-foreground);
+  --border-light: var(--border);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06);
+  --shadow-md: 0 10px 24px rgb(0 0 0 / 0.08);
+  --shadow-lg: 0 18px 40px rgb(0 0 0 / 0.12);
+  --radius-sm: 0.5rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.75rem;
+
+  color: var(--foreground);
+}
+
+.setup-shadcn-scope h1,
+.setup-shadcn-scope h2,
+.setup-shadcn-scope h3,
+.setup-shadcn-scope h4,
+.setup-shadcn-scope h5,
+.setup-shadcn-scope h6 {
+  font-family: inherit;
+  letter-spacing: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+.setup-shadcn-scope p {
+  color: inherit;
+}
+
+.setup-shadcn-scope :is(a, button, input):focus-visible {
+  outline: none;
+}
