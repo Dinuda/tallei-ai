@@ -30,6 +30,7 @@ type ChatGptTokenStatus = {
   lastTokenCreatedAt: string | null;
   lastTokenUsedAt: string | null;
   maskedToken: string | null;
+  rawToken: string | null;
 };
 
 type ConnectorId = Provider | "gemini";
@@ -85,6 +86,7 @@ const DEFAULT_CHATGPT_TOKEN_STATUS: ChatGptTokenStatus = {
   lastTokenCreatedAt: null,
   lastTokenUsedAt: null,
   maskedToken: null,
+  rawToken: null,
 };
 
 function normalizeState(value: unknown): IntegrationState {
@@ -128,6 +130,7 @@ function normalizeChatGptTokenStatus(input: unknown): ChatGptTokenStatus {
     lastTokenCreatedAt: typeof value.lastTokenCreatedAt === "string" ? value.lastTokenCreatedAt : null,
     lastTokenUsedAt: typeof value.lastTokenUsedAt === "string" ? value.lastTokenUsedAt : null,
     maskedToken: typeof value.maskedToken === "string" ? value.maskedToken : null,
+    rawToken: typeof value.rawToken === "string" ? value.rawToken : null,
   };
 }
 
@@ -277,7 +280,7 @@ export default function ConnectorsPage() {
     <div className={styles.page}>
       <header className={styles.pageHeader}>
         <div>
-          <h1 className={styles.pageTitle}>Connectors</h1>
+          <h1 className={styles.pageTitle}>AI Assistants</h1>
           <p className={styles.pageSubtitle}>Connect AI clients and keep setup in sync.</p>
         </div>
         <div className={styles.headerRight}>

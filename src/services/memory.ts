@@ -26,6 +26,7 @@ import {
 import { bucketRecall } from "../infrastructure/recall/bucket-recall.js";
 import { incrementWithTtl } from "../infrastructure/cache/redis-cache.js";
 import { setRequestTimingFields } from "../observability/request-timing.js";
+import { extractFacts } from "../orchestration/ai/fact-extract.usecase.js";
 import { SaveMemoryUseCase } from "../orchestration/memory/save.usecase.js";
 import type { SaveMemoryResult } from "../orchestration/memory/save.usecase.js";
 import { RecallMemoryUseCase } from "../orchestration/memory/recall.usecase.js";
@@ -252,6 +253,7 @@ const saveMemoryUseCase = new SaveMemoryUseCase({
   bumpRecallStamp,
   ipHash,
   createQuotaExceededError: (message) => new QuotaExceededError(message),
+  extractFacts,
   isEvalMode: IS_EVAL_MODE,
   freeSaveLimit: FREE_SAVE_LIMIT,
 });
@@ -308,6 +310,7 @@ export async function saveMemory(
     category?: string | null;
     isPinned?: boolean;
     preferenceKey?: string | null;
+    runFactExtraction?: boolean;
   }
 ): Promise<SaveMemoryResult> {
   return saveMemoryUseCase.execute({
@@ -319,6 +322,7 @@ export async function saveMemory(
     category: options?.category,
     isPinned: options?.isPinned,
     preferenceKey: options?.preferenceKey,
+    runFactExtraction: options?.runFactExtraction,
   });
 }
 
@@ -359,6 +363,7 @@ export async function savePreference(
   options?: {
     category?: string | null;
     preferenceKey?: string | null;
+    runFactExtraction?: boolean;
   }
 ): Promise<SaveMemoryResult> {
   return saveMemory(content, auth, platform, requesterIp, {
@@ -366,6 +371,7 @@ export async function savePreference(
     isPinned: true,
     category: options?.category ?? null,
     preferenceKey: options?.preferenceKey ?? null,
+    runFactExtraction: options?.runFactExtraction,
   });
 }
 

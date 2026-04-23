@@ -416,6 +416,7 @@ router.get("/chatgpt/token", requireScopes(["memory:read"]), async (req: AuthReq
       lastTokenCreatedAt: newest?.created_at ?? null,
       lastTokenUsedAt: newest?.last_used_at ?? null,
       maskedToken: keys.length > 0 ? "****************" : null,
+      rawToken: null,
     });
   } catch (error) {
     console.error("Error fetching ChatGPT token status:", error);
@@ -448,6 +449,7 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
         lastTokenCreatedAt: activeKey.created_at,
         lastTokenUsedAt: activeKey.last_used_at ?? null,
         maskedToken: "****************",
+        rawToken: null,
         message: "A ChatGPT bearer token already exists. Using the existing token.",
       });
       return;
@@ -461,6 +463,17 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
       });
     }
 
+    const revokeExistingBeforeCreate = await pool.query<{ key_hash: string }>(
+      `UPDATE api_keys
+       SET revoked_at = NOW()
+       WHERE user_id = $1
+         AND connector_type = 'chatgpt'
+         AND revoked_at IS NULL
+       RETURNING key_hash`,
+      [userId]
+    );
+    await invalidateApiKeyValidationCaches(revokeExistingBeforeCreate.rows.map((row) => row.key_hash));
+
     const generated = await generateApiKey(
       userId,
       "ChatGPT Action Bearer",
@@ -470,18 +483,6 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
       "tly",
       { allowEphemeralFallback: false }
     );
-
-    const revokeExisting = await pool.query<{ key_hash: string }>(
-      `UPDATE api_keys
-       SET revoked_at = NOW()
-       WHERE user_id = $1
-         AND connector_type = 'chatgpt'
-         AND id <> $2
-         AND revoked_at IS NULL
-       RETURNING key_hash`,
-      [userId, generated.id]
-    );
-    await invalidateApiKeyValidationCaches(revokeExisting.rows.map((row) => row.key_hash));
 
     const createdAt = new Date().toISOString();
     res.status(201).json({
@@ -494,6 +495,7 @@ router.post("/chatgpt/token", requireScopes(["memory:write"]), async (req: AuthR
       lastTokenCreatedAt: createdAt,
       lastTokenUsedAt: null,
       maskedToken: "****************",
+      rawToken: generated.key,
       message: rotateRequested
         ? "ChatGPT bearer token rotated and stored securely."
         : "ChatGPT bearer token created and stored securely.",

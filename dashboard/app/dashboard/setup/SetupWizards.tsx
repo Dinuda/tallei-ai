@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Check, Copy, ExternalLink, Zap, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X } from "lucide-react";
+import { Check, Copy, ExternalLink, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X, Clock3, RefreshCw } from "lucide-react";
 import { Button } from "../../../components/ui/button";
 import { AspectRatio } from "../../../components/ui/aspect-ratio";
 
@@ -42,6 +42,7 @@ type ChatGptTokenStatus = {
   lastTokenCreatedAt: string | null;
   lastTokenUsedAt: string | null;
   maskedToken: string | null;
+  rawToken: string | null;
 };
 
 type ClaudeOnboardingState =
@@ -169,7 +170,7 @@ async function verifyConnectivityEvent(
       ok: false,
       message:
         provider === "chatgpt"
-          ? "No ChatGPT action event found yet. Send the test prompt, click Confirm on the action permission card, then verify again."
+          ? ""
           : "No new Claude connector event found yet. Send the test prompt in Claude, then verify again.",
     };
   } catch {
@@ -480,10 +481,7 @@ export function SaveModeToggle({ mode, onChange }: { mode: SaveMode; onChange: (
     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
       <button type="button" onClick={() => onChange("instant")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: "0", border: mode === 'instant' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'instant' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
         <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: mode === 'instant' ? '6px solid #111827' : '2px solid #d1d5db', background: '#ffffff' }} />
-        <div>
-          <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#111827' }}><Zap size={14} style={{display: 'inline', marginRight: '4px'}} /> Save Instantly</div>
-          <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.25rem' }}>Memories are saved automatically.</div>
-        </div>
+     
       </button>
       <button type="button" onClick={() => onChange("on_request")} style={{ flex: '1 1 200px', padding: '1rem', borderRadius: "0", border: mode === 'on_request' ? '2px solid #111827' : '1px solid #e5e7eb', background: mode === 'on_request' ? '#f8fafc' : '#ffffff', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '0.75rem' }}>
         <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: mode === 'on_request' ? '6px solid #111827' : '2px solid #d1d5db', background: '#ffffff' }} />
@@ -585,9 +583,17 @@ export function StepMedia({
   );
 }
 
-export function TwoColumnStep({ media, content }: { media: React.ReactNode, content: React.ReactNode }) {
+export function TwoColumnStep({
+  media,
+  content,
+  mobileContentFirst = false,
+}: {
+  media: React.ReactNode;
+  content: React.ReactNode;
+  mobileContentFirst?: boolean;
+}) {
   return (
-    <div className="two-column-step" style={{ animation: 'fadeIn 0.3s ease-out' }}>
+    <div className={`two-column-step${mobileContentFirst ? " mobile-content-first" : ""}`} style={{ animation: 'fadeIn 0.3s ease-out' }}>
       
 <style dangerouslySetInnerHTML={{ __html: `
   .two-column-step {
@@ -616,6 +622,12 @@ export function TwoColumnStep({ media, content }: { media: React.ReactNode, cont
     .step-media-col {
       position: static;
       width: 100%;
+    }
+    .two-column-step.mobile-content-first .step-content-col {
+      order: 1;
+    }
+    .two-column-step.mobile-content-first .step-media-col {
+      order: 2;
     }
   }
 ` }} />
@@ -728,10 +740,16 @@ function VerifySection({
   verifyingConnection,
   step3Verified,
   onVerify,
+  headline = "Make sure to operate your memory within your Claude project.",
+  desktopHint = "Send a test message in your project to verify the connection.",
+  mobileHint = "Send a test message in your Claude project to verify the connection is working properly.",
 }: {
   verifyingConnection: boolean;
   step3Verified: boolean;
   onVerify: () => void;
+  headline?: string;
+  desktopHint?: string;
+  mobileHint?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -766,8 +784,8 @@ function VerifySection({
             lineHeight: 1.5,
           }}
         >
-          <strong>Make sure to operate your memory within your Claude project.</strong>
-          {!isMobile && <> Send a test message in your project to verify the connection.</>}
+          <strong>{headline}</strong>
+          {!isMobile && <> {desktopHint}</>}
         </p>
 
         {isMobile && (
@@ -819,7 +837,7 @@ function VerifySection({
                     lineHeight: 1.5,
                   }}
                 >
-                  Send a test message in your Claude project to verify the connection is working properly.
+                  {mobileHint}
                 </div>
               </div>
             </div>
@@ -1388,34 +1406,23 @@ export function ChatGPTWizard({
   onGenerateToken: (rotate?: boolean) => Promise<void>;
 }) {
   const [step, setStep] = useState(1);
-  const [saveMode, setSaveMode] = useState<SaveMode>("instant");
-  // Verification states
-  const [step1Verified, setStep1Verified] = useState(false);
-  const [step2Verified, setStep2Verified] = useState(false);
-  const [step3Verified, setStep3Verified] = useState(false);
-  const [verificationStartedAt, setVerificationStartedAt] = useState<number | null>(null);
-  const [verifyingConnection, setVerifyingConnection] = useState(false);
-  const [connectionVerified, setConnectionVerified] = useState(false);
-  const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
+  const saveMode: SaveMode = "instant";
 
   const openApiBase = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? window.location.origin : "");
   const openApiUrl = `${openApiBase.replace(/\/$/, "")}/chatgpt/actions/openapi.json?spec=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_TAG)}`;
 
-  const totalSteps = 4;
-
-  const resetConnectionVerification = useCallback(() => {
-    setVerificationStartedAt(Date.now());
-    setConnectionVerified(false);
-    setConnectionVerificationMessage(null);
-  }, []);
+  const totalSteps = 5;
+  const stepTitles = [
+    "Set up your ChatGPT project",
+    "Create bearer token",
+    "Set bearer authentication",
+    "Import from URL",
+    "Test in your GPT",
+  ];
 
   const handleNext = () => {
     if (step < totalSteps) {
-      const nextStep = step + 1;
-      if (nextStep === 4) {
-        resetConnectionVerification();
-      }
-      setStep(nextStep);
+      setStep(step + 1);
       return;
     }
     onClose();
@@ -1423,130 +1430,139 @@ export function ChatGPTWizard({
   const handleBack = () => {
     if (step > 1) setStep(s => s - 1);
   };
-  const canNext = () => {
-    if (step === 1) return step1Verified;
-    if (step === 2) return step2Verified;
-    if (step === 3) return step3Verified;
-    if (step === 4) return connectionVerified;
-    return true;
-  };
 
-  async function handleVerifyConnection() {
-    setVerifyingConnection(true);
-    const since = verificationStartedAt ?? Date.now() - 2 * 60 * 1000;
-    const result = await verifyConnectivityEvent("chatgpt", since, {
-      lastTokenUsedAt: tokenStatus.lastTokenUsedAt,
-    });
-    setConnectionVerified(result.ok);
-    setConnectionVerificationMessage(result.message);
-    setVerifyingConnection(false);
-  }
+  const testPrompt = "My favorite programming language is Rust.";
 
   return (
-    <WizardModal isOpen={isOpen} onClose={onClose} title="Connect ChatGPT Actions" providerIcon={<img src="/chatgpt.svg" width={24} height={24} alt="ChatGPT" />} step={step} totalSteps={totalSteps} onNext={handleNext} onBack={handleBack} canNext={canNext()}>
+    <WizardModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Connect ChatGPT Actions"
+      stepTitle={stepTitles[step - 1]}
+      providerIcon={<img src="/chatgpt.svg" width={24} height={24} alt="ChatGPT" />}
+      step={step}
+      totalSteps={totalSteps}
+      onNext={handleNext}
+      onBack={handleBack}
+      canNext={true}
+    >
       
-      {step === 1 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', animation: 'fadeIn 0.2s ease-out' }}>
-          <p style={{ color: '#4b5563', margin: 0, fontSize: '0.95rem', lineHeight: 1.6 }}>First, make sure there is an active bearer token that ChatGPT can use to securely talk to Tallei.</p>
-          
-          <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: "0", border: '1px solid #e5e7eb' }}>
-             <Button variant="default" onClick={() => void onGenerateToken(Boolean(tokenStatus.hasActiveToken))} disabled={generatingToken} style={{ marginBottom: tokenStatus.hasActiveToken ? '1rem' : '0', width: 'fit-content' }}>
-               {generatingToken ? "Saving..." : (tokenStatus.hasActiveToken ? "Rotate Bearer Token" : "Create Bearer Token")}
-             </Button>
-             {tokenStatus.hasActiveToken && (
-               <div style={{ marginTop: '1rem' }}>
-                  <CopyField value={tokenStatus.maskedToken || "****************"} label="Bearer Token (Hidden)" copyable={false} />
-               </div>
-             )}
+      {step === 2 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1rem", animation: "fadeIn 0.2s ease-out", maxWidth: "760px", margin: "0 auto", width: "100%" }}>
+          <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+            First, ensure there is an active bearer token that ChatGPT can use to securely talk to Tallei.
+          </p>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.8rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", justifyContent: "space-between", flexWrap: "wrap" }}>
+              <div style={{ display: "inline-flex", width: "fit-content", alignItems: "center", gap: "0.4rem", border: `1px solid ${tokenStatus.hasActiveToken ? "#bbf7d0" : "#e5e7eb"}`, background: tokenStatus.hasActiveToken ? "#f0fdf4" : "#ffffff", color: tokenStatus.hasActiveToken ? "#15803d" : "#6b7280", fontSize: "0.78rem", fontWeight: 600, padding: "0.28rem 0.55rem", borderRadius: "999px" }}>
+                {tokenStatus.hasActiveToken ? <CheckCircle2 size={12} /> : <Clock3 size={12} />}
+                {tokenStatus.hasActiveToken ? "Active token detected" : "No active token yet"}
+              </div>
+              <Button
+                variant="default"
+                onClick={() => void onGenerateToken(Boolean(tokenStatus.hasActiveToken))}
+                disabled={generatingToken}
+                style={{ ...PURPOSE_BUTTON_STYLE, width: "fit-content", minWidth: "200px" }}
+              >
+                {generatingToken ? "Saving..." : (tokenStatus.hasActiveToken ? <><RefreshCw size={14} style={{ marginRight: "0.35rem" }} /> Rotate token</> : "Create Bearer Token")}
+              </Button>
+            </div>
+            {tokenStatus.hasActiveToken && (
+              <CopyField value={tokenStatus.maskedToken || "****************"} label="Bearer Token (Hidden)" copyable={false} />
+            )}
+            {tokenStatus.rawToken && (
+              <CopyField value={tokenStatus.rawToken} label="New Bearer Token (Copy Now)" />
+            )}
           </div>
-          
-          <InfoCallout>The dashboard shows only a hidden token placeholder and never returns the raw bearer token value.</InfoCallout>
-          <VerifyChecklist
-            items={['I confirmed an active bearer token exists']}
-            onVerified={setStep1Verified}
-            autoCheck={[Boolean(tokenStatus.hasActiveToken)]}
-          />
+
+          <InlineInfoHint>
+            Raw bearer token is shown once right after create/rotate. Copy and store it now. Later, only the hidden placeholder is shown.
+          </InlineInfoHint>
         </div>
       )}
 
-      {step === 2 && (
-        <TwoColumnStep
-          media={<StepMedia src="/auth-bearer.mp4" alt="Import OpenAPI" caption="Importing Actions schema" />}
-          content={
-            <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>
-                In GPT Builder, open <strong>Actions</strong> and import this OpenAPI URL.
-              </p>
-              <Button
-                variant="default"
-                onClick={() => window.open("https://chatgpt.com/gpts/editor", "_blank")}
-                style={{ width: 'fit-content' }}
-              >
-                Open GPT Builder <ExternalLink size={14} style={{ marginLeft: "8px" }} />
-              </Button>
-              <CodeBlock value={openApiUrl} language="url" label="OpenAPI URL" />
-              <InfoCallout>This registers recall + remember + undo + docs-lite search/recall actions for ChatGPT.</InfoCallout>
-              <VerifyChecklist
-                items={['I opened GPT Builder → Actions', 'I imported the OpenAPI URL', 'The actions loaded without schema errors']}
-                onVerified={setStep2Verified}
-              />
-            </>
-          }
-        />
-      )}
-
       {step === 3 && (
-        <TwoColumnStep
-          media={
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-              <StepMedia src="/auth-bearer.mp4" alt="ChatGPT Auth" caption="1. Set Authentication" />
-              <StepMedia src="/custom-instructions.png" alt="ChatGPT Instructions" caption="2. Instructions" />
+        <VerticalVideoStep
+          intro={
+           <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>Open{" "}<a href="https://chatgpt.com/gpts/editor" target="_blank" rel="noopener noreferrer" style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem", whiteSpace: "nowrap" }}>GPT Builder <ExternalLink size={14} /></a>{" "}then scroll down to <strong>Actions</strong>, click <strong>Create new action</strong>, and set bearer authentication.</p>
+          }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.8rem" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", background: "#f8fafc", padding: "1rem", borderRadius: "0", border: "1px solid #e5e7eb", color: "#374151", fontSize: "0.92rem", lineHeight: 1.55 }}>
+                <div>1. Click ⚙️ to open <strong className="size-18">Authentication</strong>.</div>
+                <div>2. Click <strong>API key</strong> → select <span className="size-20 font-bold text-orange-700">Bearer</span>, paste your stored token value, then close.</div>
+              </div>
             </div>
           }
-          content={
-            <>
-              <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6 }}>Almost done. We just need to give the GPT your token and its instructions.</p>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: '#f8fafc', padding: '1.25rem', borderRadius: "0", border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
-                <div>Click the ⚙️ gear icon next to <code>API Key</code> in Actions. Set Auth Type to <strong>Bearer</strong> and paste your stored token value. Click Save.</div>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8fafc', padding: '1.25rem', borderRadius: "0", border: '1px solid #e5e7eb', fontSize: '0.95rem' }}>
-                <SaveModeToggle mode={saveMode} onChange={setSaveMode} />
-                <div>Paste these instructions into the GPT&apos;s <strong>Instructions</strong> box:</div>
-                <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" maxHeight={260} />
-                <div style={{ marginTop: '0.25rem', fontWeight: 600, color: '#111827' }}>Save the GPT (set visibility to <code>Only me</code>) and add it to a ChatGPT Project.</div>
-              </div>
-
-              <VerifyChecklist items={['I set the Auth to Bearer with my token', 'I pasted the custom instructions', 'I saved the GPT and added it to my Project']} onVerified={setStep3Verified} />
-            </>
-          }
+          media={<StepMedia src="/auth-bearer.mp4" alt="Set bearer authentication" caption="Set Authentication to Bearer" />}
         />
       )}
 
       {step === 4 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', alignItems: 'center', textAlign: 'center', padding: '2rem 1rem', animation: 'fadeIn 0.4s ease-out' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: '#16a34a', marginBottom: '0.5rem' }}>
-            <h3 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#111827', margin: 0, letterSpacing: '-0.02em' }}>You&apos;re connected!</h3>
-          </div>
-          <p style={{ color: '#4b5563', margin: 0, fontSize: '1rem', lineHeight: 1.6, maxWidth: '400px' }}>Try it out: inside your new ChatGPT project, send this test message:</p>
-          
-          <div style={{ width: '100%', maxWidth: '500px', textAlign: 'left', marginTop: '1rem' }}>
-            <CodeBlock value={saveMode === 'instant' ? "My favorite programming language is Rust." : "Remember this: my favorite programming language is Rust."} language="txt" label="Test Prompt" />
-          </div>
-
-          <Button onClick={() => void handleVerifyConnection()} disabled={verifyingConnection} style={{ marginTop: '0.75rem' }}>
-            {verifyingConnection ? "Verifying..." : "Verify Connection Event"}
-          </Button>
-
-          {connectionVerificationMessage && (
-            <p style={{ color: connectionVerified ? '#16a34a' : '#b45309', fontSize: '0.85rem', marginTop: '0.25rem' }}>
-              {connectionVerificationMessage}
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Click <strong>Import from URL</strong>, then paste this OpenAPI URL and click <strong>Import</strong>. After that, click <strong>Update</strong>.
             </p>
-          )}
+          }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              <CodeBlock value={openApiUrl} language="url" label="OpenAPI URL" />
+              <InlineInfoHint>This registers recall + remember + undo + docs-lite search/recall actions for ChatGPT.</InlineInfoHint>
+            </div>
+          }
+          media={<StepMedia src="/openapi-json.mp4" alt="Import from URL in Actions" caption="Import OpenAPI URL in Actions" />}
+        />
+      )}
 
-          <p style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: '1rem' }}>Finish is enabled only after a fresh ChatGPT action event is detected.</p>
-        </div>
+      {step === 1 && (
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Create a new GPT in{" "}
+              <a
+                href="https://chatgpt.com/gpts/editor"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#4742BC", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "0.28rem" }}
+              >
+                GPT Builder <ExternalLink size={14} />
+              </a>{" "}
+              . Click <strong>Config</strong> set the project instructions and project name.
+            </p>
+          }
+          details={
+            <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start", flexWrap: "nowrap", overflowX: "auto" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", flex: "1 1 auto", minWidth: "420px" }}>
+                <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "#111827" }}>
+                  Project <code>Custom Instructions</code>
+                </h4>
+                <CodeBlock value={getChatGptInstructions(saveMode)} language="txt" maxHeight={220} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", flex: "0 0 280px", minWidth: "280px" }}>
+                <CopyField value="Tallei Memory" label="Project Name" />
+              </div>
+            </div>
+          }
+          media={<StepMedia src="/custom-instructions.png" alt="Create project and add instructions" caption="Create project and paste instructions" />}
+        />
+      )}
+
+      {step === 5 && (
+        <VerticalVideoStep
+          intro={
+            <p style={{ color: "#4b5563", margin: 0, fontSize: "1rem", lineHeight: 1.55 }}>
+              Go into your GPT and paste this prompt to test memory.
+            </p>
+          }
+          details={
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              <CodeBlock value={testPrompt} language="txt" label="Test Prompt" />
+            </div>
+          }
+          media={<StepMedia src="/claude-demo.mp4" alt="Test in your GPT" caption="Send the test prompt inside your GPT" />}
+        />
       )}
 
     </WizardModal>

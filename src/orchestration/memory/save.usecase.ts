@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import { config } from "../../config/index.js";
 import { embedText } from "../../infrastructure/cache/embedding-cache.js";
 import { encryptMemoryContent, hashMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
-import { extractFacts } from "../../orchestration/ai/fact-extract.usecase.js";
+import type { ExtractedFact } from "../../orchestration/ai/fact-extract.usecase.js";
 import { summarizeConversation, type ConversationSummary } from "../../orchestration/ai/summarize.usecase.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { classifyMemory } from "./memory-classification.js";
@@ -88,6 +88,7 @@ interface SaveMemoryUseCaseDeps {
   readonly bumpRecallStamp: (auth: AuthContext) => Promise<void>;
   readonly ipHash: (ip?: string) => string | null;
   readonly createQuotaExceededError: (message: string) => Error;
+  readonly extractFacts: (content: string) => Promise<ExtractedFact[]>;
   readonly isEvalMode: boolean;
   readonly freeSaveLimit: number;
 }
@@ -101,6 +102,7 @@ export interface SaveMemoryUseCaseInput {
   readonly category?: string | null;
   readonly isPinned?: boolean;
   readonly preferenceKey?: string | null;
+  readonly runFactExtraction?: boolean;
 }
 
 const DEFAULT_MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
@@ -414,8 +416,9 @@ export class SaveMemoryUseCase {
       };
 
       const extractAndSaveFacts = async () => {
+        if (input.runFactExtraction === false) return;
         try {
-          const facts = await extractFacts(normalizedContent);
+          const facts = await this.deps.extractFacts(normalizedContent);
           for (const fact of facts) {
             try {
               const factText = `[FACT] ${fact.text}${fact.temporal_context ? ` (${fact.temporal_context})` : ""}`;

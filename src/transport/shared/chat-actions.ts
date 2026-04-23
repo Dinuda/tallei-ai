@@ -26,6 +26,8 @@ export type RememberKindInput = "fact" | "preference" | "document-note" | "docum
 const RECALL_MATCHED_DOCS_TIMEOUT_MS = 2_200;
 const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
 const INLINE_DOCUMENT_MAX_CHARS = 4_000;
+const DOC_BRIEF_PREVIEW_MAX_CHARS = 200;
+const MEMORY_TEXT_MAX_CHARS = 600;
 
 export function isTransientMemoryInfraError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -68,6 +70,34 @@ function truncateInlineDocumentContent(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   if (normalized.length <= INLINE_DOCUMENT_MAX_CHARS) return normalized;
   return `${normalized.slice(0, INLINE_DOCUMENT_MAX_CHARS)} [truncated]`;
+}
+
+function sanitizeMemoryForResponse(memory: { id: string; text: string; score: number; metadata: Record<string, unknown> }) {
+  const m = memory.metadata;
+  const text = typeof memory.text === "string" && memory.text.length > MEMORY_TEXT_MAX_CHARS
+    ? `${memory.text.slice(0, MEMORY_TEXT_MAX_CHARS)} [truncated]`
+    : memory.text;
+  return {
+    id: memory.id,
+    text,
+    score: memory.score,
+    metadata: {
+      platform: m["platform"] ?? null,
+      memory_type: m["memory_type"] ?? null,
+      createdAt: m["createdAt"] ?? null,
+      category: m["category"] ?? null,
+      is_pinned: m["is_pinned"] ?? false,
+    },
+  };
+}
+
+function trimDocBriefForResponse<T extends { preview?: string; blob?: unknown }>(doc: T): Omit<T, "blob"> {
+  const { blob: _blob, ...rest } = doc as T & { blob?: unknown };
+  void _blob;
+  if (!rest.preview || (rest.preview as string).length <= DOC_BRIEF_PREVIEW_MAX_CHARS) {
+    return rest as Omit<T, "blob">;
+  }
+  return { ...rest, preview: `${(rest.preview as string).slice(0, DOC_BRIEF_PREVIEW_MAX_CHARS)}…` } as Omit<T, "blob">;
 }
 
 function buildContextBlockWithDocuments(
@@ -211,7 +241,16 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
   ]);
 
   const queryExtractedRefs = Array.from(input.query.matchAll(/@(?:doc|lot):[a-z0-9_-]+/gi), (m) => m[0]);
-  const matchedRefs = matchedDocuments.slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT).map((doc) => doc.ref);
+  // Deduplicate matched docs by title to avoid fetching the same document multiple times
+  // (e.g. when a user uploads the same file under different refs)
+  const seenTitles = new Set<string>();
+  const deduplicatedMatchedDocs = matchedDocuments.filter((doc) => {
+    const key = doc.title.trim().toLowerCase();
+    if (seenTitles.has(key)) return false;
+    seenTitles.add(key);
+    return true;
+  });
+  const matchedRefs = deduplicatedMatchedDocs.slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT).map((doc) => doc.ref);
   const inlineCandidateRefs = [...new Set([...queryExtractedRefs, ...matchedRefs])];
 
   const refs = [...new Set([...(input.include_doc_refs ?? []), ...queryExtractedRefs].map((v) => v.trim()).filter(Boolean))];
@@ -268,15 +307,14 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
   return {
     status: 200,
     body: {
-      ...result,
       contextBlock: buildContextBlockWithDocuments(
         result.memories as Array<{ text: string; metadata?: Record<string, unknown> }>,
         inlineDocuments
       ),
-      recentDocuments,
+      memories: result.memories.map(sanitizeMemoryForResponse),
+      recentDocuments: recentDocuments.map(trimDocBriefForResponse),
       matchedDocuments,
       referencedDocuments,
-      ...(inlineDocuments.length > 0 ? { inlineDocuments } : {}),
       recentCompletedIngests,
       autoSave: {
         requested: uploadedFiles.length,
@@ -417,7 +455,10 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
 
   if (input.kind === "fact") {
     if (!input.content) return { status: 400, body: { error: "content is required for kind=fact" } };
-    const saved = await saveMemory(input.content, auth, input.platform ?? "chatgpt");
+    const saved = await saveMemory(input.content, auth, input.platform ?? "chatgpt", undefined, {
+      memoryType: "fact",
+      runFactExtraction: false,
+    });
     return {
       status: 200,
       body: {
@@ -435,6 +476,7 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
     const saved = await savePreference(input.content, auth, input.platform ?? "chatgpt", undefined, {
       category: input.category ?? null,
       preferenceKey: input.preference_key ?? null,
+      runFactExtraction: false,
     });
     return {
       status: 200,
