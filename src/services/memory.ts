@@ -32,6 +32,7 @@ import type { SaveMemoryResult } from "../orchestration/memory/save.usecase.js";
 import { RecallMemoryUseCase } from "../orchestration/memory/recall.usecase.js";
 import type { RecallResult } from "../orchestration/memory/recall.usecase.js";
 import { ListMemoriesUseCase } from "../orchestration/memory/list.usecase.js";
+import type { ListedMemoriesPage } from "../orchestration/memory/list.usecase.js";
 import { DeleteMemoryUseCase } from "../orchestration/memory/delete.usecase.js";
 import type { RecallSource } from "../orchestration/memory/fallback-policy.js";
 import type { MemoryType } from "../orchestration/memory/memory-types.js";
@@ -343,7 +344,22 @@ export async function recallMemories(
 }
 
 export async function listMemories(auth: AuthContext) {
-  return listMemoriesUseCase.execute(auth);
+  const page = await listMemoriesUseCase.execute(auth, { limit: 200 });
+  return page.memories;
+}
+
+export async function listMemoriesPage(
+  auth: AuthContext,
+  options?: {
+    limit?: number;
+    offset?: number;
+  }
+): Promise<ListedMemoriesPage> {
+  return listMemoriesUseCase.execute(auth, {
+    limit: options?.limit,
+    offset: options?.offset,
+    includeTotal: true,
+  });
 }
 
 export async function deleteMemory(

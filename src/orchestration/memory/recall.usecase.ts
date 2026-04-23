@@ -3,6 +3,7 @@ import type { MemoryType } from "./memory-types.js";
 import type { RecallSource } from "./fallback-policy.js";
 import type { BucketRecallResult } from "../../infrastructure/recall/bucket-recall.js";
 import type { RecallCacheLookupTimings } from "../../infrastructure/recall/fast-recall.js";
+import type { ConflictHint } from "../../infrastructure/recall/scoring-utils.js";
 
 export interface RecallResult {
   contextBlock: string;
@@ -12,6 +13,7 @@ export interface RecallResult {
     score: number;
     metadata: Record<string, unknown>;
   }>;
+  conflictHints?: ConflictHint[];
 }
 
 interface RecallMemoryUseCaseDeps {
@@ -150,7 +152,11 @@ export class RecallMemoryUseCase {
       const bucketResult = await startBucket();
       const bucketMs = Math.max(0, elapsedMs() - bucketStartedAt);
       const lookupWallMs = processLocalMs + (elapsedMs() - redisCacheStartedAt);
-      result = { contextBlock: bucketResult.contextBlock, memories: bucketResult.memories };
+      result = {
+        contextBlock: bucketResult.contextBlock,
+        memories: bucketResult.memories,
+        ...(bucketResult.conflictHints?.length ? { conflictHints: bucketResult.conflictHints } : {}),
+      };
       timingsMs = {
         ...bucketResult.timingsMs,
         recall_local_ms: recallLocalMs,
@@ -177,9 +183,10 @@ export class RecallMemoryUseCase {
       };
     }
 
-    // Write to both caches
-    this.deps.setCachedRecall(cacheKey, result);
-    void this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", result).catch(() => {});
+    // Write to both caches — strip conflictHints so stale conflict data isn't served from cache
+    const cacheableResult: RecallResult = { contextBlock: result.contextBlock, memories: result.memories };
+    this.deps.setCachedRecall(cacheKey, cacheableResult);
+    void this.deps.writeRecallPayload(input.auth, normalizedQuery, "v1", cacheableResult).catch(() => {});
     void this.deps.memoryRepository.logEvent({
       auth: input.auth,
       action: "recall",

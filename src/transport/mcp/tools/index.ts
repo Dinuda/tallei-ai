@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { config } from "../../../config/index.js";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import {
   saveMemory,
@@ -46,7 +45,7 @@ function onPlanError(err: unknown): ToolResult {
     return {
       content: [{
         type: "text",
-        text: `⚠️ PDF stash is a Pro feature. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`,
+        text: `⚠️ ${err.message} Ask the user to complete payment, then retry document sharing.`,
       }],
       isError: true,
     };

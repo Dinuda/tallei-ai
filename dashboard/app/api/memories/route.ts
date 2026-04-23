@@ -60,9 +60,13 @@ export async function GET(req: NextRequest) {
   }
 
   const backend = resolveBackendUrl(req);
+  const target = new URL(`${backend}/api/memories`);
+  req.nextUrl.searchParams.forEach((value, key) => {
+    target.searchParams.set(key, value);
+  });
 
   try {
-    const res = await fetchWithTimeout(`${backend}/api/memories`, {
+    const res = await fetchWithTimeout(target.toString(), {
       headers: backendHeaders(session.user.id),
     });
     const data = await safeJson(res);

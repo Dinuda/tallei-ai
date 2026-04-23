@@ -73,6 +73,14 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_PRO_VARIANT_ID", oldKey: "LEMONSQUEEZY_PRO_VARIANT_ID" },
   { newKey: "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID", oldKey: "LEMONSQUEEZY_POWER_VARIANT_ID" },
   { newKey: "TALLEI_BILLING__TRIAL_DAYS",                  oldKey: "LEMONSQUEEZY_TRIAL_DAYS" },
+  // Signup notifications
+  { newKey: "TALLEI_SIGNUP__RESEND_API_KEY",               oldKey: "SIGNUP_RESEND_API_KEY" },
+  { newKey: "TALLEI_SIGNUP__SLACK_WEBHOOK_URL",            oldKey: "SIGNUP_SLACK_WEBHOOK_URL" },
+  { newKey: "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_URL",     oldKey: "SIGNUP_FAILURE_PING_WEBHOOK_URL" },
+  { newKey: "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_TOKEN",   oldKey: "SIGNUP_FAILURE_PING_WEBHOOK_TOKEN" },
+  { newKey: "TALLEI_SIGNUP__EMAIL_FROM_NAME",              oldKey: "SIGNUP_EMAIL_FROM_NAME" },
+  { newKey: "TALLEI_SIGNUP__EMAIL_FROM_EMAIL",             oldKey: "SIGNUP_EMAIL_FROM_EMAIL" },
+  { newKey: "TALLEI_SIGNUP__EMAIL_REPLY_TO",               oldKey: "SIGNUP_EMAIL_REPLY_TO" },
   // Browser automation
   { newKey: "TALLEI_BROWSER__WORKER_BASE_URL",  oldKey: "BROWSER_WORKER_BASE_URL" },
   { newKey: "TALLEI_BROWSER__WORKER_API_KEY",   oldKey: "BROWSER_WORKER_API_KEY" },
@@ -302,6 +310,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     lemonSqueezyProVariantId: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_PRO_VARIANT_ID"),
     lemonSqueezyPowerVariantId: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID"),
     lemonSqueezyTrialDays: readIntEnv(e, "TALLEI_BILLING__TRIAL_DAYS", 7),
+    signupResendApiKey: readStringEnv(e, "TALLEI_SIGNUP__RESEND_API_KEY"),
+    signupSlackWebhookUrl: readStringEnv(e, "TALLEI_SIGNUP__SLACK_WEBHOOK_URL"),
+    signupFailurePingWebhookUrl: readStringEnv(e, "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_URL"),
+    signupFailurePingWebhookToken: readStringEnv(e, "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_TOKEN"),
+    signupEmailFromName: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_NAME", "Dinuda (Founder)"),
+    signupEmailFromEmail: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_EMAIL"),
+    signupEmailReplyTo: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_REPLY_TO"),
     claudeProjectInstructionsTemplate:
       e.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
       `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.

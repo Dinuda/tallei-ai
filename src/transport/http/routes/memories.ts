@@ -4,7 +4,7 @@ import {
   saveMemory,
   savePreference,
   recallMemories,
-  listMemories,
+  listMemoriesPage,
   listPreferences,
   forgetPreference,
   deleteMemory,
@@ -35,6 +35,11 @@ const recallSchema = z.object({
     },
     z.array(z.enum(["preference", "fact", "event", "decision", "note"])).optional()
   ),
+});
+
+const listSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(200),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 
@@ -120,9 +125,26 @@ router.get("/recall", requireScopes(["memory:read"]), async (req: AuthRequest, r
 
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const memories = await listMemories(req.authContext!);
-    res.json({ memories });
+    const query = listSchema.parse(req.query);
+    const page = await listMemoriesPage(req.authContext!, {
+      limit: query.limit,
+      offset: query.offset,
+    });
+    res.json({
+      memories: page.memories,
+      pagination: {
+        limit: page.limit,
+        offset: page.offset,
+        total: page.total ?? page.memories.length,
+        hasMore: page.hasMore,
+        nextOffset: page.hasMore ? page.offset + page.memories.length : null,
+      },
+    });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
     console.error("Error listing memories:", error);
     res.status(500).json({ error: "Failed to list memories" });
   }

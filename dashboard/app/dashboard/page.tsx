@@ -4,7 +4,6 @@ import {
   ChevronDown,
   Clock,
   Copy,
-  ExternalLink,
   FileText,
   RefreshCw,
   Tag,
@@ -42,10 +41,27 @@ type ModalMessage = {
   text: string;
 };
 
+type PaginationState = {
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
+};
+
+type MemoriesResponsePayload = {
+  memories?: MemoryItem[];
+  pagination?: {
+    limit?: number;
+    offset?: number;
+    total?: number;
+    hasMore?: boolean;
+  };
+  error?: string;
+};
+
 const CHATGPT_PREFERENCE_EXPORT_PROMPT = `Extract my stable preferences from this chat and return ONLY a JSON array of strings.\n\nRules:\n- Include writing style, tone, formatting rules, language preferences, tooling habits, and recurring constraints.\n- Keep each item short, explicit, and actionable.\n- Skip temporary requests or one-off tasks.\n- Output valid JSON only.\n\nExample output:\n[\n  "Use concise, direct explanations.",\n  "Prefer TypeScript over JavaScript when both are possible.",\n  "Show final answers with short bullet lists."\n]`;
 
-const TYPE_BUCKETS: MemoryType[] = ["preference", "fact", "event", "decision", "note", "unknown"];
-const PLATFORM_BUCKETS: Platform[] = ["claude", "chatgpt", "gemini", "other"];
+const PAGE_SIZE = 20;
 
 const STOPWORDS = new Set([
   "the", "and", "for", "that", "with", "this", "from", "your", "have", "what", "when", "where", "which", "into",
@@ -343,8 +359,14 @@ export default function DashboardMemoriesPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pagination, setPagination] = useState<PaginationState>({
+    limit: PAGE_SIZE,
+    offset: 0,
+    total: 0,
+    hasMore: false,
+  });
 
-  const [timeFilter, setTimeFilter] = useState<TimeFilter>("all");
+  const timeFilter: TimeFilter = "all";
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -357,20 +379,51 @@ export default function DashboardMemoriesPage() {
   const [modalMessage, setModalMessage] = useState<ModalMessage | null>(null);
   const modalRef = useRef<HTMLDivElement | null>(null);
 
-  const fetchMemories = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
+  const fetchMemories = useCallback(async (params?: {
+    mode?: "initial" | "refresh";
+    offset?: number;
+  }) => {
+    const mode = params?.mode ?? "refresh";
+    const offset = Math.max(0, params?.offset ?? 0);
     if (mode === "initial") setLoading(true);
     if (mode === "refresh") setRefreshing(true);
 
     try {
-      const response = await fetch("/api/memories");
-      const data = await response.json();
+      const query = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(offset),
+      });
+      const response = await fetch(`/api/memories?${query.toString()}`);
+      const data = (await response.json()) as MemoriesResponsePayload;
 
       if (!response.ok) {
         const message = typeof data?.error === "string" ? data.error : "Failed to load memories.";
         throw new Error(message);
       }
 
-      setMemories(Array.isArray(data?.memories) ? data.memories : []);
+      const memoriesPayload = Array.isArray(data?.memories) ? data.memories : [];
+      const paginationPayload = data?.pagination;
+      const parsedLimit = typeof paginationPayload?.limit === "number" && paginationPayload.limit > 0
+        ? paginationPayload.limit
+        : PAGE_SIZE;
+      const parsedOffset = typeof paginationPayload?.offset === "number" && paginationPayload.offset >= 0
+        ? paginationPayload.offset
+        : offset;
+      const parsedTotal = typeof paginationPayload?.total === "number" && paginationPayload.total >= 0
+        ? paginationPayload.total
+        : parsedOffset + memoriesPayload.length;
+      const parsedHasMore = typeof paginationPayload?.hasMore === "boolean"
+        ? paginationPayload.hasMore
+        : memoriesPayload.length === parsedLimit;
+
+      setMemories(memoriesPayload);
+      setExpandedIds(new Set());
+      setPagination({
+        limit: parsedLimit,
+        offset: parsedOffset,
+        total: parsedTotal,
+        hasMore: parsedHasMore,
+      });
       setError(null);
     } catch (fetchError) {
       const message = fetchError instanceof Error ? fetchError.message : "Failed to load memories.";
@@ -382,7 +435,7 @@ export default function DashboardMemoriesPage() {
   }, []);
 
   useEffect(() => {
-    void fetchMemories("initial");
+    void fetchMemories({ mode: "initial", offset: 0 });
   }, [fetchMemories]);
 
   useEffect(() => {
@@ -523,7 +576,7 @@ export default function DashboardMemoriesPage() {
       }
     }
 
-    await fetchMemories("refresh");
+    await fetchMemories({ mode: "refresh", offset: 0 });
     setImportBusy(false);
 
     if (failed === 0) {
@@ -551,7 +604,7 @@ export default function DashboardMemoriesPage() {
     try {
       await savePreference(content, "other", "manual");
       setQuickPreference("");
-      await fetchMemories("refresh");
+      await fetchMemories({ mode: "refresh", offset: 0 });
       setModalMessage({ kind: "success", text: "Preference saved." });
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Failed to save preference.";
@@ -577,16 +630,15 @@ export default function DashboardMemoriesPage() {
     try {
       const response = await fetch(`/api/memories/${id}`, { method: "DELETE" });
       if (!response.ok) return;
-      setMemories((current) => current.filter((item) => item.id !== id));
-      setExpandedIds((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
+      const backOnePage = memories.length === 1 && pagination.offset > 0;
+      const nextOffset = backOnePage
+        ? Math.max(0, pagination.offset - pagination.limit)
+        : pagination.offset;
+      await fetchMemories({ mode: "refresh", offset: nextOffset });
     } finally {
       setDeletingId(null);
     }
-  }, []);
+  }, [fetchMemories, memories.length, pagination.limit, pagination.offset]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpandedIds((prev) => {
@@ -600,11 +652,53 @@ export default function DashboardMemoriesPage() {
     });
   }, []);
 
+  const handleRefresh = useCallback(() => {
+    void fetchMemories({ mode: "refresh", offset: pagination.offset });
+  }, [fetchMemories, pagination.offset]);
+
+  const handleNextPage = useCallback(() => {
+    if (!pagination.hasMore) return;
+    void fetchMemories({ mode: "refresh", offset: pagination.offset + pagination.limit });
+  }, [fetchMemories, pagination.hasMore, pagination.limit, pagination.offset]);
+
+  const handlePrevPage = useCallback(() => {
+    if (pagination.offset <= 0) return;
+    void fetchMemories({ mode: "refresh", offset: Math.max(0, pagination.offset - pagination.limit) });
+  }, [fetchMemories, pagination.limit, pagination.offset]);
+
+  const rangeStart = filteredByTime.length > 0 ? pagination.offset + 1 : 0;
+  const rangeEnd = pagination.offset + filteredByTime.length;
+
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
         <h1 className={styles.pageTitle}>Memories</h1>
+        <div className={styles.actionButtons}>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={handleRefresh}
+            disabled={loading || refreshing}
+          >
+            <RefreshCw size={14} className={refreshing ? styles.spin : ""} />
+            {refreshing ? "Refreshing..." : "Refresh"}
+          </button>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={() => setImportOpen(true)}
+          >
+            <FileText size={14} />
+            Import preferences
+          </button>
+        </div>
       </header>
+
+      <div className={styles.listMeta}>
+        {pagination.total > 0
+          ? `Showing ${rangeStart}-${rangeEnd} of ${pagination.total} memories`
+          : "No memories yet"}
+      </div>
 
       {error && <div className={`${styles.banner} ${styles.bannerError}`}>{error}</div>}
 
@@ -650,6 +744,27 @@ export default function DashboardMemoriesPage() {
           ))
         )}
       </div>
+
+      {!loading && filteredByTime.length > 0 && (
+        <div className={styles.paginationBar}>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={handlePrevPage}
+            disabled={refreshing || pagination.offset <= 0}
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={handleNextPage}
+            disabled={refreshing || !pagination.hasMore}
+          >
+            Next
+          </button>
+        </div>
+      )}
 
       {isImportOpen && (
         <div

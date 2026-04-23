@@ -15,6 +15,11 @@ export interface User {
   tenantId: string;
 }
 
+export interface UpsertGoogleUserResult {
+  user: User;
+  isNewUser: boolean;
+}
+
 export interface SessionPayload {
   id: string;
   email: string;
@@ -460,7 +465,9 @@ export async function getUserById(id: string): Promise<User | null> {
   return hydrateUser(row.id, row.email);
 }
 
-export async function upsertGoogleUser(profile: { sub: string; email: string }): Promise<User> {
+export async function upsertGoogleUser(
+  profile: { sub: string; email: string }
+): Promise<UpsertGoogleUserResult> {
   const client = await pool.connect();
   const normalizedEmail = normalizeEmail(profile.email);
 
@@ -473,7 +480,7 @@ export async function upsertGoogleUser(profile: { sub: string; email: string }):
     );
     if (bySub.rows.length > 0) {
       await client.query("COMMIT");
-      return hydrateUser(bySub.rows[0].id, bySub.rows[0].email);
+      return { user: await hydrateUser(bySub.rows[0].id, bySub.rows[0].email), isNewUser: false };
     }
 
     const byEmail = await client.query<{ id: string; email: string }>(
@@ -491,7 +498,7 @@ export async function upsertGoogleUser(profile: { sub: string; email: string }):
       );
       if ((updated.rowCount ?? 0) < 1) throw new Error("Failed to update Google user link");
       await client.query("COMMIT");
-      return hydrateUser(existing.id, existing.email);
+      return { user: await hydrateUser(existing.id, existing.email), isNewUser: false };
     }
 
     const newUserId = randomUUID();
@@ -502,7 +509,7 @@ export async function upsertGoogleUser(profile: { sub: string; email: string }):
     );
     if ((inserted.rowCount ?? 0) >= 1) {
       await client.query("COMMIT");
-      return hydrateUser(newUserId, normalizedEmail);
+      return { user: await hydrateUser(newUserId, normalizedEmail), isNewUser: true };
     }
 
     const fallback = await client.query<{ id: string; email: string }>(
@@ -517,7 +524,7 @@ export async function upsertGoogleUser(profile: { sub: string; email: string }):
     if (!fallbackRow) throw new Error("Failed to resolve Google user after insert");
 
     await client.query("COMMIT");
-    return hydrateUser(fallbackRow.id, fallbackRow.email);
+    return { user: await hydrateUser(fallbackRow.id, fallbackRow.email), isNewUser: false };
   } catch (error: unknown) {
     await client.query("ROLLBACK");
     const pgError = error as { code?: string };
@@ -531,7 +538,7 @@ export async function upsertGoogleUser(profile: { sub: string; email: string }):
         [profile.sub, normalizedEmail]
       );
       const row = result.rows[0];
-      if (row) return hydrateUser(row.id, row.email);
+      if (row) return { user: await hydrateUser(row.id, row.email), isNewUser: false };
     }
     throw error;
   } finally {

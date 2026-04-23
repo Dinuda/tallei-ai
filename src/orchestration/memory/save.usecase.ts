@@ -290,12 +290,16 @@ export class SaveMemoryUseCase {
       : (classified.isPinned || memoryType === "preference");
     const preferenceKey = input.preferenceKey ?? summary.preference_key ?? classified.preferenceKey;
 
-    const summaryForStorage: ConversationSummary = {
+    const summaryForStorage: ConversationSummary & { provenance?: { platform: string; written_at: string } } = {
       ...summary,
       memory_type: memoryType,
       category,
       is_pinned_suggested: isPinned,
       preference_key: preferenceKey,
+      provenance: {
+        platform: input.platform,
+        written_at: createdAt,
+      },
     };
 
     const vectorDuplicate = await this.dedupeByVector(input, memoryType);

@@ -604,7 +604,7 @@ export class DocumentSizeExceededError extends Error {
 export function assertPro(auth: AuthContext): void {
   if (auth.plan === "pro" || auth.plan === "power") return;
   throw new PlanRequiredError(
-    `PDF stash is a Pro feature. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`
+    `Document sharing is a Pro feature on Tallei. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`
   );
 }
 

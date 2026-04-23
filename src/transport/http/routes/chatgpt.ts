@@ -39,7 +39,7 @@ import {
 } from "../../shared/chat-actions.js";
 
 const router = Router();
-const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
+const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "lesson", "failure"]);
 const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);
 
 const recallSchema = z.object({
@@ -137,7 +137,26 @@ const AUTH_CONTINUATION_HEADER = "X-Tallei-Auth-Continuation";
 const AUTH_CONTINUATION_TTL_SECONDS = Math.max(60, config.authContinuationTtlSeconds);
 const AUTH_CONTINUATION_ISSUER = "tallei-chatgpt-actions";
 const AUTH_CONTINUATION_AUDIENCE = "chatgpt-actions";
+const DOCUMENT_SHARING_BILLING_URL = `${config.dashboardBaseUrl.replace(/\/$/, "")}/billing`;
 const planCache = new Map<string, { plan: AuthContext["plan"]; exp: number }>();
+
+type PlanRequiredActionErrorBody = {
+  error: string;
+  code: "plan_required";
+  feature: "document_sharing";
+  billing_url: string;
+  user_message: string;
+};
+
+function planRequiredActionError(error: PlanRequiredError): PlanRequiredActionErrorBody {
+  return {
+    error: error.message,
+    code: "plan_required",
+    feature: "document_sharing",
+    billing_url: DOCUMENT_SHARING_BILLING_URL,
+    user_message: `Document sharing is a Pro feature on Tallei. Please complete payment at ${DOCUMENT_SHARING_BILLING_URL} to continue.`,
+  };
+}
 
 function getCachedPlanSync(tenantId: string): AuthContext["plan"] | null {
   const cached = planCache.get(tenantId);
@@ -809,6 +828,18 @@ export function buildOpenApiSpec(serverUrl: string) {
     },
   };
 
+  const planRequiredErrorSchema = {
+    type: "object",
+    required: ["error", "code", "feature", "billing_url", "user_message"],
+    properties: {
+      error: { type: "string" },
+      code: { type: "string", enum: ["plan_required"] },
+      feature: { type: "string", enum: ["document_sharing"] },
+      billing_url: { type: "string", format: "uri" },
+      user_message: { type: "string" },
+    },
+  };
+
   return {
     openapi: "3.1.0",
     info: {
@@ -840,7 +871,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "recall_memories",
           summary: "MANDATORY before every reply — skip this and your answer will be wrong",
           description:
-            "STRICT ORDER: call recall_memories(query='<user message>') first. Include attachments in openaiFileIdRefs. Read inlineDocuments FIRST. Call upload_blob only if autoSave.complete=false or 422. If autoSave.saved has refs, end with Saved: @doc:<ref>.",
+            "STRICT ORDER: call recall_memories(query='<user message>') with openaiFileIdRefs. Read inlineDocuments first. Call upload_blob only when autoSave.complete=false/422. If 402 code=plan_required appears, stop retries and ask user to upgrade via billing_url. If refs saved, append Saved: @doc:<ref>.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -925,6 +956,14 @@ export function buildOpenApiSpec(serverUrl: string) {
                 },
               },
             },
+            "402": {
+              description: "Plan upgrade required for document sharing. Ask user to pay at billing_url; do not retry uploads.",
+              content: {
+                "application/json": {
+                  schema: planRequiredErrorSchema,
+                },
+              },
+            },
             "401": { description: "Unauthorized" },
             "403": { description: "Insufficient scope" },
           },
@@ -935,7 +974,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "upload_blob",
           summary: "Fallback upload retry — only if recall_memories autoSave failed",
           description:
-            "FALLBACK ONLY — call this only when recall_memories returns autoSave.complete=false or a 422 for specific files. Pass those files in openaiFileIdRefs, wait for success. Retry once on failure; if retry fails, report and stop. Supports PDF and Word (.docx/.docm).",
+            "Fallback tool. Use only when recall_memories reports autoSave.complete=false or 422. Pass failed files in openaiFileIdRefs and retry once on 422. If 402 code=plan_required, stop retries and ask user to upgrade via billing_url. Supports PDF and Word (.docx/.docm).",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -987,6 +1026,14 @@ export function buildOpenApiSpec(serverUrl: string) {
               content: {
                 "application/json": {
                   schema: uploadBlobResultSchema,
+                },
+              },
+            },
+            "402": {
+              description: "Plan upgrade required for document sharing. Ask user to pay at billing_url; do not retry uploads.",
+              content: {
+                "application/json": {
+                  schema: planRequiredErrorSchema,
                 },
               },
             },
@@ -1101,6 +1148,14 @@ export function buildOpenApiSpec(serverUrl: string) {
                 },
               },
             },
+            "402": {
+              description: "Plan upgrade required for document sharing. Ask user to pay at billing_url; do not retry uploads.",
+              content: {
+                "application/json": {
+                  schema: planRequiredErrorSchema,
+                },
+              },
+            },
             "401": { description: "Unauthorized" },
             "403": { description: "Insufficient scope" },
           },
@@ -1140,6 +1195,14 @@ export function buildOpenApiSpec(serverUrl: string) {
                       type: { type: "string", enum: ["document", "lot"] },
                     },
                   },
+                },
+              },
+            },
+            "402": {
+              description: "Plan upgrade required for document sharing. Ask user to pay at billing_url.",
+              content: {
+                "application/json": {
+                  schema: planRequiredErrorSchema,
                 },
               },
             },
@@ -1308,6 +1371,10 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
       res.status(503).json({ error: error.message });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(planRequiredActionError(error));
+      return;
+    }
     if (isTransientMemoryInfraError(error)) {
       logChatGptActionAsync({
         auth: req.authContext,
@@ -1360,7 +1427,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
       return;
     }
     if (error instanceof PlanRequiredError) {
-      res.status(402).json({ error: error.message });
+      res.status(402).json(planRequiredActionError(error));
       return;
     }
     if (error instanceof DocumentSizeExceededError) {
@@ -1407,7 +1474,7 @@ router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes([
       return;
     }
     if (error instanceof PlanRequiredError) {
-      res.status(402).json({ error: error.message });
+      res.status(402).json(planRequiredActionError(error));
       return;
     }
     if (error instanceof DocumentSizeExceededError) {
@@ -1474,7 +1541,7 @@ router.post("/actions/undo_save", chatGptActionAuthMiddleware, requireScopes(["m
       return;
     }
     if (error instanceof PlanRequiredError) {
-      res.status(402).json({ error: error.message });
+      res.status(402).json(planRequiredActionError(error));
       return;
     }
     if (error instanceof Error && /not found/i.test(error.message)) {

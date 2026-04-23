@@ -29,6 +29,17 @@ const IDENTITY_PATTERNS: Array<{ key: string; pattern: RegExp }> = [
   { key: "identity_pronouns", pattern: /\bmy\s+pronouns\s+are\b/i },
 ];
 
+const LESSON_PATTERNS: RegExp[] = [
+  /\b(best\s+practice|rule\s+of\s+thumb|always\s+remember|never\s+do|learned\s+that|key\s+takeaway|takeaway)\b/i,
+  /\bshould\s+(always|never)\b/i,
+  /\bdo\s+not\s+(ever|batch|deploy|run|use)\b/i,
+];
+
+const FAILURE_PATTERNS: RegExp[] = [
+  /\b(broke|crashed|outage|incident|regression|timeout|encoding\s+mismatch|root\s+cause|postmortem)\b/i,
+  /\b(deploy\s+(broke|failed)|build\s+broke|api\s+timeout|caused\s+by)\b/i,
+];
+
 const CATEGORY_PATTERNS: Array<{ category: string; pattern: RegExp }> = [
   { category: "identity", pattern: /\b(my\s+name\s+is|i\s+am\s+called|my\s+email\s+is|my\s+pronouns\s+are)\b/i },
   { category: "stack", pattern: /\b(tech\s+stack|stack|next\.js|typescript|postgres|qdrant|react|node)\b/i },
@@ -74,6 +85,8 @@ function inferHeuristicType(text: string, hasIdentity: boolean, hasPreference: b
     return "event";
   }
   if (/\b(note|reminder|todo|to\s*do|scratch|idea)\b/i.test(text)) return "note";
+  if (FAILURE_PATTERNS.some((p) => p.test(text))) return "failure";
+  if (LESSON_PATTERNS.some((p) => p.test(text))) return "lesson";
   return "fact";
 }
 

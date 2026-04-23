@@ -19,8 +19,10 @@ import {
   listRecentCompletedUploadedFileIngestJobs,
 } from "../../services/uploaded-file-ingest-jobs.js";
 import type { OpenAiFileRef } from "../http/schemas/uploaded-files.js";
+import { confidenceTier } from "../../infrastructure/recall/scoring-utils.js";
+import type { ConflictHint } from "../../infrastructure/recall/scoring-utils.js";
 
-export type MemoryTypeInput = "preference" | "fact" | "event" | "decision" | "note";
+export type MemoryTypeInput = "preference" | "fact" | "event" | "decision" | "note" | "lesson" | "failure";
 export type RememberKindInput = "fact" | "preference" | "document-note" | "document-blob";
 
 const RECALL_MATCHED_DOCS_TIMEOUT_MS = 2_200;
@@ -116,7 +118,8 @@ function buildContextBlockWithDocuments(
     const platform = typeof metadata["platform"] === "string" && metadata["platform"].length > 0
       ? metadata["platform"]
       : "unknown";
-    const line = `[${platform.toUpperCase()}] ${memory.text}`;
+    const tier = confidenceTier(metadata["reference_count"]);
+    const line = `[${platform.toUpperCase()}:${tier}] ${memory.text}`;
     if (metadata["memory_type"] === "preference") {
       preferenceLines.push(line);
     } else {
@@ -190,6 +193,7 @@ export type RecallActionResult =
       autoSaved?: Array<{ ref: string; status: "pending"; filename: string; conversation_id: string | null }>;
       autoSaveNotice?: string;
       autoSaveErrors?: Array<{ file_id: string; filename: string; error: string }>;
+      conflictHints?: ConflictHint[];
     };
   }
   | {
@@ -327,6 +331,7 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
         autoSaveNotice: `Queued ${autoSaved.length} file(s) for background ingest. Use upload_status with returned ref values to check completion.`,
       } : {}),
       ...(autoSaveErrors.length > 0 ? { autoSaveErrors } : {}),
+      ...(result.conflictHints?.length ? { conflictHints: result.conflictHints } : {}),
     },
   };
 }

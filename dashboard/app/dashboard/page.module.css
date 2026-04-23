@@ -130,10 +130,27 @@
   color: var(--text);
 }
 
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.listMeta {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-family: var(--font-fustat), sans-serif;
+}
+
 /* Card list layout */
 .cardList {
   display: flex;
   flex-direction: column;
+  gap: 0.5rem;
+}
+
+.paginationBar {
+  display: flex;
+  justify-content: flex-end;
   gap: 0.5rem;
 }
 
@@ -821,6 +838,7 @@
 
   .actionButtons {
     justify-content: flex-end;
+    width: 100%;
   }
 
   .memoryCardRight {

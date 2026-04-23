@@ -44,6 +44,7 @@ interface ListMemoryOptions {
   types?: string[];
   pinnedOnly?: boolean;
   includeSuperseded?: boolean;
+  offset?: number;
 }
 
 function normalizeTypes(types?: string[]): string[] {
@@ -52,6 +53,32 @@ function normalizeTypes(types?: string[]): string[] {
 }
 
 export class MemoryRepository {
+  private buildListScope(auth: AuthContext, options: ListMemoryOptions = {}): {
+    clauses: string[];
+    values: unknown[];
+  } {
+    const clauses = [
+      "tenant_id = $1",
+      "user_id = $2",
+      "deleted_at IS NULL",
+    ];
+    const values: unknown[] = [auth.tenantId, auth.userId];
+    const types = normalizeTypes(options.types);
+
+    if (!options.includeSuperseded) {
+      clauses.push("superseded_by IS NULL");
+    }
+    if (types.length > 0) {
+      values.push(types);
+      clauses.push(`memory_type = ANY($${values.length}::text[])`);
+    }
+    if (options.pinnedOnly) {
+      clauses.push("is_pinned = TRUE");
+    }
+
+    return { clauses, values };
+  }
+
   async create(auth: AuthContext, input: CreateMemoryRecordInput): Promise<void> {
     await pool.query(
       `INSERT INTO memory_records
@@ -160,24 +187,7 @@ export class MemoryRepository {
     limit: number | null,
     options: ListMemoryOptions = {}
   ): Promise<MemoryRecordRow[]> {
-    const clauses = [
-      "tenant_id = $1",
-      "user_id = $2",
-      "deleted_at IS NULL",
-    ];
-    const values: unknown[] = [auth.tenantId, auth.userId];
-    const types = normalizeTypes(options.types);
-
-    if (!options.includeSuperseded) {
-      clauses.push("superseded_by IS NULL");
-    }
-    if (types.length > 0) {
-      values.push(types);
-      clauses.push(`memory_type = ANY($${values.length}::text[])`);
-    }
-    if (options.pinnedOnly) {
-      clauses.push("is_pinned = TRUE");
-    }
+    const { clauses, values } = this.buildListScope(auth, options);
 
     let sql = `SELECT *
        FROM memory_records
@@ -189,12 +199,28 @@ export class MemoryRepository {
       sql += `\n       LIMIT $${values.length}`;
     }
 
+    if (typeof options.offset === "number" && options.offset > 0) {
+      values.push(options.offset);
+      sql += `\n       OFFSET $${values.length}`;
+    }
+
     const result = await pool.query<MemoryRecordRow>(sql, values);
     return result.rows;
   }
 
   async list(auth: AuthContext, limit = 100, options: ListMemoryOptions = {}): Promise<MemoryRecordRow[]> {
     return this.listWithOptions(auth, limit, options);
+  }
+
+  async count(auth: AuthContext, options: ListMemoryOptions = {}): Promise<number> {
+    const { clauses, values } = this.buildListScope(auth, options);
+    const result = await pool.query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+       FROM memory_records
+       WHERE ${clauses.join("\n         AND ")}`,
+      values
+    );
+    return result.rows[0]?.total ?? 0;
   }
 
   /**
