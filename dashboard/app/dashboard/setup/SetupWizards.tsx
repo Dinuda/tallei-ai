@@ -329,8 +329,8 @@ export function CodeBlock({
   const displayValue = expanded ? value : firstLine;
   
   return (
-    <div className="cnn-code-block" style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: "0", overflow: 'hidden' }}>
-      <div className="cnn-code-header" style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
+    <div style={{ backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: "0", overflow: 'hidden' }}>
+      <div style={{ backgroundColor: '#f3f4f6', borderBottom: '1px solid #e5e7eb', padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.85rem', color: '#4b5563', fontWeight: 500 }}>
         <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, color: '#374151'}}>
           {getLanguageIcon(language) && <span style={{ fontSize: '0.9rem' }}>{getLanguageIcon(language)}</span>}
           <span>{label || language}</span>
@@ -355,8 +355,8 @@ export function CodeBlock({
           </button>
         </div>
       </div>
-      <div className="cnn-code-content" style={{ padding: '1rem', overflowX: 'auto', overflowY: expanded && maxHeight ? 'auto' : 'visible', maxHeight: expanded ? maxHeight : 'auto' }}>
-        <code className="cnn-code-text" style={{ whiteSpace: expanded ? 'pre-wrap' : 'nowrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, monospace', color: '#1f2937', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayValue}</code>
+      <div style={{ padding: '1rem', overflowX: 'auto', overflowY: expanded && maxHeight ? 'auto' : 'visible', maxHeight: expanded ? maxHeight : 'auto' }}>
+        <code style={{ whiteSpace: expanded ? 'pre-wrap' : 'nowrap', display: 'block', fontSize: '0.875rem', fontFamily: 'SFMono-Regular, Consolas, monospace', color: '#1f2937', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayValue}</code>
       </div>
     </div>
   );

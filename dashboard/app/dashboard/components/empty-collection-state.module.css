@@ -1,0 +1,205 @@
+.wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 300px;
+  padding: 1.5rem 1rem 1.8rem;
+  text-align: center;
+  overflow: hidden;
+  background: linear-gradient(180deg, transparent 0%, transparent 100%);
+}
+
+.withArtwork::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+  background-size: 20px 20px;
+  mask-image: radial-gradient(circle at center, black 34%, transparent 76%);
+  pointer-events: none;
+}
+
+.withoutArtwork {
+  min-height: 250px;
+  padding-top: 0.8rem;
+}
+
+.illustration {
+  position: relative;
+  width: 320px;
+  height: 190px;
+  margin-bottom: 1.85rem;
+  pointer-events: none;
+}
+
+.imageArtwork {
+  width: min(360px, 90%);
+  height: auto;
+  margin-bottom: 1rem;
+  object-fit: contain;
+}
+
+.backCard {
+  position: absolute;
+  left: 40px;
+  top: 56px;
+  width: 245px;
+  height: 112px;
+  border-radius: 22px;
+  border: 1px solid #d1d5db;
+  background: repeating-linear-gradient(
+    -35deg,
+    rgba(148, 163, 184, 0.07) 0,
+    rgba(148, 163, 184, 0.07) 6px,
+    rgba(255, 255, 255, 0.4) 6px,
+    rgba(255, 255, 255, 0.4) 11px
+  );
+  transform: rotate(-8deg);
+}
+
+.frontCard {
+  position: absolute;
+  left: 56px;
+  top: 30px;
+  width: 250px;
+  height: 122px;
+  border-radius: 22px;
+  border: 3px solid #d4d4d4;
+  background: #f7f7f7;
+  transform: rotate(-7deg);
+  box-shadow: 0 8px 30px rgba(15, 23, 42, 0.08);
+  padding: 20px 18px 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.row {
+  height: 20px;
+  border-radius: 999px;
+  background: #e5e5e5;
+}
+
+.rowSm {
+  width: 82%;
+}
+
+.rowMd {
+  width: 100%;
+}
+
+.rowLg {
+  width: 95%;
+}
+
+.brand {
+  position: absolute;
+  left: 18px;
+  top: 17px;
+  color: #d9534f;
+}
+
+.closeDot {
+  position: absolute;
+  right: -14px;
+  top: -14px;
+  width: 50px;
+  height: 50px;
+  border-radius: 999px;
+  border: 5px solid #fff;
+  background: #dc4a46;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 18px rgba(220, 74, 70, 0.35);
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(1.28rem, 1.2rem + 0.18vw, 1.45rem);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: #1f2937;
+  font-weight: 600;
+  position: relative;
+  z-index: 1;
+}
+
+.description {
+  margin: 0.45rem 0 0;
+  max-width: 560px;
+  color: #6b7280;
+  font-size: clamp(0.95rem, 0.93rem + 0.12vw, 1.05rem);
+  line-height: 1.42;
+  position: relative;
+  z-index: 1;
+}
+
+.action {
+  margin-top: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 12px;
+  background: #4f46e5;
+  color: #fff;
+  padding: 0.6rem 0.95rem;
+  min-width: 138px;
+  text-decoration: none;
+  border: 1px solid #4338ca;
+  font-size: 0.84rem;
+  font-weight: 500;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: transform 0.15s ease, background-color 0.15s ease;
+  position: relative;
+  z-index: 1;
+}
+
+.action:hover {
+  background: #4338ca;
+  transform: translateY(-1px);
+}
+
+@media (max-width: 640px) {
+  .wrap {
+    min-height: 220px;
+    padding: 1rem 0.8rem 1.4rem;
+  }
+
+  .illustration {
+    width: 280px;
+    height: 170px;
+    margin-bottom: 1.25rem;
+  }
+
+  .backCard {
+    left: 24px;
+    top: 52px;
+    width: 225px;
+    height: 100px;
+  }
+
+  .frontCard {
+    left: 36px;
+    top: 28px;
+    width: 224px;
+    height: 112px;
+    padding: 18px 16px 14px 16px;
+  }
+
+  .title {
+    font-size: 1.22rem;
+  }
+
+  .description {
+    font-size: 0.9rem;
+  }
+}

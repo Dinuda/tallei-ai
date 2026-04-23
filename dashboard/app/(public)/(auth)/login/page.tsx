@@ -1,4 +1,4 @@
-import { signIn } from "../../../auth";
+import { signIn } from "../../../../auth";
 
 type LoginPageProps = {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;

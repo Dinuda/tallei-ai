@@ -6,7 +6,8 @@
     "dev": "node ./scripts/run-next.mjs dev -p ${PORT:-3001}",
     "build": "node ./scripts/run-next.mjs build",
     "start": "node ./scripts/run-next.mjs start -p ${PORT:-3001}",
-    "lint": "eslint"
+    "lint": "eslint",
+    "check:dashboard-legacy-classes": "./scripts/check-dashboard-legacy-classes.sh"
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",

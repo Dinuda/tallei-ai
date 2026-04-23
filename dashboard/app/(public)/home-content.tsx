@@ -1,8 +1,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
-import { IntegrationsSection } from "./components/integrations-section";
-import { PerformanceSection } from "./components/performance-section";
+import { IntegrationsSection } from "../components/integrations-section";
+import { PerformanceSection } from "../components/performance-section";
 
 
 
@@ -146,9 +146,6 @@ export function HomeContent() {
       ═════════════════════════════════════════════════════ */}
       <header className="hero">
         <div className="hero-inner">
-          <div className="hero-pill">
-            Sync memory between ChatGPT and Claude
-          </div>
           <h1 className="hero-h1">
             Make your AI tools<br/>
             <em>actually</em> talk<br/>

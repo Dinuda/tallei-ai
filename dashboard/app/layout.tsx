@@ -1,12 +1,13 @@
 import type { Metadata, Viewport } from "next";
 import { auth } from "../auth";
 import { Providers } from "./providers";
-import { TopNav } from "./top-nav";
 import "./globals.css";
-import { Geist } from "next/font/google";
+import { Fustat, Geist, Space_Grotesk } from "next/font/google";
 import { cn } from "@/lib/utils";
 
 const geist = Geist({subsets:['latin'],variable:'--font-sans'});
+const spaceGrotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-title", weight: ["500", "600", "700"] });
+const fustat = Fustat({ subsets: ["latin"], variable: "--font-fustat", weight: ["400", "500", "600", "700"] });
 
 const metadataDescription =
   "Tallei syncs persistent memory across ChatGPT, Claude, and Gemini. Write your preferences once — every AI assistant already knows them.";
@@ -122,10 +123,9 @@ export default async function RootLayout({
   const session = await auth();
 
   return (
-    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable)}>
+    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable, spaceGrotesk.variable, fustat.variable)}>
       <body suppressHydrationWarning>
         <Providers session={session}>
-          <TopNav />
           {children}
         </Providers>
       </body>

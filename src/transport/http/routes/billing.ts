@@ -46,18 +46,46 @@ function looksLikeSignedLsUrl(value: string): boolean {
 }
 
 type SubscriptionRecord = {
+  plan: string;
+  status: string;
+  cancel_at_period_end: boolean;
   ls_customer_id: string | null;
   ls_subscription_id: string | null;
 };
 
 async function getTenantSubscription(tenantId: string): Promise<SubscriptionRecord | null> {
   const result = await pool.query<SubscriptionRecord>(
-    `SELECT ls_customer_id, ls_subscription_id
+    `SELECT plan, status, cancel_at_period_end, ls_customer_id, ls_subscription_id
      FROM subscriptions
      WHERE tenant_id = $1`,
     [tenantId]
   );
   return result.rows[0] ?? null;
+}
+
+function mapLsStatusToDbStatus(lsStatus: string | undefined): string {
+  switch (lsStatus) {
+    case "on_trial":
+      return "trialing";
+    case "active":
+      return "active";
+    case "paused":
+      return "paused";
+    case "past_due":
+    case "unpaid":
+      return "payment_failed";
+    case "cancelled":
+    case "expired":
+      return "expired";
+    default:
+      return "active";
+  }
+}
+
+function canUpgradeInPlace(subscription: SubscriptionRecord | null): subscription is SubscriptionRecord {
+  if (!subscription?.ls_subscription_id) return false;
+  if (subscription.plan === "free") return false;
+  return subscription.status === "active" || subscription.status === "trialing";
 }
 
 type LsSubscriptionUrls = {
@@ -167,7 +195,8 @@ router.post(
         case "subscription_updated": {
           const plan = variantIdToPlan(lsVariantId) ?? "free";
           const lsStatus = attributes.status as string | undefined;
-          const dbStatus = lsStatus === "on_trial" ? "trialing" : "active";
+          const dbStatus = mapLsStatusToDbStatus(lsStatus);
+          const dbPlan = dbStatus === "expired" ? "free" : plan;
           const trialEndsAt = attributes.trial_ends_at
             ? new Date(attributes.trial_ends_at as string)
             : null;
@@ -184,7 +213,7 @@ router.post(
                    current_period_end = $6,
                    trial_ends_at = $8,
                    updated_at = NOW()`,
-            [tenantId, plan, lsCustomerId, lsSubscriptionId, lsVariantId, currentPeriodEnd, dbStatus, trialEndsAt]
+            [tenantId, dbPlan, lsCustomerId, lsSubscriptionId, lsVariantId, currentPeriodEnd, dbStatus, trialEndsAt]
           );
           break;
         }
@@ -320,7 +349,7 @@ router.get("/checkout", async (req: AuthRequest, res: Response): Promise<void> =
 
     // If user has an active subscription, upgrade in-place instead of creating a new checkout.
     const existing = await getTenantSubscription(auth.tenantId);
-    if (existing?.ls_subscription_id) {
+    if (canUpgradeInPlace(existing)) {
       const upgradeRes = await fetch(
         `https://api.lemonsqueezy.com/v1/subscriptions/${existing.ls_subscription_id}`,
         {

@@ -4,7 +4,12 @@ import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Avatar, AvatarFallback, AvatarImage } from "../../components/ui/avatar";
+import { Menu, X } from "lucide-react";
+import "./logged-in-light.css";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 type NavItem = {
   id: string;
@@ -44,20 +49,9 @@ const ICONS = {
       <path d="M7.5 10.7V13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
-  key: (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <circle cx="5.2" cy="9" r="3.2" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M8 6.2L13.2 1M13.2 1H10.6M13.2 1V3.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
   activity: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M1.8 7.7H4.7L6.1 4.2L8.2 10.3L10 7.1H13.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  signOut: (
-    <svg width="12" height="12" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <path d="M6 13H2.5A1.5 1.5 0 0 1 1 11.5v-8A1.5 1.5 0 0 1 2.5 2H6M10 10.5l3.5-3-3.5-3M13.5 7.5H6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
 };
@@ -73,9 +67,7 @@ const NAV: NavSection[] = [
   },
   {
     label: "DEVELOPER",
-    items: [
-      { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
-    ],
+    items: [{ id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity }],
   },
 ];
 
@@ -94,6 +86,50 @@ function getInitials(name?: string | null, email?: string | null): string {
   return "?";
 }
 
+function NavSectionContent({ pathname, onNavigate }: { pathname: string; onNavigate?: () => void }) {
+  return (
+    <nav className="space-y-4 mt-4" style={{ fontFamily: "var(--font-title), sans-serif" }}>
+      {NAV.map((section) => (
+        <div key={section.label ?? "root"} className="space-y-0.5">
+          {section.label ? (
+            <p className="px-2 text-[10px] font-semibold tracking-[0.1em] text-slate-400 uppercase">{section.label}</p>
+          ) : null}
+          {section.items.map((item) => {
+            const active = isActive(pathname, item);
+            return (
+              <Link
+                key={item.id}
+                href={item.href}
+                onClick={onNavigate}
+                className={cn(
+                  "group relative flex h-8 items-center gap-2 px-2.5 text-[13px] font-medium transition-colors",
+                  active
+                    ? "text-slate-900"
+                    : "text-slate-500 hover:bg-slate-50 hover:text-slate-900 rounded-lg"
+                )}
+              >
+                {active && (
+                  <>
+                    {/* Main background */}
+                    <span className="absolute inset-y-0 left-0 w-full bg-slate-100" 
+                      style={{ borderRadius: "8px 0 0 8px" }}
+                    />
+                  
+                  </>
+                )}
+                <span className="relative z-10 flex items-center gap-2">
+                  {item.icon}
+                  <span>{item.label}</span>
+                </span>
+              </Link>
+            );
+          })}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? "";
   const { data: session } = useSession();
@@ -101,7 +137,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [profileOpen, setProfileOpen] = useState(false);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMobileOpen(false); };
+    document.documentElement.classList.remove("dark");
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setMobileOpen(false);
+        setProfileOpen(false);
+      }
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
@@ -116,44 +161,38 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     document.body.style.overflow = mobileOpen ? "hidden" : "";
-    return () => { document.body.style.overflow = ""; };
+    return () => {
+      document.body.style.overflow = "";
+    };
   }, [mobileOpen]);
 
   const initials = getInitials(session?.user?.name, session?.user?.email);
 
   return (
-    <div className="dashboard-shell">
-      {/* ── Top bar ── */}
-      <header className="dashboard-topbar">
-        <div className="dashboard-topbar-inner">
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-            {/* Mobile hamburger */}
-            <button
+    <div className="logged-in-shell-light min-h-screen bg-white text-slate-900">
+      <header className="fixed inset-x-0 top-0 z-40 bg-white/95 backdrop-blur">
+        <div className="mx-auto flex h-14 max-w-[1400px] items-center justify-between px-4 sm:px-6">
+          <div className="flex items-center gap-2">
+            <Button
               type="button"
-              className="dashboard-mobile-menu-btn"
+              variant="ghost"
+              size="icon-sm"
+              className="md:hidden"
               aria-label={mobileOpen ? "Close menu" : "Open menu"}
               onClick={() => setMobileOpen((v) => !v)}
             >
-              {mobileOpen ? (
-                <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-                  <path d="M2.5 2.5l10 10M12.5 2.5l-10 10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                </svg>
-              ) : (
-                <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-                  <path d="M2 4h11M2 7.5h11M2 11h11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                </svg>
-              )}
-            </button>
-            <Link href="/dashboard" style={{ display: "flex", alignItems: "center" }}>
-              <img src="/tallei.svg" alt="Tallei" style={{ height: "36px", width: "auto" }} />
+              {mobileOpen ? <X size={16} /> : <Menu size={16} />}
+            </Button>
+            <Link href="/dashboard" className="flex items-center">
+              <img src="/tallei.svg" alt="Tallei" className="h-8 w-auto" />
             </Link>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", borderLeft: "1px solid var(--border)", paddingLeft: "1rem", position: "relative" }}>
+          <div className="relative flex items-center gap-3 border-l pl-4">
             <button
               type="button"
               onClick={() => setProfileOpen((v) => !v)}
-              style={{ background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
+              className="rounded-full"
               aria-label="Toggle profile menu"
             >
               <Avatar size="sm">
@@ -162,103 +201,58 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </Avatar>
             </button>
 
-            {profileOpen && (
+            {profileOpen ? (
               <>
-                <div 
-                  style={{ position: "fixed", inset: 0, zIndex: 290 }} 
-                  onClick={() => setProfileOpen(false)} 
+                <button
+                  type="button"
+                  className="fixed inset-0 z-40 cursor-default"
+                  onClick={() => setProfileOpen(false)}
+                  aria-label="Close profile menu"
                 />
-                <div style={{
-                  position: "absolute",
-                  top: "calc(100% + 10px)",
-                  right: 0,
-                  background: "var(--surface)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-lg)",
-                  boxShadow: "var(--shadow-md)",
-                  minWidth: "220px",
-                  zIndex: 300,
-                  padding: "0.4rem",
-                  animation: "fadeIn 0.15s ease-out"
-                }}>
-                  <div style={{ padding: "0.6rem 0.8rem", borderBottom: "1px solid var(--border-light)", marginBottom: "0.4rem" }}>
-                    <p style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", margin: 0, marginBottom: "0.2rem" }}>Signed in as</p>
-                    <p style={{ fontSize: "0.85rem", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", margin: 0, fontWeight: 500 }}>{session?.user?.email}</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => signOut({ callbackUrl: "/login" })}
-                    className="btn btn-ghost"
-                    style={{ width: "100%", justifyContent: "flex-start", color: "var(--text-2)", padding: "0.5rem 0.8rem" }}
-                  >
-                    {ICONS.signOut}
-                    <span style={{ marginLeft: "0.3rem" }}>Sign out</span>
-                  </button>
-                </div>
+                <Card className="absolute right-0 top-[calc(100%+10px)] z-50 w-56 border-slate-200 bg-white shadow-lg">
+                  <CardContent className="space-y-3 p-2">
+                    <div className="rounded-md border px-3 py-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.05em] text-muted-foreground">Signed in as</p>
+                      <p className="truncate text-sm font-medium text-foreground">{session?.user?.email}</p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="w-full justify-start"
+                      onClick={() => signOut({ callbackUrl: "/login" })}
+                    >
+                      Sign out
+                    </Button>
+                  </CardContent>
+                </Card>
               </>
-            )}
+            ) : null}
           </div>
         </div>
       </header>
 
-      {/* ── Mobile backdrop ── */}
-      <button
-        type="button"
-        aria-label="Close navigation"
-        className={`sidebar-backdrop ${mobileOpen ? "open" : ""}`}
-        onClick={() => setMobileOpen(false)}
-      />
+      {mobileOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-30 bg-black/30 md:hidden"
+          onClick={() => setMobileOpen(false)}
+          aria-label="Close navigation"
+        />
+      ) : null}
 
-      {/* ── Sidebar ── */}
-      <aside className={`dashboard-sidebar ${mobileOpen ? "open" : ""}`} aria-label="Navigation">
-        <nav className="sidebar-nav" style={{ paddingTop: "0.25rem" }}>
-          {NAV.map((section) => (
-            <div key={section.label ?? "root"} style={{ marginBottom: section.label ? "0.1rem" : "0" }}>
-              {section.label && <p className="sidebar-label">{section.label}</p>}
-              {section.items.map((item) => {
-                const active = isActive(pathname, item);
-                return (
-                  <Link
-                    key={item.id}
-                    href={item.href}
-                    className={`sidebar-link ${active ? "active" : ""}`}
-                    onClick={() => setMobileOpen(false)}
-                  >
-                    {item.icon}
-                    <span>{item.label}</span>
-                    {active && <span className="sidebar-link-dot" />}
-                  </Link>
-                );
-              })}
-            </div>
-          ))}
-        </nav>
+      <aside
+        className={cn(
+          "fixed bottom-0 left-0 top-14 z-40 w-[248px] bg-white px-3 py-3 transition-transform md:translate-x-0",
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        )}
+        aria-label="Navigation"
+      >
+        <NavSectionContent pathname={pathname} onNavigate={() => setMobileOpen(false)} />
       </aside>
 
-      {/* ── Main ── */}
-      <main className="dashboard-main">
-        <div className="dashboard-content-wrap animate-fade-up">{children}</div>
+      <main className="min-h-screen rounded-tl-3xl bg-[#f4f4f4] pt-14 md:pl-[248px] rounded-xl">
+        {children}
       </main>
-
-      <nav
-        className={`dashboard-mobile-nav${mobileOpen ? " hidden" : ""}`}
-        aria-label="Dashboard mobile navigation"
-      >
-        {NAV[0].items.map((item) => {
-          const active = isActive(pathname, item);
-          return (
-            <Link
-              key={item.id}
-              href={item.href}
-              className={`dashboard-mobile-nav-link ${active ? "active" : ""}`}
-              aria-current={active ? "page" : undefined}
-            >
-              {item.icon}
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
     </div>
   );
 }
