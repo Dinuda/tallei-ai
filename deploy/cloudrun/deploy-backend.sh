@@ -182,6 +182,7 @@ env_vars=(
   "TALLEI_BILLING__LEMONSQUEEZY_PRO_VARIANT_ID=${TALLEI_BILLING__LEMONSQUEEZY_PRO_VARIANT_ID}"
   "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID=${TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID}"
   "TALLEI_SIGNUP__EMAIL_FROM_NAME=${TALLEI_SIGNUP__EMAIL_FROM_NAME:-Dinuda (Founder)}"
+  "TALLEI_SIGNUP__EMAIL_FROM_EMAIL=${TALLEI_SIGNUP__EMAIL_FROM_EMAIL:-}"
   "TALLEI_SIGNUP__EMAIL_REPLY_TO=${TALLEI_SIGNUP__EMAIL_REPLY_TO:-}"
 )
 
@@ -197,6 +198,8 @@ secret_vars=(
   "UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}:latest"
   "TALLEI_SIGNUP__SLACK_WEBHOOK_URL=${TALLEI_SIGNUP__SLACK_WEBHOOK_URL}:latest"
 )
+
+signup_resend_api_key_plain=""
 
 if [[ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
   validate_secret_id SUPABASE_SERVICE_ROLE_KEY
@@ -218,6 +221,18 @@ if [[ -n "${TALLEI_AUTH__API_KEY_PEPPER:-}" ]]; then
   ensure_secret_access TALLEI_AUTH__API_KEY_PEPPER
   secret_vars+=("TALLEI_AUTH__API_KEY_PEPPER=${TALLEI_AUTH__API_KEY_PEPPER}:latest")
 fi
+if [[ -n "${TALLEI_SIGNUP__RESEND_API_KEY:-}" ]]; then
+  # Support both modes:
+  # 1) Secret Manager secret ID (preferred), or
+  # 2) Raw API key passed directly and injected as plain env var.
+  if [[ "${TALLEI_SIGNUP__RESEND_API_KEY}" =~ ^[A-Za-z0-9_-]+$ ]] && \
+    gcloud secrets describe "${TALLEI_SIGNUP__RESEND_API_KEY}" --project "$PROJECT_ID" >/dev/null 2>&1; then
+    ensure_secret_access TALLEI_SIGNUP__RESEND_API_KEY
+    secret_vars+=("TALLEI_SIGNUP__RESEND_API_KEY=${TALLEI_SIGNUP__RESEND_API_KEY}:latest")
+  else
+    signup_resend_api_key_plain="${TALLEI_SIGNUP__RESEND_API_KEY}"
+  fi
+fi
 if [[ -n "${BROWSER_WORKER_API_KEY:-}" ]]; then
   validate_secret_id BROWSER_WORKER_API_KEY
   ensure_secret_access BROWSER_WORKER_API_KEY
@@ -227,6 +242,10 @@ if [[ -n "${KMS_KEY_ID:-}" ]]; then
   validate_secret_id KMS_KEY_ID
   ensure_secret_access KMS_KEY_ID
   secret_vars+=("KMS_KEY_ID=${KMS_KEY_ID}:latest")
+fi
+
+if [[ -n "$signup_resend_api_key_plain" ]]; then
+  env_vars+=("TALLEI_SIGNUP__RESEND_API_KEY=${signup_resend_api_key_plain}")
 fi
 
 env_csv="$(IFS=,; echo "${env_vars[*]}")"

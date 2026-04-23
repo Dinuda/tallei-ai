@@ -185,7 +185,7 @@ export function HomeContent() {
       {/* ═════════════════════════════════════════════════════
           FEATURES — Honest, simple narrative
       ═════════════════════════════════════════════════════ */}
-      <section className="features-section">
+      <section id="how-it-works" className="features-section">
         <div className="features-inner">
           <span className="section-eyebrow">WHY WE BUILT THIS</span>
           <h2 className="section-h2">Why we built this</h2>

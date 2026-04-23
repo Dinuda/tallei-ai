@@ -88,7 +88,7 @@ function getInitials(name?: string | null, email?: string | null): string {
 
 function NavSectionContent({ pathname, onNavigate }: { pathname: string; onNavigate?: () => void }) {
   return (
-    <nav className="space-y-4 mt-4" style={{ fontFamily: "var(--font-title), sans-serif" }}>
+    <nav className="space-y-4 mt-4" style={{ fontFamily: "var(--font-title, var(--font-sans, ui-sans-serif)), var(--font-sans, ui-sans-serif), sans-serif" }}>
       {NAV.map((section) => (
         <div key={section.label ?? "root"} className="space-y-0.5">
           {section.label ? (
@@ -167,7 +167,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [mobileOpen]);
 
   const initials = getInitials(session?.user?.name, session?.user?.email);
-  const headerUiFont = { fontFamily: "var(--font-fustat), var(--font-sans), sans-serif" } as const;
+  const headerUiFont = { fontFamily: "var(--font-fustat, var(--font-sans, ui-sans-serif)), var(--font-sans, ui-sans-serif), sans-serif" } as const;
   return (
     <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900">
       <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">

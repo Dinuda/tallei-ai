@@ -7,10 +7,10 @@
 .logged-in-shell-light [data-slot="card-title"],
 .logged-in-shell-light [data-slot="dialog-title"],
 .logged-in-shell-light [data-slot="alert-dialog-title"] {
-  font-family: var(--font-title), var(--font-sans), sans-serif;
+  font-family: var(--font-title, var(--font-sans, ui-sans-serif)), var(--font-sans, ui-sans-serif), sans-serif;
   letter-spacing: -0.02em;
 }
 
 .logged-in-shell-light .title-font {
-  font-family: var(--font-title), var(--font-sans), sans-serif;
+  font-family: var(--font-title, var(--font-sans, ui-sans-serif)), var(--font-sans, ui-sans-serif), sans-serif;
 }

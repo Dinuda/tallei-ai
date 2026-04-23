@@ -1,4 +1,6 @@
 import { config } from "../config/index.js";
+import { buildWelcomeEmailTemplate } from "./email-templates.js";
+import { sendResendEmail } from "./resend-email.js";
 
 export interface SignupNotificationInput {
   readonly userId: string;
@@ -16,29 +18,6 @@ interface DeliveryResult {
 }
 
 const WEBHOOK_TIMEOUT_MS = 8_000;
-
-function buildFounderWelcomeMessage(email: string): string {
-  const fallbackName = email.includes("@") ? email.split("@")[0] : "there";
-  const firstName = fallbackName.split(/[._-]/)[0] || "there";
-  const normalizedFirstName = firstName.charAt(0).toUpperCase() + firstName.slice(1);
-  return [
-    `Hi ${normalizedFirstName},`,
-    "",
-    "I'm Dinuda, founder of Tallei. Thanks for signing up.",
-    "",
-    "Tallei is a memory layer for AI assistants.",
-    "People usually come to Tallei so Claude, ChatGPT, and Gemini remember their context, preferences, and past decisions across sessions.",
-    "",
-    "Most teams use it to stop re-explaining the same things, keep responses consistent, and move faster.",
-    "",
-    "If you want, just reply and I can help you get the setup right for your workflow.",
-    "",
-    "Best,",
-    "",
-    "Dinuda",
-    "Founder, Tallei",
-  ].join("\n");
-}
 
 async function postJsonWebhook(
   url: string,
@@ -59,53 +38,19 @@ async function postJsonWebhook(
 }
 
 async function sendResendSignupEmail(input: SignupNotificationInput): Promise<DeliveryResult> {
-  if (!config.signupResendApiKey) {
-    return { channel: "resend_email", ok: true };
-  }
-  if (!config.signupEmailFromEmail) {
-    return {
-      channel: "resend_email",
-      ok: false,
-      error: "TALLEI_SIGNUP__EMAIL_FROM_EMAIL is required when Resend is enabled",
-    };
-  }
-
-  const founderMessage = buildFounderWelcomeMessage(input.email);
-  const subject = "Welcome to Tallei";
-  const from = `${config.signupEmailFromName} <${config.signupEmailFromEmail}>`;
-
-  try {
-    const result = await postJsonWebhook(
-      "https://api.resend.com/emails",
-      {
-        from,
-        to: [input.email],
-        subject,
-        text: founderMessage,
-        reply_to: config.signupEmailReplyTo || undefined,
-      },
-      {
-        Authorization: `Bearer ${config.signupResendApiKey}`,
-      }
-    );
-
-    if (!result.ok) {
-      return {
-        channel: "resend_email",
-        ok: false,
-        status: result.status,
-        error: `Webhook returned ${result.status}${result.responseText ? `: ${result.responseText}` : ""}`,
-      };
-    }
-
-    return { channel: "resend_email", ok: true, status: result.status };
-  } catch (error) {
-    return {
-      channel: "resend_email",
-      ok: false,
-      error: error instanceof Error ? error.message : "Unknown webhook error",
-    };
-  }
+  const template = buildWelcomeEmailTemplate(input.email);
+  const result = await sendResendEmail({
+    to: input.email,
+    subject: template.subject,
+    text: template.text,
+    html: template.html,
+  });
+  return {
+    channel: "resend_email",
+    ok: result.ok,
+    status: result.status,
+    error: result.error,
+  };
 }
 
 async function sendSlackSignupWebhook(input: SignupNotificationInput): Promise<DeliveryResult> {

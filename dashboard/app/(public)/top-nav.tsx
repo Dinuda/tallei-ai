@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { signOut, useSession } from "next-auth/react";
 import { Menu, X } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "../../components/ui/avatar";
@@ -11,6 +11,7 @@ const HIDDEN_PREFIXES = ["/dashboard", "/login", "/register", "/authorize"];
 
 export function TopNav() {
   const pathname = usePathname();
+  const router = useRouter();
   const { data: session, status } = useSession();
   const isHome = pathname === "/";
   const isLoading = status === "loading";
@@ -20,6 +21,7 @@ export function TopNav() {
   const [scrolled, setScrolled] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const pendingAnchorRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isHome) return;
@@ -53,6 +55,68 @@ export function TopNav() {
     };
   }, [mobileMenuOpen]);
 
+  const scrollToAnchor = useCallback((hash: string) => {
+    const id = hash.startsWith("#") ? hash.slice(1) : hash;
+    if (!id) return false;
+    const element = document.getElementById(id);
+    if (!element) return false;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    element.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    window.history.replaceState(null, "", `/#${id}`);
+    return true;
+  }, []);
+
+  const scrollToAnchorWithRetry = useCallback((hash: string, attempts = 12) => {
+    let remaining = attempts;
+    const tick = () => {
+      const didScroll = scrollToAnchor(hash);
+      if (didScroll) {
+        pendingAnchorRef.current = null;
+        return;
+      }
+      if (remaining <= 0) return;
+      remaining -= 1;
+      window.requestAnimationFrame(tick);
+    };
+    tick();
+  }, [scrollToAnchor]);
+
+  useEffect(() => {
+    if (!isHome) return;
+    const target = pendingAnchorRef.current ?? window.location.hash;
+    if (!target) return;
+    scrollToAnchorWithRetry(target);
+  }, [isHome, pathname, scrollToAnchorWithRetry]);
+
+  const handleAnchorClick = useCallback(
+    (hash: string, onHandled?: () => void) =>
+      (event: React.MouseEvent<HTMLAnchorElement>) => {
+        onHandled?.();
+
+        if (
+          event.defaultPrevented ||
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+
+        event.preventDefault();
+        pendingAnchorRef.current = hash;
+
+        if (isHome) {
+          scrollToAnchorWithRetry(hash);
+          return;
+        }
+
+        router.push("/");
+      },
+    [isHome, router, scrollToAnchorWithRetry]
+  );
+
   if (!pathname) return null;
   const isHidden = HIDDEN_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 
@@ -73,13 +137,25 @@ export function TopNav() {
 
         {isHome && (
           <div className="site-nav-links">
-            <Link href="#how-it-works" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
+            <Link
+              href="/#how-it-works"
+              onClick={handleAnchorClick("#how-it-works")}
+              style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}
+            >
               How it works
             </Link>
-            <Link href="#integrations" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
+            <Link
+              href="/#integrations"
+              onClick={handleAnchorClick("#integrations")}
+              style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}
+            >
               Integrations
             </Link>
-            <Link href="#pricing" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
+            <Link
+              href="/#pricing"
+              onClick={handleAnchorClick("#pricing")}
+              style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}
+            >
               Pricing
             </Link>
           </div>
@@ -209,9 +285,9 @@ export function TopNav() {
       <div className={`site-mobile-menu ${mobileMenuOpen ? "open" : ""}`}>
         {isHome && (
           <div className="site-mobile-menu-links">
-            <Link href="#how-it-works" onClick={() => setMobileMenuOpen(false)}>How it works</Link>
-            <Link href="#integrations" onClick={() => setMobileMenuOpen(false)}>Integrations</Link>
-            <Link href="#pricing" onClick={() => setMobileMenuOpen(false)}>Pricing</Link>
+            <Link href="/#how-it-works" onClick={handleAnchorClick("#how-it-works", () => setMobileMenuOpen(false))}>How it works</Link>
+            <Link href="/#integrations" onClick={handleAnchorClick("#integrations", () => setMobileMenuOpen(false))}>Integrations</Link>
+            <Link href="/#pricing" onClick={handleAnchorClick("#pricing", () => setMobileMenuOpen(false))}>Pricing</Link>
           </div>
         )}
 

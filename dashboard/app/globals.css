@@ -6,6 +6,11 @@
 @source "./components";
 
 :root {
+  /* Font variable fallbacks; Next/font classes override these when available. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-title: var(--font-sans);
+  --font-fustat: var(--font-sans);
+
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);

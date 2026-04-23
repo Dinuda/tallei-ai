@@ -2,6 +2,8 @@ import { Router, Request, Response } from "express";
 import { createHmac, timingSafeEqual } from "crypto";
 import { pool } from "../../../infrastructure/db/index.js";
 import { config } from "../../../config/index.js";
+import { notifyPaymentSuccess } from "../../../services/payment-notifications.js";
+import { runAsyncSafe } from "../../../shared/async-safe.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -140,6 +142,19 @@ async function fetchCustomerPortalUrl(customerId: string): Promise<string | null
   return customerData.data?.attributes?.urls?.customer_portal ?? null;
 }
 
+async function getTenantPrimaryEmail(tenantId: string): Promise<string | null> {
+  const result = await pool.query<{ email: string }>(
+    `SELECT u.email
+     FROM tenant_memberships tm
+     INNER JOIN users u ON u.id = tm.user_id
+     WHERE tm.tenant_id = $1
+     ORDER BY tm.is_primary DESC, (tm.role = 'owner') DESC, tm.created_at ASC
+     LIMIT 1`,
+    [tenantId]
+  );
+  return result.rows[0]?.email ?? null;
+}
+
 router.post(
   "/webhook",
   async (req: Request & { rawBody?: Buffer }, res: Response): Promise<void> => {
@@ -188,6 +203,8 @@ router.post(
     const currentPeriodEnd = attributes.renews_at
       ? new Date(attributes.renews_at as string)
       : null;
+    const payloadEmail = typeof attributes.user_email === "string" ? attributes.user_email : null;
+    let paymentNotificationPlan: string | null = null;
 
     try {
       switch (eventName) {
@@ -248,6 +265,49 @@ router.post(
             [tenantId, plan]
           );
           break;
+        }
+
+        case "subscription_payment_success": {
+          const plan = variantIdToPlan(lsVariantId) ?? "pro";
+          await pool.query(
+            `INSERT INTO subscriptions
+              (tenant_id, plan, ls_customer_id, ls_subscription_id, ls_variant_id, status, cancel_at_period_end, current_period_end, updated_at)
+             VALUES
+              ($1, $2, $3, $4, $5, 'active', FALSE, $6, NOW())
+             ON CONFLICT (tenant_id) DO UPDATE
+               SET plan = $2,
+                   ls_customer_id = COALESCE(NULLIF($3, ''), subscriptions.ls_customer_id),
+                   ls_subscription_id = COALESCE(NULLIF($4, ''), subscriptions.ls_subscription_id),
+                   ls_variant_id = COALESCE(NULLIF($5, ''), subscriptions.ls_variant_id),
+                   status = 'active',
+                   cancel_at_period_end = FALSE,
+                   current_period_end = COALESCE($6, subscriptions.current_period_end),
+                   updated_at = NOW()`,
+            [tenantId, plan, lsCustomerId, lsSubscriptionId, lsVariantId, currentPeriodEnd]
+          );
+          paymentNotificationPlan = plan;
+          break;
+        }
+      }
+
+      if (paymentNotificationPlan) {
+        const paymentPlan = paymentNotificationPlan;
+        const recipientEmail = payloadEmail ?? await getTenantPrimaryEmail(tenantId);
+        if (recipientEmail) {
+          runAsyncSafe(
+            () =>
+              notifyPaymentSuccess({
+                email: recipientEmail,
+                plan: paymentPlan,
+                currentPeriodEnd,
+              }),
+            "payment success email"
+          );
+        } else {
+          console.warn("[billing] payment success email skipped: no recipient found", {
+            tenantId,
+            subscriptionId: lsSubscriptionId,
+          });
         }
       }
 

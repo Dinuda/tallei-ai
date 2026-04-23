@@ -314,7 +314,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     signupSlackWebhookUrl: readStringEnv(e, "TALLEI_SIGNUP__SLACK_WEBHOOK_URL"),
     signupFailurePingWebhookUrl: readStringEnv(e, "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_URL"),
     signupFailurePingWebhookToken: readStringEnv(e, "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_TOKEN"),
-    signupEmailFromName: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_NAME", "Dinuda (Founder)"),
+    signupEmailFromName: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_NAME", "Dinuda Yaggahavita"),
     signupEmailFromEmail: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_EMAIL"),
     signupEmailReplyTo: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_REPLY_TO"),
     claudeProjectInstructionsTemplate:
