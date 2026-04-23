@@ -22,12 +22,21 @@ function buildFounderWelcomeMessage(email: string): string {
   const firstName = fallbackName.split(/[._-]/)[0] || "there";
   const normalizedFirstName = firstName.charAt(0).toUpperCase() + firstName.slice(1);
   return [
-    `Hey ${normalizedFirstName},`,
+    `Hi ${normalizedFirstName},`,
     "",
-    "Welcome to Tallei.",
-    "I built this to give your AI long-term memory that actually helps day-to-day work.",
+    "I'm Dinuda, founder of Tallei. Thanks for signing up.",
     "",
-    "- Dinuda (Founder)",
+    "Tallei is a memory layer for AI assistants.",
+    "People usually come to Tallei so Claude, ChatGPT, and Gemini remember their context, preferences, and past decisions across sessions.",
+    "",
+    "Most teams use it to stop re-explaining the same things, keep responses consistent, and move faster.",
+    "",
+    "If you want, just reply and I can help you get the setup right for your workflow.",
+    "",
+    "Best,",
+    "",
+    "Dinuda",
+    "Founder, Tallei",
   ].join("\n");
 }
 
