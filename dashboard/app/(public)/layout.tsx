@@ -4,9 +4,9 @@ import "./public-theme.css";
 
 export default function PublicLayout({ children }: { children: ReactNode }) {
   return (
-    <>
+    <div className="public-root">
       <TopNav />
       {children}
-    </>
+    </div>
   );
 }

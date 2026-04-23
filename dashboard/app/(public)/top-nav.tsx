@@ -90,13 +90,10 @@ export function TopNav() {
             <div style={{ width: "80px" }} aria-hidden="true" />
           ) : isAuthenticated ? (
             <>
-              <Link href="/dashboard/setup" className="btn btn-ghost">
-                Setup
-              </Link>
-              <Link href="/dashboard" className="btn btn-ghost">
+              <Link href="/dashboard" className="landing-btn landing-btn-base landing-btn-nav" style={{background: "black", border: "1px solid black"}}>
                 Dashboard
               </Link>
-              <div style={{ position: "relative" }}>
+              <div className="site-profile-menu-wrap" style={{ position: "relative" }}>
                 <button
                   type="button"
                   onClick={() => setProfileOpen((v) => !v)}
@@ -184,9 +181,6 @@ export function TopNav() {
             </>
           ) : (
             <div style={{ display: "flex", gap: "1.5rem", alignItems: "center" }}>
-              <Link href="/login" style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}>
-                Sign in
-              </Link>
               <Link href="/login" className="landing-btn landing-btn-base" style={{ padding: "0.5rem 1rem", fontSize: "0.95rem", borderRadius: "0" }}>
                 Get started
               </Link>
@@ -223,12 +217,14 @@ export function TopNav() {
 
         {isLoading ? null : isAuthenticated ? (
           <div className="site-mobile-menu-actions">
-            <Link href="/dashboard/setup" className="btn btn-ghost" onClick={() => setMobileMenuOpen(false)}>
-              Setup
-            </Link>
-            <Link href="/dashboard" className="btn btn-ghost" onClick={() => setMobileMenuOpen(false)}>
-              Dashboard
-            </Link>
+         <Link
+  href="/dashboard"
+  className="landing-btn landing-btn-base landing-btn-nav"
+  onClick={() => setMobileMenuOpen(false)}
+>
+  Dashboard
+</Link>
+
             <button
               type="button"
               className="btn btn-ghost"
@@ -242,9 +238,7 @@ export function TopNav() {
           </div>
         ) : (
           <div className="site-mobile-menu-actions">
-            <Link href="/login" className="btn btn-ghost" onClick={() => setMobileMenuOpen(false)}>
-              Sign in
-            </Link>
+          
             <Link href="/login" className="landing-btn landing-btn-base" onClick={() => setMobileMenuOpen(false)}>
               Get started
             </Link>

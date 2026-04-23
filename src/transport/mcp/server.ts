@@ -151,6 +151,48 @@ const TALLEI_INSTRUCTIONS = `Tallei stores durable memory across AI tools. Follo
    - Skip auto-save only if: user explicitly said not to save, the turn is purely conversational, or this content was already saved.
 8. UNDO HANDLING: If the user replies "undo", "del", or "delete" after that footer, call undo_save with the referenced @doc ref immediately.`;
 
+const MCP_SERVER_VERSION = "1.0.0";
+
+function resolveMcpBrandBaseUrl(): string {
+  const candidates = [config.dashboardBaseUrl, config.frontendUrl, config.publicBaseUrl];
+  for (const candidate of candidates) {
+    try {
+      return new URL(candidate).toString();
+    } catch {
+      continue;
+    }
+  }
+  return "https://tallei.com/";
+}
+
+function createConfiguredMcpServer(authContext: AuthContext): McpServer {
+  const brandBaseUrl = resolveMcpBrandBaseUrl();
+  const server = new McpServer(
+    {
+      name: "tallei",
+      title: "Tallei Memory",
+      version: MCP_SERVER_VERSION,
+      description: "Persistent memory and document context tools for AI assistants.",
+      websiteUrl: brandBaseUrl,
+      icons: [
+        {
+          src: new URL("/icon-192.png", brandBaseUrl).toString(),
+          mimeType: "image/png",
+          sizes: ["192x192"],
+        },
+        {
+          src: new URL("/icon-512.png", brandBaseUrl).toString(),
+          mimeType: "image/png",
+          sizes: ["512x512"],
+        },
+      ],
+    },
+    { instructions: TALLEI_INSTRUCTIONS }
+  );
+  registerTools(server, authContext);
+  return server;
+}
+
 export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetadataUrl: string): Router {
   const router = Router();
 
@@ -186,8 +228,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
             noteAuthTiming();
             req.authContext = evalAuth;
             prewarmRecallCache(evalAuth);
-            const server = new McpServer({ name: "tallei", version: "1.0.0" }, { instructions: TALLEI_INSTRUCTIONS });
-            registerTools(server, evalAuth);
+            const server = createConfiguredMcpServer(evalAuth);
             const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
             await server.connect(transport);
             await transport.handleRequest(req, res, req.body);
@@ -234,8 +275,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     req.authContext = authContext;
     prewarmRecallCache(authContext);
 
-    const server = new McpServer({ name: "tallei", version: "1.0.0" }, { instructions: TALLEI_INSTRUCTIONS });
-    registerTools(server, authContext);
+    const server = createConfiguredMcpServer(authContext);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     await server.connect(transport);
 

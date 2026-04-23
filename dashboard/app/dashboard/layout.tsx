@@ -167,6 +167,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [mobileOpen]);
 
   const initials = getInitials(session?.user?.name, session?.user?.email);
+  const headerUiFont = { fontFamily: "var(--font-fustat), var(--font-sans), sans-serif" } as const;
   return (
     <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900">
       <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
@@ -188,7 +189,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
 
           <div className="flex items-center gap-2 pl-3 sm:pl-4">
-            <div className="hidden items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1 text-[12px] font-medium text-amber-900 lg:inline-flex">
+            <div
+              className="hidden items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1 text-[12px] font-medium text-amber-900 lg:inline-flex"
+              style={headerUiFont}
+            >
               <Sparkles className="size-3.5" />
               <span>14 day free trial</span>
             </div>
@@ -196,9 +200,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <Button
               asChild
               size="sm"
-              className="bg-amber-500 text-amber-950 hover:bg-amber-400 focus-visible:border-amber-500 focus-visible:ring-amber-300 rounded-lg"
+              className="bg-amber-500 text-amber-950 hover:bg-amber-400 focus-visible:border-amber-500 focus-visible:ring-amber-300 rounded-lg font-medium"
             >
-              <Link href="/dashboard/billing">Upgrade</Link>
+              <Link href="/dashboard/billing" style={headerUiFont}>Upgrade</Link>
             </Button>
 
             <div className="relative ml-1 border-l border-slate-200 pl-3">
