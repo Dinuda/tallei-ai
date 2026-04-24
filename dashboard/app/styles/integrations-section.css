@@ -6,9 +6,9 @@
 .integrations-hero {
   display: grid;
   grid-template-columns: 1fr 1.2fr;
-  gap: 4rem;
+  gap: 6rem;
   align-items: center;
-  padding: 5.5rem 0rem;
+  padding: 5.5rem 4rem;
   margin: 0 auto;
   max-width: 1200px;
   background: transparent;

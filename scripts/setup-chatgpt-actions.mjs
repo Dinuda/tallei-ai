@@ -16,14 +16,17 @@ Available actions:
 - recall_document
 
 Rules:
-1) Call prepare_response(message="<exact user message>", openaiFileIdRefs=[...any attachments...]) before answering when the user asks about past context/memories/docs, gives a durable fact/opinion/belief/preference/goal/decision/correction/frustration/note, attaches a file, pastes substantial content, or may need prior context.
-2) You may skip prepare_response only for purely local replies that need no memory and contain nothing worth saving.
-3) Never write final reply text before prepare_response completes when you call it.
-4) Answer from contextBlock, inlineDocuments, and replyInstructions.
-5) If replyInstructions asks for a saved-document footer, append it exactly.
-6) Do not call remember separately unless prepare_response explicitly instructs a fallback.
-7) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
-8) Never mention tool calls in user-facing text.`;
+1) Default to answering from the visible ChatGPT conversation without calling tools.
+2) Call prepare_response(message="<exact user message>", openaiFileIdRefs=[...any attachments...]) only when the user asks about information outside the visible chat, asks about a file/document/catalogue/product list not fully visible, gives durable new information worth saving, attaches/pastes substantial content, or explicitly asks to remember/save/recall/search/use Tallei.
+3) Do NOT call prepare_response for ordinary conversation, local reasoning, writing, coding, explanations, brainstorming, summaries of visible text, or follow-ups such as "make that shorter", "continue", or "what do you mean?" when visible context is enough and nothing durable needs saving.
+4) Call for "can you tell me about the product catalogue? what can I get for my son, who is 5?" because it may need saved documents and includes durable family information.
+5) Call for "my son is 5"; do not call for "make that shorter" when revising a visible answer.
+6) Never write final reply text before prepare_response completes when you call it.
+7) Answer from contextBlock, inlineDocuments, and replyInstructions.
+8) If replyInstructions asks for a saved-document footer, append it exactly.
+9) Do not call remember separately unless prepare_response explicitly instructs a fallback.
+10) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
+11) Never mention tool calls in user-facing text.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);

@@ -132,6 +132,23 @@ test("fastPrepareResponseIntent treats product catalogue questions as retrieval 
   ]);
 });
 
+test("fastPrepareResponseIntent queues first-person age without recall", () => {
+  for (const message of [
+    "im currently 19. is it normal for me tonot know what my life is about",
+    "I'm currently 19. is it normal to feel lost?",
+    "I am 19 years old and unsure what to do",
+    "I’m now 19 and unsure what to do",
+  ]) {
+    const decision = fastPrepareResponseIntent({ message });
+
+    assert.equal(decision.shouldCallClassifier, false);
+    assert.equal(decision.intent.needsRecall, false);
+    assert.deepEqual(decision.intent.saveCandidates, [
+      { kind: "fact", content: "User is 19 years old." },
+    ]);
+  }
+});
+
 test("executePrepareResponseAction handles product catalogue prompt without classifier and saves son age", async () => {
   let classifierCount = 0;
   let recallCount = 0;
@@ -158,6 +175,35 @@ test("executePrepareResponseAction handles product catalogue prompt without clas
   assert.equal(queued.length, 1);
   assert.deepEqual(result.body.queuedSaves, [
     { kind: "fact", content: "User has a 5-year-old son.", status: "queued" },
+  ]);
+});
+
+test("executePrepareResponseAction saves first-person age and skips recall/classifier", async () => {
+  let classifierCount = 0;
+  let recallCount = 0;
+  const queued: Array<() => Promise<void>> = [];
+  const result = await executePrepareResponseAction(auth, {
+    message: "im currently 19. is it normal for me tonot know what my life is about",
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    recallAction: async () => {
+      recallCount += 1;
+      return { status: 200, body: recallBody };
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(recallCount, 0);
+  assert.equal(queued.length, 1);
+  assert.deepEqual(result.body.queuedSaves, [
+    { kind: "fact", content: "User is 19 years old.", status: "queued" },
   ]);
 });
 

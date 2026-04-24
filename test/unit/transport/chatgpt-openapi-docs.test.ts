@@ -14,7 +14,7 @@ test("ChatGPT OpenAPI includes primary prepare_response action path", () => {
   assert.equal(prepare.operationId, "prepare_response");
 });
 
-test("ChatGPT OpenAPI documents prepare_response as the primary before-answer action", () => {
+test("ChatGPT OpenAPI documents prepare_response as the primary selective action", () => {
   const spec = buildOpenApiSpec("https://example.com");
   const prepare = postOperation(spec, "/api/chatgpt/actions/prepare_response");
   const recall = postOperation(spec, "/api/chatgpt/actions/recall_memories");
@@ -23,7 +23,9 @@ test("ChatGPT OpenAPI documents prepare_response as the primary before-answer ac
   const recallDocument = postOperation(spec, "/api/chatgpt/actions/recall_document");
 
   assert.match(prepare.summary ?? "", /PRIMARY ACTION/i);
-  assert.match(prepare.description ?? "", /durable facts, opinions, beliefs, preferences/i);
+  assert.match(prepare.description ?? "", /Call only for prior context/i);
+  assert.match(prepare.description ?? "", /durable facts\/opinions\/preferences\/goals\/decisions/i);
+  assert.match(prepare.description ?? "", /visible chat is enough/i);
   assert.equal(prepare.requestBody?.required, true);
   assert.deepEqual(
     prepare.requestBody?.content?.["application/json"]?.schema?.required,
@@ -38,7 +40,7 @@ test("ChatGPT OpenAPI documents prepare_response as the primary before-answer ac
   assert.match(remember.summary ?? "", /Fallback/i);
   assert.match(remember.description ?? "", /prepare_response/i);
   assert.match(recallDocument.description ?? "", /full document text/i);
-  assert.match(spec.info.description ?? "", /Selective contract/i);
+  assert.match(spec.info.description ?? "", /Visible-chat-first contract/i);
   assert.match(spec.info.description ?? "", /durable facts\/opinions\/preferences\/goals\/decisions/i);
 });
 

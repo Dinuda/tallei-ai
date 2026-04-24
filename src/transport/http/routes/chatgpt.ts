@@ -930,7 +930,7 @@ export function buildOpenApiSpec(serverUrl: string) {
       version: CHATGPT_OPENAPI_VERSION,
       description:
         "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key). " +
-        "Selective contract: call prepare_response for prior context, documents, attachments, or durable facts/opinions/preferences/goals/decisions worth saving.",
+        "Visible-chat-first contract: call prepare_response only for prior context, hidden documents/uploads, explicit recall/save, or durable facts/opinions/preferences/goals/decisions worth saving.",
     },
     servers: [
       {
@@ -954,7 +954,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "prepare_response",
           summary: "PRIMARY ACTION: selectively prepare context and queue saves",
           description:
-            "Call when the user asks about prior context/docs or gives durable facts, opinions, beliefs, preferences, goals, decisions, corrections, notes, attachments, or substantial pasted content.",
+            "Call only for prior context, hidden docs/uploads/catalogues, explicit recall/save/search, substantial content, or durable facts/opinions/preferences/goals/decisions. Skip when visible chat is enough.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {

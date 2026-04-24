@@ -778,6 +778,7 @@ contextDependent boolean,
 saveCandidates array.
 saveCandidates items have kind fact|preference|document-note and concise content/title/summary/key_points/source_hint/category/preference_key when relevant.
 Mark durable facts, preferences, goals, decisions, corrections, beliefs, opinions, stances, frustrations, and important notes worth remembering.
+Treat first-person age statements as durable facts; e.g. "I'm currently 19" should save "User is 19 years old."
 Save subjective stances as neutral facts about the user, not objective claims about the world.
 Sanitize insults, slurs, profanity, and obvious typos instead of storing the user's wording verbatim.
 Example: if the user says they think Sri Lanka's government must better manage civic behavior and insults people, save a fact like "User is frustrated with governance in Sri Lanka and believes the government should manage civic behavior more effectively."
@@ -874,6 +875,19 @@ function buildGuardrailSaveCandidates(message: string): PrepareResponseSaveCandi
   const normalized = message.replace(/\s+/g, " ").trim();
   const normalizedWords = normalized.replace(/[?.,;:!]+/g, " ");
   const candidates: PrepareResponseSaveCandidate[] = [];
+
+  const userAgeMatch = normalizedWords.match(/\b(?:i\s+am|i\s*['\u2019]?\s*m|im)\s+(?:currently\s+|now\s+)?(\d{1,2})(?:\s+(?:years?\s+old|y\/?o))?\b/i)
+    ?? normalizedWords.match(/\b(?:currently|now)\s+(\d{1,2})(?:\s+(?:years?\s+old|y\/?o))?\b/i);
+  if (userAgeMatch?.[1]) {
+    const age = Number(userAgeMatch[1]);
+    const firstPersonContext = /\b(?:i|i\s*['\u2019]?\s*m|im|me|my)\b/i.test(normalizedWords);
+    if (firstPersonContext && Number.isInteger(age) && age >= 13 && age <= 120) {
+      candidates.push({
+        kind: "fact",
+        content: `User is ${age} years old.`,
+      });
+    }
+  }
 
   const childAgeMatch = normalizedWords.match(/\bmy\s+(son|daughter|child|kid)\b.{0,80}?\b(?:is|age(?:d)?|who\s+is)\s+(\d{1,2})\b/i);
   if (childAgeMatch?.[1] && childAgeMatch[2]) {
