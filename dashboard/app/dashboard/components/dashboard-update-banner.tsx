@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Copy, ExternalLink, RefreshCw, X } from "lucide-react";
+import { useSession } from "next-auth/react";
 
 type IntegrationAsset =
   | {
@@ -39,6 +40,7 @@ function isIntegrationAsset(value: unknown): value is IntegrationAsset {
 }
 
 export function DashboardUpdateBanner() {
+  const { update: refreshSession } = useSession();
   const [updates, setUpdates] = useState<IntegrationAsset[]>([]);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const [acknowledging, setAcknowledging] = useState(false);
@@ -48,7 +50,10 @@ export function DashboardUpdateBanner() {
 
     async function loadUpdates() {
       try {
-        const response = await fetch("/api/integration-updates", { cache: "no-store" });
+        const response = await fetch("/api/integration-updates", {
+          cache: "no-store",
+          credentials: "include",
+        });
         if (!response.ok) return;
         const payload = (await response.json()) as UpdatesResponse;
         const nextUpdates = Array.isArray(payload.updates)
@@ -90,13 +95,23 @@ export function DashboardUpdateBanner() {
     if (updates.length === 0) return;
     setAcknowledging(true);
     try {
-      const responses = await Promise.all(
-        updates.map((update) =>
-          fetch(`/api/integration-updates/${encodeURIComponent(update.assetKey)}/acknowledge`, {
-            method: "POST",
-          })
-        )
-      );
+      const acknowledgeOne = async (assetKey: IntegrationAsset["assetKey"]): Promise<Response> => {
+        let response = await fetch(`/api/integration-updates/${encodeURIComponent(assetKey)}/acknowledge`, {
+          method: "POST",
+          credentials: "include",
+        });
+
+        if (response.status !== 401) return response;
+
+        await refreshSession({ forcePlanRefresh: true });
+        response = await fetch(`/api/integration-updates/${encodeURIComponent(assetKey)}/acknowledge`, {
+          method: "POST",
+          credentials: "include",
+        });
+        return response;
+      };
+
+      const responses = await Promise.all(updates.map((update) => acknowledgeOne(update.assetKey)));
 
       if (responses.every((response) => response.ok)) {
         setUpdates([]);
@@ -104,7 +119,7 @@ export function DashboardUpdateBanner() {
     } finally {
       setAcknowledging(false);
     }
-  }, [updates]);
+  }, [refreshSession, updates]);
 
   if (updates.length === 0) return null;
 

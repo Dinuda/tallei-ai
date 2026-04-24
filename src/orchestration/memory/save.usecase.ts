@@ -82,6 +82,7 @@ interface SaveMemoryUseCaseDeps {
   readonly shouldBypassVector: () => boolean;
   readonly noteVectorFailure: (error: unknown, context: string) => void;
   readonly noteMemoryDbFailure: (error: unknown, context: string) => void;
+  readonly noteAiFailure: (error: unknown, context: string) => void;
   readonly setRequestTimingFields: (fields: RequestTimingValues) => void;
   readonly invalidateRecallCache: (auth: AuthContext) => void;
   readonly invalidateBm25Cache: (auth: AuthContext) => void;
@@ -272,7 +273,8 @@ export class SaveMemoryUseCase {
         );
         summaryMs = Number(process.hrtime.bigint() - summaryStartedAt) / 1_000_000;
         summaryFromModel = true;
-      } catch {
+      } catch (error) {
+        this.deps.noteAiFailure(error, "save-summary");
         summary = buildFallbackSummary(normalizedContent);
       }
     }
@@ -440,7 +442,10 @@ export class SaveMemoryUseCase {
                 category: "fact_extract",
                 isPinned: false,
               });
-              const factVector = await embedText(factText).catch(() => null);
+              const factVector = await embedText(factText).catch((error) => {
+                this.deps.noteAiFailure(error, "save-fact-embed");
+                return null;
+              });
               if (factVector) {
                 await this.deps.vectorRepository.upsertMemoryVector({
                   auth: input.auth,
@@ -451,12 +456,14 @@ export class SaveMemoryUseCase {
                   createdAt: new Date().toISOString(),
                 }).catch(() => {});
               }
-            } catch {
+            } catch (error) {
+              this.deps.noteAiFailure(error, "save-fact-persist");
               // Best-effort; fact save failures don't block the primary memory.
             }
           }
           this.deps.invalidateBm25Cache(input.auth);
-        } catch {
+        } catch (error) {
+          this.deps.noteAiFailure(error, "save-fact-extract");
           // Best-effort; fact extraction failures don't block the primary memory.
         }
       };

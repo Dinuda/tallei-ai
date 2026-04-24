@@ -8,6 +8,7 @@ import {
   type Policy,
   type RetryPolicy,
 } from "../../resilience/index.js";
+import { createLogger } from "../../observability/index.js";
 import { CircuitOpenError } from "../../shared/errors/provider-errors.js";
 
 import type { AiProvider } from "./ai-provider.js";
@@ -143,6 +144,9 @@ export class ProviderRegistry {
         defaultChatModel: config.openaiModel,
         defaultEmbeddingModel: config.embeddingModel,
         defaultEmbeddingDimensions: config.embeddingDims,
+        payloadLoggingEnabled: config.openaiPayloadLoggingEnabled,
+        payloadLoggingMaxChars: config.openaiPayloadLoggingMaxChars,
+        logger: createLogger({ baseFields: { component: "openai_provider" } }),
       });
       this.providers.set(openAiProvider.name, openAiProvider);
     }

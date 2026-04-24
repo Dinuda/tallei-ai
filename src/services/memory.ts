@@ -149,6 +149,10 @@ export function noteMemoryDbFailure(error: unknown, context: string): void {
   console.warn(`[memory] db pipeline degraded (${context})`, error);
 }
 
+export function noteAiFailure(error: unknown, context: string): void {
+  console.warn(`[memory] ai pipeline degraded (${context})`, error);
+}
+
 export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -248,6 +252,7 @@ const saveMemoryUseCase = new SaveMemoryUseCase({
   shouldBypassVector,
   noteVectorFailure,
   noteMemoryDbFailure,
+  noteAiFailure,
   setRequestTimingFields,
   invalidateRecallCache,
   invalidateBm25Cache,
