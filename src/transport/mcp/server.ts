@@ -145,6 +145,7 @@ const TALLEI_INSTRUCTIONS = `Tallei stores durable memory across AI tools. Follo
    b) FULL ARCHIVE (only for "archive", "full stash", "store the whole file"): remember(kind="document-blob", content="<full text>", title="..."). Warn the user this can take longer.
 7. AUTO-SAVE WITH UNDO (required when new structured content appears): If this turn includes new content the user may need later (uploaded file, pasted doc/spec/transcript, list/table/data, extracted PDF text), auto-save without asking:
    - For file refs use recall_memories(openaiFileIdRefs=[...]) or upload_blob/openaiFileIdRefs handoff and then upload_status when needed.
+   - File ingest is strict: only PDF and Word (.docx/.docm). Do not pass images or plain text/markdown files.
    - For text-only structured content, call remember(kind="document-note", ...) in the same turn.
    - Then append exactly this footer on its own line in the final reply:
      📎 Auto-saved as @doc:<ref> · reply **undo** to delete

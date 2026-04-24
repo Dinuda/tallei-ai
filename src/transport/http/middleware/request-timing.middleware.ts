@@ -3,16 +3,13 @@ import { config } from "../../../config/index.js";
 import {
   createRequestTimingStore,
   runWithRequestTimingStore,
-  type RequestTimingValue,
 } from "../../../observability/request-timing.js";
 import { getRedisHealthState } from "../../../infrastructure/cache/redis-cache.js";
 
-type TimingSurface = "mcp" | "chatgpt_actions";
-type TimingOperation = "save" | "recall_v1" | "documents";
+type TimingSurface = "mcp" | "chatgpt_actions" | "api" | "health";
 
 interface TimingTarget {
   surface: TimingSurface;
-  operation: TimingOperation;
   route: string;
   toolName?: string;
 }
@@ -27,74 +24,6 @@ function stripQuery(path: string): string {
   return idx >= 0 ? path.slice(0, idx) : path;
 }
 
-function inferChatGptActionTarget(req: Request): TimingTarget | null {
-  if (req.method !== "POST") return null;
-  const path = stripQuery(req.originalUrl || req.url || "");
-
-  if (
-    path === "/api/chatgpt/actions/remember" ||
-    path === "/api/chatgpt/actions/upload_blob" ||
-    path === "/api/chatgpt/actions/undo_save"
-  ) {
-    return {
-      surface: "chatgpt_actions",
-      operation: "save",
-      route: path,
-    };
-  }
-
-  if (path === "/api/chatgpt/actions/recall_memories") {
-    return {
-      surface: "chatgpt_actions",
-      operation: "recall_v1",
-      route: path,
-    };
-  }
-
-  if (
-    path === "/api/chatgpt/actions/recent_documents" ||
-    path === "/api/chatgpt/actions/search_documents" ||
-    path === "/api/chatgpt/actions/recall_document"
-  ) {
-    return {
-      surface: "chatgpt_actions",
-      operation: "documents",
-      route: path,
-    };
-  }
-
-  return null;
-}
-
-function inferMcpTarget(req: Request): TimingTarget | null {
-  const path = stripQuery(req.originalUrl || req.url || "");
-  if (!path.startsWith("/mcp")) return null;
-
-  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : null;
-  const rpcMethod = typeof body?.method === "string" ? body.method : "";
-  if (rpcMethod !== "tools/call") return null;
-
-  const params = body?.params && typeof body.params === "object"
-    ? (body.params as Record<string, unknown>)
-    : null;
-  const toolName = typeof params?.name === "string" ? params.name : "";
-  if (!toolName) return null;
-
-  if (toolName === "save_memory" || toolName === "save_preference" || toolName === "remember" || toolName === "undo_save") {
-    return { surface: "mcp", operation: "save", route: path, toolName };
-  }
-
-  if (toolName === "recall_memories") {
-    return { surface: "mcp", operation: "recall_v1", route: path, toolName };
-  }
-
-  return null;
-}
-
-function resolveTimingTarget(req: Request): TimingTarget | null {
-  return inferChatGptActionTarget(req) ?? inferMcpTarget(req);
-}
-
 function readAuth(req: Request): AuthLike {
   const authCandidate = (req as Request & { authContext?: unknown }).authContext;
   if (!authCandidate || typeof authCandidate !== "object") return {};
@@ -105,31 +34,59 @@ function readAuth(req: Request): AuthLike {
   };
 }
 
-function escapeLogValue(value: string): string {
-  return value.replace(/"/g, '\\"');
+function classifySurface(path: string): TimingSurface {
+  if (path === "/health") return "health";
+  if (path.startsWith("/mcp")) return "mcp";
+  if (path.startsWith("/api/chatgpt/actions")) return "chatgpt_actions";
+  return "api";
 }
 
-function formatTimingField(key: string, value: RequestTimingValue): string {
-  if (typeof value === "number") {
-    const normalized = Number.isFinite(value) ? value : 0;
-    if (key.endsWith("_ms")) {
-      return `${key}=${normalized.toFixed(2)}`;
-    }
-    return `${key}=${normalized}`;
+function toSafeNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function latencyBucket(durationMs: number): string {
+  if (durationMs < 100) return "lt_100ms";
+  if (durationMs < 250) return "lt_250ms";
+  if (durationMs < 500) return "lt_500ms";
+  if (durationMs < 1000) return "lt_1s";
+  if (durationMs < 2500) return "lt_2_5s";
+  if (durationMs < 5000) return "lt_5s";
+  return "gte_5s";
+}
+
+function normalizeRouteForMetrics(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  const normalized = segments.map((segment) => {
+    if (/^[0-9]+$/.test(segment)) return ":id";
+    if (/^[0-9a-f]{8,}$/i.test(segment)) return ":id";
+    return segment;
+  });
+  return `/${normalized.join("/")}`;
+}
+
+function resolveTimingTarget(req: Request): TimingTarget {
+  const route = stripQuery(req.originalUrl || req.url || "");
+  const surface = classifySurface(route);
+  if (surface !== "mcp" || req.method !== "POST") {
+    return { surface, route };
   }
-  if (typeof value === "boolean") {
-    return `${key}=${value}`;
+
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : null;
+  const rpcMethod = typeof body?.method === "string" ? body.method : "";
+  if (rpcMethod !== "tools/call") {
+    return { surface, route };
   }
-  return `${key}="${escapeLogValue(value)}"`;
+
+  const params = body?.params && typeof body.params === "object"
+    ? (body.params as Record<string, unknown>)
+    : null;
+  const toolName = typeof params?.name === "string" ? params.name : undefined;
+  return { surface, route, toolName };
 }
 
 export function requestTimingMiddleware(req: Request, res: Response, next: NextFunction): void {
   const target = resolveTimingTarget(req);
-  if (!target) {
-    next();
-    return;
-  }
-
   const store = createRequestTimingStore();
   store.fields.event_log_mode = "none";
   store.fields.auth_usage_update_mode = "none";
@@ -150,9 +107,9 @@ export function requestTimingMiddleware(req: Request, res: Response, next: NextF
     const responseWriteMs = endCalledAt
       ? Number(process.hrtime.bigint() - endCalledAt) / 1_000_000
       : 0;
-    const authMs = typeof store.fields.auth_ms === "number" ? store.fields.auth_ms : 0;
-    const recallMs = typeof store.fields.recall_total_ms === "number" ? store.fields.recall_total_ms : 0;
-    const rateLimitMs = typeof store.fields.rate_limit_ms === "number" ? store.fields.rate_limit_ms : 0;
+    const authMs = toSafeNumber(store.fields.auth_ms);
+    const recallMs = toSafeNumber(store.fields.recall_total_ms);
+    const rateLimitMs = toSafeNumber(store.fields.rate_limit_ms);
     const handlerMs = Math.max(0, elapsedMs - authMs - recallMs - responseWriteMs - rateLimitMs);
     const unaccountedMs = Math.max(
       0,
@@ -164,29 +121,50 @@ export function requestTimingMiddleware(req: Request, res: Response, next: NextF
 
     const auth = readAuth(req);
     const redis = getRedisHealthState();
-    const parts = [
-      `surface=${target.surface}`,
-      `operation=${target.operation}`,
-      `method=${req.method}`,
-      `route="${escapeLogValue(target.route)}"`,
-      `status=${res.statusCode}`,
-      `ok=${res.statusCode >= 200 && res.statusCode < 400}`,
-      `duration_ms=${elapsedMs.toFixed(2)}`,
-      `user_id=${auth.userId ?? "unknown"}`,
-      `tenant_id=${auth.tenantId ?? "unknown"}`,
-      `redis_mode=${redis.mode}`,
-      `redis_cooldown_until_ms=${redis.cooldownUntilMs}`,
-    ];
+    const durationMs = Number(elapsedMs.toFixed(2));
+    const status = res.statusCode;
+    const routeForMetrics = normalizeRouteForMetrics(target.route);
+    const logRecord: Record<string, unknown> = {
+      timestamp: new Date().toISOString(),
+      severity: "INFO",
+      event: "http_request_timing",
+      surface: target.surface,
+      method: req.method,
+      route: target.route,
+      route_for_metrics: routeForMetrics,
+      status,
+      ok: status >= 200 && status < 400,
+      duration_ms: durationMs,
+      latency_bucket: latencyBucket(durationMs),
+      user_id: auth.userId ?? "unknown",
+      tenant_id: auth.tenantId ?? "unknown",
+      redis_mode: redis.mode,
+      redis_cooldown_until_ms: redis.cooldownUntilMs,
+      httpRequest: {
+        requestMethod: req.method,
+        requestUrl: req.originalUrl || req.url,
+        status,
+        userAgent: req.get("user-agent") ?? undefined,
+        remoteIp: req.ip,
+      },
+      timings: {
+        auth_ms: toSafeNumber(store.fields.auth_ms),
+        recall_total_ms: toSafeNumber(store.fields.recall_total_ms),
+        rate_limit_ms: toSafeNumber(store.fields.rate_limit_ms),
+        handler_ms: toSafeNumber(store.fields.handler_ms),
+        response_write_ms: toSafeNumber(store.fields.response_write_ms),
+        unaccounted_ms: toSafeNumber(store.fields.unaccounted_ms),
+      },
+      timing_fields: Object.fromEntries(Object.entries(store.fields).sort(([a], [b]) => a.localeCompare(b))),
+    };
+
     if (redis.lastError) {
-      parts.push(`redis_last_error="${escapeLogValue(redis.lastError)}"`);
+      logRecord.redis_last_error = redis.lastError;
     }
     if (target.toolName) {
-      parts.push(`tool="${escapeLogValue(target.toolName)}"`);
+      logRecord.tool = target.toolName;
     }
-    for (const key of Object.keys(store.fields).sort()) {
-      parts.push(formatTimingField(key, store.fields[key]));
-    }
-    console.log(`[timing] ${parts.join(" ")}`);
+    console.log(JSON.stringify(logRecord));
   });
 
   runWithRequestTimingStore(store, () => {

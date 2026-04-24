@@ -91,6 +91,13 @@ function relativeDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+function isPlanRequired(data: unknown, statusCode: number): boolean {
+  if (statusCode === 402) return true;
+  if (!data || typeof data !== "object") return false;
+  const code = (data as { code?: unknown }).code;
+  return typeof code === "string" && code.toLowerCase() === "plan_required";
+}
+
 function DocCard({ doc, isExpanded, onToggle, onView, onCopy }: {
   doc: DocListItem;
   isExpanded: boolean;
@@ -219,7 +226,7 @@ function LotCard({ lot, isExpanded, onToggle, onView, onCopy }: {
 }
 
 export default function DocumentsPage() {
-  const { data: session, status: sessionStatus } = useSession();
+  const { status: sessionStatus } = useSession();
   const [docs, setDocs] = useState<DocListItem[]>([]);
   const [lots, setLots] = useState<LotListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -234,8 +241,6 @@ export default function DocumentsPage() {
   const [selected, setSelected] = useState<ModalPayload | null>(null);
   const [loadingSelected, setLoadingSelected] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const sessionPlan = session?.user?.plan ?? "free";
-  const hasDocumentAccess = sessionPlan === "pro" || sessionPlan === "power";
 
   const load = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
     if (mode === "initial") setLoading(true);
@@ -243,18 +248,11 @@ export default function DocumentsPage() {
 
     try {
       if (sessionStatus === "loading") return;
-      if (!hasDocumentAccess) {
-        setProRequired(true);
-        setError(null);
-        setDocs([]);
-        setLots([]);
-        return;
-      }
 
       const res = await fetch("/api/documents");
       const data = await res.json();
 
-      if (res.status === 402) {
+      if (isPlanRequired(data, res.status)) {
         setProRequired(true);
         setError(typeof data?.error === "string" ? data.error : "Documents are available on Pro.");
         setDocs([]);
@@ -276,7 +274,7 @@ export default function DocumentsPage() {
       if (mode === "initial") setLoading(false);
       if (mode === "refresh") setRefreshing(false);
     }
-  }, [hasDocumentAccess, sessionStatus]);
+  }, [sessionStatus]);
 
   useEffect(() => {
     if (sessionStatus !== "loading") {

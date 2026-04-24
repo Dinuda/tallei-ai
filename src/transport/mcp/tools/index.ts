@@ -355,6 +355,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         "• kind=\"fact\" — a single fact or observation. Pass text in `content`.\n" +
         "• kind=\"preference\" — a stable user preference. Pass text in `content`.\n" +
         "• kind=\"document-note\" — DEFAULT for document/file/PDF saves and auto-save notes. " +
+        "File ingest accepts only PDF and Word (.docx/.docm); other file types are rejected. " +
         "Pass title + key_points (array of strings, one per product/item/section, up to 10) + summary. " +
         "Do NOT pass `content` — it is ignored. Fast (~50ms). Recall returns the structured note.\n" +
         "• kind=\"document-blob\" — only for 'sf' / 'archive full file' / 'full stash'. " +
@@ -425,7 +426,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "upload_blob",
     {
       title: "Upload Blob",
-      description: "Queue uploaded file refs for background ingest. Parity with ChatGPT upload_blob action.",
+      description: "Queue uploaded file refs for background ingest. Parity with ChatGPT upload_blob action. Only PDF and Word (.docx/.docm) are supported.",
       inputSchema: {
         openaiFileIdRefs: z.array(openAiFileRefSchema).min(1).max(10),
         conversation_id: conversationIdSchema,

@@ -34,6 +34,7 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   // Database
   { newKey: "TALLEI_DB__URL",                  oldKey: "DATABASE_URL" },
   { newKey: "TALLEI_DB__URL_FALLBACK",          oldKey: "DATABASE_URL_FALLBACK" },
+  { newKey: "TALLEI_DB__AUTO_MIGRATE_ON_BOOT",  oldKey: "DB_AUTO_MIGRATE_ON_BOOT" },
   // LLM / generation
   { newKey: "TALLEI_LLM__OPENAI_API_KEY",       oldKey: "OPENAI_API_KEY" },
   { newKey: "TALLEI_LLM__PROVIDER",             oldKey: "LLM_PROVIDER" },
@@ -193,6 +194,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     mcpPublicUrl: e.TALLEI_HTTP__MCP_URL || "",
     databaseUrl: requireEnv(e, "TALLEI_DB__URL"),
     databaseUrlFallback: readStringEnv(e, "TALLEI_DB__URL_FALLBACK", "postgresql://tallei:tallei@localhost:5432/tallei"),
+    dbAutoMigrateOnBoot: readBooleanEnv(
+      e,
+      "TALLEI_DB__AUTO_MIGRATE_ON_BOOT",
+      nodeEnv !== "production"
+    ),
     openaiApiKey: readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
     jwtSecret: requireEnv(e, "TALLEI_AUTH__JWT_SECRET"),
     apiKeyPepper: readStringEnv(e, "TALLEI_AUTH__API_KEY_PEPPER"),

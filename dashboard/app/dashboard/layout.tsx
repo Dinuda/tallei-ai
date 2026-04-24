@@ -10,6 +10,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
 
 type NavItem = {
   id: string;
@@ -167,9 +168,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [mobileOpen]);
 
   const initials = getInitials(session?.user?.name, session?.user?.email);
-  const headerUiFont = { fontFamily: "var(--font-fustat, var(--font-sans, ui-sans-serif)), var(--font-sans, ui-sans-serif), sans-serif" } as const;
+  const sessionPlan = session?.user?.plan ?? "free";
+  const isFreePlan = sessionPlan === "free";
+  const dashboardUiFont = {
+    fontFamily:
+      "var(--font-fustat, var(--font-sans, ui-sans-serif)), var(--font-sans, ui-sans-serif), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+  } as const;
+  const headerUiFont = dashboardUiFont;
   return (
-    <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900">
+    <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900" style={dashboardUiFont}>
       <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="flex h-14 w-full items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-2">
@@ -189,21 +196,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
 
           <div className="flex items-center gap-2 pl-3 sm:pl-4">
-            <div
-              className="hidden items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1 text-[12px] font-medium text-amber-900 lg:inline-flex"
-              style={headerUiFont}
-            >
-              <Sparkles className="size-3.5" />
-              <span>14 day free trial</span>
-            </div>
+            {isFreePlan ? (
+              <>
+                <div
+                  className="hidden items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1 text-[12px] font-medium text-amber-900 lg:inline-flex"
+                  style={headerUiFont}
+                >
+                  <Sparkles className="size-3.5" />
+                  <span>14 day free trial</span>
+                </div>
 
-            <Button
-              asChild
-              size="sm"
-              className="bg-amber-500 text-amber-950 hover:bg-amber-400 focus-visible:border-amber-500 focus-visible:ring-amber-300 rounded-lg font-medium"
-            >
-              <Link href="/dashboard/billing" style={headerUiFont}>Upgrade</Link>
-            </Button>
+                <Button
+                  asChild
+                  size="sm"
+                  className="bg-amber-500 text-amber-950 hover:bg-amber-400 focus-visible:border-amber-500 focus-visible:ring-amber-300 rounded-lg font-medium"
+                >
+                  <Link href="/dashboard/billing" style={headerUiFont}>Upgrade</Link>
+                </Button>
+              </>
+            ) : null}
 
             <div className="relative ml-1 border-l border-slate-200 pl-3">
               <button
@@ -270,6 +281,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       <main className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
         <div className="mx-auto w-full max-w-7xl">
+          <DashboardUpdateBanner />
           {children}
         </div>
       </main>

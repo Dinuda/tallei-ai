@@ -23,7 +23,8 @@ test("ChatGPT OpenAPI documents strict upload/recall/save non-negotiables", () =
   assert.match(recall.description ?? "", /STRICT ORDER/i);
   assert.match(recall.description ?? "", /recall_memories\(query='<user message>'\)/i);
   assert.match(recall.description ?? "", /upload_blob/i);
-  assert.match(upload.description ?? "", /supports PDF and Word/i);
+  assert.match(upload.description ?? "", /supports only PDF and Word/i);
+  assert.match(upload.description ?? "", /\.docx\/\.docm/i);
   assert.match(spec.paths["/api/chatgpt/actions/upload_status"]?.get?.description ?? "", /handoff/i);
   assert.match(upload.description ?? "", /retry once/i);
   assert.match(remember.description ?? "", /every 5 user messages/i);

@@ -337,6 +337,12 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
 export async function initDb() {
   const client = await connectWithFallback();
   try {
+    if (!config.dbAutoMigrateOnBoot) {
+      await client.query("SELECT 1");
+      console.log("[db] auto-migrate on boot disabled; skipping schema init.");
+      return;
+    }
+
     await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 
     await client.query(`
@@ -790,6 +796,19 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_pending
         ON uploaded_file_ingest_jobs(status, created_at ASC)
         WHERE status = 'pending';
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS integration_asset_acknowledgements (
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        asset_key TEXT NOT NULL,
+        acknowledged_version TEXT NOT NULL,
+        acknowledged_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, asset_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_integration_asset_acknowledgements_user
+        ON integration_asset_acknowledgements(user_id, acknowledged_at DESC);
     `);
 
     await client.query(`

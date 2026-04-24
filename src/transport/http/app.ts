@@ -10,6 +10,7 @@ import mcpEventsRouter from "./routes/mcpEvents.js";
 import mcpCodeRouter from "./routes/mcp.js";
 import chatgptRouter from "./routes/chatgpt.js";
 import integrationsRouter from "./routes/integrations.js";
+import integrationUpdatesRouter from "./routes/integrationUpdates.js";
 import billingRouter from "./routes/billing.js";
 import { createMcpRouter } from "../mcp/server.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -92,6 +93,7 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/documents", deps.memoryRateLimit, documentsRouter);
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
+  app.use("/api/integration-updates", integrationUpdatesRouter);
   // Browser automation is intentionally disabled for production rollout.
   // app.use("/api/claude-onboarding", claudeOnboardingRouter);
   // app.use("/api/browser-use", browserUseRouter);

@@ -83,6 +83,36 @@ export function isLegacyDocFile(ref: UploadedFileRef): boolean {
   return mime === "application/msword" || name.endsWith(".doc");
 }
 
+export function isImageLikeFile(ref: UploadedFileRef): boolean {
+  const mime = (ref.mime_type ?? "").toLowerCase();
+  const name = (ref.name ?? "").toLowerCase();
+  if (mime.startsWith("image/")) return true;
+  return (
+    name.endsWith(".png")
+    || name.endsWith(".jpg")
+    || name.endsWith(".jpeg")
+    || name.endsWith(".webp")
+    || name.endsWith(".gif")
+    || name.endsWith(".bmp")
+    || name.endsWith(".tiff")
+    || name.endsWith(".tif")
+    || name.endsWith(".heic")
+    || name.endsWith(".heif")
+    || name.endsWith(".svg")
+  );
+}
+
+export function validateUploadedFileRefForIngest(ref: UploadedFileRef): string | null {
+  if (isPdfLikeFile(ref) || isDocxLikeFile(ref)) return null;
+  if (isLegacyDocFile(ref)) {
+    return "Legacy .doc files are not supported yet. Please upload as .docx.";
+  }
+  if (isImageLikeFile(ref)) {
+    return "Image files are not supported for document ingest. Please upload a PDF or Word (.docx/.docm) file.";
+  }
+  return "Unsupported file type for document ingest. Only PDF and Word (.docx/.docm) files are supported.";
+}
+
 export async function extractPdfText(buffer: Buffer): Promise<string> {
   const parser = new PDFParse({ data: buffer });
   const result = await parser.getText();
@@ -104,16 +134,18 @@ export async function fetchUploadedFileBuffer(ref: UploadedFileRef): Promise<Buf
 }
 
 export async function uploadedFileToText(ref: UploadedFileRef, buffer: Buffer): Promise<string> {
+  const validationError = validateUploadedFileRefForIngest(ref);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
   if (isPdfLikeFile(ref)) {
     return extractPdfText(buffer);
   }
   if (isDocxLikeFile(ref)) {
     return extractWordText(buffer);
   }
-  if (isLegacyDocFile(ref)) {
-    throw new Error("Legacy .doc files are not supported yet. Please upload as .docx.");
-  }
-  return buffer.toString("utf8");
+  throw new Error("Unsupported file type for document ingest.");
 }
 
 export function buildDocumentNoteDraft(input: {

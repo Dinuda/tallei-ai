@@ -140,7 +140,8 @@ router.post("/upload-blob", requireScopes(["memory:write"]), async (req: AuthReq
 });
 
 // Direct file upload — used by browser extension or dashboard drag-and-drop.
-// Accepts multipart/form-data with a `file` field (text, markdown, PDF, or Word .docx/.docm).
+// Accepts multipart/form-data with a `file` field (PDF or Word .docx/.docm only).
+// Other file types (including images/text/markdown) are rejected for ingest.
 // Optional `mode` field: "note" (default, fast) or "blob" (full archive).
 router.post(
   "/upload",
