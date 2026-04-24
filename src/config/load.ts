@@ -39,6 +39,7 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_LLM__OPENAI_API_KEY",       oldKey: "OPENAI_API_KEY" },
   { newKey: "TALLEI_LLM__PROVIDER",             oldKey: "LLM_PROVIDER" },
   { newKey: "TALLEI_LLM__CHAT_MODEL",           oldKey: "OPENAI_MODEL" },
+  { newKey: "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", oldKey: "INTENT_CLASSIFIER_MODEL" },
   { newKey: "TALLEI_LLM__OLLAMA_BASE_URL",      oldKey: "OLLAMA_BASE_URL" },
   { newKey: "TALLEI_LLM__OLLAMA_MODEL",         oldKey: "OLLAMA_MODEL" },
   { newKey: "TALLEI_LLM__LOCAL_MODEL_MODE",     oldKey: "LOCAL_MODEL_MODE" },
@@ -275,6 +276,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     embeddingDims: readIntEnv(e, "TALLEI_EMBED__DIMS", defaultEmbeddingDims),
     llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama",
     openaiModel: readStringEnv(e, "TALLEI_LLM__CHAT_MODEL", "gpt-4o-mini"),
+    intentClassifierModel: readStringEnv(e, "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
     openaiPayloadLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_ENABLED", false),
     openaiPayloadLoggingMaxChars: Math.max(
       64,

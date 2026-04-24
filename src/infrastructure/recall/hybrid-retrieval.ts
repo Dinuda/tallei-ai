@@ -258,7 +258,7 @@ function normalizeSignalScores(hits: Array<{ id: string; score: number }>): Map<
   return normalized;
 }
 
-function extractRawPreferenceText(text: string): string {
+function extractCanonicalMemoryText(text: string): string {
   const rawIdx = text.indexOf("\nRaw:");
   if (rawIdx >= 0) {
     return text.slice(rawIdx + "\nRaw:".length).trim();
@@ -501,7 +501,7 @@ export async function hybridRecall(
   const pinnedContextRows = dedupeContextRows(
     pinnedPreferenceDocs.map((doc) => ({
       id: doc.id,
-      displayText: extractRawPreferenceText(doc.text),
+      displayText: extractCanonicalMemoryText(doc.text),
       score: Number((10 + activitySignal(doc.row.reference_count ?? 1, doc.row.last_referenced_at ?? null)).toFixed(6)),
       metadata: {
         ...((doc.row.summary_json && typeof doc.row.summary_json === "object")
@@ -520,9 +520,7 @@ export async function hybridRecall(
 
   const rankedContextRows = dedupeContextRows(
     rankedCandidates.slice(0, limit).map((candidate) => {
-      const displayText = candidate.row.memory_type === "preference"
-        ? extractRawPreferenceText(candidate.text)
-        : candidate.text;
+      const displayText = extractCanonicalMemoryText(candidate.text);
 
       return {
         id: candidate.id,
@@ -556,7 +554,7 @@ export async function hybridRecall(
   if (finalMemories.length === 0) {
     const fallback = searchableDocs.slice(0, limit).map((doc, index) => ({
       id: doc.id,
-      text: doc.row.memory_type === "preference" ? extractRawPreferenceText(doc.text) : doc.text,
+      text: extractCanonicalMemoryText(doc.text),
       score: Number((1 - index * 0.05).toFixed(4)),
       metadata: {
         platform: doc.row.platform,

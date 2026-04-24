@@ -43,3 +43,17 @@ test("Claude instruction file matches the tracked integration asset copy", () =>
   const fileText = readFileSync("instructions/claude.md", "utf8").trim();
   assert.equal(fileText, CLAUDE_INSTRUCTIONS_TEXT);
 });
+
+test("ChatGPT setup instructions point users to prepare_response", () => {
+  const fileText = readFileSync("instructions/chatgpt.md", "utf8");
+  const setupWizard = readFileSync("dashboard/app/dashboard/setup/SetupWizards.tsx", "utf8");
+
+  assert.match(fileText, /prepare_response\(message="<exact user message>"/);
+  assert.match(fileText, /selective required call/);
+  assert.match(fileText, /durable fact, opinion, belief, preference, goal, decision/);
+  assert.doesNotMatch(fileText, /every single turn|before every answer/i);
+  assert.match(fileText, /Do not call `remember` separately/);
+  assert.match(setupWizard, /prepare_response\(message="<exact user message>"/);
+  assert.match(setupWizard, /selective required call/);
+  assert.match(setupWizard, /Do not call \\`remember\\` separately/);
+});

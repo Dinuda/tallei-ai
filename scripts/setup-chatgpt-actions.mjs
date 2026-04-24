@@ -6,6 +6,7 @@ const CHATGPT_ACTIONS_SPEC_TAG = "stable";
 const CHATGPT_INSTRUCTIONS_TEMPLATE = `You have access to Tallei shared memory + documents tools.
 
 Available actions:
+- prepare_response
 - recall_memories
 - upload_blob
 - remember
@@ -15,17 +16,14 @@ Available actions:
 - recall_document
 
 Rules:
-1) STEP 1 (always first): call recall_memories(query="<exact user message>", openaiFileIdRefs=[...any attachments...]) on every turn, including greetings and simple follow-ups.
-2) Never write reply text before recall_memories completes.
-3) STEP 2: read recall response.
-   - If inlineDocuments exists, read it first and use it.
-   - If autoSave.complete=false or HTTP 422, say "Upload failed, retrying…", call upload_blob(openaiFileIdRefs=[...]), retry once.
-   - If HTTP 402 and code=plan_required, do not retry. Tell the user document sharing is a Pro feature on Tallei and ask payment at https://tallei.com/dashboard/billing.
-4) STEP 3: write answer from contextBlock + inlineDocuments. Do not ask "which document?" when recall already returned relevant context.
-5) STEP 4 (always after reply): if user shared fact/preference/goal/decision, call remember(kind="fact"|"preference", content="<concise>") for each.
-6) STEP 5: if autoSave.saved is non-empty, end with Saved: @doc:<ref>. For fact/preference saves, no Saved line.
-7) Never mention tool calls in user-facing text.
-8) OpenAPI operation descriptions are the canonical execution contract.`;
+1) Call prepare_response(message="<exact user message>", openaiFileIdRefs=[...any attachments...]) before answering when the user asks about past context/memories/docs, gives a durable fact/opinion/belief/preference/goal/decision/correction/frustration/note, attaches a file, pastes substantial content, or may need prior context.
+2) You may skip prepare_response only for purely local replies that need no memory and contain nothing worth saving.
+3) Never write final reply text before prepare_response completes when you call it.
+4) Answer from contextBlock, inlineDocuments, and replyInstructions.
+5) If replyInstructions asks for a saved-document footer, append it exactly.
+6) Do not call remember separately unless prepare_response explicitly instructs a fallback.
+7) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
+8) Never mention tool calls in user-facing text.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);
@@ -87,6 +85,7 @@ async function main() {
   const openApiUrl = `${baseUrl}/api/chatgpt/actions/openapi.json?spec=${encodeURIComponent(CHATGPT_ACTIONS_SPEC_TAG)}`;
   const recallUrl = `${baseUrl}/api/chatgpt/actions/recall_memories`;
   const rememberUrl = `${baseUrl}/api/chatgpt/actions/remember`;
+  const prepareUrl = `${baseUrl}/api/chatgpt/actions/prepare_response`;
 
   console.log("Tallei ChatGPT Actions Setup");
   console.log("============================");
@@ -136,6 +135,9 @@ async function main() {
       if (!data.paths?.["/api/chatgpt/actions/recall_memories"]) {
         throw new Error("Missing /api/chatgpt/actions/recall_memories path");
       }
+      if (!data.paths?.["/api/chatgpt/actions/prepare_response"]) {
+        throw new Error("Missing /api/chatgpt/actions/prepare_response path");
+      }
       if (!data.paths?.["/api/chatgpt/actions/remember"]) {
         throw new Error("Missing /api/chatgpt/actions/remember path");
       }
@@ -149,6 +151,21 @@ async function main() {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
     };
+
+    checks.push(
+      await runCheck("Authenticated prepare_response smoke check", async () => {
+        const res = await fetch(prepareUrl, {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ message: "setup verification", conversation_id: "setup" }),
+        });
+        if (!res.ok) throw new Error(`Expected 200, got ${res.status}`);
+        const data = await safeJson(res);
+        if (!data || typeof data.contextBlock !== "string" || !Array.isArray(data.replyInstructions)) {
+          throw new Error("Invalid prepare_response response shape");
+        }
+      })
+    );
 
     checks.push(
       await runCheck("Authenticated recall smoke check", async () => {
