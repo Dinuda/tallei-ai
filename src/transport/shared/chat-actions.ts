@@ -12,6 +12,7 @@ import {
 } from "../../services/documents.js";
 import {
   ingestUploadedFileToDocument,
+  validateUploadedFileRefForIngest,
 } from "../../services/uploaded-file-ingest.js";
 import {
   enqueueUploadedFilesIngest,
@@ -30,6 +31,25 @@ const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
 const INLINE_DOCUMENT_MAX_CHARS = 4_000;
 const DOC_BRIEF_PREVIEW_MAX_CHARS = 200;
 const MEMORY_TEXT_MAX_CHARS = 600;
+
+function collectUnsupportedFileErrors(openaiFileIdRefs: OpenAiFileRef[]): Array<{ file_id: string; filename: string; error: string }> {
+  const errors: Array<{ file_id: string; filename: string; error: string }> = [];
+  for (const fileRef of openaiFileIdRefs) {
+    const error = validateUploadedFileRefForIngest({
+      id: fileRef.id,
+      name: fileRef.name,
+      mime_type: fileRef.mime_type,
+      download_link: fileRef.download_link,
+    });
+    if (!error) continue;
+    errors.push({
+      file_id: fileRef.id,
+      filename: fileRef.name ?? fileRef.id,
+      error,
+    });
+  }
+  return errors;
+}
 
 export function isTransientMemoryInfraError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -211,6 +231,22 @@ export type RecallActionResult =
 
 export async function executeRecallAction(auth: AuthContext, input: RecallActionInput): Promise<RecallActionResult> {
   const uploadedFiles = input.openaiFileIdRefs ?? [];
+  const unsupportedFileErrors = collectUnsupportedFileErrors(uploadedFiles);
+  if (unsupportedFileErrors.length > 0) {
+    return {
+      status: 422,
+      body: {
+        error: "One or more uploaded files use unsupported formats. Only PDF and Word (.docx/.docm) files are accepted.",
+        autoSave: {
+          requested: uploadedFiles.length,
+          complete: false,
+          saved: [],
+          errors: unsupportedFileErrors,
+        },
+      },
+    };
+  }
+
   const matchedDocsEnabled = shouldSearchMatchedDocuments({
     query: input.query,
     includeDocRefs: input.include_doc_refs,
@@ -356,6 +392,22 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
   if (uploadedFiles.length > 0) {
     if (input.kind !== "document-note" && input.kind !== "document-blob") {
       return { status: 400, body: { error: "openaiFileIdRefs can only be used with kind=document-note or kind=document-blob" } };
+    }
+
+    const unsupportedFileErrors = collectUnsupportedFileErrors(uploadedFiles);
+    if (unsupportedFileErrors.length > 0) {
+      return {
+        status: 422,
+        body: {
+          success: false,
+          kind: input.kind,
+          error: "One or more uploaded files use unsupported formats. Only PDF and Word (.docx/.docm) files are accepted.",
+          count_saved: 0,
+          count_failed: unsupportedFileErrors.length,
+          saved: [],
+          errors: unsupportedFileErrors,
+        },
+      };
     }
 
     assertUploadThingConfigured();
@@ -542,6 +594,21 @@ export async function executeUploadBlobAction(auth: AuthContext, input: {
   conversation_id?: string | null;
   title?: string;
 }): Promise<{ status: 200 | 422; body: Record<string, unknown> }> {
+  const unsupportedFileErrors = collectUnsupportedFileErrors(input.openaiFileIdRefs);
+  if (unsupportedFileErrors.length > 0) {
+    return {
+      status: 422,
+      body: {
+        success: false,
+        error: "One or more uploaded files use unsupported formats. Only PDF and Word (.docx/.docm) files are accepted.",
+        count_saved: 0,
+        count_failed: unsupportedFileErrors.length,
+        saved: [],
+        errors: unsupportedFileErrors,
+      },
+    };
+  }
+
   assertUploadThingConfigured();
 
   const { enqueued, errors } = await enqueueUploadedFilesIngest(input.openaiFileIdRefs, auth, {

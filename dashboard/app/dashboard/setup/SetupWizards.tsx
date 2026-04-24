@@ -45,6 +45,23 @@ type ChatGptTokenStatus = {
   rawToken: string | null;
 };
 
+type IntegrationAsset =
+  | {
+      assetKey: "chatgpt_openapi";
+      actionKind: "open_setup";
+      action: {
+        setupPath: string;
+        openApiPath: string;
+      };
+    }
+  | {
+      assetKey: "claude_instructions";
+      actionKind: "copy_text";
+      action: {
+        copyText: string;
+      };
+    };
+
 type ClaudeOnboardingState =
   | "queued"
   | "browser_started"
@@ -176,12 +193,6 @@ async function verifyConnectivityEvent(
   } catch {
     return { ok: false, message: "Failed to verify connectivity. Try again." };
   }
-}
-
-// --- Shared Utilities (Copied from page.tsx) ---
-export function getClaudeInstructions(mode: SaveMode): string {
-  void mode;
-  return `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.\n\n=== TURN PROTOCOL ===\n\nSTEP A — RECALL WHEN NEEDED:\n- Do NOT call recall_memories reflexively.\n- Call recall_memories only when prior-session context is required.\n- recall_memories defaults to facts + preferences and returns docs-lite context only.\n- include_doc_refs returns brief metadata only (no full document text).\n- recall_memories also includes a brief list of the latest 5 uploaded docs.\n- If the user references an older doc by name, call search_documents first and then include matching refs.\n- Use recall_document only when full document text is explicitly needed.\n\nSTEP B — ANSWER:\n- Answer the user directly.\n\nSTEP C — AUTO-SAVE NEW STRUCTURED CONTENT (required):\n- If this turn includes new structured content (file upload, pasted doc/spec/transcript, extracted PDF text, list/table/data), call remember(kind=\"document-note\", title, key_points, summary, source_hint) in the same turn, without asking permission.\n- Then append exactly this footer on its own line:\n  📎 Auto-saved as @doc:<ref> · reply **undo** to delete\n- Skip auto-save only if the user explicitly said not to save, the turn is purely conversational, or the same content was already saved.\n\nSTEP D — UNDO:\n- If the user replies \"undo\", \"del\", or \"delete\" after that footer, call undo_save with that @doc ref immediately.\n\n=== ONGOING ===\n- Use remember(kind=\"preference\") for stable preferences and identity facts.\n- Use remember(kind=\"fact\") for non-preference facts, decisions, events, notes, and corrections.\n- Use remember(kind=\"document-blob\") only when the user explicitly asks for full archive/full stash of complete text.\n- If document save/upload returns plan-required (\`402\`, \`code=plan_required\`, or \"Document sharing is a Pro feature\"), do NOT retry. Prompt the user to complete payment/upgrade at the returned billing URL, then continue after upgrade.\n\n=== HARD RULE ===\n- Never mention tool internals in user-facing text, except the required auto-save footer.`;
 }
 
 export function getChatGptInstructions(mode: SaveMode): string {
@@ -809,7 +820,7 @@ function VerifySection({
 
 export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onClose: () => void; mcpUrl: string }) {
   const [step, setStep] = useState(1);
-  const saveMode: SaveMode = "instant";
+  const [claudeInstructions, setClaudeInstructions] = useState("");
   const [verificationStartedAt, setVerificationStartedAt] = useState<number | null>(null);
   const [verifyingConnection, setVerifyingConnection] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
@@ -847,6 +858,33 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     "Set up your Claude project",
     step3Verified ? "You're all set!" : "Verify your setup",
   ];
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let canceled = false;
+
+    async function loadClaudeInstructions() {
+      try {
+        const response = await fetch("/api/integration-updates/assets", { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json().catch(() => ({}));
+        const assets = Array.isArray(payload?.assets) ? (payload.assets as IntegrationAsset[]) : [];
+        const asset = assets.find(
+          (item) => item.assetKey === "claude_instructions" && item.actionKind === "copy_text"
+        );
+        if (!canceled && asset?.actionKind === "copy_text") {
+          setClaudeInstructions(asset.action.copyText);
+        }
+      } catch {
+        if (!canceled) setClaudeInstructions("");
+      }
+    }
+
+    void loadClaudeInstructions();
+    return () => {
+      canceled = true;
+    };
+  }, [isOpen]);
 
   const resetConnectionVerification = useCallback(() => {
     setVerificationStartedAt(Date.now());
@@ -933,7 +971,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
         body: JSON.stringify({
           projectName: "Tallei Memory",
           applyProjectInstructions: true,
-          projectInstructions: getClaudeInstructions("instant"),
+          projectInstructions: claudeInstructions,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -953,7 +991,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     } finally {
       setOnboardingBusy(false);
     }
-  }, []);
+  }, [claudeInstructions]);
 
   const resumeAutomatedSetup = useCallback(async (options?: {
     authCompleted?: boolean;
@@ -1207,7 +1245,13 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
                   <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "#111827" }}>
                     Project <code>Custom Instructions</code>
                   </h4>
-                  <CodeBlock value={getClaudeInstructions(saveMode)} language="txt" maxHeight={180} />
+                  {claudeInstructions ? (
+                    <CodeBlock value={claudeInstructions} language="txt" maxHeight={180} />
+                  ) : (
+                    <div style={{ border: "1px solid #e5e7eb", background: "#f9fafb", padding: "1rem", color: "#6b7280", fontSize: "0.875rem" }}>
+                      Loading latest Claude instructions...
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

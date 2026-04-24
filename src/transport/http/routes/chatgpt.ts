@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import { AuthRequest, requireScopes, safeSecretEqual } from "../middleware/auth.middleware.js";
 import { config } from "../../../config/index.js";
+import { CHATGPT_OPENAPI_VERSION } from "../../shared/integration-assets.js";
 import { UploadThingConfigError } from "../../../infrastructure/storage/uploadthing-client.js";
 import { DocumentSizeExceededError } from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
@@ -525,7 +526,10 @@ export function buildOpenApiSpec(serverUrl: string) {
     properties: {
       id: { type: "string" },
       name: { type: "string" },
-      mime_type: { type: "string" },
+      mime_type: {
+        type: "string",
+        description: "MIME type of the uploaded file. Only PDF and Word (.docx/.docm) files are supported for ingest.",
+      },
       download_link: { type: "string", format: "uri" },
     },
   };
@@ -546,8 +550,8 @@ export function buildOpenApiSpec(serverUrl: string) {
     openai_file_id_refs: [
       {
         fileId: "file_456",
-        filename: "brief.md",
-        mimeType: "text/markdown",
+        filename: "brief.docx",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         downloadLink: "https://files.oaiusercontent.com/file-def",
       },
     ],
@@ -844,7 +848,7 @@ export function buildOpenApiSpec(serverUrl: string) {
     openapi: "3.1.0",
     info: {
       title: "Tallei ChatGPT Actions API",
-      version: "2026-04-21",
+      version: CHATGPT_OPENAPI_VERSION,
       description:
         "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key). " +
         "OpenAPI operation descriptions are the canonical execution contract.",
@@ -974,7 +978,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "upload_blob",
           summary: "Fallback upload retry — only if recall_memories autoSave failed",
           description:
-            "Fallback tool. Use only when recall_memories reports autoSave.complete=false or 422. Pass failed files in openaiFileIdRefs and retry once on 422. If 402 code=plan_required, stop retries and ask user to upgrade via billing_url. Supports PDF and Word (.docx/.docm).",
+            "Fallback tool. Use only when recall_memories reports autoSave.complete=false or 422. Pass failed files in openaiFileIdRefs and retry once on 422. If 402 code=plan_required, stop retries and ask user to upgrade via billing_url. Supports only PDF and Word (.docx/.docm) file ingest.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {

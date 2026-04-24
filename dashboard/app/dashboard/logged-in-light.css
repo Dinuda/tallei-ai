@@ -1,3 +1,20 @@
+.logged-in-shell-light,
+.logged-in-shell-light button,
+.logged-in-shell-light input,
+.logged-in-shell-light select,
+.logged-in-shell-light textarea {
+  font-family:
+    var(--font-fustat, var(--font-sans, ui-sans-serif)),
+    var(--font-sans, ui-sans-serif),
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+}
+
 .logged-in-shell-light h1,
 .logged-in-shell-light h2,
 .logged-in-shell-light h3,

@@ -141,6 +141,21 @@
   },
   {
     "method": "GET",
+    "path": "/api/integration-updates",
+    "source": "src/routes/integrationUpdates.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/integration-updates/:assetKey/acknowledge",
+    "source": "src/routes/integrationUpdates.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/integration-updates/assets",
+    "source": "src/routes/integrationUpdates.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/integrations/chatgpt/token",
     "source": "src/routes/integrations.ts"
   },

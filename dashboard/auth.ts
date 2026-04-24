@@ -2,6 +2,16 @@ import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 
 type UserPlan = "free" | "pro" | "power";
+const PLAN_REFRESH_INTERVAL_MS = 60_000;
+
+function normalizeBackendUrl(url: string): string {
+  return url.replace(/\/$/, "");
+}
+
+function asUserPlan(value: unknown): UserPlan | null {
+  if (value === "free" || value === "pro" || value === "power") return value;
+  return null;
+}
 
 declare module "next-auth" {
   interface Session {
@@ -67,11 +77,47 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       }
     },
 
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger, session }) {
       // On first sign-in, user is populated — persist our backendId.
       if (user) {
         token.backendId = (user as { backendId?: string }).backendId;
         token.backendPlan = (user as { backendPlan?: UserPlan }).backendPlan ?? "free";
+        token.backendPlanRefreshedAt = Date.now();
+      }
+
+      const backendId = typeof token.backendId === "string" ? token.backendId : null;
+      if (!backendId) return token;
+
+      const forcePlanRefresh =
+        trigger === "update"
+        && !!session
+        && typeof session === "object"
+        && (session as { forcePlanRefresh?: unknown }).forcePlanRefresh === true;
+
+      const refreshedAt = typeof token.backendPlanRefreshedAt === "number" ? token.backendPlanRefreshedAt : 0;
+      if (!forcePlanRefresh && Date.now() - refreshedAt < PLAN_REFRESH_INTERVAL_MS) return token;
+
+      const secret = process.env.INTERNAL_API_SECRET;
+      if (!secret) return token;
+
+      const backendUrl = normalizeBackendUrl(process.env.BACKEND_URL ?? "http://localhost:3000");
+      try {
+        const res = await fetch(`${backendUrl}/api/billing/status`, {
+          headers: {
+            "X-Internal-Secret": secret,
+            "X-User-Id": backendId,
+          },
+        });
+
+        const body = await res.json().catch(() => null);
+        if (res.ok && body && typeof body === "object") {
+          const nextPlan = asUserPlan((body as { plan?: unknown }).plan);
+          if (nextPlan) token.backendPlan = nextPlan;
+        }
+      } catch (error) {
+        console.error("[auth] Failed to refresh plan:", error);
+      } finally {
+        token.backendPlanRefreshedAt = Date.now();
       }
       return token;
     },

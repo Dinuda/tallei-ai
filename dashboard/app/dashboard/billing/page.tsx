@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -12,6 +12,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { useSession } from "next-auth/react";
 import styles from "./page.module.css";
 
 interface BillingStatus {
@@ -422,6 +423,7 @@ function InvoicesTab() {
 }
 
 export default function BillingPage() {
+  const { data: session, update } = useSession();
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -431,8 +433,13 @@ export default function BillingPage() {
   const [activeTab, setActiveTab] = useState<"subscription" | "invoices">("subscription");
   const [invoicesLoaded, setInvoicesLoaded] = useState(false);
   const manageModalRef = useRef<HTMLDivElement | null>(null);
+  const sessionPlanRef = useRef(session?.user?.plan);
 
-  async function fetchStatus() {
+  useEffect(() => {
+    sessionPlanRef.current = session?.user?.plan;
+  }, [session?.user?.plan]);
+
+  const fetchStatus = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -440,16 +447,19 @@ export default function BillingPage() {
       if (!res.ok) throw new Error("Failed to load billing info");
       const data: BillingStatus = await res.json();
       setStatus(data);
+      if (sessionPlanRef.current && data.plan !== sessionPlanRef.current) {
+        await update({ forcePlanRefresh: true });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
       setLoading(false);
     }
-  }
+  }, [update]);
 
   useEffect(() => {
     void fetchStatus();
-  }, []);
+  }, [fetchStatus]);
 
   useEffect(() => {
     if (!isManageModalOpen) return;

@@ -6,8 +6,10 @@ import {
   ingestUploadedFileToDocument,
   ingestUploadedFilesToDocuments,
   isDocxLikeFile,
+  isImageLikeFile,
   isLegacyDocFile,
   isPdfLikeFile,
+  uploadedFileToText,
   type UploadedFileRef,
 } from "../../../src/services/uploaded-file-ingest.js";
 
@@ -175,4 +177,41 @@ test("file type helpers detect pdf and word formats", () => {
     mime_type: "application/msword",
     download_link: "https://example.com/legacy.doc",
   }), true);
+
+  assert.equal(isImageLikeFile({
+    id: "img1",
+    name: "diagram.png",
+    mime_type: "image/png",
+    download_link: "https://example.com/diagram.png",
+  }), true);
+});
+
+test("uploadedFileToText rejects image files", async () => {
+  await assert.rejects(
+    uploadedFileToText(
+      {
+        id: "img2",
+        name: "chart.png",
+        mime_type: "image/png",
+        download_link: "https://example.com/chart.png",
+      },
+      Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    ),
+    /Image files are not supported for document ingest/i
+  );
+});
+
+test("uploadedFileToText rejects non-pdf/docx text files", async () => {
+  await assert.rejects(
+    uploadedFileToText(
+      {
+        id: "txt1",
+        name: "notes.txt",
+        mime_type: "text/plain",
+        download_link: "https://example.com/notes.txt",
+      },
+      Buffer.from("plain text")
+    ),
+    /Only PDF and Word \(\.docx\/\.docm\) files are supported/i
+  );
 });
