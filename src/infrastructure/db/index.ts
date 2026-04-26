@@ -324,6 +324,11 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       policy: "collab_tasks_tenant_user_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
     },
+    {
+      table: "orchestration_sessions",
+      policy: "orchestration_sessions_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
   ];
 
   for (const entry of policyStatements) {
@@ -904,6 +909,29 @@ export async function initDb() {
           FOREIGN KEY (collab_task_id) REFERENCES collab_tasks(id) ON DELETE SET NULL;
         END IF;
       END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS orchestration_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        goal TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('DRAFT','INTERVIEWING','PLAN_READY','RUNNING','DONE','ABORTED')),
+        transcript JSONB NOT NULL DEFAULT '[]'::jsonb,
+        plan JSONB,
+        collab_task_id UUID REFERENCES collab_tasks(id) ON DELETE SET NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_orchestration_sessions_owner
+        ON orchestration_sessions(tenant_id, user_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_orchestration_sessions_active
+        ON orchestration_sessions(tenant_id, user_id, status)
+        WHERE status IN ('INTERVIEWING','PLAN_READY','RUNNING');
     `);
 
     await client.query(`

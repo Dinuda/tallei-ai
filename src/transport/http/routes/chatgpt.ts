@@ -18,6 +18,15 @@ import {
   listTasks,
   submitTurn,
 } from "../../../services/collab.js";
+import {
+  abortSession as abortOrchestrationSession,
+  approvePlan as approveOrchestrationPlan,
+  buildSessionFallbackContext,
+  OrchestrationConflictError,
+  OrchestrationNotFoundError,
+  startSession as startOrchestrationSession,
+  submitAnswer as submitOrchestrationAnswer,
+} from "../../../services/orchestrator.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import {
@@ -132,6 +141,30 @@ const collabContinueSchema = z.object({
   mark_done: z.boolean().optional().default(false),
 });
 
+const orchestrateStartSchema = z.object({
+  goal: z.string().trim().min(1, "goal is required"),
+  first_actor_preference: z.enum(["chatgpt", "claude"]).optional(),
+  initial_context: z.string().optional(),
+});
+
+const orchestrateAnswerSchema = z.object({
+  session_id: z.string().uuid("session_id must be a valid UUID"),
+  answer: z.string().trim().min(1, "answer is required"),
+});
+
+const orchestrateApproveSchema = z.object({
+  session_id: z.string().uuid("session_id must be a valid UUID"),
+  overrides: z.object({
+    first_actor: z.enum(["chatgpt", "claude"]).optional(),
+    max_iterations: z.coerce.number().int().min(1).max(8).optional(),
+  }).optional(),
+});
+
+const orchestrateAbortSchema = z.object({
+  session_id: z.string().uuid("session_id must be a valid UUID"),
+  reason: z.string().optional(),
+});
+
 type EventMetadata = Record<string, unknown>;
 
 // TODO: move somwhere else, dont have data layer in route handler file
@@ -151,7 +184,11 @@ async function logChatGptAction(input: {
     | "chatgpt/collab/run-turn"
     | "chatgpt/collab/submit-turn"
     | "chatgpt/collab/continue"
-    | "chatgpt/collab/tasks";
+    | "chatgpt/collab/tasks"
+    | "chatgpt/actions/orchestrate_start"
+    | "chatgpt/actions/orchestrate_answer"
+    | "chatgpt/actions/orchestrate_approve"
+    | "chatgpt/actions/orchestrate_abort";
   collabTaskId?: string | null;
   metadata?: EventMetadata | null;
   ok: boolean;
@@ -1633,6 +1670,138 @@ export function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
+      "/api/chatgpt/actions/orchestrate_start": {
+        post: {
+          operationId: "orchestrate_start",
+          summary: "Start orchestration planning session",
+          description: "Starts a grill-me planning session and returns the first planner question.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["goal"],
+                  properties: {
+                    goal: { type: "string" },
+                    first_actor_preference: { type: "string", enum: ["chatgpt", "claude"] },
+                    initial_context: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Session started." },
+            "400": { description: "Validation failed" },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/actions/orchestrate_answer": {
+        post: {
+          operationId: "orchestrate_answer",
+          summary: "Continue orchestration planning session",
+          description: "Submits an answer and returns next question or plan when ready.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["session_id", "answer"],
+                  properties: {
+                    session_id: { type: "string", format: "uuid" },
+                    answer: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Session advanced." },
+            "400": { description: "Validation failed" },
+            "404": { description: "Session not found" },
+            "409": { description: "Session conflict" },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/actions/orchestrate_approve": {
+        post: {
+          operationId: "orchestrate_approve",
+          summary: "Approve orchestration plan and create collab task",
+          description: "Approves a PLAN_READY session and starts the linked collab task.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["session_id"],
+                  properties: {
+                    session_id: { type: "string", format: "uuid" },
+                    overrides: {
+                      type: "object",
+                      properties: {
+                        first_actor: { type: "string", enum: ["chatgpt", "claude"] },
+                        max_iterations: { type: "integer", minimum: 1, maximum: 8 },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Plan approved." },
+            "400": { description: "Validation failed" },
+            "404": { description: "Session not found" },
+            "409": { description: "Session conflict" },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/actions/orchestrate_abort": {
+        post: {
+          operationId: "orchestrate_abort",
+          summary: "Abort orchestration session",
+          description: "Aborts an active orchestration session.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["session_id"],
+                  properties: {
+                    session_id: { type: "string", format: "uuid" },
+                    reason: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Session aborted." },
+            "400": { description: "Validation failed" },
+            "404": { description: "Session not found" },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
       "/api/chatgpt/collab/tasks": {
         get: {
           operationId: "listCollabTasks",
@@ -2366,6 +2535,190 @@ router.post("/actions/recall_document", chatGptActionAuthMiddleware, requireScop
     });
     console.error("Error recalling ChatGPT document:", error);
     res.status(500).json({ error: "Failed to recall document" });
+  }
+});
+
+router.post("/actions/orchestrate_start", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = orchestrateStartSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+
+    const result = await startOrchestrationSession(
+      {
+        goal: body.goal,
+        sourcePlatform: "chatgpt",
+        firstActorPreference: body.first_actor_preference,
+        initialContext: body.initial_context ?? null,
+      },
+      auth
+    );
+
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_start",
+      metadata: {
+        category: "orchestration",
+        action: "start",
+        session_id: result.session.id,
+      },
+      ok: true,
+    });
+
+    res.json({
+      session_id: result.session.id,
+      status: result.session.status,
+      question: result.firstQuestion,
+      fallback_context: buildSessionFallbackContext(result.session),
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_start",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to start orchestration session",
+    });
+    res.status(500).json({ error: "Failed to start orchestration session" });
+  }
+});
+
+router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = orchestrateAnswerSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const result = await submitOrchestrationAnswer(body.session_id, body.answer, auth);
+
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_answer",
+      metadata: {
+        category: "orchestration",
+        action: "answer",
+        session_id: body.session_id,
+        status: result.session.status,
+      },
+      ok: true,
+    });
+
+    res.json({
+      session_id: result.session.id,
+      status: result.session.status,
+      question: result.nextQuestion ?? null,
+      plan: result.plan ?? result.session.plan,
+      fallback_context: buildSessionFallbackContext(result.session),
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof OrchestrationNotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    if (error instanceof OrchestrationConflictError) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_answer",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to continue orchestration session",
+    });
+    res.status(500).json({ error: "Failed to continue orchestration session" });
+  }
+});
+
+router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write", "collab:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = orchestrateApproveSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const result = await approveOrchestrationPlan(body.session_id, auth, body.overrides);
+
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_approve",
+      collabTaskId: result.task.id,
+      metadata: {
+        category: "orchestration",
+        action: "approve",
+        session_id: body.session_id,
+        task_id: result.task.id,
+      },
+      ok: true,
+    });
+
+    res.json({
+      task_id: result.task.id,
+      plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
+      success_criteria: result.session.plan?.success_criteria ?? [],
+      first_actor: result.session.plan?.first_actor ?? "chatgpt",
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof OrchestrationNotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    if (error instanceof OrchestrationConflictError) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_approve",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to approve orchestration plan",
+    });
+    res.status(500).json({ error: "Failed to approve orchestration plan" });
+  }
+});
+
+router.post("/actions/orchestrate_abort", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = orchestrateAbortSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const session = await abortOrchestrationSession(body.session_id, auth, body.reason);
+
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_abort",
+      metadata: {
+        category: "orchestration",
+        action: "abort",
+        session_id: body.session_id,
+      },
+      ok: true,
+    });
+
+    res.json({ session_id: session.id, status: session.status });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof OrchestrationNotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/orchestrate_abort",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to abort orchestration session",
+    });
+    res.status(500).json({ error: "Failed to abort orchestration session" });
   }
 });
 

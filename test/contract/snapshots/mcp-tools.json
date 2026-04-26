@@ -1,5 +1,21 @@
 [
   {
+    "name": "collab_check_turn",
+    "inputSchema": "{\n        task_id: z.string().uuid().describe(\"Collab task ID.\"),\n      }"
+  },
+  {
+    "name": "collab_create_task",
+    "inputSchema": "{\n        title: z.string().min(1).describe(\"Task title.\"),\n        brief: z.string().optional().describe(\"Optional task brief.\"),\n        first_actor: z.enum([\"chatgpt\", \"claude\"]).describe(\"Which model takes the first turn.\"),\n        max_iterations: z.number().int().min(1).max(8).optional(),\n      }"
+  },
+  {
+    "name": "collab_list_pending",
+    "inputSchema": "{}"
+  },
+  {
+    "name": "collab_take_turn",
+    "inputSchema": "{\n        task_id: z.string().uuid().describe(\"Collab task ID.\"),\n        content: z.string().min(1).describe(\"Turn output content.\"),\n        mark_done: z.boolean().optional().default(false),\n      }"
+  },
+  {
     "name": "create_lot",
     "inputSchema": "{\n        refs: z.array(z.string()).min(1).describe(\"Array of @doc:... references to group.\"),\n        title: z.string().optional().describe(\"Optional lot title.\"),\n      }"
   },
@@ -18,6 +34,18 @@
   {
     "name": "list_preferences",
     "inputSchema": "{}"
+  },
+  {
+    "name": "orchestrator_answer",
+    "inputSchema": "{\n        session_id: z.string().uuid().describe(\"Orchestration session ID.\"),\n        answer: z.string().min(1).describe(\"User answer to planner question.\"),\n      }"
+  },
+  {
+    "name": "orchestrator_approve",
+    "inputSchema": "{\n        session_id: z.string().uuid().describe(\"Orchestration session ID.\"),\n        overrides: z.object({\n          first_actor: z.enum([\"chatgpt\", \"claude\"]).optional(),\n          max_iterations: z.number().int().min(1).max(8).optional(),\n        }).optional(),\n      }"
+  },
+  {
+    "name": "orchestrator_start",
+    "inputSchema": "{\n        goal: z.string().min(1).describe(\"The goal to plan before collab execution.\"),\n        first_actor_preference: z.enum([\"chatgpt\", \"claude\"]).optional(),\n        initial_context: z.string().optional(),\n      }"
   },
   {
     "name": "recall_document",

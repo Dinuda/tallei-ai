@@ -34,6 +34,27 @@ type CollabTask = {
   updatedAt: string;
 };
 
+type PlanCriterion = {
+  id: string;
+  text: string;
+  weight: number;
+};
+
+type EvaluationCriterion = {
+  criterion_id: string;
+  status: "pass" | "fail" | "partial";
+  rationale: string;
+};
+
+type EvaluationEntry = {
+  iteration: number;
+  actor: "chatgpt" | "claude";
+  ts: string;
+  criterion_evaluations: EvaluationCriterion[];
+  should_mark_done: boolean;
+  remaining_work: string;
+};
+
 const POLL_CONFIG = {
   successIntervalMs: 2_000,
   hiddenIntervalMs: 30_000,
@@ -100,6 +121,70 @@ function waitingActorForState(state: CollabState): "chatgpt" | "claude" | null {
   if (state === "CREATIVE") return "chatgpt";
   if (state === "TECHNICAL") return "claude";
   return null;
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function readPlanCriteria(context: Record<string, unknown>): PlanCriterion[] {
+  const artifacts = readObject(context["artifacts"]);
+  const plan = readObject(artifacts["plan"]);
+  const source = Array.isArray(artifacts["success_criteria"])
+    ? artifacts["success_criteria"]
+    : Array.isArray(plan["success_criteria"])
+      ? plan["success_criteria"]
+      : [];
+
+  return source
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      id: typeof item["id"] === "string" ? item["id"] : "",
+      text: typeof item["text"] === "string" ? item["text"] : "",
+      weight: typeof item["weight"] === "number" ? Math.max(1, Math.min(3, Math.trunc(item["weight"]))) : 1,
+    }))
+    .filter((item) => item.id && item.text);
+}
+
+function readPlanSummary(context: Record<string, unknown>): string | null {
+  const artifacts = readObject(context["artifacts"]);
+  const plan = readObject(artifacts["plan"]);
+  const summary = plan["summary"];
+  return typeof summary === "string" && summary.trim() ? summary.trim() : null;
+}
+
+function readEvaluations(context: Record<string, unknown>): EvaluationEntry[] {
+  const artifacts = readObject(context["artifacts"]);
+  const evaluationsRaw = artifacts["evaluations"];
+  if (!Array.isArray(evaluationsRaw)) return [];
+  return evaluationsRaw
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => {
+      const criteriaRaw = Array.isArray(item["criterion_evaluations"]) ? item["criterion_evaluations"] : [];
+      const criteria = criteriaRaw
+        .filter((criterion): criterion is Record<string, unknown> => Boolean(criterion && typeof criterion === "object" && !Array.isArray(criterion)))
+        .map((criterion) => {
+          const status = criterion["status"];
+          if (status !== "pass" && status !== "fail" && status !== "partial") return null;
+          return {
+            criterion_id: typeof criterion["criterion_id"] === "string" ? criterion["criterion_id"] : "",
+            status,
+            rationale: typeof criterion["rationale"] === "string" ? criterion["rationale"] : "",
+          };
+        })
+        .filter((criterion): criterion is EvaluationCriterion => Boolean(criterion && criterion.criterion_id));
+      const actor = item["actor"];
+      return {
+        iteration: typeof item["iteration"] === "number" ? item["iteration"] : 0,
+        actor: (actor === "claude" ? "claude" : "chatgpt") as "claude" | "chatgpt",
+        ts: typeof item["ts"] === "string" ? item["ts"] : "",
+        criterion_evaluations: criteria,
+        should_mark_done: item["should_mark_done"] === true,
+        remaining_work: typeof item["remaining_work"] === "string" ? item["remaining_work"] : "",
+      };
+    })
+    .filter((entry) => entry.ts);
 }
 
 function toMarkdown(task: CollabTask): string {
@@ -409,6 +494,20 @@ export default function CollabBoardPage() {
     : 0;
   const showPollBanner = Boolean(pollReason && task?.state !== "DONE" && task?.state !== "ERROR");
   const pollBannerText = describePollReason(pollReason, pollFailures);
+  const planSummary = task ? readPlanSummary(task.context) : null;
+  const planCriteria = task ? readPlanCriteria(task.context) : [];
+  const evaluations = task ? readEvaluations(task.context) : [];
+  const latestEvaluation = evaluations.length > 0 ? evaluations[evaluations.length - 1] : null;
+  const recentEvaluations = evaluations.slice(-5).reverse();
+  const latestStatusMap = useMemo(() => {
+    const map = new Map<string, "pass" | "fail" | "partial">();
+    for (const evaluation of evaluations) {
+      for (const criterion of evaluation.criterion_evaluations) {
+        map.set(criterion.criterion_id, criterion.status);
+      }
+    }
+    return map;
+  }, [evaluations]);
   const latestOutput = useMemo(() => {
     if (!task) return null;
     const fromModel = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt" || entry.actor === "claude");
@@ -571,6 +670,54 @@ export default function CollabBoardPage() {
             <p className={`${styles.latestOutputBody} ${latestExpanded ? styles.expanded : ""}`}>
               {latestOutput.content}
             </p>
+          </article>
+        )}
+
+        {(planSummary || planCriteria.length > 0) && (
+          <article className={styles.planPanel}>
+            <header>
+              <h2 className={styles.planTitle}>Plan & Criteria</h2>
+              {planSummary ? <p className={styles.planSummary}>{planSummary}</p> : null}
+            </header>
+            {planCriteria.length > 0 && (
+              <div className={styles.criteriaList}>
+                {planCriteria.map((criterion) => {
+                  const status = latestStatusMap.get(criterion.id) ?? "pending";
+                  return (
+                    <div key={criterion.id} className={styles.criteriaRow}>
+                      <div>
+                        <p className={styles.criteriaText}>{criterion.text}</p>
+                        <p className={styles.criteriaMeta}>{criterion.id} · weight {criterion.weight}</p>
+                      </div>
+                      <span className={`${styles.criteriaStatus} ${styles[`criteria_${status}`] ?? ""}`}>
+                        {status}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {latestEvaluation && (
+              <div className={styles.evaluationTimeline}>
+                <p className={styles.evaluationTitle}>Latest Evaluation</p>
+                <p className={styles.criteriaMeta}>
+                  {ACTOR_LABEL[latestEvaluation.actor]} · iter {latestEvaluation.iteration} · {relativeTime(latestEvaluation.ts)}
+                </p>
+                {latestEvaluation.remaining_work ? (
+                  <p className={styles.evaluationRemaining}>{latestEvaluation.remaining_work}</p>
+                ) : null}
+              </div>
+            )}
+            {recentEvaluations.length > 0 && (
+              <div className={styles.evaluationHistory}>
+                <p className={styles.evaluationTitle}>Evaluation Timeline</p>
+                {recentEvaluations.map((evaluation, idx) => (
+                  <p key={`${evaluation.ts}:${idx}`} className={styles.criteriaMeta}>
+                    {ACTOR_LABEL[evaluation.actor]} · iter {evaluation.iteration} · {relativeTime(evaluation.ts)}
+                  </p>
+                ))}
+              </div>
+            )}
           </article>
         )}
 

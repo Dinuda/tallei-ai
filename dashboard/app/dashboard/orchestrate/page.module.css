@@ -1,0 +1,101 @@
+.page {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1.4rem 2rem 1.6rem;
+}
+
+.header {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.title {
+  margin: 0;
+  color: var(--text);
+  font-size: 1.35rem;
+}
+
+.subtle {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.card {
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 0.9rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.cardTitle {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  min-height: 84px;
+  padding: 0.6rem 0.7rem;
+  resize: vertical;
+}
+
+.primaryBtn {
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-foreground);
+  padding: 0.45rem 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.primaryBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.item {
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 0.55rem 0.6rem;
+  text-decoration: none;
+  color: inherit;
+  background: var(--surface);
+}
+
+.item:hover {
+  border-color: var(--border);
+}
+
+.itemTitle {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.itemMeta {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+@media (max-width: 860px) {
+  .page {
+    padding: 1rem;
+  }
+}

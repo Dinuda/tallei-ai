@@ -277,6 +277,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama",
     openaiModel: readStringEnv(e, "TALLEI_LLM__CHAT_MODEL", "gpt-4o-mini"),
     intentClassifierModel: readStringEnv(e, "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
+    plannerModel: readStringEnv(e, "TALLEI_PLANNER__MODEL", "gpt-4o-mini"),
+    plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
+    plannerWebSearchBudget: readIntEnv(e, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
+    plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 45_000),
     openaiPayloadLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_ENABLED", false),
     openaiPayloadLoggingMaxChars: Math.max(
       64,

@@ -27,6 +27,14 @@ import {
   listTasks as listCollabTasks,
   submitTurn as submitCollabTurn,
 } from "../../../services/collab.js";
+import {
+  approvePlan as approveOrchestratorPlan,
+  buildSessionFallbackContext,
+  OrchestrationConflictError,
+  OrchestrationNotFoundError,
+  startSession as startOrchestratorSession,
+  submitAnswer as submitOrchestratorAnswer,
+} from "../../../services/orchestrator.js";
 import { PlatformSchema } from "../schemas.js";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
 import {
@@ -81,6 +89,11 @@ function toJsonToolResult(body: unknown, isError = false): ToolResult {
 function hasCollabWriteScope(auth: AuthContext): boolean {
   if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
   return hasRequiredScopes(auth.scopes ?? [], ["collab:write"]);
+}
+
+function hasOrchestrateScope(auth: AuthContext): boolean {
+  if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
+  return hasRequiredScopes(auth.scopes ?? [], ["orchestrate:write"]);
 }
 
 export function registerTools(server: McpServer, auth: AuthContext): void {
@@ -353,6 +366,116 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to create collab task";
+        return toJsonToolResult({ error: message }, true);
+      }
+    }
+  );
+
+  server.registerTool(
+    "orchestrator_start",
+    {
+      title: "Start Orchestration Session",
+      description: "Starts grill-me planning for a goal and returns the first planner question.",
+      inputSchema: {
+        goal: z.string().min(1).describe("The goal to plan before collab execution."),
+        first_actor_preference: z.enum(["chatgpt", "claude"]).optional(),
+        initial_context: z.string().optional(),
+      },
+    },
+    async ({ goal, first_actor_preference, initial_context }) => {
+      try {
+        if (!hasOrchestrateScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
+        }
+        const result = await startOrchestratorSession(
+          {
+            goal,
+            sourcePlatform: "claude",
+            firstActorPreference: first_actor_preference,
+            initialContext: initial_context ?? null,
+          },
+          auth
+        );
+        return toJsonToolResult({
+          session_id: result.session.id,
+          status: result.session.status,
+          question: result.firstQuestion,
+          fallback_context: buildSessionFallbackContext(result.session),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to start orchestration session";
+        return toJsonToolResult({ error: message }, true);
+      }
+    }
+  );
+
+  server.registerTool(
+    "orchestrator_answer",
+    {
+      title: "Continue Orchestration Session",
+      description: "Submits user answer for orchestration and returns next question or plan.",
+      inputSchema: {
+        session_id: z.string().uuid().describe("Orchestration session ID."),
+        answer: z.string().min(1).describe("User answer to planner question."),
+      },
+    },
+    async ({ session_id, answer }) => {
+      try {
+        if (!hasOrchestrateScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
+        }
+        const result = await submitOrchestratorAnswer(session_id, answer, auth);
+        return toJsonToolResult({
+          session_id,
+          status: result.session.status,
+          question: result.nextQuestion ?? null,
+          plan: result.plan ?? result.session.plan,
+          fallback_context: buildSessionFallbackContext(result.session),
+        });
+      } catch (err) {
+        if (err instanceof OrchestrationConflictError || err instanceof OrchestrationNotFoundError) {
+          return toJsonToolResult({ error: err.message, session_id }, true);
+        }
+        const message = err instanceof Error ? err.message : "Failed to continue orchestration session";
+        return toJsonToolResult({ error: message }, true);
+      }
+    }
+  );
+
+  server.registerTool(
+    "orchestrator_approve",
+    {
+      title: "Approve Orchestration Plan",
+      description: "Approves the prepared orchestration plan and creates the linked collab task.",
+      inputSchema: {
+        session_id: z.string().uuid().describe("Orchestration session ID."),
+        overrides: z.object({
+          first_actor: z.enum(["chatgpt", "claude"]).optional(),
+          max_iterations: z.number().int().min(1).max(8).optional(),
+        }).optional(),
+      },
+    },
+    async ({ session_id, overrides }) => {
+      try {
+        if (!hasOrchestrateScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
+        }
+        if (!hasCollabWriteScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
+        }
+        const result = await approveOrchestratorPlan(session_id, auth, overrides);
+        return toJsonToolResult({
+          task_id: result.task.id,
+          plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
+          success_criteria: result.session.plan?.success_criteria ?? [],
+          first_actor: result.session.plan?.first_actor ?? "chatgpt",
+          fallback_context: result.session ? buildSessionFallbackContext(result.session) : null,
+        });
+      } catch (err) {
+        if (err instanceof OrchestrationConflictError || err instanceof OrchestrationNotFoundError) {
+          return toJsonToolResult({ error: err.message, session_id }, true);
+        }
+        const message = err instanceof Error ? err.message : "Failed to approve orchestration plan";
         return toJsonToolResult({ error: message }, true);
       }
     }

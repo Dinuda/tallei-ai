@@ -43,6 +43,17 @@ export interface CollabTurnFallbackContext {
   last_chatgpt_entry: CollabTranscriptEntry | null;
   last_claude_entry: CollabTranscriptEntry | null;
   recent_transcript: CollabTranscriptEntry[];
+  orchestration?: {
+    plan_summary: string;
+    success_criteria: Array<{
+      id: string;
+      text: string;
+      weight: number;
+      latest_status: "pending" | "pass" | "fail" | "partial";
+    }>;
+    last_evaluation: CollabCriterionEvaluationEntry | null;
+    instructions: string;
+  };
 }
 
 interface CollabTaskRow {
@@ -83,6 +94,23 @@ interface CollabArtifacts {
   extracted_from_iteration: number;
   extracted_from_actor: CollabModelActor;
   extracted_at: string;
+}
+
+type CollabCriterionEvaluationStatus = "pass" | "fail" | "partial";
+
+interface CollabCriterionEvaluation {
+  criterion_id: string;
+  status: CollabCriterionEvaluationStatus;
+  rationale: string;
+}
+
+interface CollabCriterionEvaluationEntry {
+  iteration: number;
+  actor: CollabModelActor;
+  ts: string;
+  criterion_evaluations: CollabCriterionEvaluation[];
+  should_mark_done: boolean;
+  remaining_work: string;
 }
 
 const TASK_CACHE_TTL_MS = 5_000;
@@ -367,6 +395,88 @@ function extractJsonObjectCandidates(content: string): Record<string, unknown>[]
   return candidates;
 }
 
+function extractJsonFromFence(content: string, fenceTag: string): Record<string, unknown> | null {
+  const pattern = new RegExp("```" + fenceTag + "\\s*([\\s\\S]*?)```", "i");
+  const match = content.match(pattern);
+  const raw = match?.[1]?.trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeEvaluationEntry(
+  parsed: Record<string, unknown>,
+  actor: CollabModelActor,
+  iteration: number,
+  submittedAt: string
+): CollabCriterionEvaluationEntry | null {
+  const criteriaRaw = parsed["criterion_evaluations"];
+  if (!Array.isArray(criteriaRaw) || criteriaRaw.length === 0) {
+    return null;
+  }
+
+  const criterionEvaluations = criteriaRaw
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => {
+      const criterionId = normalizeSingleLine(item["criterion_id"]) ?? "";
+      const statusRaw = item["status"];
+      const status = statusRaw === "pass" || statusRaw === "fail" || statusRaw === "partial" ? statusRaw : null;
+      const rationale = normalizeParagraph(item["rationale"], 400) ?? "";
+      if (!criterionId || !status || !rationale) return null;
+      return { criterion_id: criterionId, status, rationale };
+    })
+    .filter((item): item is CollabCriterionEvaluation => Boolean(item));
+
+  if (criterionEvaluations.length === 0) {
+    return null;
+  }
+
+  return {
+    iteration,
+    actor,
+    ts: submittedAt,
+    criterion_evaluations: criterionEvaluations,
+    should_mark_done: parsed["should_mark_done"] === true,
+    remaining_work: normalizeParagraph(parsed["remaining_work"], 1000) ?? "",
+  };
+}
+
+function extractEvaluation(
+  content: string,
+  actor: CollabModelActor,
+  iteration: number,
+  submittedAt: string
+): CollabCriterionEvaluationEntry | null {
+  const parsed = extractJsonFromFence(content, "orchestrator-eval");
+  if (!parsed) return null;
+  return normalizeEvaluationEntry(parsed, actor, iteration, submittedAt);
+}
+
+function normalizeEvaluationTimeline(value: unknown): CollabCriterionEvaluationEntry[] {
+  if (!Array.isArray(value)) return [];
+  const normalized: CollabCriterionEvaluationEntry[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    const actor = row["actor"];
+    const iteration = row["iteration"];
+    const ts = row["ts"];
+    if ((actor !== "chatgpt" && actor !== "claude") || typeof iteration !== "number" || typeof ts !== "string") {
+      continue;
+    }
+    const normalizedEntry = normalizeEvaluationEntry(row, actor, iteration, ts);
+    if (normalizedEntry) normalized.push(normalizedEntry);
+  }
+  return normalized;
+}
+
 function extractCollabArtifacts(
   content: string,
   actor: CollabModelActor,
@@ -477,6 +587,47 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
   const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
   const lastClaudeEntry = [...task.transcript].reverse().find((entry) => entry.actor === "claude") ?? null;
   const recentTranscript = task.transcript.slice(-6);
+  const context = normalizeContext(task.context);
+  const orchestrationContext = normalizeContext(context["orchestration"]);
+  const artifacts = normalizeContext(context["artifacts"]);
+  const plan = normalizeContext(artifacts["plan"]);
+
+  let orchestration: CollabTurnFallbackContext["orchestration"] | undefined;
+  if (typeof orchestrationContext["session_id"] === "string" && typeof plan["summary"] === "string") {
+    const criteriaRaw = Array.isArray(artifacts["success_criteria"])
+      ? artifacts["success_criteria"]
+      : Array.isArray(plan["success_criteria"])
+        ? plan["success_criteria"]
+        : [];
+    const criteria = criteriaRaw
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+      .map((item) => ({
+        id: normalizeSingleLine(item["id"]) ?? "",
+        text: normalizeParagraph(item["text"], 500) ?? "",
+        weight: typeof item["weight"] === "number" ? Math.max(1, Math.min(3, Math.trunc(item["weight"]))) : 1,
+      }))
+      .filter((item) => item.id && item.text);
+    const evaluations = normalizeEvaluationTimeline(artifacts["evaluations"]);
+    const lastEvaluation = evaluations.length > 0 ? evaluations[evaluations.length - 1] : null;
+
+    const latestStatusByCriterion = new Map<string, "pass" | "fail" | "partial">();
+    for (const evaluation of evaluations) {
+      for (const criterion of evaluation.criterion_evaluations) {
+        latestStatusByCriterion.set(criterion.criterion_id, criterion.status);
+      }
+    }
+
+    orchestration = {
+      plan_summary: normalizeParagraph(plan["summary"], 700) ?? "",
+      success_criteria: criteria.map((criterion) => ({
+        ...criterion,
+        latest_status: latestStatusByCriterion.get(criterion.id) ?? "pending",
+      })),
+      last_evaluation: lastEvaluation,
+      instructions:
+        "Append an ```orchestrator-eval``` JSON block. Set mark_done=true when all criteria pass.",
+    };
+  }
 
   return {
     task_id: task.id,
@@ -491,6 +642,7 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
     last_chatgpt_entry: lastChatGptEntry,
     last_claude_entry: lastClaudeEntry,
     recent_transcript: recentTranscript,
+    ...(orchestration ? { orchestration } : {}),
   };
 }
 
@@ -690,6 +842,33 @@ export async function submitTurn(
   } catch (error) {
     if (process.env["NODE_ENV"] !== "production") {
       console.warn("[collab] artifact extraction failed", error);
+    }
+  }
+
+  try {
+    const evaluation = extractEvaluation(trimmed, actor, task.iteration, submittedAt);
+    if (evaluation) {
+      const evaluationResult = await pool.query<CollabTaskRow>(
+        `UPDATE collab_tasks
+         SET context = jsonb_set(
+           COALESCE(context, '{}'::jsonb),
+           '{artifacts,evaluations}',
+           COALESCE(context->'artifacts'->'evaluations', '[]'::jsonb) || $3::jsonb,
+           true
+         ),
+             updated_at = now()
+         WHERE id = $1
+           AND user_id = $2
+         RETURNING *`,
+        [taskId, auth.userId, JSON.stringify([evaluation])]
+      );
+      if (evaluationResult.rows[0]) {
+        task = mapTaskRow(evaluationResult.rows[0]);
+      }
+    }
+  } catch (error) {
+    if (process.env["NODE_ENV"] !== "production") {
+      console.warn("[collab] evaluation extraction failed", error);
     }
   }
 
