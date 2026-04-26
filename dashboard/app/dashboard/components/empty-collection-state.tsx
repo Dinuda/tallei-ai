@@ -1,5 +1,6 @@
 "use client";
 
+import type React from "react";
 import Link from "next/link";
 import { Box, Brain, X } from "lucide-react";
 import styles from "./empty-collection-state.module.css";
@@ -13,6 +14,7 @@ type EmptyCollectionStateProps = {
   illustration?: "default" | "none";
   imageSrc?: string;
   imageAlt?: string;
+  actionIcon?: React.ReactNode;
 };
 
 export function EmptyCollectionState({
@@ -24,23 +26,27 @@ export function EmptyCollectionState({
   illustration = "none",
   imageSrc,
   imageAlt = "",
+  actionIcon,
 }: EmptyCollectionStateProps) {
   const hasDefaultIllustration = illustration === "default" && !imageSrc;
   const hasCustomImage = Boolean(imageSrc);
   const hasArtwork = hasDefaultIllustration || hasCustomImage;
 
+  const defaultIcon = <Box size={18} />;
+  const icon = actionIcon ?? defaultIcon;
+
   const action = actionLabel
     ? actionHref
       ? (
         <Link href={actionHref} className={styles.action}>
-          <Box size={18} />
+          {icon}
           {actionLabel}
         </Link>
       )
       : onAction
         ? (
           <button type="button" className={styles.action} onClick={onAction}>
-            <Box size={18} />
+            {icon}
             {actionLabel}
           </button>
         )

@@ -203,6 +203,13 @@ export default function CollabTasksPage() {
           actionLabel="Start your first collab"
           actionHref="/dashboard/collab/new"
           imageSrc="/tallei-home.png"
+          actionIcon={
+            <svg width="18" height="18" viewBox="0 0 15 15" fill="none" aria-hidden>
+              <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+              <circle cx="10.8" cy="10.8" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M5.8 5.3 9.2 8.7M9.2 5.3 5.8 8.7" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+            </svg>
+          }
         />
       )}
     </div>
