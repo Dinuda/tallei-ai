@@ -78,3 +78,57 @@ export async function GET(req: NextRequest) {
     );
   }
 }
+
+export async function POST(req: NextRequest) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const backend = resolveBackendUrl(req);
+
+  try {
+    const incoming = await req.formData();
+    const outgoing = new FormData();
+
+    const file = incoming.get("file");
+    if (file instanceof File) {
+      outgoing.append("file", file, file.name);
+    }
+
+    const mode = incoming.get("mode");
+    if (typeof mode === "string" && mode.trim()) {
+      outgoing.append("mode", mode);
+    } else {
+      outgoing.append("mode", "note");
+    }
+
+    const title = incoming.get("title");
+    if (typeof title === "string" && title.trim()) {
+      outgoing.append("title", title);
+    }
+
+    const res = await fetchWithTimeout(`${backend}/api/documents/upload`, {
+      method: "POST",
+      headers: {
+        "X-Internal-Secret": SECRET,
+        "X-User-Id": session.user.id,
+      },
+      body: outgoing,
+    });
+
+    const data = await safeJson(res);
+    return Response.json(data, { status: res.status });
+  } catch (error) {
+    const isAbort =
+      error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
+    return Response.json(
+      {
+        error: isAbort
+          ? "Timed out contacting backend /api/documents/upload"
+          : "Failed to reach backend /api/documents/upload",
+      },
+      { status: isAbort ? 504 : 502 }
+    );
+  }
+}

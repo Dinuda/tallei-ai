@@ -9,6 +9,7 @@ import {
   listSessions,
   OrchestrationConflictError,
   OrchestrationNotFoundError,
+  suggestSessionRoles,
   startSession,
   submitAnswer,
 } from "../../../services/orchestrator.js";
@@ -23,6 +24,19 @@ const createSessionSchema = z.object({
   source_platform: z.enum(["claude", "chatgpt", "dashboard"]).optional().default("dashboard"),
   first_actor_preference: z.enum(["chatgpt", "claude"]).optional(),
   initial_context: z.string().optional(),
+  comments: z.string().optional(),
+  provider_roles: z
+    .object({
+      chatgpt: z.string().optional(),
+      claude: z.string().optional(),
+    })
+    .optional(),
+});
+
+const suggestRolesSchema = z.object({
+  title: z.string().trim().min(1, "title is required"),
+  brief: z.string().optional(),
+  comments: z.string().optional(),
 });
 
 const idParamSchema = z.object({
@@ -59,6 +73,8 @@ router.post("/sessions", requireScopes(["orchestrate:write"]), async (req: AuthR
         sourcePlatform: body.source_platform,
         firstActorPreference: body.first_actor_preference,
         initialContext: body.initial_context ?? null,
+        comments: body.comments ?? null,
+        providerRoles: body.provider_roles ?? null,
       },
       req.authContext!
     );
@@ -75,6 +91,25 @@ router.post("/sessions", requireScopes(["orchestrate:write"]), async (req: AuthR
     }
     console.error("Error creating orchestration session:", error);
     res.status(500).json({ error: "Failed to create orchestration session" });
+  }
+});
+
+router.post("/suggest-roles", requireScopes(["orchestrate:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = suggestRolesSchema.parse(req.body ?? {});
+    const suggestion = await suggestSessionRoles({
+      title: body.title,
+      brief: body.brief ?? null,
+      comments: body.comments ?? null,
+    });
+    res.json(suggestion);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error suggesting orchestration roles:", error);
+    res.status(500).json({ error: "Failed to suggest provider roles" });
   }
 });
 

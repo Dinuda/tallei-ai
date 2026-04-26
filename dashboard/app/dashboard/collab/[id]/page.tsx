@@ -55,6 +55,14 @@ type EvaluationEntry = {
   remaining_work: string;
 };
 
+type SetupSnapshot = {
+  comments: string | null;
+  providerRoles: {
+    chatgpt: string | null;
+    claude: string | null;
+  };
+};
+
 const POLL_CONFIG = {
   successIntervalMs: 2_000,
   hiddenIntervalMs: 30_000,
@@ -185,6 +193,24 @@ function readEvaluations(context: Record<string, unknown>): EvaluationEntry[] {
       };
     })
     .filter((entry) => entry.ts);
+}
+
+function readSetupSnapshot(context: Record<string, unknown>): SetupSnapshot | null {
+  const artifacts = readObject(context["artifacts"]);
+  const setup = readObject(artifacts["setup"]);
+  if (Object.keys(setup).length === 0) return null;
+  const providerRoles = readObject(setup["provider_roles"]);
+  const comments = typeof setup["comments"] === "string" && setup["comments"].trim() ? setup["comments"].trim() : null;
+  const chatgpt = typeof providerRoles["chatgpt"] === "string" && providerRoles["chatgpt"].trim() ? providerRoles["chatgpt"].trim() : null;
+  const claude = typeof providerRoles["claude"] === "string" && providerRoles["claude"].trim() ? providerRoles["claude"].trim() : null;
+  if (!comments && !chatgpt && !claude) return null;
+  return {
+    comments,
+    providerRoles: {
+      chatgpt,
+      claude,
+    },
+  };
 }
 
 function toMarkdown(task: CollabTask): string {
@@ -497,6 +523,7 @@ export default function CollabBoardPage() {
   const planSummary = task ? readPlanSummary(task.context) : null;
   const planCriteria = task ? readPlanCriteria(task.context) : [];
   const evaluations = task ? readEvaluations(task.context) : [];
+  const setupSnapshot = task ? readSetupSnapshot(task.context) : null;
   const latestEvaluation = evaluations.length > 0 ? evaluations[evaluations.length - 1] : null;
   const recentEvaluations = evaluations.slice(-5).reverse();
   const latestStatusMap = useMemo(() => {
@@ -718,6 +745,39 @@ export default function CollabBoardPage() {
                 ))}
               </div>
             )}
+          </article>
+        )}
+
+        {setupSnapshot && (
+          <article className={styles.planPanel}>
+            <header>
+              <h2 className={styles.planTitle}>Planning Setup</h2>
+              <p className={styles.criteriaMeta}>Read-only snapshot from pre-flight setup.</p>
+            </header>
+            {setupSnapshot.comments ? (
+              <div className={styles.criteriaRow}>
+                <div>
+                  <p className={styles.criteriaText}>Comments</p>
+                  <p className={styles.criteriaMeta}>{setupSnapshot.comments}</p>
+                </div>
+              </div>
+            ) : null}
+            {setupSnapshot.providerRoles.chatgpt ? (
+              <div className={styles.criteriaRow}>
+                <div>
+                  <p className={styles.criteriaText}>ChatGPT role</p>
+                  <p className={styles.criteriaMeta}>{setupSnapshot.providerRoles.chatgpt}</p>
+                </div>
+              </div>
+            ) : null}
+            {setupSnapshot.providerRoles.claude ? (
+              <div className={styles.criteriaRow}>
+                <div>
+                  <p className={styles.criteriaText}>Claude role</p>
+                  <p className={styles.criteriaMeta}>{setupSnapshot.providerRoles.claude}</p>
+                </div>
+              </div>
+            ) : null}
           </article>
         )}
 

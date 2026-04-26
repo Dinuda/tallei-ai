@@ -9,7 +9,9 @@ import {
 } from "./collab.js";
 import {
   runPlannerStep,
+  suggestProviderRoles,
   type OrchestrationPlan,
+  type ProviderRoleSuggestion,
   type PlannerTurn,
   type WebSearchResult,
 } from "./planner.js";
@@ -76,6 +78,11 @@ export interface OrchestratorFallbackContext {
   plan_summary: string | null;
   success_criteria: Array<{ id: string; text: string; weight: number }>;
   open_questions: string[];
+}
+
+export interface OrchestrationProviderRoles {
+  chatgpt?: string;
+  claude?: string;
 }
 
 const SESSION_CACHE_TTL_MS = 5_000;
@@ -271,6 +278,23 @@ function readWebSearchCount(metadata: Record<string, unknown>): number {
   return Math.max(0, Math.trunc(count));
 }
 
+function normalizeProviderRoles(value: unknown): { chatgpt?: string; claude?: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const row = value as Record<string, unknown>;
+  const chatgpt = typeof row["chatgpt"] === "string" ? row["chatgpt"].trim() : "";
+  const claude = typeof row["claude"] === "string" ? row["claude"].trim() : "";
+  return {
+    ...(chatgpt ? { chatgpt } : {}),
+    ...(claude ? { claude } : {}),
+  };
+}
+
+function normalizeOptionalText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 async function fetchSessionRow(sessionId: string, auth: AuthContext): Promise<OrchestrationSessionRow | null> {
   const result = await pool.query<OrchestrationSessionRow>(
     `SELECT *
@@ -358,6 +382,8 @@ export async function startSession(
     sourcePlatform: OrchestrationSourcePlatform;
     firstActorPreference?: CollabModelActor;
     initialContext?: string | null;
+    comments?: string | null;
+    providerRoles?: OrchestrationProviderRoles | null;
   },
   auth: AuthContext
 ): Promise<{ session: OrchestrationSession; firstQuestion: string }> {
@@ -391,6 +417,8 @@ export async function startSession(
     planner_model: config.plannerModel,
     source_platform: input.sourcePlatform,
     first_actor_preference: input.firstActorPreference ?? null,
+    comments: normalizeOptionalText(input.comments),
+    provider_roles: normalizeProviderRoles(input.providerRoles),
   };
 
   const initialPlan = result.kind === "plan" ? result.plan : null;
@@ -518,11 +546,27 @@ export async function submitAnswer(
   return { session, nextQuestion: plannerResult.question };
 }
 
-function buildTaskContextArtifacts(plan: OrchestrationPlan): Record<string, unknown> {
+function buildTaskContextArtifacts(
+  plan: OrchestrationPlan,
+  setup: { comments?: string; provider_roles?: { chatgpt?: string; claude?: string } }
+): Record<string, unknown> {
   return {
     plan,
     success_criteria: plan.success_criteria,
     evaluations: [],
+    setup,
+  };
+}
+
+function setupSnapshotFromMetadata(metadata: Record<string, unknown>): {
+  comments?: string;
+  provider_roles?: { chatgpt?: string; claude?: string };
+} {
+  const comments = normalizeOptionalText(metadata["comments"]);
+  const providerRoles = normalizeProviderRoles(metadata["provider_roles"]);
+  return {
+    ...(comments ? { comments } : {}),
+    ...(providerRoles.chatgpt || providerRoles.claude ? { provider_roles: providerRoles } : {}),
   };
 }
 
@@ -530,6 +574,7 @@ async function attachPlanToTaskContext(
   task: CollabTask,
   sessionId: string,
   plan: OrchestrationPlan,
+  setup: { comments?: string; provider_roles?: { chatgpt?: string; claude?: string } },
   auth: AuthContext
 ): Promise<CollabTask> {
   const result = await pool.query<{ id: string } & Record<string, unknown>>(
@@ -546,7 +591,7 @@ async function attachPlanToTaskContext(
      WHERE id = $1
        AND user_id = $2
      RETURNING id`,
-    [task.id, auth.userId, JSON.stringify(buildTaskContextArtifacts(plan)), sessionId]
+    [task.id, auth.userId, JSON.stringify(buildTaskContextArtifacts(plan, setup)), sessionId]
   );
 
   if (!result.rows[0]) return task;
@@ -583,7 +628,8 @@ export async function approvePlan(
     auth
   );
 
-  const taskWithPlan = await attachPlanToTaskContext(task, session.id, session.plan, auth);
+  const setup = setupSnapshotFromMetadata(session.metadata);
+  const taskWithPlan = await attachPlanToTaskContext(task, session.id, session.plan, setup, auth);
 
   const update = await pool.query<OrchestrationSessionRow>(
     `UPDATE orchestration_sessions
@@ -606,6 +652,33 @@ export async function approvePlan(
   invalidateCachedSession(sessionId, auth);
   writeCachedSession(nextSession);
   return { session: nextSession, task: taskWithPlan };
+}
+
+export async function suggestSessionRoles(input: {
+  title: string;
+  brief?: string | null;
+  comments?: string | null;
+}): Promise<ProviderRoleSuggestion> {
+  const title = input.title.trim();
+  if (!title) {
+    throw new Error("title is required");
+  }
+
+  try {
+    return await suggestProviderRoles({
+      title,
+      brief: input.brief ?? null,
+      comments: input.comments ?? null,
+    });
+  } catch {
+    const summaryText = [input.brief ?? "", input.comments ?? ""].join(" ").toLowerCase();
+    const technicalHint = /(api|schema|db|database|migration|backend|auth|infra|typescript|test|contract|route)/.test(summaryText);
+    return {
+      chatgpt_role: "Explore alternatives, expand options, and draft creative first-pass outputs.",
+      claude_role: "Stress-test assumptions, tighten technical details, and finalize implementation-ready output.",
+      first_actor_recommendation: technicalHint ? "claude" : "chatgpt",
+    };
+  }
 }
 
 export async function abortSession(

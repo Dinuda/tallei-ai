@@ -390,6 +390,11 @@
     "source": "src/routes/orchestrate.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/orchestrate/suggest-roles",
+    "source": "src/routes/orchestrate.ts"
+  },
+  {
     "method": "GET",
     "path": "/chatgpt/actions/openapi.json",
     "source": "src/index.ts"

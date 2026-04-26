@@ -31,6 +31,12 @@ export interface OrchestrationPlan {
   web_research: Array<{ url: string; summary: string }>;
 }
 
+export interface ProviderRoleSuggestion {
+  chatgpt_role: string;
+  claude_role: string;
+  first_actor_recommendation: "chatgpt" | "claude";
+}
+
 export type PlannerStepResult =
   | { kind: "question"; question: string; rationale: string; web_searches: WebSearchResult[] }
   | { kind: "plan"; plan: OrchestrationPlan; web_searches: WebSearchResult[] };
@@ -49,11 +55,15 @@ const interviewJsonSchema = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: ["kind", "web_searches"],
+    required: ["kind", "question", "rationale", "web_searches", "plan"],
     properties: {
       kind: { type: "string", enum: ["question", "plan"] },
-      question: { type: "string", minLength: 1 },
-      rationale: { type: "string", minLength: 1 },
+      question: {
+        anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
+      },
+      rationale: {
+        anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
+      },
       web_searches: {
         type: "array",
         items: {
@@ -69,34 +79,87 @@ const interviewJsonSchema = {
       },
       // Planner may occasionally produce a complete plan during interview.
       plan: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "title",
-          "summary",
-          "phases",
-          "success_criteria",
-          "constraints",
-          "risks",
-          "stack_decisions",
-          "open_questions",
-          "first_actor",
-          "max_iterations",
-          "web_research",
+        anyOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "title",
+              "summary",
+              "phases",
+              "success_criteria",
+              "constraints",
+              "risks",
+              "stack_decisions",
+              "open_questions",
+              "first_actor",
+              "max_iterations",
+              "web_research",
+            ],
+            properties: {
+              title: { type: "string", minLength: 1 },
+              summary: { type: "string", minLength: 1 },
+              phases: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["id", "name", "outputs"],
+                  properties: {
+                    id: { type: "string", minLength: 1 },
+                    name: { type: "string", minLength: 1 },
+                    outputs: { type: "array", items: { type: "string" } },
+                  },
+                },
+              },
+              success_criteria: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["id", "text", "weight"],
+                  properties: {
+                    id: { type: "string", minLength: 1 },
+                    text: { type: "string", minLength: 1 },
+                    weight: { type: "integer", minimum: 1, maximum: 3 },
+                  },
+                },
+              },
+              constraints: { type: "array", items: { type: "string" } },
+              risks: { type: "array", items: { type: "string" } },
+              stack_decisions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["decision", "rationale"],
+                  properties: {
+                    decision: { type: "string" },
+                    rationale: { type: "string" },
+                  },
+                },
+              },
+              open_questions: { type: "array", items: { type: "string" } },
+              first_actor: { type: "string", enum: ["chatgpt", "claude"] },
+              max_iterations: { type: "integer", minimum: 1, maximum: 8 },
+              web_research: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["url", "summary"],
+                  properties: {
+                    url: { type: "string" },
+                    summary: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          { type: "null" },
         ],
-        properties: {
-          title: { type: "string", minLength: 1 },
-          summary: { type: "string", minLength: 1 },
-          phases: { type: "array", items: { type: "object" } },
-          success_criteria: { type: "array", items: { type: "object" } },
-          constraints: { type: "array", items: { type: "string" } },
-          risks: { type: "array", items: { type: "string" } },
-          stack_decisions: { type: "array", items: { type: "object" } },
-          open_questions: { type: "array", items: { type: "string" } },
-          first_actor: { type: "string", enum: ["chatgpt", "claude"] },
-          max_iterations: { type: "integer", minimum: 1, maximum: 8 },
-          web_research: { type: "array", items: { type: "object" } },
-        },
       },
     },
   },
@@ -202,6 +265,21 @@ const finalizeJsonSchema = {
           },
         },
       },
+    },
+  },
+} as const;
+
+const providerRoleJsonSchema = {
+  name: "planner_provider_roles",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["chatgpt_role", "claude_role", "first_actor_recommendation"],
+    properties: {
+      chatgpt_role: { type: "string", minLength: 1 },
+      claude_role: { type: "string", minLength: 1 },
+      first_actor_recommendation: { type: "string", enum: ["chatgpt", "claude"] },
     },
   },
 } as const;
@@ -383,6 +461,87 @@ async function callPlanner(params: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function callProviderRoleSuggestion(params: {
+  title: string;
+  brief?: string | null;
+  comments?: string | null;
+}): Promise<any> {
+  const timeoutMs = Math.max(5_000, config.plannerRequestTimeoutMs);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  const brief = params.brief?.trim() ?? "";
+  const comments = params.comments?.trim() ?? "";
+
+  const input: Array<Record<string, unknown>> = [
+    {
+      role: "system",
+      content:
+        "You suggest role assignments for ChatGPT and Claude in a two-agent collab. " +
+        "ChatGPT should lean creative exploration, ideation, and option generation. " +
+        "Claude should lean technical rigor, constraints, validation, and tightening. " +
+        "Return concise role instructions and pick who should start first. " +
+        "Only return JSON matching the schema.",
+    },
+    {
+      role: "user",
+      content: [
+        `Title: ${params.title.trim()}`,
+        brief ? `Brief: ${brief}` : "",
+        comments ? `Comments: ${comments}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    },
+  ];
+
+  try {
+    const client = getPlannerClient();
+    return await (client.responses as any).create(
+      {
+        model: config.plannerModel,
+        input,
+        tools: [],
+        text: {
+          format: {
+            type: "json_schema",
+            name: providerRoleJsonSchema.name,
+            strict: true,
+            schema: providerRoleJsonSchema.schema,
+          },
+        },
+      },
+      { signal: controller.signal }
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function suggestProviderRoles(params: {
+  title: string;
+  brief?: string | null;
+  comments?: string | null;
+}): Promise<ProviderRoleSuggestion> {
+  const response = await callProviderRoleSuggestion(params);
+  const rawText = extractResponseText(response);
+  const parsed = JSON.parse(rawText) as Record<string, unknown>;
+
+  const chatgptRole = typeof parsed["chatgpt_role"] === "string" ? parsed["chatgpt_role"].trim() : "";
+  const claudeRole = typeof parsed["claude_role"] === "string" ? parsed["claude_role"].trim() : "";
+  const firstActor = parsed["first_actor_recommendation"] === "claude" ? "claude" : "chatgpt";
+
+  if (!chatgptRole || !claudeRole) {
+    throw new Error("Provider role suggestion was incomplete");
+  }
+
+  return {
+    chatgpt_role: chatgptRole,
+    claude_role: claudeRole,
+    first_actor_recommendation: firstActor,
+  };
 }
 
 export async function runPlannerStep(params: {
