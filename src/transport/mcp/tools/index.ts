@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import type { AuthContext } from "../../../domain/auth/index.js";
+import { hasRequiredScopes } from "../../../infrastructure/auth/oauth-tokens.js";
 import {
   saveMemory,
   savePreference,
@@ -17,6 +18,14 @@ import {
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
+import {
+  buildTurnFallbackContext,
+  claimTurn,
+  createTask as createCollabTask,
+  getTask as getCollabTask,
+  listTasks as listCollabTasks,
+  submitTurn as submitCollabTurn,
+} from "../../../services/collab.js";
 import { PlatformSchema } from "../schemas.js";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
 import {
@@ -66,6 +75,11 @@ function toJsonToolResult(body: unknown, isError = false): ToolResult {
     content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
     ...(isError ? { isError: true as const } : {}),
   };
+}
+
+function hasCollabWriteScope(auth: AuthContext): boolean {
+  if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
+  return hasRequiredScopes(auth.scopes ?? [], ["collab:write"]);
 }
 
 export function registerTools(server: McpServer, auth: AuthContext): void {
@@ -167,6 +181,127 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         return toJsonToolResult(result.body, result.status >= 400);
       } catch (err) {
         return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "collab_check_turn",
+    {
+      title: "Check Claude Collab Turn",
+      description: "Checks if it's Claude's turn on a collab task and returns task context.",
+      inputSchema: {
+        task_id: z.string().uuid().describe("Collab task ID."),
+      },
+    },
+    async ({ task_id }) => {
+      try {
+        if (!hasCollabWriteScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
+        }
+
+        const claimed = await claimTurn(task_id, "claude", auth);
+        const task = claimed ?? await getCollabTask(task_id, auth);
+        if (!task) {
+          return toJsonToolResult({ error: "Task not found" }, true);
+        }
+
+        const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
+        return toJsonToolResult({
+          is_my_turn: Boolean(claimed),
+          task_id: task.id,
+          title: task.title,
+          state: task.state,
+          iteration: task.iteration,
+          max_iterations: task.maxIterations,
+          brief: task.brief,
+          last_chatgpt_entry: lastChatGptEntry,
+          recent_transcript: task.transcript.slice(-6),
+          fallback_context: buildTurnFallbackContext(task, "claude"),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to check turn";
+        return toJsonToolResult({ error: message }, true);
+      }
+    }
+  );
+
+  server.registerTool(
+    "collab_take_turn",
+    {
+      title: "Submit Claude Collab Turn",
+      description: "Submits Claude's content for a collab task turn.",
+      inputSchema: {
+        task_id: z.string().uuid().describe("Collab task ID."),
+        content: z.string().min(1).describe("Turn output content."),
+        mark_done: z.boolean().optional().default(false),
+      },
+    },
+    async ({ task_id, content, mark_done }) => {
+      try {
+        if (!hasCollabWriteScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
+        }
+        const task = await submitCollabTurn(task_id, "claude", content, auth, { markDone: mark_done ?? false });
+        return toJsonToolResult(task);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to submit turn";
+        return toJsonToolResult({ error: message }, true);
+      }
+    }
+  );
+
+  server.registerTool(
+    "collab_list_pending",
+    {
+      title: "List Pending Collab Tasks",
+      description: "Lists collab tasks currently waiting on Claude.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        if (!hasCollabWriteScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
+        }
+        const tasks = await listCollabTasks({ filter: "waiting" }, auth);
+        return toJsonToolResult({ tasks: tasks.filter((task) => task.state === "TECHNICAL") });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to list collab tasks";
+        return toJsonToolResult({ error: message }, true);
+      }
+    }
+  );
+
+  server.registerTool(
+    "collab_create_task",
+    {
+      title: "Create Collab Task",
+      description: "Creates a new collab task for ChatGPT and Claude turn-taking.",
+      inputSchema: {
+        title: z.string().min(1).describe("Task title."),
+        brief: z.string().optional().describe("Optional task brief."),
+        first_actor: z.enum(["chatgpt", "claude"]).describe("Which model takes the first turn."),
+        max_iterations: z.number().int().min(1).max(8).optional(),
+      },
+    },
+    async ({ title, brief, first_actor, max_iterations }) => {
+      try {
+        if (!hasCollabWriteScope(auth)) {
+          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
+        }
+        const task = await createCollabTask(
+          {
+            title,
+            brief: brief ?? null,
+            firstActor: first_actor,
+            maxIterations: max_iterations,
+          },
+          auth
+        );
+        return toJsonToolResult(task);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to create collab task";
+        return toJsonToolResult({ error: message }, true);
       }
     }
   );

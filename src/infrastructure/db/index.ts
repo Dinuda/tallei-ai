@@ -319,6 +319,11 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       policy: "onboarding_events_tenant_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id)",
     },
+    {
+      table: "collab_tasks",
+      policy: "collab_tasks_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
   ];
 
   for (const entry of policyStatements) {
@@ -855,6 +860,31 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_events_session_id ON claude_onboarding_events(session_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_events_tenant_id ON claude_onboarding_events(tenant_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS collab_tasks (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        brief TEXT,
+        state TEXT NOT NULL CHECK (state IN ('CREATIVE','TECHNICAL','DONE','ERROR')),
+        last_actor TEXT CHECK (last_actor IN ('chatgpt','claude','user')),
+        iteration INT NOT NULL DEFAULT 0,
+        max_iterations INT NOT NULL DEFAULT 4,
+        context JSONB NOT NULL DEFAULT '{}'::jsonb,
+        transcript JSONB NOT NULL DEFAULT '[]'::jsonb,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_collab_tasks_owner
+        ON collab_tasks(tenant_id, user_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_collab_tasks_active
+        ON collab_tasks(tenant_id, user_id, state)
+        WHERE state IN ('CREATIVE','TECHNICAL');
     `);
 
     await client.query(`

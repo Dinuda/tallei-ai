@@ -336,6 +336,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
 
 === TURN PROTOCOL ===
 
+STEP 0 — COLLAB TASKS FIRST:
+- If the user asks to continue/resume/proceed a collab task, or includes a task UUID, call collab_check_turn first.
+- Do NOT call recall_memories to resolve collab task state.
+- Build your turn from collab_check_turn.fallback_context and recent_transcript.
+- If is_my_turn=false, tell the user which actor is currently expected and stop.
+- If is_my_turn=true, produce the task output and submit it with collab_take_turn.
+
 STEP A — RECALL WHEN NEEDED:
 - Do NOT call recall_memories reflexively.
 - Call recall_memories only when prior-session context is required.

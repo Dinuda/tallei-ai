@@ -1,0 +1,154 @@
+.page {
+  display: grid;
+  gap: 1rem;
+  max-width: 760px;
+  padding: 2rem;
+}
+
+.header {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.45rem;
+  color: var(--text);
+}
+
+.dots {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.dotActive {
+  background: var(--accent);
+}
+
+.card {
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 1rem;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.input,
+.textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  padding: 0.65rem 0.74rem;
+}
+
+.textarea {
+  min-height: 110px;
+  resize: vertical;
+}
+
+.input:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.actorGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.actorCard {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 10px;
+  text-align: left;
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.3rem;
+  cursor: pointer;
+}
+
+.actorCard strong {
+  font-size: 0.92rem;
+}
+
+.actorCard span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.actorCardActive {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.slider {
+  width: 100%;
+}
+
+.helper {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.primaryBtn,
+.secondaryBtn {
+  border-radius: 10px;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid var(--border);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primaryBtn {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  border-color: var(--accent);
+}
+
+.secondaryBtn {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.primaryBtn:disabled,
+.secondaryBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (max-width: 860px) {
+  .page {
+    padding: 1.2rem;
+  }
+
+  .actorGrid {
+    grid-template-columns: 1fr;
+  }
+}

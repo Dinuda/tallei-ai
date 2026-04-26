@@ -38,6 +38,13 @@ const ICONS = {
       <path d="M5 5.5h5M5 7.5h5M5 9.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
+  collab: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="10.8" cy="10.8" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.8 5.3 9.2 8.7M9.2 5.3 5.8 8.7" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  ),
   documents: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M4 2h5l3 3v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
@@ -61,6 +68,7 @@ const NAV: NavSection[] = [
   {
     items: [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
+      { id: "collab", label: "Collab Tasks", href: "/dashboard/collab", icon: ICONS.collab },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
       { id: "connectors", label: "AI Assitants", href: "/dashboard/setup", icon: ICONS.connectors },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },

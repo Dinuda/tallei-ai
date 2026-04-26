@@ -125,6 +125,13 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 
 ## Key Constraints & Conventions
 
+### Collab Tasks Protocol (Critical)
+- If the user says `continue/resume/proceed task <uuid>` or includes a collab task UUID, call `collab_check_turn` first.
+- Do **not** call `recall_memories` to resolve collab task state.
+- Build response context from `collab_check_turn.fallback_context` and `recent_transcript`.
+- If `is_my_turn` is `false`, report which actor is expected and stop.
+- If `is_my_turn` is `true`, produce output and submit with `collab_take_turn`.
+
 ### Don't Break Memory Performance
 - The fire-and-forget pattern in `saveMemory()` is intentional: never await the full pipeline in the MCP handler
 - If adding new summarization or preprocessing steps, keep them in the background worker, not the foreground response
