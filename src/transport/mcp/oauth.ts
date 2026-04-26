@@ -14,7 +14,7 @@ import { ensurePrimaryTenantForUser, getPrimaryTenantId } from "../../infrastruc
 const AUTH_CODE_TTL_SECONDS = 10 * 60;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
-const DEFAULT_SCOPES = ["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write"];
+const DEFAULT_SCOPES = ["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write", "orchestrate:write"];
 const SUPPORTED_SCOPES = new Set([...DEFAULT_SCOPES, "automation:run"]);
 
 function createOpaqueToken(prefix: string): string {

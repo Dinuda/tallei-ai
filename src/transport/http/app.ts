@@ -7,6 +7,7 @@ import keysRouter from "./routes/keys.js";
 import memoriesRouter from "./routes/memories.js";
 import documentsRouter from "./routes/documents.js";
 import collabRouter from "./routes/collab.js";
+import orchestrateRouter from "./routes/orchestrate.js";
 import mcpEventsRouter from "./routes/mcpEvents.js";
 import mcpCodeRouter from "./routes/mcp.js";
 import chatgptRouter from "./routes/chatgpt.js";
@@ -67,7 +68,15 @@ export function createApp(deps: AppFactoryDeps): Express {
     issuerUrl: deps.issuerUrl,
     resourceServerUrl: deps.mcpPublicUrl,
     resourceName: "Tallei",
-    scopesSupported: ["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write", "automation:run"],
+    scopesSupported: [
+      "mcp:tools",
+      "memory:read",
+      "memory:write",
+      "collab:read",
+      "collab:write",
+      "orchestrate:write",
+      "automation:run",
+    ],
   }));
 
   app.get("/health", (_req, res) => {
@@ -93,6 +102,7 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/memories", deps.memoryRateLimit, memoriesRouter);
   app.use("/api/documents", deps.memoryRateLimit, documentsRouter);
   app.use("/api/collab", deps.memoryRateLimit, collabRouter);
+  app.use("/api/orchestrate", deps.memoryRateLimit, orchestrateRouter);
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
   app.use("/api/integration-updates", integrationUpdatesRouter);

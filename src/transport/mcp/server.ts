@@ -170,6 +170,41 @@ function collabLogDetails(
     };
   }
 
+  if (toolName === "orchestrator_start") {
+    return {
+      collabTaskId: null,
+      metadata: {
+        category: "orchestration",
+        action: "start",
+        goal_preview: previewText(args["goal"], 240),
+        first_actor_preference: typeof args["first_actor_preference"] === "string" ? args["first_actor_preference"] : null,
+      },
+    };
+  }
+
+  if (toolName === "orchestrator_answer") {
+    return {
+      collabTaskId: null,
+      metadata: {
+        category: "orchestration",
+        action: "answer",
+        session_id: typeof args["session_id"] === "string" ? args["session_id"] : null,
+        answer_preview: previewText(args["answer"], 240),
+      },
+    };
+  }
+
+  if (toolName === "orchestrator_approve") {
+    return {
+      collabTaskId: null,
+      metadata: {
+        category: "orchestration",
+        action: "approve",
+        session_id: typeof args["session_id"] === "string" ? args["session_id"] : null,
+      },
+    };
+  }
+
   return { collabTaskId: null, metadata: null };
 }
 
