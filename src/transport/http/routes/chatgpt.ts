@@ -28,6 +28,7 @@ import {
 } from "../schemas/uploaded-files.js";
 import {
   degradedRecallResponse,
+  executePrepareResponseAction,
   executeRecallAction,
   executeRecallDocumentAction,
   executeRecentDocumentsAction,
@@ -42,6 +43,16 @@ import {
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "lesson", "failure"]);
 const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);
+
+const prepareResponseSchema = z.object({
+  message: z.string().trim().min(1, "message is required"),
+  openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+  conversation_id: conversationIdSchema,
+  last_recall: z.object({
+    query: z.string().optional(),
+    context_hash: z.string().optional(),
+  }).optional().nullable(),
+});
 
 const recallSchema = z.object({
   query: z.string().trim().optional().default("latest user context, goals, preferences, and relevant prior facts"),
@@ -92,6 +103,7 @@ async function logChatGptAction(input: {
   auth: AuthRequest["authContext"];
   method:
     | "chatgpt/actions/recall_memories"
+    | "chatgpt/actions/prepare_response"
     | "chatgpt/actions/remember"
     | "chatgpt/actions/upload_blob"
     | "chatgpt/actions/upload_status"
@@ -795,6 +807,73 @@ export function buildOpenApiSpec(serverUrl: string) {
     },
   };
 
+  const prepareIntentSchema = {
+    type: "object",
+    required: ["needsRecall", "needsDocumentLookup", "reusePreviousContext", "contextDependent", "saveCandidates"],
+    properties: {
+      needsRecall: { type: "boolean" },
+      needsDocumentLookup: { type: "boolean" },
+      reusePreviousContext: { type: "boolean" },
+      contextDependent: { type: "boolean" },
+      saveCandidates: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["kind"],
+          properties: {
+            kind: { type: "string", enum: ["fact", "preference", "document-note"] },
+            content: { type: "string" },
+            title: { type: "string" },
+            key_points: { type: "array", items: { type: "string" } },
+            summary: { type: "string" },
+            source_hint: { type: "string" },
+            category: { type: "string" },
+            preference_key: { type: "string" },
+          },
+        },
+      },
+    },
+  };
+
+  const prepareResponseSchema = {
+    type: "object",
+    required: ["contextBlock", "memories", "recentDocuments", "matchedDocuments", "inlineDocuments", "queuedSaves", "autoSave", "replyInstructions", "intent"],
+    properties: {
+      contextBlock: { type: "string" },
+      memories: recallResultSchema.properties.memories,
+      recentDocuments: recallResultSchema.properties.recentDocuments,
+      matchedDocuments: recallResultSchema.properties.matchedDocuments,
+      inlineDocuments: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["ref", "title", "content"],
+          properties: {
+            ref: { type: "string" },
+            title: { type: ["string", "null"] },
+            content: { type: "string" },
+          },
+        },
+      },
+      queuedSaves: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["kind", "status"],
+          properties: {
+            kind: { type: "string", enum: ["fact", "preference", "document-note"] },
+            content: { type: "string" },
+            title: { type: "string" },
+            status: { type: "string", enum: ["queued"] },
+          },
+        },
+      },
+      autoSave: recallResultSchema.properties.autoSave,
+      replyInstructions: { type: "array", items: { type: "string" } },
+      intent: prepareIntentSchema,
+    },
+  };
+
   const documentRecallSchema = {
     type: "object",
     required: ["kind", "ref", "filename", "title", "content", "status"],
@@ -851,7 +930,7 @@ export function buildOpenApiSpec(serverUrl: string) {
       version: CHATGPT_OPENAPI_VERSION,
       description:
         "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key). " +
-        "OpenAPI operation descriptions are the canonical execution contract.",
+        "Visible-chat-first contract: call prepare_response only for prior context, hidden documents/uploads, explicit recall/save, or durable facts/opinions/preferences/goals/decisions worth saving.",
     },
     servers: [
       {
@@ -870,20 +949,108 @@ export function buildOpenApiSpec(serverUrl: string) {
       },
     },
     paths: {
-      "/api/chatgpt/actions/recall_memories": {
+      "/api/chatgpt/actions/prepare_response": {
         post: {
-          operationId: "recall_memories",
-          summary: "MANDATORY before every reply — skip this and your answer will be wrong",
+          operationId: "prepare_response",
+          summary: "PRIMARY ACTION: selectively prepare context and queue saves",
           description:
-            "STRICT ORDER: call recall_memories(query='<user message>') with openaiFileIdRefs. Read inlineDocuments first. Call upload_blob only when autoSave.complete=false/422. If 402 code=plan_required appears, stop retries and ask user to upgrade via billing_url. If refs saved, append Saved: @doc:<ref>.",
+            "Call only for prior context, hidden docs/uploads/catalogues, explicit recall/save/search, substantial content, or durable facts/opinions/preferences/goals/decisions. Skip when visible chat is enough.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
-            required: false,
+            required: true,
             content: {
               "application/json": {
                 schema: {
                   type: "object",
+                  required: ["message"],
+                  properties: {
+                    message: {
+                      type: "string",
+                      description: "Exact current user message.",
+                    },
+                    conversation_id: {
+                      type: "string",
+                      description: "Optional client-provided conversation identifier.",
+                    },
+                    openaiFileIdRefs: {
+                      type: "array",
+                      description: "Canonical upload refs for current-turn attachments.",
+                      items: openAiFileRefJsonSchema,
+                    },
+                    last_recall: {
+                      type: "object",
+                      properties: {
+                        query: { type: "string" },
+                        context_hash: { type: "string" },
+                      },
+                    },
+                  },
+                },
+                examples: {
+                  message: {
+                    summary: "Prepare answer context",
+                    value: {
+                      message: "What did we decide about the onboarding flow?",
+                      conversation_id: "conv_123",
+                    },
+                  },
+                  upload: {
+                    summary: "Prepare answer with attachment",
+                    value: {
+                      message: "Summarize this uploaded report",
+                      ...canonicalUploadExample,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Prepared context, queued saves, and reply instructions.",
+              content: {
+                "application/json": {
+                  schema: prepareResponseSchema,
+                },
+              },
+            },
+            "422": {
+              description: "Uploaded file ingestion failed; inspect autoSave errors.",
+              content: {
+                "application/json": {
+                  schema: prepareResponseSchema,
+                },
+              },
+            },
+            "402": {
+              description: "Plan upgrade required for document sharing. Ask user to pay at billing_url; do not retry uploads.",
+              content: {
+                "application/json": {
+                  schema: planRequiredErrorSchema,
+                },
+              },
+            },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/actions/recall_memories": {
+        post: {
+          operationId: "recall_memories",
+          summary: "Fallback memory/document recall; prefer prepare_response",
+          description:
+            "Fallback direct recall for legacy GPTs or debugging. For normal ChatGPT flow, call prepare_response before the final answer instead of direct recall/remember orchestration.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["query"],
                   properties: {
                     query: {
                       type: "string",
@@ -1081,9 +1248,9 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/remember": {
         post: {
           operationId: "remember",
-          summary: "REQUIRED after reply — call if user shared any fact, preference, goal, or decision",
+          summary: "Fallback direct save; prepare_response queues normal saves",
           description:
-            "Run after reply when user shares facts/preferences/goals/decisions; at minimum every 5 user messages. Use kind=preference for preferences, kind=fact for other atomic memories. content should be concise and self-contained. Fact/preference saves: no Saved line. Doc saves: append Saved: @doc:<ref>.",
+            "Fallback direct save for legacy GPTs or explicit save retries. Normal flow should call prepare_response first; it classifies facts/preferences/document notes and queues saves.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1310,6 +1477,45 @@ export function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
+      "/api/chatgpt/actions/recall_document": {
+        post: {
+          operationId: "recall_document",
+          summary: "Fetch full text for a known @doc or @lot ref",
+          description:
+            "Use after recall_memories/recent_documents/search_documents returns a relevant ref and the answer needs full document text. Pass the exact @doc/@lot ref without inventing or guessing.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["ref"],
+                  properties: {
+                    ref: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Full document or lot text.",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [documentRecallSchema, lotRecallSchema],
+                  },
+                },
+              },
+            },
+            "404": { description: "Document or lot ref not found." },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
     },
   };
 }
@@ -1332,6 +1538,77 @@ router.get("/openapi.json", (_req, res: Response) => {
 
 router.get("/actions/openapi.json", (_req, res: Response) => {
   sendOpenApiSpec(res);
+});
+
+router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireScopes(["memory:read", "memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = prepareResponseSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const result = await executePrepareResponseAction(auth, {
+      message: body.message,
+      openaiFileIdRefs: body.openaiFileIdRefs,
+      conversation_id: body.conversation_id ?? null,
+      last_recall: body.last_recall ?? null,
+      requesterIp: req.ip,
+    });
+
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/prepare_response",
+      ok: result.status < 400,
+      error: result.status >= 400 ? "Failed to prepare response" : null,
+    });
+    res.status(result.status).json(result.body);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof UploadThingConfigError) {
+      res.status(503).json({ error: error.message });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(planRequiredActionError(error));
+      return;
+    }
+    if (error instanceof DocumentSizeExceededError) {
+      res.status(413).json({ error: error.message });
+      return;
+    }
+    if (isTransientMemoryInfraError(error)) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/prepare_response",
+        ok: false,
+        error: error instanceof Error ? error.message : "Transient memory infra error",
+      });
+      const degraded = degradedRecallResponse();
+      res.json({
+        ...degraded,
+        inlineDocuments: [],
+        queuedSaves: [],
+        replyInstructions: ["Memory infrastructure is temporarily degraded; answer from the current conversation only."],
+        intent: {
+          needsRecall: true,
+          needsDocumentLookup: false,
+          reusePreviousContext: false,
+          contextDependent: true,
+          saveCandidates: [],
+        },
+      });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/actions/prepare_response",
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to prepare response",
+    });
+    console.error("Error preparing ChatGPT response:", error);
+    res.status(500).json({ error: "Failed to prepare response" });
+  }
 });
 
 router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {

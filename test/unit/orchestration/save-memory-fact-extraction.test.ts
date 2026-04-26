@@ -15,7 +15,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createSaveUseCaseForTest(extractFactsCalls: { count: number }, createdRows: Array<Record<string, unknown>>) {
+function createSaveUseCaseForTest(
+  extractFactsCalls: { count: number },
+  createdRows: Array<Record<string, unknown>>,
+  options?: {
+    shouldBypassVector?: () => boolean;
+    searchVectors?: () => Promise<unknown[]>;
+    noteVectorFailure?: (error: unknown, context: string) => void;
+  }
+) {
   return new SaveMemoryUseCase({
     consumeMonthlySaveQuota: async () => 0,
     memoryRepository: {
@@ -32,10 +40,10 @@ function createSaveUseCaseForTest(extractFactsCalls: { count: number }, createdR
     },
     vectorRepository: {
       upsertMemoryVector: async () => ({}),
-      searchVectors: async () => [],
+      searchVectors: async () => options?.searchVectors?.() ?? [],
     },
-    shouldBypassVector: () => true,
-    noteVectorFailure: () => {},
+    shouldBypassVector: options?.shouldBypassVector ?? (() => true),
+    noteVectorFailure: options?.noteVectorFailure ?? (() => {}),
     noteMemoryDbFailure: () => {},
     setRequestTimingFields: () => {},
     invalidateRecallCache: () => {},
@@ -75,6 +83,36 @@ test("save memory skips extracted fact writes when runFactExtraction is false", 
   assert.equal(extractFactsCalls.count, 0);
   assert.equal(createdRows.length, 1);
   assert.equal(createdRows.some((row) => row["category"] === "fact_extract"), false);
+});
+
+test("save memory skips vector dedup when runVectorDedup is false", async () => {
+  const extractFactsCalls = { count: 0 };
+  const createdRows: Array<Record<string, unknown>> = [];
+  let searchCalls = 0;
+  let vectorFailureCalls = 0;
+  const saveUseCase = createSaveUseCaseForTest(extractFactsCalls, createdRows, {
+    shouldBypassVector: () => false,
+    searchVectors: async () => {
+      searchCalls += 1;
+      throw new Error("vector search should not run");
+    },
+    noteVectorFailure: () => {
+      vectorFailureCalls += 1;
+    },
+  });
+
+  await saveUseCase.execute({
+    content: "User has a 5-year-old son.",
+    auth,
+    platform: "chatgpt-prepare",
+    memoryType: "fact",
+    runFactExtraction: false,
+    runVectorDedup: false,
+  });
+
+  assert.equal(searchCalls, 0);
+  assert.equal(vectorFailureCalls, 0);
+  assert.equal(createdRows.length, 1);
 });
 
 test("save memory writes extracted facts when runFactExtraction is enabled", async () => {

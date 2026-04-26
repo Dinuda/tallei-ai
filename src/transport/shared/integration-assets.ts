@@ -1,5 +1,5 @@
 export const CHATGPT_ACTIONS_SPEC_TAG = "stable";
-export const CHATGPT_OPENAPI_VERSION = "2026-04-21";
+export const CHATGPT_OPENAPI_VERSION = "2026-04-24.3";
 
 export const CLAUDE_INSTRUCTIONS_VERSION = "2026-04-24.2";
 export const CLAUDE_INSTRUCTIONS_TEXT = `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.

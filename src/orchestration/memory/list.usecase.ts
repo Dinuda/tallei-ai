@@ -47,6 +47,14 @@ interface ListMemoriesUseCaseDeps {
   readonly noteMemoryDbFailure: (error: unknown, context: string) => void;
 }
 
+function normalizeStoredMemoryText(text: string): string {
+  const rawIdx = text.indexOf("\nRaw:");
+  if (rawIdx >= 0) {
+    return text.slice(rawIdx + "\nRaw:".length).trim();
+  }
+  return text.trim();
+}
+
 export class ListMemoriesUseCase {
   private readonly deps: ListMemoriesUseCaseDeps;
 
@@ -66,7 +74,7 @@ export class ListMemoriesUseCase {
     const memories = rows.map((row) => {
       let text = "";
       try {
-        text = this.deps.decryptMemoryContent(row.content_ciphertext);
+        text = normalizeStoredMemoryText(this.deps.decryptMemoryContent(row.content_ciphertext));
       } catch {
         text = "[Encrypted memory unavailable]";
       }

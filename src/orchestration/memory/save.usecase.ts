@@ -104,6 +104,7 @@ export interface SaveMemoryUseCaseInput {
   readonly isPinned?: boolean;
   readonly preferenceKey?: string | null;
   readonly runFactExtraction?: boolean;
+  readonly runVectorDedup?: boolean;
 }
 
 const DEFAULT_MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
@@ -172,18 +173,11 @@ function buildMemoryText(
   rawContent: string,
   memoryType: MemoryType
 ): string {
-  if (memoryType === "preference") {
-    return rawContent.trim();
-  }
-  return [
-    `[${platform.toUpperCase()}] ${summary.title}`,
-    summary.keyPoints.length > 0 ? `Key Points: ${summary.keyPoints.join("; ")}` : "",
-    summary.decisions.length > 0 ? `Decisions: ${summary.decisions.join("; ")}` : "",
-    `Summary: ${summary.summary}`,
-    `Raw: ${rawContent.trim()}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  void platform;
+  void summary;
+  void memoryType;
+  // Persist canonical memory text only; structured summary metadata is already stored in summary_json.
+  return rawContent.trim();
 }
 
 function buildEmbeddingText(platform: string, rawContent: string): string {
@@ -304,7 +298,9 @@ export class SaveMemoryUseCase {
       },
     };
 
-    const vectorDuplicate = await this.dedupeByVector(input, memoryType);
+    const vectorDuplicate = input.runVectorDedup === false
+      ? null
+      : await this.dedupeByVector(input, memoryType);
     if (vectorDuplicate) {
       this.invalidateRecallArtifacts(input.auth);
       return {

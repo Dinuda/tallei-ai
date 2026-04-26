@@ -317,6 +317,7 @@ export async function saveMemory(
     isPinned?: boolean;
     preferenceKey?: string | null;
     runFactExtraction?: boolean;
+    runVectorDedup?: boolean;
   }
 ): Promise<SaveMemoryResult> {
   return saveMemoryUseCase.execute({
@@ -329,6 +330,7 @@ export async function saveMemory(
     isPinned: options?.isPinned,
     preferenceKey: options?.preferenceKey,
     runFactExtraction: options?.runFactExtraction,
+    runVectorDedup: options?.runVectorDedup,
   });
 }
 
@@ -385,6 +387,7 @@ export async function savePreference(
     category?: string | null;
     preferenceKey?: string | null;
     runFactExtraction?: boolean;
+    runVectorDedup?: boolean;
   }
 ): Promise<SaveMemoryResult> {
   return saveMemory(content, auth, platform, requesterIp, {
@@ -393,6 +396,7 @@ export async function savePreference(
     category: options?.category ?? null,
     preferenceKey: options?.preferenceKey ?? null,
     runFactExtraction: options?.runFactExtraction,
+    runVectorDedup: options?.runVectorDedup,
   });
 }
 

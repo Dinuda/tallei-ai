@@ -8,28 +8,40 @@ function postOperation(spec: ReturnType<typeof buildOpenApiSpec>, path: string) 
   return op;
 }
 
-test("ChatGPT OpenAPI includes upload_blob action path", () => {
+test("ChatGPT OpenAPI includes primary prepare_response action path", () => {
   const spec = buildOpenApiSpec("https://example.com");
-  const upload = postOperation(spec, "/api/chatgpt/actions/upload_blob");
-  assert.equal(upload.operationId, "upload_blob");
+  const prepare = postOperation(spec, "/api/chatgpt/actions/prepare_response");
+  assert.equal(prepare.operationId, "prepare_response");
 });
 
-test("ChatGPT OpenAPI documents strict upload/recall/save non-negotiables", () => {
+test("ChatGPT OpenAPI documents prepare_response as the primary selective action", () => {
   const spec = buildOpenApiSpec("https://example.com");
+  const prepare = postOperation(spec, "/api/chatgpt/actions/prepare_response");
   const recall = postOperation(spec, "/api/chatgpt/actions/recall_memories");
   const upload = postOperation(spec, "/api/chatgpt/actions/upload_blob");
   const remember = postOperation(spec, "/api/chatgpt/actions/remember");
+  const recallDocument = postOperation(spec, "/api/chatgpt/actions/recall_document");
 
-  assert.match(recall.description ?? "", /STRICT ORDER/i);
-  assert.match(recall.description ?? "", /recall_memories\(query='<user message>'\)/i);
-  assert.match(recall.description ?? "", /upload_blob/i);
+  assert.match(prepare.summary ?? "", /PRIMARY ACTION/i);
+  assert.match(prepare.description ?? "", /Call only for prior context/i);
+  assert.match(prepare.description ?? "", /durable facts\/opinions\/preferences\/goals\/decisions/i);
+  assert.match(prepare.description ?? "", /visible chat is enough/i);
+  assert.equal(prepare.requestBody?.required, true);
+  assert.deepEqual(
+    prepare.requestBody?.content?.["application/json"]?.schema?.required,
+    ["message"]
+  );
+  assert.match(recall.summary ?? "", /Fallback/i);
+  assert.match(recall.description ?? "", /prepare_response/i);
   assert.match(upload.description ?? "", /supports only PDF and Word/i);
   assert.match(upload.description ?? "", /\.docx\/\.docm/i);
   assert.match(spec.paths["/api/chatgpt/actions/upload_status"]?.get?.description ?? "", /handoff/i);
   assert.match(upload.description ?? "", /retry once/i);
-  assert.match(remember.description ?? "", /every 5 user messages/i);
-  assert.match(remember.description ?? "", /Fact\/preference saves: no Saved line/i);
-  assert.match(spec.info.description ?? "", /canonical execution contract/i);
+  assert.match(remember.summary ?? "", /Fallback/i);
+  assert.match(remember.description ?? "", /prepare_response/i);
+  assert.match(recallDocument.description ?? "", /full document text/i);
+  assert.match(spec.info.description ?? "", /Visible-chat-first contract/i);
+  assert.match(spec.info.description ?? "", /durable facts\/opinions\/preferences\/goals\/decisions/i);
 });
 
 test("ChatGPT OpenAPI operation descriptions stay within provider limits", () => {

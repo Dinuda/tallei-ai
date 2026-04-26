@@ -71,6 +71,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/chatgpt/actions/prepare_response",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
     "path": "/api/chatgpt/actions/recall_document",
     "source": "src/routes/chatgpt.ts"
   },

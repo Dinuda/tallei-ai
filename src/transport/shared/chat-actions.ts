@@ -22,9 +22,32 @@ import {
 import type { OpenAiFileRef } from "../http/schemas/uploaded-files.js";
 import { confidenceTier } from "../../infrastructure/recall/scoring-utils.js";
 import type { ConflictHint } from "../../infrastructure/recall/scoring-utils.js";
+import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { runAsyncSafe } from "../../shared/async-safe.js";
+import { config } from "../../config/index.js";
+import { setRequestTimingField } from "../../observability/request-timing.js";
 
 export type MemoryTypeInput = "preference" | "fact" | "event" | "decision" | "note" | "lesson" | "failure";
 export type RememberKindInput = "fact" | "preference" | "document-note" | "document-blob";
+
+export type PrepareResponseSaveCandidate = {
+  kind: "fact" | "preference" | "document-note";
+  content?: string;
+  title?: string;
+  key_points?: string[];
+  summary?: string;
+  source_hint?: string;
+  category?: string;
+  preference_key?: string;
+};
+
+export type PrepareResponseIntent = {
+  needsRecall: boolean;
+  needsDocumentLookup: boolean;
+  reusePreviousContext: boolean;
+  contextDependent: boolean;
+  saveCandidates: PrepareResponseSaveCandidate[];
+};
 
 const RECALL_MATCHED_DOCS_TIMEOUT_MS = 2_200;
 const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
@@ -384,6 +407,7 @@ export interface RememberActionInput {
   platform?: "claude" | "chatgpt" | "gemini" | "other";
   openaiFileIdRefs?: OpenAiFileRef[];
   conversation_id?: string | null;
+  runVectorDedup?: boolean;
 }
 
 export async function executeRememberAction(auth: AuthContext, input: RememberActionInput): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -515,6 +539,7 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
     const saved = await saveMemory(input.content, auth, input.platform ?? "chatgpt", undefined, {
       memoryType: "fact",
       runFactExtraction: false,
+      runVectorDedup: input.runVectorDedup,
     });
     return {
       status: 200,
@@ -534,6 +559,7 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
       category: input.category ?? null,
       preferenceKey: input.preference_key ?? null,
       runFactExtraction: false,
+      runVectorDedup: input.runVectorDedup,
     });
     return {
       status: 200,
@@ -668,4 +694,591 @@ export async function executeSearchDocumentsAction(auth: AuthContext, query: str
 export async function executeRecallDocumentAction(auth: AuthContext, ref: string): Promise<{ status: 200; body: Record<string, unknown> }> {
   const document = await recallDocument(ref, auth);
   return { status: 200, body: document as unknown as Record<string, unknown> };
+}
+
+export interface PrepareResponseActionInput {
+  message: string;
+  conversation_id?: string | null;
+  openaiFileIdRefs?: OpenAiFileRef[];
+  last_recall?: {
+    query?: string;
+    context_hash?: string;
+  } | null;
+  requesterIp?: string;
+}
+
+export interface QueuedPrepareSave {
+  kind: PrepareResponseSaveCandidate["kind"];
+  content?: string;
+  title?: string;
+  status: "queued";
+}
+
+export interface PrepareResponseActionResult {
+  status: 200 | 422;
+  body: Record<string, unknown> & {
+    contextBlock: string;
+    memories: unknown[];
+    recentDocuments: unknown[];
+    matchedDocuments: unknown[];
+    inlineDocuments: Array<{ ref: string; title: string | null; content: string }>;
+    queuedSaves: QueuedPrepareSave[];
+    autoSave: {
+      requested: number;
+      complete: boolean;
+      saved: Array<{ ref: string; status: "pending"; filename: string; conversation_id: string | null }>;
+      errors: Array<{ file_id: string; filename: string; error: string }>;
+    };
+    replyInstructions: string[];
+    intent: PrepareResponseIntent;
+  };
+}
+
+type PrepareResponseDependencies = {
+  classifyIntent?: (input: PrepareResponseActionInput) => Promise<PrepareResponseIntent>;
+  recallAction?: typeof executeRecallAction;
+  rememberAction?: typeof executeRememberAction;
+  recallDocumentAction?: typeof executeRecallDocumentAction;
+  enqueueSave?: (task: () => Promise<void>, label: string) => void;
+};
+
+type FastIntentDecision = {
+  intent: PrepareResponseIntent;
+  shouldCallClassifier: boolean;
+  reason: string;
+};
+
+const DEFAULT_PREPARE_RESPONSE_INTENT: PrepareResponseIntent = {
+  needsRecall: true,
+  needsDocumentLookup: false,
+  reusePreviousContext: false,
+  contextDependent: true,
+  saveCandidates: [],
+};
+
+function nowMs(): number {
+  return Number(process.hrtime.bigint()) / 1_000_000;
+}
+
+async function timed<T>(field: string, task: () => Promise<T>): Promise<T> {
+  const startedAt = nowMs();
+  try {
+    return await task();
+  } finally {
+    setRequestTimingField(field, Number((nowMs() - startedAt).toFixed(2)));
+  }
+}
+
+const PREPARE_RESPONSE_CLASSIFIER_SYSTEM = `You classify one user message for a personal memory/document assistant.
+Return ONLY a JSON object with:
+needsRecall boolean,
+needsDocumentLookup boolean,
+reusePreviousContext boolean,
+contextDependent boolean,
+saveCandidates array.
+saveCandidates items have kind fact|preference|document-note and concise content/title/summary/key_points/source_hint/category/preference_key when relevant.
+Mark durable facts, preferences, goals, decisions, corrections, beliefs, opinions, stances, frustrations, and important notes worth remembering.
+Treat first-person age statements as durable facts; e.g. "I'm currently 19" should save "User is 19 years old."
+Save subjective stances as neutral facts about the user, not objective claims about the world.
+Sanitize insults, slurs, profanity, and obvious typos instead of storing the user's wording verbatim.
+Example: if the user says they think Sri Lanka's government must better manage civic behavior and insults people, save a fact like "User is frustrated with governance in Sri Lanka and believes the government should manage civic behavior more effectively."
+Use document-note for pasted important structured content, specs, transcripts, lists, or notes.`;
+
+function toBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function cleanString(value: unknown, max = 1_000): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+}
+
+export function parsePrepareResponseIntent(raw: string): PrepareResponseIntent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed as Record<string, unknown>;
+  const saveCandidates = Array.isArray(obj.saveCandidates)
+    ? obj.saveCandidates.flatMap((item): PrepareResponseSaveCandidate[] => {
+      if (!item || typeof item !== "object") return [];
+      const candidate = item as Record<string, unknown>;
+      const kind = candidate.kind;
+      if (kind !== "fact" && kind !== "preference" && kind !== "document-note") return [];
+      const content = cleanString(candidate.content, 2_000);
+      const title = cleanString(candidate.title, 200);
+      const summary = cleanString(candidate.summary, 2_000);
+      const source_hint = cleanString(candidate.source_hint, 500);
+      const category = cleanString(candidate.category, 100);
+      const preference_key = cleanString(candidate.preference_key, 100);
+      const key_points = Array.isArray(candidate.key_points)
+        ? candidate.key_points.flatMap((point) => {
+          const cleaned = cleanString(point, 300);
+          return cleaned ? [cleaned] : [];
+        }).slice(0, 10)
+        : undefined;
+      return [{
+        kind,
+        ...(content ? { content } : {}),
+        ...(title ? { title } : {}),
+        ...(summary ? { summary } : {}),
+        ...(source_hint ? { source_hint } : {}),
+        ...(category ? { category } : {}),
+        ...(preference_key ? { preference_key } : {}),
+        ...(key_points && key_points.length > 0 ? { key_points } : {}),
+      }];
+    })
+    : [];
+
+  return {
+    needsRecall: toBoolean(obj.needsRecall, true),
+    needsDocumentLookup: toBoolean(obj.needsDocumentLookup, false),
+    reusePreviousContext: toBoolean(obj.reusePreviousContext, false),
+    contextDependent: toBoolean(obj.contextDependent, true),
+    saveCandidates,
+  };
+}
+
+export async function classifyPrepareResponseIntent(input: PrepareResponseActionInput): Promise<PrepareResponseIntent> {
+  const response = await aiProviderRegistry.chat({
+    model: config.intentClassifierModel,
+    responseFormat: "json_object",
+    temperature: 0,
+    maxTokens: 500,
+    messages: [
+      { role: "system", content: PREPARE_RESPONSE_CLASSIFIER_SYSTEM },
+      {
+        role: "user",
+        content: JSON.stringify({
+          message: input.message,
+          hasAttachments: (input.openaiFileIdRefs?.length ?? 0) > 0,
+          last_recall: input.last_recall ?? null,
+        }),
+      },
+    ],
+  });
+  const parsed = parsePrepareResponseIntent(response.text.trim());
+  if (!parsed) throw new Error("Failed to parse prepare_response intent JSON");
+  return parsed;
+}
+
+export function prepareResponseClassifierModel(): string {
+  return config.intentClassifierModel;
+}
+
+function buildGuardrailSaveCandidates(message: string): PrepareResponseSaveCandidate[] {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  const normalizedWords = normalized.replace(/[?.,;:!]+/g, " ");
+  const candidates: PrepareResponseSaveCandidate[] = [];
+
+  const userAgeMatch = normalizedWords.match(/\b(?:i\s+am|i\s*['\u2019]?\s*m|im)\s+(?:currently\s+|now\s+)?(\d{1,2})(?:\s+(?:years?\s+old|y\/?o))?\b/i)
+    ?? normalizedWords.match(/\b(?:currently|now)\s+(\d{1,2})(?:\s+(?:years?\s+old|y\/?o))?\b/i);
+  if (userAgeMatch?.[1]) {
+    const age = Number(userAgeMatch[1]);
+    const firstPersonContext = /\b(?:i|i\s*['\u2019]?\s*m|im|me|my)\b/i.test(normalizedWords);
+    if (firstPersonContext && Number.isInteger(age) && age >= 13 && age <= 120) {
+      candidates.push({
+        kind: "fact",
+        content: `User is ${age} years old.`,
+      });
+    }
+  }
+
+  const childAgeMatch = normalizedWords.match(/\bmy\s+(son|daughter|child|kid)\b.{0,80}?\b(?:is|age(?:d)?|who\s+is)\s+(\d{1,2})\b/i);
+  if (childAgeMatch?.[1] && childAgeMatch[2]) {
+    const relation = childAgeMatch[1].toLowerCase();
+    const age = Number(childAgeMatch[2]);
+    if (Number.isInteger(age) && age >= 0 && age <= 30) {
+      const normalizedRelation = relation === "kid" ? "child" : relation;
+      candidates.push({
+        kind: "fact",
+        content: `User has a ${age}-year-old ${normalizedRelation}.`,
+      });
+    }
+  }
+
+  if (!/\b(i|we)\s+(really\s+)?(think|believe|feel|reckon|wish|want|prefer|hate|love|am frustrated|am worried)\b/i.test(normalized)) {
+    return candidates;
+  }
+
+  const preferenceMatch = normalized.match(/\b(?:i|we)\s+(?:really\s+)?prefer\s+(.+?)[.!?]?$/i);
+  if (preferenceMatch?.[1]) {
+    candidates.push({
+      kind: "preference",
+      content: `User prefers ${preferenceMatch[1].trim().replace(/[.!?]+$/, "")}.`,
+    });
+    return candidates;
+  }
+
+  if (/\bsri\s*lank(?:a|an)\b/i.test(normalized) && /\bgovernment\b/i.test(normalized)) {
+    candidates.push({
+      kind: "fact",
+      content: "User is frustrated with governance in Sri Lanka and believes the government should manage civic behavior more effectively.",
+    });
+    return candidates;
+  }
+
+  const cleaned = normalized
+    .replace(/\b(mfs?|motherfuckers?)\b/gi, "people")
+    .replace(/\b(fuck(?:ing)?|shit|dumb|idiots?|stupid)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length < 12) return candidates;
+
+  candidates.push({
+    kind: "fact",
+    content: `User expressed a durable opinion or stance: ${cleaned}`,
+  });
+  return candidates;
+}
+
+function mergeGuardrailSaveCandidates(
+  message: string,
+  candidates: PrepareResponseSaveCandidate[]
+): PrepareResponseSaveCandidate[] {
+  const guardrailCandidates = buildGuardrailSaveCandidates(message);
+  if (guardrailCandidates.length === 0) return candidates;
+
+  const seen = new Set(candidates.map((candidate) => `${candidate.kind}:${candidate.content ?? candidate.title ?? ""}`));
+  const merged = [...candidates];
+  for (const candidate of guardrailCandidates) {
+    const key = `${candidate.kind}:${candidate.content ?? candidate.title ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(candidate);
+  }
+  return merged;
+}
+
+function isShortLocalReply(message: string): boolean {
+  return /^(thanks?|thank you|ok(?:ay)?|cool|great|nice|yes|yeah|yep|no|nope|continue|go on|sounds good|got it|yes,?\s+continue(?:\s+with\s+that)?|yeah,?\s+continue(?:\s+with\s+that)?)[.!?\s]*$/i.test(message.trim());
+}
+
+function hasRecallTrigger(message: string): boolean {
+  return /\b(remember|memory|memories|saved|previous|earlier|before|last time|past context|what did we decide|decision|decided|document|docs?|pdf|upload|file|attachment|catalogue|catalog|product|products|inventory|@doc:|@lot:)\b/i.test(message);
+}
+
+function hasDurableSaveTrigger(message: string): boolean {
+  return /\b(i|we)\s+(think|believe|feel|prefer|like|hate|want|need|decided|will|am|was|have|goal|wish)\b/i.test(message)
+    || /\b(my|our)\s+(preference|goal|decision|plan|name|company|project|opinion)\b/i.test(message)
+    || /\b(remember that|note that|important|for later)\b/i.test(message);
+}
+
+export function fastPrepareResponseIntent(input: PrepareResponseActionInput): FastIntentDecision {
+  const message = input.message.trim();
+  const hasAttachments = (input.openaiFileIdRefs?.length ?? 0) > 0;
+  const explicitRefs = extractRefsFromMessage(message);
+  const guardrailCandidates = mergeGuardrailSaveCandidates(message, []);
+
+  if (hasAttachments) {
+    return {
+      shouldCallClassifier: false,
+      reason: "attachments",
+      intent: {
+        needsRecall: true,
+        needsDocumentLookup: true,
+        reusePreviousContext: false,
+        contextDependent: true,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (explicitRefs.length > 0 || hasRecallTrigger(message)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "recall_trigger",
+      intent: {
+        needsRecall: true,
+        needsDocumentLookup: explicitRefs.length > 0 || /\b(document|docs?|pdf|upload|file|attachment|catalogue|catalog|product|products|inventory|@doc:|@lot:)\b/i.test(message),
+        reusePreviousContext: false,
+        contextDependent: true,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (guardrailCandidates.length > 0 || hasDurableSaveTrigger(message)) {
+    return {
+      shouldCallClassifier: guardrailCandidates.length === 0,
+      reason: guardrailCandidates.length > 0 ? "guardrail_save" : "durable_save_uncertain",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (input.last_recall?.query && isShortLocalReply(message)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "local_followup",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
+        saveCandidates: [],
+      },
+    };
+  }
+
+  return {
+    shouldCallClassifier: true,
+    reason: "uncertain",
+    intent: DEFAULT_PREPARE_RESPONSE_INTENT,
+  };
+}
+
+type PrepareRecallBody = {
+  contextBlock: string;
+  memories: unknown[];
+  recentDocuments: unknown[];
+  matchedDocuments: Array<{ ref: string; title: string; score: number; preview: string }>;
+  referencedDocuments: unknown[];
+  recentCompletedIngests: unknown[];
+  autoSave: PrepareResponseActionResult["body"]["autoSave"];
+  inlineDocuments?: Array<{ ref: string; title: string | null; content: string }>;
+};
+
+function emptyPrepareRecallBody(): PrepareRecallBody {
+  return {
+    contextBlock: "--- No relevant memories found ---",
+    memories: [],
+    recentDocuments: [],
+    matchedDocuments: [],
+    referencedDocuments: [],
+    recentCompletedIngests: [],
+    autoSave: {
+      requested: 0,
+      complete: true,
+      saved: [],
+      errors: [],
+    },
+  };
+}
+
+function isWeakRecallBody(body: { memories?: unknown[]; matchedDocuments?: unknown[] }): boolean {
+  return (body.memories?.length ?? 0) === 0 && (body.matchedDocuments?.length ?? 0) === 0;
+}
+
+function extractRefsFromMessage(message: string): string[] {
+  return Array.from(new Set(Array.from(message.matchAll(/@(?:doc|lot):[a-z0-9_-]+/gi), (match) => match[0])));
+}
+
+function firstHighConfidenceMatchedDoc(body: { matchedDocuments?: unknown[] }): string | null {
+  const matched = body.matchedDocuments ?? [];
+  for (const item of matched) {
+    if (!item || typeof item !== "object") continue;
+    const doc = item as Record<string, unknown>;
+    if (typeof doc.ref === "string" && typeof doc.score === "number" && doc.score >= 0.75) {
+      return doc.ref;
+    }
+  }
+  return null;
+}
+
+function inlineDocumentsFromRecallDocument(body: Record<string, unknown>): Array<{ ref: string; title: string | null; content: string }> {
+  if (body.kind === "document" && typeof body.ref === "string" && typeof body.content === "string") {
+    return [{
+      ref: body.ref,
+      title: typeof body.title === "string" ? body.title : null,
+      content: body.content,
+    }];
+  }
+  if (body.kind === "lot" && Array.isArray(body.docs)) {
+    return body.docs.flatMap((doc): Array<{ ref: string; title: string | null; content: string }> => {
+      if (!doc || typeof doc !== "object") return [];
+      const d = doc as Record<string, unknown>;
+      if (typeof d.ref !== "string" || typeof d.content !== "string") return [];
+      return [{
+        ref: d.ref,
+        title: typeof d.title === "string" ? d.title : null,
+        content: d.content,
+      }];
+    });
+  }
+  return [];
+}
+
+function appendInlineDocsToContext(
+  contextBlock: string,
+  inlineDocuments: Array<{ ref: string; title: string | null; content: string }>
+): string {
+  if (inlineDocuments.length === 0) return contextBlock;
+  const lines = inlineDocuments.flatMap((doc) => [
+    `[${doc.title ?? doc.ref}]`,
+    truncateInlineDocumentContent(doc.content),
+  ]);
+  return `${contextBlock}\n--- Prepared Document Context ---\n${lines.join("\n")}`;
+}
+
+function queuePrepareSave(
+  auth: AuthContext,
+  candidate: PrepareResponseSaveCandidate,
+  conversationId: string | null,
+  deps: Required<Pick<PrepareResponseDependencies, "rememberAction" | "enqueueSave">>
+): QueuedPrepareSave | null {
+  if ((candidate.kind === "fact" || candidate.kind === "preference") && !candidate.content) return null;
+  if (candidate.kind === "document-note" && !candidate.summary && !candidate.content && !candidate.title) return null;
+
+  deps.enqueueSave(async () => {
+    await deps.rememberAction(auth, {
+      ...candidate,
+      platform: "chatgpt",
+      conversation_id: conversationId,
+      runVectorDedup: false,
+      content: candidate.kind === "document-note" ? candidate.content ?? candidate.summary : candidate.content,
+    });
+  }, `prepare_response ${candidate.kind} save`);
+
+  return {
+    kind: candidate.kind,
+    ...(candidate.content ? { content: candidate.content } : {}),
+    ...(candidate.title ? { title: candidate.title } : {}),
+    status: "queued",
+  };
+}
+
+export async function executePrepareResponseAction(
+  auth: AuthContext,
+  input: PrepareResponseActionInput,
+  dependencies: PrepareResponseDependencies = {}
+): Promise<PrepareResponseActionResult> {
+  const classifyIntent = dependencies.classifyIntent ?? classifyPrepareResponseIntent;
+  const recallAction = dependencies.recallAction ?? executeRecallAction;
+  const rememberAction = dependencies.rememberAction ?? executeRememberAction;
+  const recallDocumentAction = dependencies.recallDocumentAction ?? executeRecallDocumentAction;
+  const enqueueSave = dependencies.enqueueSave ?? ((task, label) => runAsyncSafe(task, label));
+
+  const fastIntent = fastPrepareResponseIntent(input);
+  setRequestTimingField("prepare_fast_intent", fastIntent.reason);
+  setRequestTimingField("prepare_classifier_skipped", !fastIntent.shouldCallClassifier);
+
+  const uploadedFiles = input.openaiFileIdRefs ?? [];
+  const explicitRefs = extractRefsFromMessage(input.message);
+  const startRecall = () => timed("prepare_recall_ms", () => recallAction(auth, {
+    query: input.message,
+    limit: 5,
+    include_doc_refs: explicitRefs,
+    openaiFileIdRefs: uploadedFiles,
+    conversation_id: input.conversation_id ?? null,
+    requesterIp: input.requesterIp,
+  }));
+  const shouldSpeculateRecall = fastIntent.shouldCallClassifier
+    && fastIntent.intent.needsRecall
+    && !input.last_recall?.query;
+  const speculativeRecall = shouldSpeculateRecall ? startRecall() : null;
+  if (speculativeRecall) setRequestTimingField("prepare_recall_speculative", true);
+
+  let intent = fastIntent.intent;
+  let classifierFailed = false;
+  if (fastIntent.shouldCallClassifier) {
+    try {
+      intent = await timed("prepare_classifier_ms", () => classifyIntent(input));
+    } catch {
+      classifierFailed = true;
+    }
+  } else {
+    setRequestTimingField("prepare_classifier_ms", 0);
+  }
+
+  const shouldRecall = classifierFailed
+    || intent.needsRecall
+    || uploadedFiles.length > 0
+    || explicitRefs.length > 0
+    || (intent.contextDependent && !intent.reusePreviousContext && !input.last_recall?.query);
+  setRequestTimingField("prepare_should_recall", shouldRecall);
+
+  let recallBody: PrepareRecallBody = emptyPrepareRecallBody();
+  let status: 200 | 422 = 200;
+
+  if (shouldRecall) {
+    const firstRecall = await (speculativeRecall ?? startRecall());
+    if (firstRecall.status === 422) {
+      status = 422;
+      recallBody = {
+        ...emptyPrepareRecallBody(),
+        autoSave: firstRecall.body.autoSave,
+      };
+    } else {
+      recallBody = firstRecall.body;
+      if (intent.contextDependent && isWeakRecallBody(recallBody)) {
+        const broaderRecall = await timed("prepare_broaden_recall_ms", () => recallAction(auth, {
+          query: `${input.message}\n\nBroaden search to latest user context, goals, preferences, decisions, documents, and relevant prior facts.`,
+          limit: 10,
+          types: ["fact", "preference", "event", "decision", "note", "lesson", "failure"],
+          include_doc_refs: explicitRefs,
+          conversation_id: input.conversation_id ?? null,
+          requesterIp: input.requesterIp,
+        }));
+        if (broaderRecall.status === 200) recallBody = broaderRecall.body;
+      } else {
+        setRequestTimingField("prepare_broaden_recall_ms", 0);
+      }
+    }
+  } else {
+    if (speculativeRecall) void speculativeRecall.catch(() => undefined);
+    setRequestTimingField("prepare_recall_ms", 0);
+    setRequestTimingField("prepare_broaden_recall_ms", 0);
+  }
+
+  let inlineDocuments = Array.isArray(recallBody.inlineDocuments) ? [...recallBody.inlineDocuments] : [];
+  const fullTextRef = explicitRefs[0] ?? (intent.needsDocumentLookup ? firstHighConfidenceMatchedDoc(recallBody) : null);
+  if (fullTextRef && !inlineDocuments.some((doc) => doc.ref === fullTextRef)) {
+    try {
+      const document = await timed("prepare_doc_fetch_ms", () => recallDocumentAction(auth, fullTextRef));
+      inlineDocuments = [...inlineDocuments, ...inlineDocumentsFromRecallDocument(document.body)];
+    } catch {
+      // prepare_response should still return usable memory context if a document ref fails.
+    }
+  } else {
+    setRequestTimingField("prepare_doc_fetch_ms", 0);
+  }
+
+  const saveCandidates = mergeGuardrailSaveCandidates(input.message, intent.saveCandidates);
+  const intentForResponse = { ...intent, saveCandidates };
+
+  const queueStartedAt = nowMs();
+  const queuedSaves = classifierFailed
+    ? []
+    : saveCandidates.flatMap((candidate) => {
+      const queued = queuePrepareSave(auth, candidate, input.conversation_id ?? null, { rememberAction, enqueueSave });
+      return queued ? [queued] : [];
+    });
+  setRequestTimingField("prepare_queue_save_ms", Number((nowMs() - queueStartedAt).toFixed(2)));
+
+  const replyInstructions = [
+    "Use contextBlock and inlineDocuments as the source of truth.",
+    "Do not mention internal tool calls.",
+    ...(recallBody.autoSave.saved.length > 0
+      ? recallBody.autoSave.saved.map((saved) => `End the reply with: Saved: ${saved.ref}`)
+      : []),
+    ...(queuedSaves.some((save) => save.kind === "document-note")
+      ? ["Document-note saving is queued. Do not add a Saved footer unless autoSave.saved includes a ref."]
+      : []),
+  ];
+
+  return {
+    status,
+    body: {
+      contextBlock: appendInlineDocsToContext(recallBody.contextBlock, inlineDocuments),
+      memories: recallBody.memories,
+      recentDocuments: recallBody.recentDocuments,
+      matchedDocuments: recallBody.matchedDocuments,
+      inlineDocuments,
+      queuedSaves,
+      autoSave: recallBody.autoSave,
+      replyInstructions,
+      intent: intentForResponse,
+    },
+  };
 }

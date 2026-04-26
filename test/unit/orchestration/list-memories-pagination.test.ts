@@ -20,7 +20,7 @@ test("list memories returns pagination metadata and total when requested", async
       list: async () => [
         {
           id: "m_1",
-          content_ciphertext: "enc:one",
+          content_ciphertext: "enc:legacy",
           summary_json: { title: "One" },
           platform: "chatgpt",
           memory_type: "fact",
@@ -49,14 +49,19 @@ test("list memories returns pagination metadata and total when requested", async
         logMetadata = metadata;
       },
     },
-    decryptMemoryContent: (ciphertext) => ciphertext.replace("enc:", "plain:"),
+    decryptMemoryContent: (ciphertext) => {
+      if (ciphertext === "enc:legacy") {
+        return "[CHATGPT] Draft CV plan\nKey Points: User plans to create a new CV in about 2 days\nSummary: User plans to create a new CV in about 2 days\nRaw: User plans to create a new CV in about 2 days";
+      }
+      return ciphertext.replace("enc:", "plain:");
+    },
     noteMemoryDbFailure: () => {},
   });
 
   const result = await useCase.execute(auth, { limit: 2, offset: 2, includeTotal: true });
 
   assert.equal(result.memories.length, 2);
-  assert.equal(result.memories[0]?.text, "plain:one");
+  assert.equal(result.memories[0]?.text, "User plans to create a new CV in about 2 days");
   assert.equal(result.memories[1]?.metadata["memory_type"], "preference");
   assert.equal(result.limit, 2);
   assert.equal(result.offset, 2);
