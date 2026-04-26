@@ -21,6 +21,7 @@ import { PlanRequiredError } from "../../../shared/errors/index.js";
 import {
   buildTurnFallbackContext,
   claimTurn,
+  CollabConflictError,
   createTask as createCollabTask,
   getTask as getCollabTask,
   listTasks as listCollabTasks,
@@ -207,6 +208,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         }
 
         const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
+        const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
         return toJsonToolResult({
           is_my_turn: Boolean(claimed),
           task_id: task.id,
@@ -214,6 +216,10 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           state: task.state,
           iteration: task.iteration,
           max_iterations: task.maxIterations,
+          next_actor: nextActor,
+          user_visible: claimed
+            ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}).`
+            : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`,
           brief: task.brief,
           last_chatgpt_entry: lastChatGptEntry,
           recent_transcript: task.transcript.slice(-6),
@@ -243,8 +249,44 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
         }
         const task = await submitCollabTurn(task_id, "claude", content, auth, { markDone: mark_done ?? false });
-        return toJsonToolResult(task);
+        const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+        const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
+        return toJsonToolResult({
+          ok: true,
+          task_id: task.id,
+          state: task.state,
+          iteration: task.iteration,
+          max_iterations: task.maxIterations,
+          next_actor: nextActor,
+          user_visible: `Saved Claude turn for task ${task.id} at iteration ${task.iteration}.`,
+          saved_turn: savedTurn
+            ? {
+                actor: savedTurn.actor,
+                iteration: savedTurn.iteration,
+                ts: savedTurn.ts,
+                content_length: savedTurn.content.length,
+                content_preview: savedTurn.content.slice(0, 800),
+              }
+            : null,
+        });
       } catch (err) {
+        if (err instanceof CollabConflictError) {
+          const task = await getCollabTask(task_id, auth);
+          const nextActor = task ? (task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null) : null;
+          return toJsonToolResult({
+            ok: false,
+            error: err.message,
+            task_id,
+            state: task?.state ?? null,
+            iteration: task?.iteration ?? null,
+            max_iterations: task?.maxIterations ?? null,
+            next_actor: nextActor,
+            user_visible: task
+              ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}.`
+              : "Turn rejected due to task state mismatch.",
+            fallback_context: task ? buildTurnFallbackContext(task, "claude") : null,
+          }, true);
+        }
         const message = err instanceof Error ? err.message : "Failed to submit turn";
         return toJsonToolResult({ error: message }, true);
       }
@@ -298,7 +340,17 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           },
           auth
         );
-        return toJsonToolResult(task);
+        return toJsonToolResult({
+          ok: true,
+          task_id: task.id,
+          title: task.title,
+          brief: task.brief,
+          state: task.state,
+          iteration: task.iteration,
+          max_iterations: task.maxIterations,
+          next_actor: task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null,
+          user_visible: `Created collab task ${task.id} (${task.title}).`,
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to create collab task";
         return toJsonToolResult({ error: message }, true);

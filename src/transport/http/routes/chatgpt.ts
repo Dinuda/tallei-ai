@@ -13,6 +13,7 @@ import {
   claimTurn,
   CollabConflictError,
   CollabNotFoundError,
+  createTask as createCollabTask,
   getTask,
   listTasks,
   submitTurn,
@@ -26,7 +27,7 @@ import {
   validateApiKeyContext,
 } from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
-import { validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
+import { hasRequiredScopes, validateOAuthAccessToken } from "../../../infrastructure/auth/oauth-tokens.js";
 import { setRequestTimingField } from "../../../observability/request-timing.js";
 import { runAsyncSafe } from "../../../shared/async-safe.js";
 import {
@@ -111,11 +112,27 @@ const collabTaskIdSchema = z.object({
   task_id: z.string().uuid("task_id must be a valid UUID"),
 });
 
+const collabCreateTaskSchema = z.object({
+  title: z.string().trim().min(1, "title is required"),
+  brief: z.string().optional(),
+  first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt"),
+  max_iterations: z.coerce.number().int().min(1).max(8).optional(),
+});
+
 const collabSubmitTurnSchema = z.object({
   task_id: z.string().uuid("task_id must be a valid UUID"),
   content: z.string().trim().min(1, "content is required"),
   mark_done: z.boolean().optional().default(false),
 });
+
+const collabContinueSchema = z.object({
+  message: z.string().trim().min(1, "message is required"),
+  task_id: z.string().uuid("task_id must be a valid UUID").optional(),
+  draft_output: z.string().trim().optional(),
+  mark_done: z.boolean().optional().default(false),
+});
+
+type EventMetadata = Record<string, unknown>;
 
 // TODO: move somwhere else, dont have data layer in route handler file
 async function logChatGptAction(input: {
@@ -130,9 +147,13 @@ async function logChatGptAction(input: {
     | "chatgpt/actions/recent_documents"
     | "chatgpt/actions/search_documents"
     | "chatgpt/actions/recall_document"
+    | "chatgpt/collab/create-task"
     | "chatgpt/collab/run-turn"
     | "chatgpt/collab/submit-turn"
+    | "chatgpt/collab/continue"
     | "chatgpt/collab/tasks";
+  collabTaskId?: string | null;
+  metadata?: EventMetadata | null;
   ok: boolean;
   error?: string | null;
 }): Promise<void> {
@@ -143,14 +164,18 @@ async function logChatGptAction(input: {
   // probably want to batch these up and do bulk inserts if traffic is high, expect 100k events/month at 10k users and 1-2 events per user per day.
   try {
     await pool.query(
-      `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
-       VALUES ($1, $2, $3, $4, $5, NULL, $6, $7)`,
+      `INSERT INTO mcp_call_events (
+        tenant_id, user_id, key_id, auth_mode, method, tool_name, collab_task_id, metadata_json, ok, error
+      )
+       VALUES ($1, $2, $3, $4, $5, NULL, $6, $7::jsonb, $8, $9)`,
       [
         auth.tenantId,
         auth.userId,
         auth.keyId ?? null,
         auth.authMode,
         input.method,
+        input.collabTaskId ?? null,
+        JSON.stringify(input.metadata ?? {}),
         input.ok,
         input.error ?? null,
       ]
@@ -165,6 +190,31 @@ async function logChatGptAction(input: {
 function logChatGptActionAsync(input: Parameters<typeof logChatGptAction>[0]): void {
   setRequestTimingField("event_log_mode", "async");
   runAsyncSafe(() => logChatGptAction(input), "chatgpt action event");
+}
+
+function readBodyTaskId(body: unknown): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const value = (body as Record<string, unknown>)["task_id"];
+  return typeof value === "string" ? value : null;
+}
+
+function previewText(value: string, max = 500): string {
+  return value.trim().slice(0, max);
+}
+
+const UUID_V4_LIKE_REGEX = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+
+function extractTaskIdFromText(message: string): string | null {
+  const match = message.match(UUID_V4_LIKE_REGEX)?.[0] ?? null;
+  if (!match) return null;
+  const parsed = z.string().uuid().safeParse(match);
+  return parsed.success ? parsed.data : null;
+}
+
+function isCollabContinuePrompt(message: string): boolean {
+  const hasTaskId = Boolean(extractTaskIdFromText(message));
+  if (!hasTaskId) return false;
+  return /\bcollab\b|\bcontinue\b|\bresume\b|\btask\b|\bproceed\b/i.test(message);
 }
 
 const PLAN_CACHE_TTL_MS = 5 * 60_000;
@@ -996,7 +1046,8 @@ export function buildOpenApiSpec(serverUrl: string) {
       version: CHATGPT_OPENAPI_VERSION,
       description:
         "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key). " +
-        "Visible-chat-first contract: call prepare_response only for prior context, hidden documents/uploads, explicit recall/save, or durable facts/opinions/preferences/goals/decisions worth saving.",
+        "Visible-chat-first contract: call prepare_response only for prior context, hidden documents/uploads, explicit recall/save, or durable facts/opinions/preferences/goals/decisions worth saving. " +
+        "COLLAB RULE: if user mentions a collab task UUID or asks to continue/resume a collab task, call /api/chatgpt/actions/collab_continue first and do not loop over prepare_response.",
     },
     servers: [
       {
@@ -1020,7 +1071,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "prepare_response",
           summary: "PRIMARY ACTION: selectively prepare context and queue saves",
           description:
-            "Call only for prior context, hidden docs/uploads/catalogues, explicit recall/save/search, substantial content, or durable facts/opinions/preferences/goals/decisions. Skip when visible chat is enough.",
+            "Call only for prior context, hidden docs/uploads/catalogues, explicit recall/save/search, substantial content, or durable facts/opinions/preferences/goals/decisions. Skip when visible chat is enough. Do not call this for collab continue/resume prompts; use actions/collab_continue.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1612,11 +1663,144 @@ export function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
+      "/api/chatgpt/actions/collab_continue": {
+        post: {
+          operationId: "collab_continue",
+          summary: "Preferred collab continue action",
+          description:
+            "Single entrypoint for 'continue/resume collab task' prompts. " +
+            "Provide message and optionally draft_output. " +
+            "If it's your turn and draft_output is present, this call submits the turn.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["message"],
+                  properties: {
+                    message: { type: "string" },
+                    task_id: { type: "string", format: "uuid" },
+                    draft_output: { type: "string" },
+                    mark_done: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Collab turn check or submit result.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["ok", "is_my_turn", "task_id", "state", "iteration", "max_iterations", "next_actor", "user_visible"],
+                    properties: {
+                      ok: { type: "boolean" },
+                      is_my_turn: { type: "boolean" },
+                      task_id: { type: "string", format: "uuid" },
+                      state: { type: "string", enum: ["CREATIVE", "TECHNICAL", "DONE", "ERROR"] },
+                      iteration: { type: "integer" },
+                      max_iterations: { type: "integer" },
+                      next_actor: { type: ["string", "null"], enum: ["chatgpt", "claude", null] },
+                      user_visible: { type: "string" },
+                      submitted: { type: "boolean" },
+                      last_message: {
+                        oneOf: [collabTranscriptEntrySchema, { type: "null" }],
+                      },
+                      recent_transcript: {
+                        type: "array",
+                        items: collabTranscriptEntrySchema,
+                      },
+                      saved_turn: {
+                        oneOf: [
+                          {
+                            type: "object",
+                            required: ["actor", "iteration", "ts", "content_length", "content_preview"],
+                            properties: {
+                              actor: { type: "string", enum: ["chatgpt", "claude", "user"] },
+                              iteration: { type: "integer" },
+                              ts: { type: "string", format: "date-time" },
+                              content_length: { type: "integer" },
+                              content_preview: { type: "string" },
+                            },
+                          },
+                          { type: "null" },
+                        ],
+                      },
+                      fallback_context: { type: "object", additionalProperties: true },
+                    },
+                  },
+                },
+              },
+            },
+            "400": { description: "Validation failed" },
+            "404": { description: "Task not found" },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
+      "/api/chatgpt/collab/create-task": {
+        post: {
+          operationId: "createCollabTask",
+          summary: "Create a collab task",
+          description: "Creates a new collab task that can be continued via run-turn/submit-turn.",
+          "x-openai-isConsequential": false,
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["title"],
+                  properties: {
+                    title: { type: "string" },
+                    brief: { type: "string" },
+                    first_actor: { type: "string", enum: ["chatgpt", "claude"], default: "chatgpt" },
+                    max_iterations: { type: "integer", minimum: 1, maximum: 8 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description: "Task created.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["ok", "task_id", "title", "state", "iteration", "max_iterations", "user_visible"],
+                    properties: {
+                      ok: { type: "boolean" },
+                      task_id: { type: "string", format: "uuid" },
+                      title: { type: "string" },
+                      brief: { type: ["string", "null"] },
+                      state: { type: "string", enum: ["CREATIVE", "TECHNICAL", "DONE", "ERROR"] },
+                      iteration: { type: "integer" },
+                      max_iterations: { type: "integer" },
+                      user_visible: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": { description: "Validation failed" },
+            "401": { description: "Unauthorized" },
+            "403": { description: "Insufficient scope" },
+          },
+        },
+      },
       "/api/chatgpt/collab/run-turn": {
         post: {
           operationId: "runCollabTurn",
           summary: "Check whether it is ChatGPT's turn",
-          description: "Checks the current collab task state for ChatGPT without allowing actor override.",
+          description: "Checks the current collab task state for ChatGPT without allowing actor override. Call at most once per user turn before deciding whether to submit output.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1640,12 +1824,15 @@ export function buildOpenApiSpec(serverUrl: string) {
                 "application/json": {
                   schema: {
                     type: "object",
-                    required: ["is_my_turn", "state", "iteration", "max_iterations", "context"],
+                    required: ["is_my_turn", "task_id", "state", "iteration", "max_iterations", "next_actor", "user_visible", "context"],
                     properties: {
                       is_my_turn: { type: "boolean" },
+                      task_id: { type: "string", format: "uuid" },
                       state: { type: "string", enum: ["CREATIVE", "TECHNICAL", "DONE", "ERROR"] },
                       iteration: { type: "integer" },
                       max_iterations: { type: "integer" },
+                      next_actor: { type: ["string", "null"], enum: ["chatgpt", "claude", null] },
+                      user_visible: { type: "string" },
                       last_message: {
                         oneOf: [
                           collabTranscriptEntrySchema,
@@ -1668,7 +1855,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "submitCollabTurn",
           summary: "Submit ChatGPT turn content",
-          description: "Submits ChatGPT output for a collab task without allowing actor override.",
+          description: "Submits ChatGPT output for a collab task without allowing actor override. After success, render saved_turn.content_preview in chat and stop tool-calling for this user turn.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1689,10 +1876,38 @@ export function buildOpenApiSpec(serverUrl: string) {
           },
           responses: {
             "200": {
-              description: "Updated collab task.",
+              description: "Turn saved with compact user-visible summary.",
               content: {
                 "application/json": {
-                  schema: collabTaskSchema,
+                  schema: {
+                    type: "object",
+                    required: ["ok", "task_id", "state", "iteration", "max_iterations", "user_visible", "saved_turn"],
+                    properties: {
+                      ok: { type: "boolean" },
+                      task_id: { type: "string", format: "uuid" },
+                      state: { type: "string", enum: ["CREATIVE", "TECHNICAL", "DONE", "ERROR"] },
+                      iteration: { type: "integer" },
+                      max_iterations: { type: "integer" },
+                      next_actor: { type: ["string", "null"], enum: ["chatgpt", "claude", null] },
+                      user_visible: { type: "string" },
+                      saved_turn: {
+                        oneOf: [
+                          {
+                            type: "object",
+                            required: ["actor", "iteration", "ts", "content_length", "content_preview"],
+                            properties: {
+                              actor: { type: "string", enum: ["chatgpt", "claude", "user"] },
+                              iteration: { type: "integer" },
+                              ts: { type: "string", format: "date-time" },
+                              content_length: { type: "integer" },
+                              content_preview: { type: "string" },
+                            },
+                          },
+                          { type: "null" },
+                        ],
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -1732,6 +1947,49 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
     const body = prepareResponseSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
+
+    if (isCollabContinuePrompt(body.message)) {
+      const detectedTaskId = extractTaskIdFromText(body.message);
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/prepare_response",
+        collabTaskId: detectedTaskId,
+        metadata: {
+          category: "collab",
+          action: "prepare_short_circuit",
+          task_id_detected: detectedTaskId,
+        },
+        ok: true,
+      });
+      res.json({
+        contextBlock: `Collab task prompt detected${detectedTaskId ? ` for ${detectedTaskId}` : ""}. Skip memory flow and call collab_continue now.`,
+        memories: [],
+        recentDocuments: [],
+        matchedDocuments: [],
+        inlineDocuments: [],
+        queuedSaves: [],
+        autoSave: {
+          requested: 0,
+          complete: true,
+          saved: [],
+          errors: [],
+        },
+        replyInstructions: [
+          "Do not call prepare_response again for this turn.",
+          "Call collab_continue now with this same message.",
+          "After successful submit, render saved_turn.content_preview in chat.",
+        ],
+        intent: {
+          needsRecall: false,
+          needsDocumentLookup: false,
+          reusePreviousContext: false,
+          contextDependent: false,
+          saveCandidates: [],
+        },
+      });
+      return;
+    }
+
     const result = await executePrepareResponseAction(auth, {
       message: body.message,
       openaiFileIdRefs: body.openaiFileIdRefs,
@@ -2116,7 +2374,16 @@ router.get("/collab/tasks", chatGptActionAuthMiddleware, requireScopes(["collab:
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
     const tasks = await listTasks({ filter: "all" }, auth);
-    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/collab/tasks", ok: true });
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/collab/tasks",
+      metadata: {
+        category: "collab",
+        action: "list_tasks",
+        count: tasks.length,
+      },
+      ok: true,
+    });
     res.json({ tasks });
   } catch (error) {
     logChatGptActionAsync({
@@ -2127,6 +2394,262 @@ router.get("/collab/tasks", chatGptActionAuthMiddleware, requireScopes(["collab:
     });
     console.error("Error listing collab tasks for ChatGPT:", error);
     res.status(500).json({ error: "Failed to list collab tasks" });
+  }
+});
+
+router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScopes(["collab:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = collabContinueSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+
+    const resolvedTaskId = body.task_id ?? extractTaskIdFromText(body.message);
+    if (!resolvedTaskId) {
+      res.status(400).json({
+        ok: false,
+        error: "No collab task ID found. Provide task_id or include a task UUID in message.",
+        user_visible: "No collab task ID found. Include the task UUID and retry.",
+      });
+      return;
+    }
+
+    const claim = await claimTurn(resolvedTaskId, "chatgpt", auth);
+    const task = claim ?? await getTask(resolvedTaskId, auth);
+    if (!task) {
+      res.status(404).json({
+        ok: false,
+        task_id: resolvedTaskId,
+        error: "Task not found",
+        user_visible: `Task ${resolvedTaskId} was not found.`,
+      });
+      return;
+    }
+
+    const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+    const lastMessage = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
+
+    if (!claim) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/collab/continue",
+        collabTaskId: task.id,
+        metadata: {
+          category: "collab",
+          action: "continue",
+          is_my_turn: false,
+          state: task.state,
+          iteration: task.iteration,
+          next_actor: nextActor,
+        },
+        ok: true,
+      });
+      res.json({
+        ok: true,
+        submitted: false,
+        is_my_turn: false,
+        task_id: task.id,
+        state: task.state,
+        iteration: task.iteration,
+        max_iterations: task.maxIterations,
+        next_actor: nextActor,
+        user_visible: `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`,
+        last_message: lastMessage,
+        recent_transcript: task.transcript.slice(-6),
+        fallback_context: buildTurnFallbackContext(task, "chatgpt"),
+      });
+      return;
+    }
+
+    const canWrite =
+      auth.authMode !== "oauth" || hasRequiredScopes(auth.scopes ?? [], ["collab:write"]);
+
+    if (!body.draft_output || body.draft_output.trim().length === 0) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/collab/continue",
+        collabTaskId: task.id,
+        metadata: {
+          category: "collab",
+          action: "continue",
+          is_my_turn: true,
+          submitted: false,
+          state: task.state,
+          iteration: task.iteration,
+          next_actor: nextActor,
+        },
+        ok: true,
+      });
+      res.json({
+        ok: true,
+        submitted: false,
+        is_my_turn: true,
+        task_id: task.id,
+        state: task.state,
+        iteration: task.iteration,
+        max_iterations: task.maxIterations,
+        next_actor: nextActor,
+        user_visible: `It's your turn on task ${task.id}. Draft the output, then call collab_continue again with draft_output.`,
+        last_message: lastMessage,
+        recent_transcript: task.transcript.slice(-6),
+        fallback_context: buildTurnFallbackContext(task, "chatgpt"),
+      });
+      return;
+    }
+
+    if (!canWrite) {
+      res.status(403).json({
+        ok: false,
+        task_id: task.id,
+        error: "Insufficient OAuth scopes",
+        requiredScopes: ["collab:write"],
+        user_visible: "Write permission is required to submit this collab turn.",
+      });
+      return;
+    }
+
+    const submittedTask = await submitTurn(task.id, "chatgpt", body.draft_output, auth, { markDone: body.mark_done });
+    const savedTurn = submittedTask.transcript.length > 0 ? submittedTask.transcript[submittedTask.transcript.length - 1] : null;
+    const nextAfterSubmit = submittedTask.state === "CREATIVE"
+      ? "chatgpt"
+      : submittedTask.state === "TECHNICAL"
+        ? "claude"
+        : null;
+
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/collab/continue",
+      collabTaskId: submittedTask.id,
+      metadata: {
+        category: "collab",
+        action: "continue_submit",
+        is_my_turn: true,
+        submitted: true,
+        state: submittedTask.state,
+        iteration: submittedTask.iteration,
+        next_actor: nextAfterSubmit,
+        content_preview: savedTurn ? previewText(savedTurn.content, 700) : previewText(body.draft_output, 700),
+        content_length: savedTurn ? savedTurn.content.length : body.draft_output.length,
+      },
+      ok: true,
+    });
+
+    res.json({
+      ok: true,
+      submitted: true,
+      is_my_turn: true,
+      task_id: submittedTask.id,
+      state: submittedTask.state,
+      iteration: submittedTask.iteration,
+      max_iterations: submittedTask.maxIterations,
+      next_actor: nextAfterSubmit,
+      user_visible: `Saved ChatGPT turn for task ${submittedTask.id} at iteration ${submittedTask.iteration}.`,
+      saved_turn: savedTurn
+        ? {
+            actor: savedTurn.actor,
+            iteration: savedTurn.iteration,
+            ts: savedTurn.ts,
+            content_length: savedTurn.content.length,
+            content_preview: savedTurn.content.slice(0, 800),
+          }
+        : null,
+      recent_transcript: submittedTask.transcript.slice(-6),
+      fallback_context: buildTurnFallbackContext(submittedTask, "chatgpt"),
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof CollabConflictError) {
+      const auth = await resolveChatGptActionAuth(req, res);
+      if (!auth) return;
+      const taskIdFromBody = readBodyTaskId(req.body) ?? extractTaskIdFromText(typeof req.body?.message === "string" ? req.body.message : "");
+      const task = taskIdFromBody ? await getTask(taskIdFromBody, auth) : null;
+      const nextActor = task ? (task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null) : null;
+      res.status(409).json({
+        ok: false,
+        error: error.message,
+        task_id: taskIdFromBody ?? null,
+        state: task?.state ?? null,
+        iteration: task?.iteration ?? null,
+        max_iterations: task?.maxIterations ?? null,
+        next_actor: nextActor,
+        user_visible: task
+          ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}.`
+          : "Turn rejected due to task state mismatch.",
+      });
+      return;
+    }
+    if (error instanceof CollabNotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/collab/continue",
+      collabTaskId: readBodyTaskId(req.body),
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to continue collab task",
+    });
+    console.error("Error continuing collab task for ChatGPT:", error);
+    res.status(500).json({ error: "Failed to continue collab task" });
+  }
+});
+
+router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["collab:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = collabCreateTaskSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+
+    const task = await createCollabTask(
+      {
+        title: body.title,
+        brief: body.brief ?? null,
+        firstActor: body.first_actor,
+        maxIterations: body.max_iterations,
+      },
+      auth
+    );
+
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/collab/create-task",
+      collabTaskId: task.id,
+      metadata: {
+        category: "collab",
+        action: "create_task",
+        title_preview: previewText(task.title, 160),
+        state: task.state,
+        iteration: task.iteration,
+        max_iterations: task.maxIterations,
+      },
+      ok: true,
+    });
+    res.status(201).json({
+      ok: true,
+      task_id: task.id,
+      title: task.title,
+      brief: task.brief,
+      state: task.state,
+      iteration: task.iteration,
+      max_iterations: task.maxIterations,
+      user_visible: `Created collab task ${task.id} (${task.title}).`,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/collab/create-task",
+      collabTaskId: readBodyTaskId(req.body),
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to create collab task",
+    });
+    console.error("Error creating collab task for ChatGPT:", error);
+    res.status(500).json({ error: "Failed to create collab task" });
   }
 });
 
@@ -2147,7 +2670,21 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       ? task.transcript[task.transcript.length - 1]
       : null;
 
-    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/collab/run-turn", ok: true });
+    const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/collab/run-turn",
+      collabTaskId: task.id,
+      metadata: {
+        category: "collab",
+        action: "run_turn",
+        is_my_turn: Boolean(claim),
+        state: task.state,
+        iteration: task.iteration,
+        next_actor: nextActor,
+      },
+      ok: true,
+    });
     res.json({
       is_my_turn: Boolean(claim),
       task_id: task.id,
@@ -2156,6 +2693,10 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       state: task.state,
       iteration: task.iteration,
       max_iterations: task.maxIterations,
+      next_actor: nextActor,
+      user_visible: claim
+        ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}).`
+        : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`,
       last_message: lastMessage,
       recent_transcript: task.transcript.slice(-6),
       context: task.context,
@@ -2169,6 +2710,7 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/collab/run-turn",
+      collabTaskId: readBodyTaskId(req.body),
       ok: false,
       error: error instanceof Error ? error.message : "Failed to check collab turn",
     });
@@ -2184,15 +2726,65 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
     if (!auth) return;
 
     const task = await submitTurn(body.task_id, "chatgpt", body.content, auth, { markDone: body.mark_done });
-    logChatGptActionAsync({ auth: req.authContext, method: "chatgpt/collab/submit-turn", ok: true });
-    res.json(task);
+    const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+    const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
+    logChatGptActionAsync({
+      auth: req.authContext,
+      method: "chatgpt/collab/submit-turn",
+      collabTaskId: task.id,
+      metadata: {
+        category: "collab",
+        action: "submit_turn",
+        actor: "chatgpt",
+        state: task.state,
+        iteration: task.iteration,
+        next_actor: nextActor,
+        content_preview: savedTurn ? previewText(savedTurn.content, 700) : previewText(body.content, 700),
+        content_length: savedTurn ? savedTurn.content.length : body.content.length,
+      },
+      ok: true,
+    });
+    res.json({
+      ok: true,
+      task_id: task.id,
+      state: task.state,
+      iteration: task.iteration,
+      max_iterations: task.maxIterations,
+      next_actor: nextActor,
+      user_visible: `Saved ChatGPT turn for task ${task.id} at iteration ${task.iteration}.`,
+      saved_turn: savedTurn
+        ? {
+            actor: savedTurn.actor,
+            iteration: savedTurn.iteration,
+            ts: savedTurn.ts,
+            content_length: savedTurn.content.length,
+            content_preview: savedTurn.content.slice(0, 800),
+          }
+        : null,
+    });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
     if (error instanceof CollabConflictError) {
-      res.status(409).json({ error: error.message });
+      const auth = await resolveChatGptActionAuth(req, res);
+      if (!auth) return;
+      const taskId = readBodyTaskId(req.body);
+      const task = taskId ? await getTask(taskId, auth) : null;
+      const nextActor = task ? (task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null) : null;
+      res.status(409).json({
+        ok: false,
+        error: error.message,
+        task_id: taskId,
+        state: task?.state ?? null,
+        iteration: task?.iteration ?? null,
+        max_iterations: task?.maxIterations ?? null,
+        next_actor: nextActor,
+        user_visible: task
+          ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}.`
+          : "Turn rejected due to task state mismatch.",
+      });
       return;
     }
     if (error instanceof CollabNotFoundError) {
@@ -2202,6 +2794,7 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/collab/submit-turn",
+      collabTaskId: readBodyTaskId(req.body),
       ok: false,
       error: error instanceof Error ? error.message : "Failed to submit collab turn",
     });

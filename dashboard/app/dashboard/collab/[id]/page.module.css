@@ -115,6 +115,52 @@
   font-size: 0.82rem;
 }
 
+.stateChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.stateChip,
+.nextActorChip {
+  border-radius: 999px;
+  padding: 0.18rem 0.58rem;
+  font-size: 0.72rem;
+  border: 1px solid var(--border-light);
+}
+
+.stateChip {
+  font-weight: 700;
+}
+
+.state_CREATIVE {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.state_TECHNICAL {
+  background: #fff7ed;
+  border-color: #fdba74;
+  color: #9a3412;
+}
+
+.state_DONE {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+
+.state_ERROR {
+  background: #fff1f2;
+  border-color: #fecaca;
+  color: #be123c;
+}
+
+.nextActorChip {
+  color: var(--text-2);
+}
+
 .zoneB {
   display: grid;
   gap: 0.65rem;
@@ -153,6 +199,62 @@
   font-size: 0.76rem;
   padding: 0.2rem 0.45rem;
   cursor: pointer;
+}
+
+.latestOutputCard {
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.latestOutputHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.latestOutputTitle {
+  margin: 0;
+  font-size: 0.94rem;
+  color: var(--text);
+}
+
+.latestOutputMeta {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.latestOutputActions {
+  display: flex;
+  gap: 0.35rem;
+  align-items: flex-start;
+}
+
+.lightBtn {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  border-radius: 8px;
+  font-size: 0.74rem;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+}
+
+.latestOutputBody {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 8;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .transcriptList {

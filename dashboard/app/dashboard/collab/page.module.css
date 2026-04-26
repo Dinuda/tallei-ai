@@ -134,6 +134,51 @@
   color: var(--text-muted);
 }
 
+.statusBadges {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.statusBadge,
+.outputBadgeReady,
+.outputBadgeMissing {
+  border-radius: 999px;
+  font-size: 0.68rem;
+  padding: 0.16rem 0.5rem;
+  border: 1px solid;
+}
+
+.statusBadge {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+
+.outputBadgeReady {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.outputBadgeMissing {
+  background: #fff7ed;
+  border-color: #fdba74;
+  color: #9a3412;
+}
+
+.outputPreview {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.42;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .cardBadges {
   display: flex;
   align-items: center;

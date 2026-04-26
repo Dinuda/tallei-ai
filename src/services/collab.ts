@@ -67,6 +67,24 @@ interface CachedTask {
   exp: number;
 }
 
+interface CollabTicketArtifact {
+  title: string;
+  assignee: string | null;
+  due_date: string | null;
+  description: string | null;
+}
+
+interface CollabArtifacts {
+  prd_summary: string | null;
+  tickets: CollabTicketArtifact[];
+  checklist: string[];
+  assignee: string | null;
+  due_date: string | null;
+  extracted_from_iteration: number;
+  extracted_from_actor: CollabModelActor;
+  extracted_at: string;
+}
+
 const TASK_CACHE_TTL_MS = 5_000;
 const taskCache = new Map<string, CachedTask>();
 
@@ -186,6 +204,270 @@ function normalizeMaxIterations(value?: number): number {
   if (normalized < 1) return 1;
   if (normalized > 8) return 8;
   return normalized;
+}
+
+function normalizeSingleLine(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replace(/\s+/g, " ");
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeParagraph(value: unknown, max = 500): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized) return null;
+  return normalized.slice(0, max);
+}
+
+function truncatePreview(value: string, max = 500): string {
+  if (value.length <= max) return value;
+  return value.slice(0, max);
+}
+
+function parseTicketLine(raw: string): CollabTicketArtifact | null {
+  const line = raw.replace(/^\[[xX ]\]\s*/, "").trim();
+  if (!line) return null;
+
+  const segments = line.split(/\s+\|\s+/).map((segment) => segment.trim()).filter(Boolean);
+  const [primary, ...details] = segments;
+
+  let title = primary ?? "";
+  let assignee: string | null = null;
+  let dueDate: string | null = null;
+  let description: string | null = null;
+
+  for (const segment of details) {
+    const assigneeMatch = segment.match(/^(?:assignee|owner)\s*[:=-]\s*(.+)$/i);
+    if (assigneeMatch) {
+      assignee = normalizeSingleLine(assigneeMatch[1]);
+      continue;
+    }
+    const dueMatch = segment.match(/^due(?:\s*date)?\s*[:=-]\s*(.+)$/i);
+    if (dueMatch) {
+      dueDate = normalizeSingleLine(dueMatch[1]);
+      continue;
+    }
+    if (!description) {
+      description = normalizeSingleLine(segment);
+    }
+  }
+
+  const inlineAssignee = title.match(/\b(?:assignee|owner)\s*[:=-]\s*([^,;]+)/i);
+  if (!assignee && inlineAssignee) {
+    assignee = normalizeSingleLine(inlineAssignee[1]);
+    title = title.replace(inlineAssignee[0], "").trim();
+  }
+
+  const inlineDue = title.match(/\bdue(?:\s*date)?\s*[:=-]\s*([^,;]+)/i);
+  if (!dueDate && inlineDue) {
+    dueDate = normalizeSingleLine(inlineDue[1]);
+    title = title.replace(inlineDue[0], "").trim();
+  }
+
+  title = title.replace(/\s+-\s+$/, "").trim();
+  if (!title) return null;
+
+  return {
+    title: truncatePreview(title, 240),
+    assignee,
+    due_date: dueDate,
+    description,
+  };
+}
+
+function normalizeChecklist(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of value) {
+    const text = normalizeSingleLine(item);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(truncatePreview(text, 220));
+  }
+  return normalized.slice(0, 20);
+}
+
+function normalizeTickets(value: unknown): CollabTicketArtifact[] {
+  if (!Array.isArray(value)) return [];
+  const tickets: CollabTicketArtifact[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      if (typeof item === "string") {
+        const parsed = parseTicketLine(item);
+        if (parsed) tickets.push(parsed);
+      }
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const title = normalizeSingleLine(row["title"] ?? row["name"] ?? row["ticket"]);
+    if (!title) continue;
+    tickets.push({
+      title: truncatePreview(title, 240),
+      assignee: normalizeSingleLine(row["assignee"] ?? row["owner"]),
+      due_date: normalizeSingleLine(row["due_date"] ?? row["dueDate"] ?? row["due"]),
+      description: normalizeParagraph(row["description"] ?? row["details"], 280),
+    });
+  }
+  return tickets.slice(0, 20);
+}
+
+function toArtifactsFromObject(
+  value: Record<string, unknown>,
+  actor: CollabModelActor,
+  iteration: number,
+  submittedAt: string
+): CollabArtifacts | null {
+  const prdSummary =
+    normalizeParagraph(value["prd_summary"] ?? value["prdSummary"] ?? value["summary"], 900);
+  const tickets = normalizeTickets(value["tickets"]);
+  const checklist = normalizeChecklist(value["checklist"] ?? value["todo"] ?? value["todos"]);
+  const assignee = normalizeSingleLine(value["assignee"] ?? value["owner"]);
+  const dueDate = normalizeSingleLine(value["due_date"] ?? value["dueDate"] ?? value["due"]);
+
+  if (!prdSummary && tickets.length === 0 && checklist.length === 0 && !assignee && !dueDate) {
+    return null;
+  }
+
+  return {
+    prd_summary: prdSummary,
+    tickets,
+    checklist,
+    assignee,
+    due_date: dueDate,
+    extracted_from_iteration: iteration,
+    extracted_from_actor: actor,
+    extracted_at: submittedAt,
+  };
+}
+
+function extractJsonObjectCandidates(content: string): Record<string, unknown>[] {
+  const candidates: Record<string, unknown>[] = [];
+  const trimmed = content.trim();
+  const rawCandidates: string[] = [trimmed];
+  const fencedMatches = trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi);
+  for (const match of fencedMatches) {
+    const candidate = match[1]?.trim();
+    if (candidate) rawCandidates.push(candidate);
+  }
+
+  for (const raw of rawCandidates) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        candidates.push(parsed as Record<string, unknown>);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return candidates;
+}
+
+function extractCollabArtifacts(
+  content: string,
+  actor: CollabModelActor,
+  iteration: number,
+  submittedAt: string
+): CollabArtifacts | null {
+  const objectCandidates = extractJsonObjectCandidates(content);
+  for (const candidate of objectCandidates) {
+    const extracted = toArtifactsFromObject(candidate, actor, iteration, submittedAt);
+    if (extracted) return extracted;
+  }
+
+  const lines = content.split(/\r?\n/);
+  const summaryLines: string[] = [];
+  const checklist: string[] = [];
+  const tickets: CollabTicketArtifact[] = [];
+  const checklistSet = new Set<string>();
+  let currentSection: "summary" | "tickets" | "checklist" | "other" = "other";
+  let assignee: string | null = null;
+  let dueDate: string | null = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (heading) {
+      const normalizedHeading = heading[1].toLowerCase();
+      if (/(ticket|backlog|jira|issues?)/.test(normalizedHeading)) {
+        currentSection = "tickets";
+      } else if (/(checklist|todo|to-do|next steps?|action items?)/.test(normalizedHeading)) {
+        currentSection = "checklist";
+      } else if (/(prd|summary|overview|brief)/.test(normalizedHeading)) {
+        currentSection = "summary";
+      } else {
+        currentSection = "other";
+      }
+      continue;
+    }
+
+    const assigneeMatch = line.match(/^(?:assignee|owner)\s*[:=-]\s*(.+)$/i);
+    if (assigneeMatch) {
+      assignee = normalizeSingleLine(assigneeMatch[1]) ?? assignee;
+      continue;
+    }
+
+    const dueMatch = line.match(/^due(?:\s*date)?\s*[:=-]\s*(.+)$/i);
+    if (dueMatch) {
+      dueDate = normalizeSingleLine(dueMatch[1]) ?? dueDate;
+      continue;
+    }
+
+    const listMatch = line.match(/^(?:[-*]|\d+\.)\s+(.+)$/);
+    const checkboxMatch = line.match(/^[-*]\s+\[[ xX]\]\s+(.+)$/);
+    const listContent = (checkboxMatch?.[1] ?? listMatch?.[1] ?? "").trim();
+
+    if (listContent) {
+      if (currentSection === "tickets") {
+        const ticket = parseTicketLine(listContent);
+        if (ticket) tickets.push(ticket);
+        continue;
+      }
+      if (currentSection === "checklist" || checkboxMatch) {
+        const item = normalizeSingleLine(listContent);
+        if (item) {
+          const key = item.toLowerCase();
+          if (!checklistSet.has(key)) {
+            checklistSet.add(key);
+            checklist.push(truncatePreview(item, 220));
+          }
+        }
+        continue;
+      }
+    }
+
+    if (currentSection === "summary" && summaryLines.length < 8) {
+      summaryLines.push(line);
+    }
+  }
+
+  const paragraphs = content
+    .split(/\n\s*\n/)
+    .map((segment) => segment.trim().replace(/\s+/g, " "))
+    .filter(Boolean);
+  const fallbackSummary = paragraphs[0] ?? null;
+  const prdSummary = normalizeParagraph(summaryLines.join(" "), 900) ?? normalizeParagraph(fallbackSummary, 900);
+
+  if (!prdSummary && tickets.length === 0 && checklist.length === 0 && !assignee && !dueDate) {
+    return null;
+  }
+
+  return {
+    prd_summary: prdSummary,
+    tickets: tickets.slice(0, 20),
+    checklist: checklist.slice(0, 20),
+    assignee,
+    due_date: dueDate,
+    extracted_from_iteration: iteration,
+    extracted_from_actor: actor,
+    extracted_at: submittedAt,
+  };
 }
 
 export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelActor): CollabTurnFallbackContext {
@@ -383,7 +665,34 @@ export async function submitTurn(
     throw new CollabConflictError("Task is not in the expected state for this actor.");
   }
 
-  const task = mapTaskRow(row);
+  let task = mapTaskRow(row);
+  try {
+    const artifacts = extractCollabArtifacts(trimmed, actor, task.iteration, submittedAt);
+    if (artifacts) {
+      const contextResult = await pool.query<CollabTaskRow>(
+        `UPDATE collab_tasks
+         SET context = jsonb_set(
+           COALESCE(context, '{}'::jsonb),
+           '{artifacts}',
+           COALESCE(context->'artifacts', '{}'::jsonb) || $3::jsonb,
+           true
+         ),
+             updated_at = now()
+         WHERE id = $1
+           AND user_id = $2
+         RETURNING *`,
+        [taskId, auth.userId, JSON.stringify(artifacts)]
+      );
+      if (contextResult.rows[0]) {
+        task = mapTaskRow(contextResult.rows[0]);
+      }
+    }
+  } catch (error) {
+    if (process.env["NODE_ENV"] !== "production") {
+      console.warn("[collab] artifact extraction failed", error);
+    }
+  }
+
   invalidateCachedTask(taskId, auth);
   writeCachedTask(task);
   return task;

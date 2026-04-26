@@ -17,7 +17,7 @@ router.get("/", requireScopes(["memory:read"]), async (req, res) => {
     const userId = (req as any).userId as string;
 
     const result = await pool.query(
-      `SELECT id, auth_mode, method, tool_name, ok, error, created_at
+      `SELECT id, auth_mode, method, tool_name, ok, error, created_at, collab_task_id, metadata_json
        FROM mcp_call_events
        WHERE user_id = $1
        ORDER BY created_at DESC
@@ -34,6 +34,10 @@ router.get("/", requireScopes(["memory:read"]), async (req, res) => {
         ok: row.ok,
         error: row.error,
         createdAt: row.created_at,
+        collabTaskId: row.collab_task_id ?? null,
+        metadata: row.metadata_json && typeof row.metadata_json === "object" && !Array.isArray(row.metadata_json)
+          ? row.metadata_json
+          : {},
       })),
     });
   } catch (error) {

@@ -11,6 +11,13 @@ type CollabState = "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR";
 type CollabActor = "chatgpt" | "claude" | "user";
 type CollabFilter = "all" | "active" | "waiting" | "done";
 
+type TranscriptEntry = {
+  actor: CollabActor;
+  iteration: number;
+  content: string;
+  ts: string;
+};
+
 type CollabTask = {
   id: string;
   title: string;
@@ -20,6 +27,7 @@ type CollabTask = {
   iteration: number;
   maxIterations: number;
   updatedAt: string;
+  transcript?: TranscriptEntry[];
 };
 
 const FILTERS: Array<{ id: CollabFilter; label: string }> = [
@@ -41,6 +49,21 @@ const ACTOR_LABEL: Record<CollabActor, string> = {
   claude: "Claude",
   user: "User",
 };
+
+function waitingActorLabel(state: CollabState): string | null {
+  if (state === "CREATIVE") return "Waiting on ChatGPT";
+  if (state === "TECHNICAL") return "Waiting on Claude";
+  if (state === "DONE") return "Completed";
+  if (state === "ERROR") return "Errored";
+  return null;
+}
+
+function latestOutput(task: CollabTask): TranscriptEntry | null {
+  const transcript = Array.isArray(task.transcript) ? task.transcript : [];
+  if (transcript.length === 0) return null;
+  const modelEntry = [...transcript].reverse().find((entry) => entry.actor === "chatgpt" || entry.actor === "claude");
+  return modelEntry ?? transcript[transcript.length - 1];
+}
 
 function relativeTime(iso: string): string {
   const delta = Date.now() - new Date(iso).getTime();
@@ -133,29 +156,45 @@ export default function CollabTasksPage() {
         </div>
       ) : hasTasks ? (
         <div className={styles.grid}>
-          {tasks.map((task) => (
-            <Link key={task.id} className={styles.card} href={`/dashboard/collab/${task.id}`}>
-              <div className={styles.cardTop}>
-                <span className={styles.stateRow}>
-                  <span className={styles.stateDot} style={{ backgroundColor: STATE_COLOR[task.state] }} />
-                  {task.state}
-                </span>
-                <span className={styles.iteration}>iter {task.iteration}/{task.maxIterations}</span>
-              </div>
+          {tasks.map((task) => {
+            const latest = latestOutput(task);
+            return (
+              <Link key={task.id} className={styles.card} href={`/dashboard/collab/${task.id}`}>
+                <div className={styles.cardTop}>
+                  <span className={styles.stateRow}>
+                    <span className={styles.stateDot} style={{ backgroundColor: STATE_COLOR[task.state] }} />
+                    {task.state}
+                  </span>
+                  <span className={styles.iteration}>iter {task.iteration}/{task.maxIterations}</span>
+                </div>
 
-              <h2 className={styles.cardTitle}>{task.title}</h2>
-              <p className={styles.cardMeta}>
-                Last update: {task.lastActor ? ACTOR_LABEL[task.lastActor] : "-"} · {relativeTime(task.updatedAt)}
-              </p>
+                <h2 className={styles.cardTitle}>{task.title}</h2>
+                <p className={styles.cardMeta}>
+                  Last update: {task.lastActor ? ACTOR_LABEL[task.lastActor] : "-"} · {relativeTime(task.updatedAt)}
+                </p>
 
-              <div className={styles.cardBadges}>
-                <span className={`${styles.platformBadge} ${styles.platformChatgpt}`}>chatgpt</span>
-                <span className={styles.swapArrow}>⇄</span>
-                <span className={`${styles.platformBadge} ${styles.platformClaude}`}>claude</span>
-                <span className={styles.openCta}>Open →</span>
-              </div>
-            </Link>
-          ))}
+                <div className={styles.statusBadges}>
+                  <span className={styles.statusBadge}>{waitingActorLabel(task.state)}</span>
+                  <span className={latest ? styles.outputBadgeReady : styles.outputBadgeMissing}>
+                    {latest ? "Output ready" : "No output yet"}
+                  </span>
+                </div>
+
+                {latest && (
+                  <p className={styles.outputPreview}>
+                    {latest.content.slice(0, 120)}
+                  </p>
+                )}
+
+                <div className={styles.cardBadges}>
+                  <span className={`${styles.platformBadge} ${styles.platformChatgpt}`}>chatgpt</span>
+                  <span className={styles.swapArrow}>⇄</span>
+                  <span className={`${styles.platformBadge} ${styles.platformClaude}`}>claude</span>
+                  <span className={styles.openCta}>Open →</span>
+                </div>
+              </Link>
+            );
+          })}
         </div>
       ) : (
         <EmptyCollectionState

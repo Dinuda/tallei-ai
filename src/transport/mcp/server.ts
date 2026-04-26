@@ -31,6 +31,8 @@ interface OAuthLocalCacheEntry {
   entry: OAuthCacheEntry;
 }
 
+type EventMetadata = Record<string, unknown>;
+
 const oauthLocalCache = new Map<string, OAuthLocalCacheEntry>();
 
 function tokenCacheKey(token: string): string {
@@ -58,13 +60,17 @@ async function logMcpCallEvent(input: {
   authMode?: "api_key" | "oauth" | "unknown";
   method: string;
   toolName?: string | null;
+  collabTaskId?: string | null;
+  metadata?: EventMetadata | null;
   ok: boolean;
   error?: string | null;
 }): Promise<void> {
   try {
     await pool.query(
-      `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO mcp_call_events (
+        tenant_id, user_id, key_id, auth_mode, method, tool_name, collab_task_id, metadata_json, ok, error
+      )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`,
       [
         input.tenantId ?? null,
         input.userId ?? null,
@@ -72,6 +78,8 @@ async function logMcpCallEvent(input: {
         input.authMode ?? "unknown",
         input.method,
         input.toolName ?? null,
+        input.collabTaskId ?? null,
+        JSON.stringify(input.metadata ?? {}),
         input.ok,
         input.error ?? null,
       ]
@@ -94,6 +102,75 @@ function sendUnauthorized(res: any, resourceMetadataUrl: string, message: string
     `Bearer resource_metadata="${resourceMetadataUrl}", error="invalid_token", error_description="${message}"`
   );
   res.status(401).json({ error: message });
+}
+
+function readArgsObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function previewText(value: unknown, max = 400): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  return normalized.slice(0, max);
+}
+
+function collabLogDetails(
+  rpcMethod: string | null,
+  toolName: string | null,
+  body: unknown
+): { collabTaskId: string | null; metadata: EventMetadata | null } {
+  if (rpcMethod !== "tools/call" || !toolName) {
+    return { collabTaskId: null, metadata: null };
+  }
+
+  const payload = readArgsObject(body);
+  const params = readArgsObject(payload["params"]);
+  const args = readArgsObject(params["arguments"]);
+  const taskId = typeof args["task_id"] === "string" ? args["task_id"] : null;
+
+  if (toolName === "collab_take_turn") {
+    const content = previewText(args["content"], 700);
+    const contentLength = typeof args["content"] === "string" ? args["content"].length : null;
+    return {
+      collabTaskId: taskId,
+      metadata: {
+        category: "collab",
+        action: "submit_turn",
+        actor: "claude",
+        content_preview: content,
+        content_length: contentLength,
+        mark_done: Boolean(args["mark_done"]),
+      },
+    };
+  }
+
+  if (toolName === "collab_create_task") {
+    return {
+      collabTaskId: taskId,
+      metadata: {
+        category: "collab",
+        action: "create_task",
+        title_preview: previewText(args["title"], 160),
+        first_actor: typeof args["first_actor"] === "string" ? args["first_actor"] : null,
+        max_iterations: typeof args["max_iterations"] === "number" ? args["max_iterations"] : null,
+      },
+    };
+  }
+
+  if (toolName === "collab_check_turn") {
+    return {
+      collabTaskId: taskId,
+      metadata: {
+        category: "collab",
+        action: "check_turn",
+        actor: "claude",
+      },
+    };
+  }
+
+  return { collabTaskId: null, metadata: null };
 }
 
 async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifier): Promise<AuthContext | null> {
@@ -136,22 +213,24 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
 const TALLEI_INSTRUCTIONS = `Tallei stores durable memory across AI tools. Follow these rules on every turn:
 
 1. COLLAB TASK ROUTING: If the user asks to continue/resume/proceed a collab task, or includes a task UUID, call collab_check_turn first. Do NOT call recall_memories for collab task state. Use fallback_context + recent_transcript and submit with collab_take_turn when is_my_turn=true.
-2. DON'T RECALL REFLEXIVELY. Only call recall_memories when the user references prior sessions ("last time", "remember", "what did I say about"), asks about preferences, or the task clearly requires personalized past context. If you can answer from the attached file or the current message, do not call recall_memories.
-3. PINNED PREFERENCES are already available as the "Pinned Preferences" MCP resource. Do not call recall_memories just to look up the user's known preferences.
-4. RECALL INCLUDES DOCUMENT PARITY. recall_memories can include matched document context and inline full content for referenced/matched refs. Keep preferences first, then document context, then other memories.
-5. DOCUMENT DISCOVERY ORDER: use recent_documents first (latest 5). If needed, call search_documents, then recall_document for full text.
-6. USE REMEMBER AS THE SAVE ENTRY POINT. Prefer one remember call instead of chaining multiple save tools.
-7. DOCUMENT SAVES — TWO MODES:
+2. SHORTCUT COMMANDS: "@tallei decide" should create/continue a collab task (call collab_create_task if needed, then collab_check_turn/collab_take_turn). "@tallei ship" should output structured execution artifacts (PRD/tickets/checklist/owner/due date) and save them through collab_take_turn.
+3. VISIBILITY GUARANTEE: After collab_take_turn succeeds, include the actual submitted output content in the assistant reply. Do not reply with only status text like "completed."
+4. DON'T RECALL REFLEXIVELY. Only call recall_memories when the user references prior sessions ("last time", "remember", "what did I say about"), asks about preferences, or the task clearly requires personalized past context. If you can answer from the attached file or the current message, do not call recall_memories.
+5. PINNED PREFERENCES are already available as the "Pinned Preferences" MCP resource. Do not call recall_memories just to look up the user's known preferences.
+6. RECALL INCLUDES DOCUMENT PARITY. recall_memories can include matched document context and inline full content for referenced/matched refs. Keep preferences first, then document context, then other memories.
+7. DOCUMENT DISCOVERY ORDER: use recent_documents first (latest 5). If needed, call search_documents, then recall_document for full text.
+8. USE REMEMBER AS THE SAVE ENTRY POINT. Prefer one remember call instead of chaining multiple save tools.
+9. DOCUMENT SAVES — TWO MODES:
    a) FAST NOTE (default): remember(kind="document-note", title="...", key_points=["item 1","item 2",...], summary="..."). Put meaningful content into key_points (up to 10). Do NOT pass content.
    b) FULL ARCHIVE (only for "archive", "full stash", "store the whole file"): remember(kind="document-blob", content="<full text>", title="..."). Warn the user this can take longer.
-8. AUTO-SAVE WITH UNDO (required when new structured content appears): If this turn includes new content the user may need later (uploaded file, pasted doc/spec/transcript, list/table/data, extracted PDF text), auto-save without asking:
+10. AUTO-SAVE WITH UNDO (required when new structured content appears): If this turn includes new content the user may need later (uploaded file, pasted doc/spec/transcript, list/table/data, extracted PDF text), auto-save without asking:
    - For file refs use recall_memories(openaiFileIdRefs=[...]) or upload_blob/openaiFileIdRefs handoff and then upload_status when needed.
    - File ingest is strict: only PDF and Word (.docx/.docm). Do not pass images or plain text/markdown files.
    - For text-only structured content, call remember(kind="document-note", ...) in the same turn.
    - Then append exactly this footer on its own line in the final reply:
      📎 Auto-saved as @doc:<ref> · reply **undo** to delete
    - Skip auto-save only if: user explicitly said not to save, the turn is purely conversational, or this content was already saved.
-9. UNDO HANDLING: If the user replies "undo", "del", or "delete" after that footer, call undo_save with the referenced @doc ref immediately.`;
+11. UNDO HANDLING: If the user replies "undo", "del", or "delete" after that footer, call undo_save with the referenced @doc ref immediately.`;
 
 const MCP_SERVER_VERSION = "1.0.0";
 
@@ -201,6 +280,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
   const handleMcp = async (req: any, res: any) => {
     const rpcMethod = typeof req?.body?.method === "string" ? req.body.method.slice(0, 128) : null;
     const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name.slice(0, 128) : null;
+    const collabEvent = collabLogDetails(rpcMethod, toolName, req?.body);
     const isRecallToolCall = toolName === "recall_memories";
     const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
     const authStartedAt = process.hrtime.bigint();
@@ -243,7 +323,14 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
       noteAuthTiming();
-      logMcpCallEventAsync({ method, toolName, ok: false, error: "Missing or invalid Authorization header" });
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Missing or invalid Authorization header",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Missing or invalid Authorization header");
       return;
     }
@@ -251,7 +338,15 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const token = authHeader.split(" ")[1];
     if (token.startsWith("gm_")) {
       noteAuthTiming();
-      logMcpCallEventAsync({ method, toolName, authMode: "unknown", ok: false, error: "Legacy API keys are no longer supported on /mcp" });
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        authMode: "unknown",
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Legacy API keys are no longer supported on /mcp",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Legacy API keys are no longer supported. Reconnect via OAuth.");
       return;
     }
@@ -259,32 +354,82 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const authContext = await authFromOAuthToken(token, oauthVerifier);
     if (!authContext) {
       noteAuthTiming();
-      logMcpCallEventAsync({ method, toolName, authMode: "oauth", ok: false, error: "Invalid or expired token" });
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        authMode: "oauth",
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Invalid or expired token",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Invalid or expired token");
       return;
     }
 
     if (!hasRequiredScopes(authContext.scopes ?? [], ["mcp:tools"])) {
       noteAuthTiming();
-      logMcpCallEventAsync({ userId: authContext.userId, tenantId: authContext.tenantId, method, toolName, authMode: "oauth", ok: false, error: "Missing mcp:tools scope" });
+      logMcpCallEventAsync({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        method,
+        toolName,
+        authMode: "oauth",
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Missing mcp:tools scope",
+      });
       res.status(403).json({ error: "Insufficient OAuth scopes", requiredScopes: ["mcp:tools"] });
       return;
     }
 
-    noteAuthTiming();
-    logMcpCallEventAsync({ userId: authContext.userId, tenantId: authContext.tenantId, keyId: null, authMode: "oauth", method, toolName, ok: true });
+    try {
+      noteAuthTiming();
 
-    req.authContext = authContext;
-    prewarmRecallCache(authContext);
+      req.authContext = authContext;
+      prewarmRecallCache(authContext);
 
-    const server = createConfiguredMcpServer(authContext);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    await server.connect(transport);
+      const server = createConfiguredMcpServer(authContext);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
 
-    const dispatchStartedAt = process.hrtime.bigint();
-    await transport.handleRequest(req, res, req.body);
-    const dispatchMs = Number(process.hrtime.bigint() - dispatchStartedAt) / 1_000_000;
-    if (isRecallToolCall) setRequestTimingField("recall_mcp_dispatch_ms", dispatchMs);
+      const dispatchStartedAt = process.hrtime.bigint();
+      await transport.handleRequest(req, res, req.body);
+      const dispatchMs = Number(process.hrtime.bigint() - dispatchStartedAt) / 1_000_000;
+      if (isRecallToolCall) setRequestTimingField("recall_mcp_dispatch_ms", dispatchMs);
+
+      logMcpCallEventAsync({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        keyId: null,
+        authMode: "oauth",
+        method,
+        toolName,
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: true,
+      });
+    } catch (error) {
+      logMcpCallEventAsync({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        keyId: null,
+        authMode: "oauth",
+        method,
+        toolName,
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: error instanceof Error ? error.message : "MCP request failed",
+      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: "MCP request failed" });
+      }
+      if (config.nodeEnv !== "production") {
+        console.error("[mcp] request handling failed:", error);
+      }
+    }
   };
 
   router.all("/", handleMcp);

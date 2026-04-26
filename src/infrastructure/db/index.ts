@@ -733,6 +733,8 @@ export async function initDb() {
         auth_mode TEXT,
         method TEXT NOT NULL,
         tool_name TEXT,
+        collab_task_id UUID,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         ok BOOLEAN NOT NULL DEFAULT true,
         error TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -740,7 +742,9 @@ export async function initDb() {
 
       ALTER TABLE mcp_call_events
       ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL;
+      ADD COLUMN IF NOT EXISTS key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS collab_task_id UUID,
+      ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 
       CREATE INDEX IF NOT EXISTS idx_mcp_call_events_created_at
         ON mcp_call_events(created_at DESC);
@@ -750,6 +754,8 @@ export async function initDb() {
         ON mcp_call_events(tenant_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_mcp_call_events_user_id
         ON mcp_call_events(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mcp_call_events_collab_task_id
+        ON mcp_call_events(collab_task_id, created_at DESC);
     `);
 
     await client.query(`
@@ -885,6 +891,19 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_collab_tasks_active
         ON collab_tasks(tenant_id, user_id, state)
         WHERE state IN ('CREATIVE','TECHNICAL');
+
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'mcp_call_events_collab_task_id_fkey'
+        ) THEN
+          ALTER TABLE mcp_call_events
+          ADD CONSTRAINT mcp_call_events_collab_task_id_fkey
+          FOREIGN KEY (collab_task_id) REFERENCES collab_tasks(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
     `);
 
     await client.query(`

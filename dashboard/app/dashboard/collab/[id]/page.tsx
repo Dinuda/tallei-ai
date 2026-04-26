@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 
@@ -149,6 +149,8 @@ export default function CollabBoardPage() {
   const [nudgeOpen, setNudgeOpen] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
   const [latestEntryKey, setLatestEntryKey] = useState<string | null>(null);
+  const [latestExpanded, setLatestExpanded] = useState(false);
+  const [copiedLatest, setCopiedLatest] = useState(false);
   const [pollReason, setPollReason] = useState<PollReason>(null);
   const [pollPaused, setPollPaused] = useState(false);
   const [pollFailures, setPollFailures] = useState(0);
@@ -407,6 +409,15 @@ export default function CollabBoardPage() {
     : 0;
   const showPollBanner = Boolean(pollReason && task?.state !== "DONE" && task?.state !== "ERROR");
   const pollBannerText = describePollReason(pollReason, pollFailures);
+  const latestOutput = useMemo(() => {
+    if (!task) return null;
+    const fromModel = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt" || entry.actor === "claude");
+    return fromModel ?? task.transcript[task.transcript.length - 1] ?? null;
+  }, [task]);
+
+  useEffect(() => {
+    setLatestExpanded(false);
+  }, [latestOutput?.ts, latestOutput?.iteration, latestOutput?.actor]);
 
   const markDone = async () => {
     if (!task) return;
@@ -444,6 +455,17 @@ export default function CollabBoardPage() {
     anchor.click();
     URL.revokeObjectURL(url);
   };
+
+  const copyLatestOutput = useCallback(async () => {
+    if (!latestOutput) return;
+    try {
+      await navigator.clipboard.writeText(latestOutput.content);
+      setCopiedLatest(true);
+      setTimeout(() => setCopiedLatest(false), 1200);
+    } catch {
+      setCopiedLatest(false);
+    }
+  }, [latestOutput]);
 
   if (loading) {
     return <div className={styles.page}>Loading...</div>;
@@ -488,6 +510,12 @@ export default function CollabBoardPage() {
             ? `Waiting on ${waitingActor === "chatgpt" ? "ChatGPT" : "Claude"} for ${waitingTimer}`
             : "Task completed"}
         </p>
+        <div className={styles.stateChips}>
+          <span className={`${styles.stateChip} ${styles[`state_${task.state}`] ?? ""}`}>{task.state}</span>
+          <span className={styles.nextActorChip}>
+            {waitingActor ? `Next actor: ${waitingActor === "chatgpt" ? "ChatGPT" : "Claude"}` : "No pending actor"}
+          </span>
+        </div>
       </section>
 
       <section className={styles.zoneB}>
@@ -518,6 +546,32 @@ export default function CollabBoardPage() {
             Last turn errored.
             {task.errorMessage ? <span>{task.errorMessage}</span> : null}
           </div>
+        )}
+
+        {latestOutput && (
+          <article className={styles.latestOutputCard}>
+            <header className={styles.latestOutputHeader}>
+              <div>
+                <h2 className={styles.latestOutputTitle}>Latest Output</h2>
+                <p className={styles.latestOutputMeta}>
+                  {ACTOR_LABEL[latestOutput.actor]} · iter {latestOutput.iteration} · {relativeTime(latestOutput.ts)}
+                </p>
+              </div>
+              <div className={styles.latestOutputActions}>
+                <button type="button" className={styles.lightBtn} onClick={copyLatestOutput}>
+                  {copiedLatest ? "Copied" : "Copy"}
+                </button>
+                {latestOutput.content.length > 320 && (
+                  <button type="button" className={styles.lightBtn} onClick={() => setLatestExpanded((v) => !v)}>
+                    {latestExpanded ? "Collapse" : "Expand"}
+                  </button>
+                )}
+              </div>
+            </header>
+            <p className={`${styles.latestOutputBody} ${latestExpanded ? styles.expanded : ""}`}>
+              {latestOutput.content}
+            </p>
+          </article>
         )}
 
         <div className={styles.transcriptList}>
