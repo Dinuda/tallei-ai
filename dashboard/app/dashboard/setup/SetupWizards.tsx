@@ -217,6 +217,21 @@ COLLAB TASKS FIRST (override):
 - Do not create a Claude handoff prompt. Tallei already stored the task context/history; ask "Do you want to hand off to Claude now?" and use only the returned command, usually \`continue task <task_id>\`.
 - If the user says "handoff to Claude" or selects a handoff option like "3", call \`prepare_response\` with \`conversation_history=[{role, content}, ...]\` containing the visible ChatGPT messages and \`handoff_target="claude"\` before returning the handoff command.
 
+COLLAB GRILL-ME ROLE DISPLAY:
+- When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
+
+  ChatGPT system prompt:
+  \`\`\`text
+  <ChatGPT role text>
+  \`\`\`
+
+  Claude system prompt:
+  \`\`\`text
+  <Claude role text>
+  \`\`\`
+
+- Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
+
 COLLAB CONTINUE — execution order:
 - \`collab_continue\` runs \`prepare_response\` preflight first, then uploads/attaches files, then checks/submits the turn.
 - Always provide the exact user message in \`message\`.

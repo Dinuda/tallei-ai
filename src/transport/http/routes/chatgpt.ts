@@ -140,14 +140,12 @@ const collabCreateTaskSchema = z.object({
 const collabSubmitTurnSchema = z.object({
   task_id: z.string().uuid("task_id must be a valid UUID"),
   content: z.string().trim().min(1, "content is required"),
-  mark_done: z.boolean().optional().default(false),
 });
 
 const collabContinueSchema = z.object({
   message: z.string().trim().min(1, "message is required"),
   task_id: z.string().uuid("task_id must be a valid UUID").optional(),
   draft_output: z.string().trim().optional(),
-  mark_done: z.boolean().optional().default(false),
 });
 
 const orchestrateStartSchema = z.object({
@@ -255,6 +253,27 @@ function appendContinueCommand(
   return `${userVisible}\n\n${command.instruction}`;
 }
 
+function roleSelectionUserVisible(roleSelection: {
+  chatgpt_role: string;
+  claude_role: string;
+  first_actor_recommendation: string;
+  selected_first_actor: string;
+}): string {
+  return [
+    "Before grill-me starts, here is the provider role split. Show each provider prompt as a fenced code block so it is visually distinct:",
+    "ChatGPT system prompt:",
+    "```text",
+    roleSelection.chatgpt_role,
+    "```",
+    "Claude system prompt:",
+    "```text",
+    roleSelection.claude_role,
+    "```",
+    `Recommended first actor: ${roleSelection.first_actor_recommendation}`,
+    `Selected first actor: ${roleSelection.selected_first_actor}`,
+  ].join("\n");
+}
+
 function postgresErrorDetails(error: unknown): {
   code: string;
   constraint: string | null;
@@ -269,6 +288,22 @@ function postgresErrorDetails(error: unknown): {
     code,
     constraint: typeof constraint === "string" ? constraint : null,
     message,
+  };
+}
+
+function genericErrorDetails(error: unknown): {
+  name: string;
+  message: string;
+} {
+  if (error instanceof Error) {
+    return {
+      name: error.name || "Error",
+      message: error.message || "Unknown error",
+    };
+  }
+  return {
+    name: "Error",
+    message: String(error || "Unknown error"),
   };
 }
 
@@ -300,6 +335,24 @@ function zodValidationResponseBody(error: z.ZodError, normalizedBody: unknown): 
 }
 
 const UUID_V4_LIKE_REGEX = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+const ORCHESTRATE_ANSWER_ROUTE_TIMEOUT_MS = 25_000;
+
+class ChatGptActionTimeoutError extends Error {
+  constructor(message = "ChatGPT action timed out") {
+    super(message);
+    this.name = "ChatGptActionTimeoutError";
+  }
+}
+
+function withChatGptActionTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new ChatGptActionTimeoutError()), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
 
 function extractTaskIdFromText(message: string): string | null {
   const match = message.match(UUID_V4_LIKE_REGEX)?.[0] ?? null;
@@ -339,8 +392,13 @@ function collabStageReplyInstructions(
       return [
         "Memory recall and document save complete. Do not call prepare_response again for this turn.",
         "Start grill-me first: call orchestrate_start with goal/title/brief from the user request.",
-        "Continue grill-me with orchestrate_answer until plan_ready.",
+        "After orchestrate_start, show the ChatGPT and Claude role/system prompts as fenced code blocks, then show the first grill-me question and stop.",
+        "Do not call orchestrate_answer until the user explicitly answers or approves continuing with the displayed default/recommended answer.",
+        "After each orchestrate_answer, show the next question or plan review, then stop and wait for the user's next explicit answer or approval.",
         "Approve with orchestrate_approve to create the collab task. Do not include max_iterations.",
+        "Do not call orchestrate_approve until the user explicitly approves the displayed plan.",
+        "Do not provide final artifacts during grill-me planning; only show role split, questions, plan review, and action status.",
+        "After every orchestrate_* action, show the returned user_visible text to the user before stopping or deciding the next action.",
         "After approval, call collab_continue.",
         "If any collab action returns continue_command, end the user-facing response with its instruction.",
       ];
@@ -373,6 +431,13 @@ function collabStageReplyInstructions(
     "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     "If the call fails, return the exact error and stop.",
   ];
+}
+
+function collabNextActor(task: { state: "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR"; iteration: number; maxIterations: number }): "chatgpt" | "claude" | null {
+  if (task.iteration >= task.maxIterations) return null;
+  if (task.state === "CREATIVE") return "chatgpt";
+  if (task.state === "TECHNICAL") return "claude";
+  return null;
 }
 
 const PLAN_CACHE_TTL_MS = 5 * 60_000;
@@ -1826,7 +1891,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "orchestrate_start",
           summary: "Start orchestration planning session",
-          description: "Starts role selection plus grill-me planning before collab task creation.",
+          description: "Starts role selection plus grill-me planning before collab task creation. Show the returned role_suggestion and user_visible text to the user, then stop. Do not call orchestrate_answer until the user explicitly answers or approves continuing.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1847,7 +1912,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           },
           responses: {
             "200": {
-              description: "Session started with role_suggestion, question_payload, and next_instruction.",
+              description: "Session started with role_suggestion, question_payload, user_visible, and next_instruction.",
             },
             "400": { description: "Validation failed" },
             "401": { description: "Unauthorized" },
@@ -1859,7 +1924,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "orchestrate_answer",
           summary: "Continue orchestration planning session",
-          description: "Submits an answer and returns next question or plan when ready.",
+          description: "Submits one user-approved answer and returns the next question or plan when ready. Show returned user_visible text to the user, then stop. Do not auto-continue, batch answers, approve plans, or produce final artifacts without explicit user approval.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1871,14 +1936,17 @@ export function buildOpenApiSpec(serverUrl: string) {
                   required: ["session_id", "answer"],
                   properties: {
                     session_id: { type: "string", format: "uuid" },
-                    answer: { type: "string" },
+                    answer: {
+                      type: "string",
+                      description: "The user's explicit answer to the currently displayed grill-me question. Use 'continue' only if the user explicitly approved the displayed default/recommended answer.",
+                    },
                   },
                 },
               },
             },
           },
           responses: {
-            "200": { description: "Session advanced." },
+            "200": { description: "Session advanced with user_visible progress text." },
             "400": { description: "Validation failed" },
             "404": { description: "Session not found" },
             "409": { description: "Session conflict" },
@@ -1891,7 +1959,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "orchestrate_approve",
           summary: "Approve orchestration plan and create collab task",
-          description: "Approves a PLAN_READY session and starts the linked collab task.",
+          description: "Approves a PLAN_READY session and starts the linked collab task. Only call after the user explicitly approves the displayed plan. Show returned user_visible text before continuing the collab task.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -2007,7 +2075,6 @@ export function buildOpenApiSpec(serverUrl: string) {
                     message: { type: "string" },
                     task_id: { type: "string", format: "uuid" },
                     draft_output: { type: "string" },
-                    mark_done: { type: "boolean" },
                   },
                 },
               },
@@ -2194,7 +2261,6 @@ export function buildOpenApiSpec(serverUrl: string) {
                   properties: {
                     task_id: { type: "string", format: "uuid" },
                     content: { type: "string" },
-                    mark_done: { type: "boolean" },
                   },
                 },
               },
@@ -2789,7 +2855,10 @@ router.post("/actions/orchestrate_start", chatGptActionAuthMiddleware, requireSc
       question: result.firstQuestion,
       question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
       role_suggestion: result.roleSelection,
-      next_instruction: "Review the roles and answer the grill-me question, or say continue to accept the recommended/default answer.",
+      user_visible: result.firstQuestion
+        ? `${roleSelectionUserVisible(result.roleSelection)}\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
+        : `${roleSelectionUserVisible(result.roleSelection)}\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrate_approve.`,
+      next_instruction: "Show the role split and first grill-me question to the user, then stop. Do not call orchestrate_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
       fallback_context: buildSessionFallbackContext(result.session),
     });
   } catch (error) {
@@ -2812,7 +2881,10 @@ router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireS
     const body = orchestrateAnswerSchema.parse(req.body ?? {});
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
-    const result = await submitOrchestrationAnswer(body.session_id, body.answer, auth);
+    const result = await withChatGptActionTimeout(
+      submitOrchestrationAnswer(body.session_id, body.answer, auth),
+      ORCHESTRATE_ANSWER_ROUTE_TIMEOUT_MS
+    );
 
     logChatGptActionAsync({
       auth: req.authContext,
@@ -2832,9 +2904,12 @@ router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireS
       question: result.nextQuestion ?? null,
       question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
       plan: result.plan ?? result.session.plan,
+      user_visible: result.planReady
+        ? "I saved that answer. The grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrate_approve."
+        : `I saved that answer. Next grill-me question: ${result.nextQuestion ?? "continue with the recommended/default answer."}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`,
       next_instruction: result.planReady
-        ? "Review the plan. If it looks good, say continue so orchestrate_approve can create the collab task."
-        : "Review and answer the next grill-me question, or say continue to accept the recommended/default answer.",
+        ? "Show the plan for review, then stop. Do not call orchestrate_approve until the user explicitly approves the plan."
+        : "Show the next grill-me question, then stop. Do not call orchestrate_answer again until the user explicitly answers or approves using the displayed default/recommended answer.",
       fallback_context: buildSessionFallbackContext(result.session),
     });
   } catch (error) {
@@ -2850,13 +2925,39 @@ router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireS
       res.status(409).json({ error: error.message });
       return;
     }
+    if (error instanceof ChatGptActionTimeoutError) {
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/orchestrate_answer",
+        ok: false,
+        error: error.message,
+      });
+      res.status(504).json({
+        error: "Orchestration answer timed out",
+        details: {
+          timeout_ms: ORCHESTRATE_ANSWER_ROUTE_TIMEOUT_MS,
+          message:
+            "Planner did not finish before the ChatGPT action deadline. Retry once with the user's explicit answer.",
+        },
+        user_visible:
+          "The grill-me planner is taking too long, so I stopped this request before ChatGPT timed out. Retry once with the user's explicit answer.",
+      });
+      return;
+    }
+    const pg = postgresErrorDetails(error);
+    const details = pg ?? genericErrorDetails(error);
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/orchestrate_answer",
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to continue orchestration session",
+      error: details.message,
     });
-    res.status(500).json({ error: "Failed to continue orchestration session" });
+    res.status(500).json({
+      error: "Failed to continue orchestration session",
+      details,
+      user_visible:
+        "I could not continue the grill-me step because planning failed on the server. Retry this answer, or ask me to finalize with the information already collected.",
+    });
   }
 });
 
@@ -2885,6 +2986,7 @@ router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, require
       plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
       success_criteria: result.session.plan?.success_criteria ?? [],
       first_actor: result.session.plan?.first_actor ?? "chatgpt",
+      user_visible: `Plan approved. Collab task ${result.task.id} is ready.`,
       next_instruction: `Collab task ${result.task.id} is ready. Continue with collab_continue/collab_check_turn for the selected first actor.`,
       fallback_context: buildSessionFallbackContext(result.session),
     });
@@ -3048,7 +3150,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
     }
     const inlineDocuments = await inlineDocumentsFromTaskContext(task, auth);
 
-    const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+    const nextActor = collabNextActor(task);
     const lastMessage = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
 
     if (!claim) {
@@ -3138,14 +3240,10 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       return;
     }
 
-    const submittedTask = await submitTurn(task.id, "chatgpt", body.draft_output, auth, { markDone: body.mark_done });
+    const submittedTask = await submitTurn(task.id, "chatgpt", body.draft_output, auth);
     const savedTurn = submittedTask.transcript.length > 0 ? submittedTask.transcript[submittedTask.transcript.length - 1] : null;
     const continueCommand = buildFirstTurnContinueCommand(submittedTask);
-    const nextAfterSubmit = submittedTask.state === "CREATIVE"
-      ? "chatgpt"
-      : submittedTask.state === "TECHNICAL"
-        ? "claude"
-        : null;
+    const nextAfterSubmit = collabNextActor(submittedTask);
 
     logChatGptActionAsync({
       auth: req.authContext,
@@ -3199,7 +3297,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       if (!auth) return;
       const taskIdFromBody = readBodyTaskId(req.body) ?? extractTaskIdFromText(typeof req.body?.message === "string" ? req.body.message : "");
       const task = taskIdFromBody ? await getTask(taskIdFromBody, auth) : null;
-      const nextActor = task ? (task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null) : null;
+      const nextActor = task ? collabNextActor(task) : null;
       res.status(409).json({
         ok: false,
         error: error.message,
@@ -3310,7 +3408,7 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       ? task.transcript[task.transcript.length - 1]
       : null;
 
-    const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+    const nextActor = collabNextActor(task);
     const continueCommand = buildFirstTurnContinueCommand(task);
     logChatGptActionAsync({
       auth: req.authContext,
@@ -3369,8 +3467,8 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
 
-    const task = await submitTurn(body.task_id, "chatgpt", body.content, auth, { markDone: body.mark_done });
-    const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+    const task = await submitTurn(body.task_id, "chatgpt", body.content, auth);
+    const nextActor = collabNextActor(task);
     const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
     const continueCommand = buildFirstTurnContinueCommand(task);
     logChatGptActionAsync({
@@ -3419,7 +3517,7 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
       if (!auth) return;
       const taskId = readBodyTaskId(req.body);
       const task = taskId ? await getTask(taskId, auth) : null;
-      const nextActor = task ? (task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null) : null;
+      const nextActor = task ? collabNextActor(task) : null;
       res.status(409).json({
         ok: false,
         error: error.message,

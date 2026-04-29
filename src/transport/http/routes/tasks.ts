@@ -58,7 +58,6 @@ const runTurnSchema = z.object({ actor: z.enum(["chatgpt", "claude"]) });
 const submitTurnSchema = z.object({
   actor: z.enum(["chatgpt", "claude"]),
   content: z.string().trim().min(1, "content is required"),
-  mark_done: z.boolean().optional().default(false),
 });
 
 const finishTaskSchema = z.object({ reason: z.string().optional() });
@@ -316,8 +315,7 @@ router.post("/:id/submit-turn", requireScopes(["collab:write"]), async (req: Aut
       id,
       body.actor,
       body.content,
-      req.authContext!,
-      { markDone: body.mark_done }
+      req.authContext!
     );
     res.json(task);
   } catch (error) {

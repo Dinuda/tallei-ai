@@ -58,6 +58,11 @@ const PLANNER_SYSTEM_PROMPT =
   "Use web search when relevant facts are uncertain or time-sensitive. " +
   "Only return JSON that matches the provided schema.";
 
+function isAbortLikeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError" || /aborted|abort|timeout|timed out/i.test(error.message);
+}
+
 const interviewJsonSchema = {
   name: "planner_interview_step",
   strict: true,
@@ -639,6 +644,9 @@ export async function runPlannerStep(params: {
 
       throw new Error("Planner output did not include a question or plan");
     } catch (error) {
+      if (isAbortLikeError(error)) {
+        throw error;
+      }
       parseError = error;
     }
   }

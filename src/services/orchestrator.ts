@@ -582,8 +582,8 @@ export async function submitAnswer(
   planReady?: true;
   plan?: OrchestrationPlan;
 }> {
-  const trimmed = answer.trim();
-  if (!trimmed) {
+  const requestedAnswer = answer.trim();
+  if (!requestedAnswer) {
     throw new Error("answer is required");
   }
 
@@ -595,6 +595,14 @@ export async function submitAnswer(
     throw new OrchestrationConflictError("Session is not currently interviewing");
   }
 
+  const latestQuestion = latestPlannerQuestion(current);
+  const isContinueRequest = /^continue$/i.test(requestedAnswer);
+  const trimmed = isContinueRequest
+    ? latestQuestion?.default_answer
+      ?? latestQuestion?.suggested_answers?.[0]
+      ?? "Use the recommended/default answer and continue planning."
+    : requestedAnswer;
+
   const userEntry: OrchestrationTranscriptEntry = {
     role: "user",
     content: trimmed,
@@ -603,7 +611,7 @@ export async function submitAnswer(
 
   const transcript = [...current.transcript, userEntry];
   const questionCount = countPlannerQuestions(transcript);
-  const mode = questionCount >= config.plannerMaxQuestions ? "finalize" : "interview";
+  const mode = isContinueRequest || questionCount >= config.plannerMaxQuestions ? "finalize" : "interview";
   const metadata = current.metadata;
   const currentWebSearchCount = readWebSearchCount(metadata);
   const remainingSearchBudget = Math.max(0, config.plannerWebSearchBudget - currentWebSearchCount);
@@ -680,6 +688,50 @@ export async function submitAnswer(
         : {}),
       ...(plannerResult.default_answer ? { default_answer: plannerResult.default_answer } : {}),
     },
+  };
+}
+
+export async function submitAnswers(
+  sessionId: string,
+  answers: string[],
+  auth: AuthContext,
+  options?: { maxSteps?: number; autoContinue?: boolean }
+): Promise<{
+  session: OrchestrationSession;
+  nextQuestion?: string;
+  nextQuestionData?: { question: string; suggested_answers?: string[]; default_answer?: string | null };
+  planReady?: true;
+  plan?: OrchestrationPlan;
+  stepsProcessed: number;
+}> {
+  const maxSteps = Math.max(1, Math.min(5, Math.trunc(options?.maxSteps ?? 3)));
+  const queue = answers.map((answer) => answer.trim()).filter(Boolean);
+  let result: Awaited<ReturnType<typeof submitAnswer>> | null = null;
+  let stepsProcessed = 0;
+
+  while (stepsProcessed < maxSteps) {
+    const nextAnswer = queue.shift() ?? (options?.autoContinue ? "continue" : null);
+    if (!nextAnswer) break;
+
+    result = await submitAnswer(sessionId, nextAnswer, auth);
+    stepsProcessed += 1;
+
+    if (result.planReady || result.session.status !== "INTERVIEWING") {
+      break;
+    }
+
+    if (queue.length === 0 && !options?.autoContinue) {
+      break;
+    }
+  }
+
+  if (!result) {
+    throw new Error("answers are required");
+  }
+
+  return {
+    ...result,
+    stepsProcessed,
   };
 }
 

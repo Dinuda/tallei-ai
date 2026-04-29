@@ -38,6 +38,21 @@ CREATE  ([COLLAB:CREATE] was set in Step 1)
        title, brief, first_actor (default "chatgpt")
   2. Immediately call collab_continue with message + draft_output (if ready).
 
+GRILL-ME ROLE DISPLAY:
+  When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
+
+  ChatGPT system prompt:
+  ```text
+  <ChatGPT role text>
+  ```
+
+  Claude system prompt:
+  ```text
+  <Claude role text>
+  ```
+
+  Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
+
 CONTINUE  ([COLLAB:CONTINUE:<uuid>] was set in Step 1)
   1. Call collab_continue with the exact user message.
   2. If is_my_turn=true, include draft_output in the same call.

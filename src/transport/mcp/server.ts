@@ -141,7 +141,6 @@ function collabLogDetails(
         actor: "claude",
         content_preview: content,
         content_length: contentLength,
-        mark_done: Boolean(args["mark_done"]),
       },
     };
   }
@@ -189,6 +188,9 @@ function collabLogDetails(
         action: "answer",
         session_id: typeof args["session_id"] === "string" ? args["session_id"] : null,
         answer_preview: previewText(args["answer"], 240),
+        answers_count: Array.isArray(args["answers"]) ? args["answers"].length : null,
+        auto_continue: typeof args["auto_continue"] === "boolean" ? args["auto_continue"] : null,
+        max_steps: typeof args["max_steps"] === "number" ? args["max_steps"] : null,
       },
     };
   }

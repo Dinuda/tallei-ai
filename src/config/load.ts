@@ -280,7 +280,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     plannerModel: readStringEnv(e, "TALLEI_PLANNER__MODEL", "gpt-4o-mini"),
     plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
     plannerWebSearchBudget: readIntEnv(e, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
-    plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 45_000),
+    plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000),
     openaiPayloadLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_ENABLED", false),
     openaiPayloadLoggingMaxChars: Math.max(
       64,
@@ -356,6 +356,21 @@ STEP 0 — COLLAB TASKS FIRST:
 - If the user says "@tallei decide" and no task exists yet, call collab_create_task first, then continue with collab_check_turn/collab_take_turn.
 - If the user says "@tallei ship", return structured execution output (PRD/tickets/checklist/owner/due date) and submit that exact output to collab_take_turn.
 - After collab_take_turn succeeds, show the actual submitted output content in your reply (not just "task completed").
+
+STEP 0A - GRILL-ME ROLE DISPLAY:
+- When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
+
+  ChatGPT system prompt:
+  \`\`\`text
+  <ChatGPT role text>
+  \`\`\`
+
+  Claude system prompt:
+  \`\`\`text
+  <Claude role text>
+  \`\`\`
+
+- Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
 
 STEP A — RECALL WHEN NEEDED:
 - Do NOT call recall_memories reflexively.

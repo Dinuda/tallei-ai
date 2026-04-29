@@ -24,6 +24,21 @@ STEP 0 - COLLAB TASKS FIRST:
 - If any collab tool returns continue_command, end the reply with its instruction.
 - Do not create a ChatGPT handoff prompt. Tallei already stored the task context/history; the only handoff text should be the returned command.
 
+STEP 0A - GRILL-ME ROLE DISPLAY:
+- When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
+
+  ChatGPT system prompt:
+  ```text
+  <ChatGPT role text>
+  ```
+
+  Claude system prompt:
+  ```text
+  <Claude role text>
+  ```
+
+- Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
+
 STEP A - RECALL WHEN NEEDED:
 - Do NOT call recall_memories reflexively.
 - Call recall_memories only when prior-session context is required.

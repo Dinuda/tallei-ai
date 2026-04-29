@@ -829,7 +829,7 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
       })),
       last_evaluation: lastEvaluation,
       instructions:
-        "Append an ```orchestrator-eval``` JSON block. Set mark_done=true when all criteria pass.",
+        "Append an ```orchestrator-eval``` JSON block. Do not mark the task done automatically; ask the user for explicit approval to finish.",
     };
   }
 
@@ -840,7 +840,7 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
     state: task.state,
     iteration: task.iteration,
     max_iterations: task.maxIterations,
-    waiting_on: actorWaitingForState(task.state),
+    waiting_on: task.iteration >= task.maxIterations ? null : actorWaitingForState(task.state),
     your_actor: actor,
     last_message: lastMessage,
     last_chatgpt_entry: lastChatGptEntry,
@@ -1082,6 +1082,7 @@ export async function claimTurn(
      WHERE id = $1
        AND user_id = $2
        AND state = $3
+       AND iteration < max_iterations
      LIMIT 1`,
     [taskId, auth.userId, expectedState]
   );
@@ -1099,7 +1100,7 @@ export async function submitTurn(
   actor: CollabModelActor,
   content: string,
   auth: AuthContext,
-  opts: { markDone?: boolean } = {}
+  _opts: { markDone?: boolean } = {}
 ): Promise<CollabTask> {
   const trimmed = content.trim();
   if (!trimmed) {
@@ -1117,30 +1118,17 @@ export async function submitTurn(
     ts: submittedAt,
   };
 
-  const capEntry = {
-    actor: "user" as const,
-    iteration: 0,
-    content: "Iteration cap reached. Task auto-marked done.",
-    ts: submittedAt,
-  };
-
   const result = await pool.query<CollabTaskRow>(
     `UPDATE collab_tasks
-     SET transcript =
-       CASE
-         WHEN $7::boolean OR iteration + 1 < max_iterations
-           THEN transcript || jsonb_set($5::jsonb, '{iteration}', to_jsonb(iteration + 1))
-         ELSE transcript || jsonb_set($5::jsonb, '{iteration}', to_jsonb(iteration + 1)) || jsonb_set($6::jsonb, '{iteration}', to_jsonb(iteration + 1))
-       END,
-         state =
-       CASE
-         WHEN $7::boolean THEN 'DONE'
-         WHEN iteration + 1 >= max_iterations THEN 'DONE'
-         ELSE $8
-       END,
+     SET transcript = transcript || jsonb_set($5::jsonb, '{iteration}', to_jsonb(iteration + 1)),
+         state = $6,
          last_actor = $4,
          iteration = iteration + 1,
-         error_message = NULL,
+         error_message = CASE
+           WHEN iteration + 1 >= max_iterations
+             THEN 'Iteration limit reached. Waiting for explicit user approval to finish or extend the task.'
+           ELSE NULL
+         END,
          updated_at = now()
      WHERE id = $1
        AND user_id = $2
@@ -1153,8 +1141,6 @@ export async function submitTurn(
       expectedState,
       actor,
       JSON.stringify(newEntry),
-      JSON.stringify(capEntry),
-      Boolean(opts.markDone),
       desiredNextState,
     ]
   );

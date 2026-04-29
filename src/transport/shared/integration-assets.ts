@@ -1,7 +1,7 @@
 export const CHATGPT_ACTIONS_SPEC_TAG = "stable";
-export const CHATGPT_OPENAPI_VERSION = "2026-04-29.4";
+export const CHATGPT_OPENAPI_VERSION = "2026-04-29.5";
 
-export const CLAUDE_INSTRUCTIONS_VERSION = "2026-04-29.5";
+export const CLAUDE_INSTRUCTIONS_VERSION = "2026-04-29.6";
 export const CLAUDE_INSTRUCTIONS_TEXT = `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.
 
 === TURN PROTOCOL ===
@@ -27,6 +27,21 @@ STEP 0 - COLLAB TASKS FIRST:
 - After collab_take_turn succeeds, show the actual submitted output content in your reply (not just "task completed").
 - If any collab tool returns continue_command, end the reply with its instruction.
 - Do not create a ChatGPT handoff prompt. Tallei already stored the task context/history; the only handoff text should be the returned command.
+
+STEP 0A - GRILL-ME ROLE DISPLAY:
+- When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
+
+  ChatGPT system prompt:
+  \`\`\`text
+  <ChatGPT role text>
+  \`\`\`
+
+  Claude system prompt:
+  \`\`\`text
+  <Claude role text>
+  \`\`\`
+
+- Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
 
 STEP A - RECALL WHEN NEEDED:
 - Do NOT call recall_memories reflexively.

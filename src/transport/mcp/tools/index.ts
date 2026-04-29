@@ -39,7 +39,7 @@ import {
   OrchestrationInvalidPlanError,
   OrchestrationNotFoundError,
   startSession as startOrchestratorSession,
-  submitAnswer as submitOrchestratorAnswer,
+  submitAnswers as submitOrchestratorAnswers,
 } from "../../../services/orchestrator.js";
 import { PlatformSchema } from "../schemas.js";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
@@ -98,6 +98,27 @@ function appendContinueCommand(
 ): string {
   if (!command) return userVisible;
   return `${userVisible}\n\n${command.instruction}`;
+}
+
+function roleSelectionUserVisible(roleSelection: {
+  chatgpt_role: string;
+  claude_role: string;
+  first_actor_recommendation: string;
+  selected_first_actor: string;
+}): string {
+  return [
+    "Before grill-me starts, here is the provider role split. Show each provider prompt as a fenced code block so it is visually distinct:",
+    "ChatGPT system prompt:",
+    "```text",
+    roleSelection.chatgpt_role,
+    "```",
+    "Claude system prompt:",
+    "```text",
+    roleSelection.claude_role,
+    "```",
+    `Recommended first actor: ${roleSelection.first_actor_recommendation}`,
+    `Selected first actor: ${roleSelection.selected_first_actor}`,
+  ].join("\n");
 }
 
 function hasCollabWriteScope(auth: AuthContext): boolean {
@@ -253,7 +274,13 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         const inlineDocuments = await inlineDocumentsFromTaskContext(task, auth);
 
         const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
-        const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+        const nextActor = task.iteration >= task.maxIterations
+          ? null
+          : task.state === "CREATIVE"
+            ? "chatgpt"
+            : task.state === "TECHNICAL"
+              ? "claude"
+              : null;
         const continueCommand = buildFirstTurnContinueCommand(task);
         return toJsonToolResult({
           is_my_turn: Boolean(claimed),
@@ -297,12 +324,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       inputSchema: {
         task_id: z.string().uuid().describe("Collab task ID."),
         content: z.string().min(1).describe("Turn output content."),
-        mark_done: z.boolean().optional().default(false),
         openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
         conversation_id: conversationIdSchema,
       },
     },
-    async ({ task_id, content, mark_done, openaiFileIdRefs, conversation_id }) => {
+    async ({ task_id, content, openaiFileIdRefs, conversation_id }) => {
       try {
         if (!hasCollabWriteScope(auth)) {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
@@ -313,8 +339,14 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
             conversationId: conversation_id ?? null,
           })
           : null;
-        const task = await submitCollabTurn(task_id, "claude", content, auth, { markDone: mark_done ?? false });
-        const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+        const task = await submitCollabTurn(task_id, "claude", content, auth);
+        const nextActor = task.iteration >= task.maxIterations
+          ? null
+          : task.state === "CREATIVE"
+            ? "chatgpt"
+            : task.state === "TECHNICAL"
+              ? "claude"
+              : null;
         const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
         const continueCommand = buildFirstTurnContinueCommand(task);
         return toJsonToolResult({
@@ -349,7 +381,17 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         }
         if (err instanceof CollabConflictError) {
           const task = await getCollabTask(task_id, auth);
-          const nextActor = task ? (task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null) : null;
+          const nextActor = task
+            ? (
+              task.iteration >= task.maxIterations
+                ? null
+                : task.state === "CREATIVE"
+                  ? "chatgpt"
+                  : task.state === "TECHNICAL"
+                    ? "claude"
+                    : null
+            )
+            : null;
           return toJsonToolResult({
             ok: false,
             error: err.message,
@@ -494,7 +536,13 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           state: task.state,
           iteration: task.iteration,
           max_iterations: task.maxIterations,
-          next_actor: task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null,
+          next_actor: task.iteration >= task.maxIterations
+            ? null
+            : task.state === "CREATIVE"
+              ? "chatgpt"
+              : task.state === "TECHNICAL"
+                ? "claude"
+                : null,
           fallback_context: buildTurnFallbackContext(task, "claude"),
           preflight_recall: preflightRecall.body,
           ...(uploadSummary ? { upload: uploadSummary } : {}),
@@ -539,7 +587,10 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           question: result.firstQuestion,
           question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
           role_suggestion: result.roleSelection,
-          next_instruction: "Review the roles and answer the grill-me question, or say continue to accept the recommended/default answer.",
+          user_visible: result.firstQuestion
+            ? `${roleSelectionUserVisible(result.roleSelection)}\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
+            : `${roleSelectionUserVisible(result.roleSelection)}\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`,
+          next_instruction: "Show the role split and first grill-me question to the user, then stop. Do not call orchestrator_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
           fallback_context: buildSessionFallbackContext(result.session),
         });
       } catch (err) {
@@ -553,27 +604,42 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "orchestrator_answer",
     {
       title: "Continue Orchestration Session",
-      description: "Submits user answer for orchestration and returns next question or plan.",
+      description: "Submits one or more user answers for orchestration and returns next question or plan.",
       inputSchema: {
         session_id: z.string().uuid().describe("Orchestration session ID."),
-        answer: z.string().min(1).describe("User answer to planner question."),
+        answer: z.string().min(1).optional().describe("Single user answer. Use 'continue' to accept the displayed default/recommended answer and finalize."),
+        answers: z.array(z.string().min(1)).min(1).max(5).optional().describe("Batch of explicit user answers to process in order."),
+        auto_continue: z.boolean().optional().default(false).describe("When true, keep accepting default/recommended answers until plan_ready or max_steps is reached."),
+        max_steps: z.number().int().min(1).max(5).optional().default(3).describe("Maximum planner steps to process in this request."),
       },
     },
-    async ({ session_id, answer }) => {
+    async ({ session_id, answer, answers, auto_continue, max_steps }) => {
       try {
         if (!hasOrchestrateScope(auth)) {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
         }
-        const result = await submitOrchestratorAnswer(session_id, answer, auth);
+        const answerBatch = answers ?? (answer ? [answer] : []);
+        if (answerBatch.length === 0) {
+          return toJsonToolResult({ error: "answer or answers is required", session_id }, true);
+        }
+        const shouldAutoContinue = Boolean(auto_continue) || answerBatch.some((value) => /^continue$/i.test(value.trim()));
+        const result = await submitOrchestratorAnswers(session_id, answerBatch, auth, {
+          autoContinue: shouldAutoContinue,
+          maxSteps: max_steps,
+        });
         return toJsonToolResult({
           session_id,
           status: result.session.status,
           question: result.nextQuestion ?? null,
           question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
           plan: result.plan ?? result.session.plan,
+          steps_processed: result.stepsProcessed,
+          user_visible: result.planReady
+            ? `I processed ${result.stepsProcessed} grill-me step${result.stepsProcessed === 1 ? "" : "s"}. The plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`
+            : `I processed ${result.stepsProcessed} grill-me step${result.stepsProcessed === 1 ? "" : "s"}. Next grill-me question: ${result.nextQuestion ?? "continue with the recommended/default answer."}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`,
           next_instruction: result.planReady
-            ? "Review the plan. If it looks good, say continue so orchestrator_approve can create the collab task."
-            : "Review and answer the next grill-me question, or say continue to accept the recommended/default answer.",
+            ? "Show the plan for review, then stop. Do not call orchestrator_approve until the user explicitly approves the plan."
+            : "Show the next grill-me question, then stop. Do not call orchestrator_answer again until the user explicitly answers or approves using the displayed default/recommended answer.",
           fallback_context: buildSessionFallbackContext(result.session),
         });
       } catch (err) {
