@@ -56,6 +56,7 @@ export default function CollabTaskWizardPage() {
   const [chatgptRole, setChatgptRole] = useState("");
   const [claudeRole, setClaudeRole] = useState("");
   const [starterRecommendation, setStarterRecommendation] = useState<FirstActor>("chatgpt");
+  const [grillMeEnabled, setGrillMeEnabled] = useState(true);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [contextDocs, setContextDocs] = useState<ContextDocument[]>([]);
   const [existingDocs, setExistingDocs] = useState<ExistingDocListItem[]>([]);
@@ -204,12 +205,15 @@ export default function CollabTaskWizardPage() {
     setBusy(true);
     setErrorText(null);
     try {
-      const res = await fetch("/api/collab/tasks", {
+      const res = await fetch("/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          mode: grillMeEnabled ? "planning" : "direct",
           title: title.trim(),
+          goal: title.trim(),
           brief: brief.trim() || null,
+          initialContext: brief.trim() || null,
           firstActor: starterRecommendation,
           maxIterations: 4,
           context: {
@@ -229,10 +233,23 @@ export default function CollabTaskWizardPage() {
         }),
       });
       const body = await res.json();
-      if (!res.ok || typeof body?.id !== "string") {
+      if (grillMeEnabled) {
+        const sessionId = typeof body?.session_id === "string" ? body.session_id : null;
+        if (!res.ok || !sessionId) {
+          throw new Error(typeof body?.error === "string" ? body.error : "Failed to start grill-me planning");
+        }
+        router.push(`/dashboard/tasks/plan/${sessionId}`);
+        return;
+      }
+      const createdTaskId = typeof body?.id === "string"
+        ? body.id
+        : typeof body?.task?.id === "string"
+          ? body.task.id
+          : null;
+      if (!res.ok || !createdTaskId) {
         throw new Error(typeof body?.error === "string" ? body.error : "Failed to create collab task");
       }
-      router.push(`/dashboard/collab/kickoff/${body.id}`);
+      router.push(`/dashboard/tasks/kickoff/${createdTaskId}`);
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "Failed to create collab task.");
       setBusy(false);
@@ -361,6 +378,22 @@ export default function CollabTaskWizardPage() {
                 ))}
               </div>
             )}
+          </div>
+
+          <div className={styles.toggleRow}>
+            <div className={styles.toggleCopy}>
+              <span className={styles.toggleTitle}>Use grill-me planning</span>
+              <span className={styles.toggleText}>Ask clarifying questions and approve a plan before the task starts.</span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={grillMeEnabled}
+              className={`${styles.switch} ${grillMeEnabled ? styles.switchOn : ""}`}
+              onClick={() => setGrillMeEnabled((value) => !value)}
+            >
+              <span className={styles.switchThumb} />
+            </button>
           </div>
 
           <div className={styles.fieldGroup}>
@@ -515,6 +548,10 @@ export default function CollabTaskWizardPage() {
                 {starterRecommendation === "chatgpt" ? "ChatGPT" : "Claude"}
               </span>
             </div>
+            <div className={styles.summaryRow}>
+              <span className={styles.summaryKey}>Planning</span>
+              <span className={styles.summaryValue}>{grillMeEnabled ? "Grill-me before execution" : "Skip grill-me"}</span>
+            </div>
             {contextDocs.length > 0 && (
               <div className={styles.summaryRow}>
                 <span className={styles.summaryKey}>Documents</span>
@@ -530,7 +567,7 @@ export default function CollabTaskWizardPage() {
         <button
           type="button"
           className={styles.backBtn}
-          onClick={() => (step === 0 ? router.push("/dashboard/collab") : setStep(step - 1))}
+          onClick={() => (step === 0 ? router.push("/dashboard/tasks") : setStep(step - 1))}
           disabled={busy || roleLoading || stepWaiting}
         >
           <ArrowLeft size={14} />
@@ -570,7 +607,7 @@ export default function CollabTaskWizardPage() {
               </>
             ) : (
               <>
-                Create Task
+                {grillMeEnabled ? "Start Grill-Me" : "Create Task"}
                 <ArrowRight size={14} />
               </>
             )}

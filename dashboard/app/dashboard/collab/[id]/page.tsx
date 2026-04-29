@@ -337,13 +337,13 @@ export default function CollabBoardPage() {
   const redirectIfOrchestrationSession = useCallback(async (): Promise<boolean> => {
     if (!taskId) return false;
     try {
-      const res = await fetch(`/api/collab/orchestrations/${taskId}`, { cache: "no-store" });
+      const res = await fetch(`/api/tasks/orchestrations/${taskId}`, { cache: "no-store" });
       const body = await res.json();
       if (res.ok && typeof body?.id === "string") {
         if (typeof body?.collabTaskId === "string" && body.collabTaskId) {
-          router.replace(`/dashboard/collab/${body.collabTaskId}`);
+          router.replace(`/dashboard/tasks/${body.collabTaskId}`);
         } else {
-          router.replace("/dashboard/collab");
+          router.replace("/dashboard/tasks");
         }
         return true;
       }
@@ -358,7 +358,7 @@ export default function CollabBoardPage() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), POLL_CONFIG.requestTimeoutMs);
     try {
-      const res = await fetch(`/api/collab/tasks/${taskId}`, {
+      const res = await fetch(`/api/tasks/${taskId}`, {
         cache: "no-store",
         signal: controller.signal,
       });
@@ -531,7 +531,7 @@ export default function CollabBoardPage() {
 
   const markDone = async () => {
     if (!task) return;
-    await fetch(`/api/collab/tasks/${task.id}/finish`, {
+    await fetch(`/api/tasks/${task.id}/finish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "Marked done from dashboard" }),
@@ -541,7 +541,7 @@ export default function CollabBoardPage() {
 
   const extendByTwo = async () => {
     if (!task) return;
-    await fetch(`/api/collab/tasks/${task.id}/extend`, {
+    await fetch(`/api/tasks/${task.id}/extend`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ by: 2 }),
@@ -551,8 +551,8 @@ export default function CollabBoardPage() {
 
   const removeTask = async () => {
     if (!task) return;
-    await fetch(`/api/collab/tasks/${task.id}`, { method: "DELETE" });
-    router.push("/dashboard/collab");
+    await fetch(`/api/tasks/${task.id}`, { method: "DELETE" });
+    router.push("/dashboard/tasks");
   };
 
   const exportMarkdown = () => {
@@ -581,7 +581,7 @@ export default function CollabBoardPage() {
     return (
       <div className={styles.page}>
         <p className={styles.subtle}>Task not found.</p>
-        <Link href="/dashboard/collab" className={styles.primaryBtn}>Back to list</Link>
+        <Link href="/dashboard/tasks" className={styles.primaryBtn}>Back to list</Link>
       </div>
     );
   }
@@ -589,7 +589,7 @@ export default function CollabBoardPage() {
   return (
     <div className={styles.page}>
       <div className={styles.topBar}>
-        <Link href="/dashboard/collab" className={styles.backLink}>← Collab Tasks</Link>
+        <Link href="/dashboard/tasks" className={styles.backLink}>← Collab Tasks</Link>
         <button className={styles.iconBtn} type="button" onClick={() => setShowRaw((v) => !v)}>
           <MoreHorizontal size={16} />
         </button>

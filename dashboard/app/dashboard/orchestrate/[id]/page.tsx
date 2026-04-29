@@ -10,7 +10,7 @@ export default function OrchestrateSessionRedirectPage() {
 
   useEffect(() => {
     if (!id) {
-      router.replace("/dashboard/collab");
+      router.replace("/dashboard/tasks");
       return;
     }
 
@@ -18,16 +18,16 @@ export default function OrchestrateSessionRedirectPage() {
 
     async function resolveSession() {
       try {
-        const res = await fetch(`/api/collab/orchestrations/${id}`, { cache: "no-store" });
+        const res = await fetch(`/api/tasks/orchestrations/${id}`, { cache: "no-store" });
         const body = await res.json();
         if (!cancelled && res.ok && typeof body?.collabTaskId === "string" && body.collabTaskId) {
-          router.replace(`/dashboard/collab/${body.collabTaskId}`);
+          router.replace(`/dashboard/tasks/${body.collabTaskId}`);
           return;
         }
       } catch {
         // Fall through to the task list. Planning now lives in the provider chats, not a dashboard page.
       }
-      if (!cancelled) router.replace("/dashboard/collab");
+      if (!cancelled) router.replace("/dashboard/tasks");
     }
 
     void resolveSession();

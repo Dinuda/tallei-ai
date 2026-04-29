@@ -92,7 +92,7 @@ export default function CollabKickoffPage() {
     async function loadTask() {
       setLoading(true);
       try {
-        const res = await fetch(`/api/collab/tasks/${taskId}`, { cache: "no-store" });
+        const res = await fetch(`/api/tasks/${taskId}`, { cache: "no-store" });
         const body = await res.json();
         if (!res.ok) {
           throw new Error(typeof body?.error === "string" ? body.error : "Task not found");
@@ -145,7 +145,7 @@ export default function CollabKickoffPage() {
         <div className={styles.empty}>
           <h2 className={styles.emptyTitle}>Task not found</h2>
           <p className={styles.emptyText}>The task you are looking for does not exist or has been deleted.</p>
-          <Link href="/dashboard/collab" className={styles.primaryBtn}>
+          <Link href="/dashboard/tasks" className={styles.primaryBtn}>
             <ArrowLeft size={14} />
             Back to tasks
           </Link>
@@ -282,11 +282,11 @@ export default function CollabKickoffPage() {
 
       {/* Actions */}
       <div className={styles.actions}>
-        <Link href={`/dashboard/collab/${task.id}`} className={styles.primaryBtn}>
+        <Link href={`/dashboard/tasks/${task.id}`} className={styles.primaryBtn}>
           <ClipboardCheck size={16} />
           I pasted both — open task
         </Link>
-        <Link href="/dashboard/collab" className={styles.secondaryBtn}>
+        <Link href="/dashboard/tasks" className={styles.secondaryBtn}>
           <ArrowLeft size={14} />
           Back to tasks
         </Link>

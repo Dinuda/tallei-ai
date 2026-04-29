@@ -1,31 +1,27 @@
 .loader {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-  border-radius: var(--radius-pill, 9999px);
-  border: 1px solid var(--border, #cce89e);
-  background: var(--surface, #ffffff);
+  gap: 8px;
   color: var(--text-2, #3d5c18);
   font-size: 0.78rem;
   font-weight: 500;
-  box-shadow: var(--elevation-card, 0 1px 3px rgba(0,0,0,0.06));
   white-space: nowrap;
 }
 
-.dots {
+.tally {
   display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: rgba(126, 183, 27, 0.1);
 }
 
-.dot {
+.tally svg {
   display: block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent, #7eb71b);
-  will-change: transform, opacity;
+  filter: drop-shadow(0 1px 2px rgba(93, 140, 12, 0.25));
+  overflow: visible;
 }
 
 .label {

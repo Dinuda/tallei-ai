@@ -137,7 +137,7 @@ export default function CollabTasksPage() {
     if (mode === "refresh") setRefreshing(true);
 
     try {
-      const res = await fetch(`/api/collab/tasks?filter=${filter}`, { cache: "no-store" });
+      const res = await fetch(`/api/tasks?filter=${filter}`, { cache: "no-store" });
       const body = await res.json();
       if (!res.ok) {
         throw new Error(typeof body?.error === "string" ? body.error : "Failed to load tasks");
@@ -186,7 +186,7 @@ export default function CollabTasksPage() {
             <RefreshCw size={14} className={refreshing ? styles.spin : ""} />
             Refresh
           </button>
-          <Link className={styles.primaryBtn} href="/dashboard/collab/new">
+          <Link className={styles.primaryBtn} href="/dashboard/tasks/new">
             <Plus size={16} />
             New Task
           </Link>
@@ -246,7 +246,7 @@ export default function CollabTasksPage() {
             return (
               <Link
                 key={session.id}
-                href={session.collabTaskId ? `/dashboard/collab/${session.collabTaskId}` : `/dashboard/collab/plan/${session.id}`}
+                href={session.collabTaskId ? `/dashboard/tasks/${session.collabTaskId}` : `/dashboard/tasks/plan/${session.id}`}
                 className={styles.card}
               >
                 <div className={styles.cardTop}>
@@ -305,7 +305,7 @@ export default function CollabTasksPage() {
             const progressPercent = Math.min(100, Math.round((task.iteration / Math.max(1, task.maxIterations)) * 100));
 
             return (
-              <Link key={task.id} className={styles.card} href={`/dashboard/collab/${task.id}`}>
+              <Link key={task.id} className={styles.card} href={`/dashboard/tasks/${task.id}`}>
                 <div className={styles.cardTop}>
                   <span
                     className={styles.statusBadge}
@@ -360,8 +360,8 @@ export default function CollabTasksPage() {
           title="No collab tasks yet"
           description="Create a task to start ChatGPT ↔ Claude turn-taking with live transcript updates."
           actionLabel="Start your first collab"
-          actionHref="/dashboard/collab/new"
-          imageSrc="/tallei-home.png"
+          actionHref="/dashboard/tasks/new"
+          illustration="default"
           actionIcon={
             <svg width="18" height="18" viewBox="0 0 15 15" fill="none" aria-hidden>
               <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.2" />

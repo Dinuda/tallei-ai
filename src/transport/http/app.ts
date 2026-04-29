@@ -6,7 +6,7 @@ import authRouter from "./routes/auth.js";
 import keysRouter from "./routes/keys.js";
 import memoriesRouter from "./routes/memories.js";
 import documentsRouter from "./routes/documents.js";
-import collabRouter from "./routes/collab.js";
+import tasksRouter from "./routes/tasks.js";
 import mcpEventsRouter from "./routes/mcpEvents.js";
 import mcpCodeRouter from "./routes/mcp.js";
 import chatgptRouter from "./routes/chatgpt.js";
@@ -99,7 +99,7 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/keys", keysRouter);
   app.use("/api/memories", deps.memoryRateLimit, memoriesRouter);
   app.use("/api/documents", deps.memoryRateLimit, documentsRouter);
-  app.use("/api/collab", deps.memoryRateLimit, collabRouter);
+  app.use("/api/tasks", deps.memoryRateLimit, tasksRouter);
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
   app.use("/api/integration-updates", integrationUpdatesRouter);

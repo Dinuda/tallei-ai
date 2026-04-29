@@ -216,7 +216,7 @@ export default function McpEventsPage() {
                       ) : (
                         <div className={styles.detailsCell}>
                           {event.collabTaskId ? (
-                            <Link className={styles.taskLink} href={`/dashboard/collab/${event.collabTaskId}`}>
+                            <Link className={styles.taskLink} href={`/dashboard/tasks/${event.collabTaskId}`}>
                               Task {event.collabTaskId.slice(0, 8)}…
                             </Link>
                           ) : null}
