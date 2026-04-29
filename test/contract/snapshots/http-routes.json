@@ -361,41 +361,6 @@
   },
   {
     "method": "GET",
-    "path": "/api/orchestrate/sessions",
-    "source": "src/routes/orchestrate.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/orchestrate/sessions",
-    "source": "src/routes/orchestrate.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/orchestrate/sessions/:id",
-    "source": "src/routes/orchestrate.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/orchestrate/sessions/:id/abort",
-    "source": "src/routes/orchestrate.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/orchestrate/sessions/:id/answer",
-    "source": "src/routes/orchestrate.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/orchestrate/sessions/:id/approve",
-    "source": "src/routes/orchestrate.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/orchestrate/suggest-roles",
-    "source": "src/routes/orchestrate.ts"
-  },
-  {
-    "method": "GET",
     "path": "/chatgpt/actions/openapi.json",
     "source": "src/index.ts"
   },

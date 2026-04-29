@@ -56,6 +56,16 @@ test("conversation_id is accepted for remember-like payloads", () => {
   assert.equal(parsed.conversation_id, "conv_xyz");
 });
 
+test("blank conversation_id is treated as omitted", () => {
+  const parsed = recallLikeSchema.parse({
+    query: "remember this",
+    conversation_id: "",
+    openaiFileIdRefs: [],
+  });
+
+  assert.equal(parsed.conversation_id, undefined);
+});
+
 test("uploadBlobBodySchema rejects malformed openaiFileIdRefs", () => {
   assert.throws(
     () =>

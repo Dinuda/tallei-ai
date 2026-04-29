@@ -311,10 +311,10 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
   if (stage === "CREATE") {
     return [
       "Memory recall and document save complete. Do not call prepare_response again for this turn.",
-      "Call createCollabTask with the user-provided args (title, brief, first_actor — default 'chatgpt', max_iterations). Do not pass file or document args.",
-      "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
-      "Show the actual submitted output after collab_continue succeeds.",
-      "If any collab action returns continue_command, end the user-facing response with its instruction.",
+      "Call orchestrate_start with goal set to the user's collab goal and initial_context set to the prepared context/documents summary. Do not call createCollabTask yet.",
+      "Show the returned role_suggestion briefly, including the recommended first actor, and say the user may override roles or first actor.",
+      "Ask the returned grill-me question. End with: Review the roles and answer the question, or say continue to accept the recommended/default answer.",
+      "Only after orchestration returns PLAN_READY should orchestrate_approve create the collab task; then continue normal collab execution.",
     ];
   }
   if (stage === "CONTINUE") {
@@ -1769,7 +1769,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "orchestrate_start",
           summary: "Start orchestration planning session",
-          description: "Starts a grill-me planning session and returns the first planner question.",
+          description: "Starts role selection plus grill-me planning before collab task creation.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1789,7 +1789,9 @@ export function buildOpenApiSpec(serverUrl: string) {
             },
           },
           responses: {
-            "200": { description: "Session started." },
+            "200": {
+              description: "Session started with role_suggestion, question_payload, and next_instruction.",
+            },
             "400": { description: "Validation failed" },
             "401": { description: "Unauthorized" },
             "403": { description: "Insufficient scope" },
@@ -2723,6 +2725,9 @@ router.post("/actions/orchestrate_start", chatGptActionAuthMiddleware, requireSc
       session_id: result.session.id,
       status: result.session.status,
       question: result.firstQuestion,
+      question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
+      role_suggestion: result.roleSelection,
+      next_instruction: "Review the roles and answer the grill-me question, or say continue to accept the recommended/default answer.",
       fallback_context: buildSessionFallbackContext(result.session),
     });
   } catch (error) {
@@ -2763,7 +2768,11 @@ router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireS
       session_id: result.session.id,
       status: result.session.status,
       question: result.nextQuestion ?? null,
+      question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
       plan: result.plan ?? result.session.plan,
+      next_instruction: result.planReady
+        ? "Review the plan. If it looks good, say continue so orchestrate_approve can create the collab task."
+        : "Review and answer the next grill-me question, or say continue to accept the recommended/default answer.",
       fallback_context: buildSessionFallbackContext(result.session),
     });
   } catch (error) {
@@ -2814,6 +2823,8 @@ router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, require
       plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
       success_criteria: result.session.plan?.success_criteria ?? [],
       first_actor: result.session.plan?.first_actor ?? "chatgpt",
+      next_instruction: `Collab task ${result.task.id} is ready. Continue with collab_continue/collab_check_turn for the selected first actor.`,
+      fallback_context: buildSessionFallbackContext(result.session),
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

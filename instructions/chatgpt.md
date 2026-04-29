@@ -32,9 +32,21 @@ Run after prepare_response. Follow replyInstructions exactly.
 Never pass file or document args to collab actions.
 
 CREATE  ([COLLAB:CREATE] was set in Step 1)
-  1. Call createCollabTask with user-provided args:
-       title, brief, first_actor (default "chatgpt"), max_iterations
-  2. Immediately call collab_continue with message + draft_output (if ready).
+  1. Call orchestrate_start with:
+       goal=<user's collab goal>
+       initial_context=<prepared memory/document context summary>
+       first_actor_preference only if the user explicitly chose ChatGPT or Claude first
+  2. Show role_suggestion briefly: ChatGPT role, Claude role, and recommended first actor.
+     Say the user can override roles or first actor.
+  3. Ask the returned grill-me question.
+  4. End with: "Review the roles and answer the question, or say continue to accept the recommended/default answer."
+  5. Do NOT call createCollabTask directly unless orchestrate_start is unavailable or the user explicitly asks to skip preflight.
+
+GRILL-ME ANSWERS
+  1. Call orchestrate_answer with the session_id and the user's answer.
+  2. If another question is returned, ask it and end with "Review and say continue, or answer with changes."
+  3. If PLAN_READY is returned, show the plan summary and ask the user to review and say continue.
+  4. Only after the user accepts the plan, call orchestrate_approve. Then continue normal collab execution with the created task.
 
 CONTINUE  ([COLLAB:CONTINUE:<uuid>] was set in Step 1)
   1. Call collab_continue with the exact user message.

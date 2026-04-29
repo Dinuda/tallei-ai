@@ -540,6 +540,8 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           status: result.session.status,
           question: result.firstQuestion,
           question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
+          role_suggestion: result.roleSelection,
+          next_instruction: "Review the roles and answer the grill-me question, or say continue to accept the recommended/default answer.",
           fallback_context: buildSessionFallbackContext(result.session),
         });
       } catch (err) {
@@ -571,6 +573,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           question: result.nextQuestion ?? null,
           question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
           plan: result.plan ?? result.session.plan,
+          next_instruction: result.planReady
+            ? "Review the plan. If it looks good, say continue so orchestrator_approve can create the collab task."
+            : "Review and answer the next grill-me question, or say continue to accept the recommended/default answer.",
           fallback_context: buildSessionFallbackContext(result.session),
         });
       } catch (err) {
@@ -610,6 +615,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
           success_criteria: result.session.plan?.success_criteria ?? [],
           first_actor: result.session.plan?.first_actor ?? "chatgpt",
+          next_instruction: `Collab task ${result.task.id} is ready. Continue with collab_check_turn/collab_take_turn for the selected first actor.`,
           fallback_context: result.session ? buildSessionFallbackContext(result.session) : null,
         });
       } catch (err) {

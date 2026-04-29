@@ -80,11 +80,20 @@ export interface OrchestratorFallbackContext {
   plan_summary: string | null;
   success_criteria: Array<{ id: string; text: string; weight: number }>;
   open_questions: string[];
+  role_selection?: OrchestrationRoleSelection;
 }
 
 export interface OrchestrationProviderRoles {
   chatgpt?: string;
   claude?: string;
+}
+
+export interface OrchestrationRoleSelection {
+  chatgpt_role: string;
+  claude_role: string;
+  first_actor_recommendation: CollabModelActor;
+  selected_first_actor: CollabModelActor;
+  selection_mode: "auto" | "user_override";
 }
 
 const SESSION_CACHE_TTL_MS = 5_000;
@@ -318,6 +327,24 @@ function normalizeProviderRoles(value: unknown): { chatgpt?: string; claude?: st
   };
 }
 
+function normalizeRoleSelection(value: unknown): OrchestrationRoleSelection | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  const chatgptRole = typeof row["chatgpt_role"] === "string" ? row["chatgpt_role"].trim() : "";
+  const claudeRole = typeof row["claude_role"] === "string" ? row["claude_role"].trim() : "";
+  const recommendation = row["first_actor_recommendation"] === "claude" ? "claude" : "chatgpt";
+  const selectedFirstActor = row["selected_first_actor"] === "claude" ? "claude" : recommendation;
+  const selectionMode = row["selection_mode"] === "user_override" ? "user_override" : "auto";
+  if (!chatgptRole || !claudeRole) return undefined;
+  return {
+    chatgpt_role: chatgptRole,
+    claude_role: claudeRole,
+    first_actor_recommendation: recommendation,
+    selected_first_actor: selectedFirstActor,
+    selection_mode: selectionMode,
+  };
+}
+
 function normalizeOptionalText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -338,6 +365,7 @@ async function fetchSessionRow(sessionId: string, auth: AuthContext): Promise<Or
 
 export function buildSessionFallbackContext(session: OrchestrationSession): OrchestratorFallbackContext {
   const latestQuestion = latestPlannerQuestion(session);
+  const roleSelection = normalizeRoleSelection(session.metadata["role_selection"]);
   return {
     session_id: session.id,
     goal: session.goal,
@@ -346,6 +374,7 @@ export function buildSessionFallbackContext(session: OrchestrationSession): Orch
     plan_summary: session.plan?.summary ?? null,
     success_criteria: session.plan?.success_criteria ?? [],
     open_questions: session.plan?.open_questions ?? [],
+    ...(roleSelection ? { role_selection: roleSelection } : {}),
   };
 }
 
@@ -420,17 +449,43 @@ export async function startSession(
   session: OrchestrationSession;
   firstQuestion: string;
   firstQuestionData?: { question: string; suggested_answers?: string[]; default_answer?: string | null };
+  roleSelection: OrchestrationRoleSelection;
 }> {
   const goal = input.goal.trim();
   if (!goal) {
     throw new Error("goal is required");
   }
 
+  const roleSuggestion = await suggestSessionRoles({
+    title: goal,
+    brief: input.initialContext ?? null,
+    comments: input.comments ?? null,
+  });
+  const requestedProviderRoles = normalizeProviderRoles(input.providerRoles);
+  const roleSelection: OrchestrationRoleSelection = {
+    chatgpt_role: requestedProviderRoles.chatgpt ?? roleSuggestion.chatgpt_role,
+    claude_role: requestedProviderRoles.claude ?? roleSuggestion.claude_role,
+    first_actor_recommendation: roleSuggestion.first_actor_recommendation,
+    selected_first_actor: input.firstActorPreference ?? roleSuggestion.first_actor_recommendation,
+    selection_mode: input.firstActorPreference ? "user_override" : "auto",
+  };
+
   const now = new Date().toISOString();
   const systemTurns: OrchestrationTranscriptEntry[] = [];
   if (input.initialContext && input.initialContext.trim()) {
     systemTurns.push({ role: "system", content: `Initial context: ${input.initialContext.trim()}`, ts: now });
   }
+  systemTurns.push({
+    role: "system",
+    content:
+      "Provider role assignment: " +
+      `ChatGPT role: ${roleSelection.chatgpt_role}; ` +
+      `Claude role: ${roleSelection.claude_role}; ` +
+      `recommended first actor: ${roleSelection.first_actor_recommendation}; ` +
+      `selected first actor: ${roleSelection.selected_first_actor}. ` +
+      "The selected first actor owns the grill-me interview before collab execution starts.",
+    ts: now,
+  });
 
   const result = await runPlannerStep({
     mode: "interview",
@@ -458,7 +513,11 @@ export async function startSession(
     source_platform: input.sourcePlatform,
     first_actor_preference: input.firstActorPreference ?? null,
     comments: normalizeOptionalText(input.comments),
-    provider_roles: normalizeProviderRoles(input.providerRoles),
+    provider_roles: {
+      chatgpt: roleSelection.chatgpt_role,
+      claude: roleSelection.claude_role,
+    },
+    role_selection: roleSelection,
   };
 
   const initialPlan = result.kind === "plan" ? result.plan : null;
@@ -493,6 +552,7 @@ export async function startSession(
   return {
     session,
     firstQuestion: result.kind === "question" ? result.question : "Plan is ready for review.",
+    roleSelection,
     firstQuestionData:
       result.kind === "question"
         ? {

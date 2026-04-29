@@ -44,6 +44,16 @@ test("ChatGPT OpenAPI documents prepare_response as the primary selective action
   assert.match(spec.info.description ?? "", /openaiFileIdRefs/i);
 });
 
+test("ChatGPT OpenAPI routes new collab starts through orchestration preflight", () => {
+  const spec = buildOpenApiSpec("https://example.com");
+  const orchestrateStart = postOperation(spec, "/api/chatgpt/actions/orchestrate_start");
+
+  assert.match(orchestrateStart.description ?? "", /role selection/i);
+  assert.match(orchestrateStart.description ?? "", /grill-me/i);
+  assert.match(orchestrateStart.responses?.["200"]?.description ?? "", /role_suggestion/i);
+  assert.match(orchestrateStart.responses?.["200"]?.description ?? "", /question_payload/i);
+});
+
 test("ChatGPT OpenAPI operation descriptions stay within provider limits", () => {
   const spec = buildOpenApiSpec("https://example.com");
   const maxDescriptionLength = 300;

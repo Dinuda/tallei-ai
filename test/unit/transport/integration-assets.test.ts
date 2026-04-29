@@ -51,15 +51,21 @@ test("ChatGPT setup instructions point users to prepare_response", () => {
 
   assert.match(fileText, /ALWAYS call prepare_response first/);
   assert.match(fileText, /openaiFileIdRefs=\[\.\.\.all attachments\.\.\.\]/);
+  assert.match(fileText, /Call orchestrate_start/);
+  assert.match(fileText, /Show role_suggestion/);
   assert.match(fileText, /If a collab action returns continue_command/);
   assert.match(fileText, /Never call recall_memories, remember, or search_documents directly/);
   assert.match(setupWizard, /prepare_response\(message="<exact user message>"/);
+  assert.match(setupWizard, /orchestrate_start/);
+  assert.match(setupWizard, /role_suggestion/);
   assert.match(setupWizard, /visible chat first/);
   assert.match(setupWizard, /Default: answer from the visible ChatGPT conversation without calling tools/);
   assert.match(setupWizard, /Do NOT call \\`prepare_response\\` for ordinary conversation/);
   assert.match(setupWizard, /continue_command/);
   assert.match(setupWizard, /Do not call \\`remember\\` separately/);
+  assert.doesNotMatch(setupWizard, /call \\`createCollabTask\\` immediately/);
   assert.match(setupScript, /Default to answering from the visible ChatGPT conversation without calling tools/);
   assert.match(setupScript, /Do NOT call prepare_response for ordinary conversation/);
+  assert.match(setupScript, /orchestrate_start/);
   assert.match(setupScript, /continue_command/);
 });

@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-export const conversationIdSchema = z.string().trim().min(1).max(200).optional();
+export const conversationIdSchema = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().trim().min(1).max(200).optional()
+);
 
 export const openAiFileRefSchema = z.object({
   id: z.string().min(1, "file id is required"),
