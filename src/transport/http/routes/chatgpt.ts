@@ -15,6 +15,7 @@ import {
   CollabConflictError,
   CollabNotFoundError,
   createTask as createCollabTask,
+  describeNextActorWork,
   getTask,
   hydrateTaskWithRecentPreparedUploads,
   inlineDocumentsFromTaskContext,
@@ -274,6 +275,21 @@ function roleSelectionUserVisible(roleSelection: {
   ].join("\n");
 }
 
+function buildIterationRoadmap(plan: {
+  phases?: Array<{ id: string; name: string; outputs: string[] }>;
+  success_criteria?: Array<{ id: string; text: string; weight: number }>;
+} | null): string {
+  if (!plan || !plan.phases?.length) return "";
+  const lines = plan.phases.map((phase, i) => {
+    const outputs = phase.outputs?.length ? ` — ${phase.outputs.join(", ")}` : "";
+    return `${i + 1}. ${phase.name}${outputs}`;
+  });
+  const doneWhen = plan.success_criteria?.length
+    ? plan.success_criteria.map((s) => s.text).join("; ")
+    : "all success criteria pass";
+  return `Iteration Roadmap:\n${lines.join("\n")}\nDone when: ${doneWhen}`;
+}
+
 function postgresErrorDetails(error: unknown): {
   code: string;
   constraint: string | null;
@@ -384,29 +400,39 @@ function extractCollabStage(message: string): {
 function collabStageReplyInstructions(
   stage: "CREATE" | "CONTINUE" | "MY_TURN",
   taskId: string | null,
-  options?: { grillMeEnabled?: boolean }
+  options?: { grillMeRecommended?: boolean }
 ): string[] {
   const taskLabel = taskId ? ` (task ${taskId})` : "";
   if (stage === "CREATE") {
-    if (options?.grillMeEnabled) {
+    if (options?.grillMeRecommended) {
       return [
         "Memory recall and document save complete. Do not call prepare_response again for this turn.",
-        "Start grill-me first: call orchestrate_start with goal/title/brief from the user request.",
-        "After orchestrate_start, show the ChatGPT and Claude role/system prompts as fenced code blocks, then show the first grill-me question and stop.",
+        "ROLE APPROVAL GATE (required): Start grill-me first: call orchestrate_start with goal/title/brief from the user request.",
+        "After orchestrate_start, show the ChatGPT and Claude role/system prompts as fenced code blocks.",
+        "Then ask the user explicitly: 'Do you approve these roles? Reply yes to proceed, or tell me what to change.'",
+        "STOP if the user does not approve. Do not proceed to grill-me questions until the user explicitly says yes.",
         "Do not call orchestrate_answer until the user explicitly answers or approves continuing with the displayed default/recommended answer.",
         "After each orchestrate_answer, show the next question or plan review, then stop and wait for the user's next explicit answer or approval.",
         "Approve with orchestrate_approve to create the collab task. Do not include max_iterations.",
         "Do not call orchestrate_approve until the user explicitly approves the displayed plan.",
+        "ITERATION ROADMAP (required after approval): Immediately after orchestrate_approve succeeds, display the numbered Iteration Roadmap from the plan before continuing.",
+        "VISIBLE HANDOFFS (required): After every turn submission, never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
         "Do not provide final artifacts during grill-me planning; only show role split, questions, plan review, and action status.",
         "After every orchestrate_* action, show the returned user_visible text to the user before stopping or deciding the next action.",
-        "After approval, call collab_continue.",
+        "After approval and roadmap, call collab_continue.",
+        "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
         "If any collab action returns continue_command, end the user-facing response with its instruction.",
       ];
     }
     return [
       "Memory recall and document save complete. Do not call prepare_response again for this turn.",
-      "Call createCollabTask with title, brief, and first_actor (default 'chatgpt'). Do not include max_iterations. Do not pass file or document args.",
+      "ROLE APPROVAL GATE (required): If roles are not yet approved, display proposed ChatGPT and Claude roles as fenced code blocks.",
+      "Ask the user explicitly: 'Do you approve these roles? Reply yes to proceed, or tell me what to change.' STOP if not approved.",
+      "ITERATION ROADMAP (required after role approval): Create and display a numbered roadmap showing each turn, which provider acts, exactly what they will deliver, and the exit/done criteria. Include the deliverable constraint: text/PDF/code only, no PPTX or images.",
+      "Only after role approval AND roadmap display, call createCollabTask with title, brief, and first_actor (default 'chatgpt'). Do not include max_iterations. Do not pass file or document args.",
       "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
+      "VISIBLE HANDOFFS (required): After every collab action, never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
+      "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
       "Show the actual submitted output after collab_continue succeeds.",
       "If any collab action returns continue_command, end the user-facing response with its instruction.",
       "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
@@ -417,7 +443,9 @@ function collabStageReplyInstructions(
       "Document save complete. Do not call prepare_response again for this turn.",
       `Call collab_continue with the exact user message${taskLabel}. Do not pass file or document args.`,
       "If is_my_turn=true, include draft_output in the same collab_continue call.",
-      "If is_my_turn=false, report which actor (next_actor) is expected and stop.",
+      "If is_my_turn=false, report which actor (next_actor) is expected and what they will do next, then stop.",
+      "VISIBLE HANDOFFS (required): Never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
+      "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
       "Show the actual submitted output after a successful submit.",
       "If any collab action returns continue_command, end the user-facing response with its instruction.",
       "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
@@ -427,6 +455,8 @@ function collabStageReplyInstructions(
     "Document save complete. Do not call prepare_response again for this turn.",
     `Call collab_continue with the exact user message and draft_output included${taskLabel}. Do not pass file or document args.`,
     "Show the actual submitted output after collab_continue succeeds.",
+    "VISIBLE HANDOFFS (required): Never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
+    "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
     "If any collab action returns continue_command, end the user-facing response with its instruction.",
     "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     "If the call fails, return the exact error and stop.",
@@ -1891,7 +1921,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "orchestrate_start",
           summary: "Start orchestration planning session",
-          description: "Starts role selection plus grill-me planning before collab task creation. Show the returned role_suggestion and user_visible text to the user, then stop. Do not call orchestrate_answer until the user explicitly answers or approves continuing.",
+          description: "Starts role selection plus grill-me planning. Show returned role_suggestion and user_visible text. STOP for explicit role approval before proceeding. Only call orchestrate_answer after the user says yes and answers or approves.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1959,7 +1989,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "orchestrate_approve",
           summary: "Approve orchestration plan and create collab task",
-          description: "Approves a PLAN_READY session and starts the linked collab task. Only call after the user explicitly approves the displayed plan. Show returned user_visible text before continuing the collab task.",
+          description: "Approves a PLAN_READY session and starts the linked collab task. Only call after the user explicitly approves the displayed plan. Returns an iteration_roadmap that MUST be displayed to the user before continuing. Show returned user_visible text before continuing the collab task.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -2058,10 +2088,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "collab_continue",
           summary: "Collab continue — second step after prepare_response in collab flows",
           description:
-            "Second step after prepare_response for all collab flows (CREATE, CONTINUE, MY_TURN). " +
-            "Provide message and optionally draft_output. " +
-            "If it's your turn and draft_output is present, this call submits the turn. " +
-            "If is_my_turn=false, report next_actor to the user and stop.",
+            "Second step after prepare_response for all collab flows. Provide message and optionally draft_output to submit your turn. If is_my_turn=false, report next_actor and what they will do. Always use visible handoffs: state who is next, what they will do, and the continue command.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -2140,7 +2167,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "createCollabTask",
           summary: "Create a collab task",
-          description: "Creates a new collab task that can be continued via run-turn/submit-turn.",
+          description: "Creates a new collab task for turn-taking between providers. Deliverables are text/PDF/code only; no PPTX or images.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -2367,7 +2394,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
         inlineDocuments: [],
         queuedSaves: [],
         autoSave: { requested: 0, complete: true, saved: [], errors: [] },
-        replyInstructions: collabStageReplyInstructions(stage, taskId, { grillMeEnabled: prefs?.grillMeEnabled }),
+        replyInstructions: collabStageReplyInstructions(stage, taskId, { grillMeRecommended: prefs?.grillMeRecommended }),
         intent: {
           needsRecall: false,
           needsDocumentLookup: false,
@@ -2444,7 +2471,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
       const stageInstructions = collabStageReplyInstructions(
         collabStage.stage,
         collabStage.taskId,
-        { grillMeEnabled: prefs?.grillMeEnabled }
+        { grillMeRecommended: prefs?.grillMeRecommended }
       );
       const fileRefHint = !hasAttachments
         ? [
@@ -2856,9 +2883,9 @@ router.post("/actions/orchestrate_start", chatGptActionAuthMiddleware, requireSc
       question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
       role_suggestion: result.roleSelection,
       user_visible: result.firstQuestion
-        ? `${roleSelectionUserVisible(result.roleSelection)}\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
-        : `${roleSelectionUserVisible(result.roleSelection)}\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrate_approve.`,
-      next_instruction: "Show the role split and first grill-me question to the user, then stop. Do not call orchestrate_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
+        ? `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
+        : `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrate_approve.`,
+      next_instruction: "Show the role split and ask for explicit role approval. STOP if the user does not say yes. Do not call orchestrate_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
       fallback_context: buildSessionFallbackContext(result.session),
     });
   } catch (error) {
@@ -2981,13 +3008,23 @@ router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, require
       ok: true,
     });
 
+    const roadmap = buildIterationRoadmap(result.session.plan ?? null);
+    const firstActor = result.session.plan?.first_actor ?? "chatgpt";
+    const nextWork = firstActor === "chatgpt"
+      ? "ChatGPT will produce content, strategy, or creative output for the first phase."
+      : "Claude will implement, build, or refine the technical/design deliverables for the first phase.";
     res.json({
       task_id: result.task.id,
       plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
       success_criteria: result.session.plan?.success_criteria ?? [],
-      first_actor: result.session.plan?.first_actor ?? "chatgpt",
-      user_visible: `Plan approved. Collab task ${result.task.id} is ready.`,
-      next_instruction: `Collab task ${result.task.id} is ready. Continue with collab_continue/collab_check_turn for the selected first actor.`,
+      first_actor: firstActor,
+      iteration_roadmap: roadmap || null,
+      user_visible: [
+        `Plan approved. Collab task ${result.task.id} is ready.`,
+        roadmap ? `\n${roadmap}` : "",
+        `\nNext up: ${nextWork}`,
+      ].join(""),
+      next_instruction: `Collab task ${result.task.id} is ready. ${roadmap ? "The iteration roadmap is shown above. " : ""}Continue with collab_continue/collab_check_turn for ${firstActor}.`,
       fallback_context: buildSessionFallbackContext(result.session),
     });
   } catch (error) {
@@ -3169,6 +3206,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         },
         ok: true,
       });
+      const nextWork = describeNextActorWork(task.state, nextActor);
       res.json({
         ok: true,
         submitted: false,
@@ -3178,7 +3216,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         iteration: task.iteration,
         max_iterations: task.maxIterations,
         next_actor: nextActor,
-        user_visible: appendContinueCommand(`Task ${task.id} is waiting on ${nextActor ?? "completion"}.`, continueCommand),
+        user_visible: appendContinueCommand(`Task ${task.id} is waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`, continueCommand),
         continue_command: continueCommand,
         last_message: lastMessage,
         recent_transcript: task.transcript.slice(-6),
@@ -3194,6 +3232,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
 
     if (!body.draft_output || body.draft_output.trim().length === 0) {
       const continueCommand = buildFirstTurnContinueCommand(task);
+      const myTurnWork = describeNextActorWork(task.state, "chatgpt");
       logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/collab/continue",
@@ -3218,7 +3257,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         iteration: task.iteration,
         max_iterations: task.maxIterations,
         next_actor: nextActor,
-        user_visible: appendContinueCommand(`It's your turn on task ${task.id}. Draft the output, then call collab_continue again with draft_output.`, continueCommand),
+        user_visible: appendContinueCommand(`It's your turn on task ${task.id}. ${myTurnWork} Draft the output, then call collab_continue again with draft_output.`, continueCommand),
         continue_command: continueCommand,
         last_message: lastMessage,
         recent_transcript: task.transcript.slice(-6),
@@ -3244,6 +3283,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
     const savedTurn = submittedTask.transcript.length > 0 ? submittedTask.transcript[submittedTask.transcript.length - 1] : null;
     const continueCommand = buildFirstTurnContinueCommand(submittedTask);
     const nextAfterSubmit = collabNextActor(submittedTask);
+    const nextAfterWork = describeNextActorWork(submittedTask.state, nextAfterSubmit);
 
     logChatGptActionAsync({
       auth: req.authContext,
@@ -3272,7 +3312,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       iteration: submittedTask.iteration,
       max_iterations: submittedTask.maxIterations,
       next_actor: nextAfterSubmit,
-      user_visible: appendContinueCommand(`Saved ChatGPT turn for task ${submittedTask.id} at iteration ${submittedTask.iteration}.`, continueCommand),
+      user_visible: appendContinueCommand(`Saved ChatGPT turn for task ${submittedTask.id} at iteration ${submittedTask.iteration}. Next up: ${nextAfterWork}`, continueCommand),
       continue_command: continueCommand,
       saved_turn: savedTurn
         ? {
@@ -3298,6 +3338,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       const taskIdFromBody = readBodyTaskId(req.body) ?? extractTaskIdFromText(typeof req.body?.message === "string" ? req.body.message : "");
       const task = taskIdFromBody ? await getTask(taskIdFromBody, auth) : null;
       const nextActor = task ? collabNextActor(task) : null;
+      const nextWork = task ? describeNextActorWork(task.state, nextActor) : "";
       res.status(409).json({
         ok: false,
         error: error.message,
@@ -3307,7 +3348,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         max_iterations: task?.maxIterations ?? null,
         next_actor: nextActor,
         user_visible: task
-          ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}.`
+          ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`
           : "Turn rejected due to task state mismatch.",
       });
       return;
@@ -3344,6 +3385,8 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
     );
 
     const continueCommand = buildFirstTurnContinueCommand(task);
+    const nextActor = collabNextActor(task);
+    const nextWork = describeNextActorWork(task.state, nextActor);
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/collab/create-task",
@@ -3366,7 +3409,7 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
       state: task.state,
       iteration: task.iteration,
       max_iterations: task.maxIterations,
-      user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}).`, continueCommand),
+      user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}). Next up: ${nextWork}`, continueCommand),
       continue_command: continueCommand,
     });
   } catch (error) {

@@ -26,6 +26,7 @@ import {
   claimTurn,
   CollabConflictError,
   createTask as createCollabTask,
+  describeNextActorWork,
   getTask as getCollabTask,
   hydrateTaskWithRecentPreparedUploads,
   inlineDocumentsFromTaskContext,
@@ -119,6 +120,21 @@ function roleSelectionUserVisible(roleSelection: {
     `Recommended first actor: ${roleSelection.first_actor_recommendation}`,
     `Selected first actor: ${roleSelection.selected_first_actor}`,
   ].join("\n");
+}
+
+function buildIterationRoadmap(plan: {
+  phases?: Array<{ id: string; name: string; outputs: string[] }>;
+  success_criteria?: Array<{ id: string; text: string; weight: number }>;
+} | null): string {
+  if (!plan || !plan.phases?.length) return "";
+  const lines = plan.phases.map((phase, i) => {
+    const outputs = phase.outputs?.length ? ` — ${phase.outputs.join(", ")}` : "";
+    return `${i + 1}. ${phase.name}${outputs}`;
+  });
+  const doneWhen = plan.success_criteria?.length
+    ? plan.success_criteria.map((s) => s.text).join("; ")
+    : "all success criteria pass";
+  return `Iteration Roadmap:\n${lines.join("\n")}\nDone when: ${doneWhen}`;
 }
 
 function hasCollabWriteScope(auth: AuthContext): boolean {
@@ -282,6 +298,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
               ? "claude"
               : null;
         const continueCommand = buildFirstTurnContinueCommand(task);
+        const nextWork = describeNextActorWork(task.state, nextActor);
         return toJsonToolResult({
           is_my_turn: Boolean(claimed),
           task_id: task.id,
@@ -291,8 +308,8 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           max_iterations: task.maxIterations,
           next_actor: nextActor,
           user_visible: appendContinueCommand(claimed
-            ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}).`
-            : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`, continueCommand),
+            ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}). ${describeNextActorWork(task.state, "claude")} Draft the output, then call collab_take_turn.`
+            : `Task ${task.id} is waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`, continueCommand),
           continue_command: continueCommand,
           brief: task.brief,
           last_chatgpt_entry: lastChatGptEntry,
@@ -349,6 +366,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
               : null;
         const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
         const continueCommand = buildFirstTurnContinueCommand(task);
+        const nextWork = describeNextActorWork(task.state, nextActor);
         return toJsonToolResult({
           ok: true,
           task_id: task.id,
@@ -356,7 +374,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           iteration: task.iteration,
           max_iterations: task.maxIterations,
           next_actor: nextActor,
-          user_visible: appendContinueCommand(`Saved Claude turn for task ${task.id} at iteration ${task.iteration}.`, continueCommand),
+          user_visible: appendContinueCommand(`Saved Claude turn for task ${task.id} at iteration ${task.iteration}. Next up: ${nextWork}`, continueCommand),
           continue_command: continueCommand,
           saved_turn: savedTurn
             ? {
@@ -392,6 +410,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
                     : null
             )
             : null;
+          const nextWork = task ? describeNextActorWork(task.state, nextActor) : "";
           return toJsonToolResult({
             ok: false,
             error: err.message,
@@ -401,7 +420,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
             max_iterations: task?.maxIterations ?? null,
             next_actor: nextActor,
             user_visible: task
-              ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}.`
+              ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`
               : "Turn rejected due to task state mismatch.",
             fallback_context: task ? buildTurnFallbackContext(task, "claude") : null,
           }, true);
@@ -528,6 +547,14 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         }
         const task = (parsed.openaiFileIdRefs?.length ? await getCollabTask(createdTask.id, auth) : createdTask) ?? createdTask;
         const continueCommand = buildFirstTurnContinueCommand(task);
+        const nextActor = task.iteration >= task.maxIterations
+          ? null
+          : task.state === "CREATIVE"
+            ? "chatgpt"
+            : task.state === "TECHNICAL"
+              ? "claude"
+              : null;
+        const nextWork = describeNextActorWork(task.state, nextActor);
         return toJsonToolResult({
           ok: true,
           task_id: task.id,
@@ -536,17 +563,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           state: task.state,
           iteration: task.iteration,
           max_iterations: task.maxIterations,
-          next_actor: task.iteration >= task.maxIterations
-            ? null
-            : task.state === "CREATIVE"
-              ? "chatgpt"
-              : task.state === "TECHNICAL"
-                ? "claude"
-                : null,
+          next_actor: nextActor,
           fallback_context: buildTurnFallbackContext(task, "claude"),
           preflight_recall: preflightRecall.body,
           ...(uploadSummary ? { upload: uploadSummary } : {}),
-          user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}).`, continueCommand),
+          user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}). Next up: ${nextWork}`, continueCommand),
           continue_command: continueCommand,
         });
       } catch (err) {
@@ -588,9 +609,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
           role_suggestion: result.roleSelection,
           user_visible: result.firstQuestion
-            ? `${roleSelectionUserVisible(result.roleSelection)}\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
-            : `${roleSelectionUserVisible(result.roleSelection)}\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`,
-          next_instruction: "Show the role split and first grill-me question to the user, then stop. Do not call orchestrator_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
+            ? `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
+            : `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`,
+          next_instruction: "Show the role split and ask for explicit role approval. STOP if the user does not say yes. Do not call orchestrator_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
           fallback_context: buildSessionFallbackContext(result.session),
         });
       } catch (err) {
@@ -673,12 +694,23 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
         }
         const result = await approveOrchestratorPlan(session_id, auth, overrides);
+        const roadmap = buildIterationRoadmap(result.session.plan ?? null);
+        const firstActor = result.session.plan?.first_actor ?? "chatgpt";
+        const nextWork = firstActor === "chatgpt"
+          ? "ChatGPT will produce content, strategy, or creative output for the first phase."
+          : "Claude will implement, build, or refine the technical/design deliverables for the first phase.";
         return toJsonToolResult({
           task_id: result.task.id,
           plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
           success_criteria: result.session.plan?.success_criteria ?? [],
-          first_actor: result.session.plan?.first_actor ?? "chatgpt",
-          next_instruction: `Collab task ${result.task.id} is ready. Continue with collab_check_turn/collab_take_turn for the selected first actor.`,
+          first_actor: firstActor,
+          iteration_roadmap: roadmap || null,
+          user_visible: [
+            `Plan approved. Collab task ${result.task.id} is ready.`,
+            roadmap ? `\n${roadmap}` : "",
+            `\nNext up: ${nextWork}`,
+          ].join(""),
+          next_instruction: `Collab task ${result.task.id} is ready. ${roadmap ? "The iteration roadmap is shown above. " : ""}Continue with collab_check_turn/collab_take_turn for ${firstActor}.`,
           fallback_context: result.session ? buildSessionFallbackContext(result.session) : null,
         });
       } catch (err) {

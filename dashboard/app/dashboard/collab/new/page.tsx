@@ -56,7 +56,8 @@ export default function CollabTaskWizardPage() {
   const [chatgptRole, setChatgptRole] = useState("");
   const [claudeRole, setClaudeRole] = useState("");
   const [starterRecommendation, setStarterRecommendation] = useState<FirstActor>("chatgpt");
-  const [grillMeEnabled, setGrillMeEnabled] = useState(true);
+  const [grillMeEnabled, setGrillMeEnabled] = useState(false);
+  const [grillMeRecommendation, setGrillMeRecommendation] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [contextDocs, setContextDocs] = useState<ContextDocument[]>([]);
   const [existingDocs, setExistingDocs] = useState<ExistingDocListItem[]>([]);
@@ -291,6 +292,26 @@ export default function CollabTaskWizardPage() {
     void loadExistingDocs();
   }, [loadExistingDocs]);
 
+  useEffect(() => {
+    const loadPreferences = async () => {
+      try {
+        const res = await fetch("/api/tasks/preferences", { cache: "no-store" });
+        const body = await res.json();
+        if (!res.ok) return;
+        const recommended = Boolean(body?.grillMeRecommended);
+        if (!recommended) return;
+        const reason =
+          typeof body?.grillMeRecommendationReason === "string"
+            ? body.grillMeRecommendationReason
+            : "Recent task planning needed multiple corrections. Consider enabling grill-me.";
+        setGrillMeRecommendation(reason);
+      } catch {
+        // Ignore recommendation fetch failures.
+      }
+    };
+    void loadPreferences();
+  }, []);
+
   return (
     <div className={styles.page}>
       {/* Step indicator */}
@@ -315,6 +336,11 @@ export default function CollabTaskWizardPage() {
       {errorText && (
         <div className={styles.errorBanner}>
           <span>{errorText}</span>
+        </div>
+      )}
+      {grillMeRecommendation && step === 0 && (
+        <div className={styles.recommendationBanner}>
+          <span>{grillMeRecommendation}</span>
         </div>
       )}
 

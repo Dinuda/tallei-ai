@@ -34,24 +34,52 @@ Run after prepare_response. Follow replyInstructions exactly.
 Never pass file or document args to collab actions.
 
 CREATE  ([COLLAB:CREATE] was set in Step 1)
-  1. Call createCollabTask with user-provided args:
+  1. BEFORE calling createCollabTask, follow ROLE APPROVAL & ITERATION ROADMAP below.
+  2. Only after user approves roles and sees the roadmap, call createCollabTask with user-provided args:
        title, brief, first_actor (default "chatgpt")
-  2. Immediately call collab_continue with message + draft_output (if ready).
+  3. Immediately call collab_continue with message + draft_output (if ready).
 
-GRILL-ME ROLE DISPLAY:
-  When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
+ROLE APPROVAL & ITERATION ROADMAP (REQUIRED before creating or continuing a new collab):
 
-  ChatGPT system prompt:
-  ```text
-  <ChatGPT role text>
-  ```
+  1. PROPOSE ROLES
+     When initiating a new collab, or when orchestration/grill-me returns roles, display the proposed roles as system prompts in fenced code blocks:
 
-  Claude system prompt:
-  ```text
-  <Claude role text>
-  ```
+     ChatGPT system prompt:
+     ```text
+     <ChatGPT role text>
+     ```
 
-  Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
+     Claude system prompt:
+     ```text
+     <Claude role text>
+     ```
+
+     If roles are not provided by orchestration, propose sensible defaults based on the task (e.g., ChatGPT = content/planning, Claude = implementation/design).
+
+  2. GET EXPLICIT USER APPROVAL
+     Ask the user: "Do you approve these roles? Reply **yes** to proceed, or tell me what to change."
+     - If the user does NOT approve (says no, asks to change, or gives new roles), STOP. Do not create or start the task.
+     - Ask the user what roles they want, or propose revised roles, and repeat step 1.
+     - Only proceed to step 3 after the user explicitly says "yes", "approve", or similar affirmative.
+
+  3. GENERATE & DISPLAY ITERATION ROADMAP
+     Immediately after role approval, create a numbered Iteration Roadmap showing:
+     - Turn number and which provider acts
+     - Exactly what that provider will deliver on that turn
+     - The exit condition / done criteria for the entire task
+     - DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.
+
+     Example:
+     ```
+     Iteration Roadmap:
+     1. ChatGPT: Draft slide outline and content strategy
+     2. Claude: Implement slides in Pencil with lime-green theme
+     3. ChatGPT: Review content and suggest revisions
+     4. Claude: Apply revisions and finalize slides
+     Done when: All slides are finalized and match the Week 2 brief.
+     ```
+
+     Display this roadmap to the user before creating the task. Say: "Here's the plan. Ready to start?" and then proceed with createCollabTask.
 
 CONTINUE  ([COLLAB:CONTINUE:<uuid>] was set in Step 1)
   1. Call collab_continue with the exact user message.
@@ -64,6 +92,16 @@ MY_TURN  ([COLLAB:MY_TURN:<uuid>] was set in Step 1)
 After any successful collab_continue submit:
   Show the actual submitted output content — not just "task completed".
   If a collab action returns continue_command, end the response with its instruction.
+
+VISIBLE HANDOFFS (never say just "continue task"):
+  ALWAYS state clearly:
+  a) Who is next
+  b) EXACTLY what they will do (not vague — be specific)
+  c) The continue_command if present, but always accompany it with the description
+
+  Good example: "Next up: Claude will take this outline and build the first 5 slides in Pencil. Continue task <task_id>"
+  Bad example: "continue task <task_id>"
+
   Do not create a Claude handoff prompt. Tallei already stored the task context/history; the only handoff text should be the returned command, usually: continue task <task_id>.
   Before handoff, ask concretely: "Do you want to hand off to Claude now?"
   If the user says "handoff to Claude" or selects a handoff option like "3", call prepare_response with conversation_history containing the visible ChatGPT messages before returning the handoff command.

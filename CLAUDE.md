@@ -132,6 +132,12 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 - If `is_my_turn` is `false`, report which actor is expected and stop.
 - If `is_my_turn` is `true`, produce output and submit with `collab_take_turn`.
 
+**Role Approval Gate (NEW):** Before creating any collab task, propose roles for each AI provider and get explicit user approval. Do not create/start the task until the user says "yes" or similar affirmative.
+
+**Iteration Roadmap (NEW):** Immediately after role approval, generate and display a numbered roadmap showing each turn, which provider acts, exactly what they will deliver, and the exit/done criteria. Include the deliverable constraint: text/PDF/code only, no PPTX or images.
+
+**Visible Handoffs (NEW):** After every plan or output, never say just "continue task". Always state clearly: (a) who is next, (b) exactly what they will do, and (c) the continue command if any.
+
 ### Don't Break Memory Performance
 - The fire-and-forget pattern in `saveMemory()` is intentional: never await the full pipeline in the MCP handler
 - If adding new summarization or preprocessing steps, keep them in the background worker, not the foreground response

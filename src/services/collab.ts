@@ -331,6 +331,17 @@ export interface CollabPreparedUploadHydration {
   documents: CollabHydratedDocument[];
 }
 
+export function describeNextActorWork(
+  state: "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR",
+  actor: "chatgpt" | "claude" | null
+): string {
+  if (!actor) return "The task is complete or at max iterations.";
+  if (actor === "chatgpt") {
+    return "ChatGPT will produce content, strategy, or creative output for the next phase.";
+  }
+  return "Claude will implement, build, or refine the technical/design deliverables for the next phase.";
+}
+
 export function buildFirstTurnContinueCommand(task: CollabTask): CollabContinueCommand | null {
   if (task.iteration > 1) return null;
   const targetActor = actorWaitingForState(task.state);
@@ -338,13 +349,14 @@ export function buildFirstTurnContinueCommand(task: CollabTask): CollabContinueC
   const command = targetActor === "chatgpt"
     ? `[COLLAB:CONTINUE:${task.id}] continue collab task ${task.id}`
     : `continue task ${task.id}`;
+  const nextWork = describeNextActorWork(task.state, targetActor);
   return {
     target_actor: targetActor,
     command,
     label: `Continue in ${targetActor === "chatgpt" ? "ChatGPT" : "Claude"}`,
     instruction: targetActor === "claude"
-      ? `Review this turn. Do you want to hand off to Claude now? If yes, Tallei has the task context; paste this in Claude: ${command}`
-      : `Review this turn. Do you want to hand off to ChatGPT now? If yes, paste this in ChatGPT: ${command}`,
+      ? `Next up: ${nextWork} Do you want to hand off to Claude now? If yes, paste this in Claude: ${command}`
+      : `Next up: ${nextWork} Do you want to hand off to ChatGPT now? If yes, paste this in ChatGPT: ${command}`,
   };
 }
 

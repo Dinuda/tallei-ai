@@ -3,6 +3,9 @@ import { pool } from "../infrastructure/db/index.js";
 
 export interface TaskPreferences {
   grillMeEnabled: boolean;
+  grillMeRecommended: boolean;
+  grillMeRecommendationReason: string | null;
+  correctionSignalCount: number;
 }
 
 export async function getTaskPreferences(auth: AuthContext): Promise<TaskPreferences> {
@@ -15,7 +18,45 @@ export async function getTaskPreferences(auth: AuthContext): Promise<TaskPrefere
     [auth.userId, auth.tenantId]
   );
   const row = result.rows[0];
-  return { grillMeEnabled: row?.grill_me_enabled ?? false };
+  const grillMeEnabled = row?.grill_me_enabled ?? false;
+
+  const sessions = await pool.query<{ transcript: unknown }>(
+    `SELECT transcript
+     FROM orchestration_sessions
+     WHERE user_id = $1
+       AND tenant_id = $2
+       AND status IN ('PLAN_READY', 'RUNNING', 'DONE', 'ABORTED')
+     ORDER BY updated_at DESC
+     LIMIT 12`,
+    [auth.userId, auth.tenantId]
+  );
+
+  const correctionPattern =
+    /\b(actually|instead|not quite|that'?s wrong|wrong|fix|change|revise|update|correction|i meant|no[, ]|doesn'?t)\b/i;
+  let correctionSignalCount = 0;
+
+  for (const session of sessions.rows) {
+    if (!Array.isArray(session.transcript)) continue;
+    for (const entry of session.transcript) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (record["role"] !== "user") continue;
+      const content = typeof record["content"] === "string" ? record["content"] : "";
+      if (correctionPattern.test(content)) {
+        correctionSignalCount += 1;
+      }
+    }
+  }
+
+  const grillMeRecommended = correctionSignalCount >= 3;
+  return {
+    grillMeEnabled,
+    grillMeRecommended,
+    grillMeRecommendationReason: grillMeRecommended
+      ? "Recent planning replies included repeated corrections. Grill-me can reduce rework."
+      : null,
+    correctionSignalCount,
+  };
 }
 
 export async function setTaskPreferences(
@@ -38,4 +79,3 @@ export async function setTaskPreferences(
 
   return next;
 }
-
