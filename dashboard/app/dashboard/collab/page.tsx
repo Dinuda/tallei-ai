@@ -28,6 +28,7 @@ type CollabTask = {
   maxIterations: number;
   updatedAt: string;
   transcript?: TranscriptEntry[];
+  context?: Record<string, unknown>;
 };
 
 const FILTERS: Array<{ id: CollabFilter; label: string }> = [
@@ -63,6 +64,15 @@ function latestOutput(task: CollabTask): TranscriptEntry | null {
   if (transcript.length === 0) return null;
   const modelEntry = [...transcript].reverse().find((entry) => entry.actor === "chatgpt" || entry.actor === "claude");
   return modelEntry ?? transcript[transcript.length - 1];
+}
+
+function documentCount(task: CollabTask): number {
+  const context = task.context;
+  if (!context || typeof context !== "object" || Array.isArray(context)) return 0;
+  const docsContainer = context.documents;
+  if (!docsContainer || typeof docsContainer !== "object" || Array.isArray(docsContainer)) return 0;
+  const docs = (docsContainer as { documents?: unknown }).documents;
+  return Array.isArray(docs) ? docs.length : 0;
 }
 
 function relativeTime(iso: string): string {
@@ -158,6 +168,7 @@ export default function CollabTasksPage() {
         <div className={styles.grid}>
           {tasks.map((task) => {
             const latest = latestOutput(task);
+            const docs = documentCount(task);
             return (
               <Link key={task.id} className={styles.card} href={`/dashboard/collab/${task.id}`}>
                 <div className={styles.cardTop}>
@@ -178,6 +189,9 @@ export default function CollabTasksPage() {
                   <span className={latest ? styles.outputBadgeReady : styles.outputBadgeMissing}>
                     {latest ? "Output ready" : "No output yet"}
                   </span>
+                  {docs > 0 ? (
+                    <span className={styles.statusBadge}>{docs} docs</span>
+                  ) : null}
                 </div>
 
                 {latest && (

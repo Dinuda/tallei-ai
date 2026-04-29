@@ -6,5 +6,5 @@ export default async function OrchestrateSessionRedirectPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  redirect(`/dashboard/collab/plan/${id}`);
+  redirect(`/dashboard/collab/${id}`);
 }

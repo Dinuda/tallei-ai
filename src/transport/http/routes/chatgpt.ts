@@ -239,6 +239,33 @@ function previewText(value: string, max = 500): string {
   return value.trim().slice(0, max);
 }
 
+function hasLocalSandboxDownloadLink(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const record = body as Record<string, unknown>;
+  const refs = record["openaiFileIdRefs"];
+  if (!Array.isArray(refs)) return false;
+  return refs.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const link = (item as Record<string, unknown>)["download_link"];
+    if (typeof link !== "string") return false;
+    const normalized = link.trim().toLowerCase();
+    return normalized.startsWith("/mnt/data/") || normalized.startsWith("file://");
+  });
+}
+
+function zodValidationResponseBody(error: z.ZodError, normalizedBody: unknown): Record<string, unknown> {
+  if (!hasLocalSandboxDownloadLink(normalizedBody)) {
+    return { error: "Validation failed", details: error.errors };
+  }
+  return {
+    error: "Invalid file download links in openaiFileIdRefs",
+    code: "invalid_download_link",
+    user_message:
+      "File refs must include presigned HTTPS download links from GPT Actions (for example files.oaiusercontent.com). Local sandbox paths like /mnt/data/... or file://... are not supported. Re-send the action call with valid openaiFileIdRefs.",
+    details: error.errors,
+  };
+}
+
 const UUID_V4_LIKE_REGEX = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
 function extractTaskIdFromText(message: string): string | null {
@@ -252,6 +279,47 @@ function isCollabContinuePrompt(message: string): boolean {
   const hasTaskId = Boolean(extractTaskIdFromText(message));
   if (!hasTaskId) return false;
   return /\bcollab\b|\bcontinue\b|\bresume\b|\btask\b|\bproceed\b/i.test(message);
+}
+
+const COLLAB_STAGE_REGEX = /^\[COLLAB:(CREATE|CONTINUE|MY_TURN)(?::([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}))?\]/i;
+
+function extractCollabStage(message: string): {
+  stage: "CREATE" | "CONTINUE" | "MY_TURN";
+  taskId: string | null;
+} | null {
+  const m = message.match(COLLAB_STAGE_REGEX);
+  if (!m) return null;
+  const stage = m[1].toUpperCase() as "CREATE" | "CONTINUE" | "MY_TURN";
+  const rawId = m[2] ?? null;
+  const taskId = rawId ? (z.string().uuid().safeParse(rawId).success ? rawId : null) : null;
+  return { stage, taskId };
+}
+
+function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", taskId: string | null): string[] {
+  const taskLabel = taskId ? ` (task ${taskId})` : "";
+  if (stage === "CREATE") {
+    return [
+      "Memory recall and document save complete. Do not call prepare_response again for this turn.",
+      "Call createCollabTask with the user-provided args (title, brief, first_actor — default 'chatgpt', max_iterations). Do not pass file or document args.",
+      "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
+      "Show the actual submitted output after collab_continue succeeds.",
+    ];
+  }
+  if (stage === "CONTINUE") {
+    return [
+      "Document save complete. Do not call prepare_response again for this turn.",
+      `Call collab_continue with the exact user message${taskLabel}. Do not pass file or document args.`,
+      "If is_my_turn=true, include draft_output in the same collab_continue call.",
+      "If is_my_turn=false, report which actor (next_actor) is expected and stop.",
+      "Show the actual submitted output after a successful submit.",
+    ];
+  }
+  return [
+    "Document save complete. Do not call prepare_response again for this turn.",
+    `Call collab_continue with the exact user message and draft_output included${taskLabel}. Do not pass file or document args.`,
+    "Show the actual submitted output after collab_continue succeeds.",
+    "If the call fails, return the exact error and stop.",
+  ];
 }
 
 const PLAN_CACHE_TTL_MS = 5 * 60_000;
@@ -1083,8 +1151,8 @@ export function buildOpenApiSpec(serverUrl: string) {
       version: CHATGPT_OPENAPI_VERSION,
       description:
         "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key). " +
-        "Visible-chat-first contract: call prepare_response only for prior context, hidden documents/uploads, explicit recall/save, or durable facts/opinions/preferences/goals/decisions worth saving. " +
-        "COLLAB RULE: if user mentions a collab task UUID or asks to continue/resume a collab task, call /api/chatgpt/actions/collab_continue first and do not loop over prepare_response.",
+        "Call prepare_response on every turn. " +
+        "For collab flows, prefix the message with [COLLAB:CREATE], [COLLAB:CONTINUE:<uuid>], or [COLLAB:MY_TURN:<uuid>] — the action returns stage-specific replyInstructions telling you exactly which collab action to call next.",
     },
     servers: [
       {
@@ -1106,9 +1174,9 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/prepare_response": {
         post: {
           operationId: "prepare_response",
-          summary: "PRIMARY ACTION: selectively prepare context and queue saves",
+          summary: "PRIMARY ACTION: prepare context, queue saves, and route collab stages",
           description:
-            "Call only for prior context, hidden docs/uploads/catalogues, explicit recall/save/search, substantial content, or durable facts/opinions/preferences/goals/decisions. Skip when visible chat is enough. Do not call this for collab continue/resume prompts; use actions/collab_continue.",
+            "Call every turn. For collab flows, prefix message with [COLLAB:CREATE], [COLLAB:CONTINUE:<uuid>], or [COLLAB:MY_TURN:<uuid>]; the response returns exact replyInstructions for each stage. For non-collab turns, performs memory recall, document lookup, and save queuing as needed.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1835,11 +1903,12 @@ export function buildOpenApiSpec(serverUrl: string) {
       "/api/chatgpt/actions/collab_continue": {
         post: {
           operationId: "collab_continue",
-          summary: "Preferred collab continue action",
+          summary: "Collab continue — second step after prepare_response in collab flows",
           description:
-            "Single entrypoint for 'continue/resume collab task' prompts. " +
+            "Second step after prepare_response for all collab flows (CREATE, CONTINUE, MY_TURN). " +
             "Provide message and optionally draft_output. " +
-            "If it's your turn and draft_output is present, this call submits the turn.",
+            "If it's your turn and draft_output is present, this call submits the turn. " +
+            "If is_my_turn=false, report next_actor to the user and stop.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -2112,22 +2181,53 @@ router.get("/actions/openapi.json", (_req, res: Response) => {
 });
 
 router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireScopes(["memory:read", "memory:write"]), async (req: AuthRequest, res: Response) => {
+  const normalizedBody = normalizeUploadedFileRequestBody(req.body ?? {});
   try {
-    const body = prepareResponseSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const body = prepareResponseSchema.parse(normalizedBody);
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
 
+    const collabStage = extractCollabStage(body.message);
+    const hasAttachments = (body.openaiFileIdRefs?.length ?? 0) > 0;
+
+    // CONTINUE and MY_TURN without attachments: skip memory flow, return routing instructions only
+    if (collabStage && collabStage.stage !== "CREATE" && !hasAttachments) {
+      const { stage, taskId } = collabStage;
+      logChatGptActionAsync({
+        auth: req.authContext,
+        method: "chatgpt/actions/prepare_response",
+        collabTaskId: taskId,
+        metadata: { category: "collab", action: "prepare_short_circuit", stage, task_id_detected: taskId },
+        ok: true,
+      });
+      res.json({
+        contextBlock: `Collab stage [${stage}]${taskId ? ` (task ${taskId})` : ""} detected. Memory flow skipped.`,
+        memories: [],
+        recentDocuments: [],
+        matchedDocuments: [],
+        inlineDocuments: [],
+        queuedSaves: [],
+        autoSave: { requested: 0, complete: true, saved: [], errors: [] },
+        replyInstructions: collabStageReplyInstructions(stage, taskId),
+        intent: {
+          needsRecall: false,
+          needsDocumentLookup: false,
+          reusePreviousContext: false,
+          contextDependent: false,
+          saveCandidates: [],
+        },
+      });
+      return;
+    }
+
+    // Legacy fallback: untagged collab continue prompts (UUID + collab keyword)
     if (isCollabContinuePrompt(body.message)) {
       const detectedTaskId = extractTaskIdFromText(body.message);
       logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/actions/prepare_response",
         collabTaskId: detectedTaskId,
-        metadata: {
-          category: "collab",
-          action: "prepare_short_circuit",
-          task_id_detected: detectedTaskId,
-        },
+        metadata: { category: "collab", action: "prepare_short_circuit", task_id_detected: detectedTaskId },
         ok: true,
       });
       res.json({
@@ -2137,12 +2237,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
         matchedDocuments: [],
         inlineDocuments: [],
         queuedSaves: [],
-        autoSave: {
-          requested: 0,
-          complete: true,
-          saved: [],
-          errors: [],
-        },
+        autoSave: { requested: 0, complete: true, saved: [], errors: [] },
         replyInstructions: [
           "Do not call prepare_response again for this turn.",
           "Call collab_continue now with this same message.",
@@ -2159,8 +2254,15 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
       return;
     }
 
+    // For CREATE: strip the tag so the classifier sees the real message and runs recall normally.
+    // For CONTINUE/MY_TURN with attachments: keep the tag so the classifier returns needsRecall=false
+    // (skips vector search) but still runs file ingest.
+    const recallMessage = collabStage?.stage === "CREATE"
+      ? body.message.replace(COLLAB_STAGE_REGEX, "").trim()
+      : body.message;
+
     const result = await executePrepareResponseAction(auth, {
-      message: body.message,
+      message: recallMessage,
       openaiFileIdRefs: body.openaiFileIdRefs,
       conversation_id: body.conversation_id ?? null,
       last_recall: body.last_recall ?? null,
@@ -2173,10 +2275,16 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
       ok: result.status < 400,
       error: result.status >= 400 ? "Failed to prepare response" : null,
     });
+
+    // For any collab stage: override replyInstructions with stage-specific routing
+    if (collabStage && result.status < 400 && result.body && typeof result.body === "object") {
+      (result.body as Record<string, unknown>).replyInstructions = collabStageReplyInstructions(collabStage.stage, collabStage.taskId);
+    }
+
     res.status(result.status).json(result.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
+      res.status(400).json(zodValidationResponseBody(error, normalizedBody));
       return;
     }
     if (error instanceof UploadThingConfigError) {
@@ -2226,8 +2334,9 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
 });
 
 router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  const normalizedBody = normalizeUploadedFileRequestBody(req.body ?? {});
   try {
-    const body = recallSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const body = recallSchema.parse(normalizedBody);
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
     const recallResult = await executeRecallAction(auth, {
@@ -2259,7 +2368,7 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
     res.status(200).json(recallResult.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
+      res.status(400).json(zodValidationResponseBody(error, normalizedBody));
       return;
     }
     if (error instanceof UploadThingConfigError) {
@@ -2292,8 +2401,9 @@ router.post("/actions/recall_memories", chatGptActionAuthMiddleware, requireScop
 });
 
 router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  const normalizedBody = normalizeUploadedFileRequestBody(req.body ?? {});
   try {
-    const body = rememberSchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const body = rememberSchema.parse(normalizedBody);
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
     const rememberResult = await executeRememberAction(auth, body);
@@ -2314,7 +2424,7 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
     res.status(rememberResult.status).json(rememberResult.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
+      res.status(400).json(zodValidationResponseBody(error, normalizedBody));
       return;
     }
     if (error instanceof UploadThingConfigError) {
@@ -2341,8 +2451,9 @@ router.post("/actions/remember", chatGptActionAuthMiddleware, requireScopes(["me
 });
 
 router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  const normalizedBody = normalizeUploadedFileRequestBody(req.body ?? {});
   try {
-    const body = uploadBlobBodySchema.parse(normalizeUploadedFileRequestBody(req.body ?? {}));
+    const body = uploadBlobBodySchema.parse(normalizedBody);
     const auth = await resolveChatGptActionAuth(req, res);
     if (!auth) return;
     const uploadResult = await executeUploadBlobAction(auth, body);
@@ -2361,7 +2472,7 @@ router.post("/actions/upload_blob", chatGptActionAuthMiddleware, requireScopes([
     res.status(uploadResult.status).json(uploadResult.body);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
+      res.status(400).json(zodValidationResponseBody(error, normalizedBody));
       return;
     }
     if (error instanceof UploadThingConfigError) {

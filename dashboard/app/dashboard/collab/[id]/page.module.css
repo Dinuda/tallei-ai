@@ -338,6 +338,58 @@
   color: #be123c;
 }
 
+.docList {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.docRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 0.5rem;
+}
+
+.docPreview {
+  margin: 0.3rem 0 0;
+  color: var(--text-2);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.docStatus {
+  border-radius: 999px;
+  padding: 0.18rem 0.5rem;
+  border: 1px solid var(--border-light);
+  font-size: 0.68rem;
+  align-self: flex-start;
+  text-transform: uppercase;
+}
+
+.docStatus_pending {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+
+.docStatus_ready {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.docStatus_failed {
+  background: #fff1f2;
+  border-color: #fecaca;
+  color: #be123c;
+}
+
 .evaluationTimeline {
   border-top: 1px solid var(--border-light);
   padding-top: 0.5rem;

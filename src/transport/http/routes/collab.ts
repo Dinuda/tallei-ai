@@ -22,9 +22,10 @@ router.use(authMiddleware);
 
 const createTaskSchema = z.object({
   title: z.string().trim().min(1, "title is required"),
-  brief: z.string().optional(),
+  brief: z.string().nullable().optional(),
   firstActor: z.enum(["chatgpt", "claude"]),
   maxIterations: z.coerce.number().int().min(1).max(8).optional(),
+  context: z.record(z.unknown()).optional(),
 });
 
 const listTaskSchema = z.object({
@@ -67,6 +68,7 @@ router.post("/tasks", requireScopes(["collab:write"]), async (req: AuthRequest, 
         brief: body.brief ?? null,
         firstActor: body.firstActor,
         maxIterations: body.maxIterations,
+        context: body.context ?? null,
       },
       req.authContext!
     );

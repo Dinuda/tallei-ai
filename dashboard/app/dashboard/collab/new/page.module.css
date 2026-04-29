@@ -164,6 +164,78 @@
   padding: 0;
 }
 
+.lookupBlock {
+  border-top: 1px solid var(--border-light);
+  padding: 0 0.62rem 0.62rem;
+  display: grid;
+  gap: 0.46rem;
+}
+
+.lookupTitle {
+  margin: 0.45rem 0 0;
+  color: var(--text-2);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.lookupInput {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text);
+  font-size: 0.84rem;
+  padding: 0.52rem 0.62rem;
+}
+
+.lookupInput:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.lookupList {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.lookupItem {
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  text-align: left;
+  color: var(--text-2);
+  font-size: 0.78rem;
+  padding: 0.42rem 0.54rem;
+  cursor: pointer;
+}
+
+.lookupItem small {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.lookupItem:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-light));
+}
+
+.lookupItemActive {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border-light));
+  background: color-mix(in srgb, var(--surface) 90%, #eef2ff 10%);
+}
+
+.lookupEmpty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
 .hiddenInput {
   display: none;
 }

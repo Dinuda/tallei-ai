@@ -1,5 +1,7 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
+import { createLot, documentBriefsByRefs } from "./documents.js";
+import { ingestUploadedFilesToDocuments, type UploadedFileSaveError } from "./uploaded-file-ingest.js";
 
 export type CollabActor = "chatgpt" | "claude" | "user";
 export type CollabModelActor = "chatgpt" | "claude";
@@ -43,6 +45,20 @@ export interface CollabTurnFallbackContext {
   last_chatgpt_entry: CollabTranscriptEntry | null;
   last_claude_entry: CollabTranscriptEntry | null;
   recent_transcript: CollabTranscriptEntry[];
+  documents?: {
+    lot_ref: string;
+    lot_title: string | null;
+    conversation_id: string | null;
+    documents: Array<{
+      kind: "document";
+      ref: string;
+      title: string;
+      filename: string | null;
+      status: "pending" | "ready" | "failed";
+      preview: string;
+      blob_url: string | null;
+    }>;
+  };
   orchestration?: {
     plan_summary: string;
     success_criteria: Array<{
@@ -54,6 +70,19 @@ export interface CollabTurnFallbackContext {
     last_evaluation: CollabCriterionEvaluationEntry | null;
     instructions: string;
   };
+}
+export interface CollabOpenAiFileRef {
+  id: string;
+  name?: string;
+  mime_type?: string | null;
+  download_link: string;
+}
+
+interface TaskDocumentContextSnapshot {
+  lotRef: string | null;
+  lotTitle: string | null;
+  conversationId: string | null;
+  documentRefs: string[];
 }
 
 interface CollabTaskRow {
@@ -127,6 +156,16 @@ export class CollabNotFoundError extends Error {
   constructor(message = "Task not found") {
     super(message);
     this.name = "CollabNotFoundError";
+  }
+}
+
+export class CollabAttachmentIngestError extends Error {
+  readonly errors: UploadedFileSaveError[];
+
+  constructor(errors: UploadedFileSaveError[]) {
+    super("Failed to ingest uploaded attachments for collab task.");
+    this.name = "CollabAttachmentIngestError";
+    this.errors = errors;
   }
 }
 
@@ -210,6 +249,50 @@ function writeCachedTask(task: CollabTask): void {
 
 function invalidateCachedTask(taskId: string, auth: AuthContext): void {
   taskCache.delete(cacheKey(taskId, auth));
+}
+
+function normalizeDocRef(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.startsWith("@doc:") ? trimmed : null;
+}
+
+function readExistingTaskDocumentContext(context: Record<string, unknown>): TaskDocumentContextSnapshot {
+  const documentsContext = context["documents"];
+  if (!documentsContext || typeof documentsContext !== "object" || Array.isArray(documentsContext)) {
+    return { lotRef: null, lotTitle: null, conversationId: null, documentRefs: [] };
+  }
+
+  const row = documentsContext as Record<string, unknown>;
+  const docs = Array.isArray(row["documents"]) ? row["documents"] : [];
+  const refs = docs.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const ref = normalizeDocRef((item as Record<string, unknown>)["ref"]);
+    return ref ? [ref] : [];
+  });
+
+  return {
+    lotRef: typeof row["lot_ref"] === "string" ? row["lot_ref"] : null,
+    lotTitle: typeof row["lot_title"] === "string" ? row["lot_title"] : null,
+    conversationId: typeof row["conversation_id"] === "string" ? row["conversation_id"] : null,
+    documentRefs: refs,
+  };
+}
+
+async function loadTaskDocumentContext(taskId: string, auth: AuthContext): Promise<TaskDocumentContextSnapshot> {
+  const result = await pool.query<{ context: unknown }>(
+    `SELECT context
+     FROM collab_tasks
+     WHERE id = $1
+       AND user_id = $2
+     LIMIT 1`,
+    [taskId, auth.userId]
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new CollabNotFoundError("Task not found");
+  }
+  return readExistingTaskDocumentContext(normalizeContext(row.context));
 }
 
 function expectedStateForActor(actor: CollabModelActor): CollabState {
@@ -591,6 +674,7 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
   const orchestrationContext = normalizeContext(context["orchestration"]);
   const artifacts = normalizeContext(context["artifacts"]);
   const plan = normalizeContext(artifacts["plan"]);
+  const documentContext = normalizeContext(context["documents"]);
 
   let orchestration: CollabTurnFallbackContext["orchestration"] | undefined;
   if (typeof orchestrationContext["session_id"] === "string" && typeof plan["summary"] === "string") {
@@ -642,7 +726,141 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
     last_chatgpt_entry: lastChatGptEntry,
     last_claude_entry: lastClaudeEntry,
     recent_transcript: recentTranscript,
+    ...(typeof documentContext["lot_ref"] === "string" ? {
+      documents: {
+        lot_ref: documentContext["lot_ref"] as string,
+        lot_title: typeof documentContext["lot_title"] === "string" ? documentContext["lot_title"] : null,
+        conversation_id: typeof documentContext["conversation_id"] === "string" ? documentContext["conversation_id"] : null,
+        documents: Array.isArray(documentContext["documents"])
+          ? (documentContext["documents"] as Array<Record<string, unknown>>).flatMap((item) => {
+            if (!item || typeof item !== "object") return [];
+            if (item["kind"] !== "document" || typeof item["ref"] !== "string" || typeof item["title"] !== "string" || typeof item["preview"] !== "string") return [];
+            const status = item["status"];
+            if (status !== "pending" && status !== "ready" && status !== "failed") return [];
+            return [{
+              kind: "document" as const,
+              ref: item["ref"],
+              title: item["title"],
+              filename: typeof item["filename"] === "string" ? item["filename"] : null,
+              status,
+              preview: item["preview"],
+              blob_url:
+                item["blob"] &&
+                  typeof item["blob"] === "object" &&
+                  !Array.isArray(item["blob"]) &&
+                  typeof (item["blob"] as Record<string, unknown>)["url"] === "string"
+                  ? (item["blob"] as Record<string, unknown>)["url"] as string
+                  : null,
+            }];
+          })
+          : [],
+      },
+    } : {}),
     ...(orchestration ? { orchestration } : {}),
+  };
+}
+
+export async function attachUploadedFilesToTaskContext(
+  taskId: string,
+  auth: AuthContext,
+  input: {
+    openaiFileIdRefs?: CollabOpenAiFileRef[];
+    documentRefs?: string[];
+    conversationId?: string | null;
+    title?: string;
+  }
+): Promise<{
+  lot_ref: string | null;
+  count_saved: number;
+  count_attached_existing: number;
+  count_total_documents: number;
+  count_failed: number;
+  errors: UploadedFileSaveError[];
+}> {
+  const uploadedFileRefs = input.openaiFileIdRefs ?? [];
+  const requestedDocumentRefs = [...new Set((input.documentRefs ?? []).map((value) => value.trim()).filter(Boolean))];
+  const existingContext = await loadTaskDocumentContext(taskId, auth);
+
+  if (uploadedFileRefs.length === 0 && requestedDocumentRefs.length === 0) {
+    return {
+      lot_ref: existingContext.lotRef,
+      count_saved: 0,
+      count_attached_existing: 0,
+      count_total_documents: existingContext.documentRefs.length,
+      count_failed: 0,
+      errors: [],
+    };
+  }
+
+  const { saved, errors } = uploadedFileRefs.length > 0
+    ? await ingestUploadedFilesToDocuments(uploadedFileRefs, auth, {
+      title: input.title,
+      conversation_id: input.conversationId ?? null,
+    })
+    : { saved: [], errors: [] };
+
+  const mergedRefs = [...new Set([
+    ...existingContext.documentRefs,
+    ...requestedDocumentRefs.map((ref) => ref.trim()),
+    ...saved.map((item) => item.ref),
+  ])];
+
+  if (mergedRefs.length === 0) {
+    if (errors.length > 0) {
+      throw new CollabAttachmentIngestError(errors);
+    }
+    return {
+      lot_ref: existingContext.lotRef,
+      count_saved: 0,
+      count_attached_existing: 0,
+      count_total_documents: 0,
+      count_failed: 0,
+      errors: [],
+    };
+  }
+
+  const lot = await createLot(mergedRefs, auth, input.title ?? "Collab upload bundle");
+  const refs = [lot.lotRef, ...lot.docRefs];
+  const briefs = await documentBriefsByRefs(refs, auth, { maxLotDocs: 20 });
+  const lotBrief = briefs.find((item) => item.kind === "lot" && item.ref === lot.lotRef);
+  const documents = lotBrief?.kind === "lot" ? lotBrief.documents : [];
+  const conversationId = input.conversationId ?? existingContext.conversationId ?? null;
+  const attachedExisting = requestedDocumentRefs.filter((ref) => !existingContext.documentRefs.includes(ref)).length;
+
+  await pool.query(
+    `UPDATE collab_tasks
+     SET context = jsonb_set(
+       COALESCE(context, '{}'::jsonb),
+       '{documents}',
+       $3::jsonb,
+       true
+     ),
+         updated_at = now()
+     WHERE id = $1
+       AND user_id = $2`,
+    [taskId, auth.userId, JSON.stringify({
+      lot_ref: lot.lotRef,
+      lot_title: input.title ?? existingContext.lotTitle ?? null,
+      conversation_id: conversationId,
+      documents,
+      upload: {
+        count_saved: saved.length,
+        count_attached_existing: attachedExisting,
+        count_total_documents: lot.docRefs.length,
+        count_failed: errors.length,
+        errors,
+      },
+    })]
+  );
+  invalidateCachedTask(taskId, auth);
+
+  return {
+    lot_ref: lot.lotRef,
+    count_saved: saved.length,
+    count_attached_existing: attachedExisting,
+    count_total_documents: lot.docRefs.length,
+    count_failed: errors.length,
+    errors,
   };
 }
 
@@ -652,6 +870,7 @@ export async function createTask(
     brief?: string | null;
     firstActor: CollabModelActor;
     maxIterations?: number;
+    context?: Record<string, unknown> | null;
   },
   auth: AuthContext
 ): Promise<CollabTask> {
@@ -664,10 +883,18 @@ export async function createTask(
   const state = input.firstActor === "chatgpt" ? "CREATIVE" : "TECHNICAL";
 
   const result = await pool.query<CollabTaskRow>(
-    `INSERT INTO collab_tasks (tenant_id, user_id, title, brief, state, max_iterations)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO collab_tasks (tenant_id, user_id, title, brief, state, max_iterations, context)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
      RETURNING *`,
-    [auth.tenantId, auth.userId, title, input.brief ?? null, state, maxIterations]
+    [
+      auth.tenantId,
+      auth.userId,
+      title,
+      input.brief ?? null,
+      state,
+      maxIterations,
+      JSON.stringify(input.context ?? {}),
+    ]
   );
 
   const task = mapTaskRow(result.rows[0]);

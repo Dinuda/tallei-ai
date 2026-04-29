@@ -19,7 +19,9 @@ import {
 } from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import {
+  attachUploadedFilesToTaskContext,
   buildTurnFallbackContext,
+  CollabAttachmentIngestError,
   claimTurn,
   CollabConflictError,
   createTask as createCollabTask,
@@ -206,9 +208,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       description: "Checks if it's Claude's turn on a collab task and returns task context.",
       inputSchema: {
         task_id: z.string().uuid().describe("Collab task ID."),
+        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+        conversation_id: conversationIdSchema,
       },
     },
-    async ({ task_id }) => {
+    async ({ task_id, openaiFileIdRefs, conversation_id }) => {
       try {
         if (!hasCollabWriteScope(auth)) {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
@@ -219,6 +223,12 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         if (!task) {
           return toJsonToolResult({ error: "Task not found" }, true);
         }
+        const uploadSummary = openaiFileIdRefs?.length
+          ? await attachUploadedFilesToTaskContext(task.id, auth, {
+            openaiFileIdRefs,
+            conversationId: conversation_id ?? null,
+          })
+          : null;
 
         const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
         const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
@@ -237,8 +247,17 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           last_chatgpt_entry: lastChatGptEntry,
           recent_transcript: task.transcript.slice(-6),
           fallback_context: buildTurnFallbackContext(task, "claude"),
+          ...(uploadSummary ? { upload: uploadSummary } : {}),
         });
       } catch (err) {
+        if (err instanceof CollabAttachmentIngestError) {
+          return toJsonToolResult({
+            error: err.message,
+            count_saved: 0,
+            count_failed: err.errors.length,
+            errors: err.errors,
+          }, true);
+        }
         const message = err instanceof Error ? err.message : "Failed to check turn";
         return toJsonToolResult({ error: message }, true);
       }
@@ -254,13 +273,21 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         task_id: z.string().uuid().describe("Collab task ID."),
         content: z.string().min(1).describe("Turn output content."),
         mark_done: z.boolean().optional().default(false),
+        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+        conversation_id: conversationIdSchema,
       },
     },
-    async ({ task_id, content, mark_done }) => {
+    async ({ task_id, content, mark_done, openaiFileIdRefs, conversation_id }) => {
       try {
         if (!hasCollabWriteScope(auth)) {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
         }
+        const uploadSummary = openaiFileIdRefs?.length
+          ? await attachUploadedFilesToTaskContext(task_id, auth, {
+            openaiFileIdRefs,
+            conversationId: conversation_id ?? null,
+          })
+          : null;
         const task = await submitCollabTurn(task_id, "claude", content, auth, { markDone: mark_done ?? false });
         const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
         const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
@@ -281,8 +308,17 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
                 content_preview: savedTurn.content.slice(0, 800),
               }
             : null,
+          ...(uploadSummary ? { upload: uploadSummary } : {}),
         });
       } catch (err) {
+        if (err instanceof CollabAttachmentIngestError) {
+          return toJsonToolResult({
+            error: err.message,
+            count_saved: 0,
+            count_failed: err.errors.length,
+            errors: err.errors,
+          }, true);
+        }
         if (err instanceof CollabConflictError) {
           const task = await getCollabTask(task_id, auth);
           const nextActor = task ? (task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null) : null;
@@ -331,28 +367,99 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "collab_create_task",
     {
       title: "Create Collab Task",
-      description: "Creates a new collab task for ChatGPT and Claude turn-taking.",
+      description: "Creates a new collab task for ChatGPT and Claude turn-taking. Performs recall preflight (supports include_doc_refs) before creation and returns preflight context.",
       inputSchema: {
         title: z.string().min(1).describe("Task title."),
         brief: z.string().optional().describe("Optional task brief."),
-        first_actor: z.enum(["chatgpt", "claude"]).describe("Which model takes the first turn."),
+        first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt").describe("Which model takes the first turn."),
         max_iterations: z.number().int().min(1).max(8).optional(),
+        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+        include_doc_refs: z.array(z.string()).max(20).optional(),
+        recall_query: z.string().min(1).max(500).optional(),
+        conversation_id: conversationIdSchema,
       },
     },
-    async ({ title, brief, first_actor, max_iterations }) => {
+    async (args) => {
       try {
+        const parsed = z.object({
+          title: z.string().min(1),
+          brief: z.string().optional(),
+          first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt"),
+          max_iterations: z.number().int().min(1).max(8).optional(),
+          openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+          include_doc_refs: z.array(z.string()).max(20).optional(),
+          recall_query: z.string().min(1).max(500).optional(),
+          conversation_id: conversationIdSchema,
+        }).parse(normalizeUploadedFileRequestBody(args));
         if (!hasCollabWriteScope(auth)) {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
         }
-        const task = await createCollabTask(
+        const recallQuery = parsed.recall_query ?? parsed.brief ?? parsed.title;
+        const preflightRecall = await executeRecallAction(auth, {
+          query: recallQuery,
+          limit: 5,
+          include_doc_refs: parsed.include_doc_refs,
+          openaiFileIdRefs: parsed.openaiFileIdRefs,
+          conversation_id: parsed.conversation_id ?? null,
+        });
+        const createdTask = await createCollabTask(
           {
-            title,
-            brief: brief ?? null,
-            firstActor: first_actor,
-            maxIterations: max_iterations,
+            title: parsed.title,
+            brief: parsed.brief ?? null,
+            firstActor: parsed.first_actor ?? "chatgpt",
+            maxIterations: parsed.max_iterations,
+            context: {
+              preflight_recall: preflightRecall.status === 200
+                ? {
+                  query: recallQuery,
+                  context_block: preflightRecall.body.contextBlock,
+                  memories_count: preflightRecall.body.memories.length,
+                  matched_documents_count: preflightRecall.body.matchedDocuments.length,
+                  referenced_documents_count: preflightRecall.body.referencedDocuments.length,
+                  auto_save: preflightRecall.body.autoSave,
+                }
+                : {
+                  query: recallQuery,
+                  error: preflightRecall.body.error,
+                  auto_save: preflightRecall.body.autoSave,
+                },
+            },
           },
           auth
         );
+        let uploadSummary:
+          | {
+            lot_ref: string | null;
+            count_saved: number;
+            count_attached_existing: number;
+            count_total_documents: number;
+            count_failed: number;
+            errors: Array<{ file_id: string; filename: string; error: string }>;
+          }
+          | null = null;
+        if (parsed.openaiFileIdRefs?.length) {
+          try {
+            uploadSummary = await attachUploadedFilesToTaskContext(createdTask.id, auth, {
+              openaiFileIdRefs: parsed.openaiFileIdRefs,
+              conversationId: parsed.conversation_id ?? null,
+              title: parsed.title,
+            });
+          } catch (error) {
+            if (error instanceof CollabAttachmentIngestError) {
+              uploadSummary = {
+                lot_ref: null,
+                count_saved: 0,
+                count_attached_existing: 0,
+                count_total_documents: 0,
+                count_failed: error.errors.length,
+                errors: error.errors,
+              };
+            } else {
+              throw error;
+            }
+          }
+        }
+        const task = (parsed.openaiFileIdRefs?.length ? await getCollabTask(createdTask.id, auth) : createdTask) ?? createdTask;
         return toJsonToolResult({
           ok: true,
           task_id: task.id,
@@ -362,6 +469,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           iteration: task.iteration,
           max_iterations: task.maxIterations,
           next_actor: task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null,
+          fallback_context: buildTurnFallbackContext(task, "claude"),
+          preflight_recall: preflightRecall.body,
+          ...(uploadSummary ? { upload: uploadSummary } : {}),
           user_visible: `Created collab task ${task.id} (${task.title}).`,
         });
       } catch (err) {
@@ -400,6 +510,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           session_id: result.session.id,
           status: result.session.status,
           question: result.firstQuestion,
+          question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
           fallback_context: buildSessionFallbackContext(result.session),
         });
       } catch (err) {
@@ -429,6 +540,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           session_id,
           status: result.session.status,
           question: result.nextQuestion ?? null,
+          question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
           plan: result.plan ?? result.session.plan,
           fallback_context: buildSessionFallbackContext(result.session),
         });

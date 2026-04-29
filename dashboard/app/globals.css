@@ -22,11 +22,11 @@
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: oklch(0.46 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
+  --border: oklch(0.84 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --chart-1: oklch(0.87 0 0);
@@ -50,7 +50,7 @@
   --surface-2: color-mix(in oklab, var(--card) 88%, var(--muted) 12%);
   --text: var(--foreground);
   --text-2: var(--muted-foreground);
-  --text-muted: var(--muted-foreground);
+  --text-muted: color-mix(in oklab, var(--muted-foreground) 88%, var(--foreground) 12%);
   --border-light: var(--border);
   --border-focus: var(--ring);
   --radius-sm: calc(var(--radius) * 0.8);
@@ -143,6 +143,17 @@
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @layer base {

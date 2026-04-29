@@ -248,7 +248,7 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
 const TALLEI_INSTRUCTIONS = `Tallei stores durable memory across AI tools. Follow these rules on every turn:
 
 1. COLLAB TASK ROUTING: If the user asks to continue/resume/proceed a collab task, or includes a task UUID, call collab_check_turn first. Do NOT call recall_memories for collab task state. Use fallback_context + recent_transcript and submit with collab_take_turn when is_my_turn=true.
-2. SHORTCUT COMMANDS: "@tallei decide" should create/continue a collab task (call collab_create_task if needed, then collab_check_turn/collab_take_turn). "@tallei ship" should output structured execution artifacts (PRD/tickets/checklist/owner/due date) and save them through collab_take_turn.
+2. SHORTCUT COMMANDS: If user asks to start/create/begin collab and no task exists, call collab_create_task immediately in the same turn (default first_actor="chatgpt"), then continue with collab_check_turn/collab_take_turn. If user provides explicit collab args (title/brief/first_actor/max_iterations), call collab_create_task with those exact values before explanatory text. Pass recall_query (goal/brief/title) and include_doc_refs when explicit @doc refs are provided so recall preflight runs before ingest. Do not output copy/paste workflows or manual setup guidance when collab tools are available. Forward attached files via openaiFileIdRefs/conversation_id when available so docs upload at task creation. If collab_create_task returns upload failures, report them briefly and continue unless task creation itself failed. "@tallei decide" follows the same behavior. "@tallei ship" should output structured execution artifacts (PRD/tickets/checklist/owner/due date) and save them through collab_take_turn.
 3. VISIBILITY GUARANTEE: After collab_take_turn succeeds, include the actual submitted output content in the assistant reply. Do not reply with only status text like "completed."
 4. DON'T RECALL REFLEXIVELY. Only call recall_memories when the user references prior sessions ("last time", "remember", "what did I say about"), asks about preferences, or the task clearly requires personalized past context. If you can answer from the attached file or the current message, do not call recall_memories.
 5. PINNED PREFERENCES are already available as the "Pinned Preferences" MCP resource. Do not call recall_memories just to look up the user's known preferences.
@@ -265,7 +265,8 @@ const TALLEI_INSTRUCTIONS = `Tallei stores durable memory across AI tools. Follo
    - Then append exactly this footer on its own line in the final reply:
      📎 Auto-saved as @doc:<ref> · reply **undo** to delete
    - Skip auto-save only if: user explicitly said not to save, the turn is purely conversational, or this content was already saved.
-11. UNDO HANDLING: If the user replies "undo", "del", or "delete" after that footer, call undo_save with the referenced @doc ref immediately.`;
+11. UNDO HANDLING: If the user replies "undo", "del", or "delete" after that footer, call undo_save with the referenced @doc ref immediately.
+12. DO NOT USE ORCHESTRATOR TOOLS for normal connector-driven collab starts; use the collab_* tool flow directly.`;
 
 const MCP_SERVER_VERSION = "1.0.0";
 

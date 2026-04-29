@@ -334,8 +334,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     signupEmailFromName: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_NAME", "Dinuda Yaggahavita"),
     signupEmailFromEmail: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_EMAIL"),
     signupEmailReplyTo: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_REPLY_TO"),
+    // Keep connector instructions versioned in code to avoid stale env copies causing behavior drift.
     claudeProjectInstructionsTemplate:
-      e.CLAUDE_PROJECT_INSTRUCTIONS_TEMPLATE ||
       `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.
 
 === TURN PROTOCOL ===
@@ -346,6 +346,13 @@ STEP 0 — COLLAB TASKS FIRST:
 - Build your turn from collab_check_turn.fallback_context and recent_transcript.
 - If is_my_turn=false, tell the user which actor is currently expected and stop.
 - If is_my_turn=true, produce the task output and submit it with collab_take_turn.
+- If the user asks to start/create/begin collab and no task exists yet, call collab_create_task immediately in the same turn. Do not ask planning questions first.
+- If the user provides explicit collab task arguments (title/brief/first_actor/max_iterations), call collab_create_task with those exact values before any explanatory text.
+- Do NOT output copy/paste workflows, manual setup steps, or "you can do this" alternatives when collab tools are available.
+- Use first_actor="chatgpt" by default unless the user explicitly asks for Claude first.
+- For collab_create_task, pass recall_query (use user goal/brief/title) and include_doc_refs when user references specific @doc handles to preload.
+- If files are attached this turn, pass them to collab_create_task via openaiFileIdRefs (and conversation_id when available) so recall preflight runs first and docs are ingested/bundled at creation time.
+- If collab_create_task returns upload failures, show concise file errors and continue with task execution unless creation itself failed.
 - If the user says "@tallei decide" and no task exists yet, call collab_create_task first, then continue with collab_check_turn/collab_take_turn.
 - If the user says "@tallei ship", return structured execution output (PRD/tickets/checklist/owner/due date) and submit that exact output to collab_take_turn.
 - After collab_take_turn succeeds, show the actual submitted output content in your reply (not just "task completed").

@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import styles from "./page.module.css";
@@ -11,7 +11,14 @@ type ContextDocument = {
   ref: string;
   label: string;
   snippet: string;
-  source: "uploaded";
+  source: "uploaded" | "existing";
+};
+
+type ExistingDocListItem = {
+  ref: string;
+  filename: string | null;
+  title: string | null;
+  preview: string;
 };
 
 const STEPS = ["Scope", "Roles", "Start"];
@@ -19,35 +26,18 @@ const STEPS = ["Scope", "Roles", "Start"];
 const DEFAULT_CHATGPT_ROLE = "Explore alternatives, expand options, and draft creative first-pass outputs.";
 const DEFAULT_CLAUDE_ROLE = "Stress-test assumptions, tighten technical details, and finalize implementation-ready output.";
 
-function buildInitialContext(input: {
-  title: string;
-  brief: string;
+function suggestRolesFromPrompt(input: { title: string; brief: string }): {
   chatgptRole: string;
   claudeRole: string;
-  contextDocs: ContextDocument[];
-}): string {
-  const sections: string[] = [];
-  sections.push(`Task title:\n${input.title.trim()}`);
-
-  if (input.brief.trim()) {
-    sections.push(`Task brief:\n${input.brief.trim()}`);
-  }
-
-  const roleLines: string[] = [];
-  if (input.chatgptRole.trim()) roleLines.push(`- ChatGPT role: ${input.chatgptRole.trim()}`);
-  if (input.claudeRole.trim()) roleLines.push(`- Claude role: ${input.claudeRole.trim()}`);
-  if (roleLines.length > 0) {
-    sections.push(`Provider roles:\n${roleLines.join("\n")}`);
-  }
-
-  if (input.contextDocs.length > 0) {
-    const block = input.contextDocs
-      .map((doc, index) => `Document ${index + 1} (${doc.source}): ${doc.label}\n${doc.snippet}`)
-      .join("\n\n");
-    sections.push(`Document context:\n${block}`);
-  }
-
-  return sections.join("\n\n");
+  starter: FirstActor;
+} {
+  const text = `${input.title} ${input.brief}`.toLowerCase();
+  const technicalHint = /(api|schema|db|database|migration|backend|auth|infra|typescript|test|contract|route|architecture)/.test(text);
+  return {
+    chatgptRole: DEFAULT_CHATGPT_ROLE,
+    claudeRole: DEFAULT_CLAUDE_ROLE,
+    starter: technicalHint ? "claude" : "chatgpt",
+  };
 }
 
 export default function CollabTaskWizardPage() {
@@ -63,6 +53,10 @@ export default function CollabTaskWizardPage() {
   const [starterRecommendation, setStarterRecommendation] = useState<FirstActor>("chatgpt");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [contextDocs, setContextDocs] = useState<ContextDocument[]>([]);
+  const [existingDocs, setExistingDocs] = useState<ExistingDocListItem[]>([]);
+  const [selectedExistingRefs, setSelectedExistingRefs] = useState<string[]>([]);
+  const [docSearch, setDocSearch] = useState("");
+  const [docsLoading, setDocsLoading] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -110,6 +104,26 @@ export default function CollabTaskWizardPage() {
     }
   };
 
+  const loadExistingDocs = useCallback(async () => {
+    setDocsLoading(true);
+    try {
+      const res = await fetch("/api/documents", { cache: "no-store" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(typeof body?.error === "string" ? body.error : "Failed to load documents");
+
+      const docs = Array.isArray(body?.docs)
+        ? body.docs
+            .filter((item): item is ExistingDocListItem => Boolean(item && typeof item === "object" && typeof item.ref === "string"))
+            .slice(0, 100)
+        : [];
+      setExistingDocs(docs);
+    } catch {
+      setExistingDocs([]);
+    } finally {
+      setDocsLoading(false);
+    }
+  }, []);
+
   const prepareContextDocs = async (): Promise<ContextDocument[]> => {
     const uploadedDocs: ContextDocument[] = [];
 
@@ -136,8 +150,21 @@ export default function CollabTaskWizardPage() {
       }
     }
 
+    const selectedExistingDocs: ContextDocument[] = [];
+    for (const ref of selectedExistingRefs) {
+      const sourceItem = existingDocs.find((item) => item.ref === ref);
+      const snippet = await loadDocumentSnippet(ref);
+      selectedExistingDocs.push({
+        ref,
+        label: sourceItem?.title || sourceItem?.filename || ref,
+        snippet: snippet || sourceItem?.preview || "Existing document selected for planning context.",
+        source: "existing",
+      });
+    }
+
     const deduped = new Map<string, ContextDocument>();
     for (const item of uploadedDocs) deduped.set(item.ref, item);
+    for (const item of selectedExistingDocs) deduped.set(item.ref, item);
     return Array.from(deduped.values());
   };
 
@@ -150,26 +177,13 @@ export default function CollabTaskWizardPage() {
     setErrorText(null);
 
     try {
-      const res = await fetch("/api/orchestrate/suggest-roles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: title.trim(),
-          brief: brief.trim() || undefined,
-        }),
+      const suggested = suggestRolesFromPrompt({
+        title: title.trim(),
+        brief: brief.trim(),
       });
-      const body = await res.json();
-      if (!res.ok) {
-        throw new Error(typeof body?.error === "string" ? body.error : "Failed to suggest roles");
-      }
-
-      const suggestedChatgpt = typeof body?.chatgpt_role === "string" ? body.chatgpt_role.trim() : "";
-      const suggestedClaude = typeof body?.claude_role === "string" ? body.claude_role.trim() : "";
-      const suggestedStarter = body?.first_actor_recommendation === "claude" ? "claude" : "chatgpt";
-
-      setChatgptRole(suggestedChatgpt || DEFAULT_CHATGPT_ROLE);
-      setClaudeRole(suggestedClaude || DEFAULT_CLAUDE_ROLE);
-      setStarterRecommendation(suggestedStarter);
+      setChatgptRole(suggested.chatgptRole);
+      setClaudeRole(suggested.claudeRole);
+      setStarterRecommendation(suggested.starter);
     } catch {
       setChatgptRole((current) => current.trim() || DEFAULT_CHATGPT_ROLE);
       setClaudeRole((current) => current.trim() || DEFAULT_CLAUDE_ROLE);
@@ -180,38 +194,42 @@ export default function CollabTaskWizardPage() {
     }
   };
 
-  const createSession = async () => {
+  const createTask = async () => {
     if (busy) return;
     setBusy(true);
     setErrorText(null);
     try {
-      const res = await fetch("/api/orchestrate/sessions", {
+      const res = await fetch("/api/collab/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          goal: brief.trim() || title.trim(),
-          source_platform: "dashboard",
-          first_actor_preference: starterRecommendation,
-          provider_roles: {
-            chatgpt: chatgptRole.trim() || undefined,
-            claude: claudeRole.trim() || undefined,
+          title: title.trim(),
+          brief: brief.trim() || null,
+          firstActor: starterRecommendation,
+          maxIterations: 4,
+          context: {
+            artifacts: {
+              setup: {
+                provider_roles: {
+                  chatgpt: chatgptRole.trim() || null,
+                  claude: claudeRole.trim() || null,
+                },
+              },
+              context_documents: contextDocs,
+            },
+            migration: {
+              unified_collab: true,
+            },
           },
-          initial_context: buildInitialContext({
-            title,
-            brief,
-            chatgptRole,
-            claudeRole,
-            contextDocs,
-          }),
         }),
       });
       const body = await res.json();
-      if (!res.ok || typeof body?.session?.id !== "string") {
-        throw new Error(typeof body?.error === "string" ? body.error : "Failed to create planning session");
+      if (!res.ok || typeof body?.id !== "string") {
+        throw new Error(typeof body?.error === "string" ? body.error : "Failed to create collab task");
       }
-      router.push(`/dashboard/collab/plan/${body.session.id}`);
+      router.push(`/dashboard/collab/kickoff/${body.id}`);
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "Failed to start planning session.");
+      setErrorText(error instanceof Error ? error.message : "Failed to create collab task.");
       setBusy(false);
     }
   };
@@ -230,6 +248,27 @@ export default function CollabTaskWizardPage() {
     }
     setStep((current) => Math.min(2, current + 1));
   };
+
+  const toggleExistingDoc = (ref: string) => {
+    setSelectedExistingRefs((current) => {
+      if (current.includes(ref)) return current.filter((item) => item !== ref);
+      return [...current, ref];
+    });
+  };
+
+  const visibleExistingDocs = useMemo(() => {
+    const query = docSearch.trim().toLowerCase();
+    const pool = existingDocs.filter((item) => {
+      if (!query) return true;
+      const haystack = `${item.title ?? ""} ${item.filename ?? ""} ${item.preview ?? ""} ${item.ref}`.toLowerCase();
+      return haystack.includes(query);
+    });
+    return pool.slice(0, 8);
+  }, [docSearch, existingDocs]);
+
+  useEffect(() => {
+    void loadExistingDocs();
+  }, [loadExistingDocs]);
 
   return (
     <div className={styles.page}>
@@ -284,6 +323,39 @@ export default function CollabTaskWizardPage() {
                 ))}
               </div>
             ) : null}
+
+            <div className={styles.lookupBlock}>
+              <p className={styles.lookupTitle}>Lookup existing documents</p>
+              <input
+                className={styles.lookupInput}
+                value={docSearch}
+                onChange={(event) => setDocSearch(event.target.value)}
+                placeholder="Search docs by title, filename, preview, or @doc ref"
+              />
+              <div className={styles.lookupList}>
+                {docsLoading ? (
+                  <p className={styles.lookupEmpty}>Loading documents...</p>
+                ) : visibleExistingDocs.length === 0 ? (
+                  <p className={styles.lookupEmpty}>No matching documents found.</p>
+                ) : (
+                  visibleExistingDocs.map((doc) => {
+                    const label = doc.title || doc.filename || doc.ref;
+                    const selected = selectedExistingRefs.includes(doc.ref);
+                    return (
+                      <button
+                        key={doc.ref}
+                        type="button"
+                        className={`${styles.lookupItem} ${selected ? styles.lookupItemActive : ""}`}
+                        onClick={() => toggleExistingDoc(doc.ref)}
+                      >
+                        <span>{label}</span>
+                        <small>{doc.ref}</small>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </div>
           </div>
 
           {stepWaiting ? (
@@ -333,8 +405,8 @@ export default function CollabTaskWizardPage() {
 
       {step === 2 && (
         <section className={styles.card}>
-          <h2>Start grill-me planning</h2>
-          <p className={styles.helperText}>You will enter a streaming planning workspace, confirm the plan, then get dual copy-paste kickoff prompts.</p>
+          <h2>Create unified collab task</h2>
+          <p className={styles.helperText}>This creates one shared collab task and opens dual kickoff prompts for ChatGPT and Claude.</p>
           <div className={styles.summaryBox}>
             <p><strong>Title:</strong> {title.trim()}</p>
             {brief.trim() ? <p><strong>Brief:</strong> {brief.trim()}</p> : null}
@@ -362,8 +434,8 @@ export default function CollabTaskWizardPage() {
             {stepWaiting ? "Preparing..." : "Continue"}
           </button>
         ) : (
-          <button type="button" className={styles.primaryBtn} disabled={busy} onClick={() => void createSession()}>
-            {busy ? "Starting..." : "Start Planning"}
+          <button type="button" className={styles.primaryBtn} disabled={busy} onClick={() => void createTask()}>
+            {busy ? "Creating..." : "Create Task"}
           </button>
         )}
       </footer>

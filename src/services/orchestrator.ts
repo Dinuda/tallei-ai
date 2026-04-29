@@ -31,6 +31,8 @@ export interface OrchestrationTranscriptEntry {
   content: string;
   ts: string;
   web_searches?: WebSearchResult[];
+  suggested_answers?: string[];
+  default_answer?: string | null;
 }
 
 export interface OrchestrationSession {
@@ -159,11 +161,27 @@ function normalizeTranscriptEntry(value: unknown): OrchestrationTranscriptEntry 
         .filter((item) => item.query || item.url || item.snippet)
     : [];
 
+  const suggestedAnswersRaw = row["suggested_answers"];
+  const suggestedAnswers = Array.isArray(suggestedAnswersRaw)
+    ? suggestedAnswersRaw
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
+
+  const defaultAnswer =
+    typeof row["default_answer"] === "string" && row["default_answer"].trim()
+      ? row["default_answer"].trim()
+      : null;
+
   return {
     role,
     content,
     ts,
     ...(webSearches.length > 0 ? { web_searches: webSearches } : {}),
+    ...(suggestedAnswers.length > 0 ? { suggested_answers: suggestedAnswers } : {}),
+    ...(defaultAnswer ? { default_answer: defaultAnswer } : {}),
   };
 }
 
@@ -254,9 +272,18 @@ function mapSessionRow(row: OrchestrationSessionRow): OrchestrationSession {
   };
 }
 
-function latestPlannerQuestion(session: OrchestrationSession): string | null {
+function latestPlannerQuestion(session: OrchestrationSession): {
+  question: string;
+  suggested_answers?: string[];
+  default_answer?: string | null;
+} | null {
   const plannerEntry = [...session.transcript].reverse().find((entry) => entry.role === "planner");
-  return plannerEntry?.content ?? null;
+  if (!plannerEntry) return null;
+  return {
+    question: plannerEntry.content,
+    ...(plannerEntry.suggested_answers?.length ? { suggested_answers: plannerEntry.suggested_answers } : {}),
+    ...(plannerEntry.default_answer ? { default_answer: plannerEntry.default_answer } : {}),
+  };
 }
 
 function toPlannerTurns(transcript: OrchestrationTranscriptEntry[]): PlannerTurn[] {
@@ -265,6 +292,8 @@ function toPlannerTurns(transcript: OrchestrationTranscriptEntry[]): PlannerTurn
     content: entry.content,
     ts: entry.ts,
     web_searches: entry.web_searches,
+    suggested_answers: entry.suggested_answers,
+    default_answer: entry.default_answer,
   }));
 }
 
@@ -308,11 +337,12 @@ async function fetchSessionRow(sessionId: string, auth: AuthContext): Promise<Or
 }
 
 export function buildSessionFallbackContext(session: OrchestrationSession): OrchestratorFallbackContext {
+  const latestQuestion = latestPlannerQuestion(session);
   return {
     session_id: session.id,
     goal: session.goal,
     status: session.status,
-    question: latestPlannerQuestion(session),
+    question: latestQuestion?.question ?? null,
     plan_summary: session.plan?.summary ?? null,
     success_criteria: session.plan?.success_criteria ?? [],
     open_questions: session.plan?.open_questions ?? [],
@@ -386,7 +416,11 @@ export async function startSession(
     providerRoles?: OrchestrationProviderRoles | null;
   },
   auth: AuthContext
-): Promise<{ session: OrchestrationSession; firstQuestion: string }> {
+): Promise<{
+  session: OrchestrationSession;
+  firstQuestion: string;
+  firstQuestionData?: { question: string; suggested_answers?: string[]; default_answer?: string | null };
+}> {
   const goal = input.goal.trim();
   if (!goal) {
     throw new Error("goal is required");
@@ -410,6 +444,12 @@ export async function startSession(
     content: result.kind === "question" ? result.question : "Plan ready.",
     ts: new Date().toISOString(),
     ...(result.web_searches.length > 0 ? { web_searches: result.web_searches } : {}),
+    ...(result.kind === "question" && result.suggested_answers.length > 0
+      ? { suggested_answers: result.suggested_answers }
+      : {}),
+    ...(result.kind === "question" && result.default_answer
+      ? { default_answer: result.default_answer }
+      : {}),
   };
 
   const metadata = {
@@ -453,6 +493,14 @@ export async function startSession(
   return {
     session,
     firstQuestion: result.kind === "question" ? result.question : "Plan is ready for review.",
+    firstQuestionData:
+      result.kind === "question"
+        ? {
+            question: result.question,
+            ...(result.suggested_answers.length > 0 ? { suggested_answers: result.suggested_answers } : {}),
+            ...(result.default_answer ? { default_answer: result.default_answer } : {}),
+          }
+        : undefined,
   };
 }
 
@@ -460,7 +508,13 @@ export async function submitAnswer(
   sessionId: string,
   answer: string,
   auth: AuthContext
-): Promise<{ session: OrchestrationSession; nextQuestion?: string; planReady?: true; plan?: OrchestrationPlan }> {
+): Promise<{
+  session: OrchestrationSession;
+  nextQuestion?: string;
+  nextQuestionData?: { question: string; suggested_answers?: string[]; default_answer?: string | null };
+  planReady?: true;
+  plan?: OrchestrationPlan;
+}> {
   const trimmed = answer.trim();
   if (!trimmed) {
     throw new Error("answer is required");
@@ -499,6 +553,12 @@ export async function submitAnswer(
     content: plannerResult.kind === "question" ? plannerResult.question : "Plan ready.",
     ts: new Date().toISOString(),
     ...(plannerResult.web_searches.length > 0 ? { web_searches: plannerResult.web_searches } : {}),
+    ...(plannerResult.kind === "question" && plannerResult.suggested_answers.length > 0
+      ? { suggested_answers: plannerResult.suggested_answers }
+      : {}),
+    ...(plannerResult.kind === "question" && plannerResult.default_answer
+      ? { default_answer: plannerResult.default_answer }
+      : {}),
   };
 
   const nextTranscript = [...transcript, plannerEntry];
@@ -543,7 +603,17 @@ export async function submitAnswer(
     return { session, planReady: true, plan: plannerResult.plan };
   }
 
-  return { session, nextQuestion: plannerResult.question };
+  return {
+    session,
+    nextQuestion: plannerResult.question,
+    nextQuestionData: {
+      question: plannerResult.question,
+      ...(plannerResult.suggested_answers.length > 0
+        ? { suggested_answers: plannerResult.suggested_answers }
+        : {}),
+      ...(plannerResult.default_answer ? { default_answer: plannerResult.default_answer } : {}),
+    },
+  };
 }
 
 function buildTaskContextArtifacts(

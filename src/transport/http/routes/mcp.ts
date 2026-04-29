@@ -8,7 +8,7 @@ import { authContextFromUserId } from "../../../infrastructure/auth/auth.js";
 const router = Router();
 
 const AUTH_CODE_TTL_SECONDS = 10 * 60;
-const DEFAULT_SCOPE = "mcp:tools memory:read memory:write collab:read collab:write orchestrate:write";
+const DEFAULT_SCOPE = "mcp:tools memory:read memory:write collab:read collab:write";
 
 /**
  * POST /api/mcp/code  (internal only)
@@ -54,7 +54,7 @@ router.post("/code", internalMiddleware, async (req: AuthRequest, res) => {
     }
 
     const code = `tla_code_${randomBytes(32).toString("hex")}`;
-    const SUPPORTED_SCOPES = new Set(["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write", "orchestrate:write", "automation:run"]);
+    const SUPPORTED_SCOPES = new Set(["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write", "automation:run"]);
     const rawScopes = (scope || DEFAULT_SCOPE).split(" ").map((s) => s.trim()).filter(Boolean);
     const sanitizedScopes = rawScopes.filter((s) => SUPPORTED_SCOPES.has(s));
     const scopeValue = sanitizedScopes.length > 0 ? sanitizedScopes.join(" ") : DEFAULT_SCOPE;

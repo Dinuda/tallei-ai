@@ -34,6 +34,25 @@ type CollabTask = {
   updatedAt: string;
 };
 
+type TaskDocument = {
+  ref: string;
+  title: string;
+  filename: string | null;
+  status: "pending" | "ready" | "failed";
+  preview: string;
+};
+
+type TaskDocumentsContext = {
+  lotRef: string | null;
+  lotTitle: string | null;
+  conversationId: string | null;
+  documents: TaskDocument[];
+  upload: {
+    countSaved: number;
+    countFailed: number;
+  } | null;
+};
+
 type PlanCriterion = {
   id: string;
   text: string;
@@ -210,6 +229,40 @@ function readSetupSnapshot(context: Record<string, unknown>): SetupSnapshot | nu
       chatgpt,
       claude,
     },
+  };
+}
+
+function readTaskDocumentsContext(context: Record<string, unknown>): TaskDocumentsContext | null {
+  const documentsContext = readObject(context["documents"]);
+  if (Object.keys(documentsContext).length === 0) return null;
+
+  const rawDocuments = Array.isArray(documentsContext["documents"]) ? documentsContext["documents"] : [];
+  const documents = rawDocuments
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => {
+      const status = item["status"];
+      if (status !== "pending" && status !== "ready" && status !== "failed") return null;
+      if (typeof item["ref"] !== "string" || typeof item["title"] !== "string" || typeof item["preview"] !== "string") return null;
+      return {
+        ref: item["ref"],
+        title: item["title"],
+        filename: typeof item["filename"] === "string" ? item["filename"] : null,
+        status,
+        preview: item["preview"],
+      };
+    })
+    .filter((item): item is TaskDocument => Boolean(item));
+
+  const upload = readObject(documentsContext["upload"]);
+  const countSaved = typeof upload["count_saved"] === "number" ? upload["count_saved"] : null;
+  const countFailed = typeof upload["count_failed"] === "number" ? upload["count_failed"] : null;
+
+  return {
+    lotRef: typeof documentsContext["lot_ref"] === "string" ? documentsContext["lot_ref"] : null,
+    lotTitle: typeof documentsContext["lot_title"] === "string" ? documentsContext["lot_title"] : null,
+    conversationId: typeof documentsContext["conversation_id"] === "string" ? documentsContext["conversation_id"] : null,
+    documents,
+    upload: countSaved !== null && countFailed !== null ? { countSaved, countFailed } : null,
   };
 }
 
@@ -524,6 +577,7 @@ export default function CollabBoardPage() {
   const planCriteria = task ? readPlanCriteria(task.context) : [];
   const evaluations = task ? readEvaluations(task.context) : [];
   const setupSnapshot = task ? readSetupSnapshot(task.context) : null;
+  const taskDocuments = task ? readTaskDocumentsContext(task.context) : null;
   const latestEvaluation = evaluations.length > 0 ? evaluations[evaluations.length - 1] : null;
   const recentEvaluations = evaluations.slice(-5).reverse();
   const latestStatusMap = useMemo(() => {
@@ -778,6 +832,41 @@ export default function CollabBoardPage() {
                 </div>
               </div>
             ) : null}
+          </article>
+        )}
+
+        {taskDocuments && (
+          <article className={styles.planPanel}>
+            <header>
+              <h2 className={styles.planTitle}>Attached Documents</h2>
+              <p className={styles.criteriaMeta}>
+                {taskDocuments.documents.length} saved
+                {taskDocuments.upload ? ` · ${taskDocuments.upload.countFailed} failed` : ""}
+              </p>
+              {taskDocuments.lotRef ? (
+                <p className={styles.criteriaMeta}>
+                  Lot: {taskDocuments.lotTitle || taskDocuments.lotRef}
+                </p>
+              ) : null}
+            </header>
+            {taskDocuments.documents.length > 0 ? (
+              <div className={styles.docList}>
+                {taskDocuments.documents.map((doc) => (
+                  <div key={doc.ref} className={styles.docRow}>
+                    <div>
+                      <p className={styles.criteriaText}>{doc.title}</p>
+                      <p className={styles.criteriaMeta}>{doc.filename ?? doc.ref}</p>
+                      {doc.preview ? <p className={styles.docPreview}>{doc.preview}</p> : null}
+                    </div>
+                    <span className={`${styles.docStatus} ${styles[`docStatus_${doc.status}`] ?? ""}`}>
+                      {doc.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className={styles.criteriaMeta}>No saved documents in this task context.</p>
+            )}
           </article>
         )}
 

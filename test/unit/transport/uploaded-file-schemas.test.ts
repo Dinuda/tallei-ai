@@ -190,3 +190,21 @@ test("normalizeUploadedFileRequestBody accepts stringified object body", () => {
   assert.equal(parsed.openaiFileIdRefs.length, 1);
   assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_string_body");
 });
+
+test("normalizeUploadedFileRequestBody keeps local download_link paths (schema validation rejects non-URL)", () => {
+  const normalized = normalizeUploadedFileRequestBody({
+    openaiFileIdRefs: [
+      {
+        id: "file_local_path",
+        name: "lesson-plan.pdf",
+        mime_type: "application/pdf",
+        download_link: "/mnt/data/lesson-plan.pdf",
+      },
+    ],
+  });
+
+  assert.throws(
+    () => uploadBlobBodySchema.parse(normalized),
+    /download_link/
+  );
+});

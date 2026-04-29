@@ -776,6 +776,15 @@ needsDocumentLookup boolean,
 reusePreviousContext boolean,
 contextDependent boolean,
 saveCandidates array.
+
+COLLAB STAGE TAGS — check first, they override normal classification:
+If message starts with [COLLAB:CONTINUE:...] or [COLLAB:MY_TURN:...]:
+  return { needsRecall: false, needsDocumentLookup: false, reusePreviousContext: true, contextDependent: false, saveCandidates: [] }.
+If message starts with [COLLAB:CREATE]:
+  return { needsRecall: true, needsDocumentLookup: true, reusePreviousContext: false, contextDependent: true, saveCandidates: [] }
+  unless the remainder of the message contains durable facts or preferences — save those only.
+
+NORMAL CLASSIFICATION (no collab tag):
 saveCandidates items have kind fact|preference|document-note and concise content/title/summary/key_points/source_hint/category/preference_key when relevant.
 Mark durable facts, preferences, goals, decisions, corrections, beliefs, opinions, stances, frustrations, and important notes worth remembering.
 Treat first-person age statements as durable facts; e.g. "I'm currently 19" should save "User is 19 years old."

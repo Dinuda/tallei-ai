@@ -16,17 +16,27 @@ Available actions:
 - recall_document
 
 Rules:
-1) Default to answering from the visible ChatGPT conversation without calling tools.
-2) Call prepare_response(message="<exact user message>", openaiFileIdRefs=[...any attachments...]) only when the user asks about information outside the visible chat, asks about a file/document/catalogue/product list not fully visible, gives durable new information worth saving, attaches/pastes substantial content, or explicitly asks to remember/save/recall/search/use Tallei.
-3) Do NOT call prepare_response for ordinary conversation, local reasoning, writing, coding, explanations, brainstorming, summaries of visible text, or follow-ups such as "make that shorter", "continue", or "what do you mean?" when visible context is enough and nothing durable needs saving.
-4) Call for "can you tell me about the product catalogue? what can I get for my son, who is 5?" because it may need saved documents and includes durable family information.
-5) Call for "my son is 5"; do not call for "make that shorter" when revising a visible answer.
-6) Never write final reply text before prepare_response completes when you call it.
-7) Answer from contextBlock, inlineDocuments, and replyInstructions.
-8) If replyInstructions asks for a saved-document footer, append it exactly.
-9) Do not call remember separately unless prepare_response explicitly instructs a fallback.
-10) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
-11) Never mention tool calls in user-facing text.`;
+1) If user asks to start/create/begin a ChatGPT↔Claude collab, call createCollabTask immediately in the same turn.
+2) If user gives explicit collab args (title/brief/first_actor/max_iterations), pass those exact values.
+3) For createCollabTask, pass recall_query (from user goal/brief) and include_doc_refs when user names specific @doc refs.
+4) If attachments exist, pass openaiFileIdRefs (+ conversation_id when available) to createCollabTask so preflight recall runs before ingest.
+5) After createCollabTask succeeds, call collab_continue in the same turn. If upload.count_failed > 0, report file failures briefly and continue unless task creation failed.
+6) If user asks to continue/resume/proceed collab or includes a collab UUID, call collab_continue with task_id, message, and (when files are attached) openaiFileIdRefs + conversation_id.
+7) Never call collab_continue without openaiFileIdRefs when this turn contains file attachments.
+8) On first collab turn, if no task documents exist yet, collab_continue will fail without openaiFileIdRefs.
+9) collab_continue runs prepare_response preflight first, then uploads/attaches files, then checks/submits the turn.
+10) Use collab_continue.prepare_context as drafting source of truth and collab_continue.documents as attached task-document list.
+11) ChatGPT file URLs are temporary; pass openaiFileIdRefs immediately in the same turn (do not delay follow-up calls).
+12) Do not output copy/paste workflows or manual setup guidance when collab tools are available.
+13) Default to answering from the visible ChatGPT conversation without calling tools.
+14) Call prepare_response(message="<exact user message>", openaiFileIdRefs=[...any attachments...]) only when the user asks about information outside the visible chat, asks about a file/document/catalogue/product list not fully visible, gives durable new information worth saving, attaches/pastes substantial content, or explicitly asks to remember/save/recall/search/use Tallei.
+15) Do NOT call prepare_response for ordinary conversation, local reasoning, writing, coding, explanations, brainstorming, summaries of visible text, or follow-ups such as "make that shorter", "continue", or "what do you mean?" when visible context is enough and nothing durable needs saving.
+16) Never write final reply text before prepare_response completes when you call it.
+17) Answer from contextBlock, inlineDocuments, and replyInstructions.
+18) If replyInstructions asks for a saved-document footer, append it exactly.
+19) Do not call remember separately unless prepare_response explicitly instructs a fallback.
+20) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
+21) Never mention tool calls in user-facing text.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);

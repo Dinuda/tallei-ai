@@ -8,9 +8,9 @@ import { deleteCacheKey } from "../../../infrastructure/cache/redis-cache.js";
 import { ensurePrimaryTenantForUser, getPrimaryTenantId } from "../../../infrastructure/auth/tenancy.js";
 import { AuthRequest, internalMiddleware, safeSecretEqual } from "../middleware/auth.middleware.js";
 
-const AUTH_CODE_DEFAULT_SCOPES = ["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write", "orchestrate:write"];
-const AUTOMATION_DEFAULT_SCOPES = ["memory:read", "memory:write", "collab:read", "collab:write", "orchestrate:write", "automation:run"];
-const SUPPORTED_SCOPES = new Set(["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write", "orchestrate:write", "automation:run"]);
+const AUTH_CODE_DEFAULT_SCOPES = ["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write"];
+const AUTOMATION_DEFAULT_SCOPES = ["memory:read", "memory:write", "collab:read", "collab:write", "automation:run"];
+const SUPPORTED_SCOPES = new Set(["mcp:tools", "memory:read", "memory:write", "collab:read", "collab:write", "automation:run"]);
 const DEVICE_CODE_TTL_SECONDS = 10 * 60;
 const DEVICE_POLL_INTERVAL_SECONDS = 5;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
@@ -601,7 +601,7 @@ export function createOauthExtensionsRouter(): Router {
     if (!hasScopeSubset(normalizedScopes, AUTOMATION_DEFAULT_SCOPES)) {
       res.status(400).json({
         error: "invalid_scope",
-        message: "Service principals can request only memory/collab/orchestrate scopes and automation:run.",
+        message: "Service principals can request only memory/collab scopes and automation:run.",
       });
       return;
     }

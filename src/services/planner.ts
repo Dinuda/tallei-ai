@@ -15,6 +15,8 @@ export interface PlannerTurn {
   content: string;
   ts?: string;
   web_searches?: WebSearchResult[];
+  suggested_answers?: string[];
+  default_answer?: string | null;
 }
 
 export interface OrchestrationPlan {
@@ -38,13 +40,20 @@ export interface ProviderRoleSuggestion {
 }
 
 export type PlannerStepResult =
-  | { kind: "question"; question: string; rationale: string; web_searches: WebSearchResult[] }
+  | {
+      kind: "question";
+      question: string;
+      rationale: string;
+      suggested_answers: string[];
+      default_answer: string | null;
+      web_searches: WebSearchResult[];
+    }
   | { kind: "plan"; plan: OrchestrationPlan; web_searches: WebSearchResult[] };
 
 const PLANNER_SYSTEM_PROMPT =
   "You are Tallei's pre-flight orchestrator. Interview the user one question at a time. " +
   "Use a grill-me style: surface decision branches, resolve critical dependencies first, and define done clearly. " +
-  "Each question must include a recommended default answer. Keep questions concise. " +
+  "Each question must include exactly 3 short suggested answers and one recommended default answer. Keep questions concise. " +
   "Do not ask for information that can be inferred from the provided context. " +
   "Use web search when relevant facts are uncertain or time-sensitive. " +
   "Only return JSON that matches the provided schema.";
@@ -55,13 +64,30 @@ const interviewJsonSchema = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: ["kind", "question", "rationale", "web_searches", "plan"],
+    required: [
+      "kind",
+      "question",
+      "rationale",
+      "suggested_answers",
+      "default_answer",
+      "web_searches",
+      "plan",
+    ],
     properties: {
       kind: { type: "string", enum: ["question", "plan"] },
       question: {
         anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
       },
       rationale: {
+        anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
+      },
+      suggested_answers: {
+        anyOf: [
+          { type: "array", items: { type: "string" }, minItems: 0, maxItems: 8 },
+          { type: "null" },
+        ],
+      },
+      default_answer: {
         anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
       },
       web_searches: {
@@ -308,6 +334,21 @@ function normalizeWebSearches(value: unknown): WebSearchResult[] {
     results.push({ query, url, snippet });
   }
   return results.slice(0, 20);
+}
+
+export function normalizeSuggestedAnswers(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
+function normalizeDefaultAnswer(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }
 
 function normalizePlan(value: unknown): OrchestrationPlan {
@@ -582,6 +623,8 @@ export async function runPlannerStep(params: {
           kind: "question",
           question: parsed["question"].trim(),
           rationale: typeof parsed["rationale"] === "string" ? parsed["rationale"].trim() : "",
+          suggested_answers: normalizeSuggestedAnswers(parsed["suggested_answers"]),
+          default_answer: normalizeDefaultAnswer(parsed["default_answer"]),
           web_searches: webSearches,
         };
       }
