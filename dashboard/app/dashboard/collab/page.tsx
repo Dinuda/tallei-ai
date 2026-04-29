@@ -131,6 +131,19 @@ export default function CollabTasksPage() {
   const [orchestrationSessions, setOrchestrationSessions] = useState<OrchestrationSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [grillMeEnabled, setGrillMeEnabled] = useState(false);
+  const [savingPreference, setSavingPreference] = useState(false);
+
+  const loadPreferences = useCallback(async () => {
+    try {
+      const res = await fetch("/api/tasks/preferences", { cache: "no-store" });
+      const body = await res.json();
+      if (!res.ok) return;
+      setGrillMeEnabled(Boolean(body?.grillMeEnabled));
+    } catch {
+      // Keep default false when unavailable.
+    }
+  }, []);
 
   const fetchTasks = useCallback(async (mode: "initial" | "refresh") => {
     if (mode === "initial") setLoading(true);
@@ -156,6 +169,31 @@ export default function CollabTasksPage() {
   useEffect(() => {
     void fetchTasks("initial");
   }, [fetchTasks]);
+
+  useEffect(() => {
+    void loadPreferences();
+  }, [loadPreferences]);
+
+  const toggleGrillMe = async () => {
+    if (savingPreference) return;
+    const next = !grillMeEnabled;
+    setGrillMeEnabled(next);
+    setSavingPreference(true);
+    try {
+      const res = await fetch("/api/tasks/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grillMeEnabled: next }),
+      });
+      if (!res.ok) {
+        setGrillMeEnabled(!next);
+      }
+    } catch {
+      setGrillMeEnabled(!next);
+    } finally {
+      setSavingPreference(false);
+    }
+  };
 
   const hasTasks = tasks.length > 0 || orchestrationSessions.length > 0;
 
@@ -215,6 +253,17 @@ export default function CollabTasksPage() {
           );
         })}
       </div>
+      <div className={styles.preferenceRow}>
+        <label className={styles.preferenceLabel}>
+          <input
+            type="checkbox"
+            checked={grillMeEnabled}
+            onChange={() => void toggleGrillMe()}
+            disabled={savingPreference}
+          />
+          <span>Use grill-me planning for new collabs</span>
+        </label>
+      </div>
 
       {loading ? (
         <div className={styles.grid}>
@@ -238,10 +287,8 @@ export default function CollabTasksPage() {
             const config = ORCHESTRATION_CONFIG[session.status];
             const isPlanReady = session.status === "PLAN_READY";
             const ctaText = isPlanReady ? "Approve" : "Continue";
-            // Fake progress for orchestration cards
             const progressPercent = isPlanReady ? 100 : 50;
             const currentTurn = isPlanReady ? 2 : 1;
-            const totalTurns = 2;
 
             return (
               <Link
@@ -277,7 +324,7 @@ export default function CollabTasksPage() {
                       }}
                     />
                   </div>
-                  <span className={styles.progressLabel}>Turn {currentTurn} of {totalTurns}</span>
+                  <span className={styles.progressLabel}>Planning step {currentTurn}</span>
                 </div>
 
                 {latest && (
@@ -302,7 +349,7 @@ export default function CollabTasksPage() {
           {tasks.map((task) => {
             const latest = latestOutput(task);
             const config = STATE_CONFIG[task.state];
-            const progressPercent = Math.min(100, Math.round((task.iteration / Math.max(1, task.maxIterations)) * 100));
+            const progressPercent = task.state === "DONE" ? 100 : task.state === "ERROR" ? 100 : 58;
 
             return (
               <Link key={task.id} className={styles.card} href={`/dashboard/tasks/${task.id}`}>
@@ -334,7 +381,7 @@ export default function CollabTasksPage() {
                       }}
                     />
                   </div>
-                  <span className={styles.progressLabel}>Turn {task.iteration} of {task.maxIterations}</span>
+                  <span className={styles.progressLabel}>Turn {task.iteration}</span>
                 </div>
 
                 {latest && (

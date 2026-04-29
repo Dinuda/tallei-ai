@@ -400,7 +400,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         title: z.string().min(1).describe("Task title."),
         brief: z.string().optional().describe("Optional task brief."),
         first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt").describe("Which model takes the first turn."),
-        max_iterations: z.number().int().min(1).max(8).optional(),
         openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
         include_doc_refs: z.array(z.string()).max(20).optional(),
         recall_query: z.string().min(1).max(500).optional(),
@@ -413,7 +412,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           title: z.string().min(1),
           brief: z.string().optional(),
           first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt"),
-          max_iterations: z.number().int().min(1).max(8).optional(),
           openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
           include_doc_refs: z.array(z.string()).max(20).optional(),
           recall_query: z.string().min(1).max(500).optional(),
@@ -435,7 +433,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
             title: parsed.title,
             brief: parsed.brief ?? null,
             firstActor: parsed.first_actor ?? "chatgpt",
-            maxIterations: parsed.max_iterations,
             context: {
               preflight_recall: preflightRecall.status === 200
                 ? {
@@ -598,7 +595,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         session_id: z.string().uuid().describe("Orchestration session ID."),
         overrides: z.object({
           first_actor: z.enum(["chatgpt", "claude"]).optional(),
-          max_iterations: z.number().int().min(1).max(8).optional(),
         }).optional(),
       },
     },

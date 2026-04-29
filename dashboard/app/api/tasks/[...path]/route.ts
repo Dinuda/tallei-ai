@@ -47,7 +47,7 @@ async function safeJson(response: Response): Promise<unknown> {
   }
 }
 
-async function proxy(req: NextRequest, method: "GET" | "POST" | "DELETE", params: { path: string[] }) {
+async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT" | "DELETE", params: { path: string[] }) {
   if (!SECRET) {
     return Response.json(
       { error: "Dashboard misconfigured: INTERNAL_API_SECRET is not set." },
@@ -74,7 +74,7 @@ async function proxy(req: NextRequest, method: "GET" | "POST" | "DELETE", params
     };
 
     let body: string | undefined;
-    if (method === "POST") {
+    if (method === "POST" || method === "PUT") {
       body = await req.text();
       headers["Content-Type"] = "application/json";
     }
@@ -107,6 +107,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   return proxy(req, "POST", await params);
+}
+
+export async function PUT(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, "PUT", await params);
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {

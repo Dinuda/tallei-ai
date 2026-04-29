@@ -722,7 +722,7 @@ async function attachPlanToTaskContext(
          'artifacts',
          COALESCE(context->'artifacts', '{}'::jsonb) || $3::jsonb,
          'orchestration',
-         jsonb_build_object('session_id', $4)
+         jsonb_build_object('session_id', $4::text)
        ),
          updated_at = now()
      WHERE id = $1
@@ -739,11 +739,17 @@ async function attachPlanToTaskContext(
 export async function approvePlan(
   sessionId: string,
   auth: AuthContext,
-  overrides?: Partial<Pick<OrchestrationPlan, "first_actor" | "max_iterations">>
+  overrides?: Partial<Pick<OrchestrationPlan, "first_actor">>
 ): Promise<{ session: OrchestrationSession; task: CollabTask }> {
   const session = await getSession(sessionId, auth);
   if (!session) {
     throw new OrchestrationNotFoundError();
+  }
+  if (session.status === "RUNNING" && session.collabTaskId) {
+    const task = await getCollabTask(session.collabTaskId, auth);
+    if (task) {
+      return { session, task };
+    }
   }
   if (session.status !== "PLAN_READY") {
     throw new OrchestrationConflictError("Session is not ready for approval");
@@ -760,14 +766,12 @@ export async function approvePlan(
   }
 
   const firstActor = (overrides?.first_actor ?? session.plan.first_actor) as CollabModelActor;
-  const maxIterations = overrides?.max_iterations ?? session.plan.max_iterations;
 
   const task = await createCollabTask(
     {
       title: session.plan.title,
       brief: session.plan.summary,
       firstActor,
-      maxIterations,
     },
     auth
   );

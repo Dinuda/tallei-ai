@@ -203,7 +203,7 @@ export function getChatGptInstructions(mode: SaveMode): string {
 
 COLLAB TASKS FIRST (override):
 - If the user asks to start/create/begin a ChatGPT↔Claude collab, call \`createCollabTask\` immediately in the same turn.
-- If the user provides explicit collab task arguments (title/brief/first_actor/max_iterations), call \`createCollabTask\` with those exact values before any explanatory text.
+- If the user provides explicit collab task arguments (title/brief/first_actor), call \`createCollabTask\` with those exact values before any explanatory text. Do not set \`max_iterations\`.
 - For \`createCollabTask\`, pass \`recall_query\` (use the user goal/brief) and include \`include_doc_refs\` when the user names specific @doc refs to preload.
 - If attachments are present in this turn, pass them via \`openaiFileIdRefs\` (and \`conversation_id\` when available) to \`createCollabTask\` so preflight recall runs first and ingest runs right after.
 - After \`createCollabTask\` succeeds, call \`collab_continue\` for the same task in the same turn.

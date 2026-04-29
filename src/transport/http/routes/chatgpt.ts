@@ -62,6 +62,7 @@ import {
   executeUploadStatusAction,
   isTransientMemoryInfraError,
 } from "../../shared/chat-actions.js";
+import { getTaskPreferences } from "../../../services/task-preferences.js";
 
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "lesson", "failure"]);
@@ -134,7 +135,6 @@ const collabCreateTaskSchema = z.object({
   title: z.string().trim().min(1, "title is required"),
   brief: z.string().optional(),
   first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt"),
-  max_iterations: z.coerce.number().int().min(1).max(8).optional(),
 });
 
 const collabSubmitTurnSchema = z.object({
@@ -165,7 +165,6 @@ const orchestrateApproveSchema = z.object({
   session_id: z.string().uuid("session_id must be a valid UUID"),
   overrides: z.object({
     first_actor: z.enum(["chatgpt", "claude"]).optional(),
-    max_iterations: z.coerce.number().int().min(1).max(8).optional(),
   }).optional(),
 });
 
@@ -329,12 +328,26 @@ function extractCollabStage(message: string): {
   return { stage, taskId };
 }
 
-function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", taskId: string | null): string[] {
+function collabStageReplyInstructions(
+  stage: "CREATE" | "CONTINUE" | "MY_TURN",
+  taskId: string | null,
+  options?: { grillMeEnabled?: boolean }
+): string[] {
   const taskLabel = taskId ? ` (task ${taskId})` : "";
   if (stage === "CREATE") {
+    if (options?.grillMeEnabled) {
+      return [
+        "Memory recall and document save complete. Do not call prepare_response again for this turn.",
+        "Start grill-me first: call orchestrate_start with goal/title/brief from the user request.",
+        "Continue grill-me with orchestrate_answer until plan_ready.",
+        "Approve with orchestrate_approve to create the collab task. Do not include max_iterations.",
+        "After approval, call collab_continue.",
+        "If any collab action returns continue_command, end the user-facing response with its instruction.",
+      ];
+    }
     return [
       "Memory recall and document save complete. Do not call prepare_response again for this turn.",
-      "Call createCollabTask with the user-provided args (title, brief, first_actor — default 'chatgpt', max_iterations). Do not pass file or document args.",
+      "Call createCollabTask with title, brief, and first_actor (default 'chatgpt'). Do not include max_iterations. Do not pass file or document args.",
       "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
       "Show the actual submitted output after collab_continue succeeds.",
       "If any collab action returns continue_command, end the user-facing response with its instruction.",
@@ -1894,7 +1907,6 @@ export function buildOpenApiSpec(serverUrl: string) {
                       type: "object",
                       properties: {
                         first_actor: { type: "string", enum: ["chatgpt", "claude"] },
-                        max_iterations: { type: "integer", minimum: 1, maximum: 8 },
                       },
                     },
                   },
@@ -2075,7 +2087,6 @@ export function buildOpenApiSpec(serverUrl: string) {
                     title: { type: "string" },
                     brief: { type: "string" },
                     first_actor: { type: "string", enum: ["chatgpt", "claude"], default: "chatgpt" },
-                    max_iterations: { type: "integer", minimum: 1, maximum: 8 },
                   },
                 },
               },
@@ -2268,6 +2279,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
 
     const collabStage = extractCollabStage(body.message);
     const hasAttachments = (body.openaiFileIdRefs?.length ?? 0) > 0;
+    const prefs = collabStage?.stage === "CREATE" ? await getTaskPreferences(auth) : null;
 
     // CONTINUE and MY_TURN without attachments: skip memory flow, return routing instructions only
     if (collabStage && collabStage.stage !== "CREATE" && !hasAttachments) {
@@ -2289,7 +2301,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
         inlineDocuments: [],
         queuedSaves: [],
         autoSave: { requested: 0, complete: true, saved: [], errors: [] },
-        replyInstructions: collabStageReplyInstructions(stage, taskId),
+        replyInstructions: collabStageReplyInstructions(stage, taskId, { grillMeEnabled: prefs?.grillMeEnabled }),
         intent: {
           needsRecall: false,
           needsDocumentLookup: false,
@@ -2363,7 +2375,11 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
 
     // For any collab stage: override replyInstructions with stage-specific routing
     if (collabStage && result.status < 400 && result.body && typeof result.body === "object") {
-      const stageInstructions = collabStageReplyInstructions(collabStage.stage, collabStage.taskId);
+      const stageInstructions = collabStageReplyInstructions(
+        collabStage.stage,
+        collabStage.taskId,
+        { grillMeEnabled: prefs?.grillMeEnabled }
+      );
       const fileRefHint = !hasAttachments
         ? [
           "If this turn has visible attachments, file refs are missing. Ask for temporary HTTPS download URLs for those attachments (openaiFileIdRefs), then call prepare_response again with those refs before continuing collab.",
@@ -2912,6 +2928,17 @@ router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, require
       });
       return;
     }
+    if (pg) {
+      res.status(500).json({
+        error: "Failed to approve orchestration plan",
+        details: {
+          code: pg.code,
+          constraint: pg.constraint,
+          message: pg.message,
+        },
+      });
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/orchestrate_approve",
@@ -3214,7 +3241,6 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
         title: body.title,
         brief: body.brief ?? null,
         firstActor: body.first_actor,
-        maxIterations: body.max_iterations,
       },
       auth
     );

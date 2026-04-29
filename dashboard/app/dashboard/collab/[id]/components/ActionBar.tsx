@@ -1,6 +1,6 @@
 "use client";
 
-import { RefreshCw, CheckCircle, PlusCircle, Trash2, FileDown } from "lucide-react";
+import { RefreshCw, CheckCircle, Trash2, FileDown } from "lucide-react";
 import styles from "./ActionBar.module.css";
 
 type CollabActor = "chatgpt" | "claude" | "user";
@@ -9,14 +9,11 @@ type CollabState = "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR";
 interface ActionBarProps {
   waitingActor: CollabActor | null;
   state: CollabState;
-  atCap: boolean;
-  maxIterations: number;
   pollPaused: boolean;
   onNudge: () => void;
   onRefresh: () => void;
   onRetryLiveUpdates: () => void;
   onMarkDone: () => void;
-  onExtend: () => void;
   onDelete: () => void;
   onExport: () => void;
 }
@@ -24,14 +21,11 @@ interface ActionBarProps {
 export default function ActionBar({
   waitingActor,
   state,
-  atCap,
-  maxIterations,
   pollPaused,
   onNudge,
   onRefresh,
   onRetryLiveUpdates,
   onMarkDone,
-  onExtend,
   onDelete,
   onExport,
 }: ActionBarProps) {
@@ -63,13 +57,6 @@ export default function ActionBar({
         <button type="button" className={styles.secondaryBtn} onClick={onMarkDone}>
           <CheckCircle size={14} />
           Finish task
-        </button>
-      )}
-
-      {atCap && maxIterations < 8 && isActive && (
-        <button type="button" className={styles.secondaryBtn} onClick={onExtend}>
-          <PlusCircle size={14} />
-          Add 2 more turns
         </button>
       )}
 

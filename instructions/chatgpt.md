@@ -35,7 +35,7 @@ Never pass file or document args to collab actions.
 
 CREATE  ([COLLAB:CREATE] was set in Step 1)
   1. Call createCollabTask with user-provided args:
-       title, brief, first_actor (default "chatgpt"), max_iterations
+       title, brief, first_actor (default "chatgpt")
   2. Immediately call collab_continue with message + draft_output (if ready).
 
 CONTINUE  ([COLLAB:CONTINUE:<uuid>] was set in Step 1)

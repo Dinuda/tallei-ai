@@ -215,7 +215,6 @@ export default function CollabTaskWizardPage() {
           brief: brief.trim() || null,
           initialContext: brief.trim() || null,
           firstActor: starterRecommendation,
-          maxIterations: 4,
           context: {
             artifacts: {
               setup: {

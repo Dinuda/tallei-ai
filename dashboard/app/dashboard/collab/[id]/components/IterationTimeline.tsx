@@ -33,14 +33,13 @@ const ACTOR_BG: Record<CollabActor, string> = {
 interface IterationTimelineProps {
   entries: TimelineEntry[];
   currentIteration: number;
-  maxIterations: number;
 }
 
-export default function IterationTimeline({ entries, currentIteration, maxIterations }: IterationTimelineProps) {
+export default function IterationTimeline({ entries, currentIteration }: IterationTimelineProps) {
   const [expanded, setExpanded] = useState(entries.length <= 6);
 
   const steps: Array<{ actor: CollabActor; iteration: number; ts: string | null }> = [];
-  for (let i = 1; i <= Math.max(currentIteration, maxIterations); i++) {
+  for (let i = 1; i <= Math.max(1, currentIteration); i++) {
     const entry = entries.find((e) => e.iteration === i);
     if (entry) {
       steps.push({ actor: entry.actor, iteration: i, ts: entry.ts });

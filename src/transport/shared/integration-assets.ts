@@ -1,7 +1,7 @@
 export const CHATGPT_ACTIONS_SPEC_TAG = "stable";
 export const CHATGPT_OPENAPI_VERSION = "2026-04-29.4";
 
-export const CLAUDE_INSTRUCTIONS_VERSION = "2026-04-29.4";
+export const CLAUDE_INSTRUCTIONS_VERSION = "2026-04-29.5";
 export const CLAUDE_INSTRUCTIONS_TEXT = `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.
 
 === TURN PROTOCOL ===
@@ -14,7 +14,7 @@ STEP 0 - COLLAB TASKS FIRST:
 - If is_my_turn=false, tell the user which actor is currently expected and stop.
 - If is_my_turn=true, produce the task output and submit it with collab_take_turn.
 - If the user asks to "start/create/begin collab" and no task exists yet, call collab_create_task immediately in the same turn. Do not ask planning questions first.
-- If the user provides explicit collab task arguments (title/brief/first_actor/max_iterations), call collab_create_task with those exact values before any explanatory text.
+- If the user provides explicit collab task arguments (title/brief/first_actor), call collab_create_task with those exact values before any explanatory text. Do not set max_iterations.
 - Do NOT output copy/paste workflows, manual setup steps, or alternative "you can do this" guidance when collab tools are available.
 - Use first_actor="chatgpt" by default unless the user explicitly asks for Claude first.
 - For collab_create_task, pass recall_query (use user goal/brief/title) and include_doc_refs when user references specific @doc handles to preload.

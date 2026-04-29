@@ -25,6 +25,7 @@ import {
   startSession,
   submitAnswer,
 } from "../../../services/orchestrator.js";
+import { getTaskPreferences, setTaskPreferences } from "../../../services/task-preferences.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -51,7 +52,6 @@ const sessionParamSchema = z.object({ id: z.string().uuid("invalid session id") 
 const planningAnswerSchema = z.object({ answer: z.string().trim().min(1) });
 const planningApproveSchema = z.object({
   first_actor: z.enum(["chatgpt", "claude"]).optional(),
-  max_iterations: z.coerce.number().int().min(1).max(8).optional(),
 });
 
 const runTurnSchema = z.object({ actor: z.enum(["chatgpt", "claude"]) });
@@ -64,6 +64,9 @@ const submitTurnSchema = z.object({
 const finishTaskSchema = z.object({ reason: z.string().optional() });
 const extendSchema = z.object({ by: z.coerce.number().int().min(1).max(8) });
 const abortPlanningSchema = z.object({ reason: z.string().optional() });
+const preferencesSchema = z.object({
+  grillMeEnabled: z.boolean(),
+});
 
 function lastTranscriptEntry(task: { transcript: Array<{ actor: string; iteration: number; content: string; ts: string }> }) {
   if (!task.transcript.length) return null;
@@ -139,6 +142,31 @@ router.get("/", requireScopes(["collab:read"]), async (req: AuthRequest, res: Re
   }
 });
 
+router.get("/preferences", requireScopes(["collab:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const prefs = await getTaskPreferences(req.authContext!);
+    res.json(prefs);
+  } catch (error) {
+    console.error("Error loading task preferences:", error);
+    res.status(500).json({ error: "Failed to load task preferences" });
+  }
+});
+
+router.put("/preferences", requireScopes(["collab:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = preferencesSchema.parse(req.body ?? {});
+    const prefs = await setTaskPreferences(req.authContext!, body);
+    res.json(prefs);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error saving task preferences:", error);
+    res.status(500).json({ error: "Failed to save task preferences" });
+  }
+});
+
 router.get("/orchestrations/:id", requireScopes(["collab:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = sessionParamSchema.parse(req.params);
@@ -209,7 +237,6 @@ router.post("/planning/:id/approve", requireScopes(["orchestrate:write", "collab
     const body = planningApproveSchema.parse(req.body ?? {});
     const result = await approvePlan(id, req.authContext!, {
       first_actor: body.first_actor,
-      max_iterations: body.max_iterations,
     });
     res.json({ session: result.session, task: result.task });
   } catch (error) {

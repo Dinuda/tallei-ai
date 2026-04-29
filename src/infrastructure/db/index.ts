@@ -392,6 +392,17 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS user_task_preferences (
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        grill_me_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (tenant_id, user_id)
+      );
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS tenant_memberships (
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -932,6 +943,11 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_orchestration_sessions_active
         ON orchestration_sessions(tenant_id, user_id, status)
         WHERE status IN ('INTERVIEWING','PLAN_READY','RUNNING');
+    `);
+
+    await client.query(`
+      ALTER TABLE orchestration_sessions
+      ADD COLUMN IF NOT EXISTS collab_task_id UUID REFERENCES collab_tasks(id) ON DELETE SET NULL;
     `);
 
     await client.query(`

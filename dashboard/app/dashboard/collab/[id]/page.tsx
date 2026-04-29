@@ -227,7 +227,7 @@ function readTaskDocumentsContext(context: Record<string, unknown>): TaskDocumen
 }
 
 function toMarkdown(task: CollabTask): string {
-  const lines: string[] = [`# ${task.title}`, "", `State: ${task.state}`, `Turn: ${task.iteration}/${task.maxIterations}`, "", "## Transcript", ""];
+  const lines: string[] = [`# ${task.title}`, "", `State: ${task.state}`, `Turn: ${task.iteration}`, "", "## Transcript", ""];
   for (const entry of task.transcript) {
     lines.push(`### ${entry.actor === "chatgpt" ? "ChatGPT" : entry.actor === "claude" ? "Claude" : "User"} · Turn ${entry.iteration} · ${entry.ts}`);
     lines.push("");
@@ -506,7 +506,6 @@ export default function CollabBoardPage() {
   }, [fetchTask, redirectIfOrchestrationSession]);
 
   const waitingActor = task ? waitingActorForState(task.state) : null;
-  const atCap = Boolean(task && task.iteration >= task.maxIterations);
 
   const planSummary = task ? readPlanSummary(task.context) : null;
   const planCriteria = task ? readPlanCriteria(task.context) : [];
@@ -535,16 +534,6 @@ export default function CollabBoardPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "Marked done from dashboard" }),
-    });
-    await fetchTask();
-  };
-
-  const extendByTwo = async () => {
-    if (!task) return;
-    await fetch(`/api/tasks/${task.id}/extend`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ by: 2 }),
     });
     await fetchTask();
   };
@@ -603,14 +592,12 @@ export default function CollabBoardPage() {
               brief={task.brief}
               state={task.state}
               iteration={task.iteration}
-              maxIterations={task.maxIterations}
               updatedAt={task.updatedAt}
             />
 
             <IterationTimeline
               entries={task.transcript}
               currentIteration={task.iteration}
-              maxIterations={task.maxIterations}
             />
 
             {showPollBanner && (
@@ -618,14 +605,6 @@ export default function CollabBoardPage() {
                 <span>{pollBannerText}</span>
                 <button type="button" onClick={() => void refreshTaskNow()}>Refresh now</button>
                 {pollPaused && <button type="button" onClick={retryLiveUpdates}>Retry live updates</button>}
-              </div>
-            )}
-
-            {atCap && task.state !== "DONE" && (
-              <div className={styles.bannerAmber}>
-                Turn cap reached.
-                <button type="button" onClick={extendByTwo}>Add 2 more</button>
-                <button type="button" onClick={markDone}>Finish task</button>
               </div>
             )}
 
@@ -695,14 +674,11 @@ export default function CollabBoardPage() {
             <ActionBar
               waitingActor={waitingActor}
               state={task.state}
-              atCap={atCap}
-              maxIterations={task.maxIterations}
               pollPaused={pollPaused}
               onNudge={() => setNudgeOpen(true)}
               onRefresh={refreshTaskNow}
               onRetryLiveUpdates={retryLiveUpdates}
               onMarkDone={markDone}
-              onExtend={extendByTwo}
               onDelete={removeTask}
               onExport={exportMarkdown}
             />

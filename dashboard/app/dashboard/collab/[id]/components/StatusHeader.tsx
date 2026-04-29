@@ -30,7 +30,6 @@ interface StatusHeaderProps {
   brief: string | null;
   state: CollabState;
   iteration: number;
-  maxIterations: number;
   updatedAt: string;
 }
 
@@ -39,12 +38,9 @@ export default function StatusHeader({
   brief,
   state,
   iteration,
-  maxIterations,
   updatedAt,
 }: StatusHeaderProps) {
   const waitingActor = waitingActorForState(state);
-  const progressPercent = Math.min(100, Math.round((iteration / Math.max(1, maxIterations)) * 100));
-  const atCap = iteration >= maxIterations;
 
   const waitingSeconds = useMemo(() => {
     return Math.max(0, Math.floor((Date.now() - new Date(updatedAt).getTime()) / 1000));
@@ -93,15 +89,15 @@ export default function StatusHeader({
 
       <div className={styles.progressTrack}>
         <div
-          className={`${styles.progressFill} ${atCap ? styles.progressAtCap : ""}`}
-          style={{ width: `${progressPercent}%` }}
+          className={styles.progressFill}
+          style={{ width: waitingActor ? "58%" : "100%" }}
         />
       </div>
 
       <div className={styles.stateRow}>
         <span className={`${styles.stateChip} ${styles[`state_${state}`] ?? ""}`}>{state}</span>
         <span className={styles.iterationChip}>
-          Turn {iteration} of {maxIterations}
+          Turn {iteration}
         </span>
       </div>
     </header>
