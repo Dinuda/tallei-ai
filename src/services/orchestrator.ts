@@ -113,6 +113,13 @@ export class OrchestrationNotFoundError extends Error {
   }
 }
 
+export class OrchestrationInvalidPlanError extends Error {
+  constructor(message = "Orchestration session plan is invalid or missing") {
+    super(message);
+    this.name = "OrchestrationInvalidPlanError";
+  }
+}
+
 function cacheKey(sessionId: string, auth: AuthContext): string {
   return `${auth.userId}:${sessionId}`;
 }
@@ -742,7 +749,14 @@ export async function approvePlan(
     throw new OrchestrationConflictError("Session is not ready for approval");
   }
   if (!session.plan) {
-    throw new Error("Session plan is missing");
+    throw new OrchestrationInvalidPlanError(
+      "Session plan is missing. Continue the grill-me flow to regenerate a plan before approval."
+    );
+  }
+  if (!session.plan.title?.trim() || !session.plan.summary?.trim()) {
+    throw new OrchestrationInvalidPlanError(
+      "Session plan is incomplete. Continue the grill-me flow to regenerate a complete plan before approval."
+    );
   }
 
   const firstActor = (overrides?.first_actor ?? session.plan.first_actor) as CollabModelActor;

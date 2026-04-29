@@ -36,6 +36,7 @@ import {
   approvePlan as approveOrchestratorPlan,
   buildSessionFallbackContext,
   OrchestrationConflictError,
+  OrchestrationInvalidPlanError,
   OrchestrationNotFoundError,
   startSession as startOrchestratorSession,
   submitAnswer as submitOrchestratorAnswer,
@@ -619,7 +620,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           fallback_context: result.session ? buildSessionFallbackContext(result.session) : null,
         });
       } catch (err) {
-        if (err instanceof OrchestrationConflictError || err instanceof OrchestrationNotFoundError) {
+        if (
+          err instanceof OrchestrationConflictError ||
+          err instanceof OrchestrationNotFoundError ||
+          err instanceof OrchestrationInvalidPlanError
+        ) {
           return toJsonToolResult({ error: err.message, session_id }, true);
         }
         const message = err instanceof Error ? err.message : "Failed to approve orchestration plan";

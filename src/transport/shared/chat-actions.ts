@@ -41,6 +41,11 @@ export type PrepareResponseSaveCandidate = {
   preference_key?: string;
 };
 
+export type PrepareResponseConversationMessage = {
+  role?: "user" | "assistant" | "system" | "tool";
+  content: string;
+};
+
 export type PrepareResponseIntent = {
   needsRecall: boolean;
   needsDocumentLookup: boolean;
@@ -54,6 +59,8 @@ const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
 const INLINE_DOCUMENT_MAX_CHARS = 4_000;
 const DOC_BRIEF_PREVIEW_MAX_CHARS = 200;
 const MEMORY_TEXT_MAX_CHARS = 600;
+const CONVERSATION_HISTORY_MAX_MESSAGES = 40;
+const CONVERSATION_HISTORY_MAX_CHARS = 20_000;
 
 function collectUnsupportedFileErrors(openaiFileIdRefs: OpenAiFileRef[]): Array<{ file_id: string; filename: string; error: string }> {
   const errors: Array<{ file_id: string; filename: string; error: string }> = [];
@@ -699,6 +706,8 @@ export async function executeRecallDocumentAction(auth: AuthContext, ref: string
 export interface PrepareResponseActionInput {
   message: string;
   conversation_id?: string | null;
+  conversation_history?: PrepareResponseConversationMessage[];
+  handoff_target?: "claude" | "chatgpt" | null;
   openaiFileIdRefs?: OpenAiFileRef[];
   last_recall?: {
     query?: string;
@@ -913,15 +922,27 @@ function buildGuardrailSaveCandidates(message: string): PrepareResponseSaveCandi
     }
   }
 
-  if (!/\b(i|we)\s+(really\s+)?(think|believe|feel|reckon|wish|want|prefer|hate|love|am frustrated|am worried)\b/i.test(normalized)) {
+  if (!/\b(i|we)\s+(really\s+)?(think|believe|feel|reckon|wish|want|prefer|like|hate|love|am frustrated|am worried)\b/i.test(normalized)) {
     return candidates;
   }
 
-  const preferenceMatch = normalized.match(/\b(?:i|we)\s+(?:really\s+)?prefer\s+(.+?)[.!?]?$/i);
+  const preferenceMatch = normalized.match(/\b(?:i|we)\s+(?:really\s+)?(?:prefer|like|love)\s+(.+?)[.!?]?$/i);
   if (preferenceMatch?.[1]) {
+    const preference = preferenceMatch[1]
+      .trim()
+      .replace(/[.!?]+$/, "")
+      .replace(/\bno\s+bullshit\b/gi, "no-nonsense")
+      .replace(/\bbullshit\b/gi, "unfiltered")
+      .replace(/\bexplainatiions\b/gi, "explanations")
+      .replace(/\bexplainations\b/gi, "explanations")
+      .replace(/\bemojis?\b/gi, "emoji")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!preference) return candidates;
     candidates.push({
       kind: "preference",
-      content: `User prefers ${preferenceMatch[1].trim().replace(/[.!?]+$/, "")}.`,
+      content: `User prefers ${preference}.`,
+      category: "communication",
     });
     return candidates;
   }
@@ -964,6 +985,68 @@ function mergeGuardrailSaveCandidates(
     merged.push(candidate);
   }
   return merged;
+}
+
+function normalizeConversationHistory(
+  history: PrepareResponseConversationMessage[] | undefined
+): PrepareResponseConversationMessage[] {
+  if (!Array.isArray(history)) return [];
+  return history
+    .flatMap((entry): PrepareResponseConversationMessage[] => {
+      if (!entry || typeof entry !== "object") return [];
+      const role = entry.role === "assistant" || entry.role === "system" || entry.role === "tool" ? entry.role : "user";
+      const content = typeof entry.content === "string" ? entry.content.trim() : "";
+      if (!content) return [];
+      return [{ role, content }];
+    })
+    .slice(-CONVERSATION_HISTORY_MAX_MESSAGES);
+}
+
+function formatConversationHistory(history: PrepareResponseConversationMessage[]): string {
+  const formatted = history
+    .map((entry, index) => `${index + 1}. ${entry.role ?? "user"}: ${entry.content}`)
+    .join("\n\n");
+  if (formatted.length <= CONVERSATION_HISTORY_MAX_CHARS) return formatted;
+  return `${formatted.slice(-CONVERSATION_HISTORY_MAX_CHARS)}\n\n[truncated to latest visible history]`;
+}
+
+function inferHandoffTarget(input: PrepareResponseActionInput): "claude" | "chatgpt" | null {
+  if (input.handoff_target === "claude" || input.handoff_target === "chatgpt") return input.handoff_target;
+  const message = input.message.trim();
+  if (/\b(handoff|hand\s*off|send|pass|move|switch|continue)\b.{0,80}\bclaude\b/i.test(message)) return "claude";
+  if (/\b(handoff|hand\s*off|send|pass|move|switch|continue)\b.{0,80}\bchatgpt\b/i.test(message)) return "chatgpt";
+
+  const selectedNumber = message.match(/^\s*(\d{1,2})[.)]?\s*$/)?.[1];
+  if (selectedNumber) {
+    const historyText = normalizeConversationHistory(input.conversation_history)
+      .map((entry) => entry.content)
+      .join("\n")
+      .toLowerCase();
+    const optionPattern = new RegExp(`${selectedNumber}\\s*[.)]\\s*[^\\n]{0,120}(claude|handoff|hand-off|hand off)`, "i");
+    if (optionPattern.test(historyText)) return "claude";
+  }
+
+  return null;
+}
+
+function buildHandoffHistorySaveCandidate(input: PrepareResponseActionInput): PrepareResponseSaveCandidate | null {
+  const target = inferHandoffTarget(input);
+  if (!target) return null;
+  const history = normalizeConversationHistory(input.conversation_history);
+  if (history.length === 0) return null;
+  const content = formatConversationHistory(history);
+  return {
+    kind: "document-note",
+    title: `ChatGPT to ${target === "claude" ? "Claude" : "ChatGPT"} handoff context`,
+    summary: `Visible ChatGPT conversation history captured for ${target} handoff.`,
+    source_hint: "ChatGPT visible conversation history before provider handoff",
+    key_points: [
+      `Target provider: ${target}`,
+      `Captured ${history.length} visible message(s) from the ChatGPT window.`,
+      "Use this as task context before continuing the collab turn.",
+    ],
+    content,
+  };
 }
 
 function isShortLocalReply(message: string): boolean {
@@ -1009,6 +1092,20 @@ export function fastPrepareResponseIntent(input: PrepareResponseActionInput): Fa
         needsDocumentLookup: explicitRefs.length > 0 || /\b(document|docs?|pdf|upload|file|attachment|catalogue|catalog|product|products|inventory|@doc:|@lot:)\b/i.test(message),
         reusePreviousContext: false,
         contextDependent: true,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (inferHandoffTarget(input)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "handoff_history",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
         saveCandidates: guardrailCandidates,
       },
     };
@@ -1255,7 +1352,11 @@ export async function executePrepareResponseAction(
     setRequestTimingField("prepare_doc_fetch_ms", 0);
   }
 
-  const saveCandidates = mergeGuardrailSaveCandidates(input.message, intent.saveCandidates);
+  const handoffHistoryCandidate = buildHandoffHistorySaveCandidate(input);
+  const saveCandidates = mergeGuardrailSaveCandidates(input.message, [
+    ...intent.saveCandidates,
+    ...(handoffHistoryCandidate ? [handoffHistoryCandidate] : []),
+  ]);
   const intentForResponse = { ...intent, saveCandidates };
 
   const queueStartedAt = nowMs();
@@ -1275,6 +1376,9 @@ export async function executePrepareResponseAction(
       : []),
     ...(queuedSaves.some((save) => save.kind === "document-note")
       ? ["Document-note saving is queued. Do not add a Saved footer unless autoSave.saved includes a ref."]
+      : []),
+    ...(inferHandoffTarget(input) && !handoffHistoryCandidate
+      ? ["Handoff intent detected but conversation_history was missing. Ask the user to retry after ChatGPT sends the visible conversation_history to Tallei."]
       : []),
   ];
 

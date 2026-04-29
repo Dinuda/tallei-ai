@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { ArrowRight, FolderOpen, PlusCircle } from "lucide-react";
 
 import styles from "./page.module.css";
 
@@ -52,7 +53,10 @@ export default function CollabPlanMigrationPage() {
   if (loading) {
     return (
       <div className={styles.page}>
-        <p className={styles.text}>Migrating to unified Collab task flow...</p>
+        <div className={styles.loadingState}>
+          <div className={styles.spinner} />
+          <p className={styles.loadingText}>Redirecting to unified Collab task…</p>
+        </div>
       </div>
     );
   }
@@ -60,20 +64,34 @@ export default function CollabPlanMigrationPage() {
   if (task) {
     return (
       <div className={styles.page}>
-        <p className={styles.text}>Redirecting to <strong>{task.title}</strong>...</p>
+        <div className={styles.loadingState}>
+          <div className={styles.spinner} />
+          <p className={styles.loadingText}>Opening <strong>{task.title}</strong>…</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>Planner Sessions Migrated</h1>
-      <p className={styles.text}>
-        Orchestrate sessions were merged into Collab tasks. Create a new task or open an existing one from the Collab dashboard.
-      </p>
-      <div className={styles.actions}>
-        <Link href="/dashboard/collab/new" className={styles.primaryBtn}>Create new collab task</Link>
-        <Link href="/dashboard/collab" className={styles.secondaryBtn}>Open collab tasks</Link>
+      <div className={styles.card}>
+        <div className={styles.iconWrap}>
+          <FolderOpen size={32} strokeWidth={1.5} />
+        </div>
+        <h1 className={styles.title}>Planner Sessions Migrated</h1>
+        <p className={styles.text}>
+          Orchestrate sessions were merged into Collab tasks. Create a new task or open an existing one from the Collab dashboard.
+        </p>
+        <div className={styles.actions}>
+          <Link href="/dashboard/collab/new" className={styles.primaryBtn}>
+            <PlusCircle size={16} />
+            Create new collab task
+          </Link>
+          <Link href="/dashboard/collab" className={styles.secondaryBtn}>
+            Open collab tasks
+            <ArrowRight size={14} />
+          </Link>
+        </div>
       </div>
     </div>
   );

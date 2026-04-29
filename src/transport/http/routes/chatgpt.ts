@@ -26,6 +26,7 @@ import {
   approvePlan as approveOrchestrationPlan,
   buildSessionFallbackContext,
   OrchestrationConflictError,
+  OrchestrationInvalidPlanError,
   OrchestrationNotFoundError,
   startSession as startOrchestrationSession,
   submitAnswer as submitOrchestrationAnswer,
@@ -70,6 +71,11 @@ const prepareResponseSchema = z.object({
   message: z.string().trim().min(1, "message is required"),
   openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
   conversation_id: conversationIdSchema,
+  conversation_history: z.array(z.object({
+    role: z.enum(["user", "assistant", "system", "tool"]).optional(),
+    content: z.string().trim().min(1),
+  })).max(40).optional(),
+  handoff_target: z.enum(["claude", "chatgpt"]).optional().nullable(),
   last_recall: z.object({
     query: z.string().optional(),
     context_hash: z.string().optional(),
@@ -250,6 +256,23 @@ function appendContinueCommand(
   return `${userVisible}\n\n${command.instruction}`;
 }
 
+function postgresErrorDetails(error: unknown): {
+  code: string;
+  constraint: string | null;
+  message: string;
+} | null {
+  if (!error || typeof error !== "object" || !("code" in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== "string" || code.length === 0) return null;
+  const constraint = (error as { constraint?: unknown }).constraint;
+  const message = error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "Database error");
+  return {
+    code,
+    constraint: typeof constraint === "string" ? constraint : null,
+    message,
+  };
+}
+
 function hasLocalSandboxDownloadLink(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   const record = body as Record<string, unknown>;
@@ -311,10 +334,11 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
   if (stage === "CREATE") {
     return [
       "Memory recall and document save complete. Do not call prepare_response again for this turn.",
-      "Call orchestrate_start with goal set to the user's collab goal and initial_context set to the prepared context/documents summary. Do not call createCollabTask yet.",
-      "Show the returned role_suggestion briefly, including the recommended first actor, and say the user may override roles or first actor.",
-      "Ask the returned grill-me question. End with: Review the roles and answer the question, or say continue to accept the recommended/default answer.",
-      "Only after orchestration returns PLAN_READY should orchestrate_approve create the collab task; then continue normal collab execution.",
+      "Call createCollabTask with the user-provided args (title, brief, first_actor — default 'chatgpt', max_iterations). Do not pass file or document args.",
+      "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
+      "Show the actual submitted output after collab_continue succeeds.",
+      "If any collab action returns continue_command, end the user-facing response with its instruction.",
+      "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     ];
   }
   if (stage === "CONTINUE") {
@@ -325,6 +349,7 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
       "If is_my_turn=false, report which actor (next_actor) is expected and stop.",
       "Show the actual submitted output after a successful submit.",
       "If any collab action returns continue_command, end the user-facing response with its instruction.",
+      "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     ];
   }
   return [
@@ -332,6 +357,7 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
     `Call collab_continue with the exact user message and draft_output included${taskLabel}. Do not pass file or document args.`,
     "Show the actual submitted output after collab_continue succeeds.",
     "If any collab action returns continue_command, end the user-facing response with its instruction.",
+    "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     "If the call fails, return the exact error and stop.",
   ];
 }
@@ -1218,6 +1244,24 @@ export function buildOpenApiSpec(serverUrl: string) {
                     conversation_id: {
                       type: "string",
                       description: "Optional client-provided conversation identifier.",
+                    },
+                    conversation_history: {
+                      type: "array",
+                      maxItems: 40,
+                      description: "Visible ChatGPT conversation history as structured {role, content} messages. Required for handoff-to-Claude requests so Tallei can store context before Claude continues.",
+                      items: {
+                        type: "object",
+                        required: ["content"],
+                        properties: {
+                          role: { type: "string", enum: ["user", "assistant", "system", "tool"] },
+                          content: { type: "string" },
+                        },
+                      },
+                    },
+                    handoff_target: {
+                      type: "string",
+                      enum: ["claude", "chatgpt"],
+                      description: "Set when the user asks to hand off the visible chat context to another provider.",
                     },
                     openaiFileIdRefs: {
                       type: "array",
@@ -2304,6 +2348,8 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
       message: recallMessage,
       openaiFileIdRefs: body.openaiFileIdRefs,
       conversation_id: body.conversation_id ?? null,
+      conversation_history: body.conversation_history,
+      handoff_target: body.handoff_target ?? null,
       last_recall: body.last_recall ?? null,
       requesterIp: req.ip,
     });
@@ -2837,6 +2883,33 @@ router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, require
     }
     if (error instanceof OrchestrationConflictError) {
       res.status(409).json({ error: error.message });
+      return;
+    }
+    if (error instanceof OrchestrationInvalidPlanError) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    const pg = postgresErrorDetails(error);
+    if (pg?.code === "23514" || pg?.code === "22P02" || pg?.code === "23502") {
+      res.status(400).json({
+        error: "Invalid orchestration approval overrides",
+        details: {
+          code: pg.code,
+          constraint: pg.constraint,
+          message: pg.message,
+        },
+      });
+      return;
+    }
+    if (pg?.code === "23503" || pg?.code === "23505") {
+      res.status(409).json({
+        error: "Orchestration approval conflict",
+        details: {
+          code: pg.code,
+          constraint: pg.constraint,
+          message: pg.message,
+        },
+      });
       return;
     }
     logChatGptActionAsync({

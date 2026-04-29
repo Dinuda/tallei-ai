@@ -14,6 +14,11 @@ import {
   listTasks,
   submitTurn,
 } from "../../../services/collab.js";
+import {
+  getSession as getOrchestrationSession,
+  listSessions,
+  type OrchestrationFilter,
+} from "../../../services/orchestrator.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -87,7 +92,12 @@ router.get("/tasks", requireScopes(["collab:read"]), async (req: AuthRequest, re
   try {
     const query = listTaskSchema.parse(req.query ?? {});
     const tasks = await listTasks({ filter: query.filter }, req.authContext!);
-    res.json({ tasks });
+    const orchestrationFilter: OrchestrationFilter =
+      query.filter === "done" ? "done" : query.filter === "all" ? "all" : "active";
+    const orchestrationSessions = (await listSessions({ filter: orchestrationFilter }, req.authContext!))
+      // RUNNING sessions with a linked collab task are already represented by collab_tasks.
+      .filter((session) => !(session.status === "RUNNING" && session.collabTaskId));
+    res.json({ tasks, orchestrationSessions });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -95,6 +105,25 @@ router.get("/tasks", requireScopes(["collab:read"]), async (req: AuthRequest, re
     }
     console.error("Error listing collab tasks:", error);
     res.status(500).json({ error: "Failed to list collab tasks" });
+  }
+});
+
+router.get("/orchestrations/:id", requireScopes(["collab:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = idParamSchema.parse(req.params);
+    const session = await getOrchestrationSession(id, req.authContext!);
+    if (!session) {
+      res.status(404).json({ error: "Orchestration session not found" });
+      return;
+    }
+    res.json(session);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error loading orchestration session:", error);
+    res.status(500).json({ error: "Failed to load orchestration session" });
   }
 });
 

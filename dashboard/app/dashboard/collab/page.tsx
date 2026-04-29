@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, RefreshCw } from "lucide-react";
+import { Plus, RefreshCw, FileText, ArrowRight } from "lucide-react";
 
 import { EmptyCollectionState } from "../components/empty-collection-state";
 import styles from "./page.module.css";
@@ -31,6 +31,19 @@ type CollabTask = {
   context?: Record<string, unknown>;
 };
 
+type OrchestrationStatus = "DRAFT" | "INTERVIEWING" | "PLAN_READY" | "RUNNING" | "DONE" | "ABORTED";
+
+type OrchestrationSession = {
+  id: string;
+  goal: string;
+  status: OrchestrationStatus;
+  plan: { title?: string; summary?: string; first_actor?: "chatgpt" | "claude" } | null;
+  collabTaskId: string | null;
+  updatedAt: string;
+  transcript?: Array<{ role: "planner" | "user" | "system"; content: string; ts: string }>;
+  metadata?: Record<string, unknown>;
+};
+
 const FILTERS: Array<{ id: CollabFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
@@ -38,11 +51,40 @@ const FILTERS: Array<{ id: CollabFilter; label: string }> = [
   { id: "done", label: "Done" },
 ];
 
-const STATE_COLOR: Record<CollabState, string> = {
-  CREATIVE: "#10a37f",
-  TECHNICAL: "#D97757",
-  DONE: "var(--text-muted)",
-  ERROR: "var(--destructive)",
+const STATE_CONFIG: Record<CollabState, { label: string; bg: string; border: string; text: string }> = {
+  CREATIVE: {
+    label: "ChatGPT's turn",
+    bg: "var(--actor-chatgpt-bg)",
+    border: "var(--actor-chatgpt-border)",
+    text: "var(--actor-chatgpt-text)",
+  },
+  TECHNICAL: {
+    label: "Claude's turn",
+    bg: "var(--actor-claude-bg)",
+    border: "var(--actor-claude-border)",
+    text: "var(--actor-claude-text)",
+  },
+  DONE: {
+    label: "Completed",
+    bg: "var(--status-success-bg)",
+    border: "var(--status-success-border)",
+    text: "var(--status-success-text)",
+  },
+  ERROR: {
+    label: "Errored",
+    bg: "var(--status-error-bg)",
+    border: "var(--status-error-border)",
+    text: "var(--status-error-text)",
+  },
+};
+
+const ORCHESTRATION_CONFIG: Record<OrchestrationStatus, { label: string; bg: string; border: string; text: string }> = {
+  DRAFT: { label: "Draft", bg: "var(--status-info-bg)", border: "var(--status-info-border)", text: "var(--status-info-text)" },
+  INTERVIEWING: { label: "Grill-me active", bg: "#e0f2fe", border: "#7dd3fc", text: "#075985" },
+  PLAN_READY: { label: "Plan ready", bg: "#fef3c7", border: "#fcd34d", text: "#92400e" },
+  RUNNING: { label: "Collab created", bg: "var(--actor-chatgpt-bg)", border: "var(--actor-chatgpt-border)", text: "var(--actor-chatgpt-text)" },
+  DONE: { label: "Completed", bg: "var(--status-success-bg)", border: "var(--status-success-border)", text: "var(--status-success-text)" },
+  ABORTED: { label: "Aborted", bg: "var(--status-error-bg)", border: "var(--status-error-border)", text: "var(--status-error-text)" },
 };
 
 const ACTOR_LABEL: Record<CollabActor, string> = {
@@ -52,8 +94,8 @@ const ACTOR_LABEL: Record<CollabActor, string> = {
 };
 
 function waitingActorLabel(state: CollabState): string | null {
-  if (state === "CREATIVE") return "Waiting on ChatGPT";
-  if (state === "TECHNICAL") return "Waiting on Claude";
+  if (state === "CREATIVE") return "ChatGPT's turn";
+  if (state === "TECHNICAL") return "Claude's turn";
   if (state === "DONE") return "Completed";
   if (state === "ERROR") return "Errored";
   return null;
@@ -64,6 +106,12 @@ function latestOutput(task: CollabTask): TranscriptEntry | null {
   if (transcript.length === 0) return null;
   const modelEntry = [...transcript].reverse().find((entry) => entry.actor === "chatgpt" || entry.actor === "claude");
   return modelEntry ?? transcript[transcript.length - 1];
+}
+
+function latestPlannerText(session: OrchestrationSession): string | null {
+  const transcript = Array.isArray(session.transcript) ? session.transcript : [];
+  const latest = [...transcript].reverse().find((entry) => entry.role === "planner" || entry.role === "user");
+  return latest?.content ?? session.plan?.summary ?? null;
 }
 
 function documentCount(task: CollabTask): number {
@@ -89,6 +137,7 @@ function relativeTime(iso: string): string {
 export default function CollabTasksPage() {
   const [filter, setFilter] = useState<CollabFilter>("active");
   const [tasks, setTasks] = useState<CollabTask[]>([]);
+  const [orchestrationSessions, setOrchestrationSessions] = useState<OrchestrationSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -103,8 +152,10 @@ export default function CollabTasksPage() {
         throw new Error(typeof body?.error === "string" ? body.error : "Failed to load tasks");
       }
       setTasks(Array.isArray(body?.tasks) ? body.tasks : []);
+      setOrchestrationSessions(Array.isArray(body?.orchestrationSessions) ? body.orchestrationSessions : []);
     } catch {
       setTasks([]);
+      setOrchestrationSessions([]);
     } finally {
       if (mode === "initial") setLoading(false);
       if (mode === "refresh") setRefreshing(false);
@@ -115,23 +166,33 @@ export default function CollabTasksPage() {
     void fetchTasks("initial");
   }, [fetchTasks]);
 
-  const hasTasks = tasks.length > 0;
+  const hasTasks = tasks.length > 0 || orchestrationSessions.length > 0;
 
-  const title = useMemo(() => {
+  const stats = useMemo(() => {
     const activeCount = tasks.filter((task) => task.state === "CREATIVE" || task.state === "TECHNICAL").length;
-    return `${activeCount} active`;
-  }, [tasks]);
+    const planningCount = orchestrationSessions.filter((session) =>
+      session.status === "INTERVIEWING" || session.status === "PLAN_READY"
+    ).length;
+    const doneCount = tasks.filter((task) => task.state === "DONE").length;
+    return { active: activeCount, planning: planningCount, done: doneCount, total: tasks.length + orchestrationSessions.length };
+  }, [tasks, orchestrationSessions]);
 
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
         <div>
           <h1 className={styles.pageTitle}>Collab Tasks</h1>
-          <p className={styles.subtle}>{title}</p>
+          <p className={styles.subtle}>
+            {stats.total} total · {stats.active} active · {stats.planning} planning · {stats.done} done
+          </p>
         </div>
         <div className={styles.headerRight}>
-          <button className={styles.actionBtn} onClick={() => void fetchTasks("refresh")} disabled={refreshing || loading}>
-            <RefreshCw size={15} className={refreshing ? styles.spin : ""} />
+          <button
+            className={styles.actionBtn}
+            onClick={() => void fetchTasks("refresh")}
+            disabled={refreshing || loading}
+          >
+            <RefreshCw size={14} className={refreshing ? styles.spin : ""} />
             Refresh
           </button>
           <Link className={styles.primaryBtn} href="/dashboard/collab/new">
@@ -142,69 +203,148 @@ export default function CollabTasksPage() {
       </header>
 
       <div className={styles.filters}>
-        {FILTERS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={`${styles.filterChip} ${item.id === filter ? styles.filterChipActive : ""}`}
-            onClick={() => setFilter(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
+        {FILTERS.map((item) => {
+          const isActive = item.id === filter;
+          let count = 0;
+          if (item.id === "all") count = stats.total;
+          else if (item.id === "active") count = stats.active + stats.planning;
+          else if (item.id === "waiting") count = tasks.filter((t) => t.state === "CREATIVE" || t.state === "TECHNICAL").length;
+          else if (item.id === "done") count = stats.done;
+
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={`${styles.filterChip} ${isActive ? styles.filterChipActive : ""}`}
+              onClick={() => setFilter(item.id)}
+            >
+              <span>{item.label}</span>
+              <span className={`${styles.filterCount} ${isActive ? styles.filterCountActive : ""}`}>{count}</span>
+            </button>
+          );
+        })}
       </div>
 
       {loading ? (
         <div className={styles.grid}>
-          {[1, 2, 3, 4, 5].map((idx) => (
+          {[1, 2, 3, 4, 5, 6].map((idx) => (
             <div key={idx} className={styles.skeletonCard}>
               <div className={`${styles.skeleton} ${styles.skeletonShort}`} />
               <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
               <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+              <div className={styles.skeletonFooter}>
+                <div className={`${styles.skeleton} ${styles.skeletonBadge}`} />
+                <div className={`${styles.skeleton} ${styles.skeletonBadge}`} />
+              </div>
             </div>
           ))}
         </div>
       ) : hasTasks ? (
         <div className={styles.grid}>
+          {orchestrationSessions.map((session) => {
+            const latest = latestPlannerText(session);
+            const config = ORCHESTRATION_CONFIG[session.status];
+            const planningHref = session.collabTaskId
+              ? `/dashboard/collab/${session.collabTaskId}`
+              : `/dashboard/orchestrate/${session.id}`;
+            const planningActionLabel = session.status === "PLAN_READY" ? "Approve plan" : "Continue";
+            return (
+              <Link key={session.id} className={`${styles.card} ${styles.planningCard}`} href={planningHref}>
+                <div className={styles.cardTop}>
+                  <span
+                    className={styles.statusBadge}
+                    style={{
+                      background: config.bg,
+                      borderColor: config.border,
+                      color: config.text,
+                    }}
+                  >
+                    {config.label}
+                  </span>
+                </div>
+
+                <h2 className={styles.cardTitle}>{session.plan?.title || session.goal}</h2>
+                <p className={styles.cardMeta}>
+                  Orchestrator · {relativeTime(session.updatedAt)}
+                </p>
+
+                {latest && (
+                  <p className={styles.outputPreview}>
+                    {latest.slice(0, 140)}
+                  </p>
+                )}
+
+                <div className={styles.cardFooter}>
+                  <span className={styles.planningBadge}>orchestrator</span>
+                  <span className={styles.cardActionBtn}>
+                    {planningActionLabel}
+                  </span>
+                </div>
+              </Link>
+            );
+          })}
+
           {tasks.map((task) => {
             const latest = latestOutput(task);
             const docs = documentCount(task);
+            const config = STATE_CONFIG[task.state];
+            const progressPercent = Math.min(100, Math.round((task.iteration / Math.max(1, task.maxIterations)) * 100));
+
             return (
               <Link key={task.id} className={styles.card} href={`/dashboard/collab/${task.id}`}>
                 <div className={styles.cardTop}>
-                  <span className={styles.stateRow}>
-                    <span className={styles.stateDot} style={{ backgroundColor: STATE_COLOR[task.state] }} />
-                    {task.state}
+                  <span
+                    className={styles.statusBadge}
+                    style={{
+                      background: config.bg,
+                      borderColor: config.border,
+                      color: config.text,
+                    }}
+                  >
+                    {waitingActorLabel(task.state)}
                   </span>
-                  <span className={styles.iteration}>iter {task.iteration}/{task.maxIterations}</span>
+                  {docs > 0 && (
+                    <span className={styles.docBadge}>
+                      <FileText size={11} />
+                      {docs}
+                    </span>
+                  )}
                 </div>
 
                 <h2 className={styles.cardTitle}>{task.title}</h2>
                 <p className={styles.cardMeta}>
-                  Last update: {task.lastActor ? ACTOR_LABEL[task.lastActor] : "-"} · {relativeTime(task.updatedAt)}
+                  {task.lastActor ? ACTOR_LABEL[task.lastActor] : "-"} · {relativeTime(task.updatedAt)}
                 </p>
 
-                <div className={styles.statusBadges}>
-                  <span className={styles.statusBadge}>{waitingActorLabel(task.state)}</span>
-                  <span className={latest ? styles.outputBadgeReady : styles.outputBadgeMissing}>
-                    {latest ? "Output ready" : "No output yet"}
-                  </span>
-                  {docs > 0 ? (
-                    <span className={styles.statusBadge}>{docs} docs</span>
-                  ) : null}
+                <div className={styles.progressWrap}>
+                  <div className={styles.progressTrack}>
+                    <div
+                      className={styles.progressFill}
+                      style={{
+                        width: `${progressPercent}%`,
+                        background: task.state === "DONE" ? "var(--status-success-text)" : task.state === "ERROR" ? "var(--status-error-text)" : "var(--actor-chatgpt)",
+                      }}
+                    />
+                  </div>
+                  <span className={styles.progressLabel}>Turn {task.iteration} of {task.maxIterations}</span>
                 </div>
 
                 {latest && (
                   <p className={styles.outputPreview}>
-                    {latest.content.slice(0, 120)}
+                    {latest.content.slice(0, 140)}
                   </p>
                 )}
 
-                <div className={styles.cardBadges}>
-                  <span className={`${styles.platformBadge} ${styles.platformChatgpt}`}>chatgpt</span>
-                  <span className={styles.swapArrow}>⇄</span>
-                  <span className={`${styles.platformBadge} ${styles.platformClaude}`}>claude</span>
-                  <span className={styles.openCta}>Open →</span>
+                <div className={styles.cardFooter}>
+                  <div className={styles.actorBadges}>
+                    <span className={`${styles.actorBadge} ${styles.actorChatgpt}`}>ChatGPT</span>
+                    <span className={styles.swapArrow}>⇄</span>
+                    <span className={`${styles.actorBadge} ${styles.actorClaude}`}>Claude</span>
+                  </div>
+                  <span className={styles.openCta}>
+                    Open
+                    <ArrowRight size={12} />
+                  </span>
                 </div>
               </Link>
             );

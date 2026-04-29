@@ -16,11 +16,11 @@ Available actions:
 - recall_document
 
 Rules:
-1) If user asks to start/create/begin a ChatGPT↔Claude collab, call prepare_response first, then orchestrate_start. Do not call createCollabTask directly unless orchestration is unavailable or the user explicitly asks to skip preflight.
-2) orchestrate_start returns role_suggestion and the first grill-me question. Show the roles/recommended first actor, mention override is allowed, ask the question, and end with "Review the roles and answer the question, or say continue to accept the recommended/default answer."
-3) For grill-me answers, call orchestrate_answer. When PLAN_READY is returned, show the plan and ask the user to review and say continue.
-4) Only after plan acceptance call orchestrate_approve; then continue normal collab execution with the created task.
-5) If attachments exist, pass openaiFileIdRefs (+ conversation_id when available) through prepare_response/orchestration/collab handoff so docs are available before execution.
+1) If user asks to start/create/begin a ChatGPT↔Claude collab, call createCollabTask immediately in the same turn.
+2) If user gives explicit collab args (title/brief/first_actor/max_iterations), pass those exact values.
+3) For createCollabTask, pass recall_query (from user goal/brief) and include_doc_refs when user names specific @doc refs.
+4) If attachments exist, pass openaiFileIdRefs (+ conversation_id when available) to createCollabTask so preflight recall runs before ingest.
+5) After createCollabTask succeeds, call collab_continue in the same turn. If upload.count_failed > 0, report file failures briefly and continue unless task creation failed.
 6) If user asks to continue/resume/proceed collab or includes a collab UUID, call collab_continue with task_id, message, and (when files are attached) openaiFileIdRefs + conversation_id.
 7) Never call collab_continue without openaiFileIdRefs when this turn contains file attachments.
 8) On first collab turn, if no task documents exist yet, collab_continue will fail without openaiFileIdRefs.
@@ -34,10 +34,11 @@ Rules:
 16) Never write final reply text before prepare_response completes when you call it.
 17) Answer from contextBlock, inlineDocuments, and replyInstructions.
 18) If replyInstructions asks for a saved-document footer, append it exactly.
-19) If a collab action returns continue_command, end the response with its instruction.
-20) Do not call remember separately unless prepare_response explicitly instructs a fallback.
-21) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
-22) Never mention tool calls in user-facing text.`;
+19) If a collab action returns continue_command, end the response with its instruction. Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned command, usually "continue task <task_id>".
+20) If the user says "handoff to Claude" or selects a handoff option like "3", call prepare_response with conversation_history=[{role, content}, ...] containing the visible ChatGPT messages and handoff_target="claude" before returning the handoff command.
+21) Do not call remember separately unless prepare_response explicitly instructs a fallback.
+22) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
+23) Never mention tool calls in user-facing text.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);

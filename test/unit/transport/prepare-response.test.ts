@@ -113,6 +113,38 @@ test("fastPrepareResponseIntent skips classifier and queues sanitized opinion ca
   ]);
 });
 
+test("fastPrepareResponseIntent skips classifier and queues communication preferences from like statements", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "i really like no bullshit long explainatiions and no emojis",
+  });
+
+  assert.equal(decision.shouldCallClassifier, false);
+  assert.equal(decision.intent.needsRecall, false);
+  assert.deepEqual(decision.intent.saveCandidates, [
+    {
+      kind: "preference",
+      content: "User prefers no-nonsense long explanations and no emoji.",
+      category: "communication",
+    },
+  ]);
+});
+
+test("fastPrepareResponseIntent skips classifier for numeric handoff selections with conversation history", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "3",
+    conversation_history: [
+      {
+        role: "assistant",
+        content: "If you want, next I can do one of these:\n1. outline\n2. script\n3. make a Claude handoff prompt",
+      },
+      { role: "user", content: "3" },
+    ],
+  });
+
+  assert.equal(decision.shouldCallClassifier, false);
+  assert.equal(decision.reason, "handoff_history");
+});
+
 test("fastPrepareResponseIntent still uses classifier for uncertain prompts", () => {
   const decision = fastPrepareResponseIntent({ message: "what do you think about this?" });
 
@@ -311,6 +343,68 @@ test("executePrepareResponseAction queues sanitized durable opinion memory even 
       content: "User is frustrated with governance in Sri Lanka and believes the government should manage civic behavior more effectively.",
     },
   ]);
+});
+
+test("executePrepareResponseAction queues communication preference saves without classifier or recall", async () => {
+  const queued: Array<() => Promise<void>> = [];
+  let classifierCount = 0;
+  let recallCount = 0;
+  const result = await executePrepareResponseAction(auth, {
+    message: "i really like no bullshit long explainatiions and no emojis",
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    recallAction: async () => {
+      recallCount += 1;
+      return { status: 200, body: recallBody };
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(recallCount, 0);
+  assert.equal(queued.length, 1);
+  assert.deepEqual(result.body.queuedSaves, [
+    {
+      kind: "preference",
+      content: "User prefers no-nonsense long explanations and no emoji.",
+      status: "queued",
+    },
+  ]);
+});
+
+test("executePrepareResponseAction queues conversation history document note for Claude handoff", async () => {
+  const queued: Array<() => Promise<void>> = [];
+  let classifierCount = 0;
+  const result = await executePrepareResponseAction(auth, {
+    message: "3",
+    handoff_target: "claude",
+    conversation_history: [
+      { role: "user", content: "Create week 2 course content." },
+      { role: "assistant", content: "Drafted a week 2 outline and offered option 3 for Claude handoff." },
+      { role: "user", content: "3" },
+    ],
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(queued.length, 1);
+  assert.equal(result.body.queuedSaves[0]?.kind, "document-note");
+  assert.equal(result.body.queuedSaves[0]?.title, "ChatGPT to Claude handoff context");
+  assert.match(result.body.queuedSaves[0]?.content ?? "", /Create week 2 course content/);
 });
 
 test("executePrepareResponseAction can reuse previous context and skip recall", async () => {

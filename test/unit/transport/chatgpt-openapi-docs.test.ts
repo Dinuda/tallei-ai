@@ -26,6 +26,10 @@ test("ChatGPT OpenAPI documents prepare_response as the primary selective action
   assert.match(prepare.description ?? "", /Call every turn/i);
   assert.match(prepare.description ?? "", /openaiFileIdRefs/i);
   assert.match(prepare.description ?? "", /visible attachments/i);
+  assert.ok(
+    prepare.requestBody?.content?.["application/json"]?.schema?.properties?.conversation_history,
+    "prepare_response should accept structured visible conversation history for handoffs"
+  );
   assert.equal(prepare.requestBody?.required, true);
   assert.deepEqual(
     prepare.requestBody?.content?.["application/json"]?.schema?.required,

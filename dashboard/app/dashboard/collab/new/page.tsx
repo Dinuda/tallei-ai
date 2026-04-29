@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ArrowLeft, ArrowRight, FileText, X, Check, Upload, Sparkles, Loader2 } from "lucide-react";
 
 import styles from "./page.module.css";
 
@@ -21,7 +22,11 @@ type ExistingDocListItem = {
   preview: string;
 };
 
-const STEPS = ["Scope", "Roles", "Start"];
+const STEPS = [
+  { id: 0, label: "Scope", description: "What should ChatGPT and Claude work on?" },
+  { id: 1, label: "Roles", description: "Define each provider's focus." },
+  { id: 2, label: "Review", description: "Confirm and create the task." },
+];
 
 const DEFAULT_CHATGPT_ROLE = "Explore alternatives, expand options, and draft creative first-pass outputs.";
 const DEFAULT_CLAUDE_ROLE = "Stress-test assumptions, tighten technical details, and finalize implementation-ready output.";
@@ -113,7 +118,7 @@ export default function CollabTaskWizardPage() {
 
       const docs = Array.isArray(body?.docs)
         ? body.docs
-            .filter((item): item is ExistingDocListItem => Boolean(item && typeof item === "object" && typeof item.ref === "string"))
+            .filter((item: unknown): item is ExistingDocListItem => { const rec = item as Record<string, unknown>; return Boolean(rec && typeof rec === "object" && typeof rec.ref === "string"); })
             .slice(0, 100)
         : [];
       setExistingDocs(docs);
@@ -272,170 +277,303 @@ export default function CollabTaskWizardPage() {
 
   return (
     <div className={styles.page}>
+      {/* Step indicator */}
+      <nav className={styles.steps} aria-label="Setup progress">
+        {STEPS.map((s, idx) => (
+          <div key={s.id} className={styles.stepItem}>
+            {idx > 0 && <div className={`${styles.stepLine} ${idx <= step ? styles.stepLineDone : ""}`} />}
+            <div className={`${styles.stepNode} ${s.id === step ? styles.stepNodeActive : s.id < step ? styles.stepNodeDone : styles.stepNodePending}`}>
+              <span className={styles.stepNumber}>{s.id < step ? <Check size={12} strokeWidth={3} /> : s.id + 1}</span>
+              <span className={styles.stepLabel}>{s.label}</span>
+            </div>
+          </div>
+        ))}
+      </nav>
+
       <header className={styles.header}>
-        <h1 className={styles.title}>New Collab Task</h1>
-        <p className={styles.subtitle}>Plan first, then run ChatGPT and Claude with a shared execution track.</p>
-        <div className={styles.dots}>
-          {STEPS.map((label, idx) => (
-            <span key={label} className={`${styles.dot} ${idx <= step ? styles.dotActive : ""}`} />
-          ))}
-        </div>
+        <h1 className={styles.title}>{STEPS[step].label}</h1>
+        <p className={styles.subtitle}>{STEPS[step].description}</p>
       </header>
 
+      {/* Error */}
+      {errorText && (
+        <div className={styles.errorBanner}>
+          <span>{errorText}</span>
+        </div>
+      )}
+
+      {/* Step 0: Scope */}
       {step === 0 && (
         <section className={styles.card}>
-          <h2>Title and brief</h2>
-          <input
-            className={styles.input}
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="Draft the Series A deck"
-          />
-
-          <div className={styles.briefComposer}>
-            <textarea
-              className={styles.textarea}
-              value={brief}
-              onChange={(event) => setBrief(event.target.value)}
-              placeholder="Include product narrative, GTM story, and metrics assumptions."
-            />
+          <div className={styles.fieldGroup}>
+            <label className={styles.fieldLabel}>
+              Task title
+              <span className={styles.fieldRequired}>*</span>
+            </label>
             <input
-              ref={fileInputRef}
-              type="file"
-              className={styles.hiddenInput}
-              accept="application/pdf,.docx,.docm,text/plain"
-              multiple
-              onChange={onPickFiles}
+              className={styles.input}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g., Draft the Series A deck"
             />
-            <div className={styles.briefActions}>
-              <button type="button" className={styles.fileIconBtn} onClick={() => fileInputRef.current?.click()} disabled={stepWaiting} aria-label="Attach files">
-                +
-              </button>
-              <span className={styles.fileHint}>Attach files (PDF/DOCX). You can add many.</span>
+          </div>
+
+          <div className={styles.fieldGroup}>
+            <label className={styles.fieldLabel}>Brief</label>
+            <div className={styles.briefComposer}>
+              <textarea
+                className={styles.textarea}
+                value={brief}
+                onChange={(e) => setBrief(e.target.value)}
+                placeholder="Include product narrative, GTM story, and metrics assumptions."
+              />
+              <div className={styles.briefActions}>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className={styles.hiddenInput}
+                  accept="application/pdf,.docx,.docm,text/plain"
+                  multiple
+                  onChange={onPickFiles}
+                />
+                <button
+                  type="button"
+                  className={styles.fileBtn}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={stepWaiting}
+                >
+                  <Upload size={14} />
+                  Attach files
+                </button>
+                <span className={styles.fileHint}>PDF, DOCX, TXT</span>
+              </div>
             </div>
-            {pendingFiles.length > 0 ? (
-              <div className={styles.fileChips}>
+            {pendingFiles.length > 0 && (
+              <div className={styles.fileList}>
                 {pendingFiles.map((file, index) => (
                   <span key={`${file.name}:${file.size}:${file.lastModified}`} className={styles.fileChip}>
-                    {file.name}
-                    <button type="button" onClick={() => removePendingFile(index)} aria-label="Remove file">×</button>
+                    <FileText size={12} />
+                    <span className={styles.fileChipName}>{file.name}</span>
+                    <button type="button" className={styles.fileChipRemove} onClick={() => removePendingFile(index)} aria-label="Remove file">
+                      <X size={12} />
+                    </button>
                   </span>
                 ))}
               </div>
-            ) : null}
-
-            <div className={styles.lookupBlock}>
-              <p className={styles.lookupTitle}>Lookup existing documents</p>
-              <input
-                className={styles.lookupInput}
-                value={docSearch}
-                onChange={(event) => setDocSearch(event.target.value)}
-                placeholder="Search docs by title, filename, preview, or @doc ref"
-              />
-              <div className={styles.lookupList}>
-                {docsLoading ? (
-                  <p className={styles.lookupEmpty}>Loading documents...</p>
-                ) : visibleExistingDocs.length === 0 ? (
-                  <p className={styles.lookupEmpty}>No matching documents found.</p>
-                ) : (
-                  visibleExistingDocs.map((doc) => {
-                    const label = doc.title || doc.filename || doc.ref;
-                    const selected = selectedExistingRefs.includes(doc.ref);
-                    return (
-                      <button
-                        key={doc.ref}
-                        type="button"
-                        className={`${styles.lookupItem} ${selected ? styles.lookupItemActive : ""}`}
-                        onClick={() => toggleExistingDoc(doc.ref)}
-                      >
-                        <span>{label}</span>
-                        <small>{doc.ref}</small>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </div>
+            )}
           </div>
 
-          {stepWaiting ? (
-            <div className={styles.waitRow}>
-              <span className={styles.waitDot} />
-              Preparing role suggestions and file context...
+          <div className={styles.fieldGroup}>
+            <label className={styles.fieldLabel}>Existing documents</label>
+            <input
+              className={styles.lookupInput}
+              value={docSearch}
+              onChange={(e) => setDocSearch(e.target.value)}
+              placeholder="Search by title, filename, or content…"
+            />
+            <div className={styles.lookupList}>
+              {docsLoading ? (
+                <div className={styles.lookupEmpty}>
+                  <Loader2 size={16} className={styles.spin} />
+                  Loading documents…
+                </div>
+              ) : visibleExistingDocs.length === 0 ? (
+                <p className={styles.lookupEmpty}>No matching documents found.</p>
+              ) : (
+                visibleExistingDocs.map((doc) => {
+                  const label = doc.title || doc.filename || doc.ref;
+                  const selected = selectedExistingRefs.includes(doc.ref);
+                  return (
+                    <button
+                      key={doc.ref}
+                      type="button"
+                      className={`${styles.lookupItem} ${selected ? styles.lookupItemActive : ""}`}
+                      onClick={() => toggleExistingDoc(doc.ref)}
+                    >
+                      <div className={styles.lookupItemLeft}>
+                        <span className={`${styles.lookupCheck} ${selected ? styles.lookupCheckActive : ""}`}>
+                          {selected && <Check size={10} strokeWidth={3} />}
+                        </span>
+                        <span className={styles.lookupItemLabel}>{label}</span>
+                      </div>
+                      <span className={styles.lookupItemRef}>{doc.ref.slice(0, 8)}…</span>
+                    </button>
+                  );
+                })
+              )}
             </div>
-          ) : null}
+            {selectedExistingRefs.length > 0 && (
+              <p className={styles.lookupSelected}>{selectedExistingRefs.length} selected</p>
+            )}
+          </div>
+
+          {stepWaiting && (
+            <div className={styles.waitRow}>
+              <Loader2 size={14} className={styles.spin} />
+              Preparing role suggestions and file context…
+            </div>
+          )}
         </section>
       )}
 
+      {/* Step 1: Roles */}
       {step === 1 && (
         <section className={styles.card}>
           <div className={styles.cardHeadRow}>
-            <h2>Provider roles</h2>
-            <button type="button" className={styles.secondaryBtn} onClick={() => void loadRoleSuggestions(true)} disabled={roleLoading}>
-              {roleLoading ? "Refreshing..." : "Refresh suggestions"}
+            <h2 className={styles.cardTitle}>Provider roles</h2>
+            <button
+              type="button"
+              className={styles.refreshBtn}
+              onClick={() => void loadRoleSuggestions(true)}
+              disabled={roleLoading}
+            >
+              <Sparkles size={14} />
+              {roleLoading ? "Generating…" : "Regenerate"}
             </button>
           </div>
 
           <div className={styles.roleGrid}>
-            <div className={styles.roleCard}>
-              <p className={styles.roleTitle}>ChatGPT (Creative)</p>
+            <div className={`${styles.roleCard} ${styles.roleCardChatgpt}`}>
+              <div className={styles.roleCardHeader}>
+                <img src="/chatgpt.svg" alt="" className={styles.roleCardIcon} />
+                <div>
+                  <p className={styles.roleCardTitle}>ChatGPT</p>
+                  <p className={styles.roleCardSubtitle}>Creative exploration</p>
+                </div>
+              </div>
               <textarea
                 className={styles.textareaSecondary}
                 value={chatgptRole}
-                onChange={(event) => setChatgptRole(event.target.value)}
+                onChange={(e) => setChatgptRole(e.target.value)}
                 placeholder={DEFAULT_CHATGPT_ROLE}
               />
             </div>
-            <div className={styles.roleCard}>
-              <p className={styles.roleTitle}>Claude (Technical)</p>
+            <div className={`${styles.roleCard} ${styles.roleCardClaude}`}>
+              <div className={styles.roleCardHeader}>
+                <img src="/claude.svg" alt="" className={styles.roleCardIcon} />
+                <div>
+                  <p className={styles.roleCardTitle}>Claude</p>
+                  <p className={styles.roleCardSubtitle}>Technical refinement</p>
+                </div>
+              </div>
               <textarea
                 className={styles.textareaSecondary}
                 value={claudeRole}
-                onChange={(event) => setClaudeRole(event.target.value)}
+                onChange={(e) => setClaudeRole(e.target.value)}
                 placeholder={DEFAULT_CLAUDE_ROLE}
               />
             </div>
           </div>
 
-          <p className={styles.helperText}>
-            Planner recommends starting with <strong>{starterRecommendation === "chatgpt" ? "ChatGPT" : "Claude"}</strong> based on your prompt.
-          </p>
-        </section>
-      )}
-
-      {step === 2 && (
-        <section className={styles.card}>
-          <h2>Create unified collab task</h2>
-          <p className={styles.helperText}>This creates one shared collab task and opens dual kickoff prompts for ChatGPT and Claude.</p>
-          <div className={styles.summaryBox}>
-            <p><strong>Title:</strong> {title.trim()}</p>
-            {brief.trim() ? <p><strong>Brief:</strong> {brief.trim()}</p> : null}
-            <p><strong>ChatGPT role:</strong> {chatgptRole.trim()}</p>
-            <p><strong>Claude role:</strong> {claudeRole.trim()}</p>
-            {contextDocs.length > 0 ? <p><strong>Files linked:</strong> {contextDocs.length}</p> : null}
+          <div className={styles.starterBadge}>
+            <span className={styles.starterLabel}>Recommended first actor</span>
+            <span className={styles.starterValue}>
+              {starterRecommendation === "chatgpt" ? (
+                <>
+                  <img src="/chatgpt.svg" alt="" className={styles.starterIcon} />
+                  ChatGPT
+                </>
+              ) : (
+                <>
+                  <img src="/claude.svg" alt="" className={styles.starterIcon} />
+                  Claude
+                </>
+              )}
+            </span>
           </div>
         </section>
       )}
 
-      {errorText ? <p className={styles.errorText}>{errorText}</p> : null}
+      {/* Step 2: Review */}
+      {step === 2 && (
+        <section className={styles.card}>
+          <h2 className={styles.cardTitle}>Review and create</h2>
+          <p className={styles.helperText}>Confirm the details below, then create the collab task.</p>
 
+          <div className={styles.summaryBox}>
+            <div className={styles.summaryRow}>
+              <span className={styles.summaryKey}>Title</span>
+              <span className={styles.summaryValue}>{title.trim()}</span>
+            </div>
+            {brief.trim() && (
+              <div className={styles.summaryRow}>
+                <span className={styles.summaryKey}>Brief</span>
+                <span className={styles.summaryValue}>{brief.trim()}</span>
+              </div>
+            )}
+            <div className={styles.summaryRow}>
+              <span className={styles.summaryKey}>ChatGPT role</span>
+              <span className={styles.summaryValue}>{chatgptRole.trim()}</span>
+            </div>
+            <div className={styles.summaryRow}>
+              <span className={styles.summaryKey}>Claude role</span>
+              <span className={styles.summaryValue}>{claudeRole.trim()}</span>
+            </div>
+            <div className={styles.summaryRow}>
+              <span className={styles.summaryKey}>First actor</span>
+              <span className={styles.summaryValue}>
+                {starterRecommendation === "chatgpt" ? "ChatGPT" : "Claude"}
+              </span>
+            </div>
+            {contextDocs.length > 0 && (
+              <div className={styles.summaryRow}>
+                <span className={styles.summaryKey}>Documents</span>
+                <span className={styles.summaryValue}>{contextDocs.length} linked</span>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* Footer */}
       <footer className={styles.footer}>
         <button
           type="button"
-          className={styles.secondaryBtn}
+          className={styles.backBtn}
           onClick={() => (step === 0 ? router.push("/dashboard/collab") : setStep(step - 1))}
           disabled={busy || roleLoading || stepWaiting}
         >
-          Back
+          <ArrowLeft size={14} />
+          {step === 0 ? "Cancel" : "Back"}
         </button>
 
         {step < 2 ? (
-          <button type="button" className={styles.primaryBtn} disabled={!canContinue || busy || roleLoading || stepWaiting} onClick={() => void onContinue()}>
-            {stepWaiting ? "Preparing..." : "Continue"}
+          <button
+            type="button"
+            className={styles.primaryBtn}
+            disabled={!canContinue || busy || roleLoading || stepWaiting}
+            onClick={() => void onContinue()}
+          >
+            {stepWaiting ? (
+              <>
+                <Loader2 size={14} className={styles.spin} />
+                Preparing…
+              </>
+            ) : (
+              <>
+                Continue
+                <ArrowRight size={14} />
+              </>
+            )}
           </button>
         ) : (
-          <button type="button" className={styles.primaryBtn} disabled={busy} onClick={() => void createTask()}>
-            {busy ? "Creating..." : "Create Task"}
+          <button
+            type="button"
+            className={styles.primaryBtn}
+            disabled={busy}
+            onClick={() => void createTask()}
+          >
+            {busy ? (
+              <>
+                <Loader2 size={14} className={styles.spin} />
+                Creating…
+              </>
+            ) : (
+              <>
+                Create Task
+                <ArrowRight size={14} />
+              </>
+            )}
           </button>
         )}
       </footer>

@@ -1,0 +1,29 @@
+.layout {
+  display: grid;
+  gap: var(--collab-gap, 24px);
+}
+
+@media (min-width: 1280px) {
+  .layout {
+    grid-template-columns: var(--collab-content-width, 65%) var(--collab-sidebar-width, 35%);
+    align-items: start;
+  }
+}
+
+.content {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.sidebar {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+@media (max-width: 1279px) {
+  .sidebar {
+    order: -1;
+  }
+}

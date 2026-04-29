@@ -6,6 +6,14 @@ import { MoreHorizontal } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 
 import { NudgeModal } from "./NudgeModal";
+import CollabLayout from "./components/CollabLayout";
+import StatusHeader from "./components/StatusHeader";
+import LatestOutput from "./components/LatestOutput";
+import IterationTimeline from "./components/IterationTimeline";
+import TranscriptCard from "./components/TranscriptCard";
+import DocumentCard from "./components/DocumentCard";
+import CriteriaPanel from "./components/CriteriaPanel";
+import ActionBar from "./components/ActionBar";
 import styles from "./page.module.css";
 
 type CollabState = "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR";
@@ -74,34 +82,14 @@ type EvaluationEntry = {
   remaining_work: string;
 };
 
-type SetupSnapshot = {
-  comments: string | null;
-  providerRoles: {
-    chatgpt: string | null;
-    claude: string | null;
-  };
-};
-
 const POLL_CONFIG = {
-  successIntervalMs: 2_000,
-  hiddenIntervalMs: 30_000,
+  successIntervalMs: 20_000,
+  hiddenIntervalMs: 60_000,
   requestTimeoutMs: 10_000,
   maxErrorBackoffMs: 15_000,
   maxActiveWindowMs: 10 * 60_000,
   maxConsecutiveFailures: 6,
 } as const;
-
-const PLATFORM_COLOR: Record<CollabActor, string> = {
-  chatgpt: "#10a37f",
-  claude: "#D97757",
-  user: "#6b7280",
-};
-
-const ACTOR_LABEL: Record<CollabActor, string> = {
-  chatgpt: "ChatGPT",
-  claude: "Claude",
-  user: "User",
-};
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
@@ -131,17 +119,6 @@ function describePollReason(reason: PollReason, failures: number): string {
   if (reason === "background") return "Live updates are reduced while this tab is in the background.";
   if (reason === "too_many_failures") return `Live updates paused after repeated failures (${failures}).`;
   return "";
-}
-
-function relativeTime(iso: string): string {
-  const delta = Date.now() - new Date(iso).getTime();
-  const sec = Math.max(0, Math.floor(delta / 1000));
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  return `${Math.floor(hr / 24)}d ago`;
 }
 
 function waitingActorForState(state: CollabState): "chatgpt" | "claude" | null {
@@ -214,24 +191,6 @@ function readEvaluations(context: Record<string, unknown>): EvaluationEntry[] {
     .filter((entry) => entry.ts);
 }
 
-function readSetupSnapshot(context: Record<string, unknown>): SetupSnapshot | null {
-  const artifacts = readObject(context["artifacts"]);
-  const setup = readObject(artifacts["setup"]);
-  if (Object.keys(setup).length === 0) return null;
-  const providerRoles = readObject(setup["provider_roles"]);
-  const comments = typeof setup["comments"] === "string" && setup["comments"].trim() ? setup["comments"].trim() : null;
-  const chatgpt = typeof providerRoles["chatgpt"] === "string" && providerRoles["chatgpt"].trim() ? providerRoles["chatgpt"].trim() : null;
-  const claude = typeof providerRoles["claude"] === "string" && providerRoles["claude"].trim() ? providerRoles["claude"].trim() : null;
-  if (!comments && !chatgpt && !claude) return null;
-  return {
-    comments,
-    providerRoles: {
-      chatgpt,
-      claude,
-    },
-  };
-}
-
 function readTaskDocumentsContext(context: Record<string, unknown>): TaskDocumentsContext | null {
   const documentsContext = readObject(context["documents"]);
   if (Object.keys(documentsContext).length === 0) return null;
@@ -267,41 +226,14 @@ function readTaskDocumentsContext(context: Record<string, unknown>): TaskDocumen
 }
 
 function toMarkdown(task: CollabTask): string {
-  const lines: string[] = [`# ${task.title}`, "", `State: ${task.state}`, `Iteration: ${task.iteration}/${task.maxIterations}`, "", "## Transcript", ""];
+  const lines: string[] = [`# ${task.title}`, "", `State: ${task.state}`, `Turn: ${task.iteration}/${task.maxIterations}`, "", "## Transcript", ""];
   for (const entry of task.transcript) {
-    lines.push(`### ${ACTOR_LABEL[entry.actor]} · iter ${entry.iteration} · ${entry.ts}`);
+    lines.push(`### ${entry.actor === "chatgpt" ? "ChatGPT" : entry.actor === "claude" ? "Claude" : "User"} · Turn ${entry.iteration} · ${entry.ts}`);
     lines.push("");
     lines.push(entry.content);
     lines.push("");
   }
   return lines.join("\n");
-}
-
-function SlidingTranscriptCard({
-  entry,
-  isNew,
-}: {
-  entry: TranscriptEntry;
-  isNew: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <article className={`${styles.transcriptCard} ${isNew ? styles.newEntry : ""}`} style={{ borderLeftColor: PLATFORM_COLOR[entry.actor] }}>
-      <header className={styles.transcriptHeader}>
-        <span className={styles.actorBadge} style={{ backgroundColor: PLATFORM_COLOR[entry.actor] }}>
-          {ACTOR_LABEL[entry.actor]}
-        </span>
-        <span className={styles.metaText}>iter {entry.iteration}</span>
-        <span className={styles.metaText}>{relativeTime(entry.ts)}</span>
-      </header>
-      <p className={`${styles.transcriptBody} ${expanded ? styles.expanded : ""}`}>{entry.content}</p>
-      {entry.content.length > 240 && (
-        <button type="button" className={styles.showMore} onClick={() => setExpanded((v) => !v)}>
-          {expanded ? "Show less" : "Show more"}
-        </button>
-      )}
-    </article>
-  );
 }
 
 export default function CollabBoardPage() {
@@ -313,8 +245,6 @@ export default function CollabBoardPage() {
   const [nudgeOpen, setNudgeOpen] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
   const [latestEntryKey, setLatestEntryKey] = useState<string | null>(null);
-  const [latestExpanded, setLatestExpanded] = useState(false);
-  const [copiedLatest, setCopiedLatest] = useState(false);
   const [pollReason, setPollReason] = useState<PollReason>(null);
   const [pollPaused, setPollPaused] = useState(false);
   const [pollFailures, setPollFailures] = useState(0);
@@ -352,13 +282,8 @@ export default function CollabBoardPage() {
       }
     };
 
-    const onOnline = () => {
-      setIsOnline(true);
-    };
-
-    const onOffline = () => {
-      setIsOnline(false);
-    };
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
 
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("online", onOnline);
@@ -391,10 +316,7 @@ export default function CollabBoardPage() {
     pollPausedRef.current = true;
     pollReasonRef.current = reason;
     if (process.env.NODE_ENV !== "production") {
-      console.debug("[collab-poll] paused", {
-        reason,
-        failures: failureCountRef.current,
-      });
+      console.debug("[collab-poll] paused", { reason, failures: failureCountRef.current });
     }
   }, [clearPollTimer]);
 
@@ -410,6 +332,21 @@ export default function CollabBoardPage() {
       console.debug("[collab-poll] resumed", { reason });
     }
   }, []);
+
+  const redirectIfOrchestrationSession = useCallback(async (): Promise<boolean> => {
+    if (!taskId) return false;
+    try {
+      const res = await fetch(`/api/collab/orchestrations/${taskId}`, { cache: "no-store" });
+      const body = await res.json();
+      if (res.ok && typeof body?.id === "string") {
+        router.replace(`/dashboard/orchestrate/${body.id}`);
+        return true;
+      }
+    } catch {
+      // Keep the normal "Task not found" state if this is not an orchestration session.
+    }
+    return false;
+  }, [router, taskId]);
 
   const fetchTask = useCallback(async () => {
     if (!taskId) return;
@@ -490,6 +427,7 @@ export default function CollabBoardPage() {
       } catch (error) {
         const status = getErrorStatusCode(error);
         if (status === 404) {
+          if (await redirectIfOrchestrationSession()) return;
           setTask(null);
           setLoading(false);
           pausePolling("timeout");
@@ -524,7 +462,7 @@ export default function CollabBoardPage() {
       cancelled = true;
       clearPollTimer();
     };
-  }, [taskId, pollPaused, task?.state, isOnline, isDocumentHidden, fetchTask, pausePolling, clearPollTimer]);
+  }, [taskId, pollPaused, task?.state, isOnline, isDocumentHidden, fetchTask, pausePolling, clearPollTimer, redirectIfOrchestrationSession]);
 
   useEffect(() => {
     if (task?.state === "DONE" || task?.state === "ERROR") {
@@ -555,31 +493,21 @@ export default function CollabBoardPage() {
     } catch (error) {
       const status = getErrorStatusCode(error);
       if (status === 404) {
+        if (await redirectIfOrchestrationSession()) return;
         setTask(null);
       }
       setLoading(false);
     }
-  }, [fetchTask]);
+  }, [fetchTask, redirectIfOrchestrationSession]);
 
   const waitingActor = task ? waitingActorForState(task.state) : null;
   const atCap = Boolean(task && task.iteration >= task.maxIterations);
-  const waitingSeconds = task ? Math.max(0, Math.floor((Date.now() - new Date(task.updatedAt).getTime()) / 1000)) : 0;
-  const stalled = waitingSeconds > 30 * 60;
 
-  const waitingTimer = `${Math.floor(waitingSeconds / 60)}m ${String(waitingSeconds % 60).padStart(2, "0")}s`;
-
-  const progressPercent = task
-    ? Math.min(100, Math.round((task.iteration / Math.max(1, task.maxIterations)) * 100))
-    : 0;
-  const showPollBanner = Boolean(pollReason && task?.state !== "DONE" && task?.state !== "ERROR");
-  const pollBannerText = describePollReason(pollReason, pollFailures);
   const planSummary = task ? readPlanSummary(task.context) : null;
   const planCriteria = task ? readPlanCriteria(task.context) : [];
   const evaluations = task ? readEvaluations(task.context) : [];
-  const setupSnapshot = task ? readSetupSnapshot(task.context) : null;
   const taskDocuments = task ? readTaskDocumentsContext(task.context) : null;
-  const latestEvaluation = evaluations.length > 0 ? evaluations[evaluations.length - 1] : null;
-  const recentEvaluations = evaluations.slice(-5).reverse();
+
   const latestStatusMap = useMemo(() => {
     const map = new Map<string, "pass" | "fail" | "partial">();
     for (const evaluation of evaluations) {
@@ -589,15 +517,12 @@ export default function CollabBoardPage() {
     }
     return map;
   }, [evaluations]);
+
   const latestOutput = useMemo(() => {
     if (!task) return null;
     const fromModel = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt" || entry.actor === "claude");
     return fromModel ?? task.transcript[task.transcript.length - 1] ?? null;
   }, [task]);
-
-  useEffect(() => {
-    setLatestExpanded(false);
-  }, [latestOutput?.ts, latestOutput?.iteration, latestOutput?.actor]);
 
   const markDone = async () => {
     if (!task) return;
@@ -636,19 +561,15 @@ export default function CollabBoardPage() {
     URL.revokeObjectURL(url);
   };
 
-  const copyLatestOutput = useCallback(async () => {
-    if (!latestOutput) return;
-    try {
-      await navigator.clipboard.writeText(latestOutput.content);
-      setCopiedLatest(true);
-      setTimeout(() => setCopiedLatest(false), 1200);
-    } catch {
-      setCopiedLatest(false);
-    }
-  }, [latestOutput]);
+  const pollBannerText = describePollReason(pollReason, pollFailures);
+  const showPollBanner = Boolean(pollReason && task?.state !== "DONE" && task?.state !== "ERROR");
 
   if (loading) {
-    return <div className={styles.page}>Loading...</div>;
+    return (
+      <div className={styles.page}>
+        <div className={styles.loading}>Loading…</div>
+      </div>
+    );
   }
 
   if (!task) {
@@ -669,240 +590,121 @@ export default function CollabBoardPage() {
         </button>
       </div>
 
-      <section className={styles.zoneA}>
-        <h1 className={styles.title}>{task.title}</h1>
-        {task.brief ? <p className={styles.brief}>{task.brief}</p> : null}
+      <CollabLayout
+        content={
+          <>
+            <StatusHeader
+              title={task.title}
+              brief={task.brief}
+              state={task.state}
+              iteration={task.iteration}
+              maxIterations={task.maxIterations}
+              updatedAt={task.updatedAt}
+            />
 
-        <div className={styles.avatars}>
-          <img src="/chatgpt.svg" alt="ChatGPT" className={styles.avatar} />
-          <span className={`${styles.arrow} ${waitingActor === "chatgpt" ? styles.left : styles.right}`}>
-            {waitingActor ? (waitingActor === "chatgpt" ? "←" : "→") : "✓"}
-          </span>
-          <img src="/claude.svg" alt="Claude" className={styles.avatar} />
-        </div>
+            <IterationTimeline
+              entries={task.transcript}
+              currentIteration={task.iteration}
+              maxIterations={task.maxIterations}
+            />
 
-        <div className={`${styles.progressTrack} ${atCap ? styles.progressAtCap : ""}`}>
-          <div className={styles.progressFill} style={{ width: `${progressPercent}%` }} />
-        </div>
-
-        <p className={styles.waitingText}>
-          {waitingActor
-            ? `Waiting on ${waitingActor === "chatgpt" ? "ChatGPT" : "Claude"} for ${waitingTimer}`
-            : "Task completed"}
-        </p>
-        <div className={styles.stateChips}>
-          <span className={`${styles.stateChip} ${styles[`state_${task.state}`] ?? ""}`}>{task.state}</span>
-          <span className={styles.nextActorChip}>
-            {waitingActor ? `Next actor: ${waitingActor === "chatgpt" ? "ChatGPT" : "Claude"}` : "No pending actor"}
-          </span>
-        </div>
-      </section>
-
-      <section className={styles.zoneB}>
-        {showPollBanner && (
-          <div className={pollReason === "network" ? styles.bannerError : styles.bannerAmber}>
-            <span>{pollBannerText}</span>
-            <button type="button" onClick={() => void refreshTaskNow()}>Refresh now</button>
-            {pollPaused && (
-              <button type="button" onClick={retryLiveUpdates}>Retry live updates</button>
+            {showPollBanner && (
+              <div className={pollReason === "network" ? styles.bannerError : styles.bannerAmber}>
+                <span>{pollBannerText}</span>
+                <button type="button" onClick={() => void refreshTaskNow()}>Refresh now</button>
+                {pollPaused && <button type="button" onClick={retryLiveUpdates}>Retry live updates</button>}
+              </div>
             )}
-          </div>
-        )}
 
-        {atCap && task.state !== "DONE" && (
-          <div className={styles.bannerAmber}>
-            Iteration cap reached.
-            <button type="button" onClick={extendByTwo}>Extend +2</button>
-            <button type="button" onClick={markDone}>Mark done</button>
-          </div>
-        )}
-
-        {stalled && waitingActor && task.state !== "DONE" && (
-          <div className={styles.bannerAmber}>Stalled - nudge again?</div>
-        )}
-
-        {task.state === "ERROR" && (
-          <div className={styles.bannerError}>
-            Last turn errored.
-            {task.errorMessage ? <span>{task.errorMessage}</span> : null}
-          </div>
-        )}
-
-        {latestOutput && (
-          <article className={styles.latestOutputCard}>
-            <header className={styles.latestOutputHeader}>
-              <div>
-                <h2 className={styles.latestOutputTitle}>Latest Output</h2>
-                <p className={styles.latestOutputMeta}>
-                  {ACTOR_LABEL[latestOutput.actor]} · iter {latestOutput.iteration} · {relativeTime(latestOutput.ts)}
-                </p>
+            {atCap && task.state !== "DONE" && (
+              <div className={styles.bannerAmber}>
+                Turn cap reached.
+                <button type="button" onClick={extendByTwo}>Add 2 more</button>
+                <button type="button" onClick={markDone}>Finish task</button>
               </div>
-              <div className={styles.latestOutputActions}>
-                <button type="button" className={styles.lightBtn} onClick={copyLatestOutput}>
-                  {copiedLatest ? "Copied" : "Copy"}
-                </button>
-                {latestOutput.content.length > 320 && (
-                  <button type="button" className={styles.lightBtn} onClick={() => setLatestExpanded((v) => !v)}>
-                    {latestExpanded ? "Collapse" : "Expand"}
-                  </button>
-                )}
-              </div>
-            </header>
-            <p className={`${styles.latestOutputBody} ${latestExpanded ? styles.expanded : ""}`}>
-              {latestOutput.content}
-            </p>
-          </article>
-        )}
+            )}
 
-        {(planSummary || planCriteria.length > 0) && (
-          <article className={styles.planPanel}>
-            <header>
-              <h2 className={styles.planTitle}>Plan & Criteria</h2>
-              {planSummary ? <p className={styles.planSummary}>{planSummary}</p> : null}
-            </header>
-            {planCriteria.length > 0 && (
-              <div className={styles.criteriaList}>
-                {planCriteria.map((criterion) => {
-                  const status = latestStatusMap.get(criterion.id) ?? "pending";
+            {task.state === "ERROR" && (
+              <div className={styles.bannerError}>
+                Last turn errored.
+                {task.errorMessage ? <span>{task.errorMessage}</span> : null}
+              </div>
+            )}
+
+            {latestOutput && (
+              <LatestOutput
+                actor={latestOutput.actor}
+                iteration={latestOutput.iteration}
+                content={latestOutput.content}
+                ts={latestOutput.ts}
+              />
+            )}
+
+            <div className={styles.transcriptSection}>
+              <h2 className={styles.sectionTitle}>Transcript</h2>
+              <div className={styles.transcriptList}>
+                {task.transcript.map((entry) => {
+                  const key = `${entry.ts}:${entry.iteration}:${entry.actor}`;
                   return (
-                    <div key={criterion.id} className={styles.criteriaRow}>
-                      <div>
-                        <p className={styles.criteriaText}>{criterion.text}</p>
-                        <p className={styles.criteriaMeta}>{criterion.id} · weight {criterion.weight}</p>
-                      </div>
-                      <span className={`${styles.criteriaStatus} ${styles[`criteria_${status}`] ?? ""}`}>
-                        {status}
-                      </span>
-                    </div>
+                    <TranscriptCard
+                      key={key}
+                      actor={entry.actor}
+                      iteration={entry.iteration}
+                      content={entry.content}
+                      ts={entry.ts}
+                      isNew={latestEntryKey === key}
+                    />
                   );
                 })}
               </div>
-            )}
-            {latestEvaluation && (
-              <div className={styles.evaluationTimeline}>
-                <p className={styles.evaluationTitle}>Latest Evaluation</p>
-                <p className={styles.criteriaMeta}>
-                  {ACTOR_LABEL[latestEvaluation.actor]} · iter {latestEvaluation.iteration} · {relativeTime(latestEvaluation.ts)}
-                </p>
-                {latestEvaluation.remaining_work ? (
-                  <p className={styles.evaluationRemaining}>{latestEvaluation.remaining_work}</p>
-                ) : null}
+            </div>
+
+            {waitingActor && task.state !== "DONE" && task.state !== "ERROR" && (
+              <div className={styles.waitingPill}>
+                ⏳ {waitingActor === "chatgpt" ? "ChatGPT" : "Claude"} is drafting…
               </div>
             )}
-            {recentEvaluations.length > 0 && (
-              <div className={styles.evaluationHistory}>
-                <p className={styles.evaluationTitle}>Evaluation Timeline</p>
-                {recentEvaluations.map((evaluation, idx) => (
-                  <p key={`${evaluation.ts}:${idx}`} className={styles.criteriaMeta}>
-                    {ACTOR_LABEL[evaluation.actor]} · iter {evaluation.iteration} · {relativeTime(evaluation.ts)}
-                  </p>
-                ))}
-              </div>
+          </>
+        }
+        sidebar={
+          <>
+            {(planSummary || planCriteria.length > 0 || evaluations.length > 0) && (
+              <CriteriaPanel
+                planSummary={planSummary}
+                criteria={planCriteria}
+                evaluations={evaluations}
+                latestStatusMap={latestStatusMap}
+              />
             )}
-          </article>
-        )}
 
-        {setupSnapshot && (
-          <article className={styles.planPanel}>
-            <header>
-              <h2 className={styles.planTitle}>Planning Setup</h2>
-              <p className={styles.criteriaMeta}>Read-only snapshot from pre-flight setup.</p>
-            </header>
-            {setupSnapshot.comments ? (
-              <div className={styles.criteriaRow}>
-                <div>
-                  <p className={styles.criteriaText}>Comments</p>
-                  <p className={styles.criteriaMeta}>{setupSnapshot.comments}</p>
-                </div>
-              </div>
-            ) : null}
-            {setupSnapshot.providerRoles.chatgpt ? (
-              <div className={styles.criteriaRow}>
-                <div>
-                  <p className={styles.criteriaText}>ChatGPT role</p>
-                  <p className={styles.criteriaMeta}>{setupSnapshot.providerRoles.chatgpt}</p>
-                </div>
-              </div>
-            ) : null}
-            {setupSnapshot.providerRoles.claude ? (
-              <div className={styles.criteriaRow}>
-                <div>
-                  <p className={styles.criteriaText}>Claude role</p>
-                  <p className={styles.criteriaMeta}>{setupSnapshot.providerRoles.claude}</p>
-                </div>
-              </div>
-            ) : null}
-          </article>
-        )}
-
-        {taskDocuments && (
-          <article className={styles.planPanel}>
-            <header>
-              <h2 className={styles.planTitle}>Attached Documents</h2>
-              <p className={styles.criteriaMeta}>
-                {taskDocuments.documents.length} saved
-                {taskDocuments.upload ? ` · ${taskDocuments.upload.countFailed} failed` : ""}
-              </p>
-              {taskDocuments.lotRef ? (
-                <p className={styles.criteriaMeta}>
-                  Lot: {taskDocuments.lotTitle || taskDocuments.lotRef}
-                </p>
-              ) : null}
-            </header>
-            {taskDocuments.documents.length > 0 ? (
-              <div className={styles.docList}>
-                {taskDocuments.documents.map((doc) => (
-                  <div key={doc.ref} className={styles.docRow}>
-                    <div>
-                      <p className={styles.criteriaText}>{doc.title}</p>
-                      <p className={styles.criteriaMeta}>{doc.filename ?? doc.ref}</p>
-                      {doc.preview ? <p className={styles.docPreview}>{doc.preview}</p> : null}
-                    </div>
-                    <span className={`${styles.docStatus} ${styles[`docStatus_${doc.status}`] ?? ""}`}>
-                      {doc.status}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className={styles.criteriaMeta}>No saved documents in this task context.</p>
+            {taskDocuments && (
+              <DocumentCard
+                documents={taskDocuments.documents}
+                lotTitle={taskDocuments.lotTitle}
+                countSaved={taskDocuments.upload?.countSaved ?? taskDocuments.documents.length}
+                countFailed={taskDocuments.upload?.countFailed ?? 0}
+              />
             )}
-          </article>
-        )}
 
-        <div className={styles.transcriptList}>
-          {task.transcript.map((entry) => {
-            const key = `${entry.ts}:${entry.iteration}:${entry.actor}`;
-            return <SlidingTranscriptCard key={key} entry={entry} isNew={latestEntryKey === key} />;
-          })}
-        </div>
+            <ActionBar
+              waitingActor={waitingActor}
+              state={task.state}
+              atCap={atCap}
+              maxIterations={task.maxIterations}
+              pollPaused={pollPaused}
+              onNudge={() => setNudgeOpen(true)}
+              onRefresh={refreshTaskNow}
+              onRetryLiveUpdates={retryLiveUpdates}
+              onMarkDone={markDone}
+              onExtend={extendByTwo}
+              onDelete={removeTask}
+              onExport={exportMarkdown}
+            />
+          </>
+        }
+      />
 
-        {waitingActor && task.state !== "DONE" && task.state !== "ERROR" && (
-          <div className={styles.waitingPill}>⏳ Waiting on {waitingActor === "chatgpt" ? "ChatGPT" : "Claude"}…</div>
-        )}
-      </section>
-
-      <section className={styles.zoneC}>
-        {waitingActor && (
-          <button type="button" className={styles.primaryBtn} onClick={() => setNudgeOpen(true)}>
-            Nudge {waitingActor === "chatgpt" ? "ChatGPT" : "Claude"}
-          </button>
-        )}
-        <button type="button" className={styles.secondaryBtn} onClick={() => void refreshTaskNow()}>Refresh now</button>
-        {pollPaused && task.state !== "DONE" && task.state !== "ERROR" && (
-          <button type="button" className={styles.secondaryBtn} onClick={retryLiveUpdates}>Retry live updates</button>
-        )}
-        <button type="button" className={styles.secondaryBtn} onClick={markDone}>Mark done</button>
-        {atCap && task.maxIterations < 8 ? (
-          <button type="button" className={styles.secondaryBtn} onClick={extendByTwo}>Extend +2 iterations</button>
-        ) : null}
-        <button type="button" className={styles.dangerBtn} onClick={removeTask}>Delete</button>
-        <button type="button" className={styles.secondaryBtn} onClick={exportMarkdown}>Export markdown</button>
-      </section>
-
-      {showRaw && (
-        <pre className={styles.rawBox}>{JSON.stringify(task, null, 2)}</pre>
-      )}
+      {showRaw && <pre className={styles.rawBox}>{JSON.stringify(task, null, 2)}</pre>}
 
       {waitingActor && (
         <NudgeModal

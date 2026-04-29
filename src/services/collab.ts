@@ -335,15 +335,16 @@ export function buildFirstTurnContinueCommand(task: CollabTask): CollabContinueC
   if (task.iteration > 1) return null;
   const targetActor = actorWaitingForState(task.state);
   if (!targetActor) return null;
+  const command = targetActor === "chatgpt"
+    ? `[COLLAB:CONTINUE:${task.id}] continue collab task ${task.id}`
+    : `continue task ${task.id}`;
   return {
     target_actor: targetActor,
-    command: targetActor === "chatgpt"
-      ? `[COLLAB:CONTINUE:${task.id}] continue collab task ${task.id}`
-      : `continue collab task ${task.id}`,
+    command,
     label: `Continue in ${targetActor === "chatgpt" ? "ChatGPT" : "Claude"}`,
-    instruction: `Review this turn. If it looks good, say or paste: ${targetActor === "chatgpt"
-      ? `[COLLAB:CONTINUE:${task.id}] continue collab task ${task.id}`
-      : `continue collab task ${task.id}`}`,
+    instruction: targetActor === "claude"
+      ? `Review this turn. Do you want to hand off to Claude now? If yes, Tallei has the task context; paste this in Claude: ${command}`
+      : `Review this turn. Do you want to hand off to ChatGPT now? If yes, paste this in ChatGPT: ${command}`,
   };
 }
 

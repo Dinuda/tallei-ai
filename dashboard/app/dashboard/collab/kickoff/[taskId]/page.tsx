@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Copy, Check, ArrowRight, ArrowLeft, ClipboardCheck } from "lucide-react";
 
 import styles from "./page.module.css";
 
@@ -55,7 +56,7 @@ function buildKickoffPrompt(params: {
 
   const lines = [
     `Continue collab task ${params.task.id}.`,
-    `First call MCP tool collab_check_turn with {\"task_id\":\"${params.task.id}\"} and use fallback_context.`,
+    `First call MCP tool collab_check_turn with {"task_id":"${params.task.id}"} and use fallback_context.`,
     `Target actor: ${providerLabel}.`,
     `Task title: ${params.task.title}`,
   ];
@@ -124,63 +125,171 @@ export default function CollabKickoffPage() {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(provider);
-      setTimeout(() => setCopied((current) => (current === provider ? null : current)), 1200);
+      setTimeout(() => setCopied((current) => (current === provider ? null : current)), 1500);
     } catch {
       setCopied(null);
     }
   }, [chatgptPrompt, claudePrompt]);
 
   if (loading) {
-    return <div className={styles.page}>Loading kickoff prompts...</div>;
+    return (
+      <div className={styles.page}>
+        <div className={styles.loading}>Loading kickoff prompts…</div>
+      </div>
+    );
   }
 
   if (!task) {
     return (
       <div className={styles.page}>
-        <p className={styles.errorText}>Task not found.</p>
-        <Link href="/dashboard/collab" className={styles.secondaryBtn}>Back to tasks</Link>
+        <div className={styles.empty}>
+          <h2 className={styles.emptyTitle}>Task not found</h2>
+          <p className={styles.emptyText}>The task you are looking for does not exist or has been deleted.</p>
+          <Link href="/dashboard/collab" className={styles.primaryBtn}>
+            <ArrowLeft size={14} />
+            Back to tasks
+          </Link>
+        </div>
       </div>
     );
   }
 
   return (
     <div className={styles.page}>
+      {/* Step indicator */}
+      <nav className={styles.steps} aria-label="Setup progress">
+        <div className={styles.stepDone}>
+          <span className={styles.stepNumber}>1</span>
+          <span className={styles.stepLabel}>Create</span>
+        </div>
+        <div className={styles.stepConnector} />
+        <div className={styles.stepActive}>
+          <span className={styles.stepNumber}>2</span>
+          <span className={styles.stepLabel}>Kickoff</span>
+        </div>
+        <div className={styles.stepConnector} />
+        <div className={styles.stepPending}>
+          <span className={styles.stepNumber}>3</span>
+          <span className={styles.stepLabel}>Active</span>
+        </div>
+      </nav>
+
       <header className={styles.header}>
         <h1 className={styles.title}>Kickoff Prompts</h1>
-        <p className={styles.subtle}>Copy, edit if needed, paste into ChatGPT and Claude, then open live task tracking.</p>
+        <p className={styles.subtle}>
+          Copy these prompts into ChatGPT and Claude to start the collaboration. Then open the task to watch live updates.
+        </p>
       </header>
 
+      {/* Task summary */}
       <section className={styles.summaryCard}>
-        <p><strong>Task:</strong> {task.title}</p>
-        {task.brief ? <p><strong>Brief:</strong> {task.brief}</p> : null}
-        {setupSnapshot?.comments ? <p><strong>Comments:</strong> {setupSnapshot.comments}</p> : null}
+        <div className={styles.summaryHeader}>
+          <span className={styles.summaryLabel}>Task</span>
+          <span className={styles.summaryId}>{task.id.slice(0, 8)}…</span>
+        </div>
+        <h2 className={styles.summaryTitle}>{task.title}</h2>
+        {task.brief && <p className={styles.summaryBrief}>{task.brief}</p>}
+        {setupSnapshot?.comments && (
+          <div className={styles.summaryComment}>
+            <span className={styles.summaryCommentLabel}>Your notes</span>
+            <p>{setupSnapshot.comments}</p>
+          </div>
+        )}
+        {(setupSnapshot?.providerRoles.chatgpt || setupSnapshot?.providerRoles.claude) && (
+          <div className={styles.summaryRoles}>
+            {setupSnapshot.providerRoles.chatgpt && (
+              <div className={styles.summaryRole}>
+                <span className={styles.summaryRoleBadge} style={{ background: "var(--actor-chatgpt)", color: "#fff" }}>ChatGPT</span>
+                <span className={styles.summaryRoleText}>{setupSnapshot.providerRoles.chatgpt}</span>
+              </div>
+            )}
+            {setupSnapshot.providerRoles.claude && (
+              <div className={styles.summaryRole}>
+                <span className={styles.summaryRoleBadge} style={{ background: "var(--actor-claude)", color: "#fff" }}>Claude</span>
+                <span className={styles.summaryRoleText}>{setupSnapshot.providerRoles.claude}</span>
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
-      <section className={styles.grid}>
-        <article className={styles.card}>
-          <div className={styles.cardHead}>
-            <h2>ChatGPT prompt</h2>
-            <button type="button" className={styles.secondaryBtn} onClick={() => void copyPrompt("chatgpt")}>
-              {copied === "chatgpt" ? "Copied" : "Copy"}
+      {/* Prompt cards */}
+      <section className={styles.promptGrid}>
+        <article className={`${styles.promptCard} ${styles.promptCardChatgpt}`}>
+          <div className={styles.promptCardHead}>
+            <div className={styles.promptCardTitleRow}>
+              <img src="/chatgpt.svg" alt="" className={styles.promptCardIcon} />
+              <h2 className={styles.promptCardTitle}>ChatGPT</h2>
+            </div>
+            <button
+              type="button"
+              className={`${styles.copyBtn} ${copied === "chatgpt" ? styles.copyBtnCopied : ""}`}
+              onClick={() => void copyPrompt("chatgpt")}
+            >
+              {copied === "chatgpt" ? (
+                <>
+                  <Check size={14} />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy size={14} />
+                  Copy
+                </>
+              )}
             </button>
           </div>
-          <textarea className={styles.input} value={chatgptPrompt} onChange={(event) => setChatgptPrompt(event.target.value)} />
+          <textarea
+            className={styles.promptTextarea}
+            value={chatgptPrompt}
+            onChange={(e) => setChatgptPrompt(e.target.value)}
+            spellCheck={false}
+          />
         </article>
 
-        <article className={styles.card}>
-          <div className={styles.cardHead}>
-            <h2>Claude prompt</h2>
-            <button type="button" className={styles.secondaryBtn} onClick={() => void copyPrompt("claude")}>
-              {copied === "claude" ? "Copied" : "Copy"}
+        <article className={`${styles.promptCard} ${styles.promptCardClaude}`}>
+          <div className={styles.promptCardHead}>
+            <div className={styles.promptCardTitleRow}>
+              <img src="/claude.svg" alt="" className={styles.promptCardIcon} />
+              <h2 className={styles.promptCardTitle}>Claude</h2>
+            </div>
+            <button
+              type="button"
+              className={`${styles.copyBtn} ${copied === "claude" ? styles.copyBtnCopied : ""}`}
+              onClick={() => void copyPrompt("claude")}
+            >
+              {copied === "claude" ? (
+                <>
+                  <Check size={14} />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy size={14} />
+                  Copy
+                </>
+              )}
             </button>
           </div>
-          <textarea className={styles.input} value={claudePrompt} onChange={(event) => setClaudePrompt(event.target.value)} />
+          <textarea
+            className={styles.promptTextarea}
+            value={claudePrompt}
+            onChange={(e) => setClaudePrompt(e.target.value)}
+            spellCheck={false}
+          />
         </article>
       </section>
 
+      {/* Actions */}
       <div className={styles.actions}>
-        <Link href={`/dashboard/collab/${task.id}`} className={styles.primaryBtn}>I pasted both</Link>
-        <Link href="/dashboard/collab" className={styles.secondaryBtn}>Back to tasks</Link>
+        <Link href={`/dashboard/collab/${task.id}`} className={styles.primaryBtn}>
+          <ClipboardCheck size={16} />
+          I pasted both — open task
+        </Link>
+        <Link href="/dashboard/collab" className={styles.secondaryBtn}>
+          <ArrowLeft size={14} />
+          Back to tasks
+        </Link>
       </div>
     </div>
   );
