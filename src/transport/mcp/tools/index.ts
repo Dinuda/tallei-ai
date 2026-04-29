@@ -27,6 +27,8 @@ import {
   CollabConflictError,
   createTask as createCollabTask,
   getTask as getCollabTask,
+  hydrateTaskWithRecentPreparedUploads,
+  inlineDocumentsFromTaskContext,
   listTasks as listCollabTasks,
   submitTurn as submitCollabTurn,
 } from "../../../services/collab.js";
@@ -94,7 +96,7 @@ function appendContinueCommand(
   command: ReturnType<typeof buildFirstTurnContinueCommand>
 ): string {
   if (!command) return userVisible;
-  return `${userVisible}\n\n${command.label}:\n${command.command}`;
+  return `${userVisible}\n\n${command.instruction}`;
 }
 
 function hasCollabWriteScope(auth: AuthContext): boolean {
@@ -228,16 +230,26 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         }
 
         const claimed = await claimTurn(task_id, "claude", auth);
-        const task = claimed ?? await getCollabTask(task_id, auth);
+        let task = claimed ?? await getCollabTask(task_id, auth);
         if (!task) {
           return toJsonToolResult({ error: "Task not found" }, true);
         }
-        const uploadSummary = openaiFileIdRefs?.length
+        let uploadSummary = openaiFileIdRefs?.length
           ? await attachUploadedFilesToTaskContext(task.id, auth, {
             openaiFileIdRefs,
             conversationId: conversation_id ?? null,
           })
           : null;
+        const preparedUploadHydration = uploadSummary
+          ? null
+          : await hydrateTaskWithRecentPreparedUploads(task, auth, {
+            conversationId: conversation_id ?? null,
+          });
+        if (preparedUploadHydration) uploadSummary = preparedUploadHydration.attached;
+        if (uploadSummary) {
+          task = await getCollabTask(task.id, auth) ?? task;
+        }
+        const inlineDocuments = await inlineDocumentsFromTaskContext(task, auth);
 
         const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
         const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
@@ -258,6 +270,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           last_chatgpt_entry: lastChatGptEntry,
           recent_transcript: task.transcript.slice(-6),
           fallback_context: buildTurnFallbackContext(task, "claude"),
+          ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
           ...(uploadSummary ? { upload: uploadSummary } : {}),
         });
       } catch (err) {
@@ -317,6 +330,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
                 actor: savedTurn.actor,
                 iteration: savedTurn.iteration,
                 ts: savedTurn.ts,
+                content: savedTurn.content,
                 content_length: savedTurn.content.length,
                 content_preview: savedTurn.content.slice(0, 800),
               }

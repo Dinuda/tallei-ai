@@ -46,7 +46,7 @@ MY_TURN  ([COLLAB:MY_TURN:<uuid>] was set in Step 1)
 
 After any successful collab_continue submit:
   Show the actual submitted output content — not just "task completed".
-  If a collab action returns continue_command, end the response with its label and command.
+  If a collab action returns continue_command, end the response with its instruction.
   If a collab call fails, return the exact error and stop.
   Never offer copy/paste workflows or manual workarounds.
 

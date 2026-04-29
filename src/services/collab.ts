@@ -1,7 +1,8 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
-import { createLot, documentBriefsByRefs } from "./documents.js";
+import { createLot, documentBriefsByRefs, recallDocument } from "./documents.js";
 import { ingestUploadedFilesToDocuments, type UploadedFileSaveError } from "./uploaded-file-ingest.js";
+import { listRecentCompletedUploadedFileIngestJobs } from "./uploaded-file-ingest-jobs.js";
 
 export type CollabActor = "chatgpt" | "claude" | "user";
 export type CollabModelActor = "chatgpt" | "claude";
@@ -313,6 +314,21 @@ export interface CollabContinueCommand {
   target_actor: CollabModelActor;
   command: string;
   label: string;
+  instruction: string;
+}
+
+export interface CollabHydratedDocument {
+  ref: string;
+  title: string | null;
+  filename: string | null;
+  content: string;
+  status: "ready" | "pending_embedding" | "failed_indexing";
+  conversation_id: string | null;
+}
+
+export interface CollabPreparedUploadHydration {
+  attached: ReturnType<typeof attachUploadedFilesToTaskContext> extends Promise<infer T> ? T : never;
+  documents: CollabHydratedDocument[];
 }
 
 export function buildFirstTurnContinueCommand(task: CollabTask): CollabContinueCommand | null {
@@ -325,7 +341,91 @@ export function buildFirstTurnContinueCommand(task: CollabTask): CollabContinueC
       ? `[COLLAB:CONTINUE:${task.id}] continue collab task ${task.id}`
       : `continue collab task ${task.id}`,
     label: `Continue in ${targetActor === "chatgpt" ? "ChatGPT" : "Claude"}`,
+    instruction: `Review this turn. If it looks good, say or paste: ${targetActor === "chatgpt"
+      ? `[COLLAB:CONTINUE:${task.id}] continue collab task ${task.id}`
+      : `continue collab task ${task.id}`}`,
   };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseTimestamp(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+async function recallInlineDocuments(refs: string[], auth: AuthContext): Promise<CollabHydratedDocument[]> {
+  const docs: CollabHydratedDocument[] = [];
+  for (const ref of [...new Set(refs)]) {
+    try {
+      const recalled = await recallDocument(ref, auth);
+      if (recalled.kind === "document") {
+        docs.push({
+          ref: recalled.ref,
+          title: recalled.title,
+          filename: recalled.filename,
+          content: recalled.content,
+          status: recalled.status,
+          conversation_id: recalled.conversation_id,
+        });
+      }
+    } catch {
+      // A missing or still-indexing document should not block the turn check.
+    }
+  }
+  return docs;
+}
+
+export async function inlineDocumentsFromTaskContext(
+  task: CollabTask,
+  auth: AuthContext
+): Promise<CollabHydratedDocument[]> {
+  const existing = readExistingTaskDocumentContext(normalizeContext(task.context));
+  return recallInlineDocuments(existing.documentRefs, auth);
+}
+
+export async function hydrateTaskWithRecentPreparedUploads(
+  task: CollabTask,
+  auth: AuthContext,
+  input?: { conversationId?: string | null; maxWaitMs?: number }
+): Promise<CollabPreparedUploadHydration | null> {
+  const existing = readExistingTaskDocumentContext(normalizeContext(task.context));
+  if (existing.documentRefs.length > 0 || task.iteration > 1) return null;
+
+  const startedAt = Date.now();
+  const maxWaitMs = Math.max(0, Math.min(input?.maxWaitMs ?? 2500, 5000));
+  const conversationId = input?.conversationId?.trim() || existing.conversationId || null;
+  const taskCreatedAt = parseTimestamp(task.createdAt) ?? startedAt;
+  const minRelevantTime = taskCreatedAt - 10 * 60_000;
+
+  while (true) {
+    const jobs = await listRecentCompletedUploadedFileIngestJobs(auth, {
+      conversation_id: conversationId,
+      limit: 10,
+    });
+    const documentRefs = jobs.flatMap((job) => {
+      const completedAt = parseTimestamp(job.completed_at) ?? parseTimestamp(job.created_at) ?? 0;
+      if (completedAt < minRelevantTime) return [];
+      return job.document?.ref ? [job.document.ref] : [];
+    });
+
+    if (documentRefs.length > 0) {
+      const attached = await attachUploadedFilesToTaskContext(task.id, auth, {
+        documentRefs,
+        conversationId,
+        title: task.title,
+      });
+      const hydratedTask = await getTask(task.id, auth) ?? task;
+      const documents = await inlineDocumentsFromTaskContext(hydratedTask, auth);
+      return { attached, documents };
+    }
+
+    if (Date.now() - startedAt >= maxWaitMs) return null;
+    await delay(500);
+  }
 }
 
 function normalizeMaxIterations(value?: number): number {

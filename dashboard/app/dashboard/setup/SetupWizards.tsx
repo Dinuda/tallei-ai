@@ -213,7 +213,7 @@ COLLAB TASKS FIRST (override):
 - On first collab turn, if no task documents exist yet, \`collab_continue\` will fail without \`openaiFileIdRefs\`.
 - Do NOT respond with copy/paste workflows, manual setup steps, or alternative "you can do this" guidance when collab tools are available.
 - If collab call fails, return the exact error briefly and stop.
-- If a collab action returns \`continue_command\`, end the response with its label and command.
+- If a collab action returns \`continue_command\`, end the response with its instruction.
 
 COLLAB CONTINUE — execution order:
 - \`collab_continue\` runs \`prepare_response\` preflight first, then uploads/attaches files, then checks/submits the turn.

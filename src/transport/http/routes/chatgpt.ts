@@ -16,6 +16,8 @@ import {
   CollabNotFoundError,
   createTask as createCollabTask,
   getTask,
+  hydrateTaskWithRecentPreparedUploads,
+  inlineDocumentsFromTaskContext,
   listTasks,
   submitTurn,
 } from "../../../services/collab.js";
@@ -245,7 +247,7 @@ function appendContinueCommand(
   command: ReturnType<typeof buildFirstTurnContinueCommand>
 ): string {
   if (!command) return userVisible;
-  return `${userVisible}\n\n${command.label}:\n${command.command}`;
+  return `${userVisible}\n\n${command.instruction}`;
 }
 
 function hasLocalSandboxDownloadLink(body: unknown): boolean {
@@ -312,7 +314,7 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
       "Call createCollabTask with the user-provided args (title, brief, first_actor — default 'chatgpt', max_iterations). Do not pass file or document args.",
       "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
       "Show the actual submitted output after collab_continue succeeds.",
-      "If any collab action returns continue_command, end the user-facing response with its label and command.",
+      "If any collab action returns continue_command, end the user-facing response with its instruction.",
     ];
   }
   if (stage === "CONTINUE") {
@@ -322,14 +324,14 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
       "If is_my_turn=true, include draft_output in the same collab_continue call.",
       "If is_my_turn=false, report which actor (next_actor) is expected and stop.",
       "Show the actual submitted output after a successful submit.",
-      "If any collab action returns continue_command, end the user-facing response with its label and command.",
+      "If any collab action returns continue_command, end the user-facing response with its instruction.",
     ];
   }
   return [
     "Document save complete. Do not call prepare_response again for this turn.",
     `Call collab_continue with the exact user message and draft_output included${taskLabel}. Do not pass file or document args.`,
     "Show the actual submitted output after collab_continue succeeds.",
-    "If any collab action returns continue_command, end the user-facing response with its label and command.",
+    "If any collab action returns continue_command, end the user-facing response with its instruction.",
     "If the call fails, return the exact error and stop.",
   ];
 }
@@ -1154,11 +1156,12 @@ export function buildOpenApiSpec(serverUrl: string) {
     oneOf: [
       {
         type: "object",
-        required: ["target_actor", "command", "label"],
+        required: ["target_actor", "command", "label", "instruction"],
         properties: {
           target_actor: { type: "string", enum: ["chatgpt", "claude"] },
           command: { type: "string" },
           label: { type: "string" },
+          instruction: { type: "string" },
         },
       },
       { type: "null" },
@@ -1982,11 +1985,12 @@ export function buildOpenApiSpec(serverUrl: string) {
                         oneOf: [
                           {
                             type: "object",
-                            required: ["actor", "iteration", "ts", "content_length", "content_preview"],
+                            required: ["actor", "iteration", "ts", "content", "content_length", "content_preview"],
                             properties: {
                               actor: { type: "string", enum: ["chatgpt", "claude", "user"] },
                               iteration: { type: "integer" },
                               ts: { type: "string", format: "date-time" },
+                              content: { type: "string" },
                               content_length: { type: "integer" },
                               content_preview: { type: "string" },
                             },
@@ -2120,7 +2124,7 @@ export function buildOpenApiSpec(serverUrl: string) {
         post: {
           operationId: "submitCollabTurn",
           summary: "Submit ChatGPT turn content",
-          description: "Submits ChatGPT output for a collab task without allowing actor override. After success, render saved_turn.content_preview in chat and stop tool-calling for this user turn.",
+          description: "Submits ChatGPT output for a collab task without allowing actor override. After success, render saved_turn.content in chat and stop tool-calling for this user turn.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -2160,11 +2164,12 @@ export function buildOpenApiSpec(serverUrl: string) {
                         oneOf: [
                           {
                             type: "object",
-                            required: ["actor", "iteration", "ts", "content_length", "content_preview"],
+                            required: ["actor", "iteration", "ts", "content", "content_length", "content_preview"],
                             properties: {
                               actor: { type: "string", enum: ["chatgpt", "claude", "user"] },
                               iteration: { type: "integer" },
                               ts: { type: "string", format: "date-time" },
+                              content: { type: "string" },
                               content_length: { type: "integer" },
                               content_preview: { type: "string" },
                             },
@@ -2273,7 +2278,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
         replyInstructions: [
           "Do not call prepare_response again for this turn.",
           "Call collab_continue now with this same message.",
-          "After successful submit, render saved_turn.content_preview in chat.",
+          "After successful submit, render saved_turn.content in chat.",
         ],
         intent: {
           needsRecall: false,
@@ -2916,7 +2921,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
     }
 
     const claim = await claimTurn(resolvedTaskId, "chatgpt", auth);
-    const task = claim ?? await getTask(resolvedTaskId, auth);
+    let task = claim ?? await getTask(resolvedTaskId, auth);
     if (!task) {
       res.status(404).json({
         ok: false,
@@ -2926,6 +2931,11 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       });
       return;
     }
+    const preparedUploadHydration = await hydrateTaskWithRecentPreparedUploads(task, auth);
+    if (preparedUploadHydration) {
+      task = await getTask(task.id, auth) ?? task;
+    }
+    const inlineDocuments = await inlineDocumentsFromTaskContext(task, auth);
 
     const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
     const lastMessage = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
@@ -2960,6 +2970,8 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         last_message: lastMessage,
         recent_transcript: task.transcript.slice(-6),
         fallback_context: buildTurnFallbackContext(task, "chatgpt"),
+        ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
+        ...(preparedUploadHydration ? { upload: preparedUploadHydration.attached } : {}),
       });
       return;
     }
@@ -2998,6 +3010,8 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         last_message: lastMessage,
         recent_transcript: task.transcript.slice(-6),
         fallback_context: buildTurnFallbackContext(task, "chatgpt"),
+        ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
+        ...(preparedUploadHydration ? { upload: preparedUploadHydration.attached } : {}),
       });
       return;
     }
@@ -3056,6 +3070,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
             actor: savedTurn.actor,
             iteration: savedTurn.iteration,
             ts: savedTurn.ts,
+            content: savedTurn.content,
             content_length: savedTurn.content.length,
             content_preview: savedTurn.content.slice(0, 800),
           }
@@ -3170,11 +3185,16 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
     if (!auth) return;
 
     const claim = await claimTurn(body.task_id, "chatgpt", auth);
-    const task = claim ?? await getTask(body.task_id, auth);
+    let task = claim ?? await getTask(body.task_id, auth);
     if (!task) {
       res.status(404).json({ error: "Task not found" });
       return;
     }
+    const preparedUploadHydration = await hydrateTaskWithRecentPreparedUploads(task, auth);
+    if (preparedUploadHydration) {
+      task = await getTask(task.id, auth) ?? task;
+    }
+    const inlineDocuments = await inlineDocumentsFromTaskContext(task, auth);
 
     const lastMessage = task.transcript.length > 0
       ? task.transcript[task.transcript.length - 1]
@@ -3213,6 +3233,8 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       recent_transcript: task.transcript.slice(-6),
       context: task.context,
       fallback_context: buildTurnFallbackContext(task, "chatgpt"),
+      ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
+      ...(preparedUploadHydration ? { upload: preparedUploadHydration.attached } : {}),
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -3271,6 +3293,7 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
             actor: savedTurn.actor,
             iteration: savedTurn.iteration,
             ts: savedTurn.ts,
+            content: savedTurn.content,
             content_length: savedTurn.content.length,
             content_preview: savedTurn.content.slice(0, 800),
           }
