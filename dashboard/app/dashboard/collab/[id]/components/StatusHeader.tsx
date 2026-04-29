@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import DraftingLoader from "./DraftingLoader";
 import styles from "./StatusHeader.module.css";
 
 type CollabState = "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR";
@@ -75,9 +76,9 @@ export default function StatusHeader({
         <div className={styles.statusPill}>
           {waitingActor ? (
             <>
-              <span className={styles.pillDot} style={{ backgroundColor: PLATFORM_COLOR[waitingActor] }} />
-              <span className={styles.pillText}>
-                {ACTOR_LABEL[waitingActor]} is drafting… · {waitingTimer}
+              <DraftingLoader actor={waitingActor} />
+              <span className={styles.pillText} style={{ marginLeft: 8 }}>
+                · {waitingTimer}
               </span>
               {stalled && <span className={styles.pillWarning}>Stalled</span>}
             </>

@@ -14,6 +14,7 @@ import TranscriptCard from "./components/TranscriptCard";
 import DocumentCard from "./components/DocumentCard";
 import CriteriaPanel from "./components/CriteriaPanel";
 import ActionBar from "./components/ActionBar";
+import DraftingLoader from "./components/DraftingLoader";
 import styles from "./page.module.css";
 
 type CollabState = "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR";
@@ -664,9 +665,10 @@ export default function CollabBoardPage() {
             </div>
 
             {waitingActor && task.state !== "DONE" && task.state !== "ERROR" && (
-              <div className={styles.waitingPill}>
-                ⏳ {waitingActor === "chatgpt" ? "ChatGPT" : "Claude"} is drafting…
-              </div>
+              <DraftingLoader
+                actor={waitingActor}
+                className={styles.waitingPill}
+              />
             )}
           </>
         }

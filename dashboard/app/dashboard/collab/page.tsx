@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, RefreshCw, FileText, ArrowRight } from "lucide-react";
+import { Plus, RefreshCw, ArrowRight } from "lucide-react";
 
 import { EmptyCollectionState } from "../components/empty-collection-state";
 import styles from "./page.module.css";
@@ -29,6 +29,19 @@ type CollabTask = {
   updatedAt: string;
   transcript?: TranscriptEntry[];
   context?: Record<string, unknown>;
+};
+
+type OrchestrationStatus = "DRAFT" | "INTERVIEWING" | "PLAN_READY" | "RUNNING" | "DONE" | "ABORTED";
+
+type OrchestrationSession = {
+  id: string;
+  goal: string;
+  status: OrchestrationStatus;
+  plan: { title?: string; summary?: string; first_actor?: "chatgpt" | "claude" } | null;
+  collabTaskId: string | null;
+  updatedAt: string;
+  transcript?: Array<{ role: "planner" | "user" | "system"; content: string; ts: string }>;
+  metadata?: Record<string, unknown>;
 };
 
 const FILTERS: Array<{ id: CollabFilter; label: string }> = [
@@ -65,6 +78,15 @@ const STATE_CONFIG: Record<CollabState, { label: string; bg: string; border: str
   },
 };
 
+const ORCHESTRATION_CONFIG: Record<OrchestrationStatus, { label: string; bg: string; border: string; text: string }> = {
+  DRAFT: { label: "Draft", bg: "#f8fafc", border: "#cbd5e1", text: "#334155" },
+  INTERVIEWING: { label: "Grill-me active", bg: "#e0f2fe", border: "#7dd3fc", text: "#075985" },
+  PLAN_READY: { label: "Plan ready", bg: "#fef3c7", border: "#fcd34d", text: "#92400e" },
+  RUNNING: { label: "Collab created", bg: "var(--actor-chatgpt-bg)", border: "var(--actor-chatgpt-border)", text: "var(--actor-chatgpt-text)" },
+  DONE: { label: "Completed", bg: "var(--status-success-bg)", border: "var(--status-success-border)", text: "var(--status-success-text)" },
+  ABORTED: { label: "Aborted", bg: "var(--status-error-bg)", border: "var(--status-error-border)", text: "var(--status-error-text)" },
+};
+
 const ACTOR_LABEL: Record<CollabActor, string> = {
   chatgpt: "ChatGPT",
   claude: "Claude",
@@ -86,13 +108,10 @@ function latestOutput(task: CollabTask): TranscriptEntry | null {
   return modelEntry ?? transcript[transcript.length - 1];
 }
 
-function documentCount(task: CollabTask): number {
-  const context = task.context;
-  if (!context || typeof context !== "object" || Array.isArray(context)) return 0;
-  const docsContainer = context.documents;
-  if (!docsContainer || typeof docsContainer !== "object" || Array.isArray(docsContainer)) return 0;
-  const docs = (docsContainer as { documents?: unknown }).documents;
-  return Array.isArray(docs) ? docs.length : 0;
+function latestPlannerText(session: OrchestrationSession): string | null {
+  const transcript = Array.isArray(session.transcript) ? session.transcript : [];
+  const latest = [...transcript].reverse().find((entry) => entry.role === "planner" || entry.role === "user");
+  return latest?.content ?? session.plan?.summary ?? null;
 }
 
 function relativeTime(iso: string): string {
@@ -109,6 +128,7 @@ function relativeTime(iso: string): string {
 export default function CollabTasksPage() {
   const [filter, setFilter] = useState<CollabFilter>("active");
   const [tasks, setTasks] = useState<CollabTask[]>([]);
+  const [orchestrationSessions, setOrchestrationSessions] = useState<OrchestrationSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -123,8 +143,10 @@ export default function CollabTasksPage() {
         throw new Error(typeof body?.error === "string" ? body.error : "Failed to load tasks");
       }
       setTasks(Array.isArray(body?.tasks) ? body.tasks : []);
+      setOrchestrationSessions(Array.isArray(body?.orchestrationSessions) ? body.orchestrationSessions : []);
     } catch {
       setTasks([]);
+      setOrchestrationSessions([]);
     } finally {
       if (mode === "initial") setLoading(false);
       if (mode === "refresh") setRefreshing(false);
@@ -135,13 +157,16 @@ export default function CollabTasksPage() {
     void fetchTasks("initial");
   }, [fetchTasks]);
 
-  const hasTasks = tasks.length > 0;
+  const hasTasks = tasks.length > 0 || orchestrationSessions.length > 0;
 
   const stats = useMemo(() => {
     const activeCount = tasks.filter((task) => task.state === "CREATIVE" || task.state === "TECHNICAL").length;
+    const activePlanningCount = orchestrationSessions.filter((session) =>
+      session.status === "INTERVIEWING" || session.status === "PLAN_READY"
+    ).length;
     const doneCount = tasks.filter((task) => task.state === "DONE").length;
-    return { active: activeCount, done: doneCount, total: tasks.length };
-  }, [tasks]);
+    return { active: activeCount, planning: activePlanningCount, done: doneCount, total: tasks.length + orchestrationSessions.length };
+  }, [tasks, orchestrationSessions]);
 
   return (
     <div className={styles.page}>
@@ -149,7 +174,7 @@ export default function CollabTasksPage() {
         <div>
           <h1 className={styles.pageTitle}>Collab Tasks</h1>
           <p className={styles.subtle}>
-            {stats.total} total · {stats.active} active · {stats.done} done
+            {stats.total} total · {stats.active} active · {stats.planning} planning · {stats.done} done
           </p>
         </div>
         <div className={styles.headerRight}>
@@ -173,7 +198,7 @@ export default function CollabTasksPage() {
           const isActive = item.id === filter;
           let count = 0;
           if (item.id === "all") count = stats.total;
-          else if (item.id === "active") count = stats.active;
+          else if (item.id === "active") count = stats.active + stats.planning;
           else if (item.id === "waiting") count = tasks.filter((t) => t.state === "CREATIVE" || t.state === "TECHNICAL").length;
           else if (item.id === "done") count = stats.done;
 
@@ -207,9 +232,75 @@ export default function CollabTasksPage() {
         </div>
       ) : hasTasks ? (
         <div className={styles.grid}>
+          {/* Orchestration session cards */}
+          {orchestrationSessions.map((session) => {
+            const latest = latestPlannerText(session);
+            const config = ORCHESTRATION_CONFIG[session.status];
+            const isPlanReady = session.status === "PLAN_READY";
+            const ctaText = isPlanReady ? "Approve" : "Continue";
+            // Fake progress for orchestration cards
+            const progressPercent = isPlanReady ? 100 : 50;
+            const currentTurn = isPlanReady ? 2 : 1;
+            const totalTurns = 2;
+
+            return (
+              <Link
+                key={session.id}
+                href={session.collabTaskId ? `/dashboard/collab/${session.collabTaskId}` : `/dashboard/collab/plan/${session.id}`}
+                className={styles.card}
+              >
+                <div className={styles.cardTop}>
+                  <span
+                    className={styles.statusBadge}
+                    style={{
+                      background: config.bg,
+                      borderColor: config.border,
+                      color: config.text,
+                    }}
+                  >
+                    {config.label}
+                  </span>
+                </div>
+
+                <h2 className={styles.cardTitle}>{session.plan?.title || session.goal}</h2>
+                <p className={styles.cardMeta}>
+                  Orchestrator · {relativeTime(session.updatedAt)}
+                </p>
+
+                <div className={styles.progressWrap}>
+                  <div className={styles.progressTrack}>
+                    <div
+                      className={styles.progressFill}
+                      style={{
+                        width: `${progressPercent}%`,
+                        background: "#0ea5e9",
+                      }}
+                    />
+                  </div>
+                  <span className={styles.progressLabel}>Turn {currentTurn} of {totalTurns}</span>
+                </div>
+
+                {latest && (
+                  <p className={styles.cardPreview}>{latest.slice(0, 180)}</p>
+                )}
+
+                <div className={styles.cardFooter}>
+                  <div className={styles.actorBadges}>
+                    <span className={`${styles.actorBadge} ${styles.actorChatgpt}`}>ChatGPT</span>
+                    <span className={styles.swapArrow}>⇄</span>
+                    <span className={`${styles.actorBadge} ${styles.actorClaude}`}>Claude</span>
+                  </div>
+                  <span className={styles.footerCta}>
+                    {ctaText} <ArrowRight size={12} />
+                  </span>
+                </div>
+              </Link>
+            );
+          })}
+
+          {/* Collab task cards */}
           {tasks.map((task) => {
             const latest = latestOutput(task);
-            const docs = documentCount(task);
             const config = STATE_CONFIG[task.state];
             const progressPercent = Math.min(100, Math.round((task.iteration / Math.max(1, task.maxIterations)) * 100));
 
@@ -226,12 +317,6 @@ export default function CollabTasksPage() {
                   >
                     {waitingActorLabel(task.state)}
                   </span>
-                  {docs > 0 && (
-                    <span className={styles.docBadge}>
-                      <FileText size={11} />
-                      {docs}
-                    </span>
-                  )}
                 </div>
 
                 <h2 className={styles.cardTitle}>{task.title}</h2>
@@ -253,9 +338,7 @@ export default function CollabTasksPage() {
                 </div>
 
                 {latest && (
-                  <p className={styles.outputPreview}>
-                    {latest.content.slice(0, 140)}
-                  </p>
+                  <p className={styles.cardPreview}>{latest.content.slice(0, 140)}</p>
                 )}
 
                 <div className={styles.cardFooter}>
@@ -264,9 +347,8 @@ export default function CollabTasksPage() {
                     <span className={styles.swapArrow}>⇄</span>
                     <span className={`${styles.actorBadge} ${styles.actorClaude}`}>Claude</span>
                   </div>
-                  <span className={styles.openCta}>
-                    Open
-                    <ArrowRight size={12} />
+                  <span className={styles.footerCta}>
+                    Open <ArrowRight size={12} />
                   </span>
                 </div>
               </Link>
