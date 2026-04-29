@@ -31,19 +31,6 @@ type CollabTask = {
   context?: Record<string, unknown>;
 };
 
-type OrchestrationStatus = "DRAFT" | "INTERVIEWING" | "PLAN_READY" | "RUNNING" | "DONE" | "ABORTED";
-
-type OrchestrationSession = {
-  id: string;
-  goal: string;
-  status: OrchestrationStatus;
-  plan: { title?: string; summary?: string; first_actor?: "chatgpt" | "claude" } | null;
-  collabTaskId: string | null;
-  updatedAt: string;
-  transcript?: Array<{ role: "planner" | "user" | "system"; content: string; ts: string }>;
-  metadata?: Record<string, unknown>;
-};
-
 const FILTERS: Array<{ id: CollabFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
@@ -78,15 +65,6 @@ const STATE_CONFIG: Record<CollabState, { label: string; bg: string; border: str
   },
 };
 
-const ORCHESTRATION_CONFIG: Record<OrchestrationStatus, { label: string; bg: string; border: string; text: string }> = {
-  DRAFT: { label: "Draft", bg: "var(--status-info-bg)", border: "var(--status-info-border)", text: "var(--status-info-text)" },
-  INTERVIEWING: { label: "Grill-me active", bg: "#e0f2fe", border: "#7dd3fc", text: "#075985" },
-  PLAN_READY: { label: "Plan ready", bg: "#fef3c7", border: "#fcd34d", text: "#92400e" },
-  RUNNING: { label: "Collab created", bg: "var(--actor-chatgpt-bg)", border: "var(--actor-chatgpt-border)", text: "var(--actor-chatgpt-text)" },
-  DONE: { label: "Completed", bg: "var(--status-success-bg)", border: "var(--status-success-border)", text: "var(--status-success-text)" },
-  ABORTED: { label: "Aborted", bg: "var(--status-error-bg)", border: "var(--status-error-border)", text: "var(--status-error-text)" },
-};
-
 const ACTOR_LABEL: Record<CollabActor, string> = {
   chatgpt: "ChatGPT",
   claude: "Claude",
@@ -106,12 +84,6 @@ function latestOutput(task: CollabTask): TranscriptEntry | null {
   if (transcript.length === 0) return null;
   const modelEntry = [...transcript].reverse().find((entry) => entry.actor === "chatgpt" || entry.actor === "claude");
   return modelEntry ?? transcript[transcript.length - 1];
-}
-
-function latestPlannerText(session: OrchestrationSession): string | null {
-  const transcript = Array.isArray(session.transcript) ? session.transcript : [];
-  const latest = [...transcript].reverse().find((entry) => entry.role === "planner" || entry.role === "user");
-  return latest?.content ?? session.plan?.summary ?? null;
 }
 
 function documentCount(task: CollabTask): number {
@@ -137,7 +109,6 @@ function relativeTime(iso: string): string {
 export default function CollabTasksPage() {
   const [filter, setFilter] = useState<CollabFilter>("active");
   const [tasks, setTasks] = useState<CollabTask[]>([]);
-  const [orchestrationSessions, setOrchestrationSessions] = useState<OrchestrationSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -152,10 +123,8 @@ export default function CollabTasksPage() {
         throw new Error(typeof body?.error === "string" ? body.error : "Failed to load tasks");
       }
       setTasks(Array.isArray(body?.tasks) ? body.tasks : []);
-      setOrchestrationSessions(Array.isArray(body?.orchestrationSessions) ? body.orchestrationSessions : []);
     } catch {
       setTasks([]);
-      setOrchestrationSessions([]);
     } finally {
       if (mode === "initial") setLoading(false);
       if (mode === "refresh") setRefreshing(false);
@@ -166,16 +135,13 @@ export default function CollabTasksPage() {
     void fetchTasks("initial");
   }, [fetchTasks]);
 
-  const hasTasks = tasks.length > 0 || orchestrationSessions.length > 0;
+  const hasTasks = tasks.length > 0;
 
   const stats = useMemo(() => {
     const activeCount = tasks.filter((task) => task.state === "CREATIVE" || task.state === "TECHNICAL").length;
-    const planningCount = orchestrationSessions.filter((session) =>
-      session.status === "INTERVIEWING" || session.status === "PLAN_READY"
-    ).length;
     const doneCount = tasks.filter((task) => task.state === "DONE").length;
-    return { active: activeCount, planning: planningCount, done: doneCount, total: tasks.length + orchestrationSessions.length };
-  }, [tasks, orchestrationSessions]);
+    return { active: activeCount, done: doneCount, total: tasks.length };
+  }, [tasks]);
 
   return (
     <div className={styles.page}>
@@ -183,7 +149,7 @@ export default function CollabTasksPage() {
         <div>
           <h1 className={styles.pageTitle}>Collab Tasks</h1>
           <p className={styles.subtle}>
-            {stats.total} total · {stats.active} active · {stats.planning} planning · {stats.done} done
+            {stats.total} total · {stats.active} active · {stats.done} done
           </p>
         </div>
         <div className={styles.headerRight}>
@@ -207,7 +173,7 @@ export default function CollabTasksPage() {
           const isActive = item.id === filter;
           let count = 0;
           if (item.id === "all") count = stats.total;
-          else if (item.id === "active") count = stats.active + stats.planning;
+          else if (item.id === "active") count = stats.active;
           else if (item.id === "waiting") count = tasks.filter((t) => t.state === "CREATIVE" || t.state === "TECHNICAL").length;
           else if (item.id === "done") count = stats.done;
 
@@ -241,49 +207,6 @@ export default function CollabTasksPage() {
         </div>
       ) : hasTasks ? (
         <div className={styles.grid}>
-          {orchestrationSessions.map((session) => {
-            const latest = latestPlannerText(session);
-            const config = ORCHESTRATION_CONFIG[session.status];
-            const planningHref = session.collabTaskId
-              ? `/dashboard/collab/${session.collabTaskId}`
-              : `/dashboard/orchestrate/${session.id}`;
-            const planningActionLabel = session.status === "PLAN_READY" ? "Approve plan" : "Continue";
-            return (
-              <Link key={session.id} className={`${styles.card} ${styles.planningCard}`} href={planningHref}>
-                <div className={styles.cardTop}>
-                  <span
-                    className={styles.statusBadge}
-                    style={{
-                      background: config.bg,
-                      borderColor: config.border,
-                      color: config.text,
-                    }}
-                  >
-                    {config.label}
-                  </span>
-                </div>
-
-                <h2 className={styles.cardTitle}>{session.plan?.title || session.goal}</h2>
-                <p className={styles.cardMeta}>
-                  Orchestrator · {relativeTime(session.updatedAt)}
-                </p>
-
-                {latest && (
-                  <p className={styles.outputPreview}>
-                    {latest.slice(0, 140)}
-                  </p>
-                )}
-
-                <div className={styles.cardFooter}>
-                  <span className={styles.planningBadge}>orchestrator</span>
-                  <span className={styles.cardActionBtn}>
-                    {planningActionLabel}
-                  </span>
-                </div>
-              </Link>
-            );
-          })}
-
           {tasks.map((task) => {
             const latest = latestOutput(task);
             const docs = documentCount(task);

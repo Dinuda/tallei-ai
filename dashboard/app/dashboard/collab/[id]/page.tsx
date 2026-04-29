@@ -339,7 +339,11 @@ export default function CollabBoardPage() {
       const res = await fetch(`/api/collab/orchestrations/${taskId}`, { cache: "no-store" });
       const body = await res.json();
       if (res.ok && typeof body?.id === "string") {
-        router.replace(`/dashboard/orchestrate/${body.id}`);
+        if (typeof body?.collabTaskId === "string" && body.collabTaskId) {
+          router.replace(`/dashboard/collab/${body.collabTaskId}`);
+        } else {
+          router.replace("/dashboard/collab");
+        }
         return true;
       }
     } catch {

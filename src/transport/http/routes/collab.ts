@@ -16,8 +16,6 @@ import {
 } from "../../../services/collab.js";
 import {
   getSession as getOrchestrationSession,
-  listSessions,
-  type OrchestrationFilter,
 } from "../../../services/orchestrator.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
@@ -92,12 +90,7 @@ router.get("/tasks", requireScopes(["collab:read"]), async (req: AuthRequest, re
   try {
     const query = listTaskSchema.parse(req.query ?? {});
     const tasks = await listTasks({ filter: query.filter }, req.authContext!);
-    const orchestrationFilter: OrchestrationFilter =
-      query.filter === "done" ? "done" : query.filter === "all" ? "all" : "active";
-    const orchestrationSessions = (await listSessions({ filter: orchestrationFilter }, req.authContext!))
-      // RUNNING sessions with a linked collab task are already represented by collab_tasks.
-      .filter((session) => !(session.status === "RUNNING" && session.collabTaskId));
-    res.json({ tasks, orchestrationSessions });
+    res.json({ tasks });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });

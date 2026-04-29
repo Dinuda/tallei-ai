@@ -157,11 +157,6 @@
   transform: translateY(-2px);
 }
 
-.planningCard {
-  border-style: dashed;
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.04), transparent 50%), var(--surface);
-}
-
 .cardTop {
   display: flex;
   align-items: center;
@@ -284,19 +279,6 @@
 .swapArrow {
   color: var(--text-muted);
   font-size: 0.72rem;
-}
-
-.planningBadge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.18rem 0.5rem;
-  border-radius: 5px;
-  font-size: 0.65rem;
-  font-weight: 700;
-  color: #075985;
-  background: #e0f2fe;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
 }
 
 .openCta {
