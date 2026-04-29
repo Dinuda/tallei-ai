@@ -16,8 +16,11 @@ Collab stage tags — prepend to message when the request involves collab:
   [COLLAB:CONTINUE:<uuid>]    user says continue / resume, or gives a task UUID
   [COLLAB:MY_TURN:<uuid>]     it is your turn and you have output ready to submit
 
-Files: download_link must be a presigned https:// URL (files.oaiusercontent.com).
-If any ref contains /mnt/data or file://, stop — ask for fresh presigned links first.
+Files — CRITICAL:
+  download_link MUST be a presigned https:// URL (e.g. https://files.oaiusercontent.com/...).
+  /mnt/data/... and file://... are local sandbox paths the server CANNOT reach — NEVER pass these.
+  If a file ref only has a sandbox path: omit that ref from openaiFileIdRefs entirely and tell
+  the user "I couldn't attach [filename] — please re-upload so a valid download link is available."
 
 Do not write any reply text before prepare_response completes.
 Use contextBlock, inlineDocuments, replyInstructions as your only source of truth.

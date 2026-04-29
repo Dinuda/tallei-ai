@@ -355,6 +355,8 @@ test("executePrepareResponseAction propagates uploaded file autosave refs", asyn
         status: 200,
         body: {
           ...recallBody,
+          referencedDocuments: [{ ref: "@doc:ref_1", title: "Report" }],
+          recentCompletedIngests: [{ ref: "ingest_1", status: "done" }],
           autoSave: {
             requested: 1,
             complete: true,
@@ -367,5 +369,7 @@ test("executePrepareResponseAction propagates uploaded file autosave refs", asyn
   });
 
   assert.equal(result.body.autoSave.saved[0]?.ref, "@doc:abc");
+  assert.deepEqual(result.body.referencedDocuments, [{ ref: "@doc:ref_1", title: "Report" }]);
+  assert.deepEqual(result.body.recentCompletedIngests, [{ ref: "ingest_1", status: "done" }]);
   assert.ok(result.body.replyInstructions.some((line) => line.includes("Saved: @doc:abc")));
 });

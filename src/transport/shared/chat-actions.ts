@@ -721,6 +721,8 @@ export interface PrepareResponseActionResult {
     memories: unknown[];
     recentDocuments: unknown[];
     matchedDocuments: unknown[];
+    referencedDocuments: unknown[];
+    recentCompletedIngests: unknown[];
     inlineDocuments: Array<{ ref: string; title: string | null; content: string }>;
     queuedSaves: QueuedPrepareSave[];
     autoSave: {
@@ -1283,6 +1285,8 @@ export async function executePrepareResponseAction(
       memories: recallBody.memories,
       recentDocuments: recallBody.recentDocuments,
       matchedDocuments: recallBody.matchedDocuments,
+      referencedDocuments: recallBody.referencedDocuments,
+      recentCompletedIngests: recallBody.recentCompletedIngests,
       inlineDocuments,
       queuedSaves,
       autoSave: recallBody.autoSave,

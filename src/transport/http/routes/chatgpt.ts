@@ -710,17 +710,9 @@ async function chatGptActionAuthMiddleware(req: AuthRequest, res: Response, next
 
 export function buildOpenApiSpec(serverUrl: string) {
   const openAiFileRefJsonSchema = {
-    type: "object",
-    required: ["id", "download_link"],
-    properties: {
-      id: { type: "string" },
-      name: { type: "string" },
-      mime_type: {
-        type: "string",
-        description: "MIME type of the uploaded file. Only PDF and Word (.docx/.docm) files are supported for ingest.",
-      },
-      download_link: { type: "string", format: "uri" },
-    },
+    type: "string",
+    description:
+      "ChatGPT file reference. The OpenAPI schema must use string items; at runtime ChatGPT sends JSON objects with id, name, mime_type, and a temporary download_link URL.",
   };
 
   const canonicalUploadExample = {
@@ -1014,12 +1006,14 @@ export function buildOpenApiSpec(serverUrl: string) {
 
   const prepareResponseSchema = {
     type: "object",
-    required: ["contextBlock", "memories", "recentDocuments", "matchedDocuments", "inlineDocuments", "queuedSaves", "autoSave", "replyInstructions", "intent"],
+    required: ["contextBlock", "memories", "recentDocuments", "matchedDocuments", "referencedDocuments", "recentCompletedIngests", "inlineDocuments", "queuedSaves", "autoSave", "replyInstructions", "intent"],
     properties: {
       contextBlock: { type: "string" },
       memories: recallResultSchema.properties.memories,
       recentDocuments: recallResultSchema.properties.recentDocuments,
       matchedDocuments: recallResultSchema.properties.matchedDocuments,
+      referencedDocuments: recallResultSchema.properties.referencedDocuments,
+      recentCompletedIngests: recallResultSchema.properties.recentCompletedIngests,
       inlineDocuments: {
         type: "array",
         items: {
@@ -1151,7 +1145,7 @@ export function buildOpenApiSpec(serverUrl: string) {
       version: CHATGPT_OPENAPI_VERSION,
       description:
         "Docs-lite shared-memory Actions API for ChatGPT Custom GPTs (Bearer API key). " +
-        "Call prepare_response on every turn. " +
+        "Call prepare_response on every turn; include openaiFileIdRefs with temporary HTTPS file URLs when attachments are visible. " +
         "For collab flows, prefix the message with [COLLAB:CREATE], [COLLAB:CONTINUE:<uuid>], or [COLLAB:MY_TURN:<uuid>] — the action returns stage-specific replyInstructions telling you exactly which collab action to call next.",
     },
     servers: [
@@ -1176,7 +1170,7 @@ export function buildOpenApiSpec(serverUrl: string) {
           operationId: "prepare_response",
           summary: "PRIMARY ACTION: prepare context, queue saves, and route collab stages",
           description:
-            "Call every turn. For collab flows, prefix message with [COLLAB:CREATE], [COLLAB:CONTINUE:<uuid>], or [COLLAB:MY_TURN:<uuid>]; the response returns exact replyInstructions for each stage. For non-collab turns, performs memory recall, document lookup, and save queuing as needed.",
+            "Call every turn. Include openaiFileIdRefs with temporary HTTPS download_link URLs for visible attachments; use [] only when none are visible. For collab, this uploads docs before replyInstructions route the next action.",
           "x-openai-isConsequential": false,
           security: [{ bearerAuth: [] }],
           requestBody: {
@@ -1185,7 +1179,7 @@ export function buildOpenApiSpec(serverUrl: string) {
               "application/json": {
                 schema: {
                   type: "object",
-                  required: ["message"],
+                  required: ["message", "openaiFileIdRefs"],
                   properties: {
                     message: {
                       type: "string",
@@ -1197,7 +1191,9 @@ export function buildOpenApiSpec(serverUrl: string) {
                     },
                     openaiFileIdRefs: {
                       type: "array",
-                      description: "Canonical upload refs for current-turn attachments.",
+                      maxItems: 10,
+                      default: [],
+                      description: "Required array. Include every visible current-turn attachment. ChatGPT must populate this from attached files; use [] only when no attachments are visible. Runtime values arrive as objects with temporary HTTPS download_link URLs.",
                       items: openAiFileRefJsonSchema,
                     },
                     last_recall: {
@@ -1214,6 +1210,7 @@ export function buildOpenApiSpec(serverUrl: string) {
                     summary: "Prepare answer context",
                     value: {
                       message: "What did we decide about the onboarding flow?",
+                      openaiFileIdRefs: [],
                       conversation_id: "conv_123",
                     },
                   },
@@ -2205,6 +2202,8 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
         memories: [],
         recentDocuments: [],
         matchedDocuments: [],
+        referencedDocuments: [],
+        recentCompletedIngests: [],
         inlineDocuments: [],
         queuedSaves: [],
         autoSave: { requested: 0, complete: true, saved: [], errors: [] },
@@ -2235,6 +2234,8 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
         memories: [],
         recentDocuments: [],
         matchedDocuments: [],
+        referencedDocuments: [],
+        recentCompletedIngests: [],
         inlineDocuments: [],
         queuedSaves: [],
         autoSave: { requested: 0, complete: true, saved: [], errors: [] },
@@ -2278,7 +2279,13 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
 
     // For any collab stage: override replyInstructions with stage-specific routing
     if (collabStage && result.status < 400 && result.body && typeof result.body === "object") {
-      (result.body as Record<string, unknown>).replyInstructions = collabStageReplyInstructions(collabStage.stage, collabStage.taskId);
+      const stageInstructions = collabStageReplyInstructions(collabStage.stage, collabStage.taskId);
+      const fileRefHint = !hasAttachments
+        ? [
+          "If this turn has visible attachments, file refs are missing. Ask for temporary HTTPS download URLs for those attachments (openaiFileIdRefs), then call prepare_response again with those refs before continuing collab.",
+        ]
+        : [];
+      (result.body as Record<string, unknown>).replyInstructions = [...fileRefHint, ...stageInstructions];
     }
 
     res.status(result.status).json(result.body);
