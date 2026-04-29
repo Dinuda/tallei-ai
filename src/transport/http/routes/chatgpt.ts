@@ -9,6 +9,7 @@ import { CHATGPT_OPENAPI_VERSION } from "../../shared/integration-assets.js";
 import { UploadThingConfigError } from "../../../infrastructure/storage/uploadthing-client.js";
 import { DocumentSizeExceededError } from "../../../services/documents.js";
 import {
+  buildFirstTurnContinueCommand,
   buildTurnFallbackContext,
   claimTurn,
   CollabConflictError,
@@ -239,6 +240,14 @@ function previewText(value: string, max = 500): string {
   return value.trim().slice(0, max);
 }
 
+function appendContinueCommand(
+  userVisible: string,
+  command: ReturnType<typeof buildFirstTurnContinueCommand>
+): string {
+  if (!command) return userVisible;
+  return `${userVisible}\n\n${command.label}:\n${command.command}`;
+}
+
 function hasLocalSandboxDownloadLink(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   const record = body as Record<string, unknown>;
@@ -303,6 +312,7 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
       "Call createCollabTask with the user-provided args (title, brief, first_actor — default 'chatgpt', max_iterations). Do not pass file or document args.",
       "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
       "Show the actual submitted output after collab_continue succeeds.",
+      "If any collab action returns continue_command, end the user-facing response with its label and command.",
     ];
   }
   if (stage === "CONTINUE") {
@@ -312,12 +322,14 @@ function collabStageReplyInstructions(stage: "CREATE" | "CONTINUE" | "MY_TURN", 
       "If is_my_turn=true, include draft_output in the same collab_continue call.",
       "If is_my_turn=false, report which actor (next_actor) is expected and stop.",
       "Show the actual submitted output after a successful submit.",
+      "If any collab action returns continue_command, end the user-facing response with its label and command.",
     ];
   }
   return [
     "Document save complete. Do not call prepare_response again for this turn.",
     `Call collab_continue with the exact user message and draft_output included${taskLabel}. Do not pass file or document args.`,
     "Show the actual submitted output after collab_continue succeeds.",
+    "If any collab action returns continue_command, end the user-facing response with its label and command.",
     "If the call fails, return the exact error and stop.",
   ];
 }
@@ -1138,6 +1150,21 @@ export function buildOpenApiSpec(serverUrl: string) {
     },
   };
 
+  const collabContinueCommandSchema = {
+    oneOf: [
+      {
+        type: "object",
+        required: ["target_actor", "command", "label"],
+        properties: {
+          target_actor: { type: "string", enum: ["chatgpt", "claude"] },
+          command: { type: "string" },
+          label: { type: "string" },
+        },
+      },
+      { type: "null" },
+    ],
+  };
+
   return {
     openapi: "3.1.0",
     info: {
@@ -1942,6 +1969,7 @@ export function buildOpenApiSpec(serverUrl: string) {
                       max_iterations: { type: "integer" },
                       next_actor: { type: ["string", "null"], enum: ["chatgpt", "claude", null] },
                       user_visible: { type: "string" },
+                      continue_command: collabContinueCommandSchema,
                       submitted: { type: "boolean" },
                       last_message: {
                         oneOf: [collabTranscriptEntrySchema, { type: "null" }],
@@ -2020,6 +2048,7 @@ export function buildOpenApiSpec(serverUrl: string) {
                       iteration: { type: "integer" },
                       max_iterations: { type: "integer" },
                       user_visible: { type: "string" },
+                      continue_command: collabContinueCommandSchema,
                     },
                   },
                 },
@@ -2068,6 +2097,7 @@ export function buildOpenApiSpec(serverUrl: string) {
                       max_iterations: { type: "integer" },
                       next_actor: { type: ["string", "null"], enum: ["chatgpt", "claude", null] },
                       user_visible: { type: "string" },
+                      continue_command: collabContinueCommandSchema,
                       last_message: {
                         oneOf: [
                           collabTranscriptEntrySchema,
@@ -2125,6 +2155,7 @@ export function buildOpenApiSpec(serverUrl: string) {
                       max_iterations: { type: "integer" },
                       next_actor: { type: ["string", "null"], enum: ["chatgpt", "claude", null] },
                       user_visible: { type: "string" },
+                      continue_command: collabContinueCommandSchema,
                       saved_turn: {
                         oneOf: [
                           {
@@ -2900,6 +2931,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
     const lastMessage = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
 
     if (!claim) {
+      const continueCommand = buildFirstTurnContinueCommand(task);
       logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/collab/continue",
@@ -2923,7 +2955,8 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         iteration: task.iteration,
         max_iterations: task.maxIterations,
         next_actor: nextActor,
-        user_visible: `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`,
+        user_visible: appendContinueCommand(`Task ${task.id} is waiting on ${nextActor ?? "completion"}.`, continueCommand),
+        continue_command: continueCommand,
         last_message: lastMessage,
         recent_transcript: task.transcript.slice(-6),
         fallback_context: buildTurnFallbackContext(task, "chatgpt"),
@@ -2935,6 +2968,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       auth.authMode !== "oauth" || hasRequiredScopes(auth.scopes ?? [], ["collab:write"]);
 
     if (!body.draft_output || body.draft_output.trim().length === 0) {
+      const continueCommand = buildFirstTurnContinueCommand(task);
       logChatGptActionAsync({
         auth: req.authContext,
         method: "chatgpt/collab/continue",
@@ -2959,7 +2993,8 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         iteration: task.iteration,
         max_iterations: task.maxIterations,
         next_actor: nextActor,
-        user_visible: `It's your turn on task ${task.id}. Draft the output, then call collab_continue again with draft_output.`,
+        user_visible: appendContinueCommand(`It's your turn on task ${task.id}. Draft the output, then call collab_continue again with draft_output.`, continueCommand),
+        continue_command: continueCommand,
         last_message: lastMessage,
         recent_transcript: task.transcript.slice(-6),
         fallback_context: buildTurnFallbackContext(task, "chatgpt"),
@@ -2980,6 +3015,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
 
     const submittedTask = await submitTurn(task.id, "chatgpt", body.draft_output, auth, { markDone: body.mark_done });
     const savedTurn = submittedTask.transcript.length > 0 ? submittedTask.transcript[submittedTask.transcript.length - 1] : null;
+    const continueCommand = buildFirstTurnContinueCommand(submittedTask);
     const nextAfterSubmit = submittedTask.state === "CREATIVE"
       ? "chatgpt"
       : submittedTask.state === "TECHNICAL"
@@ -3013,7 +3049,8 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       iteration: submittedTask.iteration,
       max_iterations: submittedTask.maxIterations,
       next_actor: nextAfterSubmit,
-      user_visible: `Saved ChatGPT turn for task ${submittedTask.id} at iteration ${submittedTask.iteration}.`,
+      user_visible: appendContinueCommand(`Saved ChatGPT turn for task ${submittedTask.id} at iteration ${submittedTask.iteration}.`, continueCommand),
+      continue_command: continueCommand,
       saved_turn: savedTurn
         ? {
             actor: savedTurn.actor,
@@ -3083,6 +3120,7 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
       auth
     );
 
+    const continueCommand = buildFirstTurnContinueCommand(task);
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/collab/create-task",
@@ -3105,7 +3143,8 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
       state: task.state,
       iteration: task.iteration,
       max_iterations: task.maxIterations,
-      user_visible: `Created collab task ${task.id} (${task.title}).`,
+      user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}).`, continueCommand),
+      continue_command: continueCommand,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -3142,6 +3181,7 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       : null;
 
     const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+    const continueCommand = buildFirstTurnContinueCommand(task);
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/collab/run-turn",
@@ -3165,9 +3205,10 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       iteration: task.iteration,
       max_iterations: task.maxIterations,
       next_actor: nextActor,
-      user_visible: claim
+      user_visible: appendContinueCommand(claim
         ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}).`
-        : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`,
+        : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`, continueCommand),
+      continue_command: continueCommand,
       last_message: lastMessage,
       recent_transcript: task.transcript.slice(-6),
       context: task.context,
@@ -3199,6 +3240,7 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
     const task = await submitTurn(body.task_id, "chatgpt", body.content, auth, { markDone: body.mark_done });
     const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
     const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
+    const continueCommand = buildFirstTurnContinueCommand(task);
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/collab/submit-turn",
@@ -3222,7 +3264,8 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
       iteration: task.iteration,
       max_iterations: task.maxIterations,
       next_actor: nextActor,
-      user_visible: `Saved ChatGPT turn for task ${task.id} at iteration ${task.iteration}.`,
+      user_visible: appendContinueCommand(`Saved ChatGPT turn for task ${task.id} at iteration ${task.iteration}.`, continueCommand),
+      continue_command: continueCommand,
       saved_turn: savedTurn
         ? {
             actor: savedTurn.actor,

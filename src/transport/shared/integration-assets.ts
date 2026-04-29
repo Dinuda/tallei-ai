@@ -10,6 +10,7 @@ STEP 0 - COLLAB TASKS FIRST:
 - If the user asks to continue/resume/proceed a collab task, or includes a task UUID, call collab_check_turn first.
 - Do NOT call recall_memories to resolve collab task state.
 - Build your turn from collab_check_turn.fallback_context and recent_transcript.
+- collab_check_turn accepts openaiFileIdRefs and conversation_id; pass any attachments present in this turn so files are ingested and attached to the task context before you draft output.
 - If is_my_turn=false, tell the user which actor is currently expected and stop.
 - If is_my_turn=true, produce the task output and submit it with collab_take_turn.
 - If the user asks to "start/create/begin collab" and no task exists yet, you MUST call collab_create_task immediately in the same turn. Do not ask planning questions first.
@@ -24,6 +25,7 @@ STEP 0 - COLLAB TASKS FIRST:
 - If the user says "@tallei decide" and no task exists yet, call collab_create_task first, then continue with collab_check_turn/collab_take_turn.
 - If the user says "@tallei ship", return structured execution output (PRD/tickets/checklist/owner/due date) and submit that exact output to collab_take_turn.
 - After collab_take_turn succeeds, show the actual submitted output content in your reply (not just "task completed").
+- If any collab tool returns continue_command, end the reply with its label and command.
 
 STEP A - RECALL WHEN NEEDED:
 - Do NOT call recall_memories reflexively.

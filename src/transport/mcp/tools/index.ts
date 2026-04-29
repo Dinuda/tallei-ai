@@ -20,6 +20,7 @@ import {
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import {
   attachUploadedFilesToTaskContext,
+  buildFirstTurnContinueCommand,
   buildTurnFallbackContext,
   CollabAttachmentIngestError,
   claimTurn,
@@ -86,6 +87,14 @@ function toJsonToolResult(body: unknown, isError = false): ToolResult {
     content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
     ...(isError ? { isError: true as const } : {}),
   };
+}
+
+function appendContinueCommand(
+  userVisible: string,
+  command: ReturnType<typeof buildFirstTurnContinueCommand>
+): string {
+  if (!command) return userVisible;
+  return `${userVisible}\n\n${command.label}:\n${command.command}`;
 }
 
 function hasCollabWriteScope(auth: AuthContext): boolean {
@@ -232,6 +241,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
 
         const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
         const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
+        const continueCommand = buildFirstTurnContinueCommand(task);
         return toJsonToolResult({
           is_my_turn: Boolean(claimed),
           task_id: task.id,
@@ -240,9 +250,10 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           iteration: task.iteration,
           max_iterations: task.maxIterations,
           next_actor: nextActor,
-          user_visible: claimed
+          user_visible: appendContinueCommand(claimed
             ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}).`
-            : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`,
+            : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`, continueCommand),
+          continue_command: continueCommand,
           brief: task.brief,
           last_chatgpt_entry: lastChatGptEntry,
           recent_transcript: task.transcript.slice(-6),
@@ -291,6 +302,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         const task = await submitCollabTurn(task_id, "claude", content, auth, { markDone: mark_done ?? false });
         const nextActor = task.state === "CREATIVE" ? "chatgpt" : task.state === "TECHNICAL" ? "claude" : null;
         const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
+        const continueCommand = buildFirstTurnContinueCommand(task);
         return toJsonToolResult({
           ok: true,
           task_id: task.id,
@@ -298,7 +310,8 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           iteration: task.iteration,
           max_iterations: task.maxIterations,
           next_actor: nextActor,
-          user_visible: `Saved Claude turn for task ${task.id} at iteration ${task.iteration}.`,
+          user_visible: appendContinueCommand(`Saved Claude turn for task ${task.id} at iteration ${task.iteration}.`, continueCommand),
+          continue_command: continueCommand,
           saved_turn: savedTurn
             ? {
                 actor: savedTurn.actor,
@@ -460,6 +473,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           }
         }
         const task = (parsed.openaiFileIdRefs?.length ? await getCollabTask(createdTask.id, auth) : createdTask) ?? createdTask;
+        const continueCommand = buildFirstTurnContinueCommand(task);
         return toJsonToolResult({
           ok: true,
           task_id: task.id,
@@ -472,7 +486,8 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           fallback_context: buildTurnFallbackContext(task, "claude"),
           preflight_recall: preflightRecall.body,
           ...(uploadSummary ? { upload: uploadSummary } : {}),
-          user_visible: `Created collab task ${task.id} (${task.title}).`,
+          user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}).`, continueCommand),
+          continue_command: continueCommand,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to create collab task";

@@ -34,9 +34,10 @@ Rules:
 16) Never write final reply text before prepare_response completes when you call it.
 17) Answer from contextBlock, inlineDocuments, and replyInstructions.
 18) If replyInstructions asks for a saved-document footer, append it exactly.
-19) Do not call remember separately unless prepare_response explicitly instructs a fallback.
-20) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
-21) Never mention tool calls in user-facing text.`;
+19) If a collab action returns continue_command, end the response with its label and command.
+20) Do not call remember separately unless prepare_response explicitly instructs a fallback.
+21) recall_memories, remember, search_documents, and recall_document are fallback/debug tools. Prefer prepare_response.
+22) Never mention tool calls in user-facing text.`;
 
 function getArgValue(flag) {
   const index = process.argv.indexOf(flag);

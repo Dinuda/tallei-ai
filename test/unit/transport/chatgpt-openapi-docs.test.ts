@@ -23,13 +23,13 @@ test("ChatGPT OpenAPI documents prepare_response as the primary selective action
   const recallDocument = postOperation(spec, "/api/chatgpt/actions/recall_document");
 
   assert.match(prepare.summary ?? "", /PRIMARY ACTION/i);
-  assert.match(prepare.description ?? "", /Call only for prior context/i);
-  assert.match(prepare.description ?? "", /durable facts\/opinions\/preferences\/goals\/decisions/i);
-  assert.match(prepare.description ?? "", /visible chat is enough/i);
+  assert.match(prepare.description ?? "", /Call every turn/i);
+  assert.match(prepare.description ?? "", /openaiFileIdRefs/i);
+  assert.match(prepare.description ?? "", /visible attachments/i);
   assert.equal(prepare.requestBody?.required, true);
   assert.deepEqual(
     prepare.requestBody?.content?.["application/json"]?.schema?.required,
-    ["message"]
+    ["message", "openaiFileIdRefs"]
   );
   assert.match(recall.summary ?? "", /Fallback/i);
   assert.match(recall.description ?? "", /prepare_response/i);
@@ -40,8 +40,8 @@ test("ChatGPT OpenAPI documents prepare_response as the primary selective action
   assert.match(remember.summary ?? "", /Fallback/i);
   assert.match(remember.description ?? "", /prepare_response/i);
   assert.match(recallDocument.description ?? "", /full document text/i);
-  assert.match(spec.info.description ?? "", /Visible-chat-first contract/i);
-  assert.match(spec.info.description ?? "", /durable facts\/opinions\/preferences\/goals\/decisions/i);
+  assert.match(spec.info.description ?? "", /prepare_response on every turn/i);
+  assert.match(spec.info.description ?? "", /openaiFileIdRefs/i);
 });
 
 test("ChatGPT OpenAPI operation descriptions stay within provider limits", () => {

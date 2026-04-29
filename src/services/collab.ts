@@ -309,6 +309,25 @@ function actorWaitingForState(state: CollabState): CollabModelActor | null {
   return null;
 }
 
+export interface CollabContinueCommand {
+  target_actor: CollabModelActor;
+  command: string;
+  label: string;
+}
+
+export function buildFirstTurnContinueCommand(task: CollabTask): CollabContinueCommand | null {
+  if (task.iteration > 1) return null;
+  const targetActor = actorWaitingForState(task.state);
+  if (!targetActor) return null;
+  return {
+    target_actor: targetActor,
+    command: targetActor === "chatgpt"
+      ? `[COLLAB:CONTINUE:${task.id}] continue collab task ${task.id}`
+      : `continue collab task ${task.id}`,
+    label: `Continue in ${targetActor === "chatgpt" ? "ChatGPT" : "Claude"}`,
+  };
+}
+
 function normalizeMaxIterations(value?: number): number {
   if (!Number.isFinite(value)) return 4;
   const normalized = Math.trunc(value as number);
