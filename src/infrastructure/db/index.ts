@@ -1104,10 +1104,7 @@ export async function initDb() {
           rotation_expires_at = EXCLUDED.rotation_expires_at,
           updated_at = NOW();
 
-        IF NOT FOUND THEN
-          DELETE FROM api_key_context_cache
-          WHERE key_hash = p_key_hash;
-        END IF;
+        -- Intentionally retain cache rows when source key is missing.
       END;
       $$;
     `);
@@ -1128,13 +1125,7 @@ export async function initDb() {
           PERFORM refresh_api_key_context_cache_by_hash(key_row.key_hash);
         END LOOP;
 
-        DELETE FROM api_key_context_cache c
-        WHERE c.user_id = p_user_id
-          AND NOT EXISTS (
-            SELECT 1
-            FROM api_keys ak
-            WHERE ak.key_hash = c.key_hash
-          );
+        -- Intentionally retain cache rows even when matching keys no longer exist.
       END;
       $$;
     `);
@@ -1158,17 +1149,7 @@ export async function initDb() {
           PERFORM refresh_api_key_context_cache_by_hash(key_row.key_hash);
         END LOOP;
 
-        DELETE FROM api_key_context_cache c
-        WHERE c.tenant_id = p_tenant_id
-          AND NOT EXISTS (
-            SELECT 1
-            FROM api_keys ak
-            LEFT JOIN tenant_memberships tm
-              ON tm.user_id = ak.user_id
-             AND ak.tenant_id IS NULL
-            WHERE ak.key_hash = c.key_hash
-              AND COALESCE(ak.tenant_id, tm.tenant_id) = p_tenant_id
-          );
+        -- Intentionally retain cache rows even when source rows are missing.
       END;
       $$;
     `);
@@ -1305,28 +1286,10 @@ export async function initDb() {
         updated_at = NOW();
     `);
 
-    await client.query(`
-      DELETE FROM api_key_context_cache c
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM api_keys ak
-        WHERE ak.key_hash = c.key_hash
-      );
-    `);
+    // Intentionally do not delete from api_key_context_cache during migration.
 
     // #13 + #9: Hash-only token storage + family-based rotation
-    // One-time migration: clear plaintext tokens before adding new columns.
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'oauth_tokens' AND column_name = 'token_family_id'
-        ) THEN
-          DELETE FROM oauth_tokens;
-        END IF;
-      END $$;
-    `);
+    // Intentionally preserve existing oauth_tokens.
     await client.query(`
       ALTER TABLE oauth_tokens
         ADD COLUMN IF NOT EXISTS token_family_id UUID,
@@ -1345,21 +1308,10 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_jwt_revocations_expires
         ON jwt_revocations(expires_at);
     `);
-    await client.query(`DELETE FROM jwt_revocations WHERE expires_at < NOW()`);
+    // Intentionally preserve existing jwt_revocations.
 
     // #10: HMAC-pepper for API key hashes
-    // One-time migration: clear old bare-SHA-256 keys before switching to HMAC.
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'api_keys' AND column_name = 'pepper_version'
-        ) THEN
-          DELETE FROM api_keys;
-        END IF;
-      END $$;
-    `);
+    // Intentionally preserve existing api_keys.
     await client.query(`
       ALTER TABLE api_keys
         ADD COLUMN IF NOT EXISTS pepper_version TEXT NOT NULL DEFAULT 'v1';
