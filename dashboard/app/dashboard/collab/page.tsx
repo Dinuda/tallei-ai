@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, RefreshCw, ArrowRight } from "lucide-react";
+import { RefreshCw, ArrowRight } from "lucide-react";
 
 import { EmptyCollectionState } from "../components/empty-collection-state";
 import styles from "./page.module.css";
@@ -78,6 +78,8 @@ const STATE_CONFIG: Record<CollabState, { label: string; bg: string; border: str
     text: "var(--status-error-text)",
   },
 };
+
+const COLLAB_EMPTY_IMAGE = "/collab-i.png";
 
 const ORCHESTRATION_CONFIG: Record<OrchestrationStatus, { label: string; bg: string; border: string; text: string }> = {
   DRAFT: { label: "Draft", bg: "#f8fafc", border: "#cbd5e1", text: "#334155" },
@@ -198,10 +200,7 @@ export default function CollabTasksPage() {
             <RefreshCw size={14} className={refreshing ? styles.spin : ""} />
             Refresh
           </button>
-          <Link className={styles.primaryBtn} href="/dashboard/tasks/new">
-            <Plus size={16} />
-            New Task
-          </Link>
+
         </div>
       </header>
 
@@ -371,16 +370,8 @@ export default function CollabTasksPage() {
         <EmptyCollectionState
           title="No collab tasks yet"
           description="Create a task to start ChatGPT ↔ Claude turn-taking with live transcript updates."
-          actionLabel="Start your first collab"
-          actionHref="/dashboard/tasks/new"
           illustration="default"
-          actionIcon={
-            <svg width="18" height="18" viewBox="0 0 15 15" fill="none" aria-hidden>
-              <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.2" />
-              <circle cx="10.8" cy="10.8" r="1.7" stroke="currentColor" strokeWidth="1.2" />
-              <path d="M5.8 5.3 9.2 8.7M9.2 5.3 5.8 8.7" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-            </svg>
-          }
+          imageSrc={COLLAB_EMPTY_IMAGE || undefined}
         />
       )}
     </div>

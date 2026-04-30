@@ -3,6 +3,7 @@ export default function Head() {
     <>
       <link rel="preload" href="/memory-i.png" as="image" type="image/png" />
       <link rel="preload" href="/document-i.png" as="image" type="image/png" />
+      <link rel="preload" href="/collab-i.png" as="image" type="image/png" />
     </>
   );
 }
