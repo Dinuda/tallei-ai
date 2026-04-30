@@ -2,6 +2,10 @@ import { assertUploadThingConfigured } from "../../infrastructure/storage/upload
 import type { AuthContext } from "../../domain/auth/index.js";
 import { recallMemories, saveMemory, savePreference } from "../../services/memory.js";
 import {
+  listRecentCollabTasks,
+  getCollabTaskContentForContext,
+} from "../../services/collab.js";
+import {
   stashDocument,
   stashDocumentNote,
   recallDocument,
@@ -9,6 +13,7 @@ import {
   deleteDocumentByRef,
   recentDocumentBriefs,
   documentBriefsByRefs,
+  findLastConversationCheckpoint,
 } from "../../services/documents.js";
 import {
   ingestUploadedFileToDocument,
@@ -27,11 +32,11 @@ import { runAsyncSafe } from "../../shared/async-safe.js";
 import { config } from "../../config/index.js";
 import { setRequestTimingField } from "../../observability/request-timing.js";
 
-export type MemoryTypeInput = "preference" | "fact" | "event" | "decision" | "note" | "lesson" | "failure";
-export type RememberKindInput = "fact" | "preference" | "document-note" | "document-blob";
+export type MemoryTypeInput = "preference" | "fact" | "event" | "decision" | "note" | "lesson" | "failure" | "checkpoint";
+export type RememberKindInput = "fact" | "preference" | "document-note" | "document-blob" | "checkpoint";
 
 export type PrepareResponseSaveCandidate = {
-  kind: "fact" | "preference" | "document-note";
+  kind: "fact" | "preference" | "document-note" | "checkpoint";
   content?: string;
   title?: string;
   key_points?: string[];
@@ -39,6 +44,11 @@ export type PrepareResponseSaveCandidate = {
   source_hint?: string;
   category?: string;
   preference_key?: string;
+};
+
+export type PrepareResponseConversationMessage = {
+  role?: "user" | "assistant" | "system" | "tool";
+  content: string;
 };
 
 export type PrepareResponseIntent = {
@@ -51,9 +61,12 @@ export type PrepareResponseIntent = {
 
 const RECALL_MATCHED_DOCS_TIMEOUT_MS = 2_200;
 const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
+const RECALL_MATCHED_DOCS_FETCH_LIMIT = 12;
 const INLINE_DOCUMENT_MAX_CHARS = 4_000;
 const DOC_BRIEF_PREVIEW_MAX_CHARS = 200;
 const MEMORY_TEXT_MAX_CHARS = 600;
+const CONVERSATION_HISTORY_MAX_MESSAGES = 40;
+const CONVERSATION_HISTORY_MAX_CHARS = 20_000;
 
 function collectUnsupportedFileErrors(openaiFileIdRefs: OpenAiFileRef[]): Array<{ file_id: string; filename: string; error: string }> {
   const errors: Array<{ file_id: string; filename: string; error: string }> = [];
@@ -143,6 +156,59 @@ function trimDocBriefForResponse<T extends { preview?: string; blob?: unknown }>
     return rest as Omit<T, "blob">;
   }
   return { ...rest, preview: `${(rest.preview as string).slice(0, DOC_BRIEF_PREVIEW_MAX_CHARS)}…` } as Omit<T, "blob">;
+}
+
+function extractTaskIdFromCollabMemory(text: string): string | null {
+  const match = text.match(/^Collab Task ([a-f0-9-]+)/im);
+  return match?.[1] ?? null;
+}
+
+async function fetchRecentCollabTasks(
+  auth: AuthContext,
+  query: string
+): Promise<Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>> {
+  const directTasks = await listRecentCollabTasks(auth, 4);
+  const result: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }> = directTasks.map((task) => ({
+    id: task.id,
+    title: task.title,
+    state: task.state,
+    summary: `Collab Task ${task.id}\nTitle: ${task.title}${task.brief ? `\nBrief: ${task.brief}` : ""}\nState: ${task.state}\nProgress: iteration ${task.iteration}`,
+
+    source: "direct",
+  }));
+
+  if (result.length >= 4) return result;
+
+  try {
+    const recalled = await recallMemories(query, auth, 4 - result.length, undefined, { types: ["collab"] });
+    const seenIds = new Set(result.map((d) => d.id));
+    for (const memory of recalled.memories) {
+      const text = typeof memory.text === "string" ? memory.text : "";
+      const id = extractTaskIdFromCollabMemory(text);
+      const key = id ?? text.slice(0, 80);
+      if (seenIds.has(key)) continue;
+      seenIds.add(key);
+      result.push({
+        id: id ?? "unknown",
+        title: "Collab summary",
+        state: "unknown",
+        summary: text,
+        source: "vector",
+      });
+      if (result.length >= 4) break;
+    }
+  } catch {
+    // ignore vector search failures
+  }
+
+  return result;
+}
+
+function detectFocusedCollabTaskId(message: string): string | null {
+  const explicitMatch = message.match(/\b(?:continue|resume|proceed|task)\s+(?:collab\s+)?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b/i);
+  if (explicitMatch) return explicitMatch[1];
+  const standaloneMatch = message.match(/\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b/i);
+  return standaloneMatch?.[1] ?? null;
 }
 
 function buildContextBlockWithDocuments(
@@ -237,6 +303,7 @@ export type RecallActionResult =
       autoSaveNotice?: string;
       autoSaveErrors?: Array<{ file_id: string; filename: string; error: string }>;
       conflictHints?: ConflictHint[];
+      recentCollabTasks?: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>;
     };
   }
   | {
@@ -278,7 +345,7 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
 
   const matchedDocumentsPromise = matchedDocsEnabled
     ? withSoftTimeout(
-      searchDocuments(input.query, auth, 3).catch(() => []),
+      searchDocuments(input.query, auth, RECALL_MATCHED_DOCS_FETCH_LIMIT).catch(() => []),
       RECALL_MATCHED_DOCS_TIMEOUT_MS,
       []
     )
@@ -304,15 +371,19 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
   ]);
 
   const queryExtractedRefs = Array.from(input.query.matchAll(/@(?:doc|lot):[a-z0-9_-]+/gi), (m) => m[0]);
-  // Deduplicate matched docs by title to avoid fetching the same document multiple times
-  // (e.g. when a user uploads the same file under different refs)
-  const seenTitles = new Set<string>();
+  // Deduplicate matched docs before truncating so repeated uploads don't crowd out
+  // other relevant files in context.
+  const seenDocKeys = new Set<string>();
   const deduplicatedMatchedDocs = matchedDocuments.filter((doc) => {
-    const key = doc.title.trim().toLowerCase();
-    if (seenTitles.has(key)) return false;
-    seenTitles.add(key);
+    const normalizedTitle = doc.title.trim().toLowerCase();
+    const normalizedPreview = doc.preview.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 120);
+    const key = normalizedTitle
+      ? `${normalizedTitle}::${normalizedPreview}`
+      : doc.ref.trim().toLowerCase();
+    if (seenDocKeys.has(key)) return false;
+    seenDocKeys.add(key);
     return true;
-  });
+  }).slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT);
   const matchedRefs = deduplicatedMatchedDocs.slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT).map((doc) => doc.ref);
   const inlineCandidateRefs = [...new Set([...queryExtractedRefs, ...matchedRefs])];
 
@@ -352,6 +423,8 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
     autoSaveErrors.push(...errors);
   }
 
+  const recentCollabTasks = await fetchRecentCollabTasks(auth, input.query);
+
   if (uploadedFiles.length > 0 && autoSaveErrors.length > 0) {
     return {
       status: 422,
@@ -376,9 +449,10 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
       ),
       memories: result.memories.map(sanitizeMemoryForResponse),
       recentDocuments: recentDocuments.map(trimDocBriefForResponse),
-      matchedDocuments,
+      matchedDocuments: deduplicatedMatchedDocs,
       referencedDocuments,
       recentCompletedIngests,
+      recentCollabTasks,
       autoSave: {
         requested: uploadedFiles.length,
         complete: autoSaveErrors.length === 0,
@@ -408,6 +482,27 @@ export interface RememberActionInput {
   openaiFileIdRefs?: OpenAiFileRef[];
   conversation_id?: string | null;
   runVectorDedup?: boolean;
+}
+
+function buildDocumentNoteMemoryContent(input: RememberActionInput): string {
+  const lines: string[] = [];
+  const title = input.title?.trim();
+  const summary = input.summary?.trim();
+  const content = input.content?.trim();
+  const keyPoints = (input.key_points ?? []).map((point) => point.trim()).filter(Boolean);
+  const sourceHint = input.source_hint?.trim();
+
+  if (title) lines.push(`Title: ${title}`);
+  if (summary) lines.push(`Summary: ${summary}`);
+  if (keyPoints.length > 0) {
+    lines.push("Key points:");
+    lines.push(...keyPoints.map((point) => `- ${point}`));
+  }
+  if (content) lines.push(`Content: ${content}`);
+  if (sourceHint) lines.push(`Source: ${sourceHint}`);
+
+  const note = lines.join("\n").trim();
+  return note || "Untitled note";
 }
 
 export async function executeRememberAction(auth: AuthContext, input: RememberActionInput): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -443,6 +538,7 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
       filename: string | null;
       type: "note" | "blob";
       conversation_id: string | null;
+      memoryId?: string;
       blob: { provider: "uploadthing"; key: string; url: string; source_file_id: string } | null;
     }> = [];
     const fileErrors: Array<{ file_id: string; filename: string; error: string }> = [];
@@ -450,16 +546,20 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
     for (const fileRef of uploadedFiles) {
       try {
         if (input.kind === "document-note") {
+          const noteTitle = input.title ?? fileRef.name ?? "Uploaded Document";
           const noteResult = await stashDocumentNote({
-            title: input.title ?? fileRef.name ?? "Uploaded Document",
+            title: noteTitle,
             key_points: input.key_points ?? [],
-            summary: input.summary ?? "",
-            source_hint: input.source_hint ?? `Uploaded via ChatGPT — ${fileRef.name || fileRef.id}`,
-          }, auth, { conversationId: input.conversation_id ?? null });
+            summary: input.summary ?? input.content ?? `Uploaded via ChatGPT - ${fileRef.name || fileRef.id}`,
+            source_hint: input.source_hint ?? `Uploaded via ChatGPT - ${fileRef.name || fileRef.id}`,
+            category: input.category ?? "other",
+          }, auth, {
+            conversationId: input.conversation_id ?? null,
+          });
           savedFromFiles.push({
             ref: noteResult.refHandle,
-            status: noteResult.status,
-            title: input.title ?? fileRef.name ?? "Uploaded Document",
+            status: "ready",
+            title: noteTitle,
             filename: fileRef.name ?? null,
             type: "note",
             conversation_id: input.conversation_id ?? null,
@@ -574,13 +674,21 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
   }
 
   if (input.kind === "document-note") {
-    const saved = await stashDocumentNote({
-      title: input.title ?? "Untitled Note",
-      key_points: input.key_points ?? [],
-      summary: input.summary ?? "",
-      source_hint: input.source_hint ?? "",
-    }, auth, { conversationId: input.conversation_id ?? null });
-
+    const saved = input.content
+      ? await stashDocument(input.content, auth, {
+        title: input.title ?? input.summary ?? "Document note",
+        conversationId: input.conversation_id ?? null,
+        mimeType: "text/markdown",
+      })
+      : await stashDocumentNote({
+        title: input.title ?? "Document note",
+        key_points: input.key_points ?? [],
+        summary: input.summary ?? buildDocumentNoteMemoryContent(input),
+        source_hint: input.source_hint ?? "Saved from chat",
+        category: input.category ?? "other",
+      }, auth, {
+        conversationId: input.conversation_id ?? null,
+      });
     return {
       status: 200,
       body: {
@@ -588,8 +696,29 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
         kind: input.kind,
         ref: saved.refHandle,
         status: saved.status,
+        title: input.title ?? null,
+        summary: input.summary ?? null,
         conversation_id: input.conversation_id ?? null,
-        blob: null,
+      },
+    };
+  }
+
+  if (input.kind === "checkpoint") {
+    if (!input.content) return { status: 400, body: { error: "content is required for kind=checkpoint" } };
+    const saved = await saveMemory(input.content, auth, input.platform ?? "chatgpt", undefined, {
+      memoryType: "checkpoint",
+      category: input.category ?? null,
+      runFactExtraction: false,
+      runVectorDedup: input.runVectorDedup,
+    });
+    return {
+      status: 200,
+      body: {
+        success: true,
+        kind: input.kind,
+        memoryId: saved.memoryId,
+        title: saved.title,
+        summary: saved.summary,
       },
     };
   }
@@ -699,6 +828,8 @@ export async function executeRecallDocumentAction(auth: AuthContext, ref: string
 export interface PrepareResponseActionInput {
   message: string;
   conversation_id?: string | null;
+  conversation_history?: PrepareResponseConversationMessage[];
+  handoff_target?: "claude" | "chatgpt" | null;
   openaiFileIdRefs?: OpenAiFileRef[];
   last_recall?: {
     query?: string;
@@ -721,6 +852,8 @@ export interface PrepareResponseActionResult {
     memories: unknown[];
     recentDocuments: unknown[];
     matchedDocuments: unknown[];
+    referencedDocuments: unknown[];
+    recentCompletedIngests: unknown[];
     inlineDocuments: Array<{ ref: string; title: string | null; content: string }>;
     queuedSaves: QueuedPrepareSave[];
     autoSave: {
@@ -731,6 +864,8 @@ export interface PrepareResponseActionResult {
     };
     replyInstructions: string[];
     intent: PrepareResponseIntent;
+    recentCollabTasks?: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>;
+    focusedCollabContext?: string | null;
   };
 }
 
@@ -740,6 +875,7 @@ type PrepareResponseDependencies = {
   rememberAction?: typeof executeRememberAction;
   recallDocumentAction?: typeof executeRecallDocumentAction;
   enqueueSave?: (task: () => Promise<void>, label: string) => void;
+  platform?: "claude" | "chatgpt" | "gemini" | "other";
 };
 
 type FastIntentDecision = {
@@ -776,13 +912,26 @@ needsDocumentLookup boolean,
 reusePreviousContext boolean,
 contextDependent boolean,
 saveCandidates array.
+
+COLLAB STAGE TAGS — check first, they override normal classification:
+If message starts with [COLLAB:CONTINUE:...] or [COLLAB:MY_TURN:...]:
+  return { needsRecall: false, needsDocumentLookup: false, reusePreviousContext: true, contextDependent: false, saveCandidates: [] }.
+If message starts with [COLLAB:CREATE]:
+  return { needsRecall: true, needsDocumentLookup: true, reusePreviousContext: false, contextDependent: true, saveCandidates: [] }
+  unless the remainder of the message contains durable facts or preferences — save those only.
+
+NORMAL CLASSIFICATION (no collab tag):
 saveCandidates items have kind fact|preference|document-note and concise content/title/summary/key_points/source_hint/category/preference_key when relevant.
-Mark durable facts, preferences, goals, decisions, corrections, beliefs, opinions, stances, frustrations, and important notes worth remembering.
+Save any reusable information: facts, preferences, goals, decisions, corrections, beliefs, opinions, stances, frustrations, instructions, plans, reusable debugging context, project details, notes, and reference material.
+If the information is reusable but does not fit fact or preference, use kind=document-note and category="other".
+If the user explicitly asks to save, remember, note, store, or keep something, ALWAYS return at least one saveCandidates item. If no better type fits, use kind=document-note and category="other".
 Treat first-person age statements as durable facts; e.g. "I'm currently 19" should save "User is 19 years old."
 Save subjective stances as neutral facts about the user, not objective claims about the world.
 Sanitize insults, slurs, profanity, and obvious typos instead of storing the user's wording verbatim.
 Example: if the user says they think Sri Lanka's government must better manage civic behavior and insults people, save a fact like "User is frustrated with governance in Sri Lanka and believes the government should manage civic behavior more effectively."
-Use document-note for pasted important structured content, specs, transcripts, lists, or notes.`;
+Use document-note for pasted important structured content, specs, transcripts, lists, notes, and technical debugging context.
+Always create a document-note for visible or pasted API/error diagnostics that include request details, response status, error JSON, stack traces, SQL/database error codes, provider errors, or screenshot summaries of failed requests, even when the user is only asking what the error means.
+CHECKPOINT TRIGGERS: If the user message is "save", "save this", "remember this", "checkpoint", or similar, return needsRecall=false and include a document-note save candidate if conversation_history is available; if conversation_history is missing, still save a document-note with category="other" describing the explicit save request.`;
 
 function toBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
@@ -871,10 +1020,70 @@ export function prepareResponseClassifierModel(): string {
   return config.intentClassifierModel;
 }
 
+function countTechnicalDebugSignals(message: string): number {
+  return [
+    /\b(?:GET|POST|PUT|PATCH|DELETE)(?:\s+request\s+to|\s+request\s+for)?\s+\/api\//i,
+    /\b(?:Response(?:\s+shown)?\s+(?:is\s+)?(?:HTTP\s+)?)?(?:4|5)\d\d\s+(?:Internal Server Error|Bad Request|Unauthorized|Forbidden|Not Found|Conflict|Unprocessable|Server Error)\b/i,
+    /\bHTTP\s+(?:4|5)\d\d\b/i,
+    /\b(?:Request|JSON)\s+body\s+(?:includes|is|:)\s*\{?/i,
+    /\bwith\s+body\s+\{|\bwith\s+JSON\s+\{/i,
+    /"code"\s*:\s*"[0-9A-Z]{5}"/i,
+    /"error"\s*:\s*"[^"]+"/i,
+    /\broot cause\b/i,
+    /\bSQLSTATE\b/i,
+  ].filter((pattern) => pattern.test(message)).length;
+}
+
+function extractExplicitSaveContent(message: string): string | null {
+  const trimmed = message.trim();
+  const match = trimmed.match(/^(?:please\s+)?(?:save|remember|note|store|keep)(?:\s+(?:this|that|it|this\s+info|this\s+information|the\s+following|for\s+later))?(?:\s*[:\-]\s*|\s+)([\s\S]+)$/i);
+  const content = match?.[1]?.trim();
+  if (!content || /^(?:this|that|it|conversation|chat|thread)[.!?\s]*$/i.test(content)) return null;
+  return content.length > 2_000 ? content.slice(0, 2_000) : content;
+}
+
+function hasExplicitSaveRequest(message: string): boolean {
+  return /^(?:please\s+)?(?:save|remember|note|store|keep)\b/i.test(message.trim())
+    || isExplicitSaveCommand(message);
+}
+
+function buildExplicitSaveFallbackCandidate(message: string): PrepareResponseSaveCandidate {
+  const content = extractExplicitSaveContent(message);
+  return {
+    kind: "document-note",
+    title: "Explicit save request",
+    summary: content
+      ? "Reusable information explicitly requested to be saved."
+      : "User explicitly asked to save this turn, but no additional content was provided.",
+    source_hint: "ChatGPT explicit save request",
+    category: "other",
+    content: content ?? message.trim(),
+  };
+}
+
 function buildGuardrailSaveCandidates(message: string): PrepareResponseSaveCandidate[] {
   const normalized = message.replace(/\s+/g, " ").trim();
   const normalizedWords = normalized.replace(/[?.,;:!]+/g, " ");
   const candidates: PrepareResponseSaveCandidate[] = [];
+
+  const explicitSaveContent = extractExplicitSaveContent(normalized);
+  if (explicitSaveContent) {
+    candidates.push(buildExplicitSaveFallbackCandidate(normalized));
+  }
+
+  if (countTechnicalDebugSignals(normalized) >= 2) {
+    candidates.push({
+      kind: "document-note",
+      title: "API error investigation details",
+      summary: "Structured API/database error context provided for later troubleshooting.",
+      source_hint: "ChatGPT visible technical debugging context",
+      key_points: [
+        "Includes request/response details for an API failure.",
+        "Keep available as debugging context for root cause analysis.",
+      ],
+      content: normalized.length > 2_000 ? normalized.slice(0, 2_000) : normalized,
+    });
+  }
 
   const userAgeMatch = normalizedWords.match(/\b(?:i\s+am|i\s*['\u2019]?\s*m|im)\s+(?:currently\s+|now\s+)?(\d{1,2})(?:\s+(?:years?\s+old|y\/?o))?\b/i)
     ?? normalizedWords.match(/\b(?:currently|now)\s+(\d{1,2})(?:\s+(?:years?\s+old|y\/?o))?\b/i);
@@ -902,15 +1111,27 @@ function buildGuardrailSaveCandidates(message: string): PrepareResponseSaveCandi
     }
   }
 
-  if (!/\b(i|we)\s+(really\s+)?(think|believe|feel|reckon|wish|want|prefer|hate|love|am frustrated|am worried)\b/i.test(normalized)) {
+  if (!/\b(i|we)\s+(really\s+)?(think|believe|feel|reckon|wish|want|prefer|like|hate|love|am frustrated|am worried)\b/i.test(normalized)) {
     return candidates;
   }
 
-  const preferenceMatch = normalized.match(/\b(?:i|we)\s+(?:really\s+)?prefer\s+(.+?)[.!?]?$/i);
+  const preferenceMatch = normalized.match(/\b(?:i|we)\s+(?:really\s+)?(?:prefer|like|love)\s+(.+?)[.!?]?$/i);
   if (preferenceMatch?.[1]) {
+    const preference = preferenceMatch[1]
+      .trim()
+      .replace(/[.!?]+$/, "")
+      .replace(/\bno\s+bullshit\b/gi, "no-nonsense")
+      .replace(/\bbullshit\b/gi, "unfiltered")
+      .replace(/\bexplainatiions\b/gi, "explanations")
+      .replace(/\bexplainations\b/gi, "explanations")
+      .replace(/\bemojis?\b/gi, "emoji")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!preference) return candidates;
     candidates.push({
       kind: "preference",
-      content: `User prefers ${preferenceMatch[1].trim().replace(/[.!?]+$/, "")}.`,
+      content: `User prefers ${preference}.`,
+      category: "communication",
     });
     return candidates;
   }
@@ -955,12 +1176,132 @@ function mergeGuardrailSaveCandidates(
   return merged;
 }
 
+function normalizeConversationHistory(
+  history: PrepareResponseConversationMessage[] | undefined
+): PrepareResponseConversationMessage[] {
+  if (!Array.isArray(history)) return [];
+  return history
+    .flatMap((entry): PrepareResponseConversationMessage[] => {
+      if (!entry || typeof entry !== "object") return [];
+      const role = entry.role === "assistant" || entry.role === "system" || entry.role === "tool" ? entry.role : "user";
+      const content = typeof entry.content === "string" ? entry.content.trim() : "";
+      if (!content) return [];
+      return [{ role, content }];
+    })
+    .slice(-CONVERSATION_HISTORY_MAX_MESSAGES);
+}
+
+function formatConversationHistory(history: PrepareResponseConversationMessage[]): string {
+  const formatted = history
+    .map((entry, index) => `${index + 1}. ${entry.role ?? "user"}: ${entry.content}`)
+    .join("\n\n");
+  if (formatted.length <= CONVERSATION_HISTORY_MAX_CHARS) return formatted;
+  return `${formatted.slice(-CONVERSATION_HISTORY_MAX_CHARS)}\n\n[truncated to latest visible history]`;
+}
+
+function inferHandoffTarget(input: PrepareResponseActionInput): "claude" | "chatgpt" | null {
+  if (input.handoff_target === "claude" || input.handoff_target === "chatgpt") return input.handoff_target;
+  const message = input.message.trim();
+  if (/\b(handoff|hand\s*off|send|pass|move|switch|continue)\b.{0,80}\bclaude\b/i.test(message)) return "claude";
+  if (/\b(handoff|hand\s*off|send|pass|move|switch|continue)\b.{0,80}\bchatgpt\b/i.test(message)) return "chatgpt";
+
+  const selectedNumber = message.match(/^\s*(\d{1,2})[.)]?\s*$/)?.[1];
+  if (selectedNumber) {
+    const historyText = normalizeConversationHistory(input.conversation_history)
+      .map((entry) => entry.content)
+      .join("\n")
+      .toLowerCase();
+    const optionPattern = new RegExp(`${selectedNumber}\\s*[.)]\\s*[^\\n]{0,120}(claude|handoff|hand-off|hand off)`, "i");
+    if (optionPattern.test(historyText)) return "claude";
+  }
+
+  return null;
+}
+
+function buildHandoffHistorySaveCandidate(input: PrepareResponseActionInput): PrepareResponseSaveCandidate | null {
+  const target = inferHandoffTarget(input);
+  if (!target) return null;
+  const history = normalizeConversationHistory(input.conversation_history);
+  if (history.length === 0) return null;
+  const content = formatConversationHistory(history);
+  return {
+    kind: "document-note",
+    title: `ChatGPT to ${target === "claude" ? "Claude" : "ChatGPT"} handoff context`,
+    summary: `Visible ChatGPT conversation history captured for ${target} handoff.`,
+    source_hint: "ChatGPT visible conversation history before provider handoff",
+    key_points: [
+      `Target provider: ${target}`,
+      `Captured ${history.length} visible message(s) from the ChatGPT window.`,
+      "Use this as task context before continuing the collab turn.",
+    ],
+    content,
+  };
+}
+
+function isExplicitSaveCommand(message: string): boolean {
+  return /^(save|save this|remember this|checkpoint|save conversation|remember this conversation)[.!?\s]*$/i.test(message.trim());
+}
+
+function hasCheckpointWorthyContent(
+  history: PrepareResponseConversationMessage[] | undefined
+): boolean {
+  if (!Array.isArray(history) || history.length < 2) return false;
+  let assistantChars = 0;
+  let hasStructuredContent = false;
+  for (const entry of history) {
+    if (!entry || typeof entry !== "object") continue;
+    const content = typeof entry.content === "string" ? entry.content : "";
+    if (entry.role === "assistant") {
+      assistantChars += content.length;
+      if (/^(#{1,3}\s|```|\d+\.\s|[-*]\s|>\s)/m.test(content)) {
+        hasStructuredContent = true;
+      }
+    }
+  }
+  return assistantChars > 800 || (assistantChars > 400 && hasStructuredContent);
+}
+
+async function buildConversationCheckpointCandidate(
+  input: PrepareResponseActionInput,
+  auth: AuthContext
+): Promise<PrepareResponseSaveCandidate | null> {
+  const history = normalizeConversationHistory(input.conversation_history);
+  if (history.length === 0) return null;
+
+  const checkpoint = input.conversation_id
+    ? await findLastConversationCheckpoint(auth, input.conversation_id)
+    : null;
+
+  const messagesToInclude = history;
+
+  const transcript = messagesToInclude
+    .map((entry) => `${entry.role?.toUpperCase() ?? "USER"}: ${entry.content}`)
+    .join("\n\n---\n\n");
+
+  const turnCount = messagesToInclude.length;
+  const assistantMessages = messagesToInclude.filter((e) => e.role === "assistant");
+  const checkpointNumber = checkpoint ? " (incremental)" : " (initial)";
+
+  return {
+    kind: "checkpoint",
+    title: `Conversation checkpoint${checkpointNumber}`,
+    summary: `Raw conversation transcript from ${turnCount} message(s)${checkpoint ? ` since checkpoint ${checkpoint.ref}` : ""}.`,
+    source_hint: `conversation_id:${input.conversation_id ?? "unknown"}`,
+    key_points: [
+      `${turnCount} messages captured`,
+      `${assistantMessages.length} assistant response(s)`,
+      checkpoint ? `Previous checkpoint: ${checkpoint.ref}` : "First checkpoint for this conversation",
+    ],
+    content: transcript,
+  };
+}
+
 function isShortLocalReply(message: string): boolean {
   return /^(thanks?|thank you|ok(?:ay)?|cool|great|nice|yes|yeah|yep|no|nope|continue|go on|sounds good|got it|yes,?\s+continue(?:\s+with\s+that)?|yeah,?\s+continue(?:\s+with\s+that)?)[.!?\s]*$/i.test(message.trim());
 }
 
 function hasRecallTrigger(message: string): boolean {
-  return /\b(remember|memory|memories|saved|previous|earlier|before|last time|past context|what did we decide|decision|decided|document|docs?|pdf|upload|file|attachment|catalogue|catalog|product|products|inventory|@doc:|@lot:)\b/i.test(message);
+  return /\b(remember|memory|memories|saved|previous|earlier|before|last time|past context|what did we decide|decision|decided|document|docs?|pdf|uploads?|uploaded|uploading|file|attachment|catalogue|catalog|product|products|inventory|@doc:|@lot:)\b/i.test(message);
 }
 
 function hasDurableSaveTrigger(message: string): boolean {
@@ -974,6 +1315,7 @@ export function fastPrepareResponseIntent(input: PrepareResponseActionInput): Fa
   const hasAttachments = (input.openaiFileIdRefs?.length ?? 0) > 0;
   const explicitRefs = extractRefsFromMessage(message);
   const guardrailCandidates = mergeGuardrailSaveCandidates(message, []);
+  const hasTechnicalDebugContext = countTechnicalDebugSignals(message) >= 2;
 
   if (hasAttachments) {
     return {
@@ -991,13 +1333,69 @@ export function fastPrepareResponseIntent(input: PrepareResponseActionInput): Fa
 
   if (explicitRefs.length > 0 || hasRecallTrigger(message)) {
     return {
-      shouldCallClassifier: false,
+      shouldCallClassifier: guardrailCandidates.length === 0,
       reason: "recall_trigger",
       intent: {
-        needsRecall: true,
+        needsRecall: !hasTechnicalDebugContext || explicitRefs.length > 0,
         needsDocumentLookup: explicitRefs.length > 0 || /\b(document|docs?|pdf|upload|file|attachment|catalogue|catalog|product|products|inventory|@doc:|@lot:)\b/i.test(message),
-        reusePreviousContext: false,
-        contextDependent: true,
+        reusePreviousContext: hasTechnicalDebugContext && explicitRefs.length === 0,
+        contextDependent: !(hasTechnicalDebugContext && explicitRefs.length === 0),
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (inferHandoffTarget(input)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "handoff_history",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (hasExplicitSaveRequest(message)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "explicit_save",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (isExplicitSaveCommand(message)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "explicit_save_checkpoint",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (hasCheckpointWorthyContent(input.conversation_history)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "checkpoint_worthy_content",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
         saveCandidates: guardrailCandidates,
       },
     };
@@ -1047,6 +1445,7 @@ type PrepareRecallBody = {
   recentCompletedIngests: unknown[];
   autoSave: PrepareResponseActionResult["body"]["autoSave"];
   inlineDocuments?: Array<{ ref: string; title: string | null; content: string }>;
+  recentCollabTasks?: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>;
 };
 
 function emptyPrepareRecallBody(): PrepareRecallBody {
@@ -1125,15 +1524,15 @@ function queuePrepareSave(
   auth: AuthContext,
   candidate: PrepareResponseSaveCandidate,
   conversationId: string | null,
-  deps: Required<Pick<PrepareResponseDependencies, "rememberAction" | "enqueueSave">>
+  deps: Required<Pick<PrepareResponseDependencies, "rememberAction" | "enqueueSave" | "platform">>
 ): QueuedPrepareSave | null {
-  if ((candidate.kind === "fact" || candidate.kind === "preference") && !candidate.content) return null;
+  if ((candidate.kind === "fact" || candidate.kind === "preference" || candidate.kind === "checkpoint") && !candidate.content) return null;
   if (candidate.kind === "document-note" && !candidate.summary && !candidate.content && !candidate.title) return null;
 
   deps.enqueueSave(async () => {
     await deps.rememberAction(auth, {
       ...candidate,
-      platform: "chatgpt",
+      platform: deps.platform ?? "chatgpt",
       conversation_id: conversationId,
       runVectorDedup: false,
       content: candidate.kind === "document-note" ? candidate.content ?? candidate.summary : candidate.content,
@@ -1184,6 +1583,14 @@ export async function executePrepareResponseAction(
   if (fastIntent.shouldCallClassifier) {
     try {
       intent = await timed("prepare_classifier_ms", () => classifyIntent(input));
+      if (fastIntent.reason === "recall_trigger") {
+        intent = {
+          ...intent,
+          needsRecall: true,
+          needsDocumentLookup: fastIntent.intent.needsDocumentLookup || intent.needsDocumentLookup,
+          contextDependent: true,
+        };
+      }
     } catch {
       classifierFailed = true;
     }
@@ -1244,14 +1651,62 @@ export async function executePrepareResponseAction(
     setRequestTimingField("prepare_doc_fetch_ms", 0);
   }
 
-  const saveCandidates = mergeGuardrailSaveCandidates(input.message, intent.saveCandidates);
-  const intentForResponse = { ...intent, saveCandidates };
+  const focusedTaskId = detectFocusedCollabTaskId(input.message);
+  let focusedCollabContext: string | null = null;
+  if (focusedTaskId) {
+    try {
+      focusedCollabContext = await timed("prepare_focused_collab_ms", () => getCollabTaskContentForContext(focusedTaskId, auth));
+    } catch {
+      // Invalid task id or DB error; continue without focused collab context.
+      focusedCollabContext = null;
+    }
+  } else {
+    setRequestTimingField("prepare_focused_collab_ms", 0);
+  }
 
+  const handoffHistoryCandidate = buildHandoffHistorySaveCandidate(input);
+  const checkpointCandidate = (isExplicitSaveCommand(input.message.trim()) || hasCheckpointWorthyContent(input.conversation_history))
+    ? await buildConversationCheckpointCandidate(input, auth)
+    : null;
+  const explicitSaveFallbackCandidate = hasExplicitSaveRequest(input.message) && !checkpointCandidate && !extractExplicitSaveContent(input.message)
+    ? buildExplicitSaveFallbackCandidate(input.message)
+    : null;
+  const nonCheckpointCandidates = mergeGuardrailSaveCandidates(input.message, [
+    ...intent.saveCandidates,
+    ...(handoffHistoryCandidate ? [handoffHistoryCandidate] : []),
+    ...(explicitSaveFallbackCandidate ? [explicitSaveFallbackCandidate] : []),
+  ]);
+  const intentForResponse = { ...intent, saveCandidates: [...nonCheckpointCandidates, ...(checkpointCandidate ? [checkpointCandidate] : [])] };
+
+  // Execute checkpoint save SYNCHRONOUSLY so we get the ref immediately
+  let checkpointResult: { saved: boolean; memoryId?: string; error?: string } = { saved: false };
+  if (checkpointCandidate && !classifierFailed) {
+    try {
+      const platform = dependencies.platform ?? "chatgpt";
+      const result = await rememberAction(auth, {
+        ...checkpointCandidate,
+        platform,
+        conversation_id: input.conversation_id ?? null,
+        runVectorDedup: false,
+        content: checkpointCandidate.content ?? checkpointCandidate.summary,
+      });
+      if (result.status >= 400) {
+        checkpointResult = { saved: false, error: (result.body as Record<string, unknown>).error as string || "Checkpoint save failed" };
+      } else {
+        const body = result.body as Record<string, unknown>;
+        checkpointResult = { saved: true, memoryId: (body.memoryId as string) || undefined };
+      }
+    } catch (err) {
+      checkpointResult = { saved: false, error: err instanceof Error ? err.message : "Checkpoint save failed" };
+    }
+  }
+
+  // Queue non-checkpoint saves in the background
   const queueStartedAt = nowMs();
   const queuedSaves = classifierFailed
     ? []
-    : saveCandidates.flatMap((candidate) => {
-      const queued = queuePrepareSave(auth, candidate, input.conversation_id ?? null, { rememberAction, enqueueSave });
+    : nonCheckpointCandidates.flatMap((candidate) => {
+      const queued = queuePrepareSave(auth, candidate, input.conversation_id ?? null, { rememberAction, enqueueSave, platform: dependencies.platform ?? "chatgpt" });
       return queued ? [queued] : [];
     });
   setRequestTimingField("prepare_queue_save_ms", Number((nowMs() - queueStartedAt).toFixed(2)));
@@ -1262,23 +1717,41 @@ export async function executePrepareResponseAction(
     ...(recallBody.autoSave.saved.length > 0
       ? recallBody.autoSave.saved.map((saved) => `End the reply with: Saved: ${saved.ref}`)
       : []),
+    ...(checkpointResult.saved
+      ? ["End the reply with: Saved conversation checkpoint to memories."]
+      : checkpointResult.error
+        ? [`Checkpoint save failed: ${checkpointResult.error}. Do not claim it was saved.`]
+        : []),
     ...(queuedSaves.some((save) => save.kind === "document-note")
       ? ["Document-note saving is queued. Do not add a Saved footer unless autoSave.saved includes a ref."]
       : []),
+    ...(inferHandoffTarget(input) && !handoffHistoryCandidate
+      ? ["Handoff intent detected but conversation_history was missing. Ask the user to retry after ChatGPT sends the visible conversation_history to Tallei."]
+      : []),
   ];
+
+  const baseContextBlock = appendInlineDocsToContext(recallBody.contextBlock, inlineDocuments);
+  const contextBlock = focusedCollabContext
+    ? `--- Focused Collab Task ---\n${focusedCollabContext}\n---\n${baseContextBlock}`
+    : baseContextBlock;
 
   return {
     status,
     body: {
-      contextBlock: appendInlineDocsToContext(recallBody.contextBlock, inlineDocuments),
+      contextBlock,
       memories: recallBody.memories,
       recentDocuments: recallBody.recentDocuments,
       matchedDocuments: recallBody.matchedDocuments,
+      referencedDocuments: recallBody.referencedDocuments,
+      recentCompletedIngests: recallBody.recentCompletedIngests,
       inlineDocuments,
       queuedSaves,
+      checkpoint: checkpointResult.saved ? { memoryId: checkpointResult.memoryId } : checkpointResult.error ? { error: checkpointResult.error } : null,
       autoSave: recallBody.autoSave,
       replyInstructions,
       intent: intentForResponse,
+      recentCollabTasks: recallBody.recentCollabTasks,
+      focusedCollabContext,
     },
   };
 }

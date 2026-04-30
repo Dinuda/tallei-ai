@@ -31,6 +31,8 @@ interface OAuthLocalCacheEntry {
   entry: OAuthCacheEntry;
 }
 
+type EventMetadata = Record<string, unknown>;
+
 const oauthLocalCache = new Map<string, OAuthLocalCacheEntry>();
 
 function tokenCacheKey(token: string): string {
@@ -58,13 +60,17 @@ async function logMcpCallEvent(input: {
   authMode?: "api_key" | "oauth" | "unknown";
   method: string;
   toolName?: string | null;
+  collabTaskId?: string | null;
+  metadata?: EventMetadata | null;
   ok: boolean;
   error?: string | null;
 }): Promise<void> {
   try {
     await pool.query(
-      `INSERT INTO mcp_call_events (tenant_id, user_id, key_id, auth_mode, method, tool_name, ok, error)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO mcp_call_events (
+        tenant_id, user_id, key_id, auth_mode, method, tool_name, collab_task_id, metadata_json, ok, error
+      )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`,
       [
         input.tenantId ?? null,
         input.userId ?? null,
@@ -72,6 +78,8 @@ async function logMcpCallEvent(input: {
         input.authMode ?? "unknown",
         input.method,
         input.toolName ?? null,
+        input.collabTaskId ?? null,
+        JSON.stringify(input.metadata ?? {}),
         input.ok,
         input.error ?? null,
       ]
@@ -94,6 +102,111 @@ function sendUnauthorized(res: any, resourceMetadataUrl: string, message: string
     `Bearer resource_metadata="${resourceMetadataUrl}", error="invalid_token", error_description="${message}"`
   );
   res.status(401).json({ error: message });
+}
+
+function readArgsObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function previewText(value: unknown, max = 400): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  return normalized.slice(0, max);
+}
+
+function collabLogDetails(
+  rpcMethod: string | null,
+  toolName: string | null,
+  body: unknown
+): { collabTaskId: string | null; metadata: EventMetadata | null } {
+  if (rpcMethod !== "tools/call" || !toolName) {
+    return { collabTaskId: null, metadata: null };
+  }
+
+  const payload = readArgsObject(body);
+  const params = readArgsObject(payload["params"]);
+  const args = readArgsObject(params["arguments"]);
+  const taskId = typeof args["task_id"] === "string" ? args["task_id"] : null;
+
+  if (toolName === "collab_take_turn") {
+    const content = previewText(args["content"], 700);
+    const contentLength = typeof args["content"] === "string" ? args["content"].length : null;
+    return {
+      collabTaskId: taskId,
+      metadata: {
+        category: "collab",
+        action: "submit_turn",
+        actor: "claude",
+        content_preview: content,
+        content_length: contentLength,
+      },
+    };
+  }
+
+  if (toolName === "collab_create_task") {
+    return {
+      collabTaskId: taskId,
+      metadata: {
+        category: "collab",
+        action: "create_task",
+        title_preview: previewText(args["title"], 160),
+        first_actor: typeof args["first_actor"] === "string" ? args["first_actor"] : null,
+      },
+    };
+  }
+
+  if (toolName === "collab_check_turn") {
+    return {
+      collabTaskId: taskId,
+      metadata: {
+        category: "collab",
+        action: "check_turn",
+        actor: "claude",
+      },
+    };
+  }
+
+  if (toolName === "orchestrator_start") {
+    return {
+      collabTaskId: null,
+      metadata: {
+        category: "orchestration",
+        action: "start",
+        goal_preview: previewText(args["goal"], 240),
+        first_actor_preference: typeof args["first_actor_preference"] === "string" ? args["first_actor_preference"] : null,
+      },
+    };
+  }
+
+  if (toolName === "orchestrator_answer") {
+    return {
+      collabTaskId: null,
+      metadata: {
+        category: "orchestration",
+        action: "answer",
+        session_id: typeof args["session_id"] === "string" ? args["session_id"] : null,
+        answer_preview: previewText(args["answer"], 240),
+        answers_count: Array.isArray(args["answers"]) ? args["answers"].length : null,
+        auto_continue: typeof args["auto_continue"] === "boolean" ? args["auto_continue"] : null,
+        max_steps: typeof args["max_steps"] === "number" ? args["max_steps"] : null,
+      },
+    };
+  }
+
+  if (toolName === "orchestrator_approve") {
+    return {
+      collabTaskId: null,
+      metadata: {
+        category: "orchestration",
+        action: "approve",
+        session_id: typeof args["session_id"] === "string" ? args["session_id"] : null,
+      },
+    };
+  }
+
+  return { collabTaskId: null, metadata: null };
 }
 
 async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifier): Promise<AuthContext | null> {
@@ -135,22 +248,62 @@ async function authFromOAuthToken(token: string, oauthVerifier: OAuthTokenVerifi
 
 const TALLEI_INSTRUCTIONS = `Tallei stores durable memory across AI tools. Follow these rules on every turn:
 
-1. DON'T RECALL REFLEXIVELY. Only call recall_memories when the user references prior sessions ("last time", "remember", "what did I say about"), asks about preferences, or the task clearly requires personalized past context. If you can answer from the attached file or the current message, do not call recall_memories.
-2. PINNED PREFERENCES are already available as the "Pinned Preferences" MCP resource. Do not call recall_memories just to look up the user's known preferences.
-3. RECALL INCLUDES DOCUMENT PARITY. recall_memories can include matched document context and inline full content for referenced/matched refs. Keep preferences first, then document context, then other memories.
-4. DOCUMENT DISCOVERY ORDER: use recent_documents first (latest 5). If needed, call search_documents, then recall_document for full text.
-5. USE REMEMBER AS THE SAVE ENTRY POINT. Prefer one remember call instead of chaining multiple save tools.
-6. DOCUMENT SAVES — TWO MODES:
-   a) FAST NOTE (default): remember(kind="document-note", title="...", key_points=["item 1","item 2",...], summary="..."). Put meaningful content into key_points (up to 10). Do NOT pass content.
-   b) FULL ARCHIVE (only for "archive", "full stash", "store the whole file"): remember(kind="document-blob", content="<full text>", title="..."). Warn the user this can take longer.
-7. AUTO-SAVE WITH UNDO (required when new structured content appears): If this turn includes new content the user may need later (uploaded file, pasted doc/spec/transcript, list/table/data, extracted PDF text), auto-save without asking:
-   - For file refs use recall_memories(openaiFileIdRefs=[...]) or upload_blob/openaiFileIdRefs handoff and then upload_status when needed.
-   - File ingest is strict: only PDF and Word (.docx/.docm). Do not pass images or plain text/markdown files.
-   - For text-only structured content, call remember(kind="document-note", ...) in the same turn.
-   - Then append exactly this footer on its own line in the final reply:
-     📎 Auto-saved as @doc:<ref> · reply **undo** to delete
-   - Skip auto-save only if: user explicitly said not to save, the turn is purely conversational, or this content was already saved.
-8. UNDO HANDLING: If the user replies "undo", "del", or "delete" after that footer, call undo_save with the referenced @doc ref immediately.`;
+=== 1. EVERY TURN: prepare_turn ===
+Call prepare_turn FIRST — before answering. This is the unified entry point. It classifies intent, recalls memories, auto-saves files, queues checkpoints, and returns replyInstructions. Use contextBlock + replyInstructions as your source of truth.
+
+IMAGES: Do NOT pass image files in openaiFileIdRefs to prepare_turn. Only PDF and Word (.docx/.docm) go there. Instead, describe what you see in the image and include that description in your message. Tallei will auto-save the description as a document-note tagged with category="image/txt".
+
+=== 2. EVERY TURN: SAVE & CHECKPOINT ===
+A. Conversation checkpoints — call remember(kind="document-note", title="Conversation checkpoint", content="<transcript>") when:
+   - User says "save", "save this", "remember this", "checkpoint"
+   - You produced substantial output (>800 chars) or structured content (slides, code, lists, tables)
+   - Include conversation_id when available
+
+B. Optional save/archive:
+   - Save to Tallei only when the user explicitly asks to save, archive, or checkpoint.
+   - File ingest: only PDF and Word (.docx/.docm). No images or plain text/markdown files.
+   - If you do save, append footer: 📎 Auto-saved as @doc:<ref> · reply **undo** to delete
+
+C. Undo — if user replies "undo"/"del"/"delete" after the footer, call undo_save with the @doc ref immediately.
+
+D. Pinned Preferences MCP resource already has known preferences. Do not call recall_memories just to look them up.
+
+=== 3. COLLAB TASKS (only when collab is involved) ===
+A. Existing task — if user says continue/resume/proceed or gives a task UUID:
+   - Call collab_check_turn first. Do NOT call recall_memories for collab state.
+   - If is_my_turn=true, submit with collab_take_turn.
+   - After collab_take_turn, show the FULL submitted output visibly in Claude's chat first, exactly as the user-facing deliverable. Then show a brief summary/handoff.
+   - Never replace the full submitted output with a summary-only bullet list. If the tool returns user_visible_full_output or saved_turn.content, paste that full content before the handoff.
+
+B. New task — before creating:
+   1. Role Approval Gate: propose roles as fenced code blocks. Ask: "Do you approve these roles? Reply yes to proceed." STOP if not approved.
+   2. Iteration Roadmap: numbered turns, who acts, what they deliver, done criteria. Include: text/PDF/code only, no PPTX or images.
+   3. Then create the task.
+
+C. Visible Handoffs — never say just "continue task". State: (a) who is next, (b) exactly what they will do, (c) continue command.
+
+D. Full-content submit rule:
+   - For every collab_take_turn call, submit the complete user-facing deliverable text.
+   - Do not submit summary-only content; collab_take_turn will reject summary-only turns.
+
+E. Format rule:
+   - Final deliverables must match the format requested by the user.
+   - If no format was requested, default to plain text.
+
+F. Shortcut commands:
+   - "@tallei decide" → create collab task then continue
+   - "@tallei ship" → output structured artifacts and save through collab_take_turn
+
+=== 4. RECALL ===
+- prepare_turn already handles recall. Do NOT call recall_memories separately unless the user references prior sessions and you need additional context beyond what prepare_turn returned.
+- recall_memories includes matched document context and inline full content for referenced refs. Keep preferences first, then document context, then other memories.
+- Document discovery: use recent_documents first (latest 5). If needed, search_documents, then recall_document for full text.
+
+=== 5. REMEMBER ===
+- Prefer one remember call instead of chaining multiple save tools.
+- FAST NOTE (default): remember(kind="document-note", title, key_points, summary). Do NOT pass content.
+- FULL ARCHIVE: remember(kind="document-blob", content="<full text>", title). Only when user explicitly asks for full archive.
+- If save returns 402 / plan_required, do NOT retry. Prompt user to upgrade.`;
 
 const MCP_SERVER_VERSION = "1.0.0";
 
@@ -200,6 +353,7 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
   const handleMcp = async (req: any, res: any) => {
     const rpcMethod = typeof req?.body?.method === "string" ? req.body.method.slice(0, 128) : null;
     const toolName = typeof req?.body?.params?.name === "string" ? req.body.params.name.slice(0, 128) : null;
+    const collabEvent = collabLogDetails(rpcMethod, toolName, req?.body);
     const isRecallToolCall = toolName === "recall_memories";
     const method = rpcMethod ?? `transport:${String(req?.method || "unknown").toLowerCase()}`;
     const authStartedAt = process.hrtime.bigint();
@@ -242,7 +396,14 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
       noteAuthTiming();
-      logMcpCallEventAsync({ method, toolName, ok: false, error: "Missing or invalid Authorization header" });
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Missing or invalid Authorization header",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Missing or invalid Authorization header");
       return;
     }
@@ -250,7 +411,15 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const token = authHeader.split(" ")[1];
     if (token.startsWith("gm_")) {
       noteAuthTiming();
-      logMcpCallEventAsync({ method, toolName, authMode: "unknown", ok: false, error: "Legacy API keys are no longer supported on /mcp" });
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        authMode: "unknown",
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Legacy API keys are no longer supported on /mcp",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Legacy API keys are no longer supported. Reconnect via OAuth.");
       return;
     }
@@ -258,32 +427,82 @@ export function createMcpRouter(oauthVerifier: OAuthTokenVerifier, resourceMetad
     const authContext = await authFromOAuthToken(token, oauthVerifier);
     if (!authContext) {
       noteAuthTiming();
-      logMcpCallEventAsync({ method, toolName, authMode: "oauth", ok: false, error: "Invalid or expired token" });
+      logMcpCallEventAsync({
+        method,
+        toolName,
+        authMode: "oauth",
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Invalid or expired token",
+      });
       sendUnauthorized(res, resourceMetadataUrl, "Invalid or expired token");
       return;
     }
 
     if (!hasRequiredScopes(authContext.scopes ?? [], ["mcp:tools"])) {
       noteAuthTiming();
-      logMcpCallEventAsync({ userId: authContext.userId, tenantId: authContext.tenantId, method, toolName, authMode: "oauth", ok: false, error: "Missing mcp:tools scope" });
+      logMcpCallEventAsync({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        method,
+        toolName,
+        authMode: "oauth",
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: "Missing mcp:tools scope",
+      });
       res.status(403).json({ error: "Insufficient OAuth scopes", requiredScopes: ["mcp:tools"] });
       return;
     }
 
-    noteAuthTiming();
-    logMcpCallEventAsync({ userId: authContext.userId, tenantId: authContext.tenantId, keyId: null, authMode: "oauth", method, toolName, ok: true });
+    try {
+      noteAuthTiming();
 
-    req.authContext = authContext;
-    prewarmRecallCache(authContext);
+      req.authContext = authContext;
+      prewarmRecallCache(authContext);
 
-    const server = createConfiguredMcpServer(authContext);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    await server.connect(transport);
+      const server = createConfiguredMcpServer(authContext);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
 
-    const dispatchStartedAt = process.hrtime.bigint();
-    await transport.handleRequest(req, res, req.body);
-    const dispatchMs = Number(process.hrtime.bigint() - dispatchStartedAt) / 1_000_000;
-    if (isRecallToolCall) setRequestTimingField("recall_mcp_dispatch_ms", dispatchMs);
+      const dispatchStartedAt = process.hrtime.bigint();
+      await transport.handleRequest(req, res, req.body);
+      const dispatchMs = Number(process.hrtime.bigint() - dispatchStartedAt) / 1_000_000;
+      if (isRecallToolCall) setRequestTimingField("recall_mcp_dispatch_ms", dispatchMs);
+
+      logMcpCallEventAsync({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        keyId: null,
+        authMode: "oauth",
+        method,
+        toolName,
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: true,
+      });
+    } catch (error) {
+      logMcpCallEventAsync({
+        userId: authContext.userId,
+        tenantId: authContext.tenantId,
+        keyId: null,
+        authMode: "oauth",
+        method,
+        toolName,
+        collabTaskId: collabEvent.collabTaskId,
+        metadata: collabEvent.metadata,
+        ok: false,
+        error: error instanceof Error ? error.message : "MCP request failed",
+      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: "MCP request failed" });
+      }
+      if (config.nodeEnv !== "production") {
+        console.error("[mcp] request handling failed:", error);
+      }
+    }
   };
 
   router.all("/", handleMcp);

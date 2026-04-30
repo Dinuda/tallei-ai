@@ -1,0 +1,88 @@
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 14px;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-card);
+  position: sticky;
+  bottom: 16px;
+}
+
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: var(--actor-chatgpt);
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  box-shadow: 0 2px 8px rgba(16, 163, 127, 0.25);
+}
+
+.primaryBtn:hover {
+  background: #0d8c6d;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(16, 163, 127, 0.3);
+}
+
+.primaryBtn:active {
+  transform: translateY(1px);
+}
+
+.secondaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-light);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.secondaryBtn:hover {
+  background: var(--bg);
+  border-color: var(--border);
+  transform: translateY(-1px);
+}
+
+.secondaryBtn:active {
+  transform: translateY(1px);
+}
+
+.dangerBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--status-error-text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  opacity: 0.7;
+}
+
+.dangerBtn:hover {
+  opacity: 1;
+  background: var(--status-error-bg);
+  border-color: var(--status-error-border);
+}
+
+.dangerBtn:active {
+  transform: translateY(1px);
+}

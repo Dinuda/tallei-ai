@@ -38,6 +38,13 @@ const ICONS = {
       <path d="M5 5.5h5M5 7.5h5M5 9.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
+  collab: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="10.8" cy="10.8" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.8 5.3 9.2 8.7M9.2 5.3 5.8 8.7" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  ),
   documents: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M4 2h5l3 3v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
@@ -61,6 +68,7 @@ const NAV: NavSection[] = [
   {
     items: [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
+      { id: "collab", label: "Collab", href: "/dashboard/tasks", icon: ICONS.collab },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
       { id: "connectors", label: "AI Assitants", href: "/dashboard/setup", icon: ICONS.connectors },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
@@ -177,6 +185,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const headerUiFont = dashboardUiFont;
   return (
     <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900" style={dashboardUiFont}>
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-[60] focus:rounded-md focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:text-slate-900 focus:shadow-md"
+      >
+        Skip to main content
+      </a>
       <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="flex h-14 w-full items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-2">
@@ -279,7 +293,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <NavSectionContent pathname={pathname} onNavigate={() => setMobileOpen(false)} />
       </aside>
 
-      <main className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
+      <main id="main-content" className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
         <div className="mx-auto w-full max-w-7xl">
           <DashboardUpdateBanner />
           {children}

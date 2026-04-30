@@ -1,0 +1,661 @@
+.page {
+  display: grid;
+  gap: 1.25rem;
+  max-width: 800px;
+  padding: 1.5rem 2rem 2rem;
+  margin: 0 auto;
+}
+
+/* Step indicator */
+.steps {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  padding: 0.5rem 0;
+}
+
+.stepItem {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.stepNode {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 80px;
+}
+
+.stepNumber {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  transition: all 0.2s ease;
+}
+
+.stepNodePending .stepNumber {
+  background: var(--bg);
+  border: 2px solid var(--border-light);
+  color: var(--text-muted);
+}
+
+.stepNodeActive .stepNumber {
+  background: var(--actor-chatgpt-bg);
+  border: 2px solid var(--actor-chatgpt);
+  color: var(--actor-chatgpt-text);
+  box-shadow: 0 0 0 4px var(--actor-chatgpt-bg);
+}
+
+.stepNodeDone .stepNumber {
+  background: var(--status-success-bg);
+  border: 2px solid var(--status-success-border);
+  color: var(--status-success-text);
+}
+
+.stepLabel {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.stepNodeActive .stepLabel {
+  color: var(--actor-chatgpt-text);
+}
+
+.stepNodeDone .stepLabel {
+  color: var(--status-success-text);
+}
+
+.stepLine {
+  width: 48px;
+  height: 2px;
+  background: var(--border-light);
+  margin: 16px 4px 0;
+  border-radius: 999px;
+  transition: background 0.2s ease;
+}
+
+.stepLineDone {
+  background: var(--status-success-border);
+}
+
+/* Header */
+.header {
+  text-align: center;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+/* Error banner */
+.errorBanner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--status-error-bg);
+  border: 1px solid var(--status-error-border);
+  color: var(--status-error-text);
+  font-size: 0.84rem;
+}
+
+.recommendationBanner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--actor-chatgpt-bg);
+  border: 1px solid var(--actor-chatgpt-border);
+  color: var(--actor-chatgpt-text);
+  font-size: 0.84rem;
+}
+
+/* Card */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-card);
+  padding: 1.25rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* Field group */
+.fieldGroup {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.fieldLabel {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.fieldRequired {
+  color: var(--status-error-text);
+}
+
+/* Inputs */
+.input,
+.textarea,
+.textareaSecondary,
+.lookupInput {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.88rem;
+  padding: 0.65rem 0.8rem;
+  transition: all 0.14s ease;
+  font-family: inherit;
+}
+
+.input:focus,
+.textarea:focus,
+.textareaSecondary:focus,
+.lookupInput:focus {
+  outline: none;
+  border-color: var(--actor-chatgpt);
+  box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.12);
+}
+
+.textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.textareaSecondary {
+  min-height: 100px;
+  resize: vertical;
+  background: var(--bg);
+}
+
+/* Brief composer */
+.briefComposer {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  overflow: hidden;
+  display: grid;
+}
+
+.briefActions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--border-light);
+}
+
+.fileBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.fileBtn:hover:not(:disabled) {
+  background: var(--bg);
+  border-color: var(--actor-chatgpt);
+  color: var(--actor-chatgpt);
+}
+
+.fileBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fileHint {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.hiddenInput {
+  display: none;
+}
+
+/* File chips */
+.fileList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.fileChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 0.76rem;
+  padding: 0.25rem 0.6rem;
+  font-weight: 500;
+}
+
+.fileChipName {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipRemove {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.1rem;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  transition: all 0.14s ease;
+}
+
+.fileChipRemove:hover {
+  color: var(--status-error-text);
+  background: var(--status-error-bg);
+}
+
+/* Document lookup */
+.lookupInput {
+  font-size: 0.84rem;
+  padding: 0.55rem 0.7rem;
+}
+
+.lookupList {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.lookupItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  width: 100%;
+}
+
+.lookupItem:hover {
+  border-color: var(--actor-chatgpt-border);
+  background: var(--actor-chatgpt-bg);
+}
+
+.lookupItemActive {
+  border-color: var(--actor-chatgpt);
+  background: var(--actor-chatgpt-bg);
+}
+
+.lookupItemLeft {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.lookupCheck {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 2px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.14s ease;
+}
+
+.lookupCheckActive {
+  background: var(--actor-chatgpt);
+  border-color: var(--actor-chatgpt);
+  color: #fff;
+}
+
+.lookupItemLabel {
+  font-size: 0.82rem;
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lookupItemRef {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  flex-shrink: 0;
+}
+
+.lookupEmpty {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.lookupSelected {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--actor-chatgpt-text);
+  font-weight: 600;
+}
+
+/* Wait row */
+.waitRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  padding: 0.5rem 0;
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Role grid */
+.cardHeadRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.refreshBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.refreshBtn:hover:not(:disabled) {
+  background: var(--bg);
+  border-color: var(--actor-chatgpt);
+  color: var(--actor-chatgpt);
+}
+
+.refreshBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.roleGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.roleCard {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 1rem;
+  background: var(--surface);
+  display: grid;
+  gap: 0.6rem;
+  transition: all 0.2s ease;
+}
+
+.roleCard:hover {
+  box-shadow: var(--elevation-card);
+}
+
+.roleCardChatgpt {
+  border-top: 3px solid var(--actor-chatgpt);
+}
+
+.roleCardClaude {
+  border-top: 3px solid var(--actor-claude);
+}
+
+.roleCardHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.roleCardIcon {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+}
+
+.roleCardTitle {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.roleCardSubtitle {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+/* Starter badge */
+.starterBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  width: fit-content;
+}
+
+.starterLabel {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.starterValue {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.starterIcon {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+}
+
+/* Helper text */
+.helperText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+/* Summary box */
+.summaryBox {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 1rem;
+  display: grid;
+  gap: 0.6rem;
+  background: var(--bg);
+}
+
+.summaryRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.summaryRow:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.summaryKey {
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.summaryValue {
+  font-size: 0.86rem;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+/* Footer */
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+}
+
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.backBtn:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+.backBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--actor-chatgpt);
+  background: var(--actor-chatgpt);
+  color: #fff;
+  font-size: 0.84rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  box-shadow: 0 2px 8px rgba(16, 163, 127, 0.2);
+}
+
+.primaryBtn:hover:not(:disabled) {
+  background: #0d8c6d;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(16, 163, 127, 0.28);
+}
+
+.primaryBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 860px) {
+  .page {
+    padding: 1.2rem;
+  }
+
+  .roleGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .steps {
+    gap: 0.25rem;
+  }
+
+  .stepLine {
+    width: 24px;
+  }
+}

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { AuthContext } from "../../../src/domain/auth/index.js";
 import {
+  fetchUploadedFileBuffer,
   ingestUploadedFileToDocument,
   ingestUploadedFilesToDocuments,
   isDocxLikeFile,
@@ -213,5 +214,17 @@ test("uploadedFileToText rejects non-pdf/docx text files", async () => {
       Buffer.from("plain text")
     ),
     /Only PDF and Word \(\.docx\/\.docm\) files are supported/i
+  );
+});
+
+test("fetchUploadedFileBuffer returns clear error for inaccessible file URLs", async () => {
+  await assert.rejects(
+    fetchUploadedFileBuffer({
+      id: "missing-file",
+      name: "missing.pdf",
+      mime_type: "application/pdf",
+      download_link: "file:///definitely/not/here/missing.pdf",
+    }),
+    /File URL is not accessible in backend runtime/i
   );
 });

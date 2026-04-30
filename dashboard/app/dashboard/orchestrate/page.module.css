@@ -1,0 +1,241 @@
+.page {
+  display: grid;
+  gap: 1rem;
+  padding: 1.4rem 2rem 1.6rem;
+  max-width: 1120px;
+}
+
+.header {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.title {
+  margin: 0;
+  color: var(--text);
+  font-size: 1.35rem;
+}
+
+.subtle {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.card {
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--surface) 95%, #f8fafc 5%) 0%, var(--surface) 100%);
+  padding: 1rem;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.cardTitle {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.fieldLabel {
+  margin: 0;
+  font-size: 0.77rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.providerRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.providerBtn {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-2);
+  padding: 0.38rem 0.62rem;
+  font-size: 0.77rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.providerBtnActive {
+  border-color: color-mix(in oklab, var(--border-focus) 66%, var(--border) 34%);
+  background: color-mix(in oklab, var(--surface) 86%, #eff6ff 14%);
+  color: var(--text);
+}
+
+.input {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  min-height: 92px;
+  padding: 0.66rem 0.74rem;
+  resize: vertical;
+}
+
+.inputSecondary {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface) 96%, #f8fafc 4%);
+  color: var(--text);
+  min-height: 74px;
+  padding: 0.6rem 0.7rem;
+  resize: vertical;
+}
+
+.rolesGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.roleCard {
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--surface) 96%, #f8fafc 4%);
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.roleTitle {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.primaryBtn {
+  border-radius: 11px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-foreground);
+  padding: 0.5rem 0.78rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.primaryBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.secondaryBtn {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  padding: 0.4rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.secondaryBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.hiddenInput {
+  display: none;
+}
+
+.docActions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.fileChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+.fileChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.74rem;
+  background: #fff;
+  color: var(--text-2);
+  padding: 0.2rem 0.52rem;
+}
+
+.fileChip button {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 1;
+  font-size: 0.82rem;
+  padding: 0;
+}
+
+.errorList {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.errorText {
+  margin: 0;
+  color: #be123c;
+  font-size: 0.75rem;
+}
+
+.list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.item {
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 0.55rem 0.6rem;
+  text-decoration: none;
+  color: inherit;
+  background: var(--surface);
+}
+
+.item:hover {
+  border-color: var(--border);
+}
+
+.itemTitle {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.itemMeta {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+@media (max-width: 860px) {
+  .page {
+    padding: 1rem;
+  }
+
+  .rolesGrid {
+    grid-template-columns: 1fr;
+  }
+}

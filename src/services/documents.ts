@@ -11,7 +11,6 @@ import {
 import { pool } from "../infrastructure/db/index.js";
 import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
 import { summarizeConversation } from "../orchestration/ai/summarize.usecase.js";
-import { PlanRequiredError } from "../shared/errors/index.js";
 
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const AUTO_LOT_WINDOW_MS = 60_000;
@@ -602,10 +601,7 @@ export class DocumentSizeExceededError extends Error {
 }
 
 export function assertPro(auth: AuthContext): void {
-  if (auth.plan === "pro" || auth.plan === "power") return;
-  throw new PlanRequiredError(
-    `Document sharing is a Pro feature on Tallei. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`
-  );
+  void auth;
 }
 
 export async function stashDocument(
@@ -714,6 +710,7 @@ export async function stashDocumentNote(
     key_points: string[];
     summary: string;
     source_hint: string;
+    category?: string | null;
   },
   auth: AuthContext,
   opts?: {
@@ -727,6 +724,7 @@ export async function stashDocumentNote(
     key_points: note.key_points,
     summary: note.summary,
     source_hint: note.source_hint,
+    category: note.category ?? null,
   });
 
   const byteSize = Buffer.byteLength(noteJson, "utf8");
@@ -1150,6 +1148,33 @@ export async function recentDocumentBriefs(
   );
 
   return rows.rows.map((row) => toDocumentBrief(row));
+}
+
+export async function findLastConversationCheckpoint(
+  auth: AuthContext,
+  conversationId: string
+): Promise<{ ref: string; createdAt: string } | null> {
+  const rows = await pool.query<{
+    ref_handle: string;
+    created_at: string;
+  }>(
+    `SELECT ref_handle, created_at
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND conversation_id = $3
+       AND kind = 'note'
+       AND title LIKE 'Conversation checkpoint%'
+       AND deleted_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [auth.tenantId, auth.userId, conversationId]
+  );
+  if (rows.rows.length === 0) return null;
+  return {
+    ref: rows.rows[0].ref_handle,
+    createdAt: rows.rows[0].created_at,
+  };
 }
 
 export async function documentBriefsByRefs(

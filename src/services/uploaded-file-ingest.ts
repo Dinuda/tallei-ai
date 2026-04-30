@@ -1,5 +1,7 @@
 import { PDFParse } from "pdf-parse";
 import mammoth from "mammoth";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import type { AuthContext } from "../domain/auth/index.js";
 import { uploadBufferToUploadThing } from "../infrastructure/storage/uploadthing-client.js";
@@ -125,6 +127,25 @@ export async function extractWordText(buffer: Buffer): Promise<string> {
 }
 
 export async function fetchUploadedFileBuffer(ref: UploadedFileRef): Promise<Buffer> {
+  let parsedUrl: URL | null = null;
+  try {
+    parsedUrl = new URL(ref.download_link);
+  } catch {
+    parsedUrl = null;
+  }
+
+  if (parsedUrl?.protocol === "file:") {
+    const path = fileURLToPath(parsedUrl);
+    try {
+      return await readFile(path);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `File URL is not accessible in backend runtime (${path}). Provide a reachable HTTPS download link or mount that path. (${detail})`
+      );
+    }
+  }
+
   const response = await fetch(ref.download_link, { redirect: "follow" });
   if (!response.ok) {
     throw new Error(`Failed to download uploaded file ${ref.id}: HTTP ${response.status}`);

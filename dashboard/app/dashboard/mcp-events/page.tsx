@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Activity,
@@ -19,6 +20,8 @@ type McpEvent = {
   ok: boolean;
   error: string | null;
   createdAt: string;
+  collabTaskId: string | null;
+  metadata: Record<string, unknown>;
 };
 
 type TimeFilter = "all" | "1d" | "7d" | "30d";
@@ -46,6 +49,17 @@ function relativeDate(iso: string, now: number): string {
   if (hours < 24) return `${hours}h ago`;
   if (days < 7) return `${days}d ago`;
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function metadataText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function metadataNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
 }
 
 function EmptyState() {
@@ -163,6 +177,14 @@ export default function McpEventsPage() {
               {filteredEvents.map((event, idx) => {
                 const platform = platformStyle(event.authMode || "other");
                 const isSuccess = event.ok;
+                const action = metadataText(event.metadata?.["action"]);
+                const actor = metadataText(event.metadata?.["actor"]);
+                const iteration = metadataNumber(event.metadata?.["iteration"]);
+                const state = metadataText(event.metadata?.["state"]);
+                const preview =
+                  metadataText(event.metadata?.["content_preview"])
+                  ?? metadataText(event.metadata?.["title_preview"]);
+                const contentLength = metadataNumber(event.metadata?.["content_length"]);
 
                 return (
                   <tr key={event.id} className={idx < filteredEvents.length - 1 ? styles.rowBorder : ""}>
@@ -178,13 +200,31 @@ export default function McpEventsPage() {
                           {isSuccess ? "200 OK" : "ERROR"}
                         </span>
                         <code className={styles.methodCode}>{event.toolName || event.method}</code>
+                        {(action || actor || iteration !== null || state) && (
+                          <div className={styles.metaRow}>
+                            {action ? <span>{action}</span> : null}
+                            {actor ? <span>{actor}</span> : null}
+                            {iteration !== null ? <span>iter {iteration}</span> : null}
+                            {state ? <span>{state}</span> : null}
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td>
                       {event.error ? (
                         <div className={styles.errorBox}>{event.error}</div>
                       ) : (
-                        <span className={styles.noDetail}>—</span>
+                        <div className={styles.detailsCell}>
+                          {event.collabTaskId ? (
+                            <Link className={styles.taskLink} href={`/dashboard/tasks/${event.collabTaskId}`}>
+                              Task {event.collabTaskId.slice(0, 8)}…
+                            </Link>
+                          ) : null}
+                          {preview ? <p className={styles.previewText}>{preview}</p> : <span className={styles.noDetail}>—</span>}
+                          {contentLength !== null ? (
+                            <span className={styles.lengthText}>{contentLength} chars</span>
+                          ) : null}
+                        </div>
                       )}
                     </td>
                   </tr>

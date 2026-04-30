@@ -22,11 +22,11 @@
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: oklch(0.46 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
+  --border: oklch(0.84 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --chart-1: oklch(0.87 0 0);
@@ -50,7 +50,7 @@
   --surface-2: color-mix(in oklab, var(--card) 88%, var(--muted) 12%);
   --text: var(--foreground);
   --text-2: var(--muted-foreground);
-  --text-muted: var(--muted-foreground);
+  --text-muted: color-mix(in oklab, var(--muted-foreground) 88%, var(--foreground) 12%);
   --border-light: var(--border);
   --border-focus: var(--ring);
   --radius-sm: calc(var(--radius) * 0.8);
@@ -145,6 +145,17 @@
   100% { background-position: 200% 0; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -160,4 +171,40 @@
   html {
     @apply font-sans;
   }
+}
+
+/* Collab actor semantic tokens */
+:root {
+  --actor-chatgpt: #10a37f;
+  --actor-chatgpt-bg: #ecfdf5;
+  --actor-chatgpt-border: #bbf7d0;
+  --actor-chatgpt-text: #166534;
+  --actor-claude: #d97757;
+  --actor-claude-bg: #fff7ed;
+  --actor-claude-border: #fdba74;
+  --actor-claude-text: #9a3412;
+  --actor-user: #6b7280;
+  --actor-user-bg: #f8fafc;
+  --actor-user-border: #cbd5e1;
+  --actor-user-text: #334155;
+
+  /* Status semantic tokens */
+  --status-success-bg: #ecfdf5;
+  --status-success-border: #bbf7d0;
+  --status-success-text: #166534;
+  --status-warning-bg: #fff7ed;
+  --status-warning-border: #fdba74;
+  --status-warning-text: #9a3412;
+  --status-error-bg: #fff1f2;
+  --status-error-border: #fecaca;
+  --status-error-text: #be123c;
+  --status-info-bg: #f8fafc;
+  --status-info-border: #cbd5e1;
+  --status-info-text: #334155;
+
+  /* Elevation system */
+  --elevation-flat: none;
+  --elevation-card: 0 1px 3px rgb(0 0 0 / 0.04), 0 1px 2px rgb(0 0 0 / 0.02);
+  --elevation-float: 0 10px 30px rgb(0 0 0 / 0.08), 0 4px 6px rgb(0 0 0 / 0.04);
+  --elevation-sticky: 0 -4px 20px rgb(0 0 0 / 0.06);
 }

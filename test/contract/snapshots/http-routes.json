@@ -65,8 +65,33 @@
     "source": "src/routes/billing.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/collab_continue",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/chatgpt/actions/openapi.json",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/orchestrate_abort",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/orchestrate_answer",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/orchestrate_approve",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/actions/orchestrate_start",
     "source": "src/routes/chatgpt.ts"
   },
   {
@@ -115,9 +140,74 @@
     "source": "src/routes/chatgpt.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/chatgpt/collab/create-task",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/collab/run-turn",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chatgpt/collab/submit-turn",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chatgpt/collab/tasks",
+    "source": "src/routes/chatgpt.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/chatgpt/openapi.json",
     "source": "src/routes/chatgpt.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/collab/orchestrations/:id",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/collab/tasks",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/collab/tasks",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/collab/tasks/:id",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/collab/tasks/:id",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/collab/tasks/:id/extend",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/collab/tasks/:id/finish",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/collab/tasks/:id/run-turn",
+    "source": "src/routes/collab.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/collab/tasks/:id/submit-turn",
+    "source": "src/routes/collab.ts"
   },
   {
     "method": "GET",

@@ -1,0 +1,217 @@
+.page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  padding: 2rem;
+}
+
+.loadingState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  text-align: center;
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border-light);
+  border-top-color: var(--actor-chatgpt);
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.loadingText {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-card);
+  padding: 2.5rem;
+  max-width: 680px;
+  width: 100%;
+  display: grid;
+  gap: 1rem;
+  text-align: center;
+  justify-items: center;
+}
+
+.iconWrap {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-lg);
+  background: var(--actor-chatgpt-bg);
+  border: 1px solid var(--actor-chatgpt-border);
+  color: var(--actor-chatgpt);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.text {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  border-radius: 10px;
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--actor-chatgpt);
+  background: var(--actor-chatgpt);
+  color: #fff;
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  box-shadow: 0 2px 8px rgba(16, 163, 127, 0.2);
+}
+
+.primaryBtn:hover {
+  background: #0d8c6d;
+  transform: translateY(-1px);
+}
+
+.secondaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border-radius: 10px;
+  padding: 0.55rem 1rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.secondaryBtn:hover {
+  background: var(--bg);
+  border-color: var(--border-light);
+}
+
+.errorText {
+  margin: 0;
+  color: var(--status-error-text);
+  background: var(--status-error-bg);
+  border: 1px solid var(--status-error-border);
+  border-radius: var(--radius-md);
+  padding: 0.65rem 0.8rem;
+  font-size: 0.84rem;
+  width: 100%;
+}
+
+.question {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.5;
+  text-align: left;
+  width: 100%;
+}
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.suggestionBtn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.45rem 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.suggestionBtn:hover:not(:disabled) {
+  border-color: var(--actor-chatgpt);
+  background: var(--actor-chatgpt-bg);
+}
+
+.answerBox {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 0.85rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.answerBox:focus {
+  outline: none;
+  border-color: var(--actor-chatgpt);
+  box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.12);
+}
+
+.planBox {
+  display: grid;
+  gap: 0.65rem;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  background: var(--bg);
+}
+
+.planSummary {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.criterion {
+  border-top: 1px solid var(--border-light);
+  padding-top: 0.6rem;
+  color: var(--text-2);
+  font-size: 0.86rem;
+}
+
+.inlineSpin {
+  animation: spin 0.8s linear infinite;
+}

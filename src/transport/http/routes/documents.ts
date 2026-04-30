@@ -21,6 +21,23 @@ const upload = multer({
   limits: { fileSize: 2 * 1024 * 1024 },
 });
 
+function uploadSingleFile(req: AuthRequest, res: Response, next: (error?: unknown) => void): void {
+  upload.single("file")(req, res, (error: unknown) => {
+    if (error instanceof multer.MulterError) {
+      if (error.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({
+          error: "Uploaded file exceeds the 2MB limit. Please upload a smaller PDF or Word document.",
+        });
+        return;
+      }
+      res.status(400).json({ error: `Upload failed: ${error.message}` });
+      return;
+    }
+
+    next(error);
+  });
+}
+
 const router = Router();
 
 router.use(authMiddleware);
@@ -146,7 +163,7 @@ router.post("/upload-blob", requireScopes(["memory:write"]), async (req: AuthReq
 router.post(
   "/upload",
   requireScopes(["memory:write"]),
-  upload.single("file"),
+  uploadSingleFile,
   async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) {

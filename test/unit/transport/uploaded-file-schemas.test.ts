@@ -56,6 +56,16 @@ test("conversation_id is accepted for remember-like payloads", () => {
   assert.equal(parsed.conversation_id, "conv_xyz");
 });
 
+test("blank conversation_id is treated as omitted", () => {
+  const parsed = recallLikeSchema.parse({
+    query: "remember this",
+    conversation_id: "",
+    openaiFileIdRefs: [],
+  });
+
+  assert.equal(parsed.conversation_id, undefined);
+});
+
 test("uploadBlobBodySchema rejects malformed openaiFileIdRefs", () => {
   assert.throws(
     () =>
@@ -189,4 +199,22 @@ test("normalizeUploadedFileRequestBody accepts stringified object body", () => {
   const parsed = uploadBlobBodySchema.parse(normalized);
   assert.equal(parsed.openaiFileIdRefs.length, 1);
   assert.equal(parsed.openaiFileIdRefs[0]?.id, "file_string_body");
+});
+
+test("normalizeUploadedFileRequestBody keeps local download_link paths (schema validation rejects non-URL)", () => {
+  const normalized = normalizeUploadedFileRequestBody({
+    openaiFileIdRefs: [
+      {
+        id: "file_local_path",
+        name: "lesson-plan.pdf",
+        mime_type: "application/pdf",
+        download_link: "/mnt/data/lesson-plan.pdf",
+      },
+    ],
+  });
+
+  assert.throws(
+    () => uploadBlobBodySchema.parse(normalized),
+    /download_link/
+  );
 });

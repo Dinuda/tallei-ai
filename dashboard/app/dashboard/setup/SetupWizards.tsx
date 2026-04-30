@@ -201,9 +201,49 @@ export function getChatGptInstructions(mode: SaveMode): string {
 
 === RESPONSE PROTOCOL - visible chat first ===
 
+COLLAB TASKS FIRST (override):
+- If the user asks to start/create/begin a ChatGPT↔Claude collab, call \`createCollabTask\` immediately in the same turn.
+- If the user provides explicit collab task arguments (title/brief/first_actor), call \`createCollabTask\` with those exact values before any explanatory text. Do not set \`max_iterations\`.
+- For \`createCollabTask\`, pass \`recall_query\` (use the user goal/brief) and include \`include_doc_refs\` when the user names specific @doc refs to preload.
+- If attachments are present in this turn, pass them via \`openaiFileIdRefs\` (and \`conversation_id\` when available) to \`createCollabTask\` so preflight recall runs first and ingest runs right after.
+- After \`createCollabTask\` succeeds, call \`collab_continue\` for the same task in the same turn.
+- If \`createCollabTask\` returns \`upload.count_failed > 0\`, report the file failures briefly, then continue the collab flow unless task creation itself failed.
+- If the user asks to continue/resume/proceed a collab task or includes a collab UUID, call \`collab_continue\` with \`task_id\`, \`message\`, and (when files are attached) \`openaiFileIdRefs\` + \`conversation_id\`.
+- Never call \`collab_continue\` without \`openaiFileIdRefs\` when this turn contains file attachments.
+- On first collab turn, if no task documents exist yet, \`collab_continue\` will fail without \`openaiFileIdRefs\`.
+- Do NOT respond with copy/paste workflows, manual setup steps, or alternative "you can do this" guidance when collab tools are available.
+- If collab call fails, return the exact error briefly and stop.
+- If a collab action returns \`continue_command\` with \`target_actor="chatgpt"\`, do not tell the user to paste anything into ChatGPT. Say exactly "Shall we start?" and wait for the user's next reply before drafting/submitting ChatGPT's turn.
+- If a collab action returns \`continue_command\` with \`target_actor="claude"\`, end the response with its instruction.
+- Do not create a Claude handoff prompt. Tallei already stored the task context/history; do not ask whether to hand off. Only after Claude is next, tell the user exactly where to paste the returned command, usually \`continue task <task_id>\`, and where to return afterward.
+- If the user says "handoff to Claude" or selects a handoff option like "3", call \`prepare_response\` with \`conversation_history=[{role, content}, ...]\` containing the visible ChatGPT messages and \`handoff_target="claude"\` before returning the handoff command.
+
+COLLAB GRILL-ME ROLE DISPLAY:
+- When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
+
+  ChatGPT system prompt:
+  \`\`\`text
+  <ChatGPT role text>
+  \`\`\`
+
+  Claude system prompt:
+  \`\`\`text
+  <Claude role text>
+  \`\`\`
+
+- Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
+
+COLLAB CONTINUE — execution order:
+- \`collab_continue\` runs \`prepare_response\` preflight first, then uploads/attaches files, then checks/submits the turn.
+- Always provide the exact user message in \`message\`.
+- If output is ready and it is your turn, include \`draft_output\` in the same \`collab_continue\` call.
+- Use \`prepare_context.contextBlock\` and \`prepare_context.inlineDocuments\` from \`collab_continue\` as your drafting source of truth.
+- Use \`documents\` from \`collab_continue\` as the attached task-document list.
+- ChatGPT file URLs are temporary; pass \`openaiFileIdRefs\` immediately in the same turn (do not delay follow-up calls).
+
 Default: answer from the visible ChatGPT conversation without calling tools.
 
-Call \`prepare_response(message="<exact user message>", openaiFileIdRefs=[...any attachments...])\` before answering only when at least one condition is true:
+Call \`prepare_response(message="<exact user message>", openaiFileIdRefs=[...any attachments...], conversation_history=[...visible messages when handoff...])\` before answering only when at least one condition is true:
 - the user asks about information outside the visible chat: prior memories, previous sessions, saved facts, documents, uploads, old decisions, preferences, or past context;
 - the user asks about a file, document, catalogue, product list, upload, or saved note that is not fully visible in the current chat;
 - the user gives durable new information worth saving, such as family details, ages, identity facts, stable preferences, goals, decisions, plans, corrections, or strong opinions/beliefs;

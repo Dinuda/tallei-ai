@@ -113,6 +113,38 @@ test("fastPrepareResponseIntent skips classifier and queues sanitized opinion ca
   ]);
 });
 
+test("fastPrepareResponseIntent skips classifier and queues communication preferences from like statements", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "i really like no bullshit long explainatiions and no emojis",
+  });
+
+  assert.equal(decision.shouldCallClassifier, false);
+  assert.equal(decision.intent.needsRecall, false);
+  assert.deepEqual(decision.intent.saveCandidates, [
+    {
+      kind: "preference",
+      content: "User prefers no-nonsense long explanations and no emoji.",
+      category: "communication",
+    },
+  ]);
+});
+
+test("fastPrepareResponseIntent skips classifier for numeric handoff selections with conversation history", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "3",
+    conversation_history: [
+      {
+        role: "assistant",
+        content: "If you want, next I can do one of these:\n1. outline\n2. script\n3. make a Claude handoff prompt",
+      },
+      { role: "user", content: "3" },
+    ],
+  });
+
+  assert.equal(decision.shouldCallClassifier, false);
+  assert.equal(decision.reason, "handoff_history");
+});
+
 test("fastPrepareResponseIntent still uses classifier for uncertain prompts", () => {
   const decision = fastPrepareResponseIntent({ message: "what do you think about this?" });
 
@@ -147,6 +179,57 @@ test("fastPrepareResponseIntent queues first-person age without recall", () => {
       { kind: "fact", content: "User is 19 years old." },
     ]);
   }
+});
+
+test("fastPrepareResponseIntent queues technical error context as a document note", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "User provided expanded error details for POST /api/chatgpt/actions/orchestrate_approve. Request body: {\"session_id\":\"abc\"}. Response: 500 with JSON {\"error\":\"Failed to approve orchestration plan\",\"details\":{\"code\":\"42P18\",\"message\":\"could not determine data type of parameter $4\"}}. User wants status/meaning/root cause explanation.",
+  });
+
+  assert.equal(decision.shouldCallClassifier, false);
+  assert.equal(decision.intent.saveCandidates[0]?.kind, "document-note");
+  assert.equal(decision.intent.saveCandidates[0]?.title, "API error investigation details");
+  assert.match(decision.intent.saveCandidates[0]?.content ?? "", /42P18/);
+});
+
+test("fastPrepareResponseIntent queues screenshot-summary API errors as document notes", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "User uploaded an image showing a POST request to /api/chatgpt/actions/orchestrate_approve. The JSON body includes session_id \"3236af5c-caed-4367-8bdc-67fefe54a5b8\" and overrides {\"first_actor\":\"chatgpt\",\"max_iterations\":1}. The response shown is HTTP 500 Internal Server Error with body {\"error\":\"Failed to approve orchestration plan\"}. User asks: \"what is teh status of this error. what does it mean?\"",
+  });
+
+  assert.equal(decision.shouldCallClassifier, false);
+  assert.equal(decision.intent.saveCandidates[0]?.kind, "document-note");
+  assert.equal(decision.intent.saveCandidates[0]?.title, "API error investigation details");
+  assert.match(decision.intent.saveCandidates[0]?.content ?? "", /3236af5c/);
+});
+
+test("fastPrepareResponseIntent sends unclassified recall triggers to classifier", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "can you search my uploaded notes for the outline?",
+  });
+
+  assert.equal(decision.shouldCallClassifier, true);
+  assert.equal(decision.reason, "recall_trigger");
+  assert.deepEqual(decision.intent.saveCandidates, []);
+});
+
+test("fastPrepareResponseIntent saves explicit reusable information as other document note", () => {
+  const decision = fastPrepareResponseIntent({
+    message: "save this: route failures with missing SQL parameter types should be treated as query typing bugs",
+  });
+
+  assert.equal(decision.shouldCallClassifier, false);
+  assert.equal(decision.reason, "explicit_save");
+  assert.deepEqual(decision.intent.saveCandidates, [
+    {
+      kind: "document-note",
+      title: "Explicit save request",
+      summary: "Reusable information explicitly requested to be saved.",
+      source_hint: "ChatGPT explicit save request",
+      category: "other",
+      content: "route failures with missing SQL parameter types should be treated as query typing bugs",
+    },
+  ]);
 });
 
 test("executePrepareResponseAction handles product catalogue prompt without classifier and saves son age", async () => {
@@ -205,6 +288,130 @@ test("executePrepareResponseAction saves first-person age and skips recall/class
   assert.deepEqual(result.body.queuedSaves, [
     { kind: "fact", content: "User is 19 years old.", status: "queued" },
   ]);
+});
+
+test("executePrepareResponseAction queues technical error document notes without classifier", async () => {
+  let classifierCount = 0;
+  const queued: Array<() => Promise<void>> = [];
+  const result = await executePrepareResponseAction(auth, {
+    message: "User provided expanded error details for POST /api/chatgpt/actions/orchestrate_approve. Request body: {\"session_id\":\"abc\"}. Response: 500 with JSON {\"error\":\"Failed to approve orchestration plan\",\"details\":{\"code\":\"42P18\",\"message\":\"could not determine data type of parameter $4\"}}. User wants status/meaning/root cause explanation.",
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(queued.length, 1);
+  assert.equal(result.body.queuedSaves[0]?.kind, "document-note");
+  assert.equal(result.body.queuedSaves[0]?.title, "API error investigation details");
+});
+
+test("executePrepareResponseAction queues screenshot-summary API errors without classifier", async () => {
+  let classifierCount = 0;
+  const queued: Array<() => Promise<void>> = [];
+  const result = await executePrepareResponseAction(auth, {
+    message: "User uploaded an image showing a POST request to /api/chatgpt/actions/orchestrate_approve. The JSON body includes session_id \"3236af5c-caed-4367-8bdc-67fefe54a5b8\" and overrides {\"first_actor\":\"chatgpt\",\"max_iterations\":1}. The response shown is HTTP 500 Internal Server Error with body {\"error\":\"Failed to approve orchestration plan\"}. User asks: \"what is teh status of this error. what does it mean?\"",
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(queued.length, 1);
+  assert.equal(result.body.queuedSaves[0]?.kind, "document-note");
+  assert.equal(result.body.queuedSaves[0]?.title, "API error investigation details");
+});
+
+test("executePrepareResponseAction uses classifier for unclassified recall triggers", async () => {
+  let classifierCount = 0;
+  let recallCount = 0;
+  const queued: Array<() => Promise<void>> = [];
+  const result = await executePrepareResponseAction(auth, {
+    message: "can you search my uploaded notes for the outline?",
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: false,
+        contextDependent: false,
+        saveCandidates: [{ kind: "document-note", title: "Uploaded notes search request", summary: "User asked to search uploaded notes for an outline." }],
+      };
+    },
+    recallAction: async () => {
+      recallCount += 1;
+      return { status: 200, body: recallBody };
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 1);
+  assert.equal(recallCount, 1);
+  assert.equal(queued.length, 1);
+  assert.equal(result.body.queuedSaves[0]?.kind, "document-note");
+  assert.equal(result.body.intent.needsRecall, true);
+});
+
+test("executePrepareResponseAction always queues explicit save content", async () => {
+  let classifierCount = 0;
+  const queued: Array<() => Promise<void>> = [];
+  const result = await executePrepareResponseAction(auth, {
+    message: "save this: route failures with missing SQL parameter types should be treated as query typing bugs",
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(queued.length, 1);
+  assert.deepEqual(result.body.queuedSaves, [
+    {
+      kind: "document-note",
+      content: "route failures with missing SQL parameter types should be treated as query typing bugs",
+      title: "Explicit save request",
+      status: "queued",
+    },
+  ]);
+  assert.equal(result.body.intent.saveCandidates[0]?.category, "other");
+});
+
+test("executePrepareResponseAction queues fallback note for bare save without history", async () => {
+  const queued: Array<() => Promise<void>> = [];
+  const result = await executePrepareResponseAction(auth, {
+    message: "save",
+  }, {
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(queued.length, 1);
+  assert.equal(result.body.queuedSaves[0]?.kind, "document-note");
+  assert.equal(result.body.queuedSaves[0]?.title, "Explicit save request");
+  assert.equal(result.body.intent.saveCandidates[0]?.category, "other");
 });
 
 test("executePrepareResponseAction calls recall when intent requires recall", async () => {
@@ -313,6 +520,68 @@ test("executePrepareResponseAction queues sanitized durable opinion memory even 
   ]);
 });
 
+test("executePrepareResponseAction queues communication preference saves without classifier or recall", async () => {
+  const queued: Array<() => Promise<void>> = [];
+  let classifierCount = 0;
+  let recallCount = 0;
+  const result = await executePrepareResponseAction(auth, {
+    message: "i really like no bullshit long explainatiions and no emojis",
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    recallAction: async () => {
+      recallCount += 1;
+      return { status: 200, body: recallBody };
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(recallCount, 0);
+  assert.equal(queued.length, 1);
+  assert.deepEqual(result.body.queuedSaves, [
+    {
+      kind: "preference",
+      content: "User prefers no-nonsense long explanations and no emoji.",
+      status: "queued",
+    },
+  ]);
+});
+
+test("executePrepareResponseAction queues conversation history document note for Claude handoff", async () => {
+  const queued: Array<() => Promise<void>> = [];
+  let classifierCount = 0;
+  const result = await executePrepareResponseAction(auth, {
+    message: "3",
+    handoff_target: "claude",
+    conversation_history: [
+      { role: "user", content: "Create week 2 course content." },
+      { role: "assistant", content: "Drafted a week 2 outline and offered option 3 for Claude handoff." },
+      { role: "user", content: "3" },
+    ],
+  }, {
+    classifyIntent: async () => {
+      classifierCount += 1;
+      return noSaveIntent;
+    },
+    enqueueSave: (task) => {
+      queued.push(task);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(classifierCount, 0);
+  assert.equal(queued.length, 1);
+  assert.equal(result.body.queuedSaves[0]?.kind, "document-note");
+  assert.equal(result.body.queuedSaves[0]?.title, "ChatGPT to Claude handoff context");
+  assert.match(result.body.queuedSaves[0]?.content ?? "", /Create week 2 course content/);
+});
+
 test("executePrepareResponseAction can reuse previous context and skip recall", async () => {
   let recallCount = 0;
   let classifierCount = 0;
@@ -355,6 +624,8 @@ test("executePrepareResponseAction propagates uploaded file autosave refs", asyn
         status: 200,
         body: {
           ...recallBody,
+          referencedDocuments: [{ ref: "@doc:ref_1", title: "Report" }],
+          recentCompletedIngests: [{ ref: "ingest_1", status: "done" }],
           autoSave: {
             requested: 1,
             complete: true,
@@ -367,5 +638,7 @@ test("executePrepareResponseAction propagates uploaded file autosave refs", asyn
   });
 
   assert.equal(result.body.autoSave.saved[0]?.ref, "@doc:abc");
+  assert.deepEqual(result.body.referencedDocuments, [{ ref: "@doc:ref_1", title: "Report" }]);
+  assert.deepEqual(result.body.recentCompletedIngests, [{ ref: "ingest_1", status: "done" }]);
   assert.ok(result.body.replyInstructions.some((line) => line.includes("Saved: @doc:abc")));
 });
