@@ -1418,6 +1418,16 @@ export async function claimTurn(
 
   // Auto-restart DONE tasks within 24h so users can continue seamlessly.
   await maybeRestartDoneTask(taskId, auth, expectedState);
+  // User explicitly asked to continue: clear manual pause gate.
+  await pool.query(
+    `UPDATE collab_tasks
+     SET context = COALESCE(context, '{}'::jsonb) - 'pause',
+         updated_at = now()
+     WHERE id = $1
+       AND user_id = $2
+       AND COALESCE(context, '{}'::jsonb) ? 'pause'`,
+    [taskId, auth.userId]
+  );
 
   const result = await pool.query<CollabTaskRow>(
     `SELECT *
@@ -1466,6 +1476,12 @@ export async function submitTurn(
     `UPDATE collab_tasks
      SET transcript = transcript || jsonb_set($5::jsonb, '{iteration}', to_jsonb(iteration + 1)),
          state = $6,
+         context = jsonb_set(
+           COALESCE(context, '{}'::jsonb),
+           '{pause}',
+           $7::jsonb,
+           true
+         ),
          last_actor = $4,
          iteration = iteration + 1,
          error_message = NULL,
@@ -1481,6 +1497,12 @@ export async function submitTurn(
       actor,
       JSON.stringify(newEntry),
       desiredNextState,
+      JSON.stringify({
+        paused: true,
+        reason: "await_user_continue",
+        paused_after_actor: actor,
+        paused_at: submittedAt,
+      }),
     ]
   );
 

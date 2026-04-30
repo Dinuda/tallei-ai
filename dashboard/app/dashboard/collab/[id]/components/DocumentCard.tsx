@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FileText, X, ChevronRight } from "lucide-react";
 import styles from "./DocumentCard.module.css";
 
@@ -47,6 +47,7 @@ export default function DocumentCard({ documents, lotTitle, countSaved, countFai
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [liveByRef, setLiveByRef] = useState<Record<string, LiveDocumentState>>({});
+  const hydratedRefsRef = useRef<Set<string>>(new Set());
 
   const liveFor = (doc: TaskDocument): LiveDocumentState => {
     const live = liveByRef[doc.ref];
@@ -59,6 +60,9 @@ export default function DocumentCard({ documents, lotTitle, countSaved, countFai
 
     const refreshLiveState = async () => {
       for (const doc of documents) {
+        if (hydratedRefsRef.current.has(doc.ref)) {
+          continue;
+        }
         try {
           const res = await fetch(`/api/documents/${encodeURIComponent(doc.ref)}`, { cache: "no-store" });
           const payload = await res.json();
@@ -80,6 +84,7 @@ export default function DocumentCard({ documents, lotTitle, countSaved, countFai
             ...prev,
             [doc.ref]: { status: liveStatus, preview: resolvedPreview },
           }));
+          hydratedRefsRef.current.add(doc.ref);
         } catch {
           // Keep snapshot values when live fetch fails.
         }
@@ -137,6 +142,7 @@ export default function DocumentCard({ documents, lotTitle, countSaved, countFai
           preview: resolvedPreview,
         },
       }));
+      hydratedRefsRef.current.add(doc.ref);
       setDrawerContent(resolvedPreview);
     } catch (error) {
       setDrawerError(error instanceof Error ? error.message : "Failed to load document content.");

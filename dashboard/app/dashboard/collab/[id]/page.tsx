@@ -128,6 +128,11 @@ function waitingActorForState(state: CollabState): "chatgpt" | "claude" | null {
   return null;
 }
 
+function isTaskManuallyPaused(context: Record<string, unknown>): boolean {
+  const pause = readObject(context["pause"]);
+  return pause["paused"] === true;
+}
+
 function readObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
@@ -384,6 +389,8 @@ export default function CollabBoardPage() {
     }
   }, [taskId]);
 
+  const taskPaused = task ? isTaskManuallyPaused(task.context) : false;
+
   useEffect(() => {
     if (!taskId || pollPaused) return;
 
@@ -398,7 +405,8 @@ export default function CollabBoardPage() {
 
     const runCycle = async () => {
       if (cancelled || pollPausedRef.current || pollInFlightRef.current) return;
-      if (task?.state === "DONE" || task?.state === "ERROR") return;
+      const paused = task ? isTaskManuallyPaused(task.context) : false;
+      if (task?.state === "DONE" || task?.state === "ERROR" || paused) return;
 
       if (!isOnline) {
         pausePolling("network");
@@ -467,7 +475,7 @@ export default function CollabBoardPage() {
       cancelled = true;
       clearPollTimer();
     };
-  }, [taskId, pollPaused, task?.state, isOnline, isDocumentHidden, fetchTask, pausePolling, clearPollTimer, redirectIfOrchestrationSession]);
+  }, [taskId, pollPaused, task?.state, taskPaused, isOnline, isDocumentHidden, fetchTask, pausePolling, clearPollTimer, redirectIfOrchestrationSession]);
 
   useEffect(() => {
     if (task?.state === "DONE" || task?.state === "ERROR") {
@@ -505,7 +513,7 @@ export default function CollabBoardPage() {
     }
   }, [fetchTask, redirectIfOrchestrationSession]);
 
-  const waitingActor = task ? waitingActorForState(task.state) : null;
+  const waitingActor = task && !taskPaused ? waitingActorForState(task.state) : null;
 
   const planSummary = task ? readPlanSummary(task.context) : null;
   const planCriteria = task ? readPlanCriteria(task.context) : [];
@@ -561,7 +569,38 @@ export default function CollabBoardPage() {
   if (loading) {
     return (
       <div className={styles.page}>
-        <div className={styles.loading}>Loading…</div>
+        <div className={styles.skeletonTopBar}>
+          <div className={`${styles.skeleton} ${styles.skeletonShort}`} />
+          <div className={`${styles.skeleton} ${styles.skeletonSquare}`} />
+        </div>
+        <div className={styles.layout}>
+          <div className={styles.content}>
+            <div className={styles.skeletonHeader}>
+              <div className={`${styles.skeleton} ${styles.skeletonTitle}`} />
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+            </div>
+            <div className={styles.skeletonCard}>
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+            </div>
+            <div className={styles.skeletonCard}>
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+            </div>
+          </div>
+          <div className={styles.sidebar}>
+            <div className={styles.skeletonPanel}>
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+            </div>
+            <div className={styles.skeletonPanel}>
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+              <div className={`${styles.skeleton} ${styles.skeletonLine}`} />
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -569,8 +608,23 @@ export default function CollabBoardPage() {
   if (!task) {
     return (
       <div className={styles.page}>
-        <p className={styles.subtle}>Task not found.</p>
-        <Link href="/dashboard/tasks" className={styles.primaryBtn}>Back to list</Link>
+        <div className={styles.emptyState}>
+          <div className={styles.emptyIcon}>
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="12" y1="18" x2="12" y2="18" />
+              <line x1="9" y1="15" x2="15" y2="15" />
+            </svg>
+          </div>
+          <h2 className={styles.emptyTitle}>Task not found</h2>
+          <p className={styles.emptyDescription}>
+            The task you&apos;re looking for doesn&apos;t exist or has been deleted.
+          </p>
+          <Link href="/dashboard/tasks" className={styles.primaryBtn}>
+            Back to tasks
+          </Link>
+        </div>
       </div>
     );
   }
@@ -610,8 +664,8 @@ export default function CollabBoardPage() {
 
             {task.state === "ERROR" && (
               <div className={styles.bannerError}>
-                Last turn errored.
-                {task.errorMessage ? <span>{task.errorMessage}</span> : null}
+                <span className={styles.bannerTitle}>Last turn errored</span>
+                {task.errorMessage ? <span className={styles.bannerDetail}>{task.errorMessage}</span> : null}
               </div>
             )}
 
