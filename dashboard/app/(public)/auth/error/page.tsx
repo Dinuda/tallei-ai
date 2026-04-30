@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 
 type AuthErrorPageProps = {
@@ -33,7 +34,7 @@ export default async function AuthErrorPage({ searchParams }: AuthErrorPageProps
     <main className="auth-screen">
       <div className="auth-card animate-fade-up">
         <div className="auth-logo-wrap">
-          <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "40px", width: "auto" }} />
+          <Image src="/tallei.svg" alt="Tallei Logo" width={98} height={40} style={{ height: "40px", width: "auto" }} />
         </div>
 
         <div className="auth-heading">

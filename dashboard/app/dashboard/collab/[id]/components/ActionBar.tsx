@@ -1,6 +1,7 @@
 "use client";
 
-import { RefreshCw, CheckCircle, Trash2, FileDown } from "lucide-react";
+import { useState } from "react";
+import { RefreshCw, CheckCircle, Trash2 } from "lucide-react";
 import styles from "./ActionBar.module.css";
 
 type CollabActor = "chatgpt" | "claude" | "user";
@@ -11,41 +12,25 @@ interface ActionBarProps {
   state: CollabState;
   pollPaused: boolean;
   onNudge: () => void;
-  onRefresh: () => void;
   onRetryLiveUpdates: () => void;
   onMarkDone: () => void;
   onDelete: () => void;
-  onExport: () => void;
 }
 
 export default function ActionBar({
-  waitingActor,
   state,
   pollPaused,
-  onNudge,
-  onRefresh,
   onRetryLiveUpdates,
   onMarkDone,
   onDelete,
-  onExport,
 }: ActionBarProps) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const isDone = state === "DONE";
   const isError = state === "ERROR";
   const isActive = !isDone && !isError;
 
   return (
     <div className={styles.bar}>
-      {/* {waitingActor && isActive && (
-        <button type="button" className={styles.primaryBtn} onClick={onNudge}>
-          Remind {waitingActor === "chatgpt" ? "ChatGPT" : "Claude"}
-        </button>
-      )} */}
-
-      <button type="button" className={styles.secondaryBtn} onClick={onRefresh}>
-        <RefreshCw size={14} />
-        Refresh now
-      </button>
-
       {pollPaused && isActive && (
         <button type="button" className={styles.secondaryBtn} onClick={onRetryLiveUpdates}>
           <RefreshCw size={14} />
@@ -53,22 +38,40 @@ export default function ActionBar({
         </button>
       )}
 
-      {isActive && (
-        <button type="button" className={styles.secondaryBtn} onClick={onMarkDone}>
-          <CheckCircle size={14} />
-          Finish task
-        </button>
+      {!confirmDelete ? (
+        <div className={styles.row}>
+          {isActive && (
+            <button type="button" className={styles.primaryBtn} onClick={onMarkDone}>
+              <CheckCircle size={14} />
+              Finish task
+            </button>
+          )}
+          <button type="button" className={styles.dangerBtn} onClick={() => setConfirmDelete(true)}>
+            <Trash2 size={14} />
+            Delete
+          </button>
+        </div>
+      ) : (
+        <div className={styles.confirmRow}>
+          <span className={styles.confirmText}>Delete this task permanently?</span>
+          <div className={styles.row}>
+            <button type="button" className={styles.secondaryBtn} onClick={() => setConfirmDelete(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className={styles.dangerBtn}
+              onClick={() => {
+                setConfirmDelete(false);
+                onDelete();
+              }}
+            >
+              <Trash2 size={14} />
+              Confirm delete
+            </button>
+          </div>
+        </div>
       )}
-
-      <button type="button" className={styles.secondaryBtn} onClick={onExport}>
-        <FileDown size={14} />
-        Export markdown
-      </button>
-
-      <button type="button" className={styles.dangerBtn} onClick={onDelete}>
-        <Trash2 size={14} />
-        Delete
-      </button>
     </div>
   );
 }

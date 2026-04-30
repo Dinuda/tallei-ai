@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { signIn } from "../../../../auth";
 
 type LoginPageProps = {
@@ -17,7 +18,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
       <div className="auth-card animate-fade-up">
         <div className="auth-logo-wrap">
           <div className="auth-logo-stack" style={{ alignItems: "center" }}>
-            <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "40px", width: "auto" }} />
+            <Image src="/tallei.svg" alt="Tallei Logo" width={98} height={40} style={{ height: "40px", width: "auto" }} />
           </div>
         </div>
 

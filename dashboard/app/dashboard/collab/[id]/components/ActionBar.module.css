@@ -1,6 +1,6 @@
 .bar {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   padding: 14px;
   background: var(--surface);
@@ -8,6 +8,24 @@
   box-shadow: var(--elevation-card);
   position: sticky;
   bottom: 16px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.confirmRow {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.confirmText {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-2);
 }
 
 .primaryBtn {

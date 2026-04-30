@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
@@ -205,7 +206,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               {mobileOpen ? <X size={16} /> : <Menu size={16} />}
             </Button>
             <Link href="/dashboard" className="flex items-center">
-              <img src="/tallei.svg" alt="Tallei" className="h-8 w-auto" />
+              <Image src="/tallei.svg" alt="Tallei" width={79} height={32} className="h-8 w-auto" />
             </Link>
           </div>
 
