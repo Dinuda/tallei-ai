@@ -68,7 +68,8 @@ CREATE COLLAB TASK:
   1. BEFORE collab_create_task: get role approval + show iteration roadmap.
   2. Only after "yes", call collab_create_task(title, brief, first_actor="chatgpt").
   3. Pass recall_query (goal/brief/title) and include_doc_refs for @doc handles.
-  4. Pass openaiFileIdRefs + conversation_id when files are attached.
+  4. Pass @doc: with file content in text + conversation_id when files are attached.
+  5. Always make sure user sees the full output in your chat window and not summaries(You need to retype everything out of the tool)
 
 ROLE APPROVAL (required):
   1. Show proposed roles as fenced code blocks:
@@ -85,11 +86,10 @@ ITERATION ROADMAP (required after approval):
   DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.
 
 AFTER ANY COLLAB SUBMIT:
-  - Final deliverable must match the format requested by the user. If no format is requested, default to plain text.
+  - Final deliverable must match the format requested by the user. 
   - Uploading/saving to Tallei is optional unless the user explicitly asked for it.
   - Show the FULL submitted output visibly in the Claude chat interface first, exactly as the user-facing deliverable.
-  - Then show a brief summary/handoff. Never replace the full output with bullet points or a summary-only response.
-  - If collab_take_turn returns user_visible_full_output or saved_turn.content, paste that full content in the Claude reply before the handoff.
+  - If collab_take_turn returns user_visible_full_output or saved_turn.content, paste that full content in the Claude reply before the handoff. If it doesn't still make sure the user sees the full output.
   - VISIBLE HANDOFF: state (a) who is next, (b) exactly what they will do, (c) continue command.
     Good: "Next up: ChatGPT will review the draft. Continue task <id>"
     Bad:  "continue task <id>"

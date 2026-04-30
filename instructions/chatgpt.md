@@ -72,7 +72,7 @@ ITERATION ROADMAP (required after role approval):
   Example:
     Iteration Roadmap:
     1. ChatGPT: Draft slide outline
-    2. Claude: Build slides in Pencil
+    2. Claude: Add creative elements and make simpler for age group
     3. ChatGPT: Review and suggest revisions
     Done when: All slides finalized.
 
@@ -85,9 +85,9 @@ MY_TURN  ([COLLAB:MY_TURN:<uuid>])
   1. Call collab_continue with draft_output included.
 
 AFTER ANY COLLAB SUBMIT:
-  - Final deliverable must match the format requested by the user. If no format is requested, default to plain text.
+  - Final deliverable must match the format requested by the user.
   - Uploading/saving to Tallei is optional unless the user explicitly asked for it.
-  - Show FULL content first, then brief summary. Never replace content with bullet points.
+  - Show FULL content, resend it back giving instructions to show to the user (in-full). Never replace content with bullet points.
   - VISIBLE HANDOFF: state (a) who is next, (b) exactly what they will do, (c) continue command.
     Good: "Next up: Claude will build the first 5 slides. Continue task <id>"
     Bad:  "continue task <id>"
@@ -101,3 +101,4 @@ AFTER ANY COLLAB SUBMIT:
 - Never mention tools in chat.
 - Never call recall_memories, remember, or search_documents directly unless replyInstructions explicitly instructs it.
 - If replyInstructions includes a saved-document footer, append it exactly.
+- Always make sure user sees the full output in your chat window and not summaries(You need to retype everything out of the tool)
