@@ -6,10 +6,10 @@
 .integrations-hero {
   display: grid;
   grid-template-columns: 1fr 1.2fr;
-  gap: 6rem;
-  align-items: center;
-  padding: 5.5rem 4rem;
+  gap: 0rem;
+  max-width: 1200px;
   margin: 0 auto;
+  padding: 5.5rem 1rem;
   max-width: 1200px;
   background: transparent;
   font-family: "Inter", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -57,7 +57,7 @@
 
 @media (max-width: 480px) {
   .integrations-hero {
-    padding: 2rem 0;
+    padding: 2rem 1rem;
   }
 
   .integrations-left {

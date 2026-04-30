@@ -17,6 +17,7 @@ import {
 import {
   getSession as getOrchestrationSession,
 } from "../../../services/orchestrator.js";
+import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -27,7 +28,7 @@ const createTaskSchema = z.object({
   title: z.string().trim().min(1, "title is required"),
   brief: z.string().nullable().optional(),
   firstActor: z.enum(["chatgpt", "claude"]),
-  maxIterations: z.coerce.number().int().min(1).max(8).optional(),
+  maxIterations: z.coerce.number().int().min(1).optional(),
   context: z.record(z.unknown()).optional(),
 });
 
@@ -61,6 +62,14 @@ function lastTranscriptEntry(task: { transcript: Array<{ actor: string; iteratio
   return task.transcript[task.transcript.length - 1];
 }
 
+function sendPlanRequired(res: Response, error: PlanRequiredError): void {
+  res.status(402).json({
+    error: error.message,
+    code: "plan_required",
+    feature: "collab_sessions",
+  });
+}
+
 router.post("/tasks", requireScopes(["collab:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = createTaskSchema.parse(req.body ?? {});
@@ -78,6 +87,10 @@ router.post("/tasks", requireScopes(["collab:write"]), async (req: AuthRequest, 
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      sendPlanRequired(res, error);
       return;
     }
     console.error("Error creating collab task:", error);
@@ -168,6 +181,10 @@ router.post("/tasks/:id/run-turn", requireScopes(["collab:read"]), async (req: A
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      sendPlanRequired(res, error);
+      return;
+    }
     console.error("Error checking collab turn:", error);
     res.status(500).json({ error: "Failed to check collab turn" });
   }
@@ -187,6 +204,10 @@ router.post("/tasks/:id/submit-turn", requireScopes(["collab:write"]), async (re
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      sendPlanRequired(res, error);
       return;
     }
     if (error instanceof CollabConflictError) {
@@ -209,6 +230,10 @@ router.post("/tasks/:id/finish", requireScopes(["collab:write"]), async (req: Au
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      sendPlanRequired(res, error);
+      return;
+    }
     if (error instanceof CollabNotFoundError) {
       res.status(404).json({ error: error.message });
       return;
@@ -229,6 +254,10 @@ router.post("/tasks/:id/extend", requireScopes(["collab:write"]), async (req: Au
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      sendPlanRequired(res, error);
+      return;
+    }
     if (error instanceof CollabNotFoundError) {
       res.status(404).json({ error: error.message });
       return;
@@ -246,6 +275,10 @@ router.delete("/tasks/:id", requireScopes(["collab:write"]), async (req: AuthReq
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      sendPlanRequired(res, error);
       return;
     }
     if (error instanceof CollabNotFoundError) {

@@ -58,13 +58,9 @@ CREATE  ([COLLAB:CREATE] set in Step 1)
 ROLE APPROVAL (required before any collab task):
   1. Show proposed roles as fenced code blocks:
      ChatGPT system prompt:
-     ```text
      <role text>
-     ```
      Claude system prompt:
-     ```text
      <role text>
-     ```
   2. Ask: "Do you approve these roles? Reply **yes** to proceed, or tell me what to change."
   3. STOP if not approved. Only proceed on explicit "yes".
 

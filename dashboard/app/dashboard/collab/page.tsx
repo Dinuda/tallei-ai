@@ -126,7 +126,7 @@ function relativeTime(iso: string): string {
 }
 
 export default function CollabTasksPage() {
-  const [filter, setFilter] = useState<CollabFilter>("active");
+  const [filter, setFilter] = useState<CollabFilter>("all");
   const [tasks, setTasks] = useState<CollabTask[]>([]);
   const [orchestrationSessions, setOrchestrationSessions] = useState<OrchestrationSession[]>([]);
   const [loading, setLoading] = useState(true);

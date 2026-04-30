@@ -11,7 +11,6 @@ import {
 import { pool } from "../infrastructure/db/index.js";
 import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
 import { summarizeConversation } from "../orchestration/ai/summarize.usecase.js";
-import { PlanRequiredError } from "../shared/errors/index.js";
 
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const AUTO_LOT_WINDOW_MS = 60_000;
@@ -602,10 +601,7 @@ export class DocumentSizeExceededError extends Error {
 }
 
 export function assertPro(auth: AuthContext): void {
-  if (auth.plan === "pro" || auth.plan === "power") return;
-  throw new PlanRequiredError(
-    `Document sharing is a Pro feature on Tallei. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`
-  );
+  void auth;
 }
 
 export async function stashDocument(

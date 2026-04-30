@@ -76,7 +76,7 @@ STEP D - UNDO:
 - Use remember(kind="preference") for stable preferences and identity facts.
 - Use remember(kind="fact") for non-preference facts, decisions, events, notes, and corrections.
 - Use remember(kind="document-blob") only when the user explicitly asks for full archive/full stash of complete text.
-- If document save/upload returns plan-required (\`402\`, \`code=plan_required\`, or "Document sharing is a Pro feature"), do NOT retry. Prompt the user to complete payment/upgrade at the returned billing URL, then continue after upgrade.
+- If any tool returns plan-required (\`402\` or \`code=plan_required\`), do NOT retry. Prompt the user to complete payment/upgrade at the returned billing URL, then continue after upgrade.
 
 === HARD RULE ===
 - Never mention tool internals in user-facing text, except the required auto-save footer.`;

@@ -72,12 +72,20 @@ function onPlanError(err: unknown): ToolResult {
     return {
       content: [{
         type: "text",
-        text: `⚠️ ${err.message} Ask the user to complete payment, then retry document sharing.`,
+        text: `⚠️ ${err.message} Ask the user to complete payment, then retry.`,
       }],
       isError: true,
     };
   }
   throw err;
+}
+
+function collabPlanRequiredResult(err: PlanRequiredError): ToolResult {
+  return toJsonToolResult({
+    error: err.message,
+    code: "plan_required",
+    feature: "collab_sessions",
+  }, true);
 }
 
 function onKnownError(err: unknown): ToolResult {
@@ -309,13 +317,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         const inlineDocuments = await inlineDocumentsFromTaskContext(task, auth);
 
         const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
-        const nextActor = task.iteration >= task.maxIterations
-          ? null
-          : task.state === "CREATIVE"
-            ? "chatgpt"
-            : task.state === "TECHNICAL"
-              ? "claude"
-              : null;
+        const nextActor = task.state === "CREATIVE"
+          ? "chatgpt"
+          : task.state === "TECHNICAL"
+            ? "claude"
+            : null;
         const continueCommand = buildFirstTurnContinueCommand(task);
         const nextWork = describeNextActorWork(task.state, nextActor);
         return toJsonToolResult({
@@ -328,7 +334,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           next_actor: nextActor,
           user_visible: appendContinueCommand(claimed
             ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}). ${describeNextActorWork(task.state, "claude")} Draft the output, then call collab_take_turn.`
-            : `Task ${task.id} is waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`, continueCommand),
+            : nextActor
+              ? `Task ${task.id} is waiting on ${nextActor}. Next up: ${nextWork}`
+              : `Task ${task.id} has finished all planned iterations. ${nextWork}`, continueCommand),
           continue_command: continueCommand,
           brief: task.brief,
           last_chatgpt_entry: lastChatGptEntry,
@@ -338,6 +346,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           ...(uploadSummary ? { upload: uploadSummary } : {}),
         });
       } catch (err) {
+        if (err instanceof PlanRequiredError) {
+          return collabPlanRequiredResult(err);
+        }
         if (err instanceof CollabAttachmentIngestError) {
           return toJsonToolResult({
             error: err.message,
@@ -376,13 +387,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           })
           : null;
         const task = await submitCollabTurn(task_id, "claude", content, auth);
-        const nextActor = task.iteration >= task.maxIterations
-          ? null
-          : task.state === "CREATIVE"
-            ? "chatgpt"
-            : task.state === "TECHNICAL"
-              ? "claude"
-              : null;
+        const nextActor = task.state === "CREATIVE"
+          ? "chatgpt"
+          : task.state === "TECHNICAL"
+            ? "claude"
+            : null;
         const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
         const continueCommand = buildFirstTurnContinueCommand(task);
         const nextWork = describeNextActorWork(task.state, nextActor);
@@ -416,6 +425,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           ...(uploadSummary ? { upload: uploadSummary } : {}),
         });
       } catch (err) {
+        if (err instanceof PlanRequiredError) {
+          return collabPlanRequiredResult(err);
+        }
         if (err instanceof CollabAttachmentIngestError) {
           return toJsonToolResult({
             error: err.message,
@@ -428,13 +440,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           const task = await getCollabTask(task_id, auth);
           const nextActor = task
             ? (
-              task.iteration >= task.maxIterations
-                ? null
-                : task.state === "CREATIVE"
-                  ? "chatgpt"
-                  : task.state === "TECHNICAL"
-                    ? "claude"
-                    : null
+              task.state === "CREATIVE"
+                ? "chatgpt"
+                : task.state === "TECHNICAL"
+                  ? "claude"
+                  : null
             )
             : null;
           const nextWork = task ? describeNextActorWork(task.state, nextActor) : "";
@@ -447,7 +457,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
             max_iterations: task?.maxIterations ?? null,
             next_actor: nextActor,
             user_visible: task
-              ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`
+              ? nextActor
+                ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor}. Next up: ${nextWork}`
+                : `Turn rejected. Task ${task.id} has finished all planned iterations. ${describeNextActorWork(task.state, null)}`
               : "Turn rejected due to task state mismatch.",
             fallback_context: task ? buildTurnFallbackContext(task, "claude") : null,
           }, true);
@@ -473,6 +485,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         const tasks = await listCollabTasks({ filter: "waiting" }, auth);
         return toJsonToolResult({ tasks: tasks.filter((task) => task.state === "TECHNICAL") });
       } catch (err) {
+        if (err instanceof PlanRequiredError) {
+          return collabPlanRequiredResult(err);
+        }
         const message = err instanceof Error ? err.message : "Failed to list collab tasks";
         return toJsonToolResult({ error: message }, true);
       }
@@ -574,13 +589,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         }
         const task = (parsed.openaiFileIdRefs?.length ? await getCollabTask(createdTask.id, auth) : createdTask) ?? createdTask;
         const continueCommand = buildFirstTurnContinueCommand(task);
-        const nextActor = task.iteration >= task.maxIterations
-          ? null
-          : task.state === "CREATIVE"
-            ? "chatgpt"
-            : task.state === "TECHNICAL"
-              ? "claude"
-              : null;
+        const nextActor = task.state === "CREATIVE"
+          ? "chatgpt"
+          : task.state === "TECHNICAL"
+            ? "claude"
+            : null;
         const nextWork = describeNextActorWork(task.state, nextActor);
         return toJsonToolResult({
           ok: true,
@@ -598,6 +611,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           continue_command: continueCommand,
         });
       } catch (err) {
+        if (err instanceof PlanRequiredError) {
+          return collabPlanRequiredResult(err);
+        }
         const message = err instanceof Error ? err.message : "Failed to create collab task";
         return toJsonToolResult({ error: message }, true);
       }
@@ -642,6 +658,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           fallback_context: buildSessionFallbackContext(result.session),
         });
       } catch (err) {
+        if (err instanceof PlanRequiredError) {
+          return collabPlanRequiredResult(err);
+        }
         const message = err instanceof Error ? err.message : "Failed to start orchestration session";
         return toJsonToolResult({ error: message }, true);
       }
@@ -741,6 +760,9 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           fallback_context: result.session ? buildSessionFallbackContext(result.session) : null,
         });
       } catch (err) {
+        if (err instanceof PlanRequiredError) {
+          return collabPlanRequiredResult(err);
+        }
         if (
           err instanceof OrchestrationConflictError ||
           err instanceof OrchestrationNotFoundError ||
@@ -832,7 +854,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         "HEAVY: Requires emitting the entire document as the `content` argument. " +
         "Prefer remember(kind=\"document-note\") for most 'save this document' requests — it needs no content field. " +
         "Only use this when the user explicitly says to archive or store the full file for future retrieval. " +
-        "Call AFTER finishing your user response. Indexing runs in the background. Pro feature.",
+        "Call AFTER finishing your user response. Indexing runs in the background.",
       inputSchema: {
         content: z.string().min(1).describe("Full document markdown/text to store verbatim."),
         filename: z.string().optional().describe("Optional source filename."),
@@ -862,7 +884,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "create_lot",
     {
       title: "Create Lot",
-      description: "Groups existing stashed documents under one @lot handle for multi-file recall. Pro feature.",
+      description: "Groups existing stashed documents under one @lot handle for multi-file recall.",
       inputSchema: {
         refs: z.array(z.string()).min(1).describe("Array of @doc:... references to group."),
         title: z.string().optional().describe("Optional lot title."),
@@ -889,7 +911,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       title: "Recall Document",
       description:
         "Returns the complete stored document markdown for an @doc ref, or all full docs for an @lot ref. " +
-        "May be large: use only when the user clearly needs the full file. Pro feature.",
+        "May be large: use only when the user clearly needs the full file.",
       inputSchema: {
         ref: z.string().min(1).describe("Document or lot reference, e.g. @doc:... or @lot:..."),
       },
@@ -910,7 +932,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       title: "Search Documents",
       description:
         "Vector-searches stashed document summaries and returns matching refs for discovery. " +
-        "Does not return full content. Pro feature.",
+        "Does not return full content.",
       inputSchema: {
         query: z.string().min(1).describe("Search query to find relevant documents."),
         limit: z.number().int().min(1).max(20).optional().default(5),

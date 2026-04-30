@@ -2,6 +2,7 @@ import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
 import { config } from "../config/index.js";
 import {
+  assertCollabPlan,
   createTask as createCollabTask,
   getTask as getCollabTask,
   type CollabModelActor,
@@ -458,6 +459,8 @@ export async function startSession(
   firstQuestionData?: { question: string; suggested_answers?: string[]; default_answer?: string | null };
   roleSelection: OrchestrationRoleSelection;
 }> {
+  assertCollabPlan(auth);
+
   const goal = input.goal.trim();
   if (!goal) {
     throw new Error("goal is required");
@@ -582,6 +585,8 @@ export async function submitAnswer(
   planReady?: true;
   plan?: OrchestrationPlan;
 }> {
+  assertCollabPlan(auth);
+
   const requestedAnswer = answer.trim();
   if (!requestedAnswer) {
     throw new Error("answer is required");
@@ -793,6 +798,8 @@ export async function approvePlan(
   auth: AuthContext,
   overrides?: Partial<Pick<OrchestrationPlan, "first_actor">>
 ): Promise<{ session: OrchestrationSession; task: CollabTask }> {
+  assertCollabPlan(auth);
+
   const session = await getSession(sessionId, auth);
   if (!session) {
     throw new OrchestrationNotFoundError();

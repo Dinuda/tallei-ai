@@ -91,13 +91,6 @@ function relativeDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function isPlanRequired(data: unknown, statusCode: number): boolean {
-  if (statusCode === 402) return true;
-  if (!data || typeof data !== "object") return false;
-  const code = (data as { code?: unknown }).code;
-  return typeof code === "string" && code.toLowerCase() === "plan_required";
-}
-
 function DocCard({ doc, isExpanded, onToggle, onView, onCopy }: {
   doc: DocListItem;
   isExpanded: boolean;
@@ -232,7 +225,6 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [proRequired, setProRequired] = useState(false);
   const [docPage, setDocPage] = useState(1);
   const [lotPage, setLotPage] = useState(1);
   const [expandedDocIds, setExpandedDocIds] = useState<Set<string>>(new Set());
@@ -252,19 +244,10 @@ export default function DocumentsPage() {
       const res = await fetch("/api/documents");
       const data = await res.json();
 
-      if (isPlanRequired(data, res.status)) {
-        setProRequired(true);
-        setError(typeof data?.error === "string" ? data.error : "Documents are available on Pro.");
-        setDocs([]);
-        setLots([]);
-        return;
-      }
-
       if (!res.ok) {
         throw new Error(typeof data?.error === "string" ? data.error : "Failed to load documents.");
       }
 
-      setProRequired(false);
       setDocs(Array.isArray(data?.docs) ? data.docs : []);
       setLots(Array.isArray(data?.lots) ? data.lots : []);
       setError(null);
@@ -382,20 +365,11 @@ export default function DocumentsPage() {
         </div>
       </header>
 
-      {error && !proRequired && (
+      {error && (
         <div className={`${styles.banner} ${styles.bannerError}`}>{error}</div>
       )}
 
-      {proRequired ? (
-        <EmptyCollectionState
-          title="No documents found"
-          description="Upgrade to Pro or Power to monitor documents here."
-          actionLabel="Upgrade"
-          actionHref="/dashboard/billing"
-          imageSrc={DOCUMENTS_EMPTY_IMAGE || undefined}
-          illustration="none"
-        />
-      ) : loading && docs.length === 0 ? (
+      {loading && docs.length === 0 ? (
         <div className={styles.cardList}>
           {[1, 2, 3, 4, 5].map((i) => (
             <div key={i} className={styles.skeletonCard}>

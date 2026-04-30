@@ -1,8 +1,12 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
-import { createLot, documentBriefsByRefs, recallDocument } from "./documents.js";
+import { createLot, documentBriefsByRefs, recallDocument, stashDocument } from "./documents.js";
 import { ingestUploadedFilesToDocuments, type UploadedFileSaveError } from "./uploaded-file-ingest.js";
 import { listRecentCompletedUploadedFileIngestJobs } from "./uploaded-file-ingest-jobs.js";
+import { saveMemory } from "./memory.js";
+import { aiProviderRegistry } from "../providers/ai/index.js";
+import { PlanRequiredError } from "../shared/errors/index.js";
+import { config } from "../config/index.js";
 
 export type CollabActor = "chatgpt" | "claude" | "user";
 export type CollabModelActor = "chatgpt" | "claude";
@@ -170,6 +174,13 @@ export class CollabAttachmentIngestError extends Error {
   }
 }
 
+export function assertCollabPlan(auth: AuthContext): void {
+  if (auth.plan === "pro" || auth.plan === "power") return;
+  throw new PlanRequiredError(
+    `Collab sessions require a Pro or Power plan on Tallei. Upgrade at ${config.dashboardBaseUrl.replace(/\/$/, "")}/billing.`
+  );
+}
+
 function cacheKey(taskId: string, auth: AuthContext): string {
   return `${auth.userId}:${taskId}`;
 }
@@ -265,6 +276,40 @@ export function extractDocumentRefsFromText(content: string): string[] {
     if (ref) refs.add(ref);
   }
   return [...refs];
+}
+
+async function filterExistingDocumentRefs(
+  refs: string[],
+  auth: AuthContext
+): Promise<{ valid: string[]; missing: string[] }> {
+  if (refs.length === 0) return { valid: [], missing: [] };
+  const result = await pool.query<{ ref_handle: string }>(
+    `SELECT ref_handle
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+       AND ref_handle = ANY($3::text[])`,
+    [auth.tenantId, auth.userId, refs]
+  );
+  const existing = new Set(result.rows.map((row) => row.ref_handle));
+  const valid = refs.filter((ref) => existing.has(ref));
+  const missing = refs.filter((ref) => !existing.has(ref));
+  return { valid, missing };
+}
+
+function hasStructuredContent(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length < 400) return false;
+  const patterns = [
+    /^#{1,3}\s/m,
+    /^```/m,
+    /^\d+\.\s/m,
+    /^[-*]\s/m,
+    /^\|.*\|/m,
+    /\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/api\//i,
+  ];
+  return patterns.some((pattern) => pattern.test(trimmed));
 }
 
 function readExistingTaskDocumentContext(context: Record<string, unknown>): TaskDocumentContextSnapshot {
@@ -549,7 +594,9 @@ export function describeNextActorWork(
   state: "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR",
   actor: "chatgpt" | "claude" | null
 ): string {
-  if (!actor) return "The task is complete or at max iterations.";
+  if (!actor) {
+    return "This collab session is currently ended. Should we restart it? Reply **continue** to pick up where we left off.";
+  }
   if (actor === "chatgpt") {
     return "ChatGPT will produce content, strategy, or creative output for the next phase.";
   }
@@ -655,12 +702,9 @@ export async function hydrateTaskWithRecentPreparedUploads(
   }
 }
 
-function normalizeMaxIterations(value?: number): number {
-  if (!Number.isFinite(value)) return 4;
-  const normalized = Math.trunc(value as number);
-  if (normalized < 1) return 1;
-  if (normalized > 8) return 8;
-  return normalized;
+function normalizeMaxIterations(_value?: number): number {
+  // Iteration limit removed — collab tasks run until explicitly finished.
+  return 9999;
 }
 
 function normalizeSingleLine(value: unknown): string | null {
@@ -936,9 +980,12 @@ function extractCollabArtifacts(
       const normalizedHeading = heading[1].toLowerCase();
       if (/(ticket|backlog|jira|issues?)/.test(normalizedHeading)) {
         currentSection = "tickets";
+      } else if (/(slide flow|lesson flow|course flow|flow|outline|agenda|sequence|plan)/.test(normalizedHeading)) {
+        // Slide/lesson flow sections usually contain numbered deliverable lines.
+        currentSection = "checklist";
       } else if (/(checklist|todo|to-do|next steps?|action items?)/.test(normalizedHeading)) {
         currentSection = "checklist";
-      } else if (/(prd|summary|overview|brief)/.test(normalizedHeading)) {
+      } else if (/(prd|summary|overview|brief|review|refinement|recommend)/.test(normalizedHeading)) {
         currentSection = "summary";
       } else {
         currentSection = "other";
@@ -963,12 +1010,13 @@ function extractCollabArtifacts(
     const listContent = (checkboxMatch?.[1] ?? listMatch?.[1] ?? "").trim();
 
     if (listContent) {
+      const looksLikeSlideItem = /^slide\s*\d+\s*[:\-]/i.test(listContent);
       if (currentSection === "tickets") {
         const ticket = parseTicketLine(listContent);
         if (ticket) tickets.push(ticket);
         continue;
       }
-      if (currentSection === "checklist" || checkboxMatch) {
+      if (currentSection === "checklist" || checkboxMatch || looksLikeSlideItem) {
         const item = normalizeSingleLine(listContent);
         if (item) {
           const key = item.toLowerCase();
@@ -1066,7 +1114,7 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
     state: task.state,
     iteration: task.iteration,
     max_iterations: task.maxIterations,
-    waiting_on: task.iteration >= task.maxIterations ? null : actorWaitingForState(task.state),
+    waiting_on: actorWaitingForState(task.state),
     your_actor: actor,
     last_message: lastMessage,
     last_chatgpt_entry: lastChatGptEntry,
@@ -1123,6 +1171,8 @@ export async function attachUploadedFilesToTaskContext(
   count_failed: number;
   errors: UploadedFileSaveError[];
 }> {
+  assertCollabPlan(auth);
+
   const uploadedFileRefs = input.openaiFileIdRefs ?? [];
   const requestedDocumentRefs = [...new Set((input.documentRefs ?? []).map((value) => value.trim()).filter(Boolean))];
   const existingContext = await loadTaskDocumentContext(taskId, auth);
@@ -1220,9 +1270,45 @@ export async function createTask(
   },
   auth: AuthContext
 ): Promise<CollabTask> {
+  assertCollabPlan(auth);
+
   const title = input.title.trim();
   if (!title) {
     throw new Error("title is required");
+  }
+
+  // Reuse a recently finished task with the same title + brief instead of creating a duplicate.
+  const brief = (input.brief ?? "").trim();
+  const existing = await pool.query<CollabTaskRow>(
+    `SELECT *
+     FROM collab_tasks
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND state = 'DONE'
+       AND title = $3
+       AND COALESCE(brief, '') = $4
+       AND updated_at > now() - interval '24 hours'
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [auth.tenantId, auth.userId, title, brief]
+  );
+
+  if (existing.rows[0]) {
+    const state = input.firstActor === "chatgpt" ? "CREATIVE" : "TECHNICAL";
+    const restarted = await pool.query<CollabTaskRow>(
+      `UPDATE collab_tasks
+       SET state = $3,
+           error_message = NULL,
+           updated_at = now()
+       WHERE id = $1
+         AND user_id = $2
+       RETURNING *`,
+      [existing.rows[0].id, auth.userId, state]
+    );
+    const task = mapTaskRow(restarted.rows[0]);
+    invalidateCachedTask(task.id, auth);
+    writeCachedTask(task);
+    return task;
   }
 
   const maxIterations = normalizeMaxIterations(input.maxIterations);
@@ -1236,7 +1322,7 @@ export async function createTask(
       auth.tenantId,
       auth.userId,
       title,
-      input.brief ?? null,
+      brief || null,
       state,
       maxIterations,
       JSON.stringify(input.context ?? {}),
@@ -1296,19 +1382,49 @@ export async function listTasks(
   return result.rows.map(mapTaskRow);
 }
 
+async function maybeRestartDoneTask(
+  taskId: string,
+  auth: AuthContext,
+  toState: CollabState
+): Promise<CollabTask | null> {
+  const result = await pool.query<CollabTaskRow>(
+    `UPDATE collab_tasks
+     SET state = $3,
+         error_message = NULL,
+         updated_at = now()
+     WHERE id = $1
+       AND user_id = $2
+       AND state = 'DONE'
+       AND updated_at > now() - interval '24 hours'
+     RETURNING *`,
+    [taskId, auth.userId, toState]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  const task = mapTaskRow(row);
+  invalidateCachedTask(taskId, auth);
+  writeCachedTask(task);
+  return task;
+}
+
 export async function claimTurn(
   taskId: string,
   actor: CollabModelActor,
   auth: AuthContext
 ): Promise<CollabTask | null> {
+  assertCollabPlan(auth);
+
   const expectedState = expectedStateForActor(actor);
+
+  // Auto-restart DONE tasks within 24h so users can continue seamlessly.
+  await maybeRestartDoneTask(taskId, auth, expectedState);
+
   const result = await pool.query<CollabTaskRow>(
     `SELECT *
      FROM collab_tasks
      WHERE id = $1
        AND user_id = $2
        AND state = $3
-       AND iteration < max_iterations
      LIMIT 1`,
     [taskId, auth.userId, expectedState]
   );
@@ -1328,6 +1444,8 @@ export async function submitTurn(
   auth: AuthContext,
   _opts: { markDone?: boolean } = {}
 ): Promise<CollabTask> {
+  assertCollabPlan(auth);
+
   const trimmed = content.trim();
   if (!trimmed) {
     throw new Error("content is required");
@@ -1350,16 +1468,11 @@ export async function submitTurn(
          state = $6,
          last_actor = $4,
          iteration = iteration + 1,
-         error_message = CASE
-           WHEN iteration + 1 >= max_iterations
-             THEN 'Iteration limit reached. Waiting for explicit user approval to finish or extend the task.'
-           ELSE NULL
-         END,
+         error_message = NULL,
          updated_at = now()
      WHERE id = $1
        AND user_id = $2
        AND state = $3
-       AND iteration < max_iterations
      RETURNING *`,
     [
       taskId,
@@ -1379,19 +1492,44 @@ export async function submitTurn(
   let task = mapTaskRow(row);
 
   try {
-    const documentRefs = extractDocumentRefsFromText(trimmed);
-    if (documentRefs.length > 0) {
+    const extractedRefs = extractDocumentRefsFromText(trimmed);
+    const { valid, missing } = await filterExistingDocumentRefs(extractedRefs, auth);
+
+    if (missing.length > 0) {
+      console.warn(
+        `[collab] turn content referenced missing document refs for task ${taskId}: ${missing.join(", ")}`
+      );
+    }
+
+    const shouldAutoSave = valid.length === 0 && hasStructuredContent(trimmed);
+    let autoSavedRef: string | null = null;
+
+    if (shouldAutoSave) {
+      try {
+        const stashed = await stashDocument(trimmed, auth, {
+          title: task.title,
+          conversationId: task.id,
+          mimeType: "text/markdown",
+        });
+        autoSavedRef = stashed.refHandle;
+        console.log(`[collab] auto-saved turn content as ${autoSavedRef} for task ${taskId}`);
+      } catch (saveError) {
+        console.warn(`[collab] auto-save failed for task ${taskId}:`, saveError);
+      }
+    }
+
+    const refsToAttach = autoSavedRef ? [...valid, autoSavedRef] : valid;
+
+    if (refsToAttach.length > 0) {
       await attachUploadedFilesToTaskContext(taskId, auth, {
-        documentRefs,
+        documentRefs: refsToAttach,
         conversationId: task.id,
         title: task.title,
       });
       task = await getTask(taskId, auth) ?? task;
     }
   } catch (error) {
-    if (process.env["NODE_ENV"] !== "production") {
-      console.warn("[collab] document ref attachment failed", error);
-    }
+    console.warn("[collab] document ref attachment failed", error);
   }
 
   try {
@@ -1421,8 +1559,9 @@ export async function submitTurn(
     }
   }
 
+  let evaluation: CollabCriterionEvaluationEntry | null = null;
   try {
-    const evaluation = extractEvaluation(trimmed, actor, task.iteration, submittedAt);
+    evaluation = extractEvaluation(trimmed, actor, task.iteration, submittedAt);
     if (evaluation) {
       const evaluationResult = await pool.query<CollabTaskRow>(
         `UPDATE collab_tasks
@@ -1448,12 +1587,141 @@ export async function submitTurn(
     }
   }
 
+  // Auto-end task when explicitly marked done by the actor or evaluation.
+  const shouldAutoFinish = _opts.markDone || (evaluation?.should_mark_done ?? false);
+  if (shouldAutoFinish && task.state !== 'DONE' && task.state !== 'ERROR') {
+    try {
+      task = await finishTask(taskId, auth, "Auto-finished: turn marked done.");
+    } catch {
+      // Ignore finish errors so the turn submission itself always succeeds.
+    }
+  }
+
   invalidateCachedTask(taskId, auth);
   writeCachedTask(task);
   return task;
 }
 
+function buildCollabTaskSummary(task: CollabTask): string {
+  const lines: string[] = [];
+  lines.push(`Collab Task ${task.id}`);
+  lines.push(`Title: ${task.title}`);
+  if (task.brief) lines.push(`Brief: ${task.brief}`);
+  lines.push(`State: ${task.state}`);
+  lines.push(`Progress: iteration ${task.iteration}`);
+  if (task.lastActor) lines.push(`Last actor: ${task.lastActor}`);
+
+  if (task.transcript.length > 0) {
+    lines.push("Recent transcript:");
+    const recent = task.transcript.slice(-4);
+    for (const entry of recent) {
+      const snippet = entry.content.slice(0, 300) + (entry.content.length > 300 ? "…" : "");
+      lines.push(`  [${entry.actor} #${entry.iteration}] ${snippet}`);
+    }
+  }
+
+  const artifacts = normalizeContext(task.context)["artifacts"];
+  if (artifacts && typeof artifacts === "object" && !Array.isArray(artifacts)) {
+    const artifactRecord = artifacts as Record<string, unknown>;
+    const prd = artifactRecord["prd_summary"];
+    if (typeof prd === "string" && prd.trim()) lines.push(`PRD summary: ${prd.trim()}`);
+
+    const checklist = artifactRecord["checklist"];
+    if (Array.isArray(checklist) && checklist.length > 0) {
+      lines.push(`Checklist: ${checklist.slice(0, 5).join("; ")}`);
+    }
+
+    const tickets = artifactRecord["tickets"];
+    if (Array.isArray(tickets) && tickets.length > 0) {
+      const titles = (tickets as Array<Record<string, unknown>>)
+        .map((t) => t["title"])
+        .filter((t): t is string => typeof t === "string")
+        .slice(0, 3)
+        .join("; ");
+      if (titles) lines.push(`Tickets: ${titles}`);
+    }
+
+    const evaluations = artifactRecord["evaluations"];
+    if (Array.isArray(evaluations) && evaluations.length > 0) {
+      const lastEval = evaluations[evaluations.length - 1] as Record<string, unknown>;
+      if (lastEval["should_mark_done"] === true) {
+        lines.push("Evaluation: criteria met, task marked done.");
+      } else if (typeof lastEval["remaining_work"] === "string" && lastEval["remaining_work"]) {
+        lines.push(`Remaining work: ${lastEval["remaining_work"]}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export async function saveCollabTaskSummary(task: CollabTask, auth: AuthContext): Promise<void> {
+  const summary = buildCollabTaskSummary(task);
+  void saveMemory(summary, auth, "system", undefined, {
+    memoryType: "collab",
+    category: "collab",
+    runFactExtraction: false,
+    runVectorDedup: false,
+  }).catch(() => {});
+}
+
+export async function listRecentCollabTasks(
+  auth: AuthContext,
+  limit = 4
+): Promise<CollabTask[]> {
+  const result = await pool.query<CollabTaskRow>(
+    `SELECT *
+     FROM collab_tasks
+     WHERE tenant_id = $1
+       AND user_id = $2
+     ORDER BY updated_at DESC
+     LIMIT $3`,
+    [auth.tenantId, auth.userId, limit]
+  );
+  return result.rows.map(mapTaskRow);
+}
+
+export async function getCollabTaskContentForContext(
+  taskId: string,
+  auth: AuthContext
+): Promise<string | null> {
+  const task = await getTask(taskId, auth);
+  if (!task) return null;
+
+  const transcriptText = task.transcript
+    .map((e) => `[${e.actor} #${e.iteration}] ${e.content.slice(0, 600)}`)
+    .join("\n");
+
+  const prompt = `You are preparing context for an AI assistant that is continuing a conversation about a specific collab task.
+Summarize the task below into a concise context block. Include: the goal, what has been accomplished, key decisions or artifacts, and any remaining work. Keep it under 400 words.
+
+Task Title: ${task.title}
+Brief: ${task.brief ?? "N/A"}
+State: ${task.state}
+Iteration: ${task.iteration}
+
+Transcript:
+${transcriptText}`;
+
+  try {
+    const response = await aiProviderRegistry.chat({
+      model: aiProviderRegistry.chatModelName(),
+      messages: [
+        { role: "system", content: "You summarize collab tasks into concise context blocks for AI assistants." },
+        { role: "user", content: prompt },
+      ],
+      maxTokens: 600,
+      temperature: 0,
+    });
+    return response.text?.trim() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function finishTask(taskId: string, auth: AuthContext, reason?: string): Promise<CollabTask> {
+  assertCollabPlan(auth);
+
   const result = await pool.query<CollabTaskRow>(
     `UPDATE collab_tasks
      SET state = 'DONE',
@@ -1473,37 +1741,24 @@ export async function finishTask(taskId: string, auth: AuthContext, reason?: str
   const task = mapTaskRow(row);
   invalidateCachedTask(taskId, auth);
   writeCachedTask(task);
+  void saveCollabTaskSummary(task, auth).catch(() => {});
   return task;
 }
 
-export async function extendIterations(taskId: string, by: number, auth: AuthContext): Promise<CollabTask> {
-  const delta = Math.trunc(by);
-  if (!Number.isFinite(delta) || delta < 1) {
-    throw new Error("by must be >= 1");
-  }
+export async function extendIterations(taskId: string, _by: number, auth: AuthContext): Promise<CollabTask> {
+  assertCollabPlan(auth);
 
-  const result = await pool.query<CollabTaskRow>(
-    `UPDATE collab_tasks
-     SET max_iterations = LEAST(8, max_iterations + $3),
-         updated_at = now()
-     WHERE id = $1
-       AND user_id = $2
-     RETURNING *`,
-    [taskId, auth.userId, delta]
-  );
-
-  const row = result.rows[0];
-  if (!row) {
+  // Iteration limit removed; this is now a no-op that returns the current task.
+  const task = await getTask(taskId, auth);
+  if (!task) {
     throw new CollabNotFoundError();
   }
-
-  const task = mapTaskRow(row);
-  invalidateCachedTask(taskId, auth);
-  writeCachedTask(task);
   return task;
 }
 
 export async function deleteTask(taskId: string, auth: AuthContext): Promise<void> {
+  assertCollabPlan(auth);
+
   const result = await pool.query(
     `DELETE FROM collab_tasks
      WHERE id = $1

@@ -4,7 +4,6 @@ import { config } from "../config/index.js";
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
 import { runAsyncSafe } from "../shared/async-safe.js";
-import { assertPro } from "./documents.js";
 import { getPlanForTenant } from "../infrastructure/auth/tenancy.js";
 import { ingestUploadedFileToDocument, type UploadedFileRef } from "./uploaded-file-ingest.js";
 
@@ -302,8 +301,6 @@ export async function enqueueUploadedFileIngest(
     conversation_id?: string | null;
   }
 ): Promise<UploadedFileIngestJobPending> {
-  assertPro(auth);
-
   const filename = fileRef.name?.trim() || `upload-${fileRef.id}`;
   const ref = `ing_${randomUUID().replace(/-/g, "")}`;
   const conversationId = input?.conversation_id?.trim() || null;
@@ -345,8 +342,6 @@ export async function enqueueUploadedFilesIngest(
   enqueued: UploadedFileIngestJobPending[];
   errors: UploadedFileIngestJobError[];
 }> {
-  assertPro(auth);
-
   const enqueued: UploadedFileIngestJobPending[] = [];
   const errors: UploadedFileIngestJobError[] = [];
 

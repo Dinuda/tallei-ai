@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FileText, X, ChevronRight } from "lucide-react";
 import styles from "./DocumentCard.module.css";
 
@@ -10,6 +10,11 @@ interface TaskDocument {
   ref: string;
   title: string;
   filename: string | null;
+  status: DocumentStatus;
+  preview: string;
+}
+
+interface LiveDocumentState {
   status: DocumentStatus;
   preview: string;
 }
@@ -38,15 +43,115 @@ interface DocumentCardProps {
 export default function DocumentCard({ documents, lotTitle, countSaved, countFailed }: DocumentCardProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<TaskDocument | null>(null);
+  const [drawerContent, setDrawerContent] = useState<string>("");
+  const [drawerLoading, setDrawerLoading] = useState(false);
+  const [drawerError, setDrawerError] = useState<string | null>(null);
+  const [liveByRef, setLiveByRef] = useState<Record<string, LiveDocumentState>>({});
 
-  const openDrawer = (doc: TaskDocument) => {
+  const liveFor = (doc: TaskDocument): LiveDocumentState => {
+    const live = liveByRef[doc.ref];
+    if (!live) return { status: doc.status, preview: doc.preview };
+    return live;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshLiveState = async () => {
+      for (const doc of documents) {
+        try {
+          const res = await fetch(`/api/documents/${encodeURIComponent(doc.ref)}`, { cache: "no-store" });
+          const payload = await res.json();
+          if (!res.ok) continue;
+          if (!payload || typeof payload !== "object" || payload.kind !== "document") continue;
+
+          const statusRaw = typeof payload.status === "string" ? payload.status : "";
+          const liveStatus: DocumentStatus =
+            statusRaw === "ready"
+              ? "ready"
+              : statusRaw === "failed_indexing"
+                ? "failed"
+                : "pending";
+          const content = typeof payload.content === "string" ? payload.content : "";
+          const resolvedPreview = content || doc.preview || "";
+
+          if (cancelled) return;
+          setLiveByRef((prev) => ({
+            ...prev,
+            [doc.ref]: { status: liveStatus, preview: resolvedPreview },
+          }));
+        } catch {
+          // Keep snapshot values when live fetch fails.
+        }
+      }
+    };
+
+    void refreshLiveState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [documents]);
+
+  const openDrawer = async (doc: TaskDocument) => {
     setSelectedDoc(doc);
     setDrawerOpen(true);
+    setDrawerError(null);
+    setDrawerLoading(true);
+    const current = liveFor(doc);
+    setDrawerContent(current.preview || "");
+
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(doc.ref)}`, { cache: "no-store" });
+      const payload = await res.json();
+      if (!res.ok) {
+        const message = typeof payload?.error === "string" ? payload.error : "Failed to load document content.";
+        throw new Error(message);
+      }
+
+      const content =
+        payload &&
+        typeof payload === "object" &&
+        payload.kind === "document" &&
+        typeof payload.content === "string"
+          ? payload.content
+          : "";
+      const statusRaw =
+        payload &&
+        typeof payload === "object" &&
+        payload.kind === "document" &&
+        typeof payload.status === "string"
+          ? payload.status
+          : "";
+      const liveStatus: DocumentStatus =
+        statusRaw === "ready"
+          ? "ready"
+          : statusRaw === "failed_indexing"
+            ? "failed"
+            : "pending";
+      const resolvedPreview = content || current.preview || doc.preview || "No preview available.";
+      setLiveByRef((prev) => ({
+        ...prev,
+        [doc.ref]: {
+          status: liveStatus,
+          preview: resolvedPreview,
+        },
+      }));
+      setDrawerContent(resolvedPreview);
+    } catch (error) {
+      setDrawerError(error instanceof Error ? error.message : "Failed to load document content.");
+      setDrawerContent(current.preview || doc.preview || "No preview available.");
+    } finally {
+      setDrawerLoading(false);
+    }
   };
 
   const closeDrawer = () => {
     setDrawerOpen(false);
     setSelectedDoc(null);
+    setDrawerLoading(false);
+    setDrawerError(null);
+    setDrawerContent("");
   };
 
   return (
@@ -63,13 +168,14 @@ export default function DocumentCard({ documents, lotTitle, countSaved, countFai
 
         <div className={styles.docList}>
           {documents.map((doc) => {
-            const statusStyle = STATUS_STYLES[doc.status];
+            const live = liveFor(doc);
+            const statusStyle = STATUS_STYLES[live.status];
             return (
               <button
                 key={doc.ref}
                 type="button"
                 className={styles.docRow}
-                onClick={() => openDrawer(doc)}
+                onClick={() => void openDrawer(doc)}
               >
                 <div className={styles.docIcon}>{getFileIcon(doc.filename)}</div>
                 <div className={styles.docInfo}>
@@ -85,7 +191,7 @@ export default function DocumentCard({ documents, lotTitle, countSaved, countFai
                       color: statusStyle.text,
                     }}
                   >
-                    {doc.status}
+                    {live.status}
                   </span>
                   <ChevronRight size={14} className={styles.docArrow} />
                 </div>
@@ -108,7 +214,9 @@ export default function DocumentCard({ documents, lotTitle, countSaved, countFai
               </button>
             </div>
             <div className={styles.drawerBody}>
-              <pre className={styles.drawerPreview}>{selectedDoc.preview}</pre>
+              {drawerLoading && <pre className={styles.drawerPreview}>Loading document content…</pre>}
+              {!drawerLoading && drawerError && <pre className={styles.drawerPreview}>{drawerError}</pre>}
+              {!drawerLoading && !drawerError && <pre className={styles.drawerPreview}>{drawerContent || "No preview available."}</pre>}
             </div>
           </div>
         </div>

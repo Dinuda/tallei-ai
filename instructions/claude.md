@@ -73,13 +73,10 @@ CREATE COLLAB TASK:
 ROLE APPROVAL (required):
   1. Show proposed roles as fenced code blocks:
      ChatGPT system prompt:
-     ```text
+     ChatGPT system prompt:
      <role text>
-     ```
      Claude system prompt:
-     ```text
      <role text>
-     ```
   2. Ask: "Do you approve these roles? Reply **yes** to proceed, or tell me what to change."
   3. STOP if not approved. Only proceed on explicit "yes".
 

@@ -1,4 +1,4 @@
-export const MEMORY_TYPES = ["preference", "fact", "event", "decision", "note", "lesson", "failure", "checkpoint"] as const;
+export const MEMORY_TYPES = ["preference", "fact", "event", "decision", "note", "lesson", "failure", "checkpoint", "collab"] as const;
 
 export type MemoryType = (typeof MEMORY_TYPES)[number];
 

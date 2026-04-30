@@ -454,8 +454,7 @@ function collabStageReplyInstructions(
   ];
 }
 
-function collabNextActor(task: { state: "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR"; iteration: number; maxIterations: number }): "chatgpt" | "claude" | null {
-  if (task.iteration >= task.maxIterations) return null;
+function collabNextActor(task: { state: "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR" }): "chatgpt" | "claude" | null {
   if (task.state === "CREATIVE") return "chatgpt";
   if (task.state === "TECHNICAL") return "claude";
   return null;
@@ -472,7 +471,7 @@ const planCache = new Map<string, { plan: AuthContext["plan"]; exp: number }>();
 type PlanRequiredActionErrorBody = {
   error: string;
   code: "plan_required";
-  feature: "document_sharing";
+  feature: "documents" | "collab_sessions";
   billing_url: string;
   user_message: string;
 };
@@ -481,9 +480,19 @@ function planRequiredActionError(error: PlanRequiredError): PlanRequiredActionEr
   return {
     error: error.message,
     code: "plan_required",
-    feature: "document_sharing",
+    feature: "documents",
     billing_url: DOCUMENT_SHARING_BILLING_URL,
-    user_message: `Document sharing is a Pro feature on Tallei. Please complete payment at ${DOCUMENT_SHARING_BILLING_URL} to continue.`,
+    user_message: `This document action is not available on your current plan. Visit ${DOCUMENT_SHARING_BILLING_URL} to manage billing, then retry.`,
+  };
+}
+
+function collabPlanRequiredActionError(error: PlanRequiredError): PlanRequiredActionErrorBody {
+  return {
+    error: error.message,
+    code: "plan_required",
+    feature: "collab_sessions",
+    billing_url: DOCUMENT_SHARING_BILLING_URL,
+    user_message: `Collab sessions require a Pro or Power plan on Tallei. Upgrade at ${DOCUMENT_SHARING_BILLING_URL} to continue.`,
   };
 }
 
@@ -1227,7 +1236,7 @@ export function buildOpenApiSpec(serverUrl: string) {
     properties: {
       error: { type: "string" },
       code: { type: "string", enum: ["plan_required"] },
-      feature: { type: "string", enum: ["document_sharing"] },
+      feature: { type: "string", enum: ["documents", "collab_sessions"] },
       billing_url: { type: "string", format: "uri" },
       user_message: { type: "string" },
     },
@@ -2713,6 +2722,10 @@ router.get("/actions/upload_status", chatGptActionAuthMiddleware, requireScopes(
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(planRequiredActionError(error));
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/upload_status",
@@ -2769,6 +2782,10 @@ router.post("/actions/recent_documents", chatGptActionAuthMiddleware, requireSco
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(planRequiredActionError(error));
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/recent_documents",
@@ -2794,7 +2811,7 @@ router.post("/actions/search_documents", chatGptActionAuthMiddleware, requireSco
       return;
     }
     if (error instanceof PlanRequiredError) {
-      res.status(402).json({ error: error.message });
+      res.status(402).json(planRequiredActionError(error));
       return;
     }
     logChatGptActionAsync({
@@ -2822,7 +2839,7 @@ router.post("/actions/recall_document", chatGptActionAuthMiddleware, requireScop
       return;
     }
     if (error instanceof PlanRequiredError) {
-      res.status(402).json({ error: error.message });
+      res.status(402).json(planRequiredActionError(error));
       return;
     }
     if (error instanceof Error && /not found/i.test(error.message)) {
@@ -2884,6 +2901,10 @@ router.post("/actions/orchestrate_start", chatGptActionAuthMiddleware, requireSc
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(collabPlanRequiredActionError(error));
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/actions/orchestrate_start",
@@ -2941,6 +2962,10 @@ router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireS
     }
     if (error instanceof OrchestrationConflictError) {
       res.status(409).json({ error: error.message });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(collabPlanRequiredActionError(error));
       return;
     }
     if (error instanceof ChatGptActionTimeoutError) {
@@ -3033,6 +3058,10 @@ router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, require
     }
     if (error instanceof OrchestrationInvalidPlanError) {
       res.status(409).json({ error: error.message });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(collabPlanRequiredActionError(error));
       return;
     }
     const pg = postgresErrorDetails(error);
@@ -3207,7 +3236,9 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         iteration: task.iteration,
         max_iterations: task.maxIterations,
         next_actor: nextActor,
-        user_visible: appendContinueCommand(`Task ${task.id} is waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`, continueCommand),
+        user_visible: appendContinueCommand(nextActor
+          ? `Task ${task.id} is waiting on ${nextActor}. Next up: ${nextWork}`
+          : `Task ${task.id} has finished all planned iterations. ${nextWork}`, continueCommand),
         continue_command: continueCommand,
         last_message: lastMessage,
         recent_transcript: task.transcript,
@@ -3323,6 +3354,10 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(collabPlanRequiredActionError(error));
+      return;
+    }
     if (error instanceof CollabConflictError) {
       const auth = await resolveChatGptActionAuth(req, res);
       if (!auth) return;
@@ -3339,7 +3374,9 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         max_iterations: task?.maxIterations ?? null,
         next_actor: nextActor,
         user_visible: task
-          ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`
+          ? nextActor
+            ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor}. Next up: ${nextWork}`
+            : `Turn rejected. Task ${task.id} has finished all planned iterations. ${describeNextActorWork(task.state, null)}`
           : "Turn rejected due to task state mismatch.",
       });
       return;
@@ -3408,6 +3445,10 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(collabPlanRequiredActionError(error));
+      return;
+    }
     logChatGptActionAsync({
       auth: req.authContext,
       method: "chatgpt/collab/create-task",
@@ -3469,7 +3510,9 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       next_actor: nextActor,
       user_visible: appendContinueCommand(claim
         ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}).`
-        : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`, continueCommand),
+        : nextActor
+          ? `Task ${task.id} is waiting on ${nextActor}.`
+          : `Task ${task.id} has finished all planned iterations. ${describeNextActorWork(task.state, null)}`, continueCommand),
       continue_command: continueCommand,
       last_message: lastMessage,
       recent_transcript: task.transcript,
@@ -3481,6 +3524,10 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(collabPlanRequiredActionError(error));
       return;
     }
     logChatGptActionAsync({
@@ -3521,6 +3568,7 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
       },
       ok: true,
     });
+    const nextWork = describeNextActorWork(task.state, nextActor);
     collabActionJson(res, {
       ok: true,
       task_id: task.id,
@@ -3528,7 +3576,7 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
       iteration: task.iteration,
       max_iterations: task.maxIterations,
       next_actor: nextActor,
-      user_visible: appendContinueCommand(`Saved ChatGPT turn for task ${task.id} at iteration ${task.iteration}.`, continueCommand),
+      user_visible: appendContinueCommand(`Saved ChatGPT turn for task ${task.id} at iteration ${task.iteration}. Next up: ${nextWork}`, continueCommand),
       continue_command: continueCommand,
       saved_turn: savedTurn
         ? {
@@ -3546,6 +3594,10 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    if (error instanceof PlanRequiredError) {
+      res.status(402).json(collabPlanRequiredActionError(error));
+      return;
+    }
     if (error instanceof CollabConflictError) {
       const auth = await resolveChatGptActionAuth(req, res);
       if (!auth) return;
@@ -3561,7 +3613,9 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
         max_iterations: task?.maxIterations ?? null,
         next_actor: nextActor,
         user_visible: task
-          ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor ?? "completion"}.`
+          ? nextActor
+            ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor}.`
+            : `Turn rejected. Task ${task.id} has finished all planned iterations. ${describeNextActorWork(task.state, null)}`
           : "Turn rejected due to task state mismatch.",
       });
       return;

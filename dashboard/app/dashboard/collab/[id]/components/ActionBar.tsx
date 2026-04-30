@@ -35,11 +35,11 @@ export default function ActionBar({
 
   return (
     <div className={styles.bar}>
-      {waitingActor && isActive && (
+      {/* {waitingActor && isActive && (
         <button type="button" className={styles.primaryBtn} onClick={onNudge}>
           Remind {waitingActor === "chatgpt" ? "ChatGPT" : "Claude"}
         </button>
-      )}
+      )} */}
 
       <button type="button" className={styles.secondaryBtn} onClick={onRefresh}>
         <RefreshCw size={14} />

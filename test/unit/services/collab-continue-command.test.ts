@@ -2,11 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertCollabPlan,
   buildFirstTurnContinueCommand,
+  claimTurn,
   compactCollabTransportPayload,
+  createTask,
+  deleteTask,
+  extendIterations,
   extractDocumentRefsFromText,
+  finishTask,
+  submitTurn,
   type CollabTask,
 } from "../../../src/services/collab.js";
+import { assertPro as assertDocumentPlan } from "../../../src/services/documents.js";
+import {
+  approvePlan,
+  startSession,
+  submitAnswer,
+} from "../../../src/services/orchestrator.js";
+import { PlanRequiredError } from "../../../src/shared/errors/index.js";
+import type { AuthContext } from "../../../src/domain/auth/index.js";
 
 function task(overrides: Partial<CollabTask>): CollabTask {
   return {
@@ -27,6 +42,65 @@ function task(overrides: Partial<CollabTask>): CollabTask {
     ...overrides,
   };
 }
+
+function auth(plan: AuthContext["plan"]): AuthContext {
+  return {
+    userId: "00000000-0000-4000-8000-000000000002",
+    tenantId: "00000000-0000-4000-8000-000000000003",
+    authMode: "oauth",
+    plan,
+  };
+}
+
+test("documents are available to free-plan users", () => {
+  assert.doesNotThrow(() => assertDocumentPlan(auth("free")));
+});
+
+test("collab active-use guard requires pro or power", () => {
+  assert.throws(() => assertCollabPlan(auth("free")), PlanRequiredError);
+  assert.doesNotThrow(() => assertCollabPlan(auth("pro")));
+  assert.doesNotThrow(() => assertCollabPlan(auth("power")));
+});
+
+test("free-plan users are blocked from active collab service methods before database work", async () => {
+  const freeAuth = auth("free");
+  await assert.rejects(
+    () => createTask({ title: "Blocked", firstActor: "chatgpt" }, freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => claimTurn("00000000-0000-4000-8000-000000000001", "chatgpt", freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => submitTurn("00000000-0000-4000-8000-000000000001", "chatgpt", "draft", freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => finishTask("00000000-0000-4000-8000-000000000001", freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => extendIterations("00000000-0000-4000-8000-000000000001", 1, freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => deleteTask("00000000-0000-4000-8000-000000000001", freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => startSession({ goal: "Blocked planning", sourcePlatform: "dashboard" }, freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => submitAnswer("00000000-0000-4000-8000-000000000001", "answer", freeAuth),
+    PlanRequiredError
+  );
+  await assert.rejects(
+    () => approvePlan("00000000-0000-4000-8000-000000000001", freeAuth),
+    PlanRequiredError
+  );
+});
 
 test("buildFirstTurnContinueCommand gives direct Claude handoff instructions with short command", () => {
   const command = buildFirstTurnContinueCommand(task({ state: "TECHNICAL", lastActor: "chatgpt" }));

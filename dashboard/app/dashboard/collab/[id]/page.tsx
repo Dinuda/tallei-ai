@@ -688,7 +688,7 @@ export default function CollabBoardPage() {
 
       {showRaw && <pre className={styles.rawBox}>{JSON.stringify(task, null, 2)}</pre>}
 
-      {waitingActor && (
+      {/* {waitingActor && (
         <NudgeModal
           open={nudgeOpen}
           waitingActor={waitingActor}
@@ -697,7 +697,7 @@ export default function CollabBoardPage() {
           taskBrief={task.brief}
           onClose={() => setNudgeOpen(false)}
         />
-      )}
+      )} */}
     </div>
   );
 }
