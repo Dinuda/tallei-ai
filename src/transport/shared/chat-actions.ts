@@ -61,6 +61,7 @@ export type PrepareResponseIntent = {
 
 const RECALL_MATCHED_DOCS_TIMEOUT_MS = 2_200;
 const RECALL_MATCHED_DOCS_INLINE_LIMIT = 3;
+const RECALL_MATCHED_DOCS_FETCH_LIMIT = 12;
 const INLINE_DOCUMENT_MAX_CHARS = 4_000;
 const DOC_BRIEF_PREVIEW_MAX_CHARS = 200;
 const MEMORY_TEXT_MAX_CHARS = 600;
@@ -344,7 +345,7 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
 
   const matchedDocumentsPromise = matchedDocsEnabled
     ? withSoftTimeout(
-      searchDocuments(input.query, auth, 3).catch(() => []),
+      searchDocuments(input.query, auth, RECALL_MATCHED_DOCS_FETCH_LIMIT).catch(() => []),
       RECALL_MATCHED_DOCS_TIMEOUT_MS,
       []
     )
@@ -370,15 +371,19 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
   ]);
 
   const queryExtractedRefs = Array.from(input.query.matchAll(/@(?:doc|lot):[a-z0-9_-]+/gi), (m) => m[0]);
-  // Deduplicate matched docs by title to avoid fetching the same document multiple times
-  // (e.g. when a user uploads the same file under different refs)
-  const seenTitles = new Set<string>();
+  // Deduplicate matched docs before truncating so repeated uploads don't crowd out
+  // other relevant files in context.
+  const seenDocKeys = new Set<string>();
   const deduplicatedMatchedDocs = matchedDocuments.filter((doc) => {
-    const key = doc.title.trim().toLowerCase();
-    if (seenTitles.has(key)) return false;
-    seenTitles.add(key);
+    const normalizedTitle = doc.title.trim().toLowerCase();
+    const normalizedPreview = doc.preview.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 120);
+    const key = normalizedTitle
+      ? `${normalizedTitle}::${normalizedPreview}`
+      : doc.ref.trim().toLowerCase();
+    if (seenDocKeys.has(key)) return false;
+    seenDocKeys.add(key);
     return true;
-  });
+  }).slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT);
   const matchedRefs = deduplicatedMatchedDocs.slice(0, RECALL_MATCHED_DOCS_INLINE_LIMIT).map((doc) => doc.ref);
   const inlineCandidateRefs = [...new Set([...queryExtractedRefs, ...matchedRefs])];
 
@@ -444,7 +449,7 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
       ),
       memories: result.memories.map(sanitizeMemoryForResponse),
       recentDocuments: recentDocuments.map(trimDocBriefForResponse),
-      matchedDocuments,
+      matchedDocuments: deduplicatedMatchedDocs,
       referencedDocuments,
       recentCompletedIngests,
       recentCollabTasks,

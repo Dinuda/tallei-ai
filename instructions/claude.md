@@ -82,7 +82,7 @@ ROLE APPROVAL (required):
 
 ITERATION ROADMAP (required after approval):
   Show numbered turns: who acts, exactly what they deliver, done criteria.
-  Include: DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.
+  DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.
 
 AFTER ANY COLLAB SUBMIT:
   - Show the FULL submitted output visibly in the Claude chat interface first, exactly as the user-facing deliverable.

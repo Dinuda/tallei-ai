@@ -66,7 +66,8 @@ ROLE APPROVAL (required before any collab task):
 
 ITERATION ROADMAP (required after role approval):
   Show numbered turns: who acts, exactly what they deliver, done criteria.
-  Include: DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.
+  DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.
+  
   Example:
     Iteration Roadmap:
     1. ChatGPT: Draft slide outline

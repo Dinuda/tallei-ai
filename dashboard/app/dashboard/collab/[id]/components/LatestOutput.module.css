@@ -127,10 +127,13 @@
   color: #e2e8f0;
   padding: 14px;
   border-radius: var(--radius-md);
-  overflow-x: auto;
+  overflow-x: hidden;
   font-size: 0.82rem;
   line-height: 1.5;
   margin: 0.8em 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .body :global(pre code) {
