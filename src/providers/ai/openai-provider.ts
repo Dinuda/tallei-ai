@@ -6,6 +6,7 @@ import { mapProviderError } from "./errors.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
+  ChatMessage,
   EmbeddingRequest,
   EmbeddingResponse,
   ProviderCapabilities,
@@ -41,6 +42,8 @@ export class OpenAiProvider implements AiProvider {
   readonly name = "openai" as const;
 
   private static readonly REDACTED = "[REDACTED]";
+  private static readonly JSON_OBJECT_HINT =
+    "Return a valid JSON object response only.";
 
   private readonly client: OpenAI;
   private readonly defaultChatModel: string;
@@ -204,23 +207,24 @@ export class OpenAiProvider implements AiProvider {
 
   async chat(req: ChatCompletionRequest): Promise<ChatCompletionResponse> {
     const model = req.model ?? this.defaultChatModel;
+    const effectiveReq = this.withJsonObjectHint(req);
     const startedAt = process.hrtime.bigint();
     try {
       const response = await this.client.chat.completions.create(
         {
           model,
-          messages: [...req.messages],
-          temperature: req.temperature,
-          max_tokens: req.maxTokens,
-          response_format: req.responseFormat === "json_object" ? { type: "json_object" } : undefined,
+          messages: [...effectiveReq.messages],
+          temperature: effectiveReq.temperature,
+          max_tokens: effectiveReq.maxTokens,
+          response_format: effectiveReq.responseFormat === "json_object" ? { type: "json_object" } : undefined,
         },
-        req.signal ? { signal: req.signal } : undefined
+        effectiveReq.signal ? { signal: effectiveReq.signal } : undefined
       );
 
       const text = normalizeChatText(response.choices[0]?.message?.content);
       const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       this.logChatCall({
-        req,
+        req: effectiveReq,
         model,
         latencyMs,
         success: true,
@@ -243,7 +247,7 @@ export class OpenAiProvider implements AiProvider {
     } catch (error) {
       const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       this.logChatCall({
-        req,
+        req: effectiveReq,
         model,
         latencyMs,
         success: false,
@@ -300,5 +304,22 @@ export class OpenAiProvider implements AiProvider {
       });
       throw mapProviderError(this.name, error);
     }
+  }
+
+  private withJsonObjectHint(req: ChatCompletionRequest): ChatCompletionRequest {
+    if (req.responseFormat !== "json_object") {
+      return req;
+    }
+
+    const hasJsonWord = req.messages.some((message) => /\bjson\b/i.test(message.content));
+    if (hasJsonWord) {
+      return req;
+    }
+
+    const messages: readonly ChatMessage[] = [
+      { role: "system", content: OpenAiProvider.JSON_OBJECT_HINT },
+      ...req.messages,
+    ];
+    return { ...req, messages };
   }
 }
