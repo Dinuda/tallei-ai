@@ -110,7 +110,7 @@ export interface SaveMemoryUseCaseInput {
 const DEFAULT_MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
 const MEMORY_EMBED_TIMEOUT_MS = Math.max(DEFAULT_MEMORY_EMBED_TIMEOUT_MS, config.memoryRecallEmbedTimeoutMs);
 const MEMORY_VECTOR_UPSERT_TIMEOUT_MS = config.memoryVectorUpsertTimeoutMs;
-const SUMMARY_TIMEOUT_MS = config.nodeEnv === "production" ? 3_200 : 2_000;
+const SUMMARY_TIMEOUT_MS = config.memorySaveSummaryTimeoutMs;
 const DEDUP_VECTOR_LIMIT = 8;
 const DEDUP_VECTOR_SIMILARITY_THRESHOLD = 0.92;
 const MEMORY_EMBED_MAX_CHARS = 2_000;

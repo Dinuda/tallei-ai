@@ -109,6 +109,7 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_FEATURE__AUTH_API_KEY_VIEW_SHADOW", oldKey: "AUTH_API_KEY_VIEW_SHADOW_ENABLED" },
   // Resilience tunables
   { newKey: "TALLEI_RESILIENCE__VECTOR_UPSERT_TIMEOUT_MS", oldKey: "MEMORY_VECTOR_UPSERT_TIMEOUT_MS" },
+  { newKey: "TALLEI_RESILIENCE__SAVE_SUMMARY_TIMEOUT_MS",  oldKey: "MEMORY_SAVE_SUMMARY_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_EMBED_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_EMBED_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_VECTOR_TIMEOUT_MS", oldKey: "MEMORY_RECALL_VECTOR_TIMEOUT_MS" },
   { newKey: "TALLEI_RESILIENCE__RECALL_TOTAL_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_TOTAL_TIMEOUT_MS" },
@@ -247,6 +248,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       e,
       "TALLEI_RESILIENCE__VECTOR_UPSERT_TIMEOUT_MS",
       nodeEnv === "production" ? 10_000 : 12_000
+    ),
+    memorySaveSummaryTimeoutMs: readIntEnv(
+      e,
+      "TALLEI_RESILIENCE__SAVE_SUMMARY_TIMEOUT_MS",
+      nodeEnv === "production" ? 8_000 : 6_000
     ),
     memoryRecallEmbedTimeoutMs: readIntEnv(
       e,
