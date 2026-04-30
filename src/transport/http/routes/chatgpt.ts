@@ -421,6 +421,7 @@ function collabStageReplyInstructions(
         "After every orchestrate_* action, show the returned user_visible text to the user before stopping or deciding the next action.",
         "After approval and roadmap, call collab_continue.",
         "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
+        "FULL CONTENT RULE: When submitting a turn, show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
         "If any collab action returns continue_command, end the user-facing response with its instruction.",
       ];
     }
@@ -433,6 +434,7 @@ function collabStageReplyInstructions(
       "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
       "VISIBLE HANDOFFS (required): After every collab action, never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
       "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
+      "FULL CONTENT RULE: Show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
       "Show the actual submitted output after collab_continue succeeds.",
       "If any collab action returns continue_command, end the user-facing response with its instruction.",
       "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
@@ -446,6 +448,7 @@ function collabStageReplyInstructions(
       "If is_my_turn=false, report which actor (next_actor) is expected and what they will do next, then stop.",
       "VISIBLE HANDOFFS (required): Never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
       "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
+      "FULL CONTENT RULE: Show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
       "Show the actual submitted output after a successful submit.",
       "If any collab action returns continue_command, end the user-facing response with its instruction.",
       "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
@@ -457,6 +460,7 @@ function collabStageReplyInstructions(
     "Show the actual submitted output after collab_continue succeeds.",
     "VISIBLE HANDOFFS (required): Never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
     "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
+    "FULL CONTENT RULE: Show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
     "If any collab action returns continue_command, end the user-facing response with its instruction.",
     "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     "If the call fails, return the exact error and stop.",
@@ -3219,7 +3223,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         user_visible: appendContinueCommand(`Task ${task.id} is waiting on ${nextActor ?? "completion"}. Next up: ${nextWork}`, continueCommand),
         continue_command: continueCommand,
         last_message: lastMessage,
-        recent_transcript: task.transcript.slice(-6),
+        recent_transcript: task.transcript,
         fallback_context: buildTurnFallbackContext(task, "chatgpt"),
         ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
         ...(preparedUploadHydration ? { upload: preparedUploadHydration.attached } : {}),
@@ -3260,7 +3264,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         user_visible: appendContinueCommand(`It's your turn on task ${task.id}. ${myTurnWork} Draft the output, then call collab_continue again with draft_output.`, continueCommand),
         continue_command: continueCommand,
         last_message: lastMessage,
-        recent_transcript: task.transcript.slice(-6),
+        recent_transcript: task.transcript,
         fallback_context: buildTurnFallbackContext(task, "chatgpt"),
         ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
         ...(preparedUploadHydration ? { upload: preparedUploadHydration.attached } : {}),
@@ -3324,7 +3328,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
             content_preview: savedTurn.content.slice(0, 800),
           }
         : null,
-      recent_transcript: submittedTask.transcript.slice(-6),
+      recent_transcript: submittedTask.transcript,
       fallback_context: buildTurnFallbackContext(submittedTask, "chatgpt"),
     });
   } catch (error) {
@@ -3481,7 +3485,7 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
         : `Task ${task.id} is waiting on ${nextActor ?? "completion"}.`, continueCommand),
       continue_command: continueCommand,
       last_message: lastMessage,
-      recent_transcript: task.transcript.slice(-6),
+      recent_transcript: task.transcript,
       context: task.context,
       fallback_context: buildTurnFallbackContext(task, "chatgpt"),
       ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),

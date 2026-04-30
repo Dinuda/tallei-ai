@@ -90,8 +90,9 @@ MY_TURN  ([COLLAB:MY_TURN:<uuid>] was set in Step 1)
   1. Call collab_continue with draft_output included.
 
 After any successful collab_continue submit:
-  Show the actual submitted output content — not just "task completed".
-  If a collab action returns continue_command, end the response with its instruction.
+  Show the FULL submitted output content in your reply first, then add a brief summary at the end. Do not replace the full content with a bullet-point summary.
+  The user sees your chat window; they need the complete deliverable text there, not just a recap.
+  If a collab action returns continue_command, end the response with its instruction after the full content and summary.
 
 VISIBLE HANDOFFS (never say just "continue task"):
   ALWAYS state clearly:

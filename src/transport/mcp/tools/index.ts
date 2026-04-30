@@ -313,7 +313,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           continue_command: continueCommand,
           brief: task.brief,
           last_chatgpt_entry: lastChatGptEntry,
-          recent_transcript: task.transcript.slice(-6),
+          recent_transcript: task.transcript,
           fallback_context: buildTurnFallbackContext(task, "claude"),
           ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
           ...(uploadSummary ? { upload: uploadSummary } : {}),

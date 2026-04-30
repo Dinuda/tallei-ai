@@ -801,7 +801,7 @@ export function buildTurnFallbackContext(task: CollabTask, actor: CollabModelAct
     : null;
   const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
   const lastClaudeEntry = [...task.transcript].reverse().find((entry) => entry.actor === "claude") ?? null;
-  const recentTranscript = task.transcript.slice(-6);
+  const recentTranscript = task.transcript;
   const context = normalizeContext(task.context);
   const orchestrationContext = normalizeContext(context["orchestration"]);
   const artifacts = normalizeContext(context["artifacts"]);

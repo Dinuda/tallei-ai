@@ -136,7 +136,7 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 
 **Iteration Roadmap (NEW):** Immediately after role approval, generate and display a numbered roadmap showing each turn, which provider acts, exactly what they will deliver, and the exit/done criteria. Include the deliverable constraint: text/PDF/code only, no PPTX or images.
 
-**Visible Handoffs (NEW):** After every plan or output, never say just "continue task". Always state clearly: (a) who is next, (b) exactly what they will do, and (c) the continue command if any.
+**Visible Handoffs (NEW):** After every plan or output, never say just "continue task". Always state clearly: (a) who is next, (b) exactly what they will do, and (c) the continue command if any. Show the FULL content in chat first, then a brief summary, then the handoff.
 
 ### Don't Break Memory Performance
 - The fire-and-forget pattern in `saveMemory()` is intentional: never await the full pipeline in the MCP handler

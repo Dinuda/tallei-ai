@@ -293,7 +293,7 @@ router.post("/:id/run-turn", requireScopes(["collab:read"]), async (req: AuthReq
       iteration: task.iteration,
       max_iterations: task.maxIterations,
       last_message: lastTranscriptEntry(task),
-      recent_transcript: task.transcript.slice(-6),
+      recent_transcript: task.transcript,
       context: task.context,
       fallback_context: buildTurnFallbackContext(task, body.actor),
     });
