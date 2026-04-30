@@ -29,6 +29,7 @@ interface StatusHeaderProps {
   title: string;
   brief: string | null;
   state: CollabState;
+  paused?: boolean;
   iteration: number;
   updatedAt: string;
 }
@@ -37,10 +38,11 @@ export default function StatusHeader({
   title,
   brief,
   state,
+  paused = false,
   iteration,
   updatedAt,
 }: StatusHeaderProps) {
-  const waitingActor = waitingActorForState(state);
+  const waitingActor = paused ? null : waitingActorForState(state);
 
   const waitingSeconds = useMemo(() => {
     return Math.max(0, Math.floor((Date.now() - new Date(updatedAt).getTime()) / 1000));
@@ -78,6 +80,11 @@ export default function StatusHeader({
               </span>
               {stalled && <span className={styles.pillWarning}>Stalled</span>}
             </>
+          ) : paused ? (
+            <>
+              <span className={styles.pillDot} style={{ backgroundColor: "var(--status-warning-text)" }} />
+              <span className={styles.pillText}>Paused · awaiting continue</span>
+            </>
           ) : (
             <>
               <span className={styles.pillDot} style={{ backgroundColor: "var(--status-success-text)" }} />
@@ -90,12 +97,13 @@ export default function StatusHeader({
       <div className={styles.progressTrack}>
         <div
           className={styles.progressFill}
-          style={{ width: waitingActor ? "58%" : "100%" }}
+          style={{ width: waitingActor || paused ? "58%" : "100%" }}
         />
       </div>
 
       <div className={styles.stateRow}>
         <span className={`${styles.stateChip} ${styles[`state_${state}`] ?? ""}`}>{state}</span>
+        {paused && <span className={`${styles.stateChip} ${styles.state_PAUSED}`}>PAUSED</span>}
         <span className={styles.iterationChip}>
           Turn {iteration}
         </span>

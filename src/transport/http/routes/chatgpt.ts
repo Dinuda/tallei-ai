@@ -415,6 +415,8 @@ function collabStageReplyInstructions(
     "Do not call prepare_response again for this turn.",
     "VISIBLE HANDOFFS: Never say just 'continue task'. State (a) who is next, (b) exactly what they will do, (c) the continue command.",
     "DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.",
+    "FORMAT RULE: Final deliverable must match the user's requested format. If the user did not specify a format, default to plain text.",
+    "SAVE RULE: Uploading/saving to Tallei is optional unless the user explicitly asks to save or archive.",
     "FULL CONTENT RULE: Show FULL content first, then brief summary. Never replace with bullet points.",
     "Do not create a Claude handoff prompt; do not ask whether to hand off; use only the returned continue_command and tell the user exactly where to paste it and where to return afterward.",
   ];

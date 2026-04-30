@@ -23,6 +23,7 @@ type CollabTask = {
   title: string;
   brief: string | null;
   state: CollabState;
+  paused?: boolean;
   lastActor: CollabActor | null;
   iteration: number;
   maxIterations: number;
@@ -101,6 +102,17 @@ function waitingActorLabel(state: CollabState): string | null {
   return null;
 }
 
+function readObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function isTaskPaused(task: CollabTask): boolean {
+  if (typeof task.paused === "boolean") return task.paused;
+  const pause = readObject(task.context?.["pause"]);
+  return pause["paused"] === true;
+}
+
 function latestOutput(task: CollabTask): TranscriptEntry | null {
   const transcript = Array.isArray(task.transcript) ? task.transcript : [];
   if (transcript.length === 0) return null;
@@ -160,7 +172,7 @@ export default function CollabTasksPage() {
   const hasTasks = tasks.length > 0 || orchestrationSessions.length > 0;
 
   const stats = useMemo(() => {
-    const activeCount = tasks.filter((task) => task.state === "CREATIVE" || task.state === "TECHNICAL").length;
+    const activeCount = tasks.filter((task) => (task.state === "CREATIVE" || task.state === "TECHNICAL") && !isTaskPaused(task)).length;
     const activePlanningCount = orchestrationSessions.filter((session) =>
       session.status === "INTERVIEWING" || session.status === "PLAN_READY"
     ).length;
@@ -199,7 +211,7 @@ export default function CollabTasksPage() {
           let count = 0;
           if (item.id === "all") count = stats.total;
           else if (item.id === "active") count = stats.active + stats.planning;
-          else if (item.id === "waiting") count = tasks.filter((t) => t.state === "CREATIVE" || t.state === "TECHNICAL").length;
+          else if (item.id === "waiting") count = tasks.filter((t) => (t.state === "CREATIVE" || t.state === "TECHNICAL") && !isTaskPaused(t)).length;
           else if (item.id === "done") count = stats.done;
 
           return (
@@ -298,7 +310,10 @@ export default function CollabTasksPage() {
           {/* Collab task cards */}
           {tasks.map((task) => {
             const latest = latestOutput(task);
-            const config = STATE_CONFIG[task.state];
+            const paused = isTaskPaused(task);
+            const config = paused
+              ? { label: "Paused", bg: "var(--status-warning-bg)", border: "var(--status-warning-border)", text: "var(--status-warning-text)" }
+              : STATE_CONFIG[task.state];
             const progressPercent = task.state === "DONE" ? 100 : task.state === "ERROR" ? 100 : 58;
 
             return (
@@ -312,7 +327,7 @@ export default function CollabTasksPage() {
                       color: config.text,
                     }}
                   >
-                    {waitingActorLabel(task.state)}
+                    {paused ? "Paused" : waitingActorLabel(task.state)}
                   </span>
                 </div>
 

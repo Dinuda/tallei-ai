@@ -34,6 +34,7 @@ type CollabTask = {
   title: string;
   brief: string | null;
   state: CollabState;
+  paused?: boolean;
   lastActor: CollabActor | null;
   iteration: number;
   maxIterations: number;
@@ -389,7 +390,7 @@ export default function CollabBoardPage() {
     }
   }, [taskId]);
 
-  const taskPaused = task ? isTaskManuallyPaused(task.context) : false;
+  const taskPaused = task ? Boolean(task.paused ?? isTaskManuallyPaused(task.context)) : false;
 
   useEffect(() => {
     if (!taskId || pollPaused) return;
@@ -645,6 +646,7 @@ export default function CollabBoardPage() {
               title={task.title}
               brief={task.brief}
               state={task.state}
+              paused={taskPaused}
               iteration={task.iteration}
               updatedAt={task.updatedAt}
             />

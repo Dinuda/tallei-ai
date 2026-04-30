@@ -1,6 +1,6 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
-import { createLot, documentBriefsByRefs, recallDocument, stashDocument } from "./documents.js";
+import { createLot, documentBriefsByRefs, recallDocument } from "./documents.js";
 import { ingestUploadedFilesToDocuments, type UploadedFileSaveError } from "./uploaded-file-ingest.js";
 import { listRecentCompletedUploadedFileIngestJobs } from "./uploaded-file-ingest-jobs.js";
 import { saveMemory } from "./memory.js";
@@ -27,6 +27,7 @@ export interface CollabTask {
   title: string;
   brief: string | null;
   state: CollabState;
+  paused?: boolean;
   lastActor: CollabActor | null;
   iteration: number;
   maxIterations: number;
@@ -222,6 +223,15 @@ function normalizeTranscript(value: unknown): CollabTranscriptEntry[] {
 }
 
 function mapTaskRow(row: CollabTaskRow): CollabTask {
+  const context = normalizeContext(row.context);
+  const pause = context["pause"];
+  const paused = Boolean(
+    pause &&
+    typeof pause === "object" &&
+    !Array.isArray(pause) &&
+    (pause as Record<string, unknown>)["paused"] === true
+  );
+
   return {
     id: row.id,
     tenantId: row.tenant_id,
@@ -229,10 +239,11 @@ function mapTaskRow(row: CollabTaskRow): CollabTask {
     title: row.title,
     brief: row.brief,
     state: row.state,
+    paused,
     lastActor: row.last_actor,
     iteration: row.iteration,
     maxIterations: row.max_iterations,
-    context: normalizeContext(row.context),
+    context,
     transcript: normalizeTranscript(row.transcript),
     errorMessage: row.error_message,
     createdAt: row.created_at,
@@ -296,20 +307,6 @@ async function filterExistingDocumentRefs(
   const valid = refs.filter((ref) => existing.has(ref));
   const missing = refs.filter((ref) => !existing.has(ref));
   return { valid, missing };
-}
-
-function hasStructuredContent(value: string): boolean {
-  const trimmed = value.trim();
-  if (trimmed.length < 400) return false;
-  const patterns = [
-    /^#{1,3}\s/m,
-    /^```/m,
-    /^\d+\.\s/m,
-    /^[-*]\s/m,
-    /^\|.*\|/m,
-    /\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/api\//i,
-  ];
-  return patterns.some((pattern) => pattern.test(trimmed));
 }
 
 function readExistingTaskDocumentContext(context: Record<string, unknown>): TaskDocumentContextSnapshot {
@@ -1523,24 +1520,7 @@ export async function submitTurn(
       );
     }
 
-    const shouldAutoSave = valid.length === 0 && hasStructuredContent(trimmed);
-    let autoSavedRef: string | null = null;
-
-    if (shouldAutoSave) {
-      try {
-        const stashed = await stashDocument(trimmed, auth, {
-          title: task.title,
-          conversationId: task.id,
-          mimeType: "text/markdown",
-        });
-        autoSavedRef = stashed.refHandle;
-        console.log(`[collab] auto-saved turn content as ${autoSavedRef} for task ${taskId}`);
-      } catch (saveError) {
-        console.warn(`[collab] auto-save failed for task ${taskId}:`, saveError);
-      }
-    }
-
-    const refsToAttach = autoSavedRef ? [...valid, autoSavedRef] : valid;
+    const refsToAttach = valid;
 
     if (refsToAttach.length > 0) {
       await attachUploadedFilesToTaskContext(taskId, auth, {

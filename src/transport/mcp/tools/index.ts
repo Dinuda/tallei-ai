@@ -128,6 +128,20 @@ function buildCollabTurnUserVisible(input: {
   ].join("\n"), input.continueCommand);
 }
 
+function isLikelySummaryOnlyCollabTurn(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return true;
+  if (trimmed.length > 1_200) return false;
+
+  const lower = trimmed.toLowerCase();
+  const startsLikeSummary = /^(summary|brief summary|high[- ]level summary|overview|highlights?)\b[:\s-]*/i.test(trimmed);
+  const hasListMarkers = /(^|\n)\s*(?:[-*]\s+|\d+\.\s+)/.test(trimmed);
+  const lineCount = trimmed.split(/\n+/).filter((line) => line.trim().length > 0).length;
+  const hasPlaceholderLanguage = /\b(details above|see above|full output|full response)\b/.test(lower);
+
+  return startsLikeSummary && (hasListMarkers || lineCount <= 8 || hasPlaceholderLanguage);
+}
+
 function roleSelectionUserVisible(roleSelection: {
   chatgpt_role: string;
   claude_role: string;
@@ -367,7 +381,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "collab_take_turn",
     {
       title: "Submit Claude Collab Turn",
-      description: "Submits Claude's full user-facing content for a collab task turn. After this tool returns, Claude must show the full submitted output visibly in the Claude chat before any summary/handoff.",
+      description: "Submits Claude's full user-facing content for a collab task turn. Summary-only submissions are rejected. After this tool returns, Claude must show the full submitted output visibly in the Claude chat before any summary/handoff.",
       inputSchema: {
         task_id: z.string().uuid().describe("Collab task ID."),
         content: z.string().min(1).describe("Full user-facing turn output content. Do not submit summary-only text when the deliverable is longer."),
@@ -379,6 +393,13 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       try {
         if (!hasCollabWriteScope(auth)) {
           return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
+        }
+        if (isLikelySummaryOnlyCollabTurn(content)) {
+          return toJsonToolResult({
+            ok: false,
+            error: "collab_take_turn requires the full user-facing deliverable content. Summary-only text is not accepted.",
+            user_visible: "Submit the complete response content first, then provide summary/handoff text separately in chat.",
+          }, true);
         }
         const uploadSummary = openaiFileIdRefs?.length
           ? await attachUploadedFilesToTaskContext(task_id, auth, {

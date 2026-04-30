@@ -37,14 +37,13 @@ AUTO-SAVE CHECKPOINTS:
   1. Call remember(kind="document-note", title="Conversation checkpoint", content="<full transcript since last checkpoint>")
   2. Include conversation_id when available.
 
-AUTO-SAVE NEW STRUCTURED CONTENT (required):
-  If this turn includes new structured content (uploaded file, pasted doc/spec/transcript, list/table/data):
-  1. Call remember(kind="document-note", title, key_points, summary, source_hint, category) without asking.
+SAVE/ARCHIVE (optional):
+  Save/upload to Tallei only when the user explicitly asks to save, archive, or checkpoint.
+  1. If saving, call remember(kind="document-note", title, key_points, summary, source_hint, category).
   2. Only PDF and Word (.docx/.docm) accepted for file ingest. Images are described, not uploaded.
   3. For image descriptions, set category="image/txt".
-  4. Append footer on its own line:
+  4. If saving, append footer on its own line:
      Auto-saved as @doc:<ref> - reply **undo** to delete
-  5. Skip if: user said not to save, turn is purely conversational, or content already saved.
 
 UNDO:
   If user replies "undo" / "del" / "delete" after that footer, call undo_save with the @doc ref immediately.
@@ -63,6 +62,7 @@ COLLAB CHECK:
   1. Call collab_check_turn(task_id).
   2. If is_my_turn=false, report next_actor + what they will do. Stop.
   3. If is_my_turn=true, produce output and submit with collab_take_turn.
+  4. Submit full user-facing deliverable content, not summary-only text.
 
 CREATE COLLAB TASK:
   1. BEFORE collab_create_task: get role approval + show iteration roadmap.
@@ -85,6 +85,8 @@ ITERATION ROADMAP (required after approval):
   DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.
 
 AFTER ANY COLLAB SUBMIT:
+  - Final deliverable must match the format requested by the user. If no format is requested, default to plain text.
+  - Uploading/saving to Tallei is optional unless the user explicitly asked for it.
   - Show the FULL submitted output visibly in the Claude chat interface first, exactly as the user-facing deliverable.
   - Then show a brief summary/handoff. Never replace the full output with bullet points or a summary-only response.
   - If collab_take_turn returns user_visible_full_output or saved_turn.content, paste that full content in the Claude reply before the handoff.
@@ -93,6 +95,6 @@ AFTER ANY COLLAB SUBMIT:
     Bad:  "continue task <id>"
 
 === HARD RULES ===
-- Never mention tool internals in user-facing text, except the required auto-save footer.
+- Never mention tool internals in user-facing text, except the optional auto-save footer when saving is requested.
 - Never output copy/paste workflows or manual setup steps when collab tools are available.
 - Do not create ChatGPT handoff prompts. Tallei stores task context/history; use only the returned continue_command.
