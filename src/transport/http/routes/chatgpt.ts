@@ -12,6 +12,7 @@ import {
   buildFirstTurnContinueCommand,
   buildTurnFallbackContext,
   claimTurn,
+  compactCollabTransportPayload,
   CollabConflictError,
   CollabNotFoundError,
   createTask as createCollabTask,
@@ -66,7 +67,7 @@ import {
 import { getTaskPreferences } from "../../../services/task-preferences.js";
 
 const router = Router();
-const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "lesson", "failure"]);
+const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "lesson", "failure", "checkpoint"]);
 const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);
 
 const prepareResponseSchema = z.object({
@@ -251,7 +252,14 @@ function appendContinueCommand(
   command: ReturnType<typeof buildFirstTurnContinueCommand>
 ): string {
   if (!command) return userVisible;
+  if (command.target_actor === "chatgpt") {
+    return `${userVisible}\n\nShall we start?`;
+  }
   return `${userVisible}\n\n${command.instruction}`;
+}
+
+function collabActionJson(res: Response, body: Record<string, unknown>): void {
+  res.json(compactCollabTransportPayload(body));
 }
 
 function roleSelectionUserVisible(roleSelection: {
@@ -403,66 +411,45 @@ function collabStageReplyInstructions(
   options?: { grillMeRecommended?: boolean }
 ): string[] {
   const taskLabel = taskId ? ` (task ${taskId})` : "";
+  const shared = [
+    "Do not call prepare_response again for this turn.",
+    "VISIBLE HANDOFFS: Never say just 'continue task'. State (a) who is next, (b) exactly what they will do, (c) the continue command.",
+    "DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.",
+    "FULL CONTENT RULE: Show FULL content first, then brief summary. Never replace with bullet points.",
+    "Do not create a Claude handoff prompt; do not ask whether to hand off; use only the returned continue_command and tell the user exactly where to paste it and where to return afterward.",
+  ];
+
   if (stage === "CREATE") {
-    if (options?.grillMeRecommended) {
-      return [
-        "Memory recall and document save complete. Do not call prepare_response again for this turn.",
-        "ROLE APPROVAL GATE (required): Start grill-me first: call orchestrate_start with goal/title/brief from the user request.",
-        "After orchestrate_start, show the ChatGPT and Claude role/system prompts as fenced code blocks.",
-        "Then ask the user explicitly: 'Do you approve these roles? Reply yes to proceed, or tell me what to change.'",
-        "STOP if the user does not approve. Do not proceed to grill-me questions until the user explicitly says yes.",
-        "Do not call orchestrate_answer until the user explicitly answers or approves continuing with the displayed default/recommended answer.",
-        "After each orchestrate_answer, show the next question or plan review, then stop and wait for the user's next explicit answer or approval.",
-        "Approve with orchestrate_approve to create the collab task. Do not include max_iterations.",
-        "Do not call orchestrate_approve until the user explicitly approves the displayed plan.",
-        "ITERATION ROADMAP (required after approval): Immediately after orchestrate_approve succeeds, display the numbered Iteration Roadmap from the plan before continuing.",
-        "VISIBLE HANDOFFS (required): After every turn submission, never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
-        "Do not provide final artifacts during grill-me planning; only show role split, questions, plan review, and action status.",
-        "After every orchestrate_* action, show the returned user_visible text to the user before stopping or deciding the next action.",
-        "After approval and roadmap, call collab_continue.",
-        "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
-        "FULL CONTENT RULE: When submitting a turn, show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
-        "If any collab action returns continue_command, end the user-facing response with its instruction.",
-      ];
-    }
-    return [
-      "Memory recall and document save complete. Do not call prepare_response again for this turn.",
-      "ROLE APPROVAL GATE (required): If roles are not yet approved, display proposed ChatGPT and Claude roles as fenced code blocks.",
-      "Ask the user explicitly: 'Do you approve these roles? Reply yes to proceed, or tell me what to change.' STOP if not approved.",
-      "ITERATION ROADMAP (required after role approval): Create and display a numbered roadmap showing each turn, which provider acts, exactly what they will deliver, and the exit/done criteria. Include the deliverable constraint: text/PDF/code only, no PPTX or images.",
-      "Only after role approval AND roadmap display, call createCollabTask with title, brief, and first_actor (default 'chatgpt'). Do not include max_iterations. Do not pass file or document args.",
-      "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
-      "VISIBLE HANDOFFS (required): After every collab action, never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
-      "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
-      "FULL CONTENT RULE: Show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
-      "Show the actual submitted output after collab_continue succeeds.",
-      "If any collab action returns continue_command, end the user-facing response with its instruction.",
-      "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
-    ];
+    const collabCreate = options?.grillMeRecommended
+      ? [
+          "ROLE APPROVAL: Call orchestrate_start with goal/title/brief. Show roles as fenced code blocks. Ask: 'Do you approve these roles? Reply yes to proceed.' STOP if not approved.",
+          "ITERATION ROADMAP: After orchestrate_approve, display the numbered roadmap before continuing.",
+          "Do not provide final artifacts during grill-me planning; only show role split, questions, plan review, and action status.",
+          "After approval and roadmap, call collab_continue.",
+        ]
+      : [
+          "ROLE APPROVAL: Display proposed ChatGPT and Claude roles as fenced code blocks. Ask: 'Do you approve these roles? Reply yes to proceed.' STOP if not approved.",
+          "ITERATION ROADMAP: After approval, show numbered turns, who acts, what they deliver, done criteria.",
+          "Only after role approval AND roadmap, call createCollabTask(title, brief, first_actor='chatgpt'). Do not include max_iterations. Do not pass files.",
+          "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
+        ];
+    return [...shared, ...collabCreate];
   }
+
   if (stage === "CONTINUE") {
     return [
-      "Document save complete. Do not call prepare_response again for this turn.",
-      `Call collab_continue with the exact user message${taskLabel}. Do not pass file or document args.`,
-      "If is_my_turn=true, include draft_output in the same collab_continue call.",
-      "If is_my_turn=false, report which actor (next_actor) is expected and what they will do next, then stop.",
-      "VISIBLE HANDOFFS (required): Never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
-      "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
-      "FULL CONTENT RULE: Show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
+      ...shared,
+      `Call collab_continue with the exact user message${taskLabel}. Do not pass files.`,
+      "If is_my_turn=true, include draft_output in the same call.",
+      "If is_my_turn=false, report next_actor + what they will do next, then stop.",
       "Show the actual submitted output after a successful submit.",
-      "If any collab action returns continue_command, end the user-facing response with its instruction.",
-      "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     ];
   }
+
   return [
-    "Document save complete. Do not call prepare_response again for this turn.",
-    `Call collab_continue with the exact user message and draft_output included${taskLabel}. Do not pass file or document args.`,
+    ...shared,
+    `Call collab_continue with the exact user message and draft_output included${taskLabel}. Do not pass files.`,
     "Show the actual submitted output after collab_continue succeeds.",
-    "VISIBLE HANDOFFS (required): Never say just 'continue task'. Always state clearly: (a) who is next, (b) exactly what they will do, (c) the continue command.",
-    "DELIVERABLE CONSTRAINT: Providers can produce PDFs, code files, and any text-based output. They MUST NOT create PPTX decks, images, or non-text files.",
-    "FULL CONTENT RULE: Show the FULL content in the chat first, then a brief summary. Never replace full content with a bullet-point summary.",
-    "If any collab action returns continue_command, end the user-facing response with its instruction.",
-    "Do not create a Claude handoff prompt; ask whether to hand off now and use only the returned continue_command.",
     "If the call fails, return the exact error and stop.",
   ];
 }
@@ -900,7 +887,7 @@ export function buildOpenApiSpec(serverUrl: string) {
       memoryId: { type: "string" },
       title: { type: "string" },
       filename: { type: ["string", "null"] },
-      summary: { type: "object", additionalProperties: true },
+      summary: { oneOf: [{ type: "string" }, { type: "object", additionalProperties: true }, { type: "null" }] },
       ref: { type: "string" },
       status: { type: "string" },
       lotRef: { type: ["string", "null"] },
@@ -2880,7 +2867,7 @@ router.post("/actions/orchestrate_start", chatGptActionAuthMiddleware, requireSc
       ok: true,
     });
 
-    res.json({
+    collabActionJson(res, {
       session_id: result.session.id,
       status: result.session.status,
       question: result.firstQuestion,
@@ -2929,7 +2916,7 @@ router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireS
       ok: true,
     });
 
-    res.json({
+    collabActionJson(res, {
       session_id: result.session.id,
       status: result.session.status,
       question: result.nextQuestion ?? null,
@@ -3017,7 +3004,7 @@ router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, require
     const nextWork = firstActor === "chatgpt"
       ? "ChatGPT will produce content, strategy, or creative output for the first phase."
       : "Claude will implement, build, or refine the technical/design deliverables for the first phase.";
-    res.json({
+    collabActionJson(res, {
       task_id: result.task.id,
       plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
       success_criteria: result.session.plan?.success_criteria ?? [],
@@ -3211,7 +3198,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         ok: true,
       });
       const nextWork = describeNextActorWork(task.state, nextActor);
-      res.json({
+      collabActionJson(res, {
         ok: true,
         submitted: false,
         is_my_turn: false,
@@ -3252,7 +3239,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
         },
         ok: true,
       });
-      res.json({
+      collabActionJson(res, {
         ok: true,
         submitted: false,
         is_my_turn: true,
@@ -3307,7 +3294,7 @@ router.post("/actions/collab_continue", chatGptActionAuthMiddleware, requireScop
       ok: true,
     });
 
-    res.json({
+    collabActionJson(res, {
       ok: true,
       submitted: true,
       is_my_turn: true,
@@ -3405,7 +3392,7 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
       },
       ok: true,
     });
-    res.status(201).json({
+    res.status(201).json(compactCollabTransportPayload({
       ok: true,
       task_id: task.id,
       title: task.title,
@@ -3415,7 +3402,7 @@ router.post("/collab/create-task", chatGptActionAuthMiddleware, requireScopes(["
       max_iterations: task.maxIterations,
       user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}). Next up: ${nextWork}`, continueCommand),
       continue_command: continueCommand,
-    });
+    }));
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -3471,7 +3458,7 @@ router.post("/collab/run-turn", chatGptActionAuthMiddleware, requireScopes(["col
       },
       ok: true,
     });
-    res.json({
+    collabActionJson(res, {
       is_my_turn: Boolean(claim),
       task_id: task.id,
       title: task.title,
@@ -3534,7 +3521,7 @@ router.post("/collab/submit-turn", chatGptActionAuthMiddleware, requireScopes(["
       },
       ok: true,
     });
-    res.json({
+    collabActionJson(res, {
       ok: true,
       task_id: task.id,
       state: task.state,

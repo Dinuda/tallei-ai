@@ -125,18 +125,28 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 
 ## Key Constraints & Conventions
 
+### Turn Protocol (Critical)
+
+**First turn:** Call `recall_memories` reflexively to load previous context, preferences, and memories. This is the ONLY reflexive recall.
+
+**Subsequent turns:** Do NOT call `recall_memories` reflexively. Only call when the user references prior sessions or the task requires past context.
+
+### Save & Checkpoint Protocol
+
+- **Conversation checkpoints:** When user says "save"/"checkpoint", or you produced substantial output (>800 chars) or structured content, save a `document-note` titled "Conversation checkpoint" with the full transcript.
+- **Auto-save:** For new structured content (files, lists, tables), call `remember(kind="document-note")` without asking. Append footer: `📎 Auto-saved as @doc:<ref> · reply **undo** to delete`
+- **Undo:** If user replies "undo"/"del" after footer, call `undo_save` with the ref.
+
 ### Collab Tasks Protocol (Critical)
-- If the user says `continue/resume/proceed task <uuid>` or includes a collab task UUID, call `collab_check_turn` first.
-- Do **not** call `recall_memories` to resolve collab task state.
-- Build response context from `collab_check_turn.fallback_context` and `recent_transcript`.
-- If `is_my_turn` is `false`, report which actor is expected and stop.
-- If `is_my_turn` is `true`, produce output and submit with `collab_take_turn`.
 
-**Role Approval Gate (NEW):** Before creating any collab task, propose roles for each AI provider and get explicit user approval. Do not create/start the task until the user says "yes" or similar affirmative.
+**Existing task:** If user says `continue/resume/proceed task <uuid>` or includes a task UUID, call `collab_check_turn` first. Do NOT call `recall_memories` for collab state.
 
-**Iteration Roadmap (NEW):** Immediately after role approval, generate and display a numbered roadmap showing each turn, which provider acts, exactly what they will deliver, and the exit/done criteria. Include the deliverable constraint: text/PDF/code only, no PPTX or images.
+**New task:** Before creating:
+1. **Role Approval Gate:** Propose roles, get explicit "yes" before proceeding.
+2. **Iteration Roadmap:** After approval, show numbered turns + deliverables + done criteria. Include constraint: text/PDF/code only, no PPTX or images.
+3. Then create the task.
 
-**Visible Handoffs (NEW):** After every plan or output, never say just "continue task". Always state clearly: (a) who is next, (b) exactly what they will do, and (c) the continue command if any. Show the FULL content in chat first, then a brief summary, then the handoff.
+**Visible Handoffs:** After every output, never say just "continue task". State: (a) who is next, (b) exactly what they will do, (c) continue command. After every `collab_take_turn`, show the FULL submitted output visibly in Claude's chat first, then brief summary, then handoff. Never replace the submitted output with a summary-only bullet list.
 
 ### Don't Break Memory Performance
 - The fire-and-forget pattern in `saveMemory()` is intentional: never await the full pipeline in the MCP handler

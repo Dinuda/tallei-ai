@@ -24,6 +24,7 @@ import {
   buildTurnFallbackContext,
   CollabAttachmentIngestError,
   claimTurn,
+  compactCollabTransportPayload,
   CollabConflictError,
   createTask as createCollabTask,
   describeNextActorWork,
@@ -45,6 +46,7 @@ import {
 import { PlatformSchema } from "../schemas.js";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
 import {
+  executePrepareResponseAction,
   executeRecallAction,
   executeRecallDocumentAction,
   executeRecentDocumentsAction,
@@ -56,7 +58,7 @@ import {
 } from "../../shared/chat-actions.js";
 
 type ToolResult = { content: [{ type: "text"; text: string }]; isError?: true };
-const MemoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note"]);
+const MemoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "checkpoint"]);
 
 function onQuotaError(err: unknown): ToolResult {
   if (err instanceof QuotaExceededError) {
@@ -87,8 +89,11 @@ function onKnownError(err: unknown): ToolResult {
 }
 
 function toJsonToolResult(body: unknown, isError = false): ToolResult {
+  const safeBody = body && typeof body === "object" && !Array.isArray(body)
+    ? compactCollabTransportPayload(body as Record<string, unknown>)
+    : body;
   return {
-    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(safeBody, null, 2) }],
     ...(isError ? { isError: true as const } : {}),
   };
 }
@@ -99,6 +104,20 @@ function appendContinueCommand(
 ): string {
   if (!command) return userVisible;
   return `${userVisible}\n\n${command.instruction}`;
+}
+
+function buildCollabTurnUserVisible(input: {
+  content: string;
+  taskId: string;
+  iteration: number;
+  nextWork: string;
+  continueCommand: ReturnType<typeof buildFirstTurnContinueCommand>;
+}): string {
+  return appendContinueCommand([
+    input.content,
+    "",
+    `Saved Claude turn for task ${input.taskId} at iteration ${input.iteration}. Next up: ${input.nextWork}`,
+  ].join("\n"), input.continueCommand);
 }
 
 function roleSelectionUserVisible(roleSelection: {
@@ -337,10 +356,10 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     "collab_take_turn",
     {
       title: "Submit Claude Collab Turn",
-      description: "Submits Claude's content for a collab task turn.",
+      description: "Submits Claude's full user-facing content for a collab task turn. After this tool returns, Claude must show the full submitted output visibly in the Claude chat before any summary/handoff.",
       inputSchema: {
         task_id: z.string().uuid().describe("Collab task ID."),
-        content: z.string().min(1).describe("Turn output content."),
+        content: z.string().min(1).describe("Full user-facing turn output content. Do not submit summary-only text when the deliverable is longer."),
         openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
         conversation_id: conversationIdSchema,
       },
@@ -374,7 +393,15 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           iteration: task.iteration,
           max_iterations: task.maxIterations,
           next_actor: nextActor,
-          user_visible: appendContinueCommand(`Saved Claude turn for task ${task.id} at iteration ${task.iteration}. Next up: ${nextWork}`, continueCommand),
+          user_visible: buildCollabTurnUserVisible({
+            content,
+            taskId: task.id,
+            iteration: task.iteration,
+            nextWork,
+            continueCommand,
+          }),
+          user_visible_full_output: content,
+          user_visible_handoff: appendContinueCommand(`Saved Claude turn for task ${task.id} at iteration ${task.iteration}. Next up: ${nextWork}`, continueCommand),
           continue_command: continueCommand,
           saved_turn: savedTurn
             ? {
@@ -913,14 +940,14 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
         "• kind=\"document-note\" — DEFAULT for document/file/PDF saves and auto-save notes. " +
         "File ingest accepts only PDF and Word (.docx/.docm); other file types are rejected. " +
         "Pass title + key_points (array of strings, one per product/item/section, up to 10) + summary. " +
-        "Do NOT pass `content` — it is ignored. Fast (~50ms). Recall returns the structured note.\n" +
+        "If generated or pasted content should be preserved, pass the full text in `content`; it will be saved as a real @doc document.\n" +
         "• kind=\"document-blob\" — only for 'sf' / 'archive full file' / 'full stash'. " +
         "Requires the complete document text in `content`. Warn the user it will take a moment. " +
         "Use stash_document as a fallback if this times out.\n\n" +
         "One remember call replaces chaining save_memory + stash_document.",
       inputSchema: {
         kind: z
-          .enum(["fact", "preference", "document-note", "document-blob"])
+          .enum(["fact", "preference", "document-note", "document-blob", "checkpoint"])
           .describe("What type of thing to remember."),
         content: z
           .string()
@@ -950,7 +977,7 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     async (args) => {
       try {
         const parsed = z.object({
-          kind: z.enum(["fact", "preference", "document-note", "document-blob"]),
+          kind: z.enum(["fact", "preference", "document-note", "document-blob", "checkpoint"]),
           content: z.string().optional(),
           title: z.string().optional(),
           key_points: z.array(z.string()).max(10).optional(),
@@ -1036,6 +1063,59 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
       try {
         const result = await executeRecentDocumentsAction(auth, limit ?? 5);
         return toJsonToolResult(result.body);
+      } catch (err) {
+        return onKnownError(err);
+      }
+    }
+  );
+
+  server.registerTool(
+    "prepare_turn",
+    {
+      title: "Prepare Turn",
+      description:
+        "PRIMARY ENTRY POINT. Call this FIRST on every turn. " +
+        "Equivalent to ChatGPT's prepare_response. It classifies intent, recalls memories, " +
+        "auto-saves files, queues checkpoint saves, and returns replyInstructions telling you what to do next. " +
+        "Always call this before any other tool on a new turn.",
+      inputSchema: {
+        message: z.string().trim().min(1).describe("Exact current user message."),
+        conversation_id: conversationIdSchema,
+        conversation_history: z.array(z.object({
+          role: z.enum(["user", "assistant", "system", "tool"]).optional(),
+          content: z.string().trim().min(1),
+        })).max(40).optional().describe("Visible conversation history for checkpoint auto-save."),
+        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional().describe("Attached files with temporary HTTPS download_link URLs."),
+        last_recall: z.object({
+          query: z.string().optional(),
+          context_hash: z.string().optional(),
+        }).optional().nullable().describe("Previous recall state for deduplication."),
+      },
+    },
+    async (args) => {
+      try {
+        const parsed = z.object({
+          message: z.string().trim().min(1),
+          conversation_id: conversationIdSchema,
+          conversation_history: z.array(z.object({
+            role: z.enum(["user", "assistant", "system", "tool"]).optional(),
+            content: z.string().trim().min(1),
+          })).max(40).optional(),
+          openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
+          last_recall: z.object({
+            query: z.string().optional(),
+            context_hash: z.string().optional(),
+          }).optional().nullable(),
+        }).parse(normalizeUploadedFileRequestBody(args));
+
+        const result = await executePrepareResponseAction(auth, {
+          message: parsed.message,
+          conversation_id: parsed.conversation_id ?? null,
+          conversation_history: parsed.conversation_history,
+          openaiFileIdRefs: parsed.openaiFileIdRefs,
+          last_recall: parsed.last_recall ?? null,
+        });
+        return toJsonToolResult(result.body, result.status >= 400);
       } catch (err) {
         return onKnownError(err);
       }

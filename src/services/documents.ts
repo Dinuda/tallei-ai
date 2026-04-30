@@ -714,6 +714,7 @@ export async function stashDocumentNote(
     key_points: string[];
     summary: string;
     source_hint: string;
+    category?: string | null;
   },
   auth: AuthContext,
   opts?: {
@@ -727,6 +728,7 @@ export async function stashDocumentNote(
     key_points: note.key_points,
     summary: note.summary,
     source_hint: note.source_hint,
+    category: note.category ?? null,
   });
 
   const byteSize = Buffer.byteLength(noteJson, "utf8");

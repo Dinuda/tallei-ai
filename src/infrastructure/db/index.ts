@@ -43,9 +43,9 @@ let fallbackAttempted = false;
 
 type DbClient = pg.PoolClient;
 
-type MemoryType = "preference" | "fact" | "event" | "decision" | "note";
+type MemoryType = "preference" | "fact" | "event" | "decision" | "note" | "checkpoint";
 
-const MEMORY_TYPE_CHECK = "'preference', 'fact', 'event', 'decision', 'note'";
+const MEMORY_TYPE_CHECK = "'preference', 'fact', 'event', 'decision', 'note', 'checkpoint'";
 
 function classifyLegacyMemoryText(content: string): { memoryType: MemoryType; category: string | null; isPinned: boolean } {
   const text = content.trim();

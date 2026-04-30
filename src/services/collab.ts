@@ -258,6 +258,15 @@ function normalizeDocRef(value: unknown): string | null {
   return trimmed.startsWith("@doc:") ? trimmed : null;
 }
 
+export function extractDocumentRefsFromText(content: string): string[] {
+  const refs = new Set<string>();
+  for (const match of content.matchAll(/@doc:[A-Za-z0-9][A-Za-z0-9_-]*/g)) {
+    const ref = normalizeDocRef(match[0]);
+    if (ref) refs.add(ref);
+  }
+  return [...refs];
+}
+
 function readExistingTaskDocumentContext(context: Record<string, unknown>): TaskDocumentContextSnapshot {
   const documentsContext = context["documents"];
   if (!documentsContext || typeof documentsContext !== "object" || Array.isArray(documentsContext)) {
@@ -331,6 +340,211 @@ export interface CollabPreparedUploadHydration {
   documents: CollabHydratedDocument[];
 }
 
+export const COLLAB_TRANSPORT_RESPONSE_MAX_CHARS = 60_000;
+
+function truncateForTransport(value: string, maxChars: number): {
+  text: string;
+  length: number;
+  truncated: boolean;
+} {
+  if (value.length <= maxChars) {
+    return { text: value, length: value.length, truncated: false };
+  }
+  const omitted = value.length - maxChars;
+  return {
+    text: `${value.slice(0, Math.max(0, maxChars))}\n\n[truncated ${omitted} chars; continue with the task id to fetch current state again]`,
+    length: value.length,
+    truncated: true,
+  };
+}
+
+function compactTranscriptEntryForTransport(entry: CollabTranscriptEntry | null, maxContentChars: number): Record<string, unknown> | null {
+  if (!entry) return null;
+  const content = truncateForTransport(entry.content, maxContentChars);
+  return {
+    actor: entry.actor,
+    iteration: entry.iteration,
+    ts: entry.ts,
+    content: content.text,
+    content_length: content.length,
+    content_truncated: content.truncated,
+  };
+}
+
+function compactTranscriptForTransport(
+  transcript: CollabTranscriptEntry[],
+  options: { maxEntries: number; maxContentChars: number }
+): Array<Record<string, unknown>> {
+  const omittedEntries = Math.max(0, transcript.length - options.maxEntries);
+  const entries = transcript.slice(-options.maxEntries).map((entry) => compactTranscriptEntryForTransport(entry, options.maxContentChars)!);
+  if (omittedEntries > 0) {
+    entries.unshift({
+      actor: "system",
+      iteration: 0,
+      ts: new Date(0).toISOString(),
+      content: `[${omittedEntries} older transcript entries omitted from this tool response to stay under client size limits]`,
+      content_length: 0,
+      content_truncated: true,
+      omitted_entries: omittedEntries,
+    });
+  }
+  return entries;
+}
+
+function compactFallbackContextForTransport(context: CollabTurnFallbackContext, maxContentChars: number): Record<string, unknown> {
+  const record = context as unknown as Record<string, unknown>;
+  const recentTranscript = Array.isArray(record["recent_transcript"])
+    ? compactTranscriptForTransport(record["recent_transcript"] as CollabTranscriptEntry[], {
+        maxEntries: 6,
+        maxContentChars,
+      })
+    : record["recent_transcript"];
+  return {
+    ...context,
+    ...(record["last_message"] ? { last_message: compactTranscriptEntryForTransport(record["last_message"] as CollabTranscriptEntry, maxContentChars) } : {}),
+    ...(record["last_chatgpt_entry"] ? { last_chatgpt_entry: compactTranscriptEntryForTransport(record["last_chatgpt_entry"] as CollabTranscriptEntry, maxContentChars) } : {}),
+    ...(record["last_claude_entry"] ? { last_claude_entry: compactTranscriptEntryForTransport(record["last_claude_entry"] as CollabTranscriptEntry, maxContentChars) } : {}),
+    ...(recentTranscript ? { recent_transcript: recentTranscript } : {}),
+  };
+}
+
+function compactInlineDocumentsForTransport(
+  documents: CollabHydratedDocument[],
+  options: { maxDocs: number; maxContentChars: number }
+): Array<Record<string, unknown>> {
+  return documents.slice(0, options.maxDocs).map((doc) => {
+    const content = truncateForTransport(doc.content, options.maxContentChars);
+    return {
+      ref: doc.ref,
+      title: doc.title,
+      filename: doc.filename,
+      status: doc.status,
+      conversation_id: doc.conversation_id,
+      content: content.text,
+      content_length: content.length,
+      content_truncated: content.truncated,
+    };
+  });
+}
+
+function compactSavedTurnForTransport(value: unknown, maxContentChars: number): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const contentValue = typeof record["content"] === "string" ? record["content"] : "";
+  if (!contentValue) return value;
+  const content = truncateForTransport(contentValue, maxContentChars);
+  return {
+    ...record,
+    content: content.text,
+    content_length: content.length,
+    content_truncated: content.truncated,
+    content_preview: typeof record["content_preview"] === "string"
+      ? record["content_preview"]
+      : contentValue.slice(0, 800),
+  };
+}
+
+function compactLargeStringField(record: Record<string, unknown>, key: string, maxContentChars: number): boolean {
+  const value = record[key];
+  if (typeof value !== "string") return false;
+  const content = truncateForTransport(value, maxContentChars);
+  record[key] = content.text;
+  record[`${key}_length`] = content.length;
+  record[`${key}_truncated`] = content.truncated;
+  return content.truncated;
+}
+
+export function compactCollabTransportPayload<T extends Record<string, unknown>>(
+  payload: T,
+  options?: { maxResponseChars?: number }
+): T & { payload_compacted?: Record<string, unknown> } {
+  const maxResponseChars = options?.maxResponseChars ?? COLLAB_TRANSPORT_RESPONSE_MAX_CHARS;
+  const result: Record<string, unknown> = { ...payload };
+  let compacted = false;
+
+  if (Array.isArray(result["recent_transcript"])) {
+    result["recent_transcript"] = compactTranscriptForTransport(result["recent_transcript"] as CollabTranscriptEntry[], {
+      maxEntries: 6,
+      maxContentChars: 4_000,
+    });
+    compacted = true;
+  }
+  if (result["last_message"] && typeof result["last_message"] === "object" && !Array.isArray(result["last_message"])) {
+    result["last_message"] = compactTranscriptEntryForTransport(result["last_message"] as CollabTranscriptEntry, 4_000);
+    compacted = true;
+  }
+  if (result["fallback_context"] && typeof result["fallback_context"] === "object" && !Array.isArray(result["fallback_context"])) {
+    result["fallback_context"] = compactFallbackContextForTransport(result["fallback_context"] as CollabTurnFallbackContext, 4_000);
+    compacted = true;
+  }
+  if (Array.isArray(result["inline_documents"])) {
+    const docs = result["inline_documents"] as CollabHydratedDocument[];
+    result["inline_documents"] = compactInlineDocumentsForTransport(docs, { maxDocs: 3, maxContentChars: 6_000 });
+    if (docs.length > 3) {
+      result["inline_documents_omitted"] = docs.length - 3;
+    }
+    compacted = true;
+  }
+  if (result["saved_turn"]) {
+    result["saved_turn"] = compactSavedTurnForTransport(result["saved_turn"], 8_000);
+    compacted = true;
+  }
+  if (result["context"] && JSON.stringify(result["context"]).length > 8_000) {
+    result["context"] = {
+      omitted: true,
+      reason: "Task context omitted from this tool response to stay under client size limits; use fallback_context and task_id.",
+    };
+    compacted = true;
+  }
+  compacted = compactLargeStringField(result, "user_visible_full_output", 8_000) || compacted;
+
+  let serializedLength = JSON.stringify(result).length;
+  if (serializedLength > maxResponseChars) {
+    if (Array.isArray(result["recent_transcript"])) {
+      result["recent_transcript"] = (result["recent_transcript"] as Array<Record<string, unknown>>).map((entry) => {
+        const content = typeof entry["content"] === "string" ? truncateForTransport(entry["content"], 1_000) : null;
+        return content ? { ...entry, content: content.text, content_truncated: true } : entry;
+      });
+    }
+    if (result["fallback_context"] && typeof result["fallback_context"] === "object" && !Array.isArray(result["fallback_context"])) {
+      const context = result["fallback_context"] as Record<string, unknown>;
+      context["recent_transcript"] = Array.isArray(context["recent_transcript"])
+        ? (context["recent_transcript"] as Array<Record<string, unknown>>).slice(-3).map((entry) => {
+            const content = typeof entry["content"] === "string" ? truncateForTransport(entry["content"], 1_000) : null;
+            return content ? { ...entry, content: content.text, content_truncated: true } : entry;
+          })
+        : context["recent_transcript"];
+    }
+    if (Array.isArray(result["inline_documents"])) {
+      result["inline_documents"] = (result["inline_documents"] as Array<Record<string, unknown>>).slice(0, 1).map((doc) => {
+        const content = typeof doc["content"] === "string" ? truncateForTransport(doc["content"], 2_000) : null;
+        return content ? { ...doc, content: content.text, content_truncated: true } : doc;
+      });
+    }
+    compacted = true;
+    serializedLength = JSON.stringify(result).length;
+  }
+
+  if (serializedLength > maxResponseChars) {
+    delete result["inline_documents"];
+    delete result["recent_transcript"];
+    if (result["fallback_context"] && typeof result["fallback_context"] === "object" && !Array.isArray(result["fallback_context"])) {
+      delete (result["fallback_context"] as Record<string, unknown>)["recent_transcript"];
+    }
+    compacted = true;
+    serializedLength = JSON.stringify(result).length;
+  }
+
+  if (compacted) {
+    result["payload_compacted"] = {
+      max_response_chars: maxResponseChars,
+      estimated_json_chars: serializedLength,
+      reason: "Large collab fields are truncated to keep ChatGPT Actions and MCP tool responses under client payload limits. Full task history remains stored server-side.",
+    };
+  }
+  return result as T & { payload_compacted?: Record<string, unknown> };
+}
+
 export function describeNextActorWork(
   state: "CREATIVE" | "TECHNICAL" | "DONE" | "ERROR",
   actor: "chatgpt" | "claude" | null
@@ -355,8 +569,8 @@ export function buildFirstTurnContinueCommand(task: CollabTask): CollabContinueC
     command,
     label: `Continue in ${targetActor === "chatgpt" ? "ChatGPT" : "Claude"}`,
     instruction: targetActor === "claude"
-      ? `Next up: ${nextWork} Do you want to hand off to Claude now? If yes, paste this in Claude: ${command}`
-      : `Next up: ${nextWork} Do you want to hand off to ChatGPT now? If yes, paste this in ChatGPT: ${command}`,
+      ? `Next up: ${nextWork} Paste this in Claude: ${command}. After Claude finishes, return here and say "continue" to continue in ChatGPT.`
+      : `Next up: ${nextWork} Paste this in ChatGPT: ${command}. After ChatGPT finishes, return to Claude and say "continue" to continue there.`,
   };
 }
 
@@ -1163,6 +1377,23 @@ export async function submitTurn(
   }
 
   let task = mapTaskRow(row);
+
+  try {
+    const documentRefs = extractDocumentRefsFromText(trimmed);
+    if (documentRefs.length > 0) {
+      await attachUploadedFilesToTaskContext(taskId, auth, {
+        documentRefs,
+        conversationId: task.id,
+        title: task.title,
+      });
+      task = await getTask(taskId, auth) ?? task;
+    }
+  } catch (error) {
+    if (process.env["NODE_ENV"] !== "production") {
+      console.warn("[collab] document ref attachment failed", error);
+    }
+  }
+
   try {
     const artifacts = extractCollabArtifacts(trimmed, actor, task.iteration, submittedAt);
     if (artifacts) {

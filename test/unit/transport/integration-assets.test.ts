@@ -49,11 +49,13 @@ test("ChatGPT setup instructions point users to prepare_response", () => {
   const setupWizard = readFileSync("dashboard/app/dashboard/setup/SetupWizards.tsx", "utf8");
   const setupScript = readFileSync("scripts/setup-chatgpt-actions.mjs", "utf8");
 
-  assert.match(fileText, /ALWAYS call prepare_response first/);
+  assert.match(fileText, /Always call prepare_response/);
   assert.match(fileText, /openaiFileIdRefs=\[\.\.\.all attachments\.\.\.\]/);
-  assert.match(fileText, /Call createCollabTask/);
+  assert.match(fileText, /call createCollabTask/);
   assert.match(fileText, /If a collab action returns continue_command/);
   assert.match(fileText, /Do not create a Claude handoff prompt/);
+  assert.match(fileText, /Do not ask if the user wants to hand off/);
+  assert.match(fileText, /If the user seems confused about what to do next/);
   assert.match(fileText, /Never call recall_memories, remember, or search_documents directly/);
   assert.match(setupWizard, /prepare_response\(message="<exact user message>"/);
   assert.match(setupWizard, /createCollabTask/);
@@ -62,6 +64,7 @@ test("ChatGPT setup instructions point users to prepare_response", () => {
   assert.match(setupWizard, /Do NOT call \\`prepare_response\\` for ordinary conversation/);
   assert.match(setupWizard, /continue_command/);
   assert.match(setupWizard, /continue task <task_id>/);
+  assert.match(setupWizard, /do not ask whether to hand off/);
   assert.match(setupWizard, /conversation_history=\[\{role, content\}, \.\.\.\]/);
   assert.match(setupWizard, /Do not call \\`remember\\` separately/);
   assert.match(setupWizard, /call \\`createCollabTask\\` immediately/);
@@ -69,6 +72,7 @@ test("ChatGPT setup instructions point users to prepare_response", () => {
   assert.match(setupScript, /Do NOT call prepare_response for ordinary conversation/);
   assert.match(setupScript, /createCollabTask/);
   assert.match(setupScript, /Do not create a Claude handoff prompt/);
+  assert.match(setupScript, /do not ask whether to hand off/);
   assert.match(setupScript, /conversation_history=\[\{role, content\}, \.\.\.\]/);
   assert.match(setupScript, /continue_command/);
 });

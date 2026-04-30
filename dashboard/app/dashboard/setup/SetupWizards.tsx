@@ -213,8 +213,9 @@ COLLAB TASKS FIRST (override):
 - On first collab turn, if no task documents exist yet, \`collab_continue\` will fail without \`openaiFileIdRefs\`.
 - Do NOT respond with copy/paste workflows, manual setup steps, or alternative "you can do this" guidance when collab tools are available.
 - If collab call fails, return the exact error briefly and stop.
-- If a collab action returns \`continue_command\`, end the response with its instruction.
-- Do not create a Claude handoff prompt. Tallei already stored the task context/history; ask "Do you want to hand off to Claude now?" and use only the returned command, usually \`continue task <task_id>\`.
+- If a collab action returns \`continue_command\` with \`target_actor="chatgpt"\`, do not tell the user to paste anything into ChatGPT. Say exactly "Shall we start?" and wait for the user's next reply before drafting/submitting ChatGPT's turn.
+- If a collab action returns \`continue_command\` with \`target_actor="claude"\`, end the response with its instruction.
+- Do not create a Claude handoff prompt. Tallei already stored the task context/history; do not ask whether to hand off. Only after Claude is next, tell the user exactly where to paste the returned command, usually \`continue task <task_id>\`, and where to return afterward.
 - If the user says "handoff to Claude" or selects a handoff option like "3", call \`prepare_response\` with \`conversation_history=[{role, content}, ...]\` containing the visible ChatGPT messages and \`handoff_target="claude"\` before returning the handoff command.
 
 COLLAB GRILL-ME ROLE DISPLAY:
