@@ -77,5 +77,5 @@ export async function setTaskPreferences(
     [auth.tenantId, auth.userId, next.grillMeEnabled]
   );
 
-  return next;
+  return getTaskPreferences(auth);
 }
