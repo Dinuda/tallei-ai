@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import Image from "next/image";
 import { createPortal } from "react-dom";
 import { Check, Copy, ExternalLink, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X, Clock3, RefreshCw } from "lucide-react";
 import { Button } from "../../../components/ui/button";
@@ -404,7 +405,7 @@ export function GuideImage({ src, alt, caption, defaultExpanded = false }: { src
           {isVideo ? (
             <video src={src} autoPlay loop muted playsInline preload="auto" style={{ width: '100%', display: 'block', pointerEvents: 'none' }} />
           ) : (
-            <img src={src} alt={alt} style={{ width: '100%', display: 'block' }} />
+            <Image src={src} alt={alt} fill style={{ objectFit: 'cover' }} />
           )}
         </div>
       </div>
@@ -570,7 +571,7 @@ export function StepMedia({
                style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', pointerEvents: 'none' }}
              />
            ) : (
-             <img src={src} alt={alt} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+              <Image src={src} alt={alt} fill style={{ objectFit: 'cover' }} />
            )}
          </AspectRatio>
        </div>
@@ -1195,7 +1196,7 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       onClose={onClose}
       title="Connect Claude"
       stepTitle={stepTitles[step - 1]}
-      providerIcon={<img src="/claude.svg" width={24} height={24} alt="Claude" />}
+      providerIcon={<Image src="/claude.svg" width={24} height={24} alt="Claude" />}
       step={step}
       totalSteps={totalSteps}
       onNext={handleNext}
@@ -1467,7 +1468,7 @@ export function ChatGPTWizard({
       onClose={onClose}
       title="Connect ChatGPT Actions"
       stepTitle={stepTitles[step - 1]}
-      providerIcon={<img src="/chatgpt.svg" width={24} height={24} alt="ChatGPT" />}
+      providerIcon={<Image src="/chatgpt.svg" width={24} height={24} alt="ChatGPT" />}
       step={step}
       totalSteps={totalSteps}
       onNext={handleNext}

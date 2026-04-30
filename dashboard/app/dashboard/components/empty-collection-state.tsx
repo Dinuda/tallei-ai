@@ -35,6 +35,12 @@ export function EmptyCollectionState({
   const defaultIcon = <Box size={18} />;
   const icon = actionIcon ?? defaultIcon;
 
+  /* eslint-disable @next/next/no-img-element */
+  const customImage = hasCustomImage ? (
+    <img src={imageSrc} alt={imageAlt} className={styles.imageArtwork} />
+  ) : null;
+  /* eslint-enable @next/next/no-img-element */
+
   const action = actionLabel
     ? actionHref
       ? (
@@ -55,9 +61,7 @@ export function EmptyCollectionState({
 
   return (
     <div className={`${styles.wrap} ${hasArtwork ? styles.withArtwork : styles.withoutArtwork}`}>
-      {hasCustomImage ? (
-        <img src={imageSrc} alt={imageAlt} className={styles.imageArtwork} />
-      ) : hasDefaultIllustration ? (
+      {customImage ?? (hasDefaultIllustration ? (
         <div className={styles.illustration} aria-hidden>
           <div className={styles.backCard} />
           <div className={styles.frontCard}>
@@ -70,7 +74,7 @@ export function EmptyCollectionState({
             </div>
           </div>
         </div>
-      ) : null}
+      ) : null)}
 
       <h2 className={styles.title}>{title}</h2>
       <p className={styles.description}>{description}</p>

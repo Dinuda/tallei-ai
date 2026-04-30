@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -132,7 +133,7 @@ export function TopNav() {
     >
       <div className="container site-nav-inner">
         <Link href="/" className="site-logo">
-          <img src="/tallei.svg" alt="Tallei Logo" style={{ height: "36px", width: "auto" }} />
+          <Image src="/tallei.svg" alt="Tallei Logo" width={88} height={36} style={{ height: "36px", width: "auto" }} />
         </Link>
 
         {isHome && (

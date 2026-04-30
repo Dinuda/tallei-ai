@@ -2,10 +2,9 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MoreHorizontal } from "lucide-react";
+import { RefreshCw, FileDown } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 
-import { NudgeModal } from "./NudgeModal";
 import CollabLayout from "./components/CollabLayout";
 import StatusHeader from "./components/StatusHeader";
 import LatestOutput from "./components/LatestOutput";
@@ -249,8 +248,6 @@ export default function CollabBoardPage() {
   const [taskId, setTaskId] = useState<string>("");
   const [task, setTask] = useState<CollabTask | null>(null);
   const [loading, setLoading] = useState(true);
-  const [nudgeOpen, setNudgeOpen] = useState(false);
-  const [showRaw, setShowRaw] = useState(false);
   const [latestEntryKey, setLatestEntryKey] = useState<string | null>(null);
   const [pollReason, setPollReason] = useState<PollReason>(null);
   const [pollPaused, setPollPaused] = useState(false);
@@ -476,6 +473,7 @@ export default function CollabBoardPage() {
       cancelled = true;
       clearPollTimer();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId, pollPaused, task?.state, taskPaused, isOnline, isDocumentHidden, fetchTask, pausePolling, clearPollTimer, redirectIfOrchestrationSession]);
 
   useEffect(() => {
@@ -517,8 +515,8 @@ export default function CollabBoardPage() {
   const waitingActor = task && !taskPaused ? waitingActorForState(task.state) : null;
 
   const planSummary = task ? readPlanSummary(task.context) : null;
-  const planCriteria = task ? readPlanCriteria(task.context) : [];
-  const evaluations = task ? readEvaluations(task.context) : [];
+  const planCriteria = useMemo(() => (task ? readPlanCriteria(task.context) : []), [task]);
+  const evaluations = useMemo(() => (task ? readEvaluations(task.context) : []), [task]);
   const taskDocuments = task ? readTaskDocumentsContext(task.context) : null;
 
   const latestStatusMap = useMemo(() => {
@@ -634,9 +632,16 @@ export default function CollabBoardPage() {
     <div className={styles.page}>
       <div className={styles.topBar}>
         <Link href="/dashboard/tasks" className={styles.backLink}>← Collab Tasks</Link>
-        <button className={styles.iconBtn} type="button" onClick={() => setShowRaw((v) => !v)}>
-          <MoreHorizontal size={16} />
-        </button>
+        <div className={styles.topActions}>
+          <button type="button" className={styles.topActionBtn} onClick={() => void refreshTaskNow()}>
+            <RefreshCw size={14} />
+            Refresh now
+          </button>
+          <button type="button" className={styles.topActionBtnExport} onClick={exportMarkdown}>
+            <FileDown size={14} />
+            Export
+          </button>
+        </div>
       </div>
 
       <CollabLayout
@@ -646,7 +651,6 @@ export default function CollabBoardPage() {
               title={task.title}
               brief={task.brief}
               state={task.state}
-              paused={taskPaused}
               iteration={task.iteration}
               updatedAt={task.updatedAt}
             />
@@ -731,18 +735,14 @@ export default function CollabBoardPage() {
               waitingActor={waitingActor}
               state={task.state}
               pollPaused={pollPaused}
-              onNudge={() => setNudgeOpen(true)}
-              onRefresh={refreshTaskNow}
+              onNudge={() => undefined}
               onRetryLiveUpdates={retryLiveUpdates}
               onMarkDone={markDone}
               onDelete={removeTask}
-              onExport={exportMarkdown}
             />
           </>
         }
       />
-
-      {showRaw && <pre className={styles.rawBox}>{JSON.stringify(task, null, 2)}</pre>}
 
       {/* {waitingActor && (
         <NudgeModal

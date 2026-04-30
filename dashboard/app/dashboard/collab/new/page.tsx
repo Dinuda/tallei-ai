@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowRight, FileText, X, Check, Upload, Sparkles, Loader2 } from "lucide-react";
@@ -493,7 +494,7 @@ export default function CollabTaskWizardPage() {
           <div className={styles.roleGrid}>
             <div className={`${styles.roleCard} ${styles.roleCardChatgpt}`}>
               <div className={styles.roleCardHeader}>
-                <img src="/chatgpt.svg" alt="" className={styles.roleCardIcon} />
+                <Image src="/chatgpt.svg" alt="" width={28} height={28} className={styles.roleCardIcon} />
                 <div>
                   <p className={styles.roleCardTitle}>ChatGPT</p>
                   <p className={styles.roleCardSubtitle}>Creative exploration</p>
@@ -508,7 +509,7 @@ export default function CollabTaskWizardPage() {
             </div>
             <div className={`${styles.roleCard} ${styles.roleCardClaude}`}>
               <div className={styles.roleCardHeader}>
-                <img src="/claude.svg" alt="" className={styles.roleCardIcon} />
+                <Image src="/claude.svg" alt="" width={28} height={28} className={styles.roleCardIcon} />
                 <div>
                   <p className={styles.roleCardTitle}>Claude</p>
                   <p className={styles.roleCardSubtitle}>Technical refinement</p>
@@ -528,12 +529,12 @@ export default function CollabTaskWizardPage() {
             <span className={styles.starterValue}>
               {starterRecommendation === "chatgpt" ? (
                 <>
-                  <img src="/chatgpt.svg" alt="" className={styles.starterIcon} />
+                  <Image src="/chatgpt.svg" alt="" width={16} height={16} className={styles.starterIcon} />
                   ChatGPT
                 </>
               ) : (
                 <>
-                  <img src="/claude.svg" alt="" className={styles.starterIcon} />
+                  <Image src="/claude.svg" alt="" width={16} height={16} className={styles.starterIcon} />
                   Claude
                 </>
               )}

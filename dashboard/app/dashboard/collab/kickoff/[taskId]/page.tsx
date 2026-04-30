@@ -1,9 +1,10 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Copy, Check, ArrowRight, ArrowLeft, ClipboardCheck } from "lucide-react";
+import { Copy, Check, ArrowLeft, ClipboardCheck } from "lucide-react";
 
 import styles from "./page.module.css";
 
@@ -218,7 +219,7 @@ export default function CollabKickoffPage() {
         <article className={`${styles.promptCard} ${styles.promptCardChatgpt}`}>
           <div className={styles.promptCardHead}>
             <div className={styles.promptCardTitleRow}>
-              <img src="/chatgpt.svg" alt="" className={styles.promptCardIcon} />
+              <Image src="/chatgpt.svg" alt="" width={22} height={22} className={styles.promptCardIcon} />
               <h2 className={styles.promptCardTitle}>ChatGPT</h2>
             </div>
             <button
@@ -250,7 +251,7 @@ export default function CollabKickoffPage() {
         <article className={`${styles.promptCard} ${styles.promptCardClaude}`}>
           <div className={styles.promptCardHead}>
             <div className={styles.promptCardTitleRow}>
-              <img src="/claude.svg" alt="" className={styles.promptCardIcon} />
+              <Image src="/claude.svg" alt="" width={22} height={22} className={styles.promptCardIcon} />
               <h2 className={styles.promptCardTitle}>Claude</h2>
             </div>
             <button

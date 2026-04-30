@@ -1,10 +1,10 @@
 "use client";
 
+import Image from "next/image";
 import {
   ChevronDown,
   Clock,
   Copy,
-  FileText,
   RefreshCw,
   Tag,
   Trash2,
@@ -298,7 +298,7 @@ function MemoryCard({ memory, isExpanded, onToggle, onDelete, isDeleting }: {
         <div className={styles.memoryCardLeft}>
           <span className={styles.platformBadge} style={{ background: platformColor }}>
             {PLATFORM_ICONS[memory.platform] && (
-              <img src={PLATFORM_ICONS[memory.platform]} alt="" className={styles.platformIcon} />
+              <Image src={PLATFORM_ICONS[memory.platform]} alt="" width={14} height={14} className={styles.platformIcon} />
             )}
             {PLATFORM_LABELS[memory.platform]}
           </span>
