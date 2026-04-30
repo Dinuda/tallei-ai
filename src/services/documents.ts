@@ -1152,6 +1152,33 @@ export async function recentDocumentBriefs(
   return rows.rows.map((row) => toDocumentBrief(row));
 }
 
+export async function findLastConversationCheckpoint(
+  auth: AuthContext,
+  conversationId: string
+): Promise<{ ref: string; createdAt: string } | null> {
+  const rows = await pool.query<{
+    ref_handle: string;
+    created_at: string;
+  }>(
+    `SELECT ref_handle, created_at
+     FROM documents
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND conversation_id = $3
+       AND kind = 'note'
+       AND title LIKE 'Conversation checkpoint%'
+       AND deleted_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [auth.tenantId, auth.userId, conversationId]
+  );
+  if (rows.rows.length === 0) return null;
+  return {
+    ref: rows.rows[0].ref_handle,
+    createdAt: rows.rows[0].created_at,
+  };
+}
+
 export async function documentBriefsByRefs(
   refHandles: string[],
   auth: AuthContext,

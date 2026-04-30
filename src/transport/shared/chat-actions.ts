@@ -9,6 +9,7 @@ import {
   deleteDocumentByRef,
   recentDocumentBriefs,
   documentBriefsByRefs,
+  findLastConversationCheckpoint,
 } from "../../services/documents.js";
 import {
   ingestUploadedFileToDocument,
@@ -802,7 +803,8 @@ Treat first-person age statements as durable facts; e.g. "I'm currently 19" shou
 Save subjective stances as neutral facts about the user, not objective claims about the world.
 Sanitize insults, slurs, profanity, and obvious typos instead of storing the user's wording verbatim.
 Example: if the user says they think Sri Lanka's government must better manage civic behavior and insults people, save a fact like "User is frustrated with governance in Sri Lanka and believes the government should manage civic behavior more effectively."
-Use document-note for pasted important structured content, specs, transcripts, lists, or notes.`;
+Use document-note for pasted important structured content, specs, transcripts, lists, or notes.
+CHECKPOINT TRIGGERS: If the user message is "save", "save this", "remember this", "checkpoint", or similar, return needsRecall=false and include a document-note save candidate if conversation_history is available.`;
 
 function toBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
@@ -1049,6 +1051,64 @@ function buildHandoffHistorySaveCandidate(input: PrepareResponseActionInput): Pr
   };
 }
 
+function isExplicitSaveCommand(message: string): boolean {
+  return /^(save|save this|remember this|checkpoint|save conversation|remember this conversation)[.!?\s]*$/i.test(message.trim());
+}
+
+function hasCheckpointWorthyContent(
+  history: PrepareResponseConversationMessage[] | undefined
+): boolean {
+  if (!Array.isArray(history) || history.length < 2) return false;
+  let assistantChars = 0;
+  let hasStructuredContent = false;
+  for (const entry of history) {
+    if (!entry || typeof entry !== "object") continue;
+    const content = typeof entry.content === "string" ? entry.content : "";
+    if (entry.role === "assistant") {
+      assistantChars += content.length;
+      if (/^(#{1,3}\s|```|\d+\.\s|[-*]\s|>\s)/m.test(content)) {
+        hasStructuredContent = true;
+      }
+    }
+  }
+  return assistantChars > 800 || (assistantChars > 400 && hasStructuredContent);
+}
+
+async function buildConversationCheckpointCandidate(
+  input: PrepareResponseActionInput,
+  auth: AuthContext
+): Promise<PrepareResponseSaveCandidate | null> {
+  const history = normalizeConversationHistory(input.conversation_history);
+  if (history.length === 0) return null;
+
+  const checkpoint = input.conversation_id
+    ? await findLastConversationCheckpoint(auth, input.conversation_id)
+    : null;
+
+  const messagesToInclude = history;
+
+  const transcript = messagesToInclude
+    .map((entry) => `${entry.role?.toUpperCase() ?? "USER"}: ${entry.content}`)
+    .join("\n\n---\n\n");
+
+  const turnCount = messagesToInclude.length;
+  const assistantMessages = messagesToInclude.filter((e) => e.role === "assistant");
+  const checkpointNumber = checkpoint ? " (incremental)" : " (initial)";
+
+  return {
+    kind: "document-note",
+    title: `Conversation checkpoint${checkpointNumber}`,
+    summary: `Raw conversation transcript from ${turnCount} message(s)${checkpoint ? ` since checkpoint ${checkpoint.ref}` : ""}.`,
+    source_hint: `conversation_id:${input.conversation_id ?? "unknown"}`,
+    key_points: [
+      `${turnCount} messages captured`,
+      `${assistantMessages.length} assistant response(s)`,
+      checkpoint ? `Previous checkpoint: ${checkpoint.ref}` : "First checkpoint for this conversation",
+    ],
+    content: transcript,
+  };
+}
+
 function isShortLocalReply(message: string): boolean {
   return /^(thanks?|thank you|ok(?:ay)?|cool|great|nice|yes|yeah|yep|no|nope|continue|go on|sounds good|got it|yes,?\s+continue(?:\s+with\s+that)?|yeah,?\s+continue(?:\s+with\s+that)?)[.!?\s]*$/i.test(message.trim());
 }
@@ -1101,6 +1161,34 @@ export function fastPrepareResponseIntent(input: PrepareResponseActionInput): Fa
     return {
       shouldCallClassifier: false,
       reason: "handoff_history",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (isExplicitSaveCommand(message)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "explicit_save_checkpoint",
+      intent: {
+        needsRecall: false,
+        needsDocumentLookup: false,
+        reusePreviousContext: true,
+        contextDependent: false,
+        saveCandidates: guardrailCandidates,
+      },
+    };
+  }
+
+  if (hasCheckpointWorthyContent(input.conversation_history)) {
+    return {
+      shouldCallClassifier: false,
+      reason: "checkpoint_worthy_content",
       intent: {
         needsRecall: false,
         needsDocumentLookup: false,
@@ -1353,9 +1441,13 @@ export async function executePrepareResponseAction(
   }
 
   const handoffHistoryCandidate = buildHandoffHistorySaveCandidate(input);
+  const checkpointCandidate = (isExplicitSaveCommand(input.message.trim()) || hasCheckpointWorthyContent(input.conversation_history))
+    ? await buildConversationCheckpointCandidate(input, auth)
+    : null;
   const saveCandidates = mergeGuardrailSaveCandidates(input.message, [
     ...intent.saveCandidates,
     ...(handoffHistoryCandidate ? [handoffHistoryCandidate] : []),
+    ...(checkpointCandidate ? [checkpointCandidate] : []),
   ]);
   const intentForResponse = { ...intent, saveCandidates };
 
@@ -1376,6 +1468,9 @@ export async function executePrepareResponseAction(
       : []),
     ...(queuedSaves.some((save) => save.kind === "document-note")
       ? ["Document-note saving is queued. Do not add a Saved footer unless autoSave.saved includes a ref."]
+      : []),
+    ...(checkpointCandidate
+      ? ["Conversation checkpoint is queued. Tell the user: 'Saved conversation checkpoint.'"]
       : []),
     ...(inferHandoffTarget(input) && !handoffHistoryCandidate
       ? ["Handoff intent detected but conversation_history was missing. Ask the user to retry after ChatGPT sends the visible conversation_history to Tallei."]
