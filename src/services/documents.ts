@@ -10,7 +10,9 @@ import {
 } from "../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../infrastructure/db/index.js";
 import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
+import { VertexDocumentSearchRepository } from "../infrastructure/repositories/document-search.repository.js";
 import { summarizeConversation } from "../orchestration/ai/summarize.usecase.js";
+import { createLogger } from "../observability/index.js";
 
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const AUTO_LOT_WINDOW_MS = 60_000;
@@ -22,12 +24,31 @@ const DOCUMENT_CONTENT_CANDIDATE_LIMIT = 40;
 const SEARCH_DOCUMENT_VECTOR_TIMEOUT_MS = 1_200;
 
 const vectorRepository = new VectorRepository();
+const documentSearchRepository = new VertexDocumentSearchRepository();
+const documentLogger = createLogger({ baseFields: { component: "documents" } });
 
 export interface DocumentBlobMetadata {
   provider: "uploadthing";
   key: string;
   url: string;
   sourceFileId: string;
+}
+
+export type DocumentSearchMode = "legacy" | "vertex" | "shadow";
+
+export function selectDocumentSearchMode(auth: AuthContext): DocumentSearchMode {
+  const tenantAllowed = config.vertexDocumentSearchTenantAllowlist.includes(auth.tenantId);
+  const userAllowed = config.vertexDocumentSearchUserAllowlist.includes(auth.userId);
+  const isAgentEngineUser = auth.connectorType === "agent_engine";
+  const isNewRuntimeUser = config.vertexDocumentSearchNewUsersEnabled && isAgentEngineUser;
+
+  if (config.vertexDocumentSearchEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+    return "vertex";
+  }
+  if (config.vertexDocumentSearchShadowEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+    return "shadow";
+  }
+  return "legacy";
 }
 
 interface DocumentRow {
@@ -537,6 +558,8 @@ function normalizeContent(content: string): string {
 async function runBackgroundIndexing(input: {
   auth: AuthContext;
   documentId: string;
+  ref: string;
+  title: string | null;
   content: string;
   createdAt: string;
 }): Promise<void> {
@@ -590,6 +613,22 @@ async function runBackgroundIndexing(input: {
        AND deleted_at IS NULL`,
     [JSON.stringify(summaryForStorage), pointId, input.documentId, input.auth.tenantId, input.auth.userId]
   );
+
+  void documentSearchRepository.indexDocument({
+    auth: input.auth,
+    documentId: input.documentId,
+    ref: input.ref,
+    title: input.title,
+    content: input.content,
+    summary: summaryForStorage,
+    createdAt: input.createdAt,
+  }).catch((error) => {
+    documentLogger.warn("Vertex document indexing failed", {
+      event: "vertex_document_search_index_failed",
+      document_id: input.documentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 export class DocumentSizeExceededError extends Error {
@@ -692,6 +731,8 @@ export async function stashDocument(
   void runBackgroundIndexing({
     auth,
     documentId,
+    ref: refHandle,
+    title: opts?.title ?? null,
     content: rawContent,
     createdAt,
   }).catch((error) => {
@@ -1042,7 +1083,35 @@ export async function searchDocuments(
     }
   }
 
+  const searchMode = selectDocumentSearchMode(auth);
+  const vertexSearchPromise = searchMode === "vertex" || searchMode === "shadow"
+    ? documentSearchRepository.searchDocuments(normalizedQuery, auth, normalizedLimit).catch((error) => {
+      documentLogger.warn("Vertex document search failed", {
+        event: "vertex_document_search_failed",
+        tenant_id: auth.tenantId,
+        user_id: auth.userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    })
+    : Promise.resolve([]);
+
   const lexicalMatches = await lexicalSearchDocuments(normalizedQuery, auth, normalizedLimit);
+  const vertexMatches = await vertexSearchPromise;
+  if (searchMode === "shadow") {
+    documentLogger.info("Vertex document search shadow result", {
+      event: "vertex_document_search_shadow",
+      tenant_id: auth.tenantId,
+      user_id: auth.userId,
+      query_length: normalizedQuery.length,
+      vertex_hits: vertexMatches.length,
+      lexical_hits: lexicalMatches.length,
+      overlap_refs: vertexMatches.filter((hit) => lexicalMatches.some((current) => current.ref === hit.ref)).length,
+    });
+  }
+  if (searchMode === "vertex" && vertexMatches.length > 0) {
+    return vertexMatches;
+  }
   if (lexicalMatches.length > 0 && lexicalMatches[0].score >= 0.65) {
     return lexicalMatches;
   }

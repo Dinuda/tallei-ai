@@ -43,10 +43,15 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_LLM__OLLAMA_BASE_URL",      oldKey: "OLLAMA_BASE_URL" },
   { newKey: "TALLEI_LLM__OLLAMA_MODEL",         oldKey: "OLLAMA_MODEL" },
   { newKey: "TALLEI_LLM__LOCAL_MODEL_MODE",     oldKey: "LOCAL_MODEL_MODE" },
+  { newKey: "TALLEI_LLM__GOOGLE_MODEL",         oldKey: "GOOGLE_MODEL" },
+  { newKey: "TALLEI_GOOGLE__API_KEY",           oldKey: "GOOGLE_API_KEY" },
+  { newKey: "TALLEI_GOOGLE__PROJECT_ID",        oldKey: "GOOGLE_CLOUD_PROJECT" },
+  { newKey: "TALLEI_GOOGLE__LOCATION",          oldKey: "GOOGLE_CLOUD_LOCATION" },
   // Embedding
   { newKey: "TALLEI_EMBED__PROVIDER",           oldKey: "EMBEDDING_PROVIDER" },
   { newKey: "TALLEI_EMBED__MODEL",              oldKey: "EMBEDDING_MODEL" },
   { newKey: "TALLEI_EMBED__DIMS",               oldKey: "EMBEDDING_DIMS" },
+  { newKey: "TALLEI_EMBED__GOOGLE_MODEL",       oldKey: "GOOGLE_EMBEDDING_MODEL" },
   // Qdrant
   { newKey: "TALLEI_QDRANT__URL",              oldKey: "QDRANT_URL" },
   { newKey: "TALLEI_QDRANT__API_KEY",           oldKey: "QDRANT_API_KEY" },
@@ -277,11 +282,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         : nodeEnv === "production"
           ? 30_000
           : 10_000),
-    embeddingProvider: readStringEnv(e, "TALLEI_EMBED__PROVIDER", defaultEmbeddingProvider) as "openai" | "ollama",
+    embeddingProvider: readStringEnv(e, "TALLEI_EMBED__PROVIDER", defaultEmbeddingProvider) as "openai" | "ollama" | "google",
     embeddingModel: readStringEnv(e, "TALLEI_EMBED__MODEL", defaultEmbeddingModel),
+    googleEmbeddingModel: readStringEnv(e, "TALLEI_EMBED__GOOGLE_MODEL", "gemini-embedding-001"),
     embeddingDims: readIntEnv(e, "TALLEI_EMBED__DIMS", defaultEmbeddingDims),
-    llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama",
+    llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google",
     openaiModel: readStringEnv(e, "TALLEI_LLM__CHAT_MODEL", "gpt-4o-mini"),
+    googleModel: readStringEnv(e, "TALLEI_LLM__GOOGLE_MODEL", "gemini-2.0-flash"),
+    googleApiKey: readStringEnv(e, "TALLEI_GOOGLE__API_KEY"),
+    googleProjectId: readStringEnv(e, "TALLEI_GOOGLE__PROJECT_ID"),
+    googleLocation: readStringEnv(e, "TALLEI_GOOGLE__LOCATION", "us-central1"),
+    vertexDocumentSearchEnabled: readBooleanEnv(e, "TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH", false),
+    vertexDocumentSearchShadowEnabled: readBooleanEnv(e, "TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH_SHADOW", false),
+    vertexDocumentSearchNewUsersEnabled: readBooleanEnv(e, "TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH_NEW_USERS", true),
+    vertexDocumentSearchTenantAllowlist: readStringEnv(e, "TALLEI_VERTEX_SEARCH__TENANT_ALLOWLIST")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    vertexDocumentSearchUserAllowlist: readStringEnv(e, "TALLEI_VERTEX_SEARCH__USER_ALLOWLIST")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    vertexSearchDataStore: readStringEnv(e, "TALLEI_VERTEX_SEARCH__DATA_STORE"),
+    vertexSearchServingConfig: readStringEnv(e, "TALLEI_VERTEX_SEARCH__SERVING_CONFIG"),
+    agentEngineIssuer: readStringEnv(e, "TALLEI_AGENT_ENGINE__ISSUER", "tallei-agent-engine"),
     intentClassifierModel: readStringEnv(e, "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
     plannerModel: readStringEnv(e, "TALLEI_PLANNER__MODEL", "gpt-4o-mini"),
     plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),

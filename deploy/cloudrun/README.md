@@ -75,6 +75,7 @@ Recommended secret names for scripts:
 
 - `INTERNAL_API_SECRET`
 - `OPENAI_API_KEY`
+- `GOOGLE_API_KEY` (optional; prefer service account auth for Vertex in Cloud Run)
 - `JWT_SECRET`
 - `MEMORY_MASTER_KEY`
 - `NEXTAUTH_SECRET`
@@ -145,6 +146,14 @@ export RECALL_V2_ENABLED="true"
 
 export INTERNAL_API_SECRET="INTERNAL_API_SECRET"
 export OPENAI_API_KEY="OPENAI_API_KEY"
+export TALLEI_GOOGLE__PROJECT_ID="your-project-id"
+export TALLEI_GOOGLE__LOCATION="us-central1"
+export TALLEI_LLM__GOOGLE_MODEL="gemini-2.0-flash"
+export TALLEI_EMBED__GOOGLE_MODEL="gemini-embedding-001"
+export TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH="false"
+export TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH_SHADOW="false"
+export TALLEI_VERTEX_SEARCH__DATA_STORE=""
+export TALLEI_VERTEX_SEARCH__SERVING_CONFIG=""
 export JWT_SECRET="JWT_SECRET"
 export MEMORY_MASTER_KEY="MEMORY_MASTER_KEY"
 export TALLEI_BILLING__LEMONSQUEEZY_API_KEY="TALLEI_BILLING__LEMONSQUEEZY_API_KEY"
@@ -221,3 +230,15 @@ Repeat for `api.example.com`.
 - Keep backend and dashboard on separate service accounts.
 - Keep `FRONTEND_URL` exact (`https://app.example.com`) so CORS is tight.
 - Keep Cloud Run min instances at `0` while testing cost; raise only if needed.
+
+## 10) Vertex AI Agent Engine migration notes
+
+The first Agent Engine rollout keeps this backend authoritative. Deploy the
+Python adapter in `agent-engine/` to Vertex AI Agent Engine and configure it with:
+
+- `TALLEI_BACKEND_URL=https://api.example.com`
+- `TALLEI_AGENT_ENGINE_TOKEN=<short-lived backend-signed token>`
+- `TALLEI_AGENT_ENGINE_MODEL=gemini-2.0-flash`
+
+The adapter calls `/internal/agent-tools/:toolName`. Do not grant the Agent
+Engine service account database, billing, or dashboard permissions directly.
