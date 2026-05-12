@@ -215,6 +215,42 @@ function summaryPreview(summaryJson: unknown): string {
   return "";
 }
 
+async function markVertexIndexState(input: {
+  auth: AuthContext;
+  documentId: string;
+  baseSummary: Record<string, unknown>;
+  ok: boolean;
+  error?: string;
+}): Promise<void> {
+  const attemptsRaw = input.baseSummary["vertex_index_attempts"];
+  const priorAttempts = typeof attemptsRaw === "number" && Number.isFinite(attemptsRaw)
+    ? Math.max(0, Math.floor(attemptsRaw))
+    : 0;
+  const now = new Date().toISOString();
+  const nextSummary: Record<string, unknown> = {
+    ...input.baseSummary,
+    vertex_index_attempts: priorAttempts + 1,
+    vertex_index_last_attempt_at: now,
+  };
+  if (input.ok) {
+    nextSummary["vertex_indexed_at"] = now;
+    nextSummary["vertex_index_last_error"] = null;
+    nextSummary["vertex_index_failed_at"] = null;
+  } else {
+    nextSummary["vertex_index_last_error"] = (input.error ?? "unknown").slice(0, 320);
+    nextSummary["vertex_index_failed_at"] = now;
+  }
+  await pool.query(
+    `UPDATE documents
+     SET summary_json = $1::jsonb
+     WHERE id = $2
+       AND tenant_id = $3
+       AND user_id = $4
+       AND deleted_at IS NULL`,
+    [JSON.stringify(nextSummary), input.documentId, input.auth.tenantId, input.auth.userId]
+  );
+}
+
 function displayTitle(input: { title: string | null; filename: string | null; ref: string }): string {
   return input.title ?? input.filename ?? input.ref;
 }
@@ -622,11 +658,26 @@ async function runBackgroundIndexing(input: {
     content: input.content,
     summary: summaryForStorage,
     createdAt: input.createdAt,
-  }).catch((error) => {
+  }).then(async () => {
+    await markVertexIndexState({
+      auth: input.auth,
+      documentId: input.documentId,
+      baseSummary: summaryForStorage,
+      ok: true,
+    });
+  }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
     documentLogger.warn("Vertex document indexing failed", {
       event: "vertex_document_search_index_failed",
       document_id: input.documentId,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
+    });
+    await markVertexIndexState({
+      auth: input.auth,
+      documentId: input.documentId,
+      baseSummary: summaryForStorage,
+      ok: false,
+      error: message,
     });
   });
 }

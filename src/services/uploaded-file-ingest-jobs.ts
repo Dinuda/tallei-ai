@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 
 import { config } from "../config/index.js";
 import type { AuthContext } from "../domain/auth/index.js";
+import { createLogger } from "../observability/index.js";
 import { pool } from "../infrastructure/db/index.js";
 import { runAsyncSafe } from "../shared/async-safe.js";
 import { getPlanForTenant } from "../infrastructure/auth/tenancy.js";
@@ -43,6 +44,10 @@ export interface UploadedFileIngestJobState {
   openai_file_id: string;
   mime_type: string | null;
   conversation_id: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at: string | null;
+  last_attempt_at: string | null;
   created_at: string;
   completed_at: string | null;
   error: string | null;
@@ -58,6 +63,10 @@ interface UploadIngestJobRow {
   mime_type: string | null;
   title: string | null;
   conversation_id: string | null;
+  attempt_count?: number;
+  max_attempts?: number;
+  next_attempt_at?: string | null;
+  last_attempt_at?: string | null;
   created_at: string;
   completed_at: string | null;
   error: string | null;
@@ -81,15 +90,39 @@ interface ClaimedUploadIngestJobRow {
   mime_type: string | null;
   title: string | null;
   conversation_id: string | null;
+  attempt_count?: number;
+  max_attempts?: number;
 }
 
 const UPLOAD_INGEST_WORKER_ENABLED = config.uploadIngestWorkerEnabled;
 const UPLOAD_INGEST_WORKER_POLL_MS = Math.max(50, config.uploadIngestWorkerPollMs);
 const UPLOAD_INGEST_WORKER_BATCH_SIZE = Math.max(1, config.uploadIngestWorkerBatchSize);
 const UPLOAD_INGEST_WORKER_CONCURRENCY = Math.max(1, config.uploadIngestWorkerConcurrency);
+const UPLOAD_INGEST_WORKER_MAX_ATTEMPTS = Math.max(1, config.uploadIngestWorkerMaxAttempts);
+const UPLOAD_INGEST_RETRY_BASE_MS = Math.max(250, config.uploadIngestWorkerRetryBaseMs);
+const UPLOAD_INGEST_RETRY_MAX_MS = Math.max(UPLOAD_INGEST_RETRY_BASE_MS, config.uploadIngestWorkerRetryMaxMs);
 let uploadIngestWorkerRunning = false;
 let uploadIngestWorkerTimer: ReturnType<typeof setInterval> | null = null;
 let uploadIngestPollInFlight = false;
+const uploadIngestLogger = createLogger({ baseFields: { component: "uploaded_file_ingest_jobs" } });
+let retryColumnsAvailable: boolean | null = null;
+let retryColumnsCheckInFlight: Promise<boolean> | null = null;
+
+export function computeUploadIngestRetryDelayMs(
+  attemptCount: number,
+  baseMs = UPLOAD_INGEST_RETRY_BASE_MS,
+  maxMs = UPLOAD_INGEST_RETRY_MAX_MS
+): number {
+  const attempt = Math.max(1, attemptCount);
+  const exponential = baseMs * Math.pow(2, attempt - 1);
+  const capped = Math.min(maxMs, exponential);
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(capped * 0.3)));
+  return capped + jitter;
+}
+
+export function isRetryableUploadIngestError(message: string): boolean {
+  return !/unsupported|not supported|legacy \.doc|empty content|missing download_link/i.test(message);
+}
 
 function mapJobRow(row: UploadIngestJobRow): UploadedFileIngestJobState {
   const status: UploadedFileIngestJobStatus = row.status === "processing" ? "pending" : row.status;
@@ -116,6 +149,8 @@ function mapJobRow(row: UploadIngestJobRow): UploadedFileIngestJobState {
     }
     : null;
 
+  const attemptCount = typeof row.attempt_count === "number" ? row.attempt_count : 0;
+  const maxAttempts = typeof row.max_attempts === "number" ? row.max_attempts : UPLOAD_INGEST_WORKER_MAX_ATTEMPTS;
   return {
     ref: row.ref,
     status,
@@ -123,11 +158,42 @@ function mapJobRow(row: UploadIngestJobRow): UploadedFileIngestJobState {
     openai_file_id: row.openai_file_id,
     mime_type: row.mime_type,
     conversation_id: row.conversation_id,
+    attempt_count: attemptCount,
+    max_attempts: maxAttempts,
+    next_attempt_at: row.next_attempt_at ?? null,
+    last_attempt_at: row.last_attempt_at ?? null,
     created_at: row.created_at,
     completed_at: row.completed_at,
     error: row.error,
     document,
   };
+}
+
+async function hasRetryColumns(): Promise<boolean> {
+  if (retryColumnsAvailable !== null) return retryColumnsAvailable;
+  if (retryColumnsCheckInFlight) return retryColumnsCheckInFlight;
+
+  retryColumnsCheckInFlight = (async () => {
+    try {
+      const result = await pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'uploaded_file_ingest_jobs'
+           AND column_name IN ('attempt_count', 'max_attempts', 'next_attempt_at', 'last_attempt_at')`
+      );
+      const count = Number(result.rows[0]?.count ?? "0");
+      retryColumnsAvailable = count >= 4;
+      return retryColumnsAvailable;
+    } catch {
+      retryColumnsAvailable = false;
+      return false;
+    } finally {
+      retryColumnsCheckInFlight = null;
+    }
+  })();
+
+  return retryColumnsCheckInFlight;
 }
 
 async function setJobDone(input: {
@@ -153,6 +219,7 @@ async function setJobDone(input: {
      SET status = 'done',
          document_id = $1,
          error = NULL,
+         next_attempt_at = NOW(),
          completed_at = NOW()
      WHERE tenant_id = $2
        AND user_id = $3
@@ -161,25 +228,95 @@ async function setJobDone(input: {
   );
 }
 
-async function setJobFailed(input: {
+async function setJobRetryOrFailed(input: {
   tenantId: string;
   userId: string;
   ref: string;
   error: string;
+  attemptCount: number;
+  maxAttempts: number;
 }): Promise<void> {
+  const retryable = isRetryableUploadIngestError(input.error);
+  const shouldRetry = retryable && input.attemptCount < input.maxAttempts;
+  const nextAttemptDelayMs = shouldRetry
+    ? computeUploadIngestRetryDelayMs(input.attemptCount)
+    : 0;
   await pool.query(
     `UPDATE uploaded_file_ingest_jobs
-     SET status = 'failed',
-         error = $1,
-         completed_at = NOW()
-     WHERE tenant_id = $2
-       AND user_id = $3
-       AND ref = $4`,
-    [input.error, input.tenantId, input.userId, input.ref]
+     SET status = $1,
+         error = $2,
+         next_attempt_at = CASE
+           WHEN $3::boolean THEN NOW() + ($4::text)::interval
+           ELSE NOW()
+         END,
+         completed_at = CASE
+           WHEN $3::boolean THEN NULL
+           ELSE NOW()
+         END
+     WHERE tenant_id = $5
+       AND user_id = $6
+       AND ref = $7`,
+    [
+      shouldRetry ? "pending" : "failed",
+      input.error,
+      shouldRetry,
+      `${Math.max(0, nextAttemptDelayMs)} milliseconds`,
+      input.tenantId,
+      input.userId,
+      input.ref,
+    ]
   );
+
+  uploadIngestLogger.info("Upload ingest job attempt completed", {
+    event: "upload_ingest_job_attempt",
+    tenant_id: input.tenantId,
+    user_id: input.userId,
+    ref: input.ref,
+    status: shouldRetry ? "retry_scheduled" : "failed_terminal",
+    attempt_count: input.attemptCount,
+    max_attempts: input.maxAttempts,
+    retryable,
+    next_retry_in_ms: shouldRetry ? nextAttemptDelayMs : 0,
+    error: input.error.slice(0, 240),
+  });
 }
 
 async function claimNextPendingJob(): Promise<ClaimedUploadIngestJobRow | null> {
+  if (await hasRetryColumns()) {
+    const result = await pool.query<ClaimedUploadIngestJobRow>(
+      `WITH next_job AS (
+         SELECT ref
+         FROM uploaded_file_ingest_jobs
+         WHERE status = 'pending'
+           AND next_attempt_at <= NOW()
+           AND attempt_count < max_attempts
+         ORDER BY next_attempt_at ASC, created_at ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT 1
+       )
+       UPDATE uploaded_file_ingest_jobs j
+       SET status = 'processing',
+           error = NULL,
+           last_attempt_at = NOW(),
+           attempt_count = j.attempt_count + 1
+       FROM next_job
+       WHERE j.ref = next_job.ref
+       RETURNING
+         j.ref,
+         j.tenant_id,
+         j.user_id,
+         j.openai_file_id,
+         j.download_link,
+         j.filename,
+         j.mime_type,
+         j.title,
+         j.conversation_id,
+         j.attempt_count,
+         j.max_attempts`
+    );
+    return result.rows[0] ?? null;
+  }
+
   const result = await pool.query<ClaimedUploadIngestJobRow>(
     `WITH next_job AS (
        SELECT ref
@@ -238,12 +375,28 @@ async function processClaimedJob(job: ClaimedUploadIngestJobRow): Promise<void> 
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await setJobFailed({
-      tenantId: job.tenant_id,
-      userId: job.user_id,
-      ref: job.ref,
-      error: message,
-    });
+    const supportsRetries = await hasRetryColumns();
+    if (supportsRetries) {
+      await setJobRetryOrFailed({
+        tenantId: job.tenant_id,
+        userId: job.user_id,
+        ref: job.ref,
+        error: message,
+        attemptCount: typeof job.attempt_count === "number" ? job.attempt_count : 1,
+        maxAttempts: typeof job.max_attempts === "number" ? job.max_attempts : UPLOAD_INGEST_WORKER_MAX_ATTEMPTS,
+      });
+    } else {
+      await pool.query(
+        `UPDATE uploaded_file_ingest_jobs
+         SET status = 'failed',
+             error = $1,
+             completed_at = NOW()
+         WHERE tenant_id = $2
+           AND user_id = $3
+           AND ref = $4`,
+        [message, job.tenant_id, job.user_id, job.ref]
+      );
+    }
   }
 }
 
@@ -280,9 +433,15 @@ export function startUploadedFileIngestWorker(): void {
   }, UPLOAD_INGEST_WORKER_POLL_MS);
   uploadIngestWorkerTimer.unref?.();
   runAsyncSafe(() => pollUploadIngestQueueOnce(), "upload ingest worker initial poll");
-  console.log(
-    `[workers] upload ingest worker started poll_ms=${UPLOAD_INGEST_WORKER_POLL_MS} batch=${UPLOAD_INGEST_WORKER_BATCH_SIZE} concurrency=${UPLOAD_INGEST_WORKER_CONCURRENCY}`
-  );
+  uploadIngestLogger.info("Upload ingest worker started", {
+    event: "upload_ingest_worker_started",
+    poll_ms: UPLOAD_INGEST_WORKER_POLL_MS,
+    batch_size: UPLOAD_INGEST_WORKER_BATCH_SIZE,
+    concurrency: UPLOAD_INGEST_WORKER_CONCURRENCY,
+    max_attempts: UPLOAD_INGEST_WORKER_MAX_ATTEMPTS,
+    retry_base_ms: UPLOAD_INGEST_RETRY_BASE_MS,
+    retry_max_ms: UPLOAD_INGEST_RETRY_MAX_MS,
+  });
 }
 
 export function stopUploadedFileIngestWorker(): void {
@@ -305,22 +464,42 @@ export async function enqueueUploadedFileIngest(
   const ref = `ing_${randomUUID().replace(/-/g, "")}`;
   const conversationId = input?.conversation_id?.trim() || null;
 
-  await pool.query(
-    `INSERT INTO uploaded_file_ingest_jobs
-     (ref, tenant_id, user_id, openai_file_id, download_link, filename, title, mime_type, status, conversation_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)`,
-    [
-      ref,
-      auth.tenantId,
-      auth.userId,
-      fileRef.id,
-      fileRef.download_link,
-      filename,
-      input?.title ?? null,
-      fileRef.mime_type ?? null,
-      conversationId,
-    ]
-  );
+  if (await hasRetryColumns()) {
+    await pool.query(
+      `INSERT INTO uploaded_file_ingest_jobs
+       (ref, tenant_id, user_id, openai_file_id, download_link, filename, title, mime_type, status, conversation_id, attempt_count, max_attempts, next_attempt_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, 0, $10, NOW())`,
+      [
+        ref,
+        auth.tenantId,
+        auth.userId,
+        fileRef.id,
+        fileRef.download_link,
+        filename,
+        input?.title ?? null,
+        fileRef.mime_type ?? null,
+        conversationId,
+        UPLOAD_INGEST_WORKER_MAX_ATTEMPTS,
+      ]
+    );
+  } else {
+    await pool.query(
+      `INSERT INTO uploaded_file_ingest_jobs
+       (ref, tenant_id, user_id, openai_file_id, download_link, filename, title, mime_type, status, conversation_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)`,
+      [
+        ref,
+        auth.tenantId,
+        auth.userId,
+        fileRef.id,
+        fileRef.download_link,
+        filename,
+        input?.title ?? null,
+        fileRef.mime_type ?? null,
+        conversationId,
+      ]
+    );
+  }
   runAsyncSafe(() => pollUploadIngestQueueOnce(), "upload ingest worker nudge");
 
   return {
@@ -365,36 +544,67 @@ export async function getUploadedFileIngestJobStatus(
   auth: AuthContext,
   ref: string
 ): Promise<UploadedFileIngestJobState | null> {
-  const result = await pool.query<UploadIngestJobRow>(
-    `SELECT
-       j.ref,
-       j.status,
-       j.filename,
-       j.openai_file_id,
-       j.download_link,
-       j.mime_type,
-       j.conversation_id,
-       j.created_at::text AS created_at,
-       j.completed_at::text AS completed_at,
-       j.error,
-       d.ref_handle AS document_ref,
-       d.title AS document_title,
-       d.filename AS document_filename,
-       d.conversation_id AS document_conversation_id,
-       d.blob_provider,
-       d.blob_key,
-       d.blob_url,
-       d.blob_source_file_id
-     FROM uploaded_file_ingest_jobs j
-     LEFT JOIN documents d
-       ON d.id = j.document_id
-       AND d.deleted_at IS NULL
-     WHERE j.tenant_id = $1
-       AND j.user_id = $2
-       AND j.ref = $3
-     LIMIT 1`,
-    [auth.tenantId, auth.userId, ref]
-  );
+  const supportsRetries = await hasRetryColumns();
+  const result = await pool.query<UploadIngestJobRow>(supportsRetries
+    ? `SELECT
+         j.ref,
+         j.status,
+         j.filename,
+         j.openai_file_id,
+         j.download_link,
+         j.mime_type,
+         j.conversation_id,
+         j.attempt_count,
+         j.max_attempts,
+         j.next_attempt_at::text AS next_attempt_at,
+         j.last_attempt_at::text AS last_attempt_at,
+         j.created_at::text AS created_at,
+         j.completed_at::text AS completed_at,
+         j.error,
+         d.ref_handle AS document_ref,
+         d.title AS document_title,
+         d.filename AS document_filename,
+         d.conversation_id AS document_conversation_id,
+         d.blob_provider,
+         d.blob_key,
+         d.blob_url,
+         d.blob_source_file_id
+       FROM uploaded_file_ingest_jobs j
+       LEFT JOIN documents d
+         ON d.id = j.document_id
+         AND d.deleted_at IS NULL
+       WHERE j.tenant_id = $1
+         AND j.user_id = $2
+         AND j.ref = $3
+       LIMIT 1`
+    : `SELECT
+         j.ref,
+         j.status,
+         j.filename,
+         j.openai_file_id,
+         j.download_link,
+         j.mime_type,
+         j.conversation_id,
+         j.created_at::text AS created_at,
+         j.completed_at::text AS completed_at,
+         j.error,
+         d.ref_handle AS document_ref,
+         d.title AS document_title,
+         d.filename AS document_filename,
+         d.conversation_id AS document_conversation_id,
+         d.blob_provider,
+         d.blob_key,
+         d.blob_url,
+         d.blob_source_file_id
+       FROM uploaded_file_ingest_jobs j
+       LEFT JOIN documents d
+         ON d.id = j.document_id
+         AND d.deleted_at IS NULL
+       WHERE j.tenant_id = $1
+         AND j.user_id = $2
+         AND j.ref = $3
+       LIMIT 1`,
+  [auth.tenantId, auth.userId, ref]);
 
   const row = result.rows[0];
   if (!row) return null;
@@ -411,38 +621,71 @@ export async function listRecentCompletedUploadedFileIngestJobs(
   const limit = Math.max(1, Math.min(input?.limit ?? 5, 20));
   const conversationId = input?.conversation_id?.trim() || null;
 
-  const result = await pool.query<UploadIngestJobRow>(
-    `SELECT
-       j.ref,
-       j.status,
-       j.filename,
-       j.openai_file_id,
-       j.download_link,
-       j.mime_type,
-       j.conversation_id,
-       j.created_at::text AS created_at,
-       j.completed_at::text AS completed_at,
-       j.error,
-       d.ref_handle AS document_ref,
-       d.title AS document_title,
-       d.filename AS document_filename,
-       d.conversation_id AS document_conversation_id,
-       d.blob_provider,
-       d.blob_key,
-       d.blob_url,
-       d.blob_source_file_id
-     FROM uploaded_file_ingest_jobs j
-     LEFT JOIN documents d
-       ON d.id = j.document_id
-       AND d.deleted_at IS NULL
-     WHERE j.tenant_id = $1
-       AND j.user_id = $2
-       AND j.status = 'done'
-       AND ($3::text IS NULL OR j.conversation_id = $3::text)
-     ORDER BY j.completed_at DESC
-     LIMIT $4`,
-    [auth.tenantId, auth.userId, conversationId, limit]
-  );
+  const supportsRetries = await hasRetryColumns();
+  const result = await pool.query<UploadIngestJobRow>(supportsRetries
+    ? `SELECT
+         j.ref,
+         j.status,
+         j.filename,
+         j.openai_file_id,
+         j.download_link,
+         j.mime_type,
+         j.conversation_id,
+         j.attempt_count,
+         j.max_attempts,
+         j.next_attempt_at::text AS next_attempt_at,
+         j.last_attempt_at::text AS last_attempt_at,
+         j.created_at::text AS created_at,
+         j.completed_at::text AS completed_at,
+         j.error,
+         d.ref_handle AS document_ref,
+         d.title AS document_title,
+         d.filename AS document_filename,
+         d.conversation_id AS document_conversation_id,
+         d.blob_provider,
+         d.blob_key,
+         d.blob_url,
+         d.blob_source_file_id
+       FROM uploaded_file_ingest_jobs j
+       LEFT JOIN documents d
+         ON d.id = j.document_id
+         AND d.deleted_at IS NULL
+       WHERE j.tenant_id = $1
+         AND j.user_id = $2
+         AND j.status = 'done'
+         AND ($3::text IS NULL OR j.conversation_id = $3::text)
+       ORDER BY j.completed_at DESC
+       LIMIT $4`
+    : `SELECT
+         j.ref,
+         j.status,
+         j.filename,
+         j.openai_file_id,
+         j.download_link,
+         j.mime_type,
+         j.conversation_id,
+         j.created_at::text AS created_at,
+         j.completed_at::text AS completed_at,
+         j.error,
+         d.ref_handle AS document_ref,
+         d.title AS document_title,
+         d.filename AS document_filename,
+         d.conversation_id AS document_conversation_id,
+         d.blob_provider,
+         d.blob_key,
+         d.blob_url,
+         d.blob_source_file_id
+       FROM uploaded_file_ingest_jobs j
+       LEFT JOIN documents d
+         ON d.id = j.document_id
+         AND d.deleted_at IS NULL
+       WHERE j.tenant_id = $1
+         AND j.user_id = $2
+         AND j.status = 'done'
+         AND ($3::text IS NULL OR j.conversation_id = $3::text)
+       ORDER BY j.completed_at DESC
+       LIMIT $4`,
+  [auth.tenantId, auth.userId, conversationId, limit]);
 
   return result.rows.map(mapJobRow);
 }

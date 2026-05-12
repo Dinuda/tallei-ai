@@ -52,8 +52,14 @@ test("Agent Engine token marks requests as new runtime users", () => {
   assert.equal(selectDocumentSearchMode(verified), "vertex");
 });
 
-test("Vertex document search records low placeholder latency", async () => {
-  const repo = new VertexDocumentSearchRepository();
+test("Vertex document search records low latency timing", async () => {
+  const repo = new VertexDocumentSearchRepository({
+    fetchImpl: (async () => new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch,
+    accessTokenProvider: async () => "test-token",
+  });
   const store = createRequestTimingStore();
 
   await runWithRequestTimingStore(store, async () => {
@@ -61,6 +67,7 @@ test("Vertex document search records low placeholder latency", async () => {
     assert.deepEqual(results, []);
     const fields = currentRequestTimingStore()?.fields ?? {};
     assert.equal(typeof fields["vertex_document_search_ms"], "number");
+    assert.equal(fields["vertex_document_search_status"], "success");
     assert.ok(Number(fields["vertex_document_search_ms"]) < 50);
   });
 });

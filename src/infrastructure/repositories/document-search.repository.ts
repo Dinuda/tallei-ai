@@ -2,6 +2,7 @@ import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { createLogger } from "../../observability/index.js";
 import { setRequestTimingFields } from "../../observability/request-timing.js";
+import { execFile } from "node:child_process";
 
 export interface DocumentSearchHit {
   ref: string;
@@ -26,16 +27,163 @@ export interface DocumentSearchRepository {
 }
 
 const logger = createLogger({ baseFields: { component: "document_search_repository" } });
+const DISCOVERY_ENGINE_BASE_URL = "https://discoveryengine.googleapis.com/v1";
+const METADATA_TOKEN_ENDPOINT =
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+const CONTENT_MAX_BYTES = 950_000;
+const TOKEN_REFRESH_SKEW_MS = 30_000;
+const DEFAULT_INDEX_TIMEOUT_MS = 8_000;
+const DEFAULT_SEARCH_TIMEOUT_MS = 5_000;
+const GCLOUD_TOKEN_TIMEOUT_MS = 4_000;
+
+interface TokenResponse {
+  access_token?: string;
+  expires_in?: number;
+}
+
+interface VertexSearchResult {
+  id?: string;
+  document?: {
+    id?: string;
+    structData?: Record<string, unknown>;
+    derivedStructData?: {
+      snippets?: Array<{ snippet?: string }>;
+    };
+  };
+  chunk?: {
+    id?: string;
+    documentMetadata?: {
+      id?: string;
+      structData?: Record<string, unknown>;
+    };
+    derivedStructData?: {
+      snippets?: Array<{ snippet?: string }>;
+    };
+    content?: string;
+  };
+  modelScores?: Record<string, { values?: number[] }>;
+}
+
+interface VertexSearchResponse {
+  results?: VertexSearchResult[];
+}
+
+interface VertexDocumentSearchRepositoryOptions {
+  fetchImpl?: typeof fetch;
+  accessTokenProvider?: () => Promise<string>;
+  indexTimeoutMs?: number;
+  searchTimeoutMs?: number;
+}
 
 function elapsedMs(startedAt: bigint): number {
   return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
 }
 
+function toBase64Utf8(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64");
+}
+
+function stripHtml(value: string): string {
+  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let end = Math.max(64, Math.floor(value.length * 0.95));
+  while (end > 64) {
+    const candidate = value.slice(0, end);
+    if (Buffer.byteLength(candidate, "utf8") <= maxBytes) return candidate;
+    end = Math.floor(end * 0.8);
+  }
+  return value.slice(0, 64);
+}
+
+function normalizeDataStoreResource(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  if (value.startsWith("projects/")) return value.replace(/\/+$/, "");
+  if (!config.googleProjectId) return null;
+  return `projects/${config.googleProjectId}/locations/global/collections/default_collection/dataStores/${value}`;
+}
+
+function normalizeServingConfigResource(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  if (value.startsWith("projects/")) return value.replace(/\/+$/, "");
+  return null;
+}
+
+function buildBranchResource(dataStoreResource: string): string {
+  return `${dataStoreResource}/branches/default_branch`;
+}
+
+function resourceProject(resourceName: string): string | null {
+  const match = resourceName.match(/^projects\/([^/]+)/);
+  return match?.[1] ?? null;
+}
+
+function quoteFilterLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function summaryText(summary: Record<string, unknown>): string {
+  const explicit = typeof summary["summary"] === "string" ? summary["summary"] : "";
+  if (explicit.trim()) return explicit.trim();
+  if (Array.isArray(summary["keyPoints"])) {
+    const first = summary["keyPoints"].find((v) => typeof v === "string");
+    if (typeof first === "string" && first.trim()) return first.trim();
+  }
+  return "";
+}
+
+function modelScore(result: VertexSearchResult): number {
+  if (!result.modelScores) return 0;
+  for (const entry of Object.values(result.modelScores)) {
+    const score = entry?.values?.find((value) => Number.isFinite(value));
+    if (typeof score === "number") return score;
+  }
+  return 0;
+}
+
+function parseJsonSafely(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function extractErrorMessage(status: number, payloadText: string): string {
+  const payload = parseJsonSafely(payloadText);
+  if (payload && typeof payload === "object") {
+    const message = (payload as { error?: { message?: string } }).error?.message;
+    if (message) return `HTTP ${status}: ${message}`;
+  }
+  return `HTTP ${status}: ${payloadText.slice(0, 300) || "request failed"}`;
+}
+
 export class VertexDocumentSearchRepository implements DocumentSearchRepository {
+  private readonly fetchImpl: typeof fetch;
+  private readonly accessTokenProvider: () => Promise<string>;
+  private readonly indexTimeoutMs: number;
+  private readonly searchTimeoutMs: number;
+
+  private cachedAccessToken: string | null = null;
+  private cachedAccessTokenExpiresAtMs = 0;
+  private tokenInFlight: Promise<string> | null = null;
+
+  constructor(options: VertexDocumentSearchRepositoryOptions = {}) {
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.accessTokenProvider = options.accessTokenProvider ?? (() => this.getAccessTokenFromMetadata());
+    this.indexTimeoutMs = Math.max(1_000, options.indexTimeoutMs ?? DEFAULT_INDEX_TIMEOUT_MS);
+    this.searchTimeoutMs = Math.max(1_000, options.searchTimeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS);
+  }
+
   async indexDocument(input: DocumentSearchIndexInput): Promise<void> {
     const startedAt = process.hrtime.bigint();
     if (!config.vertexDocumentSearchEnabled && !config.vertexDocumentSearchShadowEnabled) return;
-    if (!config.vertexSearchDataStore) {
+    const dataStore = normalizeDataStoreResource(config.vertexSearchDataStore);
+    if (!dataStore) {
       logger.warn("Vertex document search indexing skipped; data store is not configured", {
         event: "vertex_document_search_index_skipped",
         document_id: input.documentId,
@@ -48,24 +196,80 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
       return;
     }
 
-    logger.info("Vertex document search indexing placeholder", {
-      event: "vertex_document_search_index_placeholder",
-      document_id: input.documentId,
-      tenant_id: input.auth.tenantId,
-      user_id: input.auth.userId,
-      ref: input.ref,
-      datastore: config.vertexSearchDataStore,
-    });
-    setRequestTimingFields({
-      vertex_document_index_ms: elapsedMs(startedAt),
-      vertex_document_index_status: "placeholder",
-    });
+    const branch = buildBranchResource(dataStore);
+    const documentId = encodeURIComponent(input.documentId);
+    const documentName = `${branch}/documents/${documentId}`;
+    const summary = summaryText(input.summary);
+    const searchBodyText = truncateUtf8(
+      [input.title ?? "", input.ref, summary, input.content].filter(Boolean).join("\n\n"),
+      CONTENT_MAX_BYTES
+    );
+
+    const documentPayload = {
+      id: input.documentId,
+      structData: {
+        tenant_id: input.auth.tenantId,
+        user_id: input.auth.userId,
+        ref: input.ref,
+        title: input.title ?? "",
+        summary,
+        created_at: input.createdAt,
+      },
+      content: {
+        mimeType: "text/plain",
+        rawBytes: toBase64Utf8(searchBodyText),
+      },
+    };
+
+    try {
+      await this.discoveryRequest({
+        url: `${DISCOVERY_ENGINE_BASE_URL}/${branch}/documents?documentId=${documentId}`,
+        method: "POST",
+        body: documentPayload,
+        timeoutMs: this.indexTimeoutMs,
+        billingProject: this.billingProject(dataStore),
+      });
+      setRequestTimingFields({
+        vertex_document_index_ms: elapsedMs(startedAt),
+        vertex_document_index_status: "success_create",
+      });
+      return;
+    } catch (error) {
+      if (!this.isAlreadyExistsError(error)) {
+        setRequestTimingFields({
+          vertex_document_index_ms: elapsedMs(startedAt),
+          vertex_document_index_status: "failed_create",
+        });
+        throw error;
+      }
+    }
+
+    try {
+      await this.discoveryRequest({
+        url: `${DISCOVERY_ENGINE_BASE_URL}/${documentName}?updateMask=structData,content`,
+        method: "PATCH",
+        body: documentPayload,
+        timeoutMs: this.indexTimeoutMs,
+        billingProject: this.billingProject(dataStore),
+      });
+      setRequestTimingFields({
+        vertex_document_index_ms: elapsedMs(startedAt),
+        vertex_document_index_status: "success_update",
+      });
+    } catch (error) {
+      setRequestTimingFields({
+        vertex_document_index_ms: elapsedMs(startedAt),
+        vertex_document_index_status: "failed_update",
+      });
+      throw error;
+    }
   }
 
   async searchDocuments(query: string, auth: AuthContext, limit: number): Promise<DocumentSearchHit[]> {
     const startedAt = process.hrtime.bigint();
     if (!config.vertexDocumentSearchEnabled && !config.vertexDocumentSearchShadowEnabled) return [];
-    if (!config.vertexSearchServingConfig) {
+    const servingConfig = normalizeServingConfigResource(config.vertexSearchServingConfig);
+    if (!servingConfig) {
       logger.warn("Vertex document search query skipped; serving config is not configured", {
         event: "vertex_document_search_query_skipped",
         tenant_id: auth.tenantId,
@@ -78,18 +282,227 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
       return [];
     }
 
-    logger.info("Vertex document search query placeholder", {
-      event: "vertex_document_search_query_placeholder",
-      tenant_id: auth.tenantId,
-      user_id: auth.userId,
-      query_length: query.length,
-      limit,
-      serving_config: config.vertexSearchServingConfig,
+    const dataStore = normalizeDataStoreResource(config.vertexSearchDataStore);
+    const filter =
+      `tenant_id: ANY("${quoteFilterLiteral(auth.tenantId)}") AND ` +
+      `user_id: ANY("${quoteFilterLiteral(auth.userId)}")`;
+
+    const payload: Record<string, unknown> = {
+      query,
+      pageSize: Math.min(20, Math.max(1, Math.floor(limit))),
+      filter,
+      contentSearchSpec: {
+        snippetSpec: {
+          returnSnippet: true,
+        },
+      },
+    };
+    if (dataStore) {
+      payload["branch"] = buildBranchResource(dataStore);
+    }
+
+    try {
+      const response = await this.discoveryRequest<VertexSearchResponse>({
+        url: `${DISCOVERY_ENGINE_BASE_URL}/${servingConfig}:search`,
+        method: "POST",
+        body: payload,
+        timeoutMs: this.searchTimeoutMs,
+        billingProject: this.billingProject(servingConfig),
+      });
+
+      const hits: DocumentSearchHit[] = [];
+      for (const result of response.results ?? []) {
+        const structData = result.document?.structData ?? result.chunk?.documentMetadata?.structData;
+        if (!structData) continue;
+
+        const tenant = typeof structData["tenant_id"] === "string" ? structData["tenant_id"] : "";
+        const user = typeof structData["user_id"] === "string" ? structData["user_id"] : "";
+        if (tenant !== auth.tenantId || user !== auth.userId) {
+          continue;
+        }
+
+        const ref = typeof structData["ref"] === "string"
+          ? structData["ref"]
+          : result.document?.id ?? result.id ?? result.chunk?.id ?? "";
+        if (!ref) continue;
+
+        const title = typeof structData["title"] === "string" && structData["title"].trim()
+          ? structData["title"]
+          : ref;
+        const summary = typeof structData["summary"] === "string" ? structData["summary"] : "";
+
+        const snippet =
+          result.document?.derivedStructData?.snippets?.[0]?.snippet
+          ?? result.chunk?.derivedStructData?.snippets?.[0]?.snippet
+          ?? result.chunk?.content
+          ?? summary;
+
+        hits.push({
+          ref,
+          title,
+          score: modelScore(result),
+          preview: stripHtml((snippet ?? "").toString()).slice(0, 400),
+        });
+      }
+
+      setRequestTimingFields({
+        vertex_document_search_ms: elapsedMs(startedAt),
+        vertex_document_search_status: "success",
+      });
+      return hits.slice(0, Math.min(20, Math.max(1, Math.floor(limit))));
+    } catch (error) {
+      setRequestTimingFields({
+        vertex_document_search_ms: elapsedMs(startedAt),
+        vertex_document_search_status: "failed",
+      });
+      throw error;
+    }
+  }
+
+  private async discoveryRequest<T>(input: {
+    url: string;
+    method: "POST" | "PATCH";
+    body: unknown;
+    timeoutMs: number;
+    billingProject: string | null;
+  }): Promise<T> {
+    const accessToken = await this.getAccessToken();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+    try {
+      const response = await this.fetchImpl(input.url, {
+        method: input.method,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          ...(input.billingProject ? { "x-goog-user-project": input.billingProject } : {}),
+        },
+        body: JSON.stringify(input.body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const payloadText = await response.text();
+        throw new Error(extractErrorMessage(response.status, payloadText));
+      }
+      return await response.json() as T;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error(`Discovery Engine request timed out after ${input.timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private billingProject(resourceName: string): string | null {
+    return config.googleProjectId || resourceProject(resourceName);
+  }
+
+  private async getAccessToken(): Promise<string> {
+    const envToken = process.env.TALLEI_GOOGLE__ACCESS_TOKEN?.trim();
+    if (envToken) return envToken;
+
+    const now = Date.now();
+    if (this.cachedAccessToken && now < this.cachedAccessTokenExpiresAtMs - TOKEN_REFRESH_SKEW_MS) {
+      return this.cachedAccessToken;
+    }
+
+    if (this.tokenInFlight) {
+      return this.tokenInFlight;
+    }
+
+    this.tokenInFlight = this.accessTokenProvider()
+      .catch(async (error) => {
+        // Local dev fallback: if not on Cloud Run metadata and no static token is set,
+        // use ADC token from gcloud when available.
+        if (config.nodeEnv === "production") {
+          throw error;
+        }
+        return this.getAccessTokenFromGcloud(error);
+      })
+      .then((token) => {
+        this.cachedAccessToken = token;
+        this.cachedAccessTokenExpiresAtMs = now + 55 * 60 * 1000;
+        return token;
+      })
+      .finally(() => {
+        this.tokenInFlight = null;
+      });
+
+    return this.tokenInFlight;
+  }
+
+  private async getAccessTokenFromMetadata(): Promise<string> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1_500);
+    try {
+      const response = await this.fetchImpl(METADATA_TOKEN_ENDPOINT, {
+        method: "GET",
+        headers: { "Metadata-Flavor": "Google" },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Metadata token endpoint failed with HTTP ${response.status}`);
+      }
+      const payload = await response.json() as TokenResponse;
+      const token = payload.access_token?.trim();
+      if (!token) {
+        throw new Error("Metadata token endpoint response missing access_token");
+      }
+      const expiresIn = typeof payload.expires_in === "number" ? payload.expires_in : 3300;
+      this.cachedAccessTokenExpiresAtMs = Date.now() + Math.max(60, expiresIn) * 1000;
+      return token;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("Metadata token endpoint timed out");
+      }
+      if (error instanceof Error) {
+        throw new Error(
+          `Metadata token lookup failed: ${error.message}. ` +
+          `If running locally, set TALLEI_GOOGLE__ACCESS_TOKEN or run ` +
+          `"gcloud auth application-default login" and ensure a quota project is set.`
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async getAccessTokenFromGcloud(cause: unknown): Promise<string> {
+    const token = await new Promise<string>((resolve, reject) => {
+      execFile(
+        "gcloud",
+        ["auth", "application-default", "print-access-token"],
+        { timeout: GCLOUD_TOKEN_TIMEOUT_MS, maxBuffer: 32 * 1024 },
+        (error, stdout) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(stdout.trim());
+        }
+      );
+    }).catch((gcloudError) => {
+      const causeMessage = cause instanceof Error ? cause.message : String(cause);
+      const gcloudMessage = gcloudError instanceof Error ? gcloudError.message : String(gcloudError);
+      throw new Error(
+        `Google access token acquisition failed. Metadata cause: ${causeMessage}. ` +
+        `gcloud fallback cause: ${gcloudMessage}.`
+      );
     });
-    setRequestTimingFields({
-      vertex_document_search_ms: elapsedMs(startedAt),
-      vertex_document_search_status: "placeholder",
-    });
-    return [];
+
+    if (!token) {
+      throw new Error("gcloud printed an empty access token");
+    }
+    return token;
+  }
+
+  private isAlreadyExistsError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    return /HTTP 409|ALREADY_EXISTS/i.test(error.message);
   }
 }
