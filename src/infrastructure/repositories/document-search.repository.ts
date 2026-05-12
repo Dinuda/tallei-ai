@@ -32,6 +32,10 @@ const DISCOVERY_ENGINE_BASE_URL = "https://discoveryengine.googleapis.com/v1";
 const METADATA_TOKEN_ENDPOINT =
   "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const CONTENT_MAX_BYTES = 950_000;
+const CHUNK_TARGET_CHARS = 3_500;
+const CHUNK_OVERLAP_CHARS = 350;
+const CHUNK_MIN_ADVANCE_CHARS = 500;
+const CHUNK_MAX_COUNT = 180;
 const TOKEN_REFRESH_SKEW_MS = 30_000;
 const DEFAULT_INDEX_TIMEOUT_MS = 8_000;
 const DEFAULT_SEARCH_TIMEOUT_MS = 5_000;
@@ -137,6 +141,10 @@ function summaryText(summary: Record<string, unknown>): string {
   return "";
 }
 
+function chunkSummaryText(chunk: string, maxChars = 320): string {
+  return chunk.replace(/\s+/g, " ").trim().slice(0, maxChars);
+}
+
 function modelScore(result: VertexSearchResult): number {
   if (!result.modelScores) return 0;
   for (const entry of Object.values(result.modelScores)) {
@@ -165,6 +173,40 @@ function extractErrorMessage(status: number, payloadText: string): string {
 
 function shortHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function chunkDocumentContent(rawContent: string): string[] {
+  const content = rawContent.trim();
+  if (!content) return [""];
+  if (content.length <= CHUNK_TARGET_CHARS) return [content];
+
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < content.length && chunks.length < CHUNK_MAX_COUNT) {
+    const hardEnd = Math.min(content.length, start + CHUNK_TARGET_CHARS);
+    let end = hardEnd;
+
+    if (hardEnd < content.length) {
+      const scanStart = Math.max(start + CHUNK_MIN_ADVANCE_CHARS, hardEnd - 500);
+      for (let i = hardEnd; i >= scanStart; i -= 1) {
+        const char = content[i];
+        if (char === "\n" || char === "." || char === " " || char === "\t") {
+          end = i;
+          break;
+        }
+      }
+    }
+
+    const chunk = content.slice(start, end).trim();
+    if (chunk.length > 0) chunks.push(chunk);
+    if (end >= content.length) break;
+
+    const nextStart = Math.max(start + CHUNK_MIN_ADVANCE_CHARS, end - CHUNK_OVERLAP_CHARS);
+    start = nextStart;
+  }
+
+  if (chunks.length === 0) return [content.slice(0, CHUNK_TARGET_CHARS)];
+  return chunks;
 }
 
 export class VertexDocumentSearchRepository implements DocumentSearchRepository {
@@ -202,29 +244,14 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
     }
 
     const branch = buildBranchResource(dataStore);
-    const documentId = encodeURIComponent(input.documentId);
-    const documentName = `${branch}/documents/${documentId}`;
     const summary = summaryText(input.summary);
     const searchBodyText = truncateUtf8(
       [input.title ?? "", input.ref, summary, input.content].filter(Boolean).join("\n\n"),
       CONTENT_MAX_BYTES
     );
+    const chunks = chunkDocumentContent(searchBodyText);
+    const totalChunks = chunks.length;
 
-    const documentPayload = {
-      id: input.documentId,
-      structData: {
-        tenant_id: input.auth.tenantId,
-        user_id: input.auth.userId,
-        ref: input.ref,
-        title: input.title ?? "",
-        summary,
-        created_at: input.createdAt,
-      },
-      content: {
-        mimeType: "text/plain",
-        rawBytes: toBase64Utf8(searchBodyText),
-      },
-    };
     const baseLogFields = {
       tenant_id: input.auth.tenantId,
       user_id: input.auth.userId,
@@ -232,64 +259,67 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
       ref: input.ref,
       title: input.title ?? "",
       content_bytes: Buffer.byteLength(searchBodyText, "utf8"),
+      chunk_count: totalChunks,
       data_store: dataStore,
       branch,
     };
 
     try {
-      await this.discoveryRequest({
-        url: `${DISCOVERY_ENGINE_BASE_URL}/${branch}/documents?documentId=${documentId}`,
-        method: "POST",
-        body: documentPayload,
-        timeoutMs: this.indexTimeoutMs,
-        billingProject: this.billingProject(dataStore),
-      });
-      setRequestTimingFields({
-        vertex_document_index_ms: elapsedMs(startedAt),
-        vertex_document_index_status: "success_create",
-      });
-      if (config.vertexSearchVerboseLoggingEnabled) {
-        logger.info("Vertex document index completed", {
-          event: "vertex_document_index",
-          status: "success_create",
-          duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
-          ...baseLogFields,
-        });
-      }
-      return;
-    } catch (error) {
-      if (!this.isAlreadyExistsError(error)) {
-        setRequestTimingFields({
-          vertex_document_index_ms: elapsedMs(startedAt),
-          vertex_document_index_status: "failed_create",
-        });
-        logger.warn("Vertex document index create failed", {
-          event: "vertex_document_index",
-          status: "failed_create",
-          duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
-          error: error instanceof Error ? error.message : String(error),
-          ...baseLogFields,
-        });
-        throw error;
-      }
-    }
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+        const chunk = chunks[chunkIndex]!;
+        const chunkId = `${input.documentId}--c-${String(chunkIndex + 1).padStart(4, "0")}`;
+        const chunkDocumentId = encodeURIComponent(chunkId);
+        const chunkDocumentName = `${branch}/documents/${chunkDocumentId}`;
+        const chunkSummary = chunkSummaryText(chunk);
+        const documentPayload = {
+          id: chunkId,
+          structData: {
+            tenant_id: input.auth.tenantId,
+            user_id: input.auth.userId,
+            doc_id: input.documentId,
+            chunk_index: chunkIndex + 1,
+            chunk_total: totalChunks,
+            ref: input.ref,
+            title: input.title ?? "",
+            summary: chunkSummary,
+            doc_summary: summary,
+            created_at: input.createdAt,
+          },
+          content: {
+            mimeType: "text/plain",
+            rawBytes: toBase64Utf8(chunk),
+          },
+        };
 
-    try {
-      await this.discoveryRequest({
-        url: `${DISCOVERY_ENGINE_BASE_URL}/${documentName}?updateMask=structData,content`,
-        method: "PATCH",
-        body: documentPayload,
-        timeoutMs: this.indexTimeoutMs,
-        billingProject: this.billingProject(dataStore),
-      });
+        try {
+          await this.discoveryRequest({
+            url: `${DISCOVERY_ENGINE_BASE_URL}/${branch}/documents?documentId=${chunkDocumentId}`,
+            method: "POST",
+            body: documentPayload,
+            timeoutMs: this.indexTimeoutMs,
+            billingProject: this.billingProject(dataStore),
+          });
+        } catch (error) {
+          if (!this.isAlreadyExistsError(error)) throw error;
+          await this.discoveryRequest({
+            url: `${DISCOVERY_ENGINE_BASE_URL}/${chunkDocumentName}?updateMask=structData,content`,
+            method: "PATCH",
+            body: documentPayload,
+            timeoutMs: this.indexTimeoutMs,
+            billingProject: this.billingProject(dataStore),
+          });
+        }
+      }
+
       setRequestTimingFields({
         vertex_document_index_ms: elapsedMs(startedAt),
-        vertex_document_index_status: "success_update",
+        vertex_document_index_status: "success",
+        vertex_document_index_chunks: totalChunks,
       });
       if (config.vertexSearchVerboseLoggingEnabled) {
         logger.info("Vertex document index completed", {
           event: "vertex_document_index",
-          status: "success_update",
+          status: "success",
           duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
           ...baseLogFields,
         });
@@ -297,11 +327,12 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
     } catch (error) {
       setRequestTimingFields({
         vertex_document_index_ms: elapsedMs(startedAt),
-        vertex_document_index_status: "failed_update",
+        vertex_document_index_status: "failed",
+        vertex_document_index_chunks: totalChunks,
       });
-      logger.warn("Vertex document index update failed", {
+      logger.warn("Vertex document index failed", {
         event: "vertex_document_index",
-        status: "failed_update",
+        status: "failed",
         duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
         error: error instanceof Error ? error.message : String(error),
         ...baseLogFields,
@@ -372,9 +403,10 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
         billingProject: this.billingProject(servingConfig),
       });
 
-      const hits: DocumentSearchHit[] = [];
+      const hitsByRef = new Map<string, DocumentSearchHit>();
       let backendResultCount = 0;
       let filteredOutCount = 0;
+      let scopedChunkCount = 0;
       const rawResults = response.results ?? [];
       backendResultCount = rawResults.length;
       for (const result of rawResults) {
@@ -387,6 +419,7 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
           filteredOutCount += 1;
           continue;
         }
+        scopedChunkCount += 1;
 
         const ref = typeof structData["ref"] === "string"
           ? structData["ref"]
@@ -404,18 +437,28 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
           ?? result.chunk?.content
           ?? summary;
 
-        hits.push({
+        const candidate: DocumentSearchHit = {
           ref,
           title,
           score: modelScore(result),
           preview: stripHtml((snippet ?? "").toString()).slice(0, 400),
-        });
+        };
+        const current = hitsByRef.get(ref);
+        if (!current || candidate.score > current.score) {
+          hitsByRef.set(ref, candidate);
+        } else if (!current.preview && candidate.preview) {
+          current.preview = candidate.preview;
+          hitsByRef.set(ref, current);
+        }
       }
+      const hits = [...hitsByRef.values()]
+        .sort((left, right) => right.score - left.score);
 
       setRequestTimingFields({
         vertex_document_search_ms: elapsedMs(startedAt),
         vertex_document_search_status: "success",
         vertex_document_search_hits: hits.length,
+        vertex_document_search_scoped_chunks: scopedChunkCount,
         vertex_document_search_backend_results: backendResultCount,
         vertex_document_search_filtered_out: filteredOutCount,
         ...baseSearchTiming,
@@ -426,6 +469,7 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
           status: "success",
           duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
           backend_results: backendResultCount,
+          scoped_chunks: scopedChunkCount,
           scoped_hits: hits.length,
           filtered_out: filteredOutCount,
           ...baseSearchLogFields,

@@ -135,17 +135,21 @@ test("indexDocument creates documents with scoped metadata and searchable conten
       createdAt: "2026-05-12T00:00:00.000Z",
     });
     const fields = currentRequestTimingStore()?.fields ?? {};
-    assert.equal(fields["vertex_document_index_status"], "success_create");
+    assert.equal(fields["vertex_document_index_status"], "success");
+    assert.equal(fields["vertex_document_index_chunks"], 1);
     assert.equal(typeof fields["vertex_document_index_ms"], "number");
   });
 
   assert.equal(calls.length, 1);
   const call = calls[0]!;
-  assert.match(call.url, /\/documents\?documentId=dbf5f4e4-4dbd-43dd-8407-cc821deec1b9$/);
+  assert.match(call.url, /\/documents\?documentId=dbf5f4e4-4dbd-43dd-8407-cc821deec1b9--c-0001$/);
   const body = JSON.parse((call.init?.body as string) ?? "{}") as Record<string, unknown>;
   const structData = body["structData"] as Record<string, unknown>;
   assert.equal(structData["tenant_id"], "tenant-a");
   assert.equal(structData["user_id"], "user-a");
+  assert.equal(structData["doc_id"], "dbf5f4e4-4dbd-43dd-8407-cc821deec1b9");
+  assert.equal(structData["chunk_index"], 1);
+  assert.equal(structData["chunk_total"], 1);
   assert.equal(structData["ref"], "@doc:pricing-x1y2");
 
   const content = body["content"] as Record<string, string>;
@@ -187,8 +191,8 @@ test("indexDocument updates document when it already exists", async () => {
   });
 
   assert.equal(calls.length, 2);
-  assert.match(calls[0]!.url, /\/documents\?documentId=2ad08f28-7d44-495e-9779-06d59f399228$/);
-  assert.match(calls[1]!.url, /\/documents\/2ad08f28-7d44-495e-9779-06d59f399228\?updateMask=structData,content$/);
+  assert.match(calls[0]!.url, /\/documents\?documentId=2ad08f28-7d44-495e-9779-06d59f399228--c-0001$/);
+  assert.match(calls[1]!.url, /\/documents\/2ad08f28-7d44-495e-9779-06d59f399228--c-0001\?updateMask=structData,content$/);
 });
 
 test("searchDocuments records latency timing field", async () => {
