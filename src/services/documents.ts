@@ -42,7 +42,7 @@ export function selectDocumentSearchMode(auth: AuthContext): DocumentSearchMode 
   const isAgentEngineUser = auth.connectorType === "agent_engine";
   const isNewRuntimeUser = config.vertexDocumentSearchNewUsersEnabled && isAgentEngineUser;
 
-  if (config.vertexDocumentSearchEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+  if (config.vertexDocumentSearchEnabled) {
     return "vertex";
   }
   if (config.vertexDocumentSearchShadowEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
@@ -60,6 +60,9 @@ function documentSearchRouteReason(auth: AuthContext): string {
     if (tenantAllowed) return "vertex_enabled_tenant_allowlist";
     if (userAllowed) return "vertex_enabled_user_allowlist";
     if (isNewRuntimeUser) return "vertex_enabled_new_runtime_user";
+  }
+  if (config.vertexDocumentSearchEnabled) {
+    return "vertex_enabled_global";
   }
   if (config.vertexDocumentSearchShadowEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
     if (tenantAllowed) return "shadow_enabled_tenant_allowlist";

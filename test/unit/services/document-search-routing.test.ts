@@ -28,8 +28,8 @@ function auth(overrides: Partial<AuthContext> = {}): AuthContext {
   };
 }
 
-test("old connector users stay on legacy document search", () => {
-  assert.equal(selectDocumentSearchMode(auth()), "legacy");
+test("old connector users use Vertex when global flag is enabled", () => {
+  assert.equal(selectDocumentSearchMode(auth()), "vertex");
 });
 
 test("new Agent Engine users route to Vertex document search", () => {
