@@ -51,6 +51,30 @@ export function selectDocumentSearchMode(auth: AuthContext): DocumentSearchMode 
   return "legacy";
 }
 
+function documentSearchRouteReason(auth: AuthContext): string {
+  const tenantAllowed = config.vertexDocumentSearchTenantAllowlist.includes(auth.tenantId);
+  const userAllowed = config.vertexDocumentSearchUserAllowlist.includes(auth.userId);
+  const isAgentEngineUser = auth.connectorType === "agent_engine";
+  const isNewRuntimeUser = config.vertexDocumentSearchNewUsersEnabled && isAgentEngineUser;
+  if (config.vertexDocumentSearchEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+    if (tenantAllowed) return "vertex_enabled_tenant_allowlist";
+    if (userAllowed) return "vertex_enabled_user_allowlist";
+    if (isNewRuntimeUser) return "vertex_enabled_new_runtime_user";
+  }
+  if (config.vertexDocumentSearchShadowEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+    if (tenantAllowed) return "shadow_enabled_tenant_allowlist";
+    if (userAllowed) return "shadow_enabled_user_allowlist";
+    if (isNewRuntimeUser) return "shadow_enabled_new_runtime_user";
+  }
+  if (!config.vertexDocumentSearchEnabled && !config.vertexDocumentSearchShadowEnabled) {
+    return "vertex_flags_disabled";
+  }
+  if (!isAgentEngineUser && config.vertexDocumentSearchNewUsersEnabled) {
+    return "not_new_runtime_user";
+  }
+  return "not_allowlisted";
+}
+
 interface DocumentRow {
   id: string;
   ref_handle: string;
@@ -1135,6 +1159,22 @@ export async function searchDocuments(
   }
 
   const searchMode = selectDocumentSearchMode(auth);
+  if (config.vertexSearchVerboseLoggingEnabled) {
+    documentLogger.info("Document search route decision", {
+      event: "document_search_route_decision",
+      tenant_id: auth.tenantId,
+      user_id: auth.userId,
+      connector_type: auth.connectorType ?? null,
+      mode: searchMode,
+      reason: documentSearchRouteReason(auth),
+      vertex_enabled: config.vertexDocumentSearchEnabled,
+      vertex_shadow_enabled: config.vertexDocumentSearchShadowEnabled,
+      vertex_new_users_enabled: config.vertexDocumentSearchNewUsersEnabled,
+      tenant_allowlist_size: config.vertexDocumentSearchTenantAllowlist.length,
+      user_allowlist_size: config.vertexDocumentSearchUserAllowlist.length,
+      query_length: normalizedQuery.length,
+    });
+  }
   const vertexSearchPromise = searchMode === "vertex" || searchMode === "shadow"
     ? documentSearchRepository.searchDocuments(normalizedQuery, auth, normalizedLimit).catch((error) => {
       documentLogger.warn("Vertex document search failed", {

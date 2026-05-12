@@ -3,6 +3,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { createLogger } from "../../observability/index.js";
 import { setRequestTimingFields } from "../../observability/request-timing.js";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 
 export interface DocumentSearchHit {
   ref: string;
@@ -162,6 +163,10 @@ function extractErrorMessage(status: number, payloadText: string): string {
   return `HTTP ${status}: ${payloadText.slice(0, 300) || "request failed"}`;
 }
 
+function shortHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
 export class VertexDocumentSearchRepository implements DocumentSearchRepository {
   private readonly fetchImpl: typeof fetch;
   private readonly accessTokenProvider: () => Promise<string>;
@@ -220,6 +225,16 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
         rawBytes: toBase64Utf8(searchBodyText),
       },
     };
+    const baseLogFields = {
+      tenant_id: input.auth.tenantId,
+      user_id: input.auth.userId,
+      document_id: input.documentId,
+      ref: input.ref,
+      title: input.title ?? "",
+      content_bytes: Buffer.byteLength(searchBodyText, "utf8"),
+      data_store: dataStore,
+      branch,
+    };
 
     try {
       await this.discoveryRequest({
@@ -233,12 +248,27 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
         vertex_document_index_ms: elapsedMs(startedAt),
         vertex_document_index_status: "success_create",
       });
+      if (config.vertexSearchVerboseLoggingEnabled) {
+        logger.info("Vertex document index completed", {
+          event: "vertex_document_index",
+          status: "success_create",
+          duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
+          ...baseLogFields,
+        });
+      }
       return;
     } catch (error) {
       if (!this.isAlreadyExistsError(error)) {
         setRequestTimingFields({
           vertex_document_index_ms: elapsedMs(startedAt),
           vertex_document_index_status: "failed_create",
+        });
+        logger.warn("Vertex document index create failed", {
+          event: "vertex_document_index",
+          status: "failed_create",
+          duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
+          error: error instanceof Error ? error.message : String(error),
+          ...baseLogFields,
         });
         throw error;
       }
@@ -256,10 +286,25 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
         vertex_document_index_ms: elapsedMs(startedAt),
         vertex_document_index_status: "success_update",
       });
+      if (config.vertexSearchVerboseLoggingEnabled) {
+        logger.info("Vertex document index completed", {
+          event: "vertex_document_index",
+          status: "success_update",
+          duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
+          ...baseLogFields,
+        });
+      }
     } catch (error) {
       setRequestTimingFields({
         vertex_document_index_ms: elapsedMs(startedAt),
         vertex_document_index_status: "failed_update",
+      });
+      logger.warn("Vertex document index update failed", {
+        event: "vertex_document_index",
+        status: "failed_update",
+        duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
+        error: error instanceof Error ? error.message : String(error),
+        ...baseLogFields,
       });
       throw error;
     }
@@ -300,6 +345,23 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
     if (dataStore) {
       payload["branch"] = buildBranchResource(dataStore);
     }
+    const queryHash = shortHash(query);
+    const limitClamped = Math.min(20, Math.max(1, Math.floor(limit)));
+    const baseSearchTiming = {
+      vertex_document_search_query_len: query.length,
+      vertex_document_search_limit: limitClamped,
+    };
+    const baseSearchLogFields = {
+      tenant_id: auth.tenantId,
+      user_id: auth.userId,
+      query_hash: queryHash,
+      query_len: query.length,
+      limit: limitClamped,
+      serving_config: servingConfig,
+      data_store: dataStore,
+      branch: dataStore ? buildBranchResource(dataStore) : null,
+      filter,
+    };
 
     try {
       const response = await this.discoveryRequest<VertexSearchResponse>({
@@ -311,13 +373,18 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
       });
 
       const hits: DocumentSearchHit[] = [];
-      for (const result of response.results ?? []) {
+      let backendResultCount = 0;
+      let filteredOutCount = 0;
+      const rawResults = response.results ?? [];
+      backendResultCount = rawResults.length;
+      for (const result of rawResults) {
         const structData = result.document?.structData ?? result.chunk?.documentMetadata?.structData;
         if (!structData) continue;
 
         const tenant = typeof structData["tenant_id"] === "string" ? structData["tenant_id"] : "";
         const user = typeof structData["user_id"] === "string" ? structData["user_id"] : "";
         if (tenant !== auth.tenantId || user !== auth.userId) {
+          filteredOutCount += 1;
           continue;
         }
 
@@ -348,12 +415,35 @@ export class VertexDocumentSearchRepository implements DocumentSearchRepository 
       setRequestTimingFields({
         vertex_document_search_ms: elapsedMs(startedAt),
         vertex_document_search_status: "success",
+        vertex_document_search_hits: hits.length,
+        vertex_document_search_backend_results: backendResultCount,
+        vertex_document_search_filtered_out: filteredOutCount,
+        ...baseSearchTiming,
       });
+      if (config.vertexSearchVerboseLoggingEnabled) {
+        logger.info("Vertex document search completed", {
+          event: "vertex_document_search",
+          status: "success",
+          duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
+          backend_results: backendResultCount,
+          scoped_hits: hits.length,
+          filtered_out: filteredOutCount,
+          ...baseSearchLogFields,
+        });
+      }
       return hits.slice(0, Math.min(20, Math.max(1, Math.floor(limit))));
     } catch (error) {
       setRequestTimingFields({
         vertex_document_search_ms: elapsedMs(startedAt),
         vertex_document_search_status: "failed",
+        ...baseSearchTiming,
+      });
+      logger.warn("Vertex document search failed", {
+        event: "vertex_document_search",
+        status: "failed",
+        duration_ms: Number(elapsedMs(startedAt).toFixed(2)),
+        error: error instanceof Error ? error.message : String(error),
+        ...baseSearchLogFields,
       });
       throw error;
     }
