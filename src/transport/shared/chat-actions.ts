@@ -399,10 +399,10 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
       try {
         const doc = await recallDocument(ref, auth);
         if (doc.kind === "document") {
-          inlineDocuments.push({ ref, title: doc.title ?? null, content: doc.content });
+          inlineDocuments.push({ ref, title: doc.title ?? null, content: truncateInlineDocumentContent(doc.content) });
         } else if (doc.kind === "lot") {
           for (const d of doc.docs) {
-            inlineDocuments.push({ ref: d.ref, title: d.title ?? null, content: d.content });
+            inlineDocuments.push({ ref: d.ref, title: d.title ?? null, content: truncateInlineDocumentContent(d.content) });
           }
         }
       } catch {
@@ -1490,7 +1490,7 @@ function inlineDocumentsFromRecallDocument(body: Record<string, unknown>): Array
     return [{
       ref: body.ref,
       title: typeof body.title === "string" ? body.title : null,
-      content: body.content,
+      content: truncateInlineDocumentContent(body.content),
     }];
   }
   if (body.kind === "lot" && Array.isArray(body.docs)) {
@@ -1501,7 +1501,7 @@ function inlineDocumentsFromRecallDocument(body: Record<string, unknown>): Array
       return [{
         ref: d.ref,
         title: typeof d.title === "string" ? d.title : null,
-        content: d.content,
+        content: truncateInlineDocumentContent(d.content),
       }];
     });
   }

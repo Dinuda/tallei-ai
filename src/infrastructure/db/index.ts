@@ -808,7 +808,11 @@ export async function initDb() {
     await client.query(`
       ALTER TABLE uploaded_file_ingest_jobs
       ADD COLUMN IF NOT EXISTS title TEXT,
-      ADD COLUMN IF NOT EXISTS download_link TEXT;
+      ADD COLUMN IF NOT EXISTS download_link TEXT,
+      ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 4,
+      ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMP WITH TIME ZONE;
 
       ALTER TABLE uploaded_file_ingest_jobs
       DROP CONSTRAINT IF EXISTS uploaded_file_ingest_jobs_status_check;
@@ -820,9 +824,17 @@ export async function initDb() {
       SET status = 'pending'
       WHERE status = 'processing';
 
+      UPDATE uploaded_file_ingest_jobs
+      SET next_attempt_at = COALESCE(next_attempt_at, CURRENT_TIMESTAMP),
+          max_attempts = CASE WHEN max_attempts < 1 THEN 1 ELSE max_attempts END;
+
       CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_pending
-        ON uploaded_file_ingest_jobs(status, created_at ASC)
+        ON uploaded_file_ingest_jobs(status, next_attempt_at ASC, created_at ASC)
         WHERE status = 'pending';
+
+      CREATE INDEX IF NOT EXISTS idx_uploaded_file_ingest_jobs_status_attempts
+        ON uploaded_file_ingest_jobs(status, attempt_count, max_attempts, next_attempt_at ASC)
+        WHERE status IN ('pending', 'failed');
     `);
 
     await client.query(`

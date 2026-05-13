@@ -429,6 +429,36 @@ test("executePrepareResponseAction calls recall when intent requires recall", as
   assert.equal(result.body.contextBlock, recallBody.contextBlock);
 });
 
+test("executePrepareResponseAction truncates explicit document refs for action response size", async () => {
+  const longContent = "Document sentence. ".repeat(600);
+  const result = await executePrepareResponseAction(auth, { message: "@doc:large-file-abcd retrieve this" }, {
+    recallAction: async () => ({
+      status: 200,
+      body: {
+        ...recallBody,
+        contextBlock: "--- No relevant memories found ---",
+        memories: [],
+        matchedDocuments: [],
+      },
+    }),
+    recallDocumentAction: async () => ({
+      status: 200,
+      body: {
+        kind: "document",
+        ref: "@doc:large-file-abcd",
+        title: "Large File",
+        content: longContent,
+      },
+    }),
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.inlineDocuments.length, 1);
+  assert.ok(result.body.inlineDocuments[0]!.content.length < longContent.length);
+  assert.match(result.body.inlineDocuments[0]!.content, /\[truncated\]$/);
+  assert.match(result.body.contextBlock, /Prepared Document Context/);
+});
+
 test("executePrepareResponseAction broadens recall once when first recall is weak", async () => {
   const queries: string[] = [];
   const result = await executePrepareResponseAction(auth, { message: "What was the important decision?" }, {

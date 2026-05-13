@@ -43,10 +43,15 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_LLM__OLLAMA_BASE_URL",      oldKey: "OLLAMA_BASE_URL" },
   { newKey: "TALLEI_LLM__OLLAMA_MODEL",         oldKey: "OLLAMA_MODEL" },
   { newKey: "TALLEI_LLM__LOCAL_MODEL_MODE",     oldKey: "LOCAL_MODEL_MODE" },
+  { newKey: "TALLEI_LLM__GOOGLE_MODEL",         oldKey: "GOOGLE_MODEL" },
+  { newKey: "TALLEI_GOOGLE__API_KEY",           oldKey: "GOOGLE_API_KEY" },
+  { newKey: "TALLEI_GOOGLE__PROJECT_ID",        oldKey: "GOOGLE_CLOUD_PROJECT" },
+  { newKey: "TALLEI_GOOGLE__LOCATION",          oldKey: "GOOGLE_CLOUD_LOCATION" },
   // Embedding
   { newKey: "TALLEI_EMBED__PROVIDER",           oldKey: "EMBEDDING_PROVIDER" },
   { newKey: "TALLEI_EMBED__MODEL",              oldKey: "EMBEDDING_MODEL" },
   { newKey: "TALLEI_EMBED__DIMS",               oldKey: "EMBEDDING_DIMS" },
+  { newKey: "TALLEI_EMBED__GOOGLE_MODEL",       oldKey: "GOOGLE_EMBEDDING_MODEL" },
   // Qdrant
   { newKey: "TALLEI_QDRANT__URL",              oldKey: "QDRANT_URL" },
   { newKey: "TALLEI_QDRANT__API_KEY",           oldKey: "QDRANT_API_KEY" },
@@ -99,6 +104,13 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", oldKey: "UPLOAD_INGEST_WORKER_POLL_MS" },
   { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", oldKey: "UPLOAD_INGEST_WORKER_BATCH_SIZE" },
   { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_CONCURRENCY", oldKey: "UPLOAD_INGEST_WORKER_CONCURRENCY" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_MAX_ATTEMPTS", oldKey: "UPLOAD_INGEST_WORKER_MAX_ATTEMPTS" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_BASE_MS", oldKey: "UPLOAD_INGEST_WORKER_RETRY_BASE_MS" },
+  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_MAX_MS", oldKey: "UPLOAD_INGEST_WORKER_RETRY_MAX_MS" },
+  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_ENABLED", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_ENABLED" },
+  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_POLL_MS", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_POLL_MS" },
+  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_BATCH_SIZE", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_BATCH_SIZE" },
+  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_MAX_ATTEMPTS", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_MAX_ATTEMPTS" },
   // Feature flags
   { newKey: "TALLEI_FEATURE__RERANK",           oldKey: "RERANK_ENABLED" },
   { newKey: "TALLEI_FEATURE__USE_NEW_SAVE",     oldKey: "USE_NEW_SAVE_USECASE" },
@@ -277,11 +289,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         : nodeEnv === "production"
           ? 30_000
           : 10_000),
-    embeddingProvider: readStringEnv(e, "TALLEI_EMBED__PROVIDER", defaultEmbeddingProvider) as "openai" | "ollama",
+    embeddingProvider: readStringEnv(e, "TALLEI_EMBED__PROVIDER", defaultEmbeddingProvider) as "openai" | "ollama" | "google",
     embeddingModel: readStringEnv(e, "TALLEI_EMBED__MODEL", defaultEmbeddingModel),
+    googleEmbeddingModel: readStringEnv(e, "TALLEI_EMBED__GOOGLE_MODEL", "gemini-embedding-001"),
     embeddingDims: readIntEnv(e, "TALLEI_EMBED__DIMS", defaultEmbeddingDims),
-    llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama",
+    llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google",
     openaiModel: readStringEnv(e, "TALLEI_LLM__CHAT_MODEL", "gpt-4o-mini"),
+    googleModel: readStringEnv(e, "TALLEI_LLM__GOOGLE_MODEL", "gemini-2.0-flash"),
+    googleApiKey: readStringEnv(e, "TALLEI_GOOGLE__API_KEY"),
+    googleProjectId: readStringEnv(e, "TALLEI_GOOGLE__PROJECT_ID"),
+    googleLocation: readStringEnv(e, "TALLEI_GOOGLE__LOCATION", "us-central1"),
+    vertexDocumentSearchEnabled: readBooleanEnv(e, "TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH", false),
+    vertexDocumentSearchShadowEnabled: readBooleanEnv(e, "TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH_SHADOW", false),
+    vertexDocumentSearchNewUsersEnabled: readBooleanEnv(e, "TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH_NEW_USERS", true),
+    vertexDocumentSearchTenantAllowlist: readStringEnv(e, "TALLEI_VERTEX_SEARCH__TENANT_ALLOWLIST")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    vertexDocumentSearchUserAllowlist: readStringEnv(e, "TALLEI_VERTEX_SEARCH__USER_ALLOWLIST")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    vertexSearchDataStore: readStringEnv(e, "TALLEI_VERTEX_SEARCH__DATA_STORE"),
+    vertexSearchServingConfig: readStringEnv(e, "TALLEI_VERTEX_SEARCH__SERVING_CONFIG"),
+    agentEngineIssuer: readStringEnv(e, "TALLEI_AGENT_ENGINE__ISSUER", "tallei-agent-engine"),
     intentClassifierModel: readStringEnv(e, "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
     plannerModel: readStringEnv(e, "TALLEI_PLANNER__MODEL", "gpt-4o-mini"),
     plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
@@ -292,6 +323,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       64,
       Math.min(readIntEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_MAX_CHARS", 2000), 20_000)
     ),
+    vertexSearchVerboseLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__VERTEX_SEARCH_VERBOSE", false),
     ollamaBaseUrl: readStringEnv(e, "TALLEI_LLM__OLLAMA_BASE_URL", "http://localhost:11434/v1"),
     ollamaModel: readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen2.5:7b"),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
@@ -326,6 +358,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     uploadIngestWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", 150),
     uploadIngestWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", 4),
     uploadIngestWorkerConcurrency: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_CONCURRENCY", 2),
+    uploadIngestWorkerMaxAttempts: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_MAX_ATTEMPTS", 4),
+    uploadIngestWorkerRetryBaseMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_BASE_MS", 5_000),
+    uploadIngestWorkerRetryMaxMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_MAX_MS", 300_000),
+    vertexDocumentBackfillWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_ENABLED", false),
+    vertexDocumentBackfillWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_POLL_MS", 60_000),
+    vertexDocumentBackfillWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_BATCH_SIZE", 10),
+    vertexDocumentBackfillMaxAttempts: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_MAX_ATTEMPTS", 8),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),

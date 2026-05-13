@@ -1,0 +1,20 @@
+{
+  "thread_id": "019cecfe-5615-7eb2-a761-f49d20fe0825",
+  "thread_name": "Add temporal action graph",
+  "source": "/Users/dinudayaggahavita/.codex/sessions/2026/03/14/rollout-2026-03-14T21-06-57-019cecfe-5615-7eb2-a761-f49d20fe0825.jsonl",
+  "raw_export": "/Users/dinudayaggahavita/Documents/work/tallei-ai/exports/codex-threads/add-temporal-action-graph/add-temporal-action-graph.raw.jsonl",
+  "markdown_export": "/Users/dinudayaggahavita/Documents/work/tallei-ai/exports/codex-threads/add-temporal-action-graph/add-temporal-action-graph.transcript.md",
+  "workspace": "/Users/dinudayaggahavita/Documents/work/actionlog",
+  "first_timestamp": "2026-03-14T15:36:58.399Z",
+  "last_timestamp": "2026-03-19T04:50:13.749Z",
+  "counts": {
+    "records": 5923,
+    "user_messages": 96,
+    "assistant_messages": 503,
+    "commentary_messages": 436,
+    "function_calls": 1154,
+    "function_outputs": 1149,
+    "plans": 5,
+    "patch_events": 0
+  }
+}

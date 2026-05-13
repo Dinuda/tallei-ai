@@ -13,6 +13,8 @@ import { CircuitOpenError } from "../../shared/errors/provider-errors.js";
 
 import type { AiProvider } from "./ai-provider.js";
 import { isRetriableProviderError } from "./errors.js";
+import { GoogleGenAI } from "@google/genai";
+import { GoogleProvider } from "./google-provider.js";
 import { OllamaProvider } from "./ollama-provider.js";
 import { OpenAiProvider } from "./openai-provider.js";
 import type {
@@ -93,10 +95,13 @@ export class ProviderRegistry {
   }
 
   chatModelName(): string {
-    return this.chatProviderName === "ollama" ? config.ollamaModel : config.openaiModel;
+    if (this.chatProviderName === "ollama") return config.ollamaModel;
+    if (this.chatProviderName === "google") return config.googleModel;
+    return config.openaiModel;
   }
 
   embeddingModelName(): string {
+    if (this.embeddingProviderName === "google") return config.googleEmbeddingModel;
     return config.embeddingModel;
   }
 
@@ -158,6 +163,18 @@ export class ProviderRegistry {
         defaultEmbeddingModel: config.embeddingModel,
       });
       this.providers.set(ollamaProvider.name, ollamaProvider);
+    }
+
+    if (requiredNames.includes("google")) {
+      const googleProvider = new GoogleProvider({
+        client: new GoogleGenAI(config.googleApiKey
+          ? { apiKey: config.googleApiKey }
+          : { vertexai: true, project: config.googleProjectId, location: config.googleLocation }),
+        defaultChatModel: config.googleModel,
+        defaultEmbeddingModel: config.googleEmbeddingModel,
+        defaultEmbeddingDimensions: config.embeddingDims,
+      });
+      this.providers.set(googleProvider.name, googleProvider);
     }
   }
 

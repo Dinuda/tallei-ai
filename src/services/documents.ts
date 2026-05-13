@@ -10,7 +10,9 @@ import {
 } from "../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../infrastructure/db/index.js";
 import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
+import { VertexDocumentSearchRepository } from "../infrastructure/repositories/document-search.repository.js";
 import { summarizeConversation } from "../orchestration/ai/summarize.usecase.js";
+import { createLogger } from "../observability/index.js";
 
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const AUTO_LOT_WINDOW_MS = 60_000;
@@ -22,12 +24,58 @@ const DOCUMENT_CONTENT_CANDIDATE_LIMIT = 40;
 const SEARCH_DOCUMENT_VECTOR_TIMEOUT_MS = 1_200;
 
 const vectorRepository = new VectorRepository();
+const documentSearchRepository = new VertexDocumentSearchRepository();
+const documentLogger = createLogger({ baseFields: { component: "documents" } });
 
 export interface DocumentBlobMetadata {
   provider: "uploadthing";
   key: string;
   url: string;
   sourceFileId: string;
+}
+
+export type DocumentSearchMode = "legacy" | "vertex" | "shadow";
+
+export function selectDocumentSearchMode(auth: AuthContext): DocumentSearchMode {
+  const tenantAllowed = config.vertexDocumentSearchTenantAllowlist.includes(auth.tenantId);
+  const userAllowed = config.vertexDocumentSearchUserAllowlist.includes(auth.userId);
+  const isAgentEngineUser = auth.connectorType === "agent_engine";
+  const isNewRuntimeUser = config.vertexDocumentSearchNewUsersEnabled && isAgentEngineUser;
+
+  if (config.vertexDocumentSearchEnabled) {
+    return "vertex";
+  }
+  if (config.vertexDocumentSearchShadowEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+    return "shadow";
+  }
+  return "legacy";
+}
+
+function documentSearchRouteReason(auth: AuthContext): string {
+  const tenantAllowed = config.vertexDocumentSearchTenantAllowlist.includes(auth.tenantId);
+  const userAllowed = config.vertexDocumentSearchUserAllowlist.includes(auth.userId);
+  const isAgentEngineUser = auth.connectorType === "agent_engine";
+  const isNewRuntimeUser = config.vertexDocumentSearchNewUsersEnabled && isAgentEngineUser;
+  if (config.vertexDocumentSearchEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+    if (tenantAllowed) return "vertex_enabled_tenant_allowlist";
+    if (userAllowed) return "vertex_enabled_user_allowlist";
+    if (isNewRuntimeUser) return "vertex_enabled_new_runtime_user";
+  }
+  if (config.vertexDocumentSearchEnabled) {
+    return "vertex_enabled_global";
+  }
+  if (config.vertexDocumentSearchShadowEnabled && (tenantAllowed || userAllowed || isNewRuntimeUser)) {
+    if (tenantAllowed) return "shadow_enabled_tenant_allowlist";
+    if (userAllowed) return "shadow_enabled_user_allowlist";
+    if (isNewRuntimeUser) return "shadow_enabled_new_runtime_user";
+  }
+  if (!config.vertexDocumentSearchEnabled && !config.vertexDocumentSearchShadowEnabled) {
+    return "vertex_flags_disabled";
+  }
+  if (!isAgentEngineUser && config.vertexDocumentSearchNewUsersEnabled) {
+    return "not_new_runtime_user";
+  }
+  return "not_allowlisted";
 }
 
 interface DocumentRow {
@@ -192,6 +240,42 @@ function summaryPreview(summaryJson: unknown): string {
     if (typeof first === "string") return first;
   }
   return "";
+}
+
+async function markVertexIndexState(input: {
+  auth: AuthContext;
+  documentId: string;
+  baseSummary: Record<string, unknown>;
+  ok: boolean;
+  error?: string;
+}): Promise<void> {
+  const attemptsRaw = input.baseSummary["vertex_index_attempts"];
+  const priorAttempts = typeof attemptsRaw === "number" && Number.isFinite(attemptsRaw)
+    ? Math.max(0, Math.floor(attemptsRaw))
+    : 0;
+  const now = new Date().toISOString();
+  const nextSummary: Record<string, unknown> = {
+    ...input.baseSummary,
+    vertex_index_attempts: priorAttempts + 1,
+    vertex_index_last_attempt_at: now,
+  };
+  if (input.ok) {
+    nextSummary["vertex_indexed_at"] = now;
+    nextSummary["vertex_index_last_error"] = null;
+    nextSummary["vertex_index_failed_at"] = null;
+  } else {
+    nextSummary["vertex_index_last_error"] = (input.error ?? "unknown").slice(0, 320);
+    nextSummary["vertex_index_failed_at"] = now;
+  }
+  await pool.query(
+    `UPDATE documents
+     SET summary_json = $1::jsonb
+     WHERE id = $2
+       AND tenant_id = $3
+       AND user_id = $4
+       AND deleted_at IS NULL`,
+    [JSON.stringify(nextSummary), input.documentId, input.auth.tenantId, input.auth.userId]
+  );
 }
 
 function displayTitle(input: { title: string | null; filename: string | null; ref: string }): string {
@@ -537,6 +621,8 @@ function normalizeContent(content: string): string {
 async function runBackgroundIndexing(input: {
   auth: AuthContext;
   documentId: string;
+  ref: string;
+  title: string | null;
   content: string;
   createdAt: string;
 }): Promise<void> {
@@ -590,6 +676,37 @@ async function runBackgroundIndexing(input: {
        AND deleted_at IS NULL`,
     [JSON.stringify(summaryForStorage), pointId, input.documentId, input.auth.tenantId, input.auth.userId]
   );
+
+  void documentSearchRepository.indexDocument({
+    auth: input.auth,
+    documentId: input.documentId,
+    ref: input.ref,
+    title: input.title,
+    content: input.content,
+    summary: summaryForStorage,
+    createdAt: input.createdAt,
+  }).then(async () => {
+    await markVertexIndexState({
+      auth: input.auth,
+      documentId: input.documentId,
+      baseSummary: summaryForStorage,
+      ok: true,
+    });
+  }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    documentLogger.warn("Vertex document indexing failed", {
+      event: "vertex_document_search_index_failed",
+      document_id: input.documentId,
+      error: message,
+    });
+    await markVertexIndexState({
+      auth: input.auth,
+      documentId: input.documentId,
+      baseSummary: summaryForStorage,
+      ok: false,
+      error: message,
+    });
+  });
 }
 
 export class DocumentSizeExceededError extends Error {
@@ -692,6 +809,8 @@ export async function stashDocument(
   void runBackgroundIndexing({
     auth,
     documentId,
+    ref: refHandle,
+    title: opts?.title ?? null,
     content: rawContent,
     createdAt,
   }).catch((error) => {
@@ -1042,7 +1161,51 @@ export async function searchDocuments(
     }
   }
 
+  const searchMode = selectDocumentSearchMode(auth);
+  if (config.vertexSearchVerboseLoggingEnabled) {
+    documentLogger.info("Document search route decision", {
+      event: "document_search_route_decision",
+      tenant_id: auth.tenantId,
+      user_id: auth.userId,
+      connector_type: auth.connectorType ?? null,
+      mode: searchMode,
+      reason: documentSearchRouteReason(auth),
+      vertex_enabled: config.vertexDocumentSearchEnabled,
+      vertex_shadow_enabled: config.vertexDocumentSearchShadowEnabled,
+      vertex_new_users_enabled: config.vertexDocumentSearchNewUsersEnabled,
+      tenant_allowlist_size: config.vertexDocumentSearchTenantAllowlist.length,
+      user_allowlist_size: config.vertexDocumentSearchUserAllowlist.length,
+      query_length: normalizedQuery.length,
+    });
+  }
+  const vertexSearchPromise = searchMode === "vertex" || searchMode === "shadow"
+    ? documentSearchRepository.searchDocuments(normalizedQuery, auth, normalizedLimit).catch((error) => {
+      documentLogger.warn("Vertex document search failed", {
+        event: "vertex_document_search_failed",
+        tenant_id: auth.tenantId,
+        user_id: auth.userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    })
+    : Promise.resolve([]);
+
   const lexicalMatches = await lexicalSearchDocuments(normalizedQuery, auth, normalizedLimit);
+  const vertexMatches = await vertexSearchPromise;
+  if (searchMode === "shadow") {
+    documentLogger.info("Vertex document search shadow result", {
+      event: "vertex_document_search_shadow",
+      tenant_id: auth.tenantId,
+      user_id: auth.userId,
+      query_length: normalizedQuery.length,
+      vertex_hits: vertexMatches.length,
+      lexical_hits: lexicalMatches.length,
+      overlap_refs: vertexMatches.filter((hit) => lexicalMatches.some((current) => current.ref === hit.ref)).length,
+    });
+  }
+  if (searchMode === "vertex" && vertexMatches.length > 0) {
+    return vertexMatches;
+  }
   if (lexicalMatches.length > 0 && lexicalMatches[0].score >= 0.65) {
     return lexicalMatches;
   }
