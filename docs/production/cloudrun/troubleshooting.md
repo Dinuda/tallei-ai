@@ -101,6 +101,74 @@ Clear ambiguous vars:
 unset SERVICE_ACCOUNT SERVICE_NAME
 ```
 
+## Vertex document search auth and runtime verification (production)
+
+Use this checklist when Vertex indexing/search does not appear in production logs.
+
+Known deployment values:
+- `PROJECT_ID=actionlog-487112`
+- `REGION=us-central1`
+- `SERVICE_NAME=tallei-backend`
+
+### 1) Confirm backend runtime service account
+
+```bash
+gcloud run services describe tallei-backend \
+  --region us-central1 \
+  --project actionlog-487112 \
+  --format='value(spec.template.spec.serviceAccountName)'
+```
+
+### 2) Confirm service account has Discovery Engine permissions
+
+```bash
+gcloud projects get-iam-policy actionlog-487112 \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:serviceAccount:tallei-dashboard-sa@actionlog-487112.iam.gserviceaccount.com" \
+  --format="table(bindings.role)"
+```
+
+Ensure a Discovery Engine role is present (for example `roles/discoveryengine.editor`).
+
+If missing:
+
+```bash
+gcloud projects add-iam-policy-binding actionlog-487112 \
+  --member="serviceAccount:tallei-dashboard-sa@actionlog-487112.iam.gserviceaccount.com" \
+  --role="roles/discoveryengine.editor"
+```
+
+### 3) Confirm required APIs are enabled
+
+```bash
+gcloud services list --enabled --project actionlog-487112 \
+  --filter="name:discoveryengine.googleapis.com OR name:aiplatform.googleapis.com"
+```
+
+### 4) Confirm backend Vertex env vars on the active revision
+
+```bash
+gcloud run services describe tallei-backend \
+  --region us-central1 \
+  --project actionlog-487112 \
+  --format='json(spec.template.spec.containers[0].env)'
+```
+
+Verify:
+- `TALLEI_FEATURE__VERTEX_DOCUMENT_SEARCH=true`
+- `TALLEI_VERTEX_SEARCH__DATA_STORE=...`
+- `TALLEI_VERTEX_SEARCH__SERVING_CONFIG=...`
+- `TALLEI_GOOGLE__PROJECT_ID=actionlog-487112` (or your intended project)
+
+### 5) Runtime smoke-check signals
+
+After uploading a test document and calling `prepare_response` with an `@doc:` query, logs should include:
+- `event: "document_search_route_decision"` with `mode: "vertex"`
+- `event: "vertex_document_search"` with `status: "success"`
+- `event: "vertex_document_index"` for new/updated docs
+
+If `mode` is `legacy`, inspect the `reason` field in `document_search_route_decision` and adjust flags/allowlists.
+
 ## Dashboard `/mcp` proxies to `127.0.0.1:3000` in production
 
 Typical logs:

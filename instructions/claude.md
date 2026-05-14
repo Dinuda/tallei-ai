@@ -8,12 +8,12 @@ prepare_turn(
   message="<exact user message>",
   conversation_id="...",                         // include when available
   conversation_history=[{role, content}, ...],   // include for checkpoint auto-save
-  openaiFileIdRefs=[...PDF/Word attachments...]   // omit images — describe them in message instead
 )
 
-IMAGES: Do NOT pass image files in openaiFileIdRefs. Only PDF and Word (.docx/.docm) go there.
+IMAGES: Do NOT pass image files.
 Instead, describe what you see in the image and include that description in your message.
 Tallei will auto-save the description as a document-note tagged with category="image/txt".
+When a user shares a document, always save the document
 
 After prepare_turn returns, use ONLY contextBlock, inlineDocuments, replyInstructions as your source of truth.
 Do not write reply text before it completes.
