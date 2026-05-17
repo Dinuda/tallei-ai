@@ -20,16 +20,6 @@ import {
   listTasks,
   submitTurn,
 } from "../../../services/collab.js";
-import {
-  abortSession as abortOrchestrationSession,
-  approvePlan as approveOrchestrationPlan,
-  buildSessionFallbackContext,
-  OrchestrationConflictError,
-  OrchestrationInvalidPlanError,
-  OrchestrationNotFoundError,
-  startSession as startOrchestrationSession,
-  submitAnswer as submitOrchestrationAnswer,
-} from "../../../services/orchestrator.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { hasRequiredScopes } from "../../../infrastructure/auth/oauth-tokens.js";
 import {
@@ -53,7 +43,6 @@ import {
 } from "../../shared/chat-actions.js";
 import { logChatGptActionAsync } from "../../shared/chatgpt-action-events.js";
 import { chatGptActionAuthMiddleware, resolveChatGptActionAuth } from "../auth/chatgpt-action-auth.js";
-import { getTaskPreferences } from "../../../services/task-preferences.js";
 
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "lesson", "failure", "checkpoint"]);
@@ -139,29 +128,6 @@ const collabContinueSchema = z.object({
   draft_output: z.string().trim().optional(),
 });
 
-const orchestrateStartSchema = z.object({
-  goal: z.string().trim().min(1, "goal is required"),
-  first_actor_preference: z.enum(["chatgpt", "claude"]).optional(),
-  initial_context: z.string().optional(),
-});
-
-const orchestrateAnswerSchema = z.object({
-  session_id: z.string().uuid("session_id must be a valid UUID"),
-  answer: z.string().trim().min(1, "answer is required"),
-});
-
-const orchestrateApproveSchema = z.object({
-  session_id: z.string().uuid("session_id must be a valid UUID"),
-  overrides: z.object({
-    first_actor: z.enum(["chatgpt", "claude"]).optional(),
-  }).optional(),
-});
-
-const orchestrateAbortSchema = z.object({
-  session_id: z.string().uuid("session_id must be a valid UUID"),
-  reason: z.string().optional(),
-});
-
 function readBodyTaskId(body: unknown): string | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const value = (body as Record<string, unknown>)["task_id"];
@@ -185,75 +151,6 @@ function appendContinueCommand(
 
 function collabActionJson(res: Response, body: Record<string, unknown>): void {
   res.json(compactCollabTransportPayload(body));
-}
-
-function roleSelectionUserVisible(roleSelection: {
-  chatgpt_role: string;
-  claude_role: string;
-  first_actor_recommendation: string;
-  selected_first_actor: string;
-}): string {
-  return [
-    "Before grill-me starts, here is the provider role split. Show each provider prompt as a fenced code block so it is visually distinct:",
-    "ChatGPT system prompt:",
-    "```text",
-    roleSelection.chatgpt_role,
-    "```",
-    "Claude system prompt:",
-    "```text",
-    roleSelection.claude_role,
-    "```",
-    `Recommended first actor: ${roleSelection.first_actor_recommendation}`,
-    `Selected first actor: ${roleSelection.selected_first_actor}`,
-  ].join("\n");
-}
-
-function buildIterationRoadmap(plan: {
-  phases?: Array<{ id: string; name: string; outputs: string[] }>;
-  success_criteria?: Array<{ id: string; text: string; weight: number }>;
-} | null): string {
-  if (!plan || !plan.phases?.length) return "";
-  const lines = plan.phases.map((phase, i) => {
-    const outputs = phase.outputs?.length ? ` — ${phase.outputs.join(", ")}` : "";
-    return `${i + 1}. ${phase.name}${outputs}`;
-  });
-  const doneWhen = plan.success_criteria?.length
-    ? plan.success_criteria.map((s) => s.text).join("; ")
-    : "all success criteria pass";
-  return `Iteration Roadmap:\n${lines.join("\n")}\nDone when: ${doneWhen}`;
-}
-
-function postgresErrorDetails(error: unknown): {
-  code: string;
-  constraint: string | null;
-  message: string;
-} | null {
-  if (!error || typeof error !== "object" || !("code" in error)) return null;
-  const code = (error as { code?: unknown }).code;
-  if (typeof code !== "string" || code.length === 0) return null;
-  const constraint = (error as { constraint?: unknown }).constraint;
-  const message = error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "Database error");
-  return {
-    code,
-    constraint: typeof constraint === "string" ? constraint : null,
-    message,
-  };
-}
-
-function genericErrorDetails(error: unknown): {
-  name: string;
-  message: string;
-} {
-  if (error instanceof Error) {
-    return {
-      name: error.name || "Error",
-      message: error.message || "Unknown error",
-    };
-  }
-  return {
-    name: "Error",
-    message: String(error || "Unknown error"),
-  };
 }
 
 function hasLocalSandboxDownloadLink(body: unknown): boolean {
@@ -284,25 +181,6 @@ function zodValidationResponseBody(error: z.ZodError, normalizedBody: unknown): 
 }
 
 const UUID_V4_LIKE_REGEX = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
-const ORCHESTRATE_ANSWER_ROUTE_TIMEOUT_MS = 25_000;
-
-class ChatGptActionTimeoutError extends Error {
-  constructor(message = "ChatGPT action timed out") {
-    super(message);
-    this.name = "ChatGptActionTimeoutError";
-  }
-}
-
-function withChatGptActionTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | null = null;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => reject(new ChatGptActionTimeoutError()), timeoutMs);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    if (timeout) clearTimeout(timeout);
-  });
-}
-
 function extractTaskIdFromText(message: string): string | null {
   const match = message.match(UUID_V4_LIKE_REGEX)?.[0] ?? null;
   if (!match) return null;
@@ -332,8 +210,7 @@ function extractCollabStage(message: string): {
 
 function collabStageReplyInstructions(
   stage: "CREATE" | "CONTINUE" | "MY_TURN",
-  taskId: string | null,
-  options?: { grillMeRecommended?: boolean }
+  taskId: string | null
 ): string[] {
   const taskLabel = taskId ? ` (task ${taskId})` : "";
   const shared = [
@@ -347,20 +224,13 @@ function collabStageReplyInstructions(
   ];
 
   if (stage === "CREATE") {
-    const collabCreate = options?.grillMeRecommended
-      ? [
-          "ROLE APPROVAL: Call orchestrate_start with goal/title/brief. Show roles as fenced code blocks. Ask: 'Do you approve these roles? Reply yes to proceed.' STOP if not approved.",
-          "ITERATION ROADMAP: After orchestrate_approve, display the numbered roadmap before continuing.",
-          "Do not provide final artifacts during grill-me planning; only show role split, questions, plan review, and action status.",
-          "After approval and roadmap, call collab_continue.",
-        ]
-      : [
-          "ROLE APPROVAL: Display proposed ChatGPT and Claude roles as fenced code blocks. Ask: 'Do you approve these roles? Reply yes to proceed.' STOP if not approved.",
-          "ITERATION ROADMAP: After approval, show numbered turns, who acts, what they deliver, done criteria.",
-          "Only after role approval AND roadmap, call createCollabTask(title, brief, first_actor='chatgpt'). Do not include max_iterations. Do not pass files.",
-          "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
-        ];
-    return [...shared, ...collabCreate];
+    return [
+      ...shared,
+      "ROLE APPROVAL: Display proposed ChatGPT and Claude roles as fenced code blocks. Ask: 'Do you approve these roles? Reply yes to proceed.' STOP if not approved.",
+      "ITERATION ROADMAP: After approval, show numbered turns, who acts, what they deliver, done criteria.",
+      "Only after role approval AND roadmap, call createCollabTask(title, brief, first_actor='chatgpt'). Do not include max_iterations. Do not pass files.",
+      "Immediately after createCollabTask succeeds, call collab_continue with the original user message and draft_output if ready.",
+    ];
   }
 
   if (stage === "CONTINUE") {
@@ -1478,142 +1348,6 @@ export function buildOpenApiSpec(serverUrl: string) {
           },
         },
       },
-      "/api/chatgpt/actions/orchestrate_start": {
-        post: {
-          operationId: "orchestrate_start",
-          summary: "Start orchestration planning session",
-          description: "Starts role selection plus grill-me planning. Show returned role_suggestion and user_visible text. STOP for explicit role approval before proceeding. Only call orchestrate_answer after the user says yes and answers or approves.",
-          "x-openai-isConsequential": false,
-          security: [{ bearerAuth: [] }],
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["goal"],
-                  properties: {
-                    goal: { type: "string" },
-                    first_actor_preference: { type: "string", enum: ["chatgpt", "claude"] },
-                    initial_context: { type: "string" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Session started with role_suggestion, question_payload, user_visible, and next_instruction.",
-            },
-            "400": { description: "Validation failed" },
-            "401": { description: "Unauthorized" },
-            "403": { description: "Insufficient scope" },
-          },
-        },
-      },
-      "/api/chatgpt/actions/orchestrate_answer": {
-        post: {
-          operationId: "orchestrate_answer",
-          summary: "Continue orchestration planning session",
-          description: "Submits one user-approved answer and returns the next question or plan when ready. Show returned user_visible text to the user, then stop. Do not auto-continue, batch answers, approve plans, or produce final artifacts without explicit user approval.",
-          "x-openai-isConsequential": false,
-          security: [{ bearerAuth: [] }],
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["session_id", "answer"],
-                  properties: {
-                    session_id: { type: "string", format: "uuid" },
-                    answer: {
-                      type: "string",
-                      description: "The user's explicit answer to the currently displayed grill-me question. Use 'continue' only if the user explicitly approved the displayed default/recommended answer.",
-                    },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": { description: "Session advanced with user_visible progress text." },
-            "400": { description: "Validation failed" },
-            "404": { description: "Session not found" },
-            "409": { description: "Session conflict" },
-            "401": { description: "Unauthorized" },
-            "403": { description: "Insufficient scope" },
-          },
-        },
-      },
-      "/api/chatgpt/actions/orchestrate_approve": {
-        post: {
-          operationId: "orchestrate_approve",
-          summary: "Approve orchestration plan and create collab task",
-          description: "Approves a PLAN_READY session and starts the linked collab task. Only call after the user explicitly approves the displayed plan. Returns an iteration_roadmap that MUST be displayed to the user before continuing. Show returned user_visible text before continuing the collab task.",
-          "x-openai-isConsequential": false,
-          security: [{ bearerAuth: [] }],
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["session_id"],
-                  properties: {
-                    session_id: { type: "string", format: "uuid" },
-                    overrides: {
-                      type: "object",
-                      properties: {
-                        first_actor: { type: "string", enum: ["chatgpt", "claude"] },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": { description: "Plan approved." },
-            "400": { description: "Validation failed" },
-            "404": { description: "Session not found" },
-            "409": { description: "Session conflict" },
-            "401": { description: "Unauthorized" },
-            "403": { description: "Insufficient scope" },
-          },
-        },
-      },
-      "/api/chatgpt/actions/orchestrate_abort": {
-        post: {
-          operationId: "orchestrate_abort",
-          summary: "Abort orchestration session",
-          description: "Aborts an active orchestration session.",
-          "x-openai-isConsequential": false,
-          security: [{ bearerAuth: [] }],
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["session_id"],
-                  properties: {
-                    session_id: { type: "string", format: "uuid" },
-                    reason: { type: "string" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": { description: "Session aborted." },
-            "400": { description: "Validation failed" },
-            "404": { description: "Session not found" },
-            "401": { description: "Unauthorized" },
-            "403": { description: "Insufficient scope" },
-          },
-        },
-      },
       "/api/chatgpt/collab/tasks": {
         get: {
           operationId: "listCollabTasks",
@@ -1933,7 +1667,6 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
 
     const collabStage = extractCollabStage(body.message);
     const hasAttachments = (body.openaiFileIdRefs?.length ?? 0) > 0;
-    const prefs = collabStage?.stage === "CREATE" ? await getTaskPreferences(auth) : null;
 
     // CONTINUE and MY_TURN without attachments: skip memory flow, return routing instructions only
     if (collabStage && collabStage.stage !== "CREATE" && !hasAttachments) {
@@ -1955,7 +1688,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
         inlineDocuments: [],
         queuedSaves: [],
         autoSave: { requested: 0, complete: true, saved: [], errors: [] },
-        replyInstructions: collabStageReplyInstructions(stage, taskId, { grillMeRecommended: prefs?.grillMeRecommended }),
+        replyInstructions: collabStageReplyInstructions(stage, taskId),
         intent: {
           needsRecall: false,
           needsDocumentLookup: false,
@@ -2029,11 +1762,7 @@ router.post("/actions/prepare_response", chatGptActionAuthMiddleware, requireSco
 
     // For any collab stage: override replyInstructions with stage-specific routing
     if (collabStage && result.status < 400 && result.body && typeof result.body === "object") {
-      const stageInstructions = collabStageReplyInstructions(
-        collabStage.stage,
-        collabStage.taskId,
-        { grillMeRecommended: prefs?.grillMeRecommended }
-      );
+      const stageInstructions = collabStageReplyInstructions(collabStage.stage, collabStage.taskId);
       const fileRefHint = !hasAttachments
         ? [
           "If this turn has visible attachments, file refs are missing. Ask for temporary HTTPS download URLs for those attachments (openaiFileIdRefs), then call prepare_response again with those refs before continuing collab.",
@@ -2415,295 +2144,6 @@ router.post("/actions/recall_document", chatGptActionAuthMiddleware, requireScop
     });
     console.error("Error recalling ChatGPT document:", error);
     res.status(500).json({ error: "Failed to recall document" });
-  }
-});
-
-router.post("/actions/orchestrate_start", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = orchestrateStartSchema.parse(req.body ?? {});
-    const auth = await resolveChatGptActionAuth(req, res);
-    if (!auth) return;
-
-    const result = await startOrchestrationSession(
-      {
-        goal: body.goal,
-        sourcePlatform: "chatgpt",
-        firstActorPreference: body.first_actor_preference,
-        initialContext: body.initial_context ?? null,
-      },
-      auth
-    );
-
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_start",
-      metadata: {
-        category: "orchestration",
-        action: "start",
-        session_id: result.session.id,
-      },
-      ok: true,
-    });
-
-    collabActionJson(res, {
-      session_id: result.session.id,
-      status: result.session.status,
-      question: result.firstQuestion,
-      question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
-      role_suggestion: result.roleSelection,
-      user_visible: result.firstQuestion
-        ? `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
-        : `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrate_approve.`,
-      next_instruction: "Show the role split and ask for explicit role approval. STOP if the user does not say yes. Do not call orchestrate_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
-      fallback_context: buildSessionFallbackContext(result.session),
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof PlanRequiredError) {
-      res.status(402).json(collabPlanRequiredActionError(error));
-      return;
-    }
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_start",
-      ok: false,
-      error: error instanceof Error ? error.message : "Failed to start orchestration session",
-    });
-    res.status(500).json({ error: "Failed to start orchestration session" });
-  }
-});
-
-router.post("/actions/orchestrate_answer", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = orchestrateAnswerSchema.parse(req.body ?? {});
-    const auth = await resolveChatGptActionAuth(req, res);
-    if (!auth) return;
-    const result = await withChatGptActionTimeout(
-      submitOrchestrationAnswer(body.session_id, body.answer, auth),
-      ORCHESTRATE_ANSWER_ROUTE_TIMEOUT_MS
-    );
-
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_answer",
-      metadata: {
-        category: "orchestration",
-        action: "answer",
-        session_id: body.session_id,
-        status: result.session.status,
-      },
-      ok: true,
-    });
-
-    collabActionJson(res, {
-      session_id: result.session.id,
-      status: result.session.status,
-      question: result.nextQuestion ?? null,
-      question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
-      plan: result.plan ?? result.session.plan,
-      user_visible: result.planReady
-        ? "I saved that answer. The grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrate_approve."
-        : `I saved that answer. Next grill-me question: ${result.nextQuestion ?? "continue with the recommended/default answer."}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`,
-      next_instruction: result.planReady
-        ? "Show the plan for review, then stop. Do not call orchestrate_approve until the user explicitly approves the plan."
-        : "Show the next grill-me question, then stop. Do not call orchestrate_answer again until the user explicitly answers or approves using the displayed default/recommended answer.",
-      fallback_context: buildSessionFallbackContext(result.session),
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof OrchestrationNotFoundError) {
-      res.status(404).json({ error: error.message });
-      return;
-    }
-    if (error instanceof OrchestrationConflictError) {
-      res.status(409).json({ error: error.message });
-      return;
-    }
-    if (error instanceof PlanRequiredError) {
-      res.status(402).json(collabPlanRequiredActionError(error));
-      return;
-    }
-    if (error instanceof ChatGptActionTimeoutError) {
-      logChatGptActionAsync({
-        auth: req.authContext,
-        method: "chatgpt/actions/orchestrate_answer",
-        ok: false,
-        error: error.message,
-      });
-      res.status(504).json({
-        error: "Orchestration answer timed out",
-        details: {
-          timeout_ms: ORCHESTRATE_ANSWER_ROUTE_TIMEOUT_MS,
-          message:
-            "Planner did not finish before the ChatGPT action deadline. Retry once with the user's explicit answer.",
-        },
-        user_visible:
-          "The grill-me planner is taking too long, so I stopped this request before ChatGPT timed out. Retry once with the user's explicit answer.",
-      });
-      return;
-    }
-    const pg = postgresErrorDetails(error);
-    const details = pg ?? genericErrorDetails(error);
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_answer",
-      ok: false,
-      error: details.message,
-    });
-    res.status(500).json({
-      error: "Failed to continue orchestration session",
-      details,
-      user_visible:
-        "I could not continue the grill-me step because planning failed on the server. Retry this answer, or ask me to finalize with the information already collected.",
-    });
-  }
-});
-
-router.post("/actions/orchestrate_approve", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write", "collab:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = orchestrateApproveSchema.parse(req.body ?? {});
-    const auth = await resolveChatGptActionAuth(req, res);
-    if (!auth) return;
-    const result = await approveOrchestrationPlan(body.session_id, auth, body.overrides);
-
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_approve",
-      collabTaskId: result.task.id,
-      metadata: {
-        category: "orchestration",
-        action: "approve",
-        session_id: body.session_id,
-        task_id: result.task.id,
-      },
-      ok: true,
-    });
-
-    const roadmap = buildIterationRoadmap(result.session.plan ?? null);
-    const firstActor = result.session.plan?.first_actor ?? "chatgpt";
-    const nextWork = firstActor === "chatgpt"
-      ? "ChatGPT will produce content, strategy, or creative output for the first phase."
-      : "Claude will implement, build, or refine the technical/design deliverables for the first phase.";
-    collabActionJson(res, {
-      task_id: result.task.id,
-      plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
-      success_criteria: result.session.plan?.success_criteria ?? [],
-      first_actor: firstActor,
-      iteration_roadmap: roadmap || null,
-      user_visible: [
-        `Plan approved. Collab task ${result.task.id} is ready.`,
-        roadmap ? `\n${roadmap}` : "",
-        `\nNext up: ${nextWork}`,
-      ].join(""),
-      next_instruction: `Collab task ${result.task.id} is ready. ${roadmap ? "The iteration roadmap is shown above. " : ""}Continue with collab_continue/collab_check_turn for ${firstActor}.`,
-      fallback_context: buildSessionFallbackContext(result.session),
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof OrchestrationNotFoundError) {
-      res.status(404).json({ error: error.message });
-      return;
-    }
-    if (error instanceof OrchestrationConflictError) {
-      res.status(409).json({ error: error.message });
-      return;
-    }
-    if (error instanceof OrchestrationInvalidPlanError) {
-      res.status(409).json({ error: error.message });
-      return;
-    }
-    if (error instanceof PlanRequiredError) {
-      res.status(402).json(collabPlanRequiredActionError(error));
-      return;
-    }
-    const pg = postgresErrorDetails(error);
-    if (pg?.code === "23514" || pg?.code === "22P02" || pg?.code === "23502") {
-      res.status(400).json({
-        error: "Invalid orchestration approval overrides",
-        details: {
-          code: pg.code,
-          constraint: pg.constraint,
-          message: pg.message,
-        },
-      });
-      return;
-    }
-    if (pg?.code === "23503" || pg?.code === "23505") {
-      res.status(409).json({
-        error: "Orchestration approval conflict",
-        details: {
-          code: pg.code,
-          constraint: pg.constraint,
-          message: pg.message,
-        },
-      });
-      return;
-    }
-    if (pg) {
-      res.status(500).json({
-        error: "Failed to approve orchestration plan",
-        details: {
-          code: pg.code,
-          constraint: pg.constraint,
-          message: pg.message,
-        },
-      });
-      return;
-    }
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_approve",
-      ok: false,
-      error: error instanceof Error ? error.message : "Failed to approve orchestration plan",
-    });
-    res.status(500).json({ error: "Failed to approve orchestration plan" });
-  }
-});
-
-router.post("/actions/orchestrate_abort", chatGptActionAuthMiddleware, requireScopes(["orchestrate:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = orchestrateAbortSchema.parse(req.body ?? {});
-    const auth = await resolveChatGptActionAuth(req, res);
-    if (!auth) return;
-    const session = await abortOrchestrationSession(body.session_id, auth, body.reason);
-
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_abort",
-      metadata: {
-        category: "orchestration",
-        action: "abort",
-        session_id: body.session_id,
-      },
-      ok: true,
-    });
-
-    res.json({ session_id: session.id, status: session.status });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof OrchestrationNotFoundError) {
-      res.status(404).json({ error: error.message });
-      return;
-    }
-    logChatGptActionAsync({
-      auth: req.authContext,
-      method: "chatgpt/actions/orchestrate_abort",
-      ok: false,
-      error: error instanceof Error ? error.message : "Failed to abort orchestration session",
-    });
-    res.status(500).json({ error: "Failed to abort orchestration session" });
   }
 });
 

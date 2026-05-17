@@ -20,11 +20,7 @@ export type ChatGptActionMethod =
   | "chatgpt/collab/run-turn"
   | "chatgpt/collab/submit-turn"
   | "chatgpt/collab/continue"
-  | "chatgpt/collab/tasks"
-  | "chatgpt/actions/orchestrate_start"
-  | "chatgpt/actions/orchestrate_answer"
-  | "chatgpt/actions/orchestrate_approve"
-  | "chatgpt/actions/orchestrate_abort";
+  | "chatgpt/collab/tasks";
 
 export async function logChatGptAction(input: {
   auth: AuthContext | null | undefined;

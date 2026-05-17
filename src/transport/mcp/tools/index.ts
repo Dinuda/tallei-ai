@@ -34,15 +34,6 @@ import {
   listTasks as listCollabTasks,
   submitTurn as submitCollabTurn,
 } from "../../../services/collab.js";
-import {
-  approvePlan as approveOrchestratorPlan,
-  buildSessionFallbackContext,
-  OrchestrationConflictError,
-  OrchestrationInvalidPlanError,
-  OrchestrationNotFoundError,
-  startSession as startOrchestratorSession,
-  submitAnswers as submitOrchestratorAnswers,
-} from "../../../services/orchestrator.js";
 import { PlatformSchema } from "../schemas.js";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
 import {
@@ -142,50 +133,9 @@ function isLikelySummaryOnlyCollabTurn(content: string): boolean {
   return startsLikeSummary && (hasListMarkers || lineCount <= 8 || hasPlaceholderLanguage);
 }
 
-function roleSelectionUserVisible(roleSelection: {
-  chatgpt_role: string;
-  claude_role: string;
-  first_actor_recommendation: string;
-  selected_first_actor: string;
-}): string {
-  return [
-    "Before grill-me starts, here is the provider role split. Show each provider prompt as a fenced code block so it is visually distinct:",
-    "ChatGPT system prompt:",
-    "```text",
-    roleSelection.chatgpt_role,
-    "```",
-    "Claude system prompt:",
-    "```text",
-    roleSelection.claude_role,
-    "```",
-    `Recommended first actor: ${roleSelection.first_actor_recommendation}`,
-    `Selected first actor: ${roleSelection.selected_first_actor}`,
-  ].join("\n");
-}
-
-function buildIterationRoadmap(plan: {
-  phases?: Array<{ id: string; name: string; outputs: string[] }>;
-  success_criteria?: Array<{ id: string; text: string; weight: number }>;
-} | null): string {
-  if (!plan || !plan.phases?.length) return "";
-  const lines = plan.phases.map((phase, i) => {
-    const outputs = phase.outputs?.length ? ` — ${phase.outputs.join(", ")}` : "";
-    return `${i + 1}. ${phase.name}${outputs}`;
-  });
-  const doneWhen = plan.success_criteria?.length
-    ? plan.success_criteria.map((s) => s.text).join("; ")
-    : "all success criteria pass";
-  return `Iteration Roadmap:\n${lines.join("\n")}\nDone when: ${doneWhen}`;
-}
-
 function hasCollabWriteScope(auth: AuthContext): boolean {
   if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
   return hasRequiredScopes(auth.scopes ?? [], ["collab:write"]);
-}
-
-function hasOrchestrateScope(auth: AuthContext): boolean {
-  if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
-  return hasRequiredScopes(auth.scopes ?? [], ["orchestrate:write"]);
 }
 
 export function registerTools(server: McpServer, auth: AuthContext): void {
@@ -636,162 +586,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           return collabPlanRequiredResult(err);
         }
         const message = err instanceof Error ? err.message : "Failed to create collab task";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "orchestrator_start",
-    {
-      title: "Start Orchestration Session",
-      description: "Starts grill-me planning for a goal and returns the first planner question.",
-      inputSchema: {
-        goal: z.string().min(1).describe("The goal to plan before collab execution."),
-        first_actor_preference: z.enum(["chatgpt", "claude"]).optional(),
-        initial_context: z.string().optional(),
-      },
-    },
-    async ({ goal, first_actor_preference, initial_context }) => {
-      try {
-        if (!hasOrchestrateScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
-        }
-        const result = await startOrchestratorSession(
-          {
-            goal,
-            sourcePlatform: "claude",
-            firstActorPreference: first_actor_preference,
-            initialContext: initial_context ?? null,
-          },
-          auth
-        );
-        return toJsonToolResult({
-          session_id: result.session.id,
-          status: result.session.status,
-          question: result.firstQuestion,
-          question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
-          role_suggestion: result.roleSelection,
-          user_visible: result.firstQuestion
-            ? `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
-            : `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`,
-          next_instruction: "Show the role split and ask for explicit role approval. STOP if the user does not say yes. Do not call orchestrator_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
-          fallback_context: buildSessionFallbackContext(result.session),
-        });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        const message = err instanceof Error ? err.message : "Failed to start orchestration session";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "orchestrator_answer",
-    {
-      title: "Continue Orchestration Session",
-      description: "Submits one or more user answers for orchestration and returns next question or plan.",
-      inputSchema: {
-        session_id: z.string().uuid().describe("Orchestration session ID."),
-        answer: z.string().min(1).optional().describe("Single user answer. Use 'continue' to accept the displayed default/recommended answer and finalize."),
-        answers: z.array(z.string().min(1)).min(1).max(5).optional().describe("Batch of explicit user answers to process in order."),
-        auto_continue: z.boolean().optional().default(false).describe("When true, keep accepting default/recommended answers until plan_ready or max_steps is reached."),
-        max_steps: z.number().int().min(1).max(5).optional().default(3).describe("Maximum planner steps to process in this request."),
-      },
-    },
-    async ({ session_id, answer, answers, auto_continue, max_steps }) => {
-      try {
-        if (!hasOrchestrateScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
-        }
-        const answerBatch = answers ?? (answer ? [answer] : []);
-        if (answerBatch.length === 0) {
-          return toJsonToolResult({ error: "answer or answers is required", session_id }, true);
-        }
-        const shouldAutoContinue = Boolean(auto_continue) || answerBatch.some((value) => /^continue$/i.test(value.trim()));
-        const result = await submitOrchestratorAnswers(session_id, answerBatch, auth, {
-          autoContinue: shouldAutoContinue,
-          maxSteps: max_steps,
-        });
-        return toJsonToolResult({
-          session_id,
-          status: result.session.status,
-          question: result.nextQuestion ?? null,
-          question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
-          plan: result.plan ?? result.session.plan,
-          steps_processed: result.stepsProcessed,
-          user_visible: result.planReady
-            ? `I processed ${result.stepsProcessed} grill-me step${result.stepsProcessed === 1 ? "" : "s"}. The plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`
-            : `I processed ${result.stepsProcessed} grill-me step${result.stepsProcessed === 1 ? "" : "s"}. Next grill-me question: ${result.nextQuestion ?? "continue with the recommended/default answer."}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`,
-          next_instruction: result.planReady
-            ? "Show the plan for review, then stop. Do not call orchestrator_approve until the user explicitly approves the plan."
-            : "Show the next grill-me question, then stop. Do not call orchestrator_answer again until the user explicitly answers or approves using the displayed default/recommended answer.",
-          fallback_context: buildSessionFallbackContext(result.session),
-        });
-      } catch (err) {
-        if (err instanceof OrchestrationConflictError || err instanceof OrchestrationNotFoundError) {
-          return toJsonToolResult({ error: err.message, session_id }, true);
-        }
-        const message = err instanceof Error ? err.message : "Failed to continue orchestration session";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "orchestrator_approve",
-    {
-      title: "Approve Orchestration Plan",
-      description: "Approves the prepared orchestration plan and creates the linked collab task.",
-      inputSchema: {
-        session_id: z.string().uuid().describe("Orchestration session ID."),
-        overrides: z.object({
-          first_actor: z.enum(["chatgpt", "claude"]).optional(),
-        }).optional(),
-      },
-    },
-    async ({ session_id, overrides }) => {
-      try {
-        if (!hasOrchestrateScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
-        }
-        if (!hasCollabWriteScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
-        }
-        const result = await approveOrchestratorPlan(session_id, auth, overrides);
-        const roadmap = buildIterationRoadmap(result.session.plan ?? null);
-        const firstActor = result.session.plan?.first_actor ?? "chatgpt";
-        const nextWork = firstActor === "chatgpt"
-          ? "ChatGPT will produce content, strategy, or creative output for the first phase."
-          : "Claude will implement, build, or refine the technical/design deliverables for the first phase.";
-        return toJsonToolResult({
-          task_id: result.task.id,
-          plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
-          success_criteria: result.session.plan?.success_criteria ?? [],
-          first_actor: firstActor,
-          iteration_roadmap: roadmap || null,
-          user_visible: [
-            `Plan approved. Collab task ${result.task.id} is ready.`,
-            roadmap ? `\n${roadmap}` : "",
-            `\nNext up: ${nextWork}`,
-          ].join(""),
-          next_instruction: `Collab task ${result.task.id} is ready. ${roadmap ? "The iteration roadmap is shown above. " : ""}Continue with collab_check_turn/collab_take_turn for ${firstActor}.`,
-          fallback_context: result.session ? buildSessionFallbackContext(result.session) : null,
-        });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        if (
-          err instanceof OrchestrationConflictError ||
-          err instanceof OrchestrationNotFoundError ||
-          err instanceof OrchestrationInvalidPlanError
-        ) {
-          return toJsonToolResult({ error: err.message, session_id }, true);
-        }
-        const message = err instanceof Error ? err.message : "Failed to approve orchestration plan";
         return toJsonToolResult({ error: message }, true);
       }
     }
