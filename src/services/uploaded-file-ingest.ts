@@ -169,26 +169,6 @@ export async function uploadedFileToText(ref: UploadedFileRef, buffer: Buffer): 
   throw new Error("Unsupported file type for document ingest.");
 }
 
-export function buildDocumentNoteDraft(input: {
-  name: string;
-  titleOverride?: string;
-  sourceHint?: string;
-  text: string;
-}): { title: string; key_points: string[]; summary: string; source_hint: string } {
-  const preview = input.text.slice(0, 3000);
-  const lines = preview
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 20)
-    .slice(0, 8);
-  return {
-    title: input.titleOverride?.trim() || input.name || "Uploaded Document",
-    key_points: lines,
-    summary: `Uploaded file: ${input.name || "document"}`,
-    source_hint: input.sourceHint?.trim() || `Uploaded via ChatGPT action — ${input.name || "document"}`,
-  };
-}
-
 export async function ingestUploadedFileToDocument(
   fileRef: UploadedFileRef,
   auth: AuthContext,

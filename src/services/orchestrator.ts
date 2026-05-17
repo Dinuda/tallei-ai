@@ -418,31 +418,6 @@ export async function getSession(sessionId: string, auth: AuthContext): Promise<
   return session;
 }
 
-export async function listSessions(
-  input: { filter?: OrchestrationFilter },
-  auth: AuthContext
-): Promise<OrchestrationSession[]> {
-  const filter = input.filter ?? "all";
-  let where = "tenant_id = $1 AND user_id = $2";
-
-  if (filter === "active") {
-    where += " AND status IN ('INTERVIEWING', 'PLAN_READY', 'RUNNING')";
-  } else if (filter === "done") {
-    where += " AND status IN ('DONE', 'ABORTED')";
-  }
-
-  const result = await pool.query<OrchestrationSessionRow>(
-    `SELECT *
-     FROM orchestration_sessions
-     WHERE ${where}
-     ORDER BY updated_at DESC
-     LIMIT 50`,
-    [auth.tenantId, auth.userId]
-  );
-
-  return result.rows.map(mapSessionRow);
-}
-
 export async function startSession(
   input: {
     goal: string;

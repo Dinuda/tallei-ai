@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button } from "../../components/ui/button";
+import { Button } from "@/components/ui/button";
 import { EmptyCollectionState } from "./components/empty-collection-state";
 import styles from "./page.module.css";
 
