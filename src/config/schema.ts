@@ -55,11 +55,15 @@ export function normalizeBaseUrl(raw: string): string {
 
   try {
     const parsed = new URL(value);
-    if (parsed.pathname === "/mcp" || parsed.pathname.endsWith("/mcp/")) {
+    const normalizedPath = parsed.pathname.replace(/\/{2,}/g, "/");
+    if (normalizedPath === "/mcp" || normalizedPath.endsWith("/mcp/")) {
       parsed.pathname = "/";
+    } else {
+      parsed.pathname = normalizedPath;
     }
     return parsed.toString().replace(/\/$/, "");
   } catch {
-    return value.replace(/\/mcp\/?$/, "").replace(/\/$/, "");
+    const normalized = value.replace(/\/{2,}/g, "/");
+    return normalized.replace(/\/mcp\/?$/, "").replace(/\/$/, "");
   }
 }

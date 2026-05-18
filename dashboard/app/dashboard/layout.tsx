@@ -13,6 +13,22 @@ import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
 
+/* Suppress known React DevTools false-positive in React 19 / Next.js 16 */
+if (typeof window !== "undefined" && window.console && window.console.error) {
+  const orig = window.console.error;
+  window.console.error = (...args: unknown[]) => {
+    const msg = args[0];
+    if (
+      typeof msg === "string" &&
+      (msg.includes("cleaning up async info that was not on the parent Suspense boundary") ||
+        msg.includes("React instrumentation encountered an error"))
+    ) {
+      return;
+    }
+    orig.apply(window.console, args);
+  };
+}
+
 type NavItem = {
   id: string;
   label: string;
@@ -52,15 +68,28 @@ const ICONS = {
       <path d="M9 2v3h3M5 8h5M5 10h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
-  connectors: (
+  aiAssistants: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <path d="M5.2 2V5.2M9.8 2V5.2M4.1 5.2H10.9V7.3C10.9 9.2 9.4 10.7 7.5 10.7C5.6 10.7 4.1 9.2 4.1 7.3V5.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M7.5 10.7V13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M7.5 2v3.5M7.5 9.5V13M2 7.5h3.5M9.5 7.5H13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="7.5" cy="7.5" r="1.8" fill="currentColor" />
+    </svg>
+  ),
+  connectedApps: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M5 3a2.5 2.5 0 0 0-2.5 2.5v1M10 12a2.5 2.5 0 0 0 2.5-2.5v-1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M5 12a2.5 2.5 0 0 1-2.5-2.5V8.5M10 3a2.5 2.5 0 0 1 2.5 2.5v1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M5.5 7.5h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
   activity: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M1.8 7.7H4.7L6.1 4.2L8.2 10.3L10 7.1H13.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  loops: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M2.5 5a5 5 0 0 1 8-1.5M11 4v2.5H8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12.5 10a5 5 0 0 1-8 1.5M4 11V8.5h2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
 };
@@ -71,7 +100,9 @@ const NAV: NavSection[] = [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
       { id: "collab", label: "Collab", href: "/dashboard/tasks", icon: ICONS.collab },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
-      { id: "connectors", label: "AI Assitants", href: "/dashboard/setup", icon: ICONS.connectors },
+      { id: "loops", label: "Loops", href: "/dashboard/workflows", icon: ICONS.loops },
+      { id: "connectors", label: "AI Assistants", href: "/dashboard/setup", icon: ICONS.aiAssistants },
+      { id: "connected-apps", label: "Connected Apps", href: "/dashboard/integrations", icon: ICONS.connectedApps },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
     ],
   },

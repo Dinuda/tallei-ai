@@ -1,0 +1,146 @@
+import { Router, type Response } from "express";
+import { z } from "zod";
+
+import {
+  continueConnectorAuth,
+  getConnectorAuthSession,
+  handleComposioWebhook,
+  listConnectorAccounts,
+  removeConnectorAccount,
+  startConnectorAuth,
+  verifyComposioWebhookSignature,
+} from "../../../services/workflow-automation.js";
+import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
+
+const router = Router();
+router.use(authMiddleware);
+
+const createAuthSessionSchema = z.object({
+  app_key: z.string().min(1).optional(),
+  required_scopes: z.array(z.string()).optional().default([]),
+  redirect_uri: z.string().url().optional(),
+});
+
+const continueAuthSchema = z.object({
+  external_account_id: z.string().optional(),
+  scopes: z.array(z.string()).optional(),
+});
+
+router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const connectors = await listConnectorAccounts(req.authContext!);
+    res.json({ connectors });
+  } catch (error) {
+    console.error("Error listing connectors:", error);
+    res.status(500).json({ error: "Failed to list connectors" });
+  }
+});
+
+router.post("/:provider/auth-sessions", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const provider = String(req.params.provider || "").trim();
+    const body = createAuthSessionSchema.parse(req.body ?? {});
+
+    const session = await startConnectorAuth({
+      auth: req.authContext!,
+      provider,
+      appKey: body.app_key ?? null,
+      requiredScopes: body.required_scopes,
+      redirectUri: body.redirect_uri ?? null,
+    });
+
+    res.status(201).json({
+      auth_session_id: session.sessionId,
+      setup_url: session.setupUrl,
+      expires_at: session.expiresAt,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /Composio is required/i.test(error.message)) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    console.error("Error creating connector auth session:", error);
+    res.status(500).json({ error: "Failed to create connector auth session" });
+  }
+});
+
+router.get("/auth-sessions/:id", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await getConnectorAuthSession({
+      auth: req.authContext!,
+      authSessionId: String(req.params.id),
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error reading connector auth session:", error);
+    res.status(500).json({ error: "Failed to read connector auth session" });
+  }
+});
+
+router.post("/auth-sessions/:id/continue", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = continueAuthSchema.parse(req.body ?? {});
+    const result = await continueConnectorAuth({
+      auth: req.authContext!,
+      authSessionId: String(req.params.id),
+      externalAccountId: body.external_account_id,
+      scopes: body.scopes,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error continuing connector auth:", error);
+    res.status(500).json({ error: "Failed to continue connector auth" });
+  }
+});
+
+router.delete("/:id", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    await removeConnectorAccount(req.authContext!, String(req.params.id));
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error removing connector account:", error);
+    res.status(500).json({ error: "Failed to remove connector account" });
+  }
+});
+
+router.post("/composio/webhook", async (req, res: Response) => {
+  try {
+    const signature = typeof req.headers["x-composio-signature"] === "string"
+      ? req.headers["x-composio-signature"]
+      : undefined;
+    const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody;
+    const isValid = verifyComposioWebhookSignature(rawBody, signature);
+    if (!isValid) {
+      res.status(401).json({ error: "Invalid webhook signature" });
+      return;
+    }
+
+    const result = await handleComposioWebhook(req.body);
+    res.json(result);
+  } catch (error) {
+    console.error("Error handling composio webhook:", error);
+    res.status(500).json({ error: "Failed to handle composio webhook" });
+  }
+});
+
+export default router;

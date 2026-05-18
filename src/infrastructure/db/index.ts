@@ -654,6 +654,306 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS ai_activity_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        activity_type TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        content_text TEXT NOT NULL,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_activity_events_scope_created
+        ON ai_activity_events(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ai_activity_events_hash
+        ON ai_activity_events(tenant_id, user_id, content_hash, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS patterns (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        fingerprint TEXT NOT NULL,
+        title TEXT NOT NULL,
+        confidence NUMERIC(5,4) NOT NULL DEFAULT 0,
+        trigger_count INTEGER NOT NULL DEFAULT 0,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, user_id, fingerprint)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS workflow_suggestions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        fingerprint TEXT NOT NULL,
+        title TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        suggested_prompt TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'approved', 'dismissed')),
+        confidence NUMERIC(5,4) NOT NULL DEFAULT 0,
+        trigger_count INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'inline',
+        dismissal_reason TEXT,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_suggestions_scope_created
+        ON workflow_suggestions(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_suggestions_fingerprint
+        ON workflow_suggestions(tenant_id, user_id, fingerprint, updated_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS workflows (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        source_suggestion_id UUID NULL REFERENCES workflow_suggestions(id) ON DELETE SET NULL,
+        title TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        instruction TEXT,
+        schedule_rrule TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK (status IN ('active', 'paused', 'archived')),
+        requires_connector BOOLEAN NOT NULL DEFAULT FALSE,
+        connector_provider TEXT NULL,
+        connector_scope_keys JSONB NOT NULL DEFAULT '[]'::jsonb,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        definition_version TEXT NOT NULL DEFAULT 'v1',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflows_scope_status
+        ON workflows(tenant_id, user_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflows_fingerprint
+        ON workflows(tenant_id, user_id, fingerprint);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS workflow_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        run_mode TEXT NOT NULL DEFAULT 'scheduled'
+          CHECK (run_mode IN ('scheduled', 'manual')),
+        status TEXT NOT NULL DEFAULT 'scheduled'
+          CHECK (status IN ('scheduled', 'running', 'waiting_for_approval', 'completed', 'failed', 'skipped', 'cancelled')),
+        scheduled_for TIMESTAMPTZ,
+        draft_output TEXT,
+        connector_action_status TEXT,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_scope_status
+        ON workflow_runs(tenant_id, user_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow
+        ON workflow_runs(workflow_id, created_at DESC);
+
+      ALTER TABLE workflow_runs
+        DROP CONSTRAINT IF EXISTS workflow_runs_status_check;
+      ALTER TABLE workflow_runs
+        ADD CONSTRAINT workflow_runs_status_check
+        CHECK (status IN ('scheduled', 'running', 'waiting_for_approval', 'completed', 'failed', 'skipped', 'cancelled'));
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS workflow_run_steps (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        step_name TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        status TEXT NOT NULL
+          CHECK (status IN ('started', 'completed', 'failed', 'skipped')),
+        input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, user_id, idempotency_key)
+      );
+
+      ALTER TABLE workflow_run_steps
+        ADD COLUMN IF NOT EXISTS error_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approvals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        target_type TEXT NOT NULL
+          CHECK (target_type IN ('workflow_suggestion', 'workflow_run')),
+        target_id UUID NOT NULL,
+        channel TEXT NOT NULL
+          CHECK (channel IN ('chat', 'email', 'whatsapp', 'portal')),
+        decision TEXT NOT NULL
+          CHECK (decision IN ('approved', 'dismissed', 'skipped', 'ignored')),
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notification_channels (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL
+          CHECK (kind IN ('email', 'whatsapp', 'slack', 'discord')),
+        destination TEXT NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, user_id, kind, destination)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notification_deliveries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        channel TEXT NOT NULL
+          CHECK (channel IN ('email', 'whatsapp', 'slack', 'discord')),
+        target_type TEXT NOT NULL,
+        target_id UUID NOT NULL,
+        status TEXT NOT NULL
+          CHECK (status IN ('queued', 'sent', 'failed', 'ignored')),
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS connector_adapters (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        provider TEXT NOT NULL UNIQUE,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      INSERT INTO connector_adapters (provider, enabled, config_json)
+      VALUES ('composio', TRUE, '{}'::jsonb)
+      ON CONFLICT (provider) DO NOTHING
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS connector_accounts (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        external_account_id TEXT NOT NULL,
+        status TEXT NOT NULL
+          CHECK (status IN ('not_required', 'missing', 'auth_started', 'connected', 'expired', 'revoked', 'failed')),
+        scopes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_connector_accounts_scope_provider
+        ON connector_accounts(tenant_id, user_id, provider, updated_at DESC);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_accounts_unique_external
+        ON connector_accounts(tenant_id, user_id, provider, external_account_id);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS connector_auth_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL
+          CHECK (status IN ('auth_started', 'connected', 'expired', 'failed', 'revoked')),
+        setup_url TEXT NOT NULL,
+        required_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_connector_auth_sessions_scope_created
+        ON connector_auth_sessions(tenant_id, user_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS connector_action_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        connector_account_id UUID NOT NULL REFERENCES connector_accounts(id) ON DELETE CASCADE,
+        action_name TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        status TEXT NOT NULL
+          CHECK (status IN ('started', 'completed', 'failed', 'skipped')),
+        request_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        response_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, user_id, idempotency_key)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS workflow_approval_tokens (
+        token TEXT PRIMARY KEY,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        target_type TEXT NOT NULL
+          CHECK (target_type IN ('workflow_suggestion', 'workflow_run')),
+        target_id UUID NOT NULL,
+        channel TEXT NOT NULL
+          CHECK (channel IN ('email', 'whatsapp')),
+        expires_at TIMESTAMPTZ NOT NULL,
+        consumed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS daily_intelligence_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL
+          CHECK (status IN ('running', 'completed', 'failed')),
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_daily_intelligence_runs_scope_created
+        ON daily_intelligence_runs(tenant_id, user_id, created_at DESC);
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS oauth_clients (
         client_id TEXT PRIMARY KEY,
         client_info JSONB NOT NULL,

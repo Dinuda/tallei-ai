@@ -41,6 +41,19 @@ import {
   executeUploadStatusAction,
   isTransientMemoryInfraError,
 } from "../../shared/chat-actions.js";
+import {
+  approveWorkflowRun,
+  approveWorkflowSuggestion,
+  continueConnectorAuth,
+  createExplicitWorkflow,
+  dismissWorkflowSuggestion,
+  getWorkflowRun,
+  listConnectorAccounts,
+  listWorkflowSuggestions,
+  skipWorkflowRun,
+  startConnectorAuth,
+  updateWorkflowSuggestion,
+} from "../../../services/workflow-automation.js";
 import { logChatGptActionAsync } from "../../shared/chatgpt-action-events.js";
 import { chatGptActionAuthMiddleware, resolveChatGptActionAuth } from "../auth/chatgpt-action-auth.js";
 
@@ -126,6 +139,53 @@ const collabContinueSchema = z.object({
   message: z.string().trim().min(1, "message is required"),
   task_id: z.string().uuid("task_id must be a valid UUID").optional(),
   draft_output: z.string().trim().optional(),
+});
+
+const workflowCreateSchema = z.object({
+  title: z.string().min(1),
+  instruction: z.string().min(1),
+  schedule_rrule: z.string().min(1),
+  requires_connector: z.boolean().optional().default(false),
+  connector_provider: z.string().optional(),
+  connector_scope_keys: z.array(z.string()).optional().default([]),
+});
+
+const workflowSuggestionApproveSchema = z.object({
+  suggestion_id: z.string().uuid(),
+  schedule_rrule: z.string().optional(),
+  requires_connector: z.boolean().optional().default(false),
+  connector_provider: z.string().optional(),
+  connector_scope_keys: z.array(z.string()).optional().default([]),
+});
+
+const workflowSuggestionDismissSchema = z.object({
+  suggestion_id: z.string().uuid(),
+  reason: z.string().optional(),
+});
+
+const workflowSuggestionUpdateSchema = z.object({
+  suggestion_id: z.string().uuid(),
+  title: z.string().optional(),
+  suggested_prompt: z.string().optional(),
+});
+
+const connectorStartAuthSchema = z.object({
+  provider: z.string(),
+  app_key: z.string().min(1).optional(),
+  required_scopes: z.array(z.string()).optional().default([]),
+  redirect_uri: z.string().optional(),
+});
+
+const connectorContinueAuthSchema = z.object({
+  auth_session_id: z.string().uuid(),
+  external_account_id: z.string().optional(),
+  scopes: z.array(z.string()).optional(),
+});
+
+const workflowRunActionSchema = z.object({
+  workflow_id: z.string().uuid(),
+  run_id: z.string().uuid(),
+  include_sdk: z.boolean().optional().default(false),
 });
 
 function readBodyTaskId(body: unknown): string | null {
@@ -2084,6 +2144,216 @@ router.post("/actions/recent_documents", chatGptActionAuthMiddleware, requireSco
     });
     console.error("Error loading recent ChatGPT documents:", error);
     res.status(500).json({ error: "Failed to load recent documents" });
+  }
+});
+
+router.post("/actions/tallei_list_workflow_suggestions", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const suggestions = await listWorkflowSuggestions(auth);
+    res.json({ suggestions });
+  } catch (error) {
+    console.error("Error listing workflow suggestions:", error);
+    res.status(500).json({ error: "Failed to list workflow suggestions" });
+  }
+});
+
+router.post("/actions/tallei_create_workflow", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = workflowCreateSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const result = await createExplicitWorkflow({
+      auth,
+      title: body.title,
+      instruction: body.instruction,
+      scheduleRrule: body.schedule_rrule,
+      requiresConnector: body.requires_connector,
+      connectorProvider: body.connector_provider,
+      connectorScopeKeys: body.connector_scope_keys,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error creating workflow:", error);
+    res.status(500).json({ error: "Failed to create workflow" });
+  }
+});
+
+router.post("/actions/tallei_approve_workflow_suggestion", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = workflowSuggestionApproveSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const result = await approveWorkflowSuggestion({
+      auth,
+      suggestionId: body.suggestion_id,
+      scheduleRrule: body.schedule_rrule,
+      requiresConnector: body.requires_connector,
+      connectorProvider: body.connector_provider,
+      connectorScopeKeys: body.connector_scope_keys,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error approving workflow suggestion:", error);
+    res.status(500).json({ error: "Failed to approve workflow suggestion" });
+  }
+});
+
+router.post("/actions/tallei_dismiss_workflow_suggestion", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = workflowSuggestionDismissSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    await dismissWorkflowSuggestion({ auth, suggestionId: body.suggestion_id, reason: body.reason });
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error dismissing workflow suggestion:", error);
+    res.status(500).json({ error: "Failed to dismiss workflow suggestion" });
+  }
+});
+
+router.post("/actions/tallei_update_workflow_suggestion", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = workflowSuggestionUpdateSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    await updateWorkflowSuggestion({
+      auth,
+      suggestionId: body.suggestion_id,
+      title: body.title,
+      suggestedPrompt: body.suggested_prompt,
+    });
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error updating workflow suggestion:", error);
+    res.status(500).json({ error: "Failed to update workflow suggestion" });
+  }
+});
+
+router.post("/actions/tallei_start_connector_auth", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = connectorStartAuthSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const result = await startConnectorAuth({
+      auth,
+      provider: body.provider,
+      appKey: body.app_key ?? null,
+      requiredScopes: body.required_scopes,
+      redirectUri: body.redirect_uri ?? null,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error starting connector auth:", error);
+    res.status(500).json({ error: "Failed to start connector auth" });
+  }
+});
+
+router.post("/actions/tallei_continue_connector_auth", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = connectorContinueAuthSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const result = await continueConnectorAuth({
+      auth,
+      authSessionId: body.auth_session_id,
+      externalAccountId: body.external_account_id,
+      scopes: body.scopes,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error continuing connector auth:", error);
+    res.status(500).json({ error: "Failed to continue connector auth" });
+  }
+});
+
+router.post("/actions/tallei_list_connectors", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const connectors = await listConnectorAccounts(auth);
+    res.json({ connectors });
+  } catch (error) {
+    console.error("Error listing connectors:", error);
+    res.status(500).json({ error: "Failed to list connectors" });
+  }
+});
+
+router.post("/actions/tallei_get_workflow_run", chatGptActionAuthMiddleware, requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = workflowRunActionSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const run = await getWorkflowRun(auth, body.workflow_id, body.run_id, {
+      includeSdkDetails: body.include_sdk,
+    });
+    res.json(run);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error loading workflow run:", error);
+    res.status(500).json({ error: "Failed to load workflow run" });
+  }
+});
+
+router.post("/actions/tallei_approve_workflow_run", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = workflowRunActionSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const run = await approveWorkflowRun({ auth, workflowId: body.workflow_id, runId: body.run_id, channel: "chat" });
+    res.json(run);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error approving workflow run:", error);
+    res.status(500).json({ error: "Failed to approve workflow run" });
+  }
+});
+
+router.post("/actions/tallei_skip_workflow_run", chatGptActionAuthMiddleware, requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = workflowRunActionSchema.parse(req.body ?? {});
+    const auth = await resolveChatGptActionAuth(req, res);
+    if (!auth) return;
+    const run = await skipWorkflowRun({ auth, workflowId: body.workflow_id, runId: body.run_id, channel: "chat" });
+    res.json(run);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error skipping workflow run:", error);
+    res.status(500).json({ error: "Failed to skip workflow run" });
   }
 });
 
