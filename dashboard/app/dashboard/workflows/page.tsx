@@ -19,6 +19,7 @@ import {
   User,
   ChevronRight,
   Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { StickToBottom } from "use-stick-to-bottom";
 
@@ -566,46 +567,23 @@ export default function WorkflowsPage() {
   const hasContent = conversation !== null || inspectedWorkflow !== null;
 
   return (
-    <main className="mx-auto flex h-[calc(100vh-72px)] max-w-7xl gap-4 px-6 py-6">
+    <main className="flex h-[calc(100vh-72px)] gap-4 p-8 font-[var(--font-fustat)]">
       {/* =====================  CHAT AREA  ===================== */}
-      <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[#e4f5c6] bg-white shadow-sm">
-        {/* Header */}
-        <header className="flex items-center justify-between border-b border-[#e4f5c6] px-5 py-3">
-          <div className="flex items-center gap-3">
-            <div className="grid h-8 w-8 place-items-center rounded-lg bg-[#f8fdf2]">
-              <Sparkles size={16} className="text-[#7eb71b]" />
-            </div>
-            <div>
-              <h1 className="text-sm font-bold text-[#182506]">Workflows</h1>
-              <p className="text-[11px] text-[#7a9a4a]">Chat to build recurring tasks</p>
-            </div>
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[#e4f5c6] bg-white shadow-sm">
+        <header className="flex items-start justify-between gap-4 px-7 py-6">
+          <div>
+            <h1 className="text-4xl font-bold leading-tight tracking-[-0.01em] text-slate-950">Loops</h1>
+            <p className="mt-1 text-sm text-slate-500">Patterns Tallei noticed in your work</p>
           </div>
-          <div className="flex items-center gap-2">
-            <SessionDropdown
-              sessions={sessions}
-              workflows={workflows}
-              selectedId={
-                selectedSessionId ?? inspectedWorkflow?.id ?? null
-              }
-              onSelect={handleSelect}
-              onNew={handleNew}
-            />
-            <button
-              onClick={handleNew}
-              className="grid h-9 w-9 place-items-center rounded-xl border border-[#e4f5c6] text-[#7a9a4a] transition hover:border-[#7eb71b] hover:text-[#7eb71b]"
-              aria-label="New workflow chat"
-            >
-              <Plus size={16} />
-            </button>
-            <button
-              onClick={() => void loadData()}
-              disabled={loading}
-              className="grid h-9 w-9 place-items-center rounded-xl border border-[#e4f5c6] text-[#7a9a4a] transition hover:border-[#7eb71b] hover:text-[#7eb71b] disabled:opacity-40"
-              aria-label="Refresh"
-            >
-              <GitBranch size={16} />
-            </button>
-          </div>
+          <button
+            onClick={() => void loadData()}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-700 transition hover:border-[#7eb71b] hover:text-slate-900 disabled:opacity-40"
+            aria-label="Refresh"
+          >
+            <RefreshCw size={16} />
+            Refresh
+          </button>
         </header>
 
         {error ? (

@@ -8,14 +8,15 @@ import {
   Calendar,
   Check,
   Clock,
+  RotateCcw,
   Sparkles,
   X,
   Zap,
+  MessageCircle,
 } from "lucide-react";
 import Link from "next/link";
 
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -23,6 +24,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import Image from "next/image";
 
 /* ------------------------------------------------------------------ */
 //  Types
@@ -30,7 +32,7 @@ import {
 
 type Platform = "claude" | "chatgpt";
 
-type Episode = {
+type Conversation = {
   id: string;
   title: string;
   date: string;
@@ -43,13 +45,12 @@ type LoopInsight = {
   name: string;
   description: string;
   frequency: string;
-  episodeCount: number;
+  conversationCount: number;
   lastOccurred: string;
   nextPredicted: string;
   confidence: number;
   status: "detected" | "looped" | "dismissed";
-  episodes: Episode[];
-  threadPath: string;
+  conversations: Conversation[];
 };
 
 /* ------------------------------------------------------------------ */
@@ -63,12 +64,12 @@ const MOCK_LOOPS: LoopInsight[] = [
     description:
       "You've drafted a company newsletter 4 times. Always Friday afternoon. Always the same warm, founder-tone.",
     frequency: "Every Friday",
-    episodeCount: 4,
+    conversationCount: 4,
     lastOccurred: "2026-05-16T16:30:00Z",
     nextPredicted: "2026-05-23T16:00:00Z",
     confidence: 94,
     status: "detected",
-    episodes: [
+    conversations: [
       {
         id: "ep-1",
         title: "Week 18 update",
@@ -98,8 +99,6 @@ const MOCK_LOOPS: LoopInsight[] = [
         snippet: "Product launch week newsletter — metrics, quotes, CTA...",
       },
     ],
-    threadPath:
-      "M 20 80 Q 45 65 70 82 Q 95 98 120 78 Q 145 58 170 80",
   },
   {
     id: "loop-2",
@@ -107,12 +106,12 @@ const MOCK_LOOPS: LoopInsight[] = [
     description:
       "Twice this month you asked for a 'quick product summary' before a call. Same structure, same context.",
     frequency: "Before key calls",
-    episodeCount: 2,
+    conversationCount: 2,
     lastOccurred: "2026-05-14T09:00:00Z",
     nextPredicted: "2026-05-21T09:00:00Z",
     confidence: 71,
     status: "detected",
-    episodes: [
+    conversations: [
       {
         id: "ep-5",
         title: "Pre-investor sync",
@@ -128,7 +127,6 @@ const MOCK_LOOPS: LoopInsight[] = [
         snippet: "Summarized product features and integration roadmap for...",
       },
     ],
-    threadPath: "M 20 80 Q 50 55 80 80 Q 110 105 140 80",
   },
   {
     id: "loop-3",
@@ -136,12 +134,12 @@ const MOCK_LOOPS: LoopInsight[] = [
     description:
       "End-of-month investor updates. Tallei noticed the pattern forming — only 2 occurrences so far.",
     frequency: "End of month",
-    episodeCount: 2,
+    conversationCount: 2,
     lastOccurred: "2026-04-30T18:00:00Z",
     nextPredicted: "2026-05-31T18:00:00Z",
     confidence: 58,
     status: "detected",
-    episodes: [
+    conversations: [
       {
         id: "ep-7",
         title: "April investor memo",
@@ -157,7 +155,6 @@ const MOCK_LOOPS: LoopInsight[] = [
         snippet: "Investor update with new metrics dashboard and hiring plan...",
       },
     ],
-    threadPath: "M 20 80 Q 50 60 80 80 Q 110 100 140 80",
   },
 ];
 
@@ -169,6 +166,15 @@ function formatDate(ts: string): string {
   try {
     const d = new Date(ts);
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch {
+    return "";
+  }
+}
+
+function formatDay(ts: string): string {
+  try {
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined, { weekday: "short" });
   } catch {
     return "";
   }
@@ -196,180 +202,255 @@ function seededRandom(seed: string): number {
   return x - Math.floor(x);
 }
 
-function platformIcon(platform: Platform) {
-  return platform === "claude" ? (
-    <span className="text-[10px] font-bold text-[#d97757]">C</span>
-  ) : (
-    <span className="text-[10px] font-bold text-[#10a37f]">G</span>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-//  Components
-/* ------------------------------------------------------------------ */
-
-function WaxSeal({
-  looped,
-  onClick,
-}: {
-  looped: boolean;
-  onClick?: () => void;
-}) {
-  if (looped) {
-    return (
-      <motion.div
-        initial={{ scale: 0.8, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        className="flex items-center gap-1.5 rounded-full border border-[#bbf7d0] bg-[#ecfdf5] px-3 py-1.5 text-xs font-semibold text-[#166534]"
-      >
-        <Check size={12} />
-        Ritual active
-      </motion.div>
-    );
+function platformStyle(platform: Platform): {
+  bg: string;
+  text: string;
+  label: string;
+  iconPath: string;
+} {
+  if (platform === "claude") {
+    return { bg: "#D97757", text: "#fff", label: "Claude", iconPath: "/claude.svg" };
   }
+  return { bg: "#10a37f", text: "#fff", label: "ChatGPT", iconPath: "/chatgpt.svg" };
+}
+
+/* ------------------------------------------------------------------ */
+//  Accent color (only for CTAs and active states)
+/* ------------------------------------------------------------------ */
+
+const ACCENT = "#4338ca";
+
+/* ------------------------------------------------------------------ */
+//  Conversation Deck — always fanned
+/* ------------------------------------------------------------------ */
+
+function ConversationDeck({ conversations }: { conversations: Conversation[] }) {
+  const total = conversations.length;
+  const [hovered, setHovered] = useState(false);
+  const [hoveredCardId, setHoveredCardId] = useState<string | null>(null);
 
   return (
-    <motion.button
-      whileHover={{ scale: 1.04 }}
-      whileTap={{ scale: 0.96 }}
-      onClick={onClick}
-      className="group relative flex items-center gap-2"
+    <div
+      className="relative mx-auto h-40 w-full max-w-[390px]"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => {
+        setHovered(false);
+        setHoveredCardId(null);
+      }}
     >
-      <div className="relative grid h-10 w-10 place-items-center rounded-full bg-[#7eb71b] shadow-md transition group-hover:shadow-lg">
-        <div className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.25),transparent_60%)]" />
-        <Sparkles size={16} className="relative text-white" />
-      </div>
-      <span className="text-xs font-semibold text-[var(--text)]">
-        Make this a ritual
-      </span>
-    </motion.button>
-  );
-}
+      {conversations.map((conv, index) => {
+        const offset = index - (total - 1) / 2;
+        const restRotation =
+          (seededRandom(conv.id + "-rot") > 0.5 ? 1 : -1) * (Math.abs(offset) * 0.6 + 0.3);
+        const fanRotation = offset * 7;
+        const restX = offset * 34;
+        const fanX = offset * 58;
+        const restY = -index * 3;
+        const fanY = Math.abs(offset) * 4;
+        const ps = platformStyle(conv.platform);
+        const isCardHovered = hoveredCardId === conv.id;
 
-function EpisodeCard({
-  episode,
-  index,
-  total,
-  hovered,
-}: {
-  episode: Episode;
-  index: number;
-  total: number;
-  hovered: boolean;
-}) {
-  const center = (total - 1) / 2;
-  const offset = index - center;
-
-  const restRotation = (seededRandom(episode.id + "-rot") > 0.5 ? 1 : -1) * (Math.abs(offset) * 0.6 + 0.3);
-  const restX = offset * 2;
-  const restY = -index * 3;
-
-  const fanRotation = offset * 7;
-  const fanX = offset * 55;
-  const fanY = -Math.abs(offset) * 8;
-
-  return (
-    <TooltipProvider delayDuration={200}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <motion.div
-            animate={{
-              rotate: hovered ? fanRotation : restRotation,
-              x: hovered ? fanX : restX,
-              y: hovered ? fanY : restY,
-              zIndex: total - index,
-            }}
-            transition={{ type: "spring", stiffness: 280, damping: 24 }}
-            className="absolute left-1/2 top-0 w-40 cursor-default"
-            style={{ marginLeft: -80 }}
-          >
-            <Card className="border-[var(--border-light)] p-3 shadow-sm">
-              <div className="mb-1.5 flex items-center gap-1.5">
-                <div className="grid h-5 w-5 place-items-center rounded-md bg-[var(--muted)]">
-                  {platformIcon(episode.platform)}
-                </div>
-                <span className="text-[10px] font-medium text-[var(--text-muted)]">
-                  {formatDate(episode.date)}
-                </span>
-              </div>
-              <p className="truncate text-xs font-medium text-[var(--text)]">
-                {episode.title}
-              </p>
-              <p className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-[var(--text-2)]">
-                {episode.snippet}
-              </p>
-            </Card>
-          </motion.div>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-[220px]">
-          <p className="text-xs font-medium">{episode.title}</p>
-          <p className="mt-0.5 text-[11px] text-white/70">{episode.snippet}</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
-
-function RhythmStripe({
-  episodes,
-  nextPredicted,
-}: {
-  episodes: Episode[];
-  nextPredicted: string;
-}) {
-  const allDates = useMemo(() => {
-    const dates = episodes.map((e) => new Date(e.date).getTime());
-    dates.push(new Date(nextPredicted).getTime());
-    return dates;
-  }, [episodes, nextPredicted]);
-
-  const min = Math.min(...allDates);
-  const max = Math.max(...allDates);
-  const range = max - min || 1;
-
-  const position = (ts: number) => ((ts - min) / range) * 100;
-
-  return (
-    <TooltipProvider delayDuration={100}>
-      <div className="relative h-8 w-full">
-        <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-[var(--border-light)]" />
-        {episodes.map((ep) => {
-          const pos = position(new Date(ep.date).getTime());
-          return (
-            <Tooltip key={ep.id}>
+        return (
+          <TooltipProvider key={conv.id} delayDuration={200}>
+            <Tooltip>
               <TooltipTrigger asChild>
-                <div
-                  className="absolute top-1/2 h-2.5 w-0.5 -translate-y-1/2 rounded-full bg-[var(--text-muted)] cursor-default"
-                  style={{ left: `${pos}%` }}
-                />
+                <motion.div
+                  initial={{ opacity: 0, y: 20, rotate: 0 }}
+                  animate={{
+                    opacity: 1,
+                    x: hovered ? fanX : restX,
+                    y: hovered ? fanY : restY,
+                    rotate: hovered ? fanRotation : restRotation,
+                  }}
+                  whileHover={{ scale: 1.04 }}
+                  onMouseEnter={() => setHoveredCardId(conv.id)}
+                  onMouseLeave={() =>
+                    setHoveredCardId((current) => (current === conv.id ? null : current))
+                  }
+                  transition={{
+                    type: "spring",
+                    stiffness: hovered ? 300 : 260,
+                    damping: hovered ? 20 : 24,
+                    delay: index * 0.04,
+                  }}
+                  className="absolute left-1/2 top-1 w-[174px]"
+                  style={{ marginLeft: -87, zIndex: isCardHovered ? 200 : index }}
+                >
+                  <Card className="border-[var(--border-light)] p-3 shadow-sm">
+                    <div className="mb-1 flex items-center justify-between gap-1">
+                      <span
+                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                        style={{ background: ps.bg, color: ps.text }}
+                      >
+                        <Image
+                          src={ps.iconPath}
+                          alt={`${ps.label} icon`}
+                          width={12}
+                          height={12}
+                          className="h-3 w-3 rounded-[2px] bg-white/90 p-[1px]"
+                        />
+                        {ps.label}
+                      </span>
+                      <span className="text-[10px] text-[var(--text-muted)]">
+                        {formatDate(conv.date)}
+                      </span>
+                    </div>
+                    <p className="truncate text-xs font-medium text-[var(--text)]">
+                      {conv.title}
+                    </p>
+                  </Card>
+                </motion.div>
               </TooltipTrigger>
-              <TooltipContent side="top">
-                <p className="text-xs font-medium">{ep.title}</p>
-                <p className="text-[11px] text-white/70">{formatDate(ep.date)}</p>
+              <TooltipContent side="top" className="max-w-[200px]">
+                <p className="text-xs font-medium">{conv.title}</p>
+                <p className="mt-0.5 text-[11px] text-white/70">{conv.snippet}</p>
               </TooltipContent>
             </Tooltip>
-          );
-        })}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <motion.div
-              className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full border-2 border-[#7eb71b] bg-white cursor-default"
-              style={{ left: `${position(new Date(nextPredicted).getTime())}%`, marginLeft: -6 }}
-              animate={{ scale: [1, 1.2, 1] }}
-              transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-            />
-          </TooltipTrigger>
-          <TooltipContent side="top">
-            <p className="text-xs font-medium">Next predicted</p>
-            <p className="text-[11px] text-white/70">{formatDate(nextPredicted)}</p>
-          </TooltipContent>
-        </Tooltip>
-      </div>
-    </TooltipProvider>
+          </TooltipProvider>
+        );
+      })}
+    </div>
   );
 }
 
-function EchoStack({
+/* ------------------------------------------------------------------ */
+//  Creative Timeline inside card
+/* ------------------------------------------------------------------ */
+
+function CreativeTimeline({
+  conversations,
+  nextPredicted,
+  loopId,
+}: {
+  conversations: Conversation[];
+  nextPredicted: string;
+  loopId: string;
+}) {
+  const items = useMemo(() => {
+    const sorted = [...conversations].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+    return [
+      ...sorted.map((c) => ({ ...c, kind: "past" as const })),
+      {
+        id: "next",
+        title: "Next",
+        date: nextPredicted,
+        platform: "claude" as Platform,
+        snippet: "Tallei will prepare this",
+        kind: "future" as const,
+      },
+    ];
+  }, [conversations, nextPredicted]);
+
+  const count = items.length;
+  const width = 260;
+  const height = 54;
+  const padding = 28;
+  const usableWidth = width - padding * 2;
+  const step = usableWidth / (count - 1);
+
+  const pathPoints = items.map((_, i) => {
+    const x = padding + i * step;
+    const wave = Math.sin(i * 1.2 + seededRandom(loopId) * 10) * 8;
+    const y = height / 2 + wave;
+    return { x, y };
+  });
+
+  const pathD = pathPoints.reduce((acc, p, i) => {
+    if (i === 0) return `M ${p.x} ${p.y}`;
+    const prev = pathPoints[i - 1];
+    const cpx1 = prev.x + step * 0.4;
+    const cpy1 = prev.y;
+    const cpx2 = p.x - step * 0.4;
+    const cpy2 = p.y;
+    return `${acc} C ${cpx1} ${cpy1}, ${cpx2} ${cpy2}, ${p.x} ${p.y}`;
+  }, "");
+
+  return (
+    <svg
+      width={width}
+      height={height + 16}
+      viewBox={`0 0 ${width} ${height + 16}`}
+      className="mx-auto block"
+    >
+      <motion.path
+        d={pathD}
+        fill="none"
+        stroke="#e2e8f0"
+        strokeWidth={5}
+        strokeLinecap="round"
+        initial={{ pathLength: 0 }}
+        animate={{ pathLength: 1 }}
+        transition={{ duration: 1.2, ease: "easeOut" }}
+      />
+      <motion.path
+        d={pathD}
+        fill="none"
+        stroke="#cbd5e1"
+        strokeWidth={2}
+        strokeLinecap="round"
+        initial={{ pathLength: 0 }}
+        animate={{ pathLength: 1 }}
+        transition={{ duration: 1.2, ease: "easeOut" }}
+      />
+
+      {items.map((item, i) => {
+        const p = pathPoints[i];
+        const isFuture = item.kind === "future";
+        return (
+          <g key={item.id}>
+            <circle
+              cx={p.x}
+              cy={p.y}
+              r={9}
+              fill={isFuture ? "#fff" : "#f8fafc"}
+              stroke={isFuture ? "#0f172a" : "#cbd5e1"}
+              strokeWidth={2}
+            />
+            {isFuture ? (
+              <motion.circle
+                cx={p.x}
+                cy={p.y}
+                r={3.5}
+                fill={ACCENT}
+                animate={{ r: [3.5, 4.5, 3.5] }}
+                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+              />
+            ) : (
+              <circle cx={p.x} cy={p.y} r={2.5} fill="#94a3b8" />
+            )}
+            <text
+              x={p.x}
+              y={height + 12}
+              textAnchor="middle"
+              className="fill-[var(--text-muted)]"
+              style={{ fontSize: 9, fontFamily: "inherit" }}
+            >
+              {isFuture ? formatDay(item.date) : formatDate(item.date)}
+            </text>
+            <rect
+              x={p.x - 14}
+              y={p.y - 14}
+              width={28}
+              height={28}
+              fill="transparent"
+              cursor="default"
+            >
+              <title>{item.title}{"\n"}{isFuture ? "Predicted" : formatDate(item.date)}</title>
+            </rect>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+//  Loop Card
+/* ------------------------------------------------------------------ */
+
+function LoopCard({
   loop,
   index,
   onDismiss,
@@ -380,135 +461,203 @@ function EchoStack({
   onDismiss: (id: string) => void;
   onLoop: (id: string) => void;
 }) {
-  const [hovered, setHovered] = useState(false);
   const [looped, setLooped] = useState(loop.status === "looped");
   const days = daysUntil(loop.nextPredicted);
 
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 40, rotate: (index % 2 === 0 ? -1 : 1) * (seededRandom(loop.id + "-init") * 1.5) }}
+      initial={{ opacity: 0, y: 30 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.9, y: 20 }}
-      transition={{ type: "spring", stiffness: 200, damping: 22, delay: index * 0.1 }}
-      className="relative flex flex-col gap-4"
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      exit={{ opacity: 0, scale: 0.96 }}
+      transition={{ type: "spring", stiffness: 260, damping: 24, delay: index * 0.08 }}
     >
-      <Card className="relative flex flex-col gap-4 overflow-hidden p-5 transition-shadow hover:shadow-md">
-        {/* Subtle top accent */}
-        <div
-          className={`absolute left-0 right-0 top-0 h-0.5 ${
-            loop.confidence >= 80
-              ? "bg-[#7eb71b]"
-              : loop.confidence >= 60
-                ? "bg-[var(--text-muted)]"
-                : "bg-[var(--border-light)]"
-          }`}
-        />
-
-        {/* Dismiss */}
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          onClick={() => onDismiss(loop.id)}
-          className="absolute right-3 top-3 opacity-0 transition-opacity hover:bg-[var(--muted)] group-hover:opacity-100"
-          style={{ opacity: hovered ? 1 : 0 }}
-        >
-          <X size={12} />
-        </Button>
-
-        {/* Header */}
-        <div>
-          <div className="mb-1 flex items-center gap-2">
-            <Badge
-              variant={
-                loop.confidence >= 80
-                  ? "default"
-                  : loop.confidence >= 60
-                    ? "secondary"
-                    : "outline"
-              }
-            >
-              {loop.confidence}% match
-            </Badge>
-            <span className="text-[10px] text-[var(--text-muted)]">
-              {loop.episodeCount} episodes
-            </span>
-          </div>
-          <h3 className="text-base font-bold text-[var(--text)]">{loop.name}</h3>
-          <p className="mt-1 max-w-[320px] text-sm leading-relaxed text-[var(--text-2)]">
-            {loop.description}
-          </p>
-        </div>
-
-        {/* Stack visualization */}
-        <div className="relative h-44 w-full">
-          <svg
-            className="pointer-events-none absolute inset-0 h-full w-full"
-            viewBox="0 0 200 120"
-            preserveAspectRatio="none"
-          >
-            <motion.path
-              d={loop.threadPath}
-              fill="none"
-              stroke="#7eb71b"
-              strokeWidth={1.5}
-              strokeLinecap="round"
-              strokeDasharray={300}
-              initial={{ strokeDashoffset: 300 }}
-              animate={{ strokeDashoffset: 0 }}
-              transition={{ duration: 1.2, delay: index * 0.15 + 0.3, ease: "easeOut" }}
-              opacity={0.35}
-            />
-          </svg>
-
-          <div className="relative mx-auto h-full w-full max-w-[200px]">
-            {loop.episodes.map((ep, i) => (
-              <EpisodeCard
-                key={ep.id}
-                episode={ep}
-                index={i}
-                total={loop.episodes.length}
-                hovered={hovered}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-end justify-between gap-3">
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-2)]">
-              <Calendar size={11} className="text-[var(--text-muted)]" />
+      <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
+        {/* Slate-tinted header band */}
+        <div className="flex items-center justify-between bg-slate-50 px-5 py-3">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-md bg-white px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200">
+              <RotateCcw size={11} className="text-slate-500" />
               {loop.frequency}
             </div>
-            <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-2)]">
-              <Clock size={11} className="text-[var(--text-muted)]" />
-              {days > 0
-                ? `Next in ${days} day${days === 1 ? "" : "s"}`
-                : "Due soon"}
-            </div>
+            {days <= 3 && days > 0 && (
+              <div className="flex items-center gap-1 rounded-md bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+                <Clock size={10} />
+                Soon
+              </div>
+            )}
           </div>
-
-          <WaxSeal
-            looped={looped}
-            onClick={() => {
-              setLooped(true);
-              onLoop(loop.id);
-            }}
-          />
+          <button
+            onClick={() => onDismiss(loop.id)}
+            className="grid h-7 w-7 place-items-center rounded-md text-slate-400 opacity-0 transition hover:bg-white hover:text-slate-700 hover:shadow-sm group-hover:opacity-100"
+          >
+            <X size={13} />
+          </button>
         </div>
 
-        {/* Rhythm stripe */}
-        <div className="pt-1">
-          <RhythmStripe
-            episodes={loop.episodes}
-            nextPredicted={loop.nextPredicted}
-          />
+        <div className="px-5 pb-5 pt-3">
+          {/* Title + meta */}
+          <div className="mb-1">
+            <h3 className="text-base font-bold text-[var(--text)]">{loop.name}</h3>
+            <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
+              <MessageCircle size={11} />
+              {loop.conversationCount} conversations
+            </p>
+          </div>
+
+          {/* Deck */}
+          <div className="mb-1 mt-4">
+            <ConversationDeck conversations={loop.conversations} />
+          </div>
+
+          {/* Creative timeline */}
+          <div className="mb-2 mt-3 flex justify-center">
+            <CreativeTimeline
+              conversations={loop.conversations}
+              nextPredicted={loop.nextPredicted}
+              loopId={loop.id}
+            />
+          </div>
+
+          {/* Footer */}
+          <div className="flex items-center justify-between gap-3 border-t border-[var(--border-light)] pt-4">
+            <div className="flex items-center gap-1.5 text-xs text-[var(--text-2)]">
+              <Calendar size={13} className="text-[var(--text-muted)]" />
+              {days > 0 ? (
+                <span>
+                  Next in <span className="font-semibold text-[var(--text)]">{days} days</span>
+                </span>
+              ) : (
+                <span className="font-semibold" style={{ color: ACCENT }}>
+                  Due today
+                </span>
+              )}
+            </div>
+
+            {!looped ? (
+              <Button
+                onClick={() => {
+                  setLooped(true);
+                  onLoop(loop.id);
+                }}
+                className="h-8 gap-2 rounded-none px-4 text-sm text-white"
+                style={{ backgroundColor: ACCENT }}
+              >
+                <RotateCcw size={14} />
+                Loop this
+              </Button>
+            ) : (
+              <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700">
+                <Check size={14} className="text-slate-500" />
+                Ritual active
+              </div>
+            )}
+          </div>
         </div>
       </Card>
     </motion.div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+//  Rhythm — compact uptime-style bar chart
+/* ------------------------------------------------------------------ */
+
+function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
+  const loopColors: Record<string, string> = {
+    "loop-1": "#6366f1",
+    "loop-2": "#10b981",
+    "loop-3": "#f59e0b",
+  };
+
+  // Generate 60 bars
+  const bars = useMemo(() => {
+    const result: Array<{ status: "ok" | "warn" | "late"; loopId?: string }> = [];
+    for (let d = 0; d < 60; d++) {
+      const r = seededRandom(`merged:${d}`);
+      if (r > 0.94) result.push({ status: "late", loopId: loops[d % loops.length]?.id });
+      else if (r > 0.82) result.push({ status: "warn", loopId: loops[d % loops.length]?.id });
+      else result.push({ status: "ok", loopId: loops[d % loops.length]?.id });
+    }
+    return result;
+  }, [loops]);
+
+  const upcoming = loops.map((loop) => ({
+    name: loop.name,
+    days: daysUntil(loop.nextPredicted),
+    color: loopColors[loop.id] ?? "#94a3b8",
+  }));
+
+  return (
+    <footer className="border-t border-[var(--border-light)] px-6 py-5">
+      <div className="mx-auto max-w-5xl">
+        {/* Header */}
+        <div className="mb-4 flex items-center justify-between">
+          <span className="text-sm font-semibold text-[var(--text)]">Your rhythm</span>
+          <span className="text-xs text-[var(--text-muted)]">60-day activity</span>
+        </div>
+
+        {/* Bar chart */}
+        <div className="mb-2 flex items-center gap-[2px]">
+          {bars.map((bar, i) => {
+            const color = bar.loopId ? loopColors[bar.loopId] ?? "#94a3b8" : "#94a3b8";
+            let opacity = 0.15;
+            if (bar.status === "late") opacity = 1;
+            else if (bar.status === "warn") opacity = 0.65;
+
+            return (
+              <TooltipProvider key={i} delayDuration={80}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div
+                      className="h-6 flex-1 rounded-[2px] cursor-default transition hover:brightness-125"
+                      style={{ backgroundColor: color, opacity }}
+                    />
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    <p className="text-[11px]">
+                      {bar.status === "late" ? "High activity" : bar.status === "warn" ? "Moderate" : "Normal"}
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            );
+          })}
+        </div>
+
+        {/* Date labels */}
+        <div className="flex items-center justify-between text-[10px] text-[var(--text-muted)] mb-4">
+          <span>60 days ago</span>
+          <span>Today</span>
+        </div>
+
+        {/* Legend + upcoming */}
+        <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-[var(--border-light)]">
+          <div className="flex items-center gap-3">
+            {loops.map((loop) => (
+              <div key={loop.id} className="flex items-center gap-1.5">
+                <div
+                  className="h-2 w-2 rounded-full"
+                  style={{ backgroundColor: loopColors[loop.id] ?? "#94a3b8" }}
+                />
+                <span className="text-xs text-[var(--text-2)]">{loop.name}</span>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-4">
+            {upcoming.map((u) => (
+              <div key={u.name} className="flex items-center gap-1.5">
+                <span className="text-xs text-[var(--text-2)]">
+                  {u.name}{" "}
+                  <span style={{ color: u.color }}>→</span>{" "}
+                  <span className="font-medium text-[var(--text)]">Next in {u.days}d</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </footer>
   );
 }
 
@@ -540,41 +689,32 @@ export default function LoopsPage() {
     <TooltipProvider delayDuration={150}>
       <div className="flex h-[calc(100vh-72px)] flex-col">
         {/* Header */}
-        <header className="flex flex-wrap items-center justify-between gap-4 border-b bg-[var(--surface)] px-6 py-4">
-          <div className="flex items-center gap-3">
-            <div className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--muted)]">
-              <Sparkles size={18} className="text-[#7eb71b]" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-[var(--text)]">Loops</h1>
-              <p className="text-xs text-[var(--text-muted)]">
-                Patterns Tallei noticed in your work
-              </p>
-            </div>
+        <header className="flex mx-auto max-w-5xl w-full flex-wrap items-end justify-between gap-4 border-b py-5">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-[var(--text)]">Loops</h1>
+            <p className="mt-0.5 text-sm text-[var(--text-2)]">
+              Patterns Tallei noticed in your work
+            </p>
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="flex items-center rounded-xl border border-[var(--border-light)] bg-[var(--muted)] p-0.5">
+            <div className="flex items-center border border-[var(--border-light)] bg-[var(--muted)] p-0.5">
               {(["all", "high", "medium"] as const).map((f) => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  className={`px-3 py-1.5 text-xs font-medium transition ${
                     filter === f
                       ? "bg-[var(--surface)] text-[var(--text)] shadow-sm"
                       : "text-[var(--text-muted)] hover:text-[var(--text-2)]"
                   }`}
                 >
-                  {f === "all"
-                    ? "All"
-                    : f === "high"
-                      ? "High confidence"
-                      : "Medium confidence"}
+                  {f === "all" ? "All" : f === "high" ? "High confidence" : "Medium"}
                 </button>
               ))}
             </div>
 
-            <Button variant="outline" size="sm" asChild className="gap-1.5">
+            <Button asChild className="gap-1.5 h-9 bg-orange-500 text-white hover:bg-orange-600 rounded-none">
               <Link href="/dashboard/workflows">
                 <Bot size={14} />
                 Builder
@@ -593,8 +733,8 @@ export default function LoopsPage() {
                 animate={{ opacity: 1 }}
                 className="flex h-full flex-col items-center justify-center gap-5 text-center"
               >
-                <div className="grid h-16 w-16 place-items-center rounded-2xl bg-[var(--surface)] shadow-sm">
-                  <Sparkles size={28} className="text-[var(--text-muted)]" />
+                <div className="grid h-16 w-16 place-items-center rounded-xl bg-slate-100 shadow-sm">
+                  <Sparkles size={28} className="text-slate-400" />
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-[var(--text)]">
@@ -606,7 +746,11 @@ export default function LoopsPage() {
                     recurring dream.
                   </p>
                 </div>
-                <Button asChild className="gap-2 bg-[#7eb71b] text-white hover:bg-[#6a9e18]">
+                <Button
+                  asChild
+                  className="gap-2 rounded-full text-white"
+                  style={{ backgroundColor: ACCENT }}
+                >
                   <Link href="/dashboard/workflows">
                     <Zap size={14} />
                     Open workflow builder
@@ -614,61 +758,25 @@ export default function LoopsPage() {
                 </Button>
               </motion.div>
             ) : (
-              <div className="mx-auto grid max-w-5xl grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
-                {filtered.map((loop, i) => (
-                  <EchoStack
-                    key={loop.id}
-                    loop={loop}
-                    index={i}
-                    onDismiss={dismissLoop}
-                    onLoop={activateLoop}
-                  />
-                ))}
+              <div className="mx-auto max-w-5xl">
+                {/* Cards grid */}
+                <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
+                  {filtered.map((loop, i) => (
+                    <LoopCard
+                      key={loop.id}
+                      loop={loop}
+                      index={i}
+                      onDismiss={dismissLoop}
+                      onLoop={activateLoop}
+                    />
+                  ))}
+                </div>
               </div>
             )}
           </AnimatePresence>
         </main>
 
-        {/* Bottom rhythm stripe (shared) */}
-        {filtered.length > 0 && (
-          <div className="border-t bg-[var(--surface)] px-6 py-3">
-            <div className="mx-auto flex max-w-5xl items-center gap-4">
-              <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                Your rhythm
-              </span>
-              <div className="relative h-6 flex-1">
-                <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-[var(--border-light)]" />
-                {filtered.map((loop) => {
-                  const d = daysUntil(loop.nextPredicted);
-                  const pos = Math.max(0, Math.min(100, 100 - d * 8));
-                  return (
-                    <TooltipProvider key={loop.id} delayDuration={100}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <div
-                            className="absolute top-1/2 flex -translate-y-1/2 flex-col items-center cursor-default"
-                            style={{ left: `${pos}%` }}
-                          >
-                            <span className="mb-1 whitespace-nowrap text-[9px] font-medium text-[var(--text-2)]">
-                              {loop.name}
-                            </span>
-                            <div className="h-2.5 w-2.5 rounded-full bg-[#7eb71b]" />
-                          </div>
-                        </TooltipTrigger>
-                        <TooltipContent side="top">
-                          <p className="text-xs font-medium">{loop.name}</p>
-                          <p className="text-[11px] text-white/70">
-                            {d > 0 ? `Next in ${d} days` : "Due soon"} · {loop.confidence}% match
-                          </p>
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
+        {filtered.length > 0 && <RhythmFooterTimeline loops={filtered} />}
       </div>
     </TooltipProvider>
   );
