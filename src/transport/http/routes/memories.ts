@@ -9,6 +9,12 @@ import {
   forgetPreference,
   deleteMemory,
 } from "../../../services/memory.js";
+import {
+  getMemoryCleanupRun,
+  listMemoryCleanupRuns,
+  resetMemoryCleanupReviewFlags,
+  runMemoryCleanupForUser,
+} from "../../../services/memory-cleanup.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -40,6 +46,14 @@ const recallSchema = z.object({
 const listSchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(200),
   offset: z.coerce.number().int().min(0).default(0),
+});
+
+const cleanupRunSchema = z.object({
+  dryRun: z.boolean().optional(),
+  maxMemories: z.number().int().min(1).max(500).optional(),
+  processAll: z.boolean().optional(),
+  includeReviewed: z.boolean().optional(),
+  logImplicitKeeps: z.boolean().optional(),
 });
 
 
@@ -122,6 +136,61 @@ router.get("/recall", requireScopes(["memory:read"]), async (req: AuthRequest, r
   }
 });
 
+router.post("/cleanup/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = cleanupRunSchema.parse(req.body ?? {});
+    const run = await runMemoryCleanupForUser(req.authContext!, {
+      runReason: "manual",
+      dryRun: body.dryRun ?? true,
+      maxMemories: body.maxMemories,
+      processAll: body.processAll ?? true,
+      includeReviewed: body.includeReviewed ?? false,
+      logImplicitKeeps: body.logImplicitKeeps ?? false,
+    });
+    res.status(201).json({ run });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error running memory cleanup:", error);
+    res.status(500).json({ error: "Failed to run memory cleanup" });
+  }
+});
+
+router.post("/cleanup/reset", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await resetMemoryCleanupReviewFlags(req.authContext!);
+    res.json(result);
+  } catch (error) {
+    console.error("Error resetting memory cleanup review flags:", error);
+    res.status(500).json({ error: "Failed to reset memory cleanup review flags" });
+  }
+});
+
+router.get("/cleanup/runs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const runs = await listMemoryCleanupRuns(req.authContext!);
+    res.json({ runs });
+  } catch (error) {
+    console.error("Error listing memory cleanup runs:", error);
+    res.status(500).json({ error: "Failed to list memory cleanup runs" });
+  }
+});
+
+router.get("/cleanup/runs/:id", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const run = await getMemoryCleanupRun(req.authContext!, String(req.params.id));
+    if (!run) {
+      res.status(404).json({ error: "Memory cleanup run not found" });
+      return;
+    }
+    res.json({ run });
+  } catch (error) {
+    console.error("Error reading memory cleanup run:", error);
+    res.status(500).json({ error: "Failed to read memory cleanup run" });
+  }
+});
 
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {

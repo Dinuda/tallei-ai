@@ -984,6 +984,104 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_cleanup_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL
+          CHECK (status IN ('running', 'completed', 'failed')),
+        run_reason TEXT NOT NULL
+          CHECK (run_reason IN ('daily_intelligence', 'manual')),
+        dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_runs_scope_created
+        ON memory_cleanup_runs(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_runs_scope_status
+        ON memory_cleanup_runs(tenant_id, user_id, status, updated_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_cleanup_proposals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id UUID NOT NULL REFERENCES memory_cleanup_runs(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        proposal_type TEXT NOT NULL
+          CHECK (proposal_type IN ('bucket', 'keep', 'promote', 'merge', 'rewrite', 'prune')),
+        status TEXT NOT NULL
+          CHECK (status IN ('proposed', 'contested', 'approved', 'rejected', 'applied', 'failed')),
+        source_memory_ids UUID[] NOT NULL,
+        target_memory_id UUID,
+        proposed_content TEXT,
+        rationale TEXT NOT NULL,
+        risk_level TEXT NOT NULL
+          CHECK (risk_level IN ('low', 'medium', 'high')),
+        confidence NUMERIC(5,4) NOT NULL DEFAULT 0,
+        cleanup_bucket TEXT
+          CHECK (cleanup_bucket IS NULL OR cleanup_bucket IN ('short_term', 'long_term', 'permanent')),
+        cleanup_bucket_reason TEXT,
+        cleanup_bucket_confidence NUMERIC(5,4),
+        consolidator_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        adversary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        debate_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        judge_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        apply_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_proposals_run
+        ON memory_cleanup_proposals(run_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_proposals_scope_status
+        ON memory_cleanup_proposals(tenant_id, user_id, status, updated_at DESC);
+    `);
+
+    await client.query(`
+      ALTER TABLE memory_cleanup_proposals
+      DROP CONSTRAINT IF EXISTS memory_cleanup_proposals_proposal_type_check;
+      ALTER TABLE memory_cleanup_proposals
+      ADD CONSTRAINT memory_cleanup_proposals_proposal_type_check
+      CHECK (proposal_type IN ('bucket', 'keep', 'promote', 'merge', 'rewrite', 'prune'));
+      ALTER TABLE memory_cleanup_proposals
+      ADD COLUMN IF NOT EXISTS cleanup_bucket TEXT,
+      ADD COLUMN IF NOT EXISTS cleanup_bucket_reason TEXT,
+      ADD COLUMN IF NOT EXISTS cleanup_bucket_confidence NUMERIC(5,4);
+      ALTER TABLE memory_cleanup_proposals
+      DROP CONSTRAINT IF EXISTS memory_cleanup_proposals_cleanup_bucket_check;
+      ALTER TABLE memory_cleanup_proposals
+      ADD CONSTRAINT memory_cleanup_proposals_cleanup_bucket_check
+      CHECK (cleanup_bucket IS NULL OR cleanup_bucket IN ('short_term', 'long_term', 'permanent'));
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_cleanup_memory_reviews (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        memory_id UUID NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+        last_run_id UUID NOT NULL REFERENCES memory_cleanup_runs(id) ON DELETE CASCADE,
+        status TEXT NOT NULL
+          CHECK (status IN ('reviewed', 'applied', 'skipped')),
+        reviewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE (tenant_id, user_id, memory_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_memory_reviews_scope_reviewed
+        ON memory_cleanup_memory_reviews(tenant_id, user_id, reviewed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_memory_reviews_run
+        ON memory_cleanup_memory_reviews(last_run_id);
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS oauth_clients (
         client_id TEXT PRIMARY KEY,
         client_info JSONB NOT NULL,

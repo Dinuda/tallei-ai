@@ -21,6 +21,11 @@ export interface ChatCompletionResponse {
   readonly text: string;
   readonly model: string;
   readonly finishReason: string | null;
+  readonly usage?: {
+    readonly promptTokens?: number;
+    readonly completionTokens?: number;
+    readonly totalTokens?: number;
+  };
 }
 
 export interface EmbeddingRequest {

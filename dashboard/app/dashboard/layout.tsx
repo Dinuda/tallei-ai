@@ -92,6 +92,19 @@ const ICONS = {
       <path d="M12.5 10a5 5 0 0 1-8 1.5M4 11V8.5h2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  workflows: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <rect x="1.5" y="2.5" width="4" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="9.5" y="8.5" width="4" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.5 4.5h2v2h2M3.5 6.5v2h2M9.5 6.5v2h2M7.5 8.5h2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
+  cleanup: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M7.5 1.8 12 3.6v3.2c0 2.8-1.8 5.2-4.5 6.4C4.8 12 3 9.6 3 6.8V3.6l4.5-1.8Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M5.2 7.4 6.7 8.9 9.9 5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
 };
 
 const NAV: NavSection[] = [
@@ -101,6 +114,7 @@ const NAV: NavSection[] = [
       { id: "collab", label: "Collab", href: "/dashboard/tasks", icon: ICONS.collab },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
       { id: "loops", label: "Loops", href: "/dashboard/loops", icon: ICONS.loops },
+      { id: "workflows", label: "Workflows", href: "/dashboard/workflows", icon: ICONS.workflows },
       { id: "connectors", label: "AI Assistants", href: "/dashboard/setup", icon: ICONS.aiAssistants },
       { id: "connected-apps", label: "Connected Apps", href: "/dashboard/integrations", icon: ICONS.connectedApps },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
@@ -108,7 +122,10 @@ const NAV: NavSection[] = [
   },
   {
     label: "DEVELOPER",
-    items: [{ id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity }],
+    items: [
+      { id: "cleanup", label: "Memory Cleanup", href: "/dashboard/memory-cleanup", icon: ICONS.cleanup },
+      { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
+    ],
   },
 ];
 

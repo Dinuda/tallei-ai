@@ -93,6 +93,8 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_NOTIFICATIONS__WHATSAPP_WEBHOOK_TOKEN", oldKey: "NOTIFICATIONS_WHATSAPP_WEBHOOK_TOKEN" },
   { newKey: "TALLEI_NOTIFICATIONS__DELIVERY_MAX_ATTEMPTS", oldKey: "NOTIFICATIONS_DELIVERY_MAX_ATTEMPTS" },
   { newKey: "TALLEI_NOTIFICATIONS__DELIVERY_RETRY_BASE_MS", oldKey: "NOTIFICATIONS_DELIVERY_RETRY_BASE_MS" },
+  { newKey: "TALLEI_ADMIN__EMAIL", oldKey: "TALLEI_ADMIN_EMAIL" },
+  { newKey: "TALLEI_ADMIN__EMAIL", oldKey: "ADMIN_EMAIL" },
   // Browser automation
   { newKey: "TALLEI_BROWSER__WORKER_BASE_URL",  oldKey: "BROWSER_WORKER_BASE_URL" },
   { newKey: "TALLEI_BROWSER__WORKER_API_KEY",   oldKey: "BROWSER_WORKER_API_KEY" },
@@ -397,6 +399,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     notificationsWhatsAppWebhookToken: readStringEnv(e, "TALLEI_NOTIFICATIONS__WHATSAPP_WEBHOOK_TOKEN"),
     notificationsDeliveryMaxAttempts: readIntEnv(e, "TALLEI_NOTIFICATIONS__DELIVERY_MAX_ATTEMPTS", 3),
     notificationsDeliveryRetryBaseMs: readIntEnv(e, "TALLEI_NOTIFICATIONS__DELIVERY_RETRY_BASE_MS", 2_000),
+    adminEmail: readStringEnv(e, "TALLEI_ADMIN__EMAIL"),
     composioApiKey: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_API_KEY"),
     composioBaseUrl: normalizeBaseUrl(readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_BASE_URL", "https://backend.composio.dev")),
     composioAuthConfigId: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_AUTH_CONFIG_ID"),

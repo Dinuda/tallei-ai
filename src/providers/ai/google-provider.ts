@@ -31,6 +31,24 @@ function finishReasonFromResponse(response: unknown): string | null {
   return candidates?.[0]?.finishReason ?? null;
 }
 
+function usageFromResponse(response: unknown): ChatCompletionResponse["usage"] {
+  const usage = response && typeof response === "object"
+    ? (response as {
+        usageMetadata?: {
+          promptTokenCount?: number;
+          candidatesTokenCount?: number;
+          totalTokenCount?: number;
+        };
+      }).usageMetadata
+    : null;
+  if (!usage) return undefined;
+  return {
+    promptTokens: usage.promptTokenCount,
+    completionTokens: usage.candidatesTokenCount,
+    totalTokens: usage.totalTokenCount,
+  };
+}
+
 export class GoogleProvider implements AiProvider {
   readonly name = "google" as const;
 
@@ -67,6 +85,7 @@ export class GoogleProvider implements AiProvider {
         text: response.text ?? "",
         model,
         finishReason: finishReasonFromResponse(response),
+        usage: usageFromResponse(response),
       };
     } catch (error) {
       throw mapProviderError(this.name, error);

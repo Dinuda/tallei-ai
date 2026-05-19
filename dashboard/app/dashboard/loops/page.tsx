@@ -735,7 +735,7 @@ export default function LoopsPage() {
               >
                 <div className="grid h-16 w-16 place-items-center rounded-xl bg-slate-100 shadow-sm">
                   <Sparkles size={28} className="text-slate-400" />
-                </div>
+                </div>sk
                 <div>
                   <h2 className="text-lg font-semibold text-[var(--text)]">
                     Tallei is watching your work

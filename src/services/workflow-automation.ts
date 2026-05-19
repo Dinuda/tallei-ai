@@ -22,6 +22,7 @@ import {
   type WorkflowSdkRunStatus,
 } from "./workflow-sdk-runtime.js";
 import { encryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
+import { runMemoryCleanupForUser } from "./memory-cleanup.js";
 
 export type ConnectorSetupState =
   | "not_required"
@@ -2500,7 +2501,16 @@ export async function runDailyIntelligencePassForUserInternal(
     }
   }
 
-  const memoryCleanup = await buildMemoryCleanupSummary(auth);
+  const memoryCleanupRun = await runMemoryCleanupForUser(auth, {
+    runReason: "daily_intelligence",
+    dryRun: false,
+    maxMemories: 200,
+  });
+  const memoryCleanup = {
+    runId: memoryCleanupRun.id,
+    status: memoryCleanupRun.status,
+    ...memoryCleanupRun.summary,
+  };
 
   const recentActivities = await pool.query<{ content_text: string }>(
     `SELECT content_text
@@ -2557,6 +2567,13 @@ export async function runDailyIntelligencePassForUserInternal(
       JSON.stringify({ suggestionCount: suggestions.length, memoryCleanup }),
     ]
   );
+
+  await sendDailyMemoryCleanupAdminEmail({
+    auth,
+    runId,
+    suggestionCount: suggestions.length,
+    memoryCleanup,
+  });
 
   if (isWorkflowSdkEnabled()) {
     await pool.query(
@@ -2633,6 +2650,73 @@ async function buildMemoryCleanupSummary(auth: AuthContext): Promise<{
   } catch (error) {
     console.warn("[workflow] daily memory cleanup summary failed:", error);
     return { staleCandidates: 0, promotionCandidates: 0, duplicateHashCandidates: 0 };
+  }
+}
+
+function formatCurrency(value: number | undefined): string {
+  return `$${(value ?? 0).toFixed(6)}`;
+}
+
+function htmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function sendDailyMemoryCleanupAdminEmail(input: {
+  auth: AuthContext;
+  runId: string;
+  suggestionCount: number;
+  memoryCleanup: Record<string, unknown>;
+}): Promise<void> {
+  if (!config.adminEmail) return;
+  const usage = input.memoryCleanup.usage && typeof input.memoryCleanup.usage === "object" && !Array.isArray(input.memoryCleanup.usage)
+    ? input.memoryCleanup.usage as Record<string, unknown>
+    : {};
+  const models = usage.models && typeof usage.models === "object" && !Array.isArray(usage.models)
+    ? Object.entries(usage.models as Record<string, unknown>).map(([model, count]) => `${model}: ${count}`).join(", ")
+    : "none";
+  const lines = [
+    "Tallei daily memory cleanup completed.",
+    "",
+    `Tenant: ${input.auth.tenantId}`,
+    `User: ${input.auth.userId}`,
+    `Daily run: ${input.runId}`,
+    `Cleanup run: ${String(input.memoryCleanup.runId ?? "")}`,
+    `Status: ${String(input.memoryCleanup.status ?? "")}`,
+    "",
+    `Selected memories: ${String(input.memoryCleanup.selectedMemories ?? 0)}`,
+    `Bucketed: ${String(input.memoryCleanup.bucketed ?? 0)}`,
+    `Short term: ${String(input.memoryCleanup.shortTerm ?? 0)}`,
+    `Long term: ${String(input.memoryCleanup.longTerm ?? 0)}`,
+    `Permanent: ${String(input.memoryCleanup.permanent ?? 0)}`,
+    `Applied: ${String(input.memoryCleanup.applied ?? 0)}`,
+    `Rejected: ${String(input.memoryCleanup.rejected ?? 0)}`,
+    `Failed: ${String(input.memoryCleanup.failed ?? 0)}`,
+    `Workflow suggestions: ${input.suggestionCount}`,
+    "",
+    `AI calls: ${String(usage.calls ?? input.memoryCleanup.aiCalls ?? 0)}`,
+    `Provider prompt tokens: ${String(usage.promptTokens ?? 0)}`,
+    `Provider completion tokens: ${String(usage.completionTokens ?? 0)}`,
+    `Provider total tokens: ${String(usage.totalTokens ?? 0)}`,
+    `Estimated prompt tokens: ${String(usage.estimatedPromptTokens ?? 0)}`,
+    `Estimated completion tokens: ${String(usage.estimatedCompletionTokens ?? 0)}`,
+    `Estimated total tokens: ${String(usage.estimatedTotalTokens ?? 0)}`,
+    `Estimated cost: ${formatCurrency(Number(usage.estimatedCostUsd ?? 0))}`,
+    `Models: ${models}`,
+  ];
+  const text = lines.join("\n");
+  const html = `<pre style="font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;">${htmlEscape(text)}</pre>`;
+  const result = await sendResendEmail({
+    to: config.adminEmail,
+    subject: "Tallei daily memory cleanup stats",
+    text,
+    html,
+  });
+  if (!result.ok) {
+    console.error("[workflow] failed to send daily memory cleanup admin email:", result.error);
   }
 }
 

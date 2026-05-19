@@ -243,6 +243,11 @@ export class OpenAiProvider implements AiProvider {
         text,
         model: response.model,
         finishReason: response.choices[0]?.finish_reason ?? null,
+        usage: {
+          promptTokens: response.usage?.prompt_tokens,
+          completionTokens: response.usage?.completion_tokens,
+          totalTokens: response.usage?.total_tokens,
+        },
       };
     } catch (error) {
       const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
