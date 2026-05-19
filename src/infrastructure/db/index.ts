@@ -739,6 +739,32 @@ export async function initDb() {
         ON workflows(tenant_id, user_id, status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_workflows_fingerprint
         ON workflows(tenant_id, user_id, fingerprint);
+
+      ALTER TABLE workflows
+        ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ;
+      ALTER TABLE workflows
+        ADD COLUMN IF NOT EXISTS last_scheduled_at TIMESTAMPTZ;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS workflow_builder_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_id UUID REFERENCES workflows(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'draft'
+          CHECK (status IN ('draft', 'saved', 'archived')),
+        title TEXT NOT NULL,
+        goal TEXT NOT NULL,
+        transcript_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        draft_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        debate_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_scope_updated
+        ON workflow_builder_sessions(tenant_id, user_id, updated_at DESC);
     `);
 
     await client.query(`

@@ -15,6 +15,7 @@ import integrationUpdatesRouter from "./routes/integrationUpdates.js";
 import billingRouter from "./routes/billing.js";
 import agentToolsRouter from "./routes/agentTools.js";
 import connectorsRouter from "./routes/connectors.js";
+import workflowsRouter from "./routes/workflows.js";
 import { createMcpRouter } from "../mcp/server.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requestTimingMiddleware } from "./middleware/request-timing.middleware.js";
@@ -106,6 +107,7 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/integrations", integrationsRouter);
   app.use("/api/integration-updates", integrationUpdatesRouter);
   app.use("/api/connectors", deps.memoryRateLimit, connectorsRouter);
+  app.use("/api/workflows", deps.memoryRateLimit, workflowsRouter);
   // Browser automation is intentionally disabled for production rollout.
   // app.use("/api/claude-onboarding", claudeOnboardingRouter);
   // app.use("/api/browser-use", browserUseRouter);
