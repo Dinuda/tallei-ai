@@ -14,6 +14,7 @@ import {
   listMemoryCleanupRuns,
   resetMemoryCleanupReviewFlags,
   runMemoryCleanupForUser,
+  sendMemoryCleanupAdminEmail,
 } from "../../../services/memory-cleanup.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
@@ -54,6 +55,7 @@ const cleanupRunSchema = z.object({
   processAll: z.boolean().optional(),
   includeReviewed: z.boolean().optional(),
   logImplicitKeeps: z.boolean().optional(),
+  emailAdmin: z.boolean().optional(),
 });
 
 
@@ -147,7 +149,14 @@ router.post("/cleanup/run", requireScopes(["memory:write"]), async (req: AuthReq
       includeReviewed: body.includeReviewed ?? false,
       logImplicitKeeps: body.logImplicitKeeps ?? false,
     });
-    res.status(201).json({ run });
+    const adminEmail = body.emailAdmin === false
+      ? { sent: false, skipped: true, to: null, error: "disabled by request" }
+      : await sendMemoryCleanupAdminEmail({
+          auth: req.authContext!,
+          run,
+          source: "manual",
+        });
+    res.status(201).json({ run, adminEmail });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });

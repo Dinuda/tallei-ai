@@ -1,4 +1,5 @@
 import type { AuthContext } from "../domain/auth/index.js";
+import { config } from "../config/index.js";
 import { decryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { MemoryCleanupRepository } from "../infrastructure/repositories/memory-cleanup.repository.js";
 import { invalidateBm25Cache } from "../infrastructure/recall/hybrid-retrieval.js";
@@ -18,6 +19,7 @@ import type {
 } from "../orchestration/memory-cleanup/types.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage } from "../orchestration/memory-cleanup/usage.js";
 import { invalidateRecallCache } from "./memory.js";
+import { sendResendEmail } from "./resend-email.js";
 
 export interface RunMemoryCleanupOptions {
   maxMemories?: number;
@@ -95,6 +97,88 @@ export async function listMemoryCleanupRuns(auth: AuthContext): Promise<MemoryCl
 
 export async function getMemoryCleanupRun(auth: AuthContext, runId: string): Promise<MemoryCleanupRunView | null> {
   return cleanupRepository.getRunView(auth, runId);
+}
+
+export interface MemoryCleanupAdminEmailResult {
+  sent: boolean;
+  skipped: boolean;
+  to: string | null;
+  error?: string;
+}
+
+function formatCurrency(value: number | undefined): string {
+  return `$${(value ?? 0).toFixed(6)}`;
+}
+
+function htmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+export async function sendMemoryCleanupAdminEmail(input: {
+  auth: AuthContext;
+  run: MemoryCleanupRunView;
+  source: "manual" | "daily_intelligence";
+  dailyRunId?: string;
+  suggestionCount?: number;
+}): Promise<MemoryCleanupAdminEmailResult> {
+  if (!config.adminEmail) {
+    return { sent: false, skipped: true, to: null, error: "TALLEI_ADMIN_EMAIL is not configured" };
+  }
+  const usage = input.run.summary.usage;
+  const models = usage?.models
+    ? Object.entries(usage.models).map(([model, count]) => `${model}: ${count}`).join(", ")
+    : "none";
+  const lines = [
+    `Tallei memory cleanup completed (${input.source}).`,
+    "",
+    `Tenant: ${input.auth.tenantId}`,
+    `User: ${input.auth.userId}`,
+    input.dailyRunId ? `Daily run: ${input.dailyRunId}` : null,
+    `Cleanup run: ${input.run.id}`,
+    `Status: ${input.run.status}`,
+    `Dry run: ${input.run.dryRun}`,
+    "",
+    `Selected memories: ${input.run.summary.selectedMemories ?? 0}`,
+    `Bucketed: ${input.run.summary.bucketed ?? 0}`,
+    `Short term: ${input.run.summary.shortTerm ?? 0}`,
+    `Long term: ${input.run.summary.longTerm ?? 0}`,
+    `Permanent: ${input.run.summary.permanent ?? 0}`,
+    `Applied: ${input.run.summary.applied}`,
+    `Rejected: ${input.run.summary.rejected}`,
+    `Failed: ${input.run.summary.failed}`,
+    input.suggestionCount === undefined ? null : `Workflow suggestions: ${input.suggestionCount}`,
+    "",
+    `AI calls: ${usage?.calls ?? input.run.summary.aiCalls ?? 0}`,
+    `Provider prompt tokens: ${usage?.promptTokens ?? 0}`,
+    `Provider completion tokens: ${usage?.completionTokens ?? 0}`,
+    `Provider total tokens: ${usage?.totalTokens ?? 0}`,
+    `Estimated prompt tokens: ${usage?.estimatedPromptTokens ?? 0}`,
+    `Estimated completion tokens: ${usage?.estimatedCompletionTokens ?? 0}`,
+    `Estimated total tokens: ${usage?.estimatedTotalTokens ?? 0}`,
+    `Estimated cost: ${formatCurrency(usage?.estimatedCostUsd)}`,
+    `Models: ${models}`,
+  ].filter((line): line is string => line !== null);
+  const text = lines.join("\n");
+  const result = await sendResendEmail({
+    to: config.adminEmail,
+    subject: input.source === "manual"
+      ? "Tallei manual memory cleanup stats"
+      : "Tallei daily memory cleanup stats",
+    text,
+    html: `<pre style="font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;">${htmlEscape(text)}</pre>`,
+  });
+
+  if (!result.ok) {
+    const error = result.error ?? `HTTP ${result.status ?? 0}`;
+    logger.error("cleanup admin email failed", { runId: input.run.id, to: config.adminEmail, error });
+    return { sent: false, skipped: false, to: config.adminEmail, error };
+  }
+  logger.info("cleanup admin email sent", { runId: input.run.id, to: config.adminEmail, source: input.source });
+  return { sent: true, skipped: false, to: config.adminEmail };
 }
 
 export async function resetMemoryCleanupReviewFlags(auth: AuthContext): Promise<{

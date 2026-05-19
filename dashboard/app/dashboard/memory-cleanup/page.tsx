@@ -104,6 +104,12 @@ type RunsPayload = {
 
 type RunPayload = {
   run?: CleanupRun;
+  adminEmail?: {
+    sent: boolean;
+    skipped: boolean;
+    to: string | null;
+    error?: string;
+  };
   error?: string;
 };
 
@@ -197,6 +203,7 @@ export default function MemoryCleanupPage() {
   const [runningMode, setRunningMode] = useState<"dry" | "apply" | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [adminEmailStatus, setAdminEmailStatus] = useState<RunPayload["adminEmail"] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedCount = selectedIds.size;
@@ -273,6 +280,7 @@ export default function MemoryCleanupPage() {
   const runCleanup = useCallback(async (dryRun: boolean) => {
     setRunningMode(dryRun ? "dry" : "apply");
     setError(null);
+    setAdminEmailStatus(null);
     try {
       const response = await fetch("/api/memories/cleanup/run", {
         method: "POST",
@@ -282,6 +290,7 @@ export default function MemoryCleanupPage() {
       const payload = (await response.json().catch(() => ({}))) as RunPayload;
       if (!response.ok || !payload.run) throw new Error(payload.error ?? "Failed to run cleanup");
       setActiveRun(payload.run);
+      setAdminEmailStatus(payload.adminEmail ?? null);
       await Promise.all([fetchMemories(), fetchRuns()]);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Failed to run cleanup");
@@ -292,6 +301,7 @@ export default function MemoryCleanupPage() {
 
   const resetCleanupFlags = useCallback(async () => {
     setError(null);
+    setAdminEmailStatus(null);
     try {
       const response = await fetch("/api/memories/cleanup/reset", { method: "POST" });
       const payload = await response.json().catch(() => ({}));
@@ -576,6 +586,14 @@ export default function MemoryCleanupPage() {
                       <div>Models: {Object.entries(activeRun.summary.usage?.models ?? {}).map(([model, count]) => `${model} x${count}`).join(", ") || "none"}</div>
                     </div>
                   </div>
+                  {adminEmailStatus ? (
+                    <div className="border border-slate-200 bg-white p-2 text-xs leading-5 text-slate-600">
+                      <div className="font-semibold text-slate-800">Admin email</div>
+                      <div>Status: {adminEmailStatus.sent ? "sent" : adminEmailStatus.skipped ? "skipped" : "failed"}</div>
+                      <div>To: {adminEmailStatus.to ?? "none"}</div>
+                      {adminEmailStatus.error ? <div className="text-rose-600">Error: {adminEmailStatus.error}</div> : null}
+                    </div>
+                  ) : null}
                   <div className="space-y-2">
                     <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Phase Trace</div>
                     {["snapshot", "consolidator", "adversary", "debate", "judge", "apply"].map((phase, index) => (
