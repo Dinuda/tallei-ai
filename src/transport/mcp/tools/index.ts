@@ -1,8 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { randomUUID } from "crypto";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import { hasRequiredScopes } from "../../../infrastructure/auth/oauth-tokens.js";
+import { pool } from "../../../infrastructure/db/index.js";
 import {
   saveMemory,
   savePreference,
@@ -47,20 +49,6 @@ import {
   executeUploadBlobAction,
   executeUploadStatusAction,
 } from "../../shared/chat-actions.js";
-import {
-  approveWorkflowRun,
-  approveWorkflowSuggestion,
-  continueConnectorAuth,
-  createExplicitWorkflow,
-  dismissWorkflowSuggestion,
-  getWorkflowRun,
-  listConnectorAccounts,
-  listWorkflowSuggestions,
-  skipWorkflowRun,
-  startConnectorAuth,
-  updateWorkflowSuggestion,
-  recordWorkflowActivity,
-} from "../../../services/workflow-automation.js";
 
 type ToolResult = { content: [{ type: "text"; text: string }]; isError?: true };
 const MemoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "checkpoint"]);
@@ -168,13 +156,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     async ({ content, platform }) => {
       try {
         const saved = await saveMemory(content, auth, platform ?? "claude");
-        void recordWorkflowActivity({
-          auth,
-          source: platform ?? "claude",
-          activityType: "save_memory",
-          content,
-          metadata: { tool: "save_memory" },
-        }).catch(() => {});
         return { content: [{ type: "text", text: `✅ Memory saved (${saved.memoryId}).` }] };
       } catch (err) {
         return onKnownError(err);
@@ -205,13 +186,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
           category: category ?? null,
           preferenceKey: preference_key ?? null,
         });
-        void recordWorkflowActivity({
-          auth,
-          source: platform ?? "claude",
-          activityType: "save_preference",
-          content,
-          metadata: { category: category ?? null, preference_key: preference_key ?? null },
-        }).catch(() => {});
         return { content: [{ type: "text", text: `✅ Preference saved (${saved.memoryId}).` }] };
       } catch (err) {
         return onKnownError(err);
@@ -988,258 +962,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   // One-word undo for auto-saves: user replies "undo" and Claude calls this.
-  server.registerTool(
-    "tallei_create_workflow",
-    {
-      title: "Create Workflow",
-      description: "Create an explicit recurring workflow. Composio is required when third-party dependencies are enabled.",
-      inputSchema: {
-        title: z.string().min(1),
-        instruction: z.string().min(1),
-        schedule_rrule: z.string().min(1),
-        requires_connector: z.boolean().optional().default(false),
-        connector_provider: z.string().optional(),
-        connector_scope_keys: z.array(z.string()).optional().default([]),
-      },
-    },
-    async ({ title, instruction, schedule_rrule, requires_connector, connector_provider, connector_scope_keys }) => {
-      try {
-        const result = await createExplicitWorkflow({
-          auth,
-          title,
-          instruction,
-          scheduleRrule: schedule_rrule,
-          requiresConnector: requires_connector ?? false,
-          connectorProvider: connector_provider,
-          connectorScopeKeys: connector_scope_keys ?? [],
-        });
-        return toJsonToolResult(result);
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_list_workflow_suggestions",
-    {
-      title: "List Workflow Suggestions",
-      description: "List discovered workflow suggestions.",
-      inputSchema: {},
-    },
-    async () => {
-      try {
-        const suggestions = await listWorkflowSuggestions(auth);
-        return toJsonToolResult({ suggestions });
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_approve_workflow_suggestion",
-    {
-      title: "Approve Workflow Suggestion",
-      description: "Approve a discovered workflow suggestion and optionally trigger connector setup.",
-      inputSchema: {
-        suggestion_id: z.string().uuid(),
-        schedule_rrule: z.string().optional(),
-        requires_connector: z.boolean().optional().default(false),
-        connector_provider: z.string().optional(),
-        connector_scope_keys: z.array(z.string()).optional().default([]),
-      },
-    },
-    async ({ suggestion_id, schedule_rrule, requires_connector, connector_provider, connector_scope_keys }) => {
-      try {
-        const result = await approveWorkflowSuggestion({
-          auth,
-          suggestionId: suggestion_id,
-          scheduleRrule: schedule_rrule,
-          requiresConnector: requires_connector ?? false,
-          connectorProvider: connector_provider,
-          connectorScopeKeys: connector_scope_keys ?? [],
-        });
-        return toJsonToolResult(result);
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_dismiss_workflow_suggestion",
-    {
-      title: "Dismiss Workflow Suggestion",
-      description: "Dismiss a discovered workflow suggestion.",
-      inputSchema: {
-        suggestion_id: z.string().uuid(),
-        reason: z.string().optional(),
-      },
-    },
-    async ({ suggestion_id, reason }) => {
-      try {
-        await dismissWorkflowSuggestion({ auth, suggestionId: suggestion_id, reason });
-        return toJsonToolResult({ success: true });
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_update_workflow_suggestion",
-    {
-      title: "Update Workflow Suggestion",
-      description: "Edit a pending workflow suggestion.",
-      inputSchema: {
-        suggestion_id: z.string().uuid(),
-        title: z.string().optional(),
-        suggested_prompt: z.string().optional(),
-      },
-    },
-    async ({ suggestion_id, title, suggested_prompt }) => {
-      try {
-        await updateWorkflowSuggestion({ auth, suggestionId: suggestion_id, title, suggestedPrompt: suggested_prompt });
-        return toJsonToolResult({ success: true });
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_start_connector_auth",
-    {
-      title: "Start Connector Auth",
-      description: "Start connector authorization. Composio is required for third-party dependencies.",
-      inputSchema: {
-        provider: z.string(),
-        app_key: z.string().optional(),
-        required_scopes: z.array(z.string()).optional().default([]),
-        redirect_uri: z.string().optional(),
-      },
-    },
-    async ({ provider, app_key, required_scopes, redirect_uri }) => {
-      try {
-        const session = await startConnectorAuth({
-          auth,
-          provider,
-          appKey: app_key ?? null,
-          requiredScopes: required_scopes ?? [],
-          redirectUri: redirect_uri ?? null,
-        });
-        return toJsonToolResult(session);
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_continue_connector_auth",
-    {
-      title: "Continue Connector Auth",
-      description: "Mark a connector auth session as completed and attach account metadata.",
-      inputSchema: {
-        auth_session_id: z.string().uuid(),
-        external_account_id: z.string().optional(),
-        scopes: z.array(z.string()).optional(),
-      },
-    },
-    async ({ auth_session_id, external_account_id, scopes }) => {
-      try {
-        const result = await continueConnectorAuth({
-          auth,
-          authSessionId: auth_session_id,
-          externalAccountId: external_account_id,
-          scopes,
-        });
-        return toJsonToolResult(result);
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_list_connectors",
-    {
-      title: "List Connectors",
-      description: "List connector accounts for the current user.",
-      inputSchema: {},
-    },
-    async () => {
-      try {
-        const connectors = await listConnectorAccounts(auth);
-        return toJsonToolResult({ connectors });
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_get_workflow_run",
-    {
-      title: "Get Workflow Run",
-      description: "Get workflow run state by workflow + run id.",
-      inputSchema: {
-        workflow_id: z.string().uuid(),
-        run_id: z.string().uuid(),
-        include_sdk: z.boolean().optional().default(false),
-      },
-    },
-    async ({ workflow_id, run_id, include_sdk }) => {
-      try {
-        const run = await getWorkflowRun(auth, workflow_id, run_id, { includeSdkDetails: include_sdk });
-        return toJsonToolResult(run);
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_approve_workflow_run",
-    {
-      title: "Approve Workflow Run",
-      description: "Approve a pending workflow run and execute connector action when required.",
-      inputSchema: {
-        workflow_id: z.string().uuid(),
-        run_id: z.string().uuid(),
-      },
-    },
-    async ({ workflow_id, run_id }) => {
-      try {
-        const run = await approveWorkflowRun({ auth, workflowId: workflow_id, runId: run_id, channel: "chat" });
-        return toJsonToolResult(run);
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
-  server.registerTool(
-    "tallei_skip_workflow_run",
-    {
-      title: "Skip Workflow Run",
-      description: "Skip a pending workflow run.",
-      inputSchema: {
-        workflow_id: z.string().uuid(),
-        run_id: z.string().uuid(),
-      },
-    },
-    async ({ workflow_id, run_id }) => {
-      try {
-        const run = await skipWorkflowRun({ auth, workflowId: workflow_id, runId: run_id, channel: "chat" });
-        return toJsonToolResult(run);
-      } catch (err) {
-        return onKnownError(err);
-      }
-    }
-  );
-
   server.registerTool(
     "undo_save",
     {

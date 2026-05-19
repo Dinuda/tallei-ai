@@ -5,9 +5,13 @@ import {
   continueConnectorAuth,
   getConnectorAuthSession,
   handleComposioWebhook,
+  getResendConnectorSetup,
+  listComposioToolkits,
   listConnectorAccounts,
+  removeResendConnector,
   removeConnectorAccount,
   startConnectorAuth,
+  upsertResendConnector,
   verifyComposioWebhookSignature,
 } from "../../../services/workflow-automation.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
@@ -25,6 +29,10 @@ const continueAuthSchema = z.object({
   external_account_id: z.string().optional(),
   scopes: z.array(z.string()).optional(),
 });
+const saveResendSchema = z.object({
+  api_key: z.string().min(1),
+  label: z.string().max(80).optional(),
+});
 
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
@@ -33,6 +41,77 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
   } catch (error) {
     console.error("Error listing connectors:", error);
     res.status(500).json({ error: "Failed to list connectors" });
+  }
+});
+
+router.get("/composio/toolkits", requireScopes(["memory:read"]), async (_req: AuthRequest, res: Response) => {
+  try {
+    const toolkits = await listComposioToolkits();
+    res.json({ toolkits });
+  } catch (error) {
+    console.error("Error listing Composio toolkits:", error);
+    res.json({ toolkits: [] });
+  }
+});
+
+router.get("/resend", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const setup = await getResendConnectorSetup(req.authContext!);
+    res.json(setup);
+  } catch (error) {
+    console.error("Error loading Resend connector setup:", error);
+    res.status(500).json({ error: "Failed to load Resend connector setup" });
+  }
+});
+
+router.post("/resend", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = saveResendSchema.parse(req.body ?? {});
+    const setup = await upsertResendConnector({
+      auth: req.authContext!,
+      apiKey: body.api_key,
+      label: body.label,
+    });
+    res.status(201).json(setup);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /(Invalid Resend API key format|Resend key verification failed)/i.test(error.message)) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    console.error("Error saving Resend connector:", error);
+    res.status(500).json({ error: "Failed to save Resend connector" });
+  }
+});
+
+router.delete("/resend", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    await removeResendConnector(req.authContext!, undefined);
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error removing Resend connector:", error);
+    res.status(500).json({ error: "Failed to remove Resend connector" });
+  }
+});
+
+router.delete("/resend/:id", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    await removeResendConnector(req.authContext!, String(req.params.id));
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error removing Resend connector:", error);
+    res.status(500).json({ error: "Failed to remove Resend connector" });
   }
 });
 
@@ -60,6 +139,10 @@ router.post("/:provider/auth-sessions", requireScopes(["memory:write"]), async (
       return;
     }
     if (error instanceof Error && /Composio is required/i.test(error.message)) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    if (error instanceof Error && /(Failed to start Resend auth|Failed to create Composio connect link|auth config|toolkit)/i.test(error.message)) {
       res.status(400).json({ error: error.message });
       return;
     }

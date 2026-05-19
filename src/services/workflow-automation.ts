@@ -21,6 +21,7 @@ import {
   getWorkflowSdkRunDetails,
   type WorkflowSdkRunStatus,
 } from "./workflow-sdk-runtime.js";
+import { encryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 
 export type ConnectorSetupState =
   | "not_required"
@@ -56,6 +57,23 @@ export interface ConnectorAccountView {
   updatedAt: string;
 }
 
+export interface ResendConnectorSetupView {
+  provider: "resend";
+  status: "connected" | "missing";
+  portalUrl: string;
+  apiKeysUrl: string;
+  docsUrl: string;
+  steps: string[];
+  connection?: {
+    id: string;
+    status: ConnectorSetupState;
+    createdAt: string;
+    updatedAt: string;
+    last4: string | null;
+    label: string | null;
+  };
+}
+
 export interface WorkflowRunView {
   id: string;
   workflowId: string;
@@ -82,6 +100,8 @@ export interface WorkflowView {
   requiresConnector: boolean;
   connectorProvider: string | null;
   connectorScopeKeys: string[];
+  definitionVersion?: string;
+  definition_version?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -210,6 +230,15 @@ function resolveConnectorAppKey(input: {
 
 function isComposioConfigured(): boolean {
   return Boolean(config.composioApiKey && config.composioBaseUrl);
+}
+
+function normalizeComposioAppKey(appKey: string | null | undefined): string {
+  const key = (appKey ?? "").trim().toLowerCase();
+  if (!key) return "gmail";
+  if (key === "google_calendar") return "googlecalendar";
+  if (key === "google-mail" || key === "googlemail") return "gmail";
+  if (key === "resend_email") return "resend";
+  return key;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -511,6 +540,73 @@ async function composioRequest<T>(input: {
   return data as T;
 }
 
+export async function listComposioToolkits(): Promise<
+  Array<{
+    slug: string;
+    name: string;
+    description: string;
+    logo: string;
+    category?: string;
+  }>
+> {
+  if (!isComposioConfigured()) {
+    return [];
+  }
+
+  type ToolkitRow = {
+    slug?: string;
+    name?: string;
+    meta?: { description?: string; logo?: string };
+    description?: string;
+    logo?: string;
+  };
+
+  const normalizeItems = (items: unknown): ToolkitRow[] =>
+    Array.isArray(items)
+      ? items.filter((item): item is ToolkitRow => Boolean(item) && typeof item === "object")
+      : [];
+
+  try {
+    const composio = getComposioVercelClient() as unknown as {
+      toolkits?: { list?: (args?: Record<string, unknown>) => Promise<unknown> };
+    };
+    if (composio.toolkits?.list) {
+      const sdkResponse = await composio.toolkits.list({});
+      const asRecord = toObjectRecord(sdkResponse);
+      const sdkItems = normalizeItems(asRecord.items);
+      if (sdkItems.length > 0) {
+        return sdkItems.map((item) => ({
+          slug: item.slug ?? "",
+          name: item.name ?? item.slug ?? "",
+          description: item.meta?.description ?? item.description ?? "",
+          logo: item.meta?.logo ?? item.logo ?? "",
+        })).filter((item) => item.slug.length > 0);
+      }
+    }
+  } catch (error) {
+    console.warn("[workflow] composio toolkits sdk list failed:", error);
+  }
+
+  const fallbackPaths = ["/api/v3/toolkits", "/api/v3.1/toolkits"];
+  for (const path of fallbackPaths) {
+    try {
+      const data = await composioRequest<{ items?: ToolkitRow[] }>({ path });
+      const items = normalizeItems(data.items);
+      if (items.length === 0) continue;
+      return items.map((item) => ({
+        slug: item.slug ?? "",
+        name: item.name ?? item.slug ?? "",
+        description: item.meta?.description ?? item.description ?? "",
+        logo: item.meta?.logo ?? item.logo ?? "",
+      })).filter((item) => item.slug.length > 0);
+    } catch (error) {
+      console.warn(`[workflow] composio toolkit fallback failed for ${path}:`, error);
+    }
+  }
+
+  return [];
+}
+
 const COMPOSIO_ADAPTER: ConnectorAdapter = {
   provider: "composio",
   async startAuthSession(input) {
@@ -518,7 +614,7 @@ const COMPOSIO_ADAPTER: ConnectorAdapter = {
     const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
     let setupUrl: string | null = null;
     let externalSessionId: string | null = null;
-    const appKey = input.appKey ?? inferComposioAppKey(input.requiredScopes);
+    const appKey = normalizeComposioAppKey(input.appKey ?? inferComposioAppKey(input.requiredScopes));
 
     if (isComposioConfigured()) {
       try {
@@ -544,6 +640,12 @@ const COMPOSIO_ADAPTER: ConnectorAdapter = {
           externalSessionId = request.id;
         }
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (appKey === "resend") {
+          throw new Error(
+            `Failed to start Resend auth in Composio. Ensure a Resend auth config exists in Composio for this project and uses your Resend API key auth. Underlying error: ${message}`
+          );
+        }
         if (config.composioStrictMode) {
           throw error;
         }
@@ -554,7 +656,7 @@ const COMPOSIO_ADAPTER: ConnectorAdapter = {
     }
 
     if (!setupUrl) {
-      throw new Error("Failed to create Composio connect link. Check toolkit auth setup.");
+      throw new Error(`Failed to create Composio connect link for app "${appKey}". Check Composio toolkit auth setup.`);
     }
 
     await pool.query(
@@ -691,6 +793,27 @@ function selectConnectorAdapter(provider: string): ConnectorAdapter {
 
 function normalizeText(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function isResendApiKey(value: string): boolean {
+  return /^re_[A-Za-z0-9_-]{16,}$/.test(value.trim());
+}
+
+async function verifyResendApiKey(apiKey: string): Promise<void> {
+  const response = await fetch("https://api.resend.com/domains", {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(
+      `Resend key verification failed (${response.status})${body ? `: ${body}` : ""}`
+    );
+  }
 }
 
 function fingerprintForMessage(message: string): { fingerprint: string; title: string; prompt: string; reason: string } | null {
@@ -1245,10 +1368,11 @@ export async function listActiveWorkflows(auth: AuthContext): Promise<WorkflowVi
     requires_connector: boolean;
     connector_provider: string | null;
     connector_scope_keys: unknown;
+    definition_version: string;
     created_at: string;
     updated_at: string;
   }>(
-    `SELECT id, title, fingerprint, schedule_rrule, status, requires_connector, connector_provider, connector_scope_keys, created_at, updated_at
+    `SELECT id, title, fingerprint, schedule_rrule, status, requires_connector, connector_provider, connector_scope_keys, definition_version, created_at, updated_at
      FROM workflows
      WHERE tenant_id = $1
        AND user_id = $2
@@ -1268,6 +1392,8 @@ export async function listActiveWorkflows(auth: AuthContext): Promise<WorkflowVi
     connectorScopeKeys: Array.isArray(row.connector_scope_keys)
       ? row.connector_scope_keys.filter((v): v is string => typeof v === "string")
       : [],
+    definitionVersion: row.definition_version,
+    definition_version: row.definition_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }));
@@ -1438,6 +1564,127 @@ export async function removeConnectorAccount(auth: AuthContext, accountId: strin
   if (result.rowCount === 0) {
     throw new Error("Connector account not found");
   }
+}
+
+export async function getResendConnectorSetup(auth: AuthContext): Promise<ResendConnectorSetupView> {
+  const result = await pool.query<{
+    id: string;
+    status: ConnectorSetupState;
+    metadata_json: unknown;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT id, status, metadata_json, created_at, updated_at
+     FROM connector_accounts
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND provider = 'resend'
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [auth.tenantId, auth.userId]
+  );
+
+  const row = result.rows[0];
+  const metadata = toObjectRecord(row?.metadata_json);
+  const last4Raw = typeof metadata.last4 === "string" ? metadata.last4 : null;
+  const label = typeof metadata.label === "string" ? metadata.label : null;
+
+  return {
+    provider: "resend",
+    status: row ? "connected" : "missing",
+    portalUrl: config.resendPortalUrl,
+    apiKeysUrl: config.resendApiKeysUrl,
+    docsUrl: config.resendDocsUrl,
+    steps: [
+      "Open your Resend dashboard and create an API key with sending access.",
+      "Copy the key now. Resend only shows it once.",
+      "Paste the key here to connect your account securely.",
+    ],
+    ...(row
+      ? {
+          connection: {
+            id: row.id,
+            status: row.status,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            last4: last4Raw,
+            label,
+          },
+        }
+      : {}),
+  };
+}
+
+export async function upsertResendConnector(input: {
+  auth: AuthContext;
+  apiKey: string;
+  label?: string | null;
+}): Promise<ResendConnectorSetupView> {
+  const trimmed = input.apiKey.trim();
+  if (!isResendApiKey(trimmed)) {
+    throw new Error("Invalid Resend API key format");
+  }
+
+  await verifyResendApiKey(trimmed);
+
+  const encryptedKey = encryptMemoryContent(trimmed);
+  const last4 = trimmed.slice(-4);
+  const label = (input.label ?? "").trim();
+  const externalAccountId = `resend:${last4}`;
+  const metadata = {
+    appKey: "resend",
+    authMode: "api_key",
+    apiKeyCiphertext: encryptedKey,
+    last4,
+    ...(label ? { label } : {}),
+  };
+
+  await pool.query(
+    `INSERT INTO connector_accounts
+     (id, tenant_id, user_id, provider, external_account_id, status, scopes_json, metadata_json)
+     VALUES ($1, $2, $3, 'resend', $4, 'connected', $5::jsonb, $6::jsonb)
+     ON CONFLICT (tenant_id, user_id, provider, external_account_id)
+     DO UPDATE SET
+       status = 'connected',
+       scopes_json = EXCLUDED.scopes_json,
+       metadata_json = COALESCE(connector_accounts.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json,
+       updated_at = NOW()`,
+    [
+      randomUUID(),
+      input.auth.tenantId,
+      input.auth.userId,
+      externalAccountId,
+      JSON.stringify(["resend.send_email"]),
+      JSON.stringify(metadata),
+    ]
+  );
+
+  return getResendConnectorSetup(input.auth);
+}
+
+export async function removeResendConnector(auth: AuthContext, connectorId?: string): Promise<void> {
+  if (connectorId) {
+    const result = await pool.query(
+      `DELETE FROM connector_accounts
+       WHERE id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+         AND provider = 'resend'`,
+      [connectorId, auth.tenantId, auth.userId]
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      throw new Error("Resend connector not found");
+    }
+    return;
+  }
+
+  await pool.query(
+    `DELETE FROM connector_accounts
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND provider = 'resend'`,
+    [auth.tenantId, auth.userId]
+  );
 }
 
 export async function createWorkflowRun(input: {

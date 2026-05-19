@@ -162,9 +162,11 @@
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
 }
 
-.connectedIconWrap svg {
+.connectedIconWrap svg,
+.connectedIconWrap img {
   width: 26px;
   height: 26px;
+  object-fit: contain;
 }
 
 .connectedInfo {
@@ -330,9 +332,11 @@
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
 }
 
-.recommendedIconWrap svg {
+.recommendedIconWrap svg,
+.recommendedIconWrap img {
   width: 24px;
   height: 24px;
+  object-fit: contain;
 }
 
 .recommendedMeta {
@@ -644,9 +648,11 @@
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
 }
 
-.drawerRowIcon svg {
+.drawerRowIcon svg,
+.drawerRowIcon img {
   width: 24px;
   height: 24px;
+  object-fit: contain;
 }
 
 .drawerRowInfo {

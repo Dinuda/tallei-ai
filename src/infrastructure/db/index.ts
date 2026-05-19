@@ -768,7 +768,7 @@ export async function initDb() {
         DROP CONSTRAINT IF EXISTS workflow_runs_status_check;
       ALTER TABLE workflow_runs
         ADD CONSTRAINT workflow_runs_status_check
-        CHECK (status IN ('scheduled', 'running', 'waiting_for_approval', 'completed', 'failed', 'skipped', 'cancelled'));
+        CHECK (status IN ('scheduled', 'running', 'waiting_for_approval', 'paused_for_approval', 'completed', 'failed', 'skipped', 'cancelled'));
     `);
 
     await client.query(`
@@ -790,6 +790,10 @@ export async function initDb() {
 
       ALTER TABLE workflow_run_steps
         ADD COLUMN IF NOT EXISTS error_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE workflow_run_steps
+        ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+      ALTER TABLE workflow_run_steps
+        ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
     `);
 
     await client.query(`

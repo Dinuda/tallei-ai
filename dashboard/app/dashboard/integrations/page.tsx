@@ -13,6 +13,7 @@ import {
   Plus,
   Command,
   ArrowRight,
+  ExternalLink,
 } from "lucide-react";
 import styles from "./page.module.css";
 
@@ -45,311 +46,57 @@ type AppDef = {
   category: AppCategory;
   scopes: string[];
   color: string;
-  icon: React.ComponentType<{ size?: number }>;
+  logo: string;
+  authMode?: "composio" | "native_api_key";
+};
+
+type ComposioToolkit = {
+  slug: string;
+  name: string;
+  description: string;
+  logo: string;
 };
 
 /* ------------------------------------------------------------------ */
-/* Artistic brand icons (custom premium SVGs)                          */
+/* Static metadata merged with Composio toolkit data                  */
 /* ------------------------------------------------------------------ */
-
-function GmailIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="gmailGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#FF6B6B" />
-          <stop offset="1" stopColor="#EA4335" />
-        </linearGradient>
-      </defs>
-      <rect x="4" y="10" width="40" height="28" rx="6" fill="url(#gmailGrad)" />
-      <path d="M4 16l20 14 20-14" stroke="rgba(255,255,255,0.9)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M4 16v22" stroke="rgba(255,255,255,0.7)" strokeWidth="2" />
-      <path d="M44 16v22" stroke="rgba(255,255,255,0.7)" strokeWidth="2" />
-    </svg>
-  );
+function normalizeComposioSlug(slug: string): string {
+  const map: Record<string, string> = {
+    google_calendar: "googlecalendar",
+    microsoft_teams: "msteams",
+    microsoft_outlook: "outlook",
+    microsoft_onedrive: "onedrive",
+    google_drive: "gdrive",
+  };
+  return map[slug] ?? slug;
 }
 
-function SlackIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect width="48" height="48" rx="12" fill="#4A154B" />
-      <circle cx="17" cy="17" r="5" fill="#E01E5A" />
-      <circle cx="31" cy="17" r="5" fill="#36C5F0" />
-      <circle cx="17" cy="31" r="5" fill="#2EB67D" />
-      <circle cx="31" cy="31" r="5" fill="#ECB22E" />
-      <circle cx="17" cy="17" r="2" fill="#4A154B" />
-      <circle cx="31" cy="17" r="2" fill="#4A154B" />
-      <circle cx="17" cy="31" r="2" fill="#4A154B" />
-      <circle cx="31" cy="31" r="2" fill="#4A154B" />
-    </svg>
-  );
-}
+const APP_META: Record<
+  string,
+  { scopes: string[]; color: string; category: AppCategory; authMode?: "composio" | "native_api_key" }
+> = {
+  resend: { scopes: ["resend.send_email"], color: "#000000", category: "Communication", authMode: "native_api_key" },
+  gmail: { scopes: ["gmail.send_email"], color: "#EA4335", category: "Communication" },
+  slack: { scopes: ["slack.post_message"], color: "#4A154B", category: "Communication" },
+  msteams: { scopes: [], color: "#6264A7", category: "Communication" },
+  discord: { scopes: [], color: "#5865F2", category: "Communication" },
+  googlecalendar: { scopes: ["googlecalendar.create_event"], color: "#4285F4", category: "Scheduling" },
+  outlook: { scopes: [], color: "#0078D4", category: "Scheduling" },
+  calendly: { scopes: [], color: "#006BFF", category: "Scheduling" },
+  twitter: { scopes: [], color: "#000000", category: "Social" },
+  linkedin: { scopes: [], color: "#0A66C2", category: "Social" },
+  github: { scopes: ["github.create_issue"], color: "#181717", category: "Development" },
+  gitlab: { scopes: [], color: "#FC6D26", category: "Development" },
+  linear: { scopes: [], color: "#5E6AD2", category: "Development" },
+  jira: { scopes: [], color: "#0052CC", category: "Development" },
+  notion: { scopes: ["notion.create_page"], color: "#000000", category: "Productivity" },
+  asana: { scopes: [], color: "#F06A6A", category: "Productivity" },
+  trello: { scopes: [], color: "#0079BF", category: "Productivity" },
+  gdrive: { scopes: [], color: "#34A853", category: "Storage" },
+  dropbox: { scopes: [], color: "#0061FF", category: "Storage" },
+  onedrive: { scopes: [], color: "#0078D4", category: "Storage" },
+};
 
-function TeamsIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="teamsGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#7B83EB" />
-          <stop offset="1" stopColor="#6264A7" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="12" fill="url(#teamsGrad)" />
-      <circle cx="18" cy="19" r="7" fill="rgba(255,255,255,0.9)" />
-      <path d="M10 38c0-6 5-10 10-10h4c5 0 10 4 10 10v2H10v-2Z" fill="rgba(255,255,255,0.9)" />
-      <circle cx="34" cy="15" r="5" fill="rgba(255,255,255,0.6)" />
-      <path d="M30 30h8v4c0 3-2.2 5-4 5s-4-2-4-5v-4Z" fill="rgba(255,255,255,0.6)" />
-    </svg>
-  );
-}
-
-function DiscordIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect width="48" height="48" rx="14" fill="#5865F2" />
-      <path d="M18.5 20c-1.4 0-2.5 1.1-2.5 2.5s1.1 2.5 2.5 2.5 2.5-1.1 2.5-2.5-1.1-2.5-2.5-2.5Zm11 0c-1.4 0-2.5 1.1-2.5 2.5s1.1 2.5 2.5 2.5 2.5-1.1 2.5-2.5-1.1-2.5-2.5-2.5Z" fill="#fff" />
-      <path d="M14 16c4-2 8-2.5 12-2.5s8 .5 12 2.5c0 0 2 10-2 14-2 2-5 3-8 3.5l-1-1.5c2.5-.5 4.5-1.5 6-3-2 1-4.5 1.5-7 1.5s-5-.5-7-1.5c1.5 1.5 3.5 2.5 6 3l-1 1.5c-3-.5-6-1.5-8-3.5-4-4-2-14-2-14Z" fill="#fff" />
-    </svg>
-  );
-}
-
-function GCalIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect x="4" y="6" width="40" height="36" rx="6" fill="#fff" stroke="#E8EAED" strokeWidth="2" />
-      <rect x="4" y="14" width="40" height="2" fill="#E8EAED" />
-      <rect x="12" y="4" width="6" height="6" rx="2" fill="#EA4335" />
-      <rect x="30" y="4" width="6" height="6" rx="2" fill="#EA4335" />
-      <rect x="10" y="22" width="6" height="6" rx="1.5" fill="#4285F4" />
-      <rect x="21" y="22" width="6" height="6" rx="1.5" fill="#EA4335" />
-      <rect x="32" y="22" width="6" height="6" rx="1.5" fill="#34A853" />
-      <rect x="10" y="32" width="6" height="6" rx="1.5" fill="#FBBC04" />
-      <rect x="21" y="32" width="6" height="6" rx="1.5" fill="#4285F4" />
-      <rect x="32" y="32" width="6" height="6" rx="1.5" fill="#EA4335" />
-    </svg>
-  );
-}
-
-function OutlookIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="outlookGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#0A8BD9" />
-          <stop offset="1" stopColor="#0078D4" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="10" fill="url(#outlookGrad)" />
-      <rect x="8" y="14" width="20" height="20" rx="4" fill="rgba(255,255,255,0.15)" />
-      <rect x="12" y="20" width="12" height="2.5" rx="1" fill="rgba(255,255,255,0.8)" />
-      <rect x="12" y="26" width="8" height="2.5" rx="1" fill="rgba(255,255,255,0.5)" />
-      <path d="M28 18l10-4v20l-10-4V18Z" fill="rgba(255,255,255,0.25)" />
-      <path d="M28 18l10 6-10 6" stroke="rgba(255,255,255,0.8)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function CalendlyIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="calGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#2B8CFF" />
-          <stop offset="1" stopColor="#006BFF" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="12" fill="url(#calGrad)" />
-      <circle cx="24" cy="24" r="12" stroke="rgba(255,255,255,0.9)" strokeWidth="3" />
-      <path d="M24 16v8.5l6 3.5" stroke="rgba(255,255,255,0.9)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function TwitterIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect width="48" height="48" rx="12" fill="#000" />
-      <path d="M26.5 20.5L34 12h-2l-6 6.5L21 12h-6l8 11-8 9h2l6.5-7 5.5 7H31l-8.5-11.5Z" fill="#fff" />
-    </svg>
-  );
-}
-
-function LinkedInIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="liGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#0A76D9" />
-          <stop offset="1" stopColor="#0A66C2" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="8" fill="url(#liGrad)" />
-      <rect x="12" y="20" width="5" height="18" rx="1" fill="#fff" />
-      <circle cx="14.5" cy="14.5" r="3" fill="#fff" />
-      <path d="M21 20h5v2.5c.5-1 2.5-2.5 4-2.5 4 0 6 2.5 6 7V38h-5v-9c0-2-1-4-3-4s-3 2-3 4v9h-5V20Z" fill="#fff" />
-    </svg>
-  );
-}
-
-function GitHubIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect width="48" height="48" rx="14" fill="#181717" />
-      <path d="M24 8c-8.8 0-16 7.2-16 16 0 7 4.5 13 10.8 15.2.8.2 1.1-.4 1.1-.8v-2.8c-4.4 1-5.3-1.8-5.3-1.8-.7-1.8-1.8-2.3-1.8-2.3-1.5-1 .1-1 .1-1 1.6.1 2.5 1.7 2.5 1.7 1.5 2.5 3.8 1.8 4.7 1.4.1-1.1.6-1.8 1-2.2-3.5-.4-7.2-1.8-7.2-7.9 0-1.7.6-3.2 1.6-4.3-.2-.4-.7-2 .2-4.2 0 0 1.3-.4 4.3 1.6a14.8 14.8 0 0 1 8 0c3-2 4.3-1.6 4.3-1.6.8 2.2.3 3.8.2 4.2 1 1 1.6 2.5 1.6 4.3 0 6.2-3.7 7.5-7.3 7.9.6.5 1.1 1.5 1.1 3V38c0 .5.3.9 1 .8C35.5 37 40 31 40 24c0-8.8-7.2-16-16-16Z" fill="#fff" />
-    </svg>
-  );
-}
-
-function GitLabIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect width="48" height="48" rx="12" fill="#FC6D26" />
-      <path d="M24 40l-8-18h16l-8 18Z" fill="#E24329" />
-      <path d="M24 40L8 22h8l8 18Z" fill="#FCA326" />
-      <path d="M24 40l16-18h-8l-8 18Z" fill="#FC6D26" />
-      <path d="M8 22l4-10h4L8 22Z" fill="#E24329" />
-      <path d="M40 22l-4-10h-4L40 22Z" fill="#FCA326" />
-      <path d="M16 12h16L24 40 16 12Z" fill="#FC6D26" />
-    </svg>
-  );
-}
-
-function LinearIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="linGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#8B93F6" />
-          <stop offset="1" stopColor="#5E6AD2" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="10" fill="url(#linGrad)" />
-      <path d="M12 36L32 16M28 12h8v8" stroke="#fff" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function JiraIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect width="48" height="48" rx="10" fill="#0052CC" />
-      <path d="M24 10h10a6 6 0 0 1 6 6v10H24V10Z" fill="#2684FF" />
-      <path d="M24 26v10a6 6 0 0 1-6 6H8a6 6 0 0 1-6-6V26h22Z" fill="#2684FF" opacity="0.6" />
-    </svg>
-  );
-}
-
-function NotionIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <rect width="48" height="48" rx="10" fill="#000" />
-      <path d="M12 10l20-1.5 6 4-20 1.5-6-4Z" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M14 16v24l18 1.5V17.5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M26 16l-4 25" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function AsanaIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="asanaGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#FF8A8A" />
-          <stop offset="1" stopColor="#F06A6A" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="12" fill="url(#asanaGrad)" />
-      <circle cx="17" cy="18" r="6" fill="#fff" />
-      <circle cx="31" cy="18" r="6" fill="#fff" />
-      <path d="M17 28c0 4 3 7 7 7s7-3 7-7" stroke="#fff" strokeWidth="3" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function TrelloIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="trelloGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#1BA1F2" />
-          <stop offset="1" stopColor="#0079BF" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="10" fill="url(#trelloGrad)" />
-      <rect x="10" y="10" width="10" height="28" rx="3" fill="#fff" opacity="0.9" />
-      <rect x="28" y="10" width="10" height="16" rx="3" fill="#fff" opacity="0.5" />
-    </svg>
-  );
-}
-
-function GDriveIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <path d="M16 6l-8 14h12l8-14H16Z" fill="#0066DA" />
-      <path d="M32 6l-8 14h12l8-14H32Z" fill="#00AC47" />
-      <path d="M4 34l6 8h12l-6-8H4Z" fill="#FFBA00" />
-      <path d="M20 34l6 8h12l-6-8H20Z" fill="#00832D" />
-      <path d="M12 28h12l6 8H18l-6-8Z" fill="#2684FC" />
-      <path d="M28 28h12l6 8H34l-6-8Z" fill="#EA4335" />
-    </svg>
-  );
-}
-
-function DropboxIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="dropGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#2B8CFF" />
-          <stop offset="1" stopColor="#0061FF" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="10" fill="url(#dropGrad)" />
-      <path d="M16 12l8 6-8 6-8-6 8-6ZM32 12l8 6-8 6-8-6 8-6ZM8 24l8 6 8-6-8-6-8 6ZM24 24l8 6 8-6-8-6-8 6ZM16 30l8 6 8-6" stroke="#fff" strokeWidth="2.5" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function OneDriveIcon({ size = 20 }: { size?: number }) {
-  const s = size;
-  return (
-    <svg width={s} height={s} viewBox="0 0 48 48" fill="none">
-      <defs>
-        <linearGradient id="odGrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#2B9DFF" />
-          <stop offset="1" stopColor="#0078D4" />
-        </linearGradient>
-      </defs>
-      <rect width="48" height="48" rx="10" fill="url(#odGrad)" />
-      <path d="M10 32c0-5 4-8 8-8h2c3 0 5-2 5-5 0-3-2-5-5-5h-1c-3 0-5 2-5 5" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" fill="none" />
-      <path d="M14 30c0-4 3.5-6 6.5-6h3c3 0 5.5-2.5 5.5-5.5S27 13 24 13c-2 0-3.8 1-4.8 2.5" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" fill="none" />
-      <path d="M38 32c0-3.5-2.8-6.2-6-6.2-1.5 0-2.8.5-3.8 1.4" stroke="rgba(255,255,255,0.4)" strokeWidth="2" strokeLinecap="round" fill="none" />
-    </svg>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* App definitions                                                     */
-/* ------------------------------------------------------------------ */
 const CATEGORIES: AppCategory[] = [
   "All",
   "Communication",
@@ -360,6 +107,8 @@ const CATEGORIES: AppCategory[] = [
   "Storage",
 ];
 
+const RECOMMENDED_KEYS = ["resend", "gmail", "slack", "googlecalendar", "github", "notion"];
+
 const PENDING_CONNECTOR_KEY = "tallei:pending-connector-auth";
 
 type PendingConnectorAuth = {
@@ -369,181 +118,20 @@ type PendingConnectorAuth = {
   startedAt: number;
 };
 
-const APPS: AppDef[] = [
-  {
-    key: "gmail",
-    name: "Gmail",
-    description: "Send emails, manage labels, and search your inbox.",
-    category: "Communication",
-    scopes: ["gmail.send_email"],
-    color: "#EA4335",
-    icon: GmailIcon,
-  },
-  {
-    key: "slack",
-    name: "Slack",
-    description: "Post messages and manage channels.",
-    category: "Communication",
-    scopes: ["slack.post_message"],
-    color: "#4A154B",
-    icon: SlackIcon,
-  },
-  {
-    key: "msteams",
-    name: "Microsoft Teams",
-    description: "Send messages and manage team conversations.",
-    category: "Communication",
-    scopes: [],
-    color: "#6264A7",
-    icon: TeamsIcon,
-  },
-  {
-    key: "discord",
-    name: "Discord",
-    description: "Send messages to channels and servers.",
-    category: "Communication",
-    scopes: [],
-    color: "#5865F2",
-    icon: DiscordIcon,
-  },
-  {
-    key: "googlecalendar",
-    name: "Google Calendar",
-    description: "Create events and manage your schedule.",
-    category: "Scheduling",
-    scopes: ["googlecalendar.create_event"],
-    color: "#4285F4",
-    icon: GCalIcon,
-  },
-  {
-    key: "outlook",
-    name: "Outlook Calendar",
-    description: "Create and manage calendar events.",
-    category: "Scheduling",
-    scopes: [],
-    color: "#0078D4",
-    icon: OutlookIcon,
-  },
-  {
-    key: "calendly",
-    name: "Calendly",
-    description: "Schedule meetings and manage availability.",
-    category: "Scheduling",
-    scopes: [],
-    color: "#006BFF",
-    icon: CalendlyIcon,
-  },
-  {
-    key: "twitter",
-    name: "Twitter / X",
-    description: "Post tweets and manage your timeline.",
-    category: "Social",
-    scopes: [],
-    color: "#000000",
-    icon: TwitterIcon,
-  },
-  {
-    key: "linkedin",
-    name: "LinkedIn",
-    description: "Share posts and manage your professional presence.",
-    category: "Social",
-    scopes: [],
-    color: "#0A66C2",
-    icon: LinkedInIcon,
-  },
-  {
-    key: "github",
-    name: "GitHub",
-    description: "Create issues, PRs, and manage repositories.",
-    category: "Development",
-    scopes: ["github.create_issue"],
-    color: "#181717",
-    icon: GitHubIcon,
-  },
-  {
-    key: "gitlab",
-    name: "GitLab",
-    description: "Manage issues, merge requests, and projects.",
-    category: "Development",
-    scopes: [],
-    color: "#FC6D26",
-    icon: GitLabIcon,
-  },
-  {
-    key: "linear",
-    name: "Linear",
-    description: "Create issues and manage project workflows.",
-    category: "Development",
-    scopes: [],
-    color: "#5E6AD2",
-    icon: LinearIcon,
-  },
-  {
-    key: "jira",
-    name: "Jira",
-    description: "Create tickets and track project progress.",
-    category: "Development",
-    scopes: [],
-    color: "#0052CC",
-    icon: JiraIcon,
-  },
-  {
-    key: "notion",
-    name: "Notion",
-    description: "Create pages and manage your workspace.",
-    category: "Productivity",
-    scopes: ["notion.create_page"],
-    color: "#000000",
-    icon: NotionIcon,
-  },
-  {
-    key: "asana",
-    name: "Asana",
-    description: "Create tasks and manage team projects.",
-    category: "Productivity",
-    scopes: [],
-    color: "#F06A6A",
-    icon: AsanaIcon,
-  },
-  {
-    key: "trello",
-    name: "Trello",
-    description: "Create cards and manage boards.",
-    category: "Productivity",
-    scopes: [],
-    color: "#0079BF",
-    icon: TrelloIcon,
-  },
-  {
-    key: "gdrive",
-    name: "Google Drive",
-    description: "Upload and manage files in your Drive.",
-    category: "Storage",
-    scopes: [],
-    color: "#34A853",
-    icon: GDriveIcon,
-  },
-  {
-    key: "dropbox",
-    name: "Dropbox",
-    description: "Upload and sync files across devices.",
-    category: "Storage",
-    scopes: [],
-    color: "#0061FF",
-    icon: DropboxIcon,
-  },
-  {
-    key: "onedrive",
-    name: "OneDrive",
-    description: "Store and share files from the cloud.",
-    category: "Storage",
-    scopes: [],
-    color: "#0078D4",
-    icon: OneDriveIcon,
-  },
-];
-
-const RECOMMENDED_KEYS = ["gmail", "slack", "googlecalendar", "github", "notion"];
+type ResendSetupPayload = {
+  provider: "resend";
+  status: "connected" | "missing";
+  portalUrl: string;
+  apiKeysUrl: string;
+  docsUrl: string;
+  steps: string[];
+  connection?: {
+    id: string;
+    status: string;
+    last4: string | null;
+    label: string | null;
+  };
+};
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -604,26 +192,82 @@ function useKeydown(key: string, handler: () => void) {
   }, [key, handler]);
 }
 
+function mergeApps(toolkits: ComposioToolkit[]): AppDef[] {
+  const seen = new Set<string>();
+  const apps: AppDef[] = [];
+
+  for (const tk of toolkits) {
+    const key = normalizeComposioSlug(tk.slug);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const meta = APP_META[key];
+    apps.push({
+      key,
+      name: tk.name || key,
+      description: tk.description || "",
+      category: meta?.category ?? "Productivity",
+      scopes: meta?.scopes ?? [],
+      color: meta?.color ?? "#7a9a4a",
+      logo: tk.logo || "",
+      authMode: meta?.authMode,
+    });
+  }
+
+  // Add any statically-defined apps that Composio didn't return
+  for (const [key, meta] of Object.entries(APP_META)) {
+    if (seen.has(key)) continue;
+    apps.push({
+      key,
+      name: key,
+      description: "",
+      category: meta.category,
+      scopes: meta.scopes,
+      color: meta.color,
+      logo: "",
+      authMode: meta.authMode,
+    });
+  }
+
+  return apps;
+}
+
 /* ------------------------------------------------------------------ */
 /* Main page                                                           */
 /* ------------------------------------------------------------------ */
 export default function ConnectedAppsPage() {
   const [connectors, setConnectors] = useState<ConnectorAccount[]>([]);
+  const [apps, setApps] = useState<AppDef[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checkingConnection, setCheckingConnection] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [resendModalOpen, setResendModalOpen] = useState(false);
+  const [resendSetup, setResendSetup] = useState<ResendSetupPayload | null>(null);
+  const [resendApiKey, setResendApiKey] = useState("");
+  const [resendLabel, setResendLabel] = useState("");
+  const [resendBusy, setResendBusy] = useState(false);
+  const [resendError, setResendError] = useState<string | null>(null);
 
   async function load(options?: { connectionCheck?: boolean }) {
     setError(null);
     if (options?.connectionCheck) setCheckingConnection(true);
     try {
-      const res = await fetch("/api/connectors", { cache: "no-store" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to load connected apps");
-      setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
+      const [connectorsRes, toolkitsRes] = await Promise.all([
+        fetch("/api/connectors", { cache: "no-store" }),
+        fetch("/api/connectors/composio/toolkits", { cache: "no-store" }),
+      ]);
+
+      const connectorsData = await connectorsRes.json();
+      const toolkitsData = await toolkitsRes.json();
+
+      if (!connectorsRes.ok) throw new Error(connectorsData?.error || "Failed to load connected apps");
+      setConnectors(Array.isArray(connectorsData.connectors) ? connectorsData.connectors : []);
+
+      const toolkits = Array.isArray(toolkitsData.toolkits) ? toolkitsData.toolkits : [];
+      setApps(mergeApps(toolkits));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load connected apps");
     } finally {
@@ -697,18 +341,37 @@ export default function ConnectedAppsPage() {
   const connectedApps = useMemo(() => {
     return connectors
       .map((c) => {
-        const app = APPS.find((a) => a.key === resolveConnectorKey(c));
+        const app = apps.find((a) => a.key === resolveConnectorKey(c));
         return app ? { ...c, app } : null;
       })
       .filter(Boolean) as (ConnectorAccount & { app: AppDef })[];
-  }, [connectors]);
+  }, [connectors, apps]);
 
   const recommendedApps = useMemo(() => {
     const connectedKeys = new Set(connectors.map((c) => resolveConnectorKey(c)).filter((k): k is string => !!k));
-    return APPS.filter((a) => RECOMMENDED_KEYS.includes(a.key) && !connectedKeys.has(a.key));
-  }, [connectors]);
+    return apps.filter((a) => RECOMMENDED_KEYS.includes(a.key) && !connectedKeys.has(a.key));
+  }, [connectors, apps]);
 
   async function startAuth(app: AppDef) {
+    if (app.authMode === "native_api_key" && app.key === "resend") {
+      setResendBusy(true);
+      setResendError(null);
+      setResendApiKey("");
+      setResendLabel("");
+      try {
+        const res = await fetch("/api/connectors/resend", { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || "Failed to load Resend setup");
+        setResendSetup(data as ResendSetupPayload);
+        setResendModalOpen(true);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load Resend setup");
+      } finally {
+        setResendBusy(false);
+      }
+      return;
+    }
+
     setBusyKey(app.key);
     setError(null);
     try {
@@ -750,6 +413,36 @@ export default function ConnectedAppsPage() {
       window.sessionStorage.removeItem(PENDING_CONNECTOR_KEY);
       setError(e instanceof Error ? e.message : "Failed to start connection");
       setBusyKey(null);
+    }
+  }
+
+  async function saveResendConnector() {
+    if (!resendApiKey.trim()) {
+      setResendError("Resend API key is required");
+      return;
+    }
+    setResendBusy(true);
+    setResendError(null);
+    try {
+      const res = await fetch("/api/connectors/resend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key: resendApiKey.trim(),
+          ...(resendLabel.trim().length > 0 ? { label: resendLabel.trim() } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to connect Resend");
+      setResendSetup(data as ResendSetupPayload);
+      setResendModalOpen(false);
+      setResendApiKey("");
+      setResendLabel("");
+      await load();
+    } catch (e) {
+      setResendError(e instanceof Error ? e.message : "Failed to connect Resend");
+    } finally {
+      setResendBusy(false);
     }
   }
 
@@ -857,7 +550,20 @@ export default function ConnectedAppsPage() {
                 <div key={account.id} className={styles.connectedCard}>
                   <div className={styles.connectedCardLeft}>
                     <div className={styles.connectedIconWrap}>
-                      <app.icon size={22} />
+                      {app.logo ? (
+                        <img src={app.logo} alt={app.name} />
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 700,
+                            color: app.color,
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          {app.name.charAt(0)}
+                        </span>
+                      )}
                     </div>
                     <div className={styles.connectedInfo}>
                       <span className={styles.connectedName}>{app.name}</span>
@@ -898,12 +604,25 @@ export default function ConnectedAppsPage() {
           <div className={styles.recommendedGrid}>
             {recommendedApps.map((app) => {
               const isBusy = busyKey === app.key;
-              const isComingSoon = app.scopes.length === 0;
+              const isComingSoon = app.authMode !== "native_api_key" && app.scopes.length === 0;
               return (
                 <div key={app.key} className={styles.recommendedCard}>
                   <div className={styles.recommendedTop}>
                     <div className={styles.recommendedIconWrap}>
-                      <app.icon size={22} />
+                      {app.logo ? (
+                        <img src={app.logo} alt={app.name} />
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 700,
+                            color: app.color,
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          {app.name.charAt(0)}
+                        </span>
+                      )}
                     </div>
                     <div className={styles.recommendedMeta}>
                       <span className={styles.recommendedName}>{app.name}</span>
@@ -939,6 +658,7 @@ export default function ConnectedAppsPage() {
       {/* Add App Drawer */}
       {addOpen && (
         <AddAppDrawer
+          apps={apps}
           onClose={() => setAddOpen(false)}
           connectedKeys={new Set(connectors.map((c) => resolveConnectorKey(c)).filter((k): k is string => !!k))}
           busyKey={busyKey}
@@ -946,6 +666,91 @@ export default function ConnectedAppsPage() {
           onDisconnect={(accountId) => void disconnect(accountId)}
           connectors={connectors}
         />
+      )}
+
+      {resendModalOpen && resendSetup && (
+        <div className={styles.drawerOverlay} onClick={() => setResendModalOpen(false)}>
+          <div className={styles.drawer} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.drawerHeader}>
+              <div>
+                <h2 className={styles.drawerTitle}>Connect Resend</h2>
+                <p className={styles.drawerSubtitle}>Use your own Resend API key for sending.</p>
+              </div>
+              <button type="button" className={styles.drawerClose} onClick={() => setResendModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className={styles.drawerList}>
+              <div className={styles.drawerRow}>
+                <div className={styles.drawerRowLeft}>
+                  <div className={styles.drawerRowInfo}>
+                    <div className={styles.drawerRowHead}>
+                      <span className={styles.drawerRowName}>Steps</span>
+                    </div>
+                    <ol style={{ margin: "8px 0 0 18px", color: "var(--muted-foreground)" }}>
+                      {resendSetup.steps.map((step, index) => (
+                        <li key={`${index}-${step}`} style={{ marginBottom: 6 }}>{step}</li>
+                      ))}
+                    </ol>
+                    <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                      <a className={styles.connectMiniBtn} href={resendSetup.portalUrl} target="_blank" rel="noreferrer">
+                        Open Portal <ExternalLink size={12} />
+                      </a>
+                      <a className={styles.connectMiniBtn} href={resendSetup.apiKeysUrl} target="_blank" rel="noreferrer">
+                        API Keys <ExternalLink size={12} />
+                      </a>
+                      <a className={styles.connectMiniBtn} href={resendSetup.docsUrl} target="_blank" rel="noreferrer">
+                        Docs <ExternalLink size={12} />
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className={styles.drawerRow}>
+                <div className={styles.drawerRowLeft}>
+                  <div className={styles.drawerRowInfo}>
+                    <label className={styles.drawerRowName} htmlFor="resend-label">Label (optional)</label>
+                    <input
+                      id="resend-label"
+                      className={styles.drawerSearchInput}
+                      value={resendLabel}
+                      onChange={(e) => setResendLabel(e.target.value)}
+                      placeholder="Production key"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className={styles.drawerRow}>
+                <div className={styles.drawerRowLeft}>
+                  <div className={styles.drawerRowInfo}>
+                    <label className={styles.drawerRowName} htmlFor="resend-api-key">API key</label>
+                    <input
+                      id="resend-api-key"
+                      type="password"
+                      className={styles.drawerSearchInput}
+                      value={resendApiKey}
+                      onChange={(e) => setResendApiKey(e.target.value)}
+                      placeholder="re_xxxxxxxxx"
+                    />
+                    {resendError ? <p style={{ marginTop: 8, color: "#dc2626", fontSize: 12 }}>{resendError}</p> : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 12 }}>
+              <button type="button" className={styles.refreshBtn} onClick={() => setResendModalOpen(false)} disabled={resendBusy}>
+                Cancel
+              </button>
+              <button type="button" className={styles.addBtn} onClick={() => void saveResendConnector()} disabled={resendBusy}>
+                {resendBusy ? "Saving..." : "Save and connect"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -955,6 +760,7 @@ export default function ConnectedAppsPage() {
 /* Add App Drawer                                                      */
 /* ------------------------------------------------------------------ */
 function AddAppDrawer({
+  apps,
   onClose,
   connectedKeys,
   busyKey,
@@ -962,6 +768,7 @@ function AddAppDrawer({
   onDisconnect,
   connectors,
 }: {
+  apps: AppDef[];
   onClose: () => void;
   connectedKeys: Set<string>;
   busyKey: string | null;
@@ -975,7 +782,7 @@ function AddAppDrawer({
   useKeydown("Escape", onClose);
 
   const filtered = useMemo(() => {
-    let list = APPS;
+    let list = apps;
     if (activeCategory !== "All") list = list.filter((a) => a.category === activeCategory);
     if (search.trim()) {
       const q = search.trim().toLowerCase();
@@ -987,7 +794,7 @@ function AddAppDrawer({
       );
     }
     return list;
-  }, [activeCategory, search]);
+  }, [activeCategory, search, apps]);
 
   const connectedAccountByKey = useMemo(() => {
     const map = new Map<string, ConnectorAccount>();
@@ -1052,13 +859,26 @@ function AddAppDrawer({
               const connected = connectedKeys.has(app.key);
               const account = connectedAccountByKey.get(app.key);
               const isBusy = busyKey === app.key || (account && busyKey === `disconnect-${account.id}`);
-              const isComingSoon = app.scopes.length === 0;
+              const isComingSoon = app.authMode !== "native_api_key" && app.scopes.length === 0;
 
               return (
                 <div key={app.key} className={styles.drawerRow}>
                   <div className={styles.drawerRowLeft}>
                     <div className={styles.drawerRowIcon}>
-                      <app.icon size={22} />
+                      {app.logo ? (
+                        <img src={app.logo} alt={app.name} />
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 700,
+                            color: app.color,
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          {app.name.charAt(0)}
+                        </span>
+                      )}
                     </div>
                     <div className={styles.drawerRowInfo}>
                       <div className={styles.drawerRowHead}>

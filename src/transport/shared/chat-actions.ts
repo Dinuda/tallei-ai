@@ -31,11 +31,6 @@ import { aiProviderRegistry } from "../../providers/ai/index.js";
 import { runAsyncSafe } from "../../shared/async-safe.js";
 import { config } from "../../config/index.js";
 import { setRequestTimingField } from "../../observability/request-timing.js";
-import {
-  discoverInlineWorkflowSuggestions,
-  recordWorkflowActivity,
-  type WorkflowSuggestion,
-} from "../../services/workflow-automation.js";
 
 export type MemoryTypeInput = "preference" | "fact" | "event" | "decision" | "note" | "lesson" | "failure" | "checkpoint";
 export type RememberKindInput = "fact" | "preference" | "document-note" | "document-blob" | "checkpoint";
@@ -656,13 +651,6 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
         summary: saved.summary,
       },
     };
-    void recordWorkflowActivity({
-      auth,
-      source: input.platform ?? "chatgpt",
-      activityType: "remember_fact",
-      content: input.content,
-      metadata: { kind: input.kind },
-    }).catch(() => {});
     return response;
   }
 
@@ -684,13 +672,6 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
         summary: saved.summary,
       },
     };
-    void recordWorkflowActivity({
-      auth,
-      source: input.platform ?? "chatgpt",
-      activityType: "remember_preference",
-      content: input.content,
-      metadata: { kind: input.kind, category: input.category ?? null },
-    }).catch(() => {});
     return response;
   }
 
@@ -722,13 +703,6 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
         conversation_id: input.conversation_id ?? null,
       },
     };
-    void recordWorkflowActivity({
-      auth,
-      source: input.platform ?? "chatgpt",
-      activityType: "remember_document_note",
-      content: input.content ?? input.summary ?? input.title ?? "document note",
-      metadata: { kind: input.kind },
-    }).catch(() => {});
     return response;
   }
 
@@ -750,13 +724,6 @@ export async function executeRememberAction(auth: AuthContext, input: RememberAc
         summary: saved.summary,
       },
     };
-    void recordWorkflowActivity({
-      auth,
-      source: input.platform ?? "chatgpt",
-      activityType: "remember_checkpoint",
-      content: input.content,
-      metadata: { kind: input.kind },
-    }).catch(() => {});
     return response;
   }
 
@@ -901,7 +868,6 @@ export interface PrepareResponseActionResult {
     };
     replyInstructions: string[];
     intent: PrepareResponseIntent;
-    workflowSuggestions?: WorkflowSuggestion[];
     recentCollabTasks?: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>;
     focusedCollabContext?: string | null;
   };
@@ -1773,29 +1739,6 @@ export async function executePrepareResponseAction(
     ? `--- Focused Collab Task ---\n${focusedCollabContext}\n---\n${baseContextBlock}`
     : baseContextBlock;
 
-  // Activity intake + inline workflow discovery runs best-effort and should never
-  // block the response path.
-  let workflowSuggestions: WorkflowSuggestion[] = [];
-  try {
-    await recordWorkflowActivity({
-      auth,
-      source: dependencies.platform ?? "chatgpt",
-      activityType: "chat_turn",
-      content: input.message,
-      metadata: {
-        hasAttachments: (input.openaiFileIdRefs?.length ?? 0) > 0,
-        queuedSaves: queuedSaves.length,
-      },
-    });
-    workflowSuggestions = await discoverInlineWorkflowSuggestions({
-      auth,
-      message: input.message,
-      source: dependencies.platform ?? "chatgpt",
-    });
-  } catch {
-    workflowSuggestions = [];
-  }
-
   return {
     status,
     body: {
@@ -1811,7 +1754,6 @@ export async function executePrepareResponseAction(
       autoSave: recallBody.autoSave,
       replyInstructions,
       intent: intentForResponse,
-      workflowSuggestions,
       recentCollabTasks: recallBody.recentCollabTasks,
       focusedCollabContext,
     },
