@@ -1,13 +1,16 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
+  AlertCircle,
   ArrowRight,
   Bot,
   Calendar,
   Check,
   Clock,
+  Loader2,
+  RefreshCw,
   RotateCcw,
   Sparkles,
   X,
@@ -53,110 +56,38 @@ type LoopInsight = {
   conversations: Conversation[];
 };
 
-/* ------------------------------------------------------------------ */
-//  Mock Data
-/* ------------------------------------------------------------------ */
+type LoopMinerEpisode = {
+  id: string;
+  title?: string;
+  summary?: string;
+  intent?: string;
+  toolNames?: string[];
+  sealedAt?: string;
+  createdAt?: string;
+};
 
-const MOCK_LOOPS: LoopInsight[] = [
-  {
-    id: "loop-1",
-    name: "Friday Newsletter",
-    description:
-      "You've drafted a company newsletter 4 times. Always Friday afternoon. Always the same warm, founder-tone.",
-    frequency: "Every Friday",
-    conversationCount: 4,
-    lastOccurred: "2026-05-16T16:30:00Z",
-    nextPredicted: "2026-05-23T16:00:00Z",
-    confidence: 94,
-    status: "detected",
-    conversations: [
-      {
-        id: "ep-1",
-        title: "Week 18 update",
-        date: "2026-04-25T16:15:00Z",
-        platform: "claude",
-        snippet: "Drafted the weekly company newsletter covering product ship...",
-      },
-      {
-        id: "ep-2",
-        title: "Week 19 update",
-        date: "2026-05-02T16:20:00Z",
-        platform: "chatgpt",
-        snippet: "Newsletter draft with customer story highlight and roadmap...",
-      },
-      {
-        id: "ep-3",
-        title: "Week 20 update",
-        date: "2026-05-09T16:10:00Z",
-        platform: "claude",
-        snippet: "Founder update: new integrations, team growth, next quarter...",
-      },
-      {
-        id: "ep-4",
-        title: "Week 21 update",
-        date: "2026-05-16T16:30:00Z",
-        platform: "claude",
-        snippet: "Product launch week newsletter — metrics, quotes, CTA...",
-      },
-    ],
-  },
-  {
-    id: "loop-2",
-    name: "Product Snapshot",
-    description:
-      "Twice this month you asked for a 'quick product summary' before a call. Same structure, same context.",
-    frequency: "Before key calls",
-    conversationCount: 2,
-    lastOccurred: "2026-05-14T09:00:00Z",
-    nextPredicted: "2026-05-21T09:00:00Z",
-    confidence: 71,
-    status: "detected",
-    conversations: [
-      {
-        id: "ep-5",
-        title: "Pre-investor sync",
-        date: "2026-05-07T09:00:00Z",
-        platform: "chatgpt",
-        snippet: "Generated a one-pager on current product status and metrics...",
-      },
-      {
-        id: "ep-6",
-        title: "Pre-partner call",
-        date: "2026-05-14T09:00:00Z",
-        platform: "claude",
-        snippet: "Summarized product features and integration roadmap for...",
-      },
-    ],
-  },
-  {
-    id: "loop-3",
-    name: "Investor Update",
-    description:
-      "End-of-month investor updates. Tallei noticed the pattern forming — only 2 occurrences so far.",
-    frequency: "End of month",
-    conversationCount: 2,
-    lastOccurred: "2026-04-30T18:00:00Z",
-    nextPredicted: "2026-05-31T18:00:00Z",
-    confidence: 58,
-    status: "detected",
-    conversations: [
-      {
-        id: "ep-7",
-        title: "April investor memo",
-        date: "2026-03-31T18:00:00Z",
-        platform: "chatgpt",
-        snippet: "Monthly investor update: revenue, burn, hires, risks...",
-      },
-      {
-        id: "ep-8",
-        title: "May investor memo",
-        date: "2026-04-30T18:00:00Z",
-        platform: "claude",
-        snippet: "Investor update with new metrics dashboard and hiring plan...",
-      },
-    ],
-  },
-];
+type LoopMinerSuggestion = {
+  id: string;
+  title: string;
+  reason: string;
+  confidence: number;
+  triggerCount: number;
+  createdAt: string;
+  metadata?: unknown;
+};
+
+type LoopMinerRun = {
+  id: string;
+  createdAt: string;
+  completedAt: string | null;
+  episodes: LoopMinerEpisode[];
+  suggestions: LoopMinerSuggestion[];
+};
+
+type LoopMinerRunsPayload = {
+  runs?: LoopMinerRun[];
+  error?: string;
+};
 
 /* ------------------------------------------------------------------ */
 //  Helpers
@@ -187,6 +118,124 @@ function daysUntil(ts: string): number {
   } catch {
     return 0;
   }
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function readStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function cadenceLabel(raw: unknown): string {
+  if (typeof raw !== "string" || raw.trim().length === 0) return "Detected pattern";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function inferPlatform(toolNames: string[] | undefined): Platform {
+  if ((toolNames ?? []).some((name) => name.toLowerCase().includes("claude"))) return "claude";
+  return "chatgpt";
+}
+
+function addDays(baseIso: string, days: number): string {
+  const base = new Date(baseIso);
+  if (Number.isNaN(base.getTime())) return new Date().toISOString();
+  base.setDate(base.getDate() + days);
+  return base.toISOString();
+}
+
+function inferNextPredictionFromCadence(lastOccurred: string, cadence: string): string {
+  const text = cadence.toLowerCase();
+  if (text.includes("daily")) return addDays(lastOccurred, 1);
+  if (text.includes("weekly")) return addDays(lastOccurred, 7);
+  if (text.includes("month")) return addDays(lastOccurred, 30);
+  return addDays(lastOccurred, 7);
+}
+
+function episodeToConversation(episode: LoopMinerEpisode): Conversation {
+  return {
+    id: episode.id,
+    title: episode.title ?? episode.intent ?? "Episode",
+    date: episode.sealedAt ?? episode.createdAt ?? new Date().toISOString(),
+    platform: inferPlatform(episode.toolNames),
+    snippet: episode.summary ?? episode.intent ?? "Built from collaborative activity.",
+  };
+}
+
+function buildLoopInsights(runs: LoopMinerRun[]): LoopInsight[] {
+  if (runs.length === 0) return [];
+  const latest = runs[0];
+  const episodes = latest.episodes ?? [];
+  const suggestions = latest.suggestions ?? [];
+  const episodeById = new Map(episodes.map((episode) => [episode.id, episode]));
+
+  if (suggestions.length > 0) {
+    return suggestions.map((suggestion) => {
+      const metadata = readRecord(suggestion.metadata);
+      const evaluation = readRecord(metadata.evaluation);
+      const candidateLoop = readRecord(metadata.candidateLoop);
+      const episodeIds = readStringList(candidateLoop.episodeIds ?? evaluation.episodeIds ?? metadata.episodeIds);
+
+      let conversations = episodeIds
+        .map((id) => episodeById.get(id))
+        .filter((episode): episode is LoopMinerEpisode => Boolean(episode))
+        .map(episodeToConversation);
+
+      if (conversations.length === 0) {
+        conversations = episodes
+          .slice(0, Math.max(1, suggestion.triggerCount))
+          .map(episodeToConversation);
+      }
+
+      const lastOccurred = conversations
+        .map((conversation) => conversation.date)
+        .sort((a, b) => b.localeCompare(a))[0] ?? latest.completedAt ?? latest.createdAt;
+
+      const cadence = cadenceLabel(evaluation.estimatedCadence);
+      return {
+        id: suggestion.id,
+        name: suggestion.title,
+        description: suggestion.reason,
+        frequency: cadence,
+        conversationCount: Math.max(suggestion.triggerCount, conversations.length),
+        lastOccurred,
+        nextPredicted: inferNextPredictionFromCadence(lastOccurred, cadence),
+        confidence: Math.max(1, Math.min(99, Math.round((suggestion.confidence ?? 0.5) * 100))),
+        status: "detected",
+        conversations,
+      };
+    });
+  }
+
+  const grouped = new Map<string, LoopMinerEpisode[]>();
+  for (const episode of episodes) {
+    const key = (episode.intent ?? episode.title ?? "episode").trim().toLowerCase();
+    const current = grouped.get(key) ?? [];
+    current.push(episode);
+    grouped.set(key, current);
+  }
+
+  return [...grouped.entries()]
+    .map(([key, groupedEpisodes], index) => {
+      const conversations = groupedEpisodes
+        .sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""))
+        .map(episodeToConversation);
+      const lastOccurred = conversations[0]?.date ?? latest.completedAt ?? latest.createdAt;
+      return {
+        id: `episode-group-${index}-${key}`,
+        name: conversations[0]?.title ?? "Detected Episode Pattern",
+        description: conversations[0]?.snippet ?? "Pattern inferred from built episodes.",
+        frequency: "Detected pattern",
+        conversationCount: conversations.length,
+        lastOccurred,
+        nextPredicted: inferNextPredictionFromCadence(lastOccurred, "weekly"),
+        confidence: 65,
+        status: "detected" as const,
+        conversations,
+      };
+    })
+    .sort((a, b) => b.lastOccurred.localeCompare(a.lastOccurred));
 }
 
 function hashString(str: string): number {
@@ -666,8 +715,31 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
 /* ------------------------------------------------------------------ */
 
 export default function LoopsPage() {
-  const [loops, setLoops] = useState<LoopInsight[]>(MOCK_LOOPS);
+  const [loops, setLoops] = useState<LoopInsight[]>([]);
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadLoopMinerRuns = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/memories/cleanup/loop-miner/runs", { cache: "no-store" });
+      const payload = (await response.json().catch(() => ({}))) as LoopMinerRunsPayload;
+      if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
+      const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      setLoops(buildLoopInsights(runs));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
+      setLoops([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLoopMinerRuns();
+  }, [loadLoopMinerRuns]);
 
   const dismissLoop = useCallback((id: string) => {
     setLoops((prev) => prev.filter((l) => l.id !== id));
@@ -713,6 +785,10 @@ export default function LoopsPage() {
                 </button>
               ))}
             </div>
+            <Button type="button" variant="outline" className="h-9 gap-1.5" onClick={loadLoopMinerRuns} disabled={loading}>
+              {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              Refresh
+            </Button>
 
             <Button asChild className="gap-1.5 h-9 bg-orange-500 text-white hover:bg-orange-600 rounded-none">
               <Link href="/dashboard/workflows">
@@ -726,6 +802,14 @@ export default function LoopsPage() {
 
         {/* Main stage */}
         <main className="min-h-0 flex-1 overflow-y-auto bg-[var(--muted)] px-6 py-6">
+          {error ? (
+            <div className="mx-auto mb-4 max-w-5xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              <span className="inline-flex items-center gap-2">
+                <AlertCircle size={14} />
+                {error}
+              </span>
+            </div>
+          ) : null}
           <AnimatePresence mode="popLayout">
             {filtered.length === 0 ? (
               <motion.div
@@ -735,7 +819,7 @@ export default function LoopsPage() {
               >
                 <div className="grid h-16 w-16 place-items-center rounded-xl bg-slate-100 shadow-sm">
                   <Sparkles size={28} className="text-slate-400" />
-                </div>sk
+                </div>
                 <div>
                   <h2 className="text-lg font-semibold text-[var(--text)]">
                     Tallei is watching your work
