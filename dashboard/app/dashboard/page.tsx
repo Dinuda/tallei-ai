@@ -23,7 +23,17 @@ type MemoryItem = {
 };
 
 type Platform = "claude" | "chatgpt" | "gemini" | "other";
-type MemoryType = "preference" | "fact" | "event" | "decision" | "note" | "unknown";
+type MemoryType =
+  | "preference"
+  | "fact"
+  | "event"
+  | "decision"
+  | "note"
+  | "lesson"
+  | "failure"
+  | "checkpoint"
+  | "collab"
+  | "unknown";
 
 type UIMemory = MemoryItem & {
   platform: Platform;
@@ -59,7 +69,101 @@ type MemoriesResponsePayload = {
   error?: string;
 };
 
-const CHATGPT_PREFERENCE_EXPORT_PROMPT = `Extract my stable preferences from this chat and return ONLY a JSON array of strings.\n\nRules:\n- Include writing style, tone, formatting rules, language preferences, tooling habits, and recurring constraints.\n- Keep each item short, explicit, and actionable.\n- Skip temporary requests or one-off tasks.\n- Output valid JSON only.\n\nExample output:\n[\n  "Use concise, direct explanations.",\n  "Prefer TypeScript over JavaScript when both are possible.",\n  "Show final answers with short bullet lists."\n]`;
+type ChatGptImportCandidate = {
+  raw: string;
+  normalized: string;
+  detectedKey: string | null;
+  detectedValue: string;
+  sourceDateTime: string | null;
+  memoryType: MemoryType;
+  category: string | null;
+  isPinned: boolean;
+  preferenceKey: string | null;
+  status: "accepted" | "duplicate" | "conflict" | "invalid";
+  reason?: string;
+};
+
+type ChatGptImportConflict = {
+  reason: "contradictory_value";
+  candidate: {
+    raw: string;
+    memoryType: MemoryType;
+    category: string | null;
+    isPinned: boolean;
+    entityKey: string;
+    sourceDateTime: string | null;
+    preferenceKey: string | null;
+    detectedKey: string | null;
+    detectedValue: string;
+  };
+  existing: {
+    memoryId: string;
+    text: string;
+    memoryType: MemoryType;
+    preferenceKey: string | null;
+    category: string | null;
+    detectedValue: string;
+  };
+};
+
+type ChatGptImportDuplicate = {
+  reason: string;
+  candidate: {
+    raw: string;
+    normalized: string;
+    sourceDateTime: string | null;
+    memoryType: MemoryType;
+    category: string | null;
+    preferenceKey: string | null;
+    detectedKey: string | null;
+  };
+  existingMemoryId?: string;
+};
+
+type ChatGptImportResult = {
+  batchId: string;
+  mode: "json_export" | "paste";
+  summary: {
+    parsed: number;
+    accepted: number;
+    duplicates: number;
+    conflicts: number;
+    invalid: number;
+    persisted: number;
+  };
+  preview: ChatGptImportCandidate[];
+  conflicts: ChatGptImportConflict[];
+  duplicates: ChatGptImportDuplicate[];
+  warnings: string[];
+};
+
+const CHATGPT_MEMORY_EXPORT_PROMPT = `Extract my memory-relevant facts from this chat and return ONLY a JSON array of objects.
+
+Balance complete coverage with a loop/workflow bias.
+
+Prioritize:
+1) Recurring workflows, repeated tasks, operating cadence, routines, checklists, and playbooks.
+2) Stable identity and preferences (communication style, tools, constraints, environment).
+3) Ongoing projects, decisions, commitments, deadlines, and notable events.
+4) Important lessons/failures and corrective actions.
+
+Rules:
+- Keep each item atomic, explicit, and reusable.
+- Use this exact object shape: {"memory":"...","datetime":"..."}.
+- Put the best available date/time for when the memory became true, happened, or was discussed.
+- Use ISO 8601 datetime when possible. If only a date is known, use YYYY-MM-DD. If unknown, use null.
+- Include enough detail to be actionable; skip filler/chit-chat.
+- Keep both loop-oriented and non-loop memories.
+- Output valid JSON only.
+
+Example output:
+[
+  {"memory":"Every Monday I prepare the weekly product metrics report.","datetime":"2026-05-20"},
+  {"memory":"Use concise, direct explanations.","datetime":null},
+  {"memory":"I live in San Francisco.","datetime":"2026-05-20"},
+  {"memory":"Decision: use TypeScript for all new services.","datetime":"2026-05-20T10:30:00Z"},
+  {"memory":"When loop-miner runs timeout, split by token budget before retrying.","datetime":"2026-05-20"}
+]`;
 
 const PAGE_SIZE = 20;
 
@@ -96,6 +200,10 @@ function normalizeMemoryType(raw: unknown): MemoryType {
   if (value === "event") return "event";
   if (value === "decision") return "decision";
   if (value === "note") return "note";
+  if (value === "lesson") return "lesson";
+  if (value === "failure") return "failure";
+  if (value === "checkpoint") return "checkpoint";
+  if (value === "collab") return "collab";
   return "unknown";
 }
 
@@ -163,7 +271,7 @@ function normalizePreferenceKey(value: string): string | null {
     .replace(/^_+|_+$/g, "") || null;
 }
 
-function parsePastedPreferences(input: string): string[] {
+function parsePastedImportItems(input: string): string[] {
   const trimmed = input.trim();
   if (!trimmed) return [];
 
@@ -189,7 +297,7 @@ function parsePastedPreferences(input: string): string[] {
           if (typeof item === "string") return item;
           if (item && typeof item === "object") {
             const rec = item as Record<string, unknown>;
-            const value = rec.preference ?? rec.value ?? rec.text ?? rec.content;
+            const value = rec.preference ?? rec.value ?? rec.text ?? rec.content ?? rec.memory ?? rec.fact ?? rec.note ?? rec.summary;
             if (typeof value === "string") return value;
           }
           return "";
@@ -207,7 +315,7 @@ function parsePastedPreferences(input: string): string[] {
             if (typeof item === "string") return item;
             if (item && typeof item === "object") {
               const rec = item as Record<string, unknown>;
-              const value = rec.preference ?? rec.value ?? rec.text ?? rec.content;
+              const value = rec.preference ?? rec.value ?? rec.text ?? rec.content ?? rec.memory ?? rec.fact ?? rec.note ?? rec.summary;
               if (typeof value === "string") return value;
             }
             return "";
@@ -377,6 +485,7 @@ export default function DashboardMemoriesPage() {
   const [copyLabel, setCopyLabel] = useState("Copy prompt");
   const [importBusy, setImportBusy] = useState(false);
   const [modalMessage, setModalMessage] = useState<ModalMessage | null>(null);
+  const [importReport, setImportReport] = useState<ChatGptImportResult | null>(null);
   const modalRef = useRef<HTMLDivElement | null>(null);
 
   const fetchMemories = useCallback(async (params?: {
@@ -532,7 +641,7 @@ export default function DashboardMemoriesPage() {
     return enriched.filter((memory) => new Date(memory.createdAt).getTime() >= cutoff);
   }, [enriched, timeFilter]);
 
-  const parsedImportItems = useMemo(() => parsePastedPreferences(importText), [importText]);
+  const parsedImportItems = useMemo(() => parsePastedImportItems(importText), [importText]);
 
   const savePreference = useCallback(async (content: string, platform: Platform | "other", category: string) => {
     const preferenceKey = normalizePreferenceKey(content);
@@ -554,45 +663,67 @@ export default function DashboardMemoriesPage() {
     }
   }, []);
 
-  const handleImport = useCallback(async () => {
-    const items = parsePastedPreferences(importText);
-    if (items.length === 0) {
-      setModalMessage({ kind: "error", text: "No preference lines found. Paste JSON or one line per preference." });
+  const runImportRequest = useCallback(async (apply: boolean) => {
+    const response = await fetch("/api/memories/import/chatgpt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: importText,
+        apply,
+      }),
+    });
+    const payload = (await response.json().catch(() => ({}))) as ChatGptImportResult & { error?: string };
+    if (!response.ok) {
+      throw new Error(typeof payload.error === "string" ? payload.error : "Import request failed.");
+    }
+    return payload as ChatGptImportResult;
+  }, [importText]);
+
+  const handlePreviewImport = useCallback(async () => {
+    if (!importText.trim()) {
+      setModalMessage({ kind: "error", text: "Paste ChatGPT memory text or JSON first." });
       return;
     }
-
     setImportBusy(true);
     setModalMessage(null);
-
-    let success = 0;
-    let failed = 0;
-
-    for (const item of items) {
-      try {
-        await savePreference(item, "chatgpt", "chatgpt-import");
-        success += 1;
-      } catch {
-        failed += 1;
-      }
-    }
-
-    await fetchMemories({ mode: "refresh", offset: 0 });
-    setImportBusy(false);
-
-    if (failed === 0) {
-      setImportText("");
+    try {
+      const report = await runImportRequest(false);
+      setImportReport(report);
+      const { accepted, conflicts, duplicates, invalid } = report.summary;
       setModalMessage({
-        kind: "success",
-        text: `Imported ${success} preference${success === 1 ? "" : "s"} from ChatGPT.`,
+        kind: "info",
+        text: `Preview ready: ${accepted} accepted, ${conflicts} conflicts, ${duplicates} duplicates, ${invalid} invalid.`,
       });
+    } catch (previewError) {
+      const message = previewError instanceof Error ? previewError.message : "Preview failed.";
+      setModalMessage({ kind: "error", text: message });
+    } finally {
+      setImportBusy(false);
+    }
+  }, [importText, runImportRequest]);
+
+  const handleApplyImport = useCallback(async () => {
+    if (!importText.trim()) {
+      setModalMessage({ kind: "error", text: "Paste ChatGPT memory text or JSON first." });
       return;
     }
-
-    setModalMessage({
-      kind: "error",
-      text: `Imported ${success} preference${success === 1 ? "" : "s"}. ${failed} failed.`,
-    });
-  }, [fetchMemories, importText, savePreference]);
+    setImportBusy(true);
+    setModalMessage(null);
+    try {
+      const report = await runImportRequest(true);
+      setImportReport(report);
+      await fetchMemories({ mode: "refresh", offset: 0 });
+      setModalMessage({
+        kind: "success",
+        text: `Imported ${report.summary.persisted} memor${report.summary.persisted === 1 ? "y" : "ies"}. Conflicts were quarantined for review.`,
+      });
+    } catch (applyError) {
+      const message = applyError instanceof Error ? applyError.message : "Import apply failed.";
+      setModalMessage({ kind: "error", text: message });
+    } finally {
+      setImportBusy(false);
+    }
+  }, [fetchMemories, importText, runImportRequest]);
 
   const handleQuickAdd = useCallback(async () => {
     const content = quickPreference.trim();
@@ -616,13 +747,19 @@ export default function DashboardMemoriesPage() {
 
   const handleCopyPrompt = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(CHATGPT_PREFERENCE_EXPORT_PROMPT);
+      await navigator.clipboard.writeText(CHATGPT_MEMORY_EXPORT_PROMPT);
       setCopyLabel("Copied");
       setTimeout(() => setCopyLabel("Copy prompt"), 1500);
     } catch {
       setCopyLabel("Copy failed");
       setTimeout(() => setCopyLabel("Copy prompt"), 1800);
     }
+  }, []);
+
+  const openImportModal = useCallback(() => {
+    setImportOpen(true);
+    setModalMessage(null);
+    setImportReport(null);
   }, []);
 
   const handleDeleteMemory = useCallback(async (id: string) => {
@@ -674,6 +811,14 @@ export default function DashboardMemoriesPage() {
       <header className={styles.pageHeader}>
         <h1 className={styles.pageTitle}>Memories</h1>
         <div className={styles.actionButtons}>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={openImportModal}
+            disabled={loading}
+          >
+            Import from ChatGPT
+          </button>
           <button
             type="button"
             className={styles.actionBtn}
@@ -767,7 +912,7 @@ export default function DashboardMemoriesPage() {
         >
           <div className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="import-dialog-title" ref={modalRef}>
             <div className={styles.modalHeader}>
-              <h2 id="import-dialog-title" className={styles.modalTitle}>Import Preferences From ChatGPT</h2>
+              <h2 id="import-dialog-title" className={styles.modalTitle}>Import ChatGPT Memory Dump</h2>
               <Button variant="ghost" size="icon" className={styles.modalClose}
                 onClick={() => setImportOpen(false)}
                 aria-label="Close dialog"
@@ -777,7 +922,7 @@ export default function DashboardMemoriesPage() {
             </div>
 
             <p className={styles.modalSubtitle}>
-              Copy the prompt into ChatGPT, then paste the response here as JSON or one preference per line.
+              Copy the prompt into ChatGPT, then paste the response here as JSON or one item per line.
             </p>
 
             {modalMessage && (
@@ -793,29 +938,120 @@ export default function DashboardMemoriesPage() {
               </Button>
               <details className={styles.promptDetails}>
                 <summary>Show prompt text</summary>
-                <pre>{CHATGPT_PREFERENCE_EXPORT_PROMPT}</pre>
+                <pre>{CHATGPT_MEMORY_EXPORT_PROMPT}</pre>
               </details>
             </div>
 
             <textarea
               value={importText}
-              onChange={(event) => setImportText(event.target.value)}
+              onChange={(event) => {
+                setImportText(event.target.value);
+                setImportReport(null);
+              }}
               className={styles.importTextarea}
               rows={8}
-              placeholder='Paste ChatGPT output (JSON array, object, or one line per preference)'
+              placeholder='Paste ChatGPT output, e.g. [{"memory":"Every Monday I prepare the metrics report.","datetime":"2026-05-20"}]'
             />
 
             <div className={styles.importFooter}>
               <span className={styles.parsedHint}>
-                Parsed {parsedImportItems.length} preference{parsedImportItems.length === 1 ? "" : "s"}
+                Parsed {parsedImportItems.length} candidate memor{parsedImportItems.length === 1 ? "y" : "ies"}
               </span>
-              <Button
-                disabled={importBusy || parsedImportItems.length === 0}
-                onClick={() => void handleImport()}
-              >
-                {importBusy ? "Importing..." : "Import preferences"}
-              </Button>
+              <div className={styles.importActionsRow}>
+                <Button
+                  variant="outline"
+                  disabled={importBusy || importText.trim().length === 0}
+                  onClick={() => void handlePreviewImport()}
+                >
+                  {importBusy ? "Working..." : "Preview import"}
+                </Button>
+                <Button
+                  disabled={importBusy || !importReport || importReport.summary.accepted === 0}
+                  onClick={() => void handleApplyImport()}
+                >
+                  {importBusy ? "Importing..." : `Import accepted (${importReport?.summary.accepted ?? 0})`}
+                </Button>
+              </div>
             </div>
+
+            {importReport && (
+              <div className={styles.importReport}>
+                <div className={styles.importReportHeader}>
+                  <strong>Preview Report</strong>
+                  <span>Batch {importReport.batchId.slice(0, 8)} · mode: {importReport.mode}</span>
+                </div>
+                <div className={styles.importSummaryGrid}>
+                  <div className={styles.importSummaryCell}><span>Parsed</span><strong>{importReport.summary.parsed}</strong></div>
+                  <div className={styles.importSummaryCell}><span>Accepted</span><strong>{importReport.summary.accepted}</strong></div>
+                  <div className={styles.importSummaryCell}><span>Conflicts</span><strong>{importReport.summary.conflicts}</strong></div>
+                  <div className={styles.importSummaryCell}><span>Duplicates</span><strong>{importReport.summary.duplicates}</strong></div>
+                  <div className={styles.importSummaryCell}><span>Invalid</span><strong>{importReport.summary.invalid}</strong></div>
+                  <div className={styles.importSummaryCell}><span>Persisted</span><strong>{importReport.summary.persisted}</strong></div>
+                </div>
+
+                {importReport.conflicts.length > 0 && (
+                  <div className={styles.importSection}>
+                    <h3>Conflicts (quarantined)</h3>
+                    <div className={styles.importList}>
+                      {importReport.conflicts.slice(0, 8).map((conflict, index) => (
+                          <div key={`${conflict.existing.memoryId}-${index}`} className={styles.importListItem}>
+                            <div><strong>Candidate:</strong> {conflict.candidate.raw}</div>
+                            {conflict.candidate.sourceDateTime && (
+                              <div><strong>Source date:</strong> {conflict.candidate.sourceDateTime}</div>
+                            )}
+                            <div><strong>Existing:</strong> {conflict.existing.text}</div>
+                          </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {importReport.preview.length > 0 && (
+                  <div className={styles.importSection}>
+                    <h3>Accepted candidates</h3>
+                    <div className={styles.importList}>
+                      {importReport.preview
+                        .filter((candidate) => candidate.status === "accepted")
+                        .slice(0, 12)
+                        .map((candidate, index) => (
+                          <div key={`${candidate.normalized}-${index}`} className={styles.importListItem}>
+                            <span>{candidate.raw}</span>
+                            <em>
+                              {candidate.memoryType}{candidate.category ? ` · ${candidate.category}` : ""}
+                              {candidate.sourceDateTime ? ` · ${candidate.sourceDateTime}` : ""}
+                            </em>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                {importReport.duplicates.length > 0 && (
+                  <div className={styles.importSection}>
+                    <h3>Duplicates skipped</h3>
+                    <div className={styles.importList}>
+                      {importReport.duplicates.slice(0, 8).map((duplicate, index) => (
+                        <div key={`${duplicate.candidate.normalized}-${index}`} className={styles.importListItem}>
+                          <span>{duplicate.candidate.raw}</span>
+                          <em>{duplicate.reason}</em>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {importReport.warnings.length > 0 && (
+                  <div className={styles.importSection}>
+                    <h3>Warnings</h3>
+                    <ul className={styles.importWarnings}>
+                      {importReport.warnings.slice(0, 8).map((warning, index) => (
+                        <li key={`${warning}-${index}`}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className={styles.quickAddBlock}>
               <label className={styles.quickAddLabel} htmlFor="quick-preference-input">Add single preference</label>

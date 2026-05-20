@@ -1,4 +1,5 @@
 import type { AuthContext } from "../../domain/auth/index.js";
+import { embedText } from "../../infrastructure/cache/embedding-cache.js";
 import { LoopMinerRepository as PgLoopMinerRepository } from "../../infrastructure/repositories/loop-miner.repository.js";
 import { createLogger } from "../../observability/index.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage } from "../memory-cleanup/usage.js";
@@ -10,6 +11,8 @@ import type {
   CandidateLoop,
   EpisodeRecord,
   LoopEvaluation,
+  LoopMinerMemoryDecision,
+  MinerEvent,
   PhaseUsageMetrics,
   LoopMinerRepository,
   LoopMinerRunReason,
@@ -71,7 +74,7 @@ function createDefaultDeps(): LoopMinerDeps {
   return {
     repository,
     episodeBuilder: new EpisodeBuilderUseCase(repository),
-    loopDetector: new LoopDetectorUseCase(),
+    loopDetector: new LoopDetectorUseCase(undefined, async (text) => embedText(text)),
     loopEvaluator: new LoopEvaluatorUseCase(),
     dnaGenerator: new DnaGeneratorUseCase(),
   };
@@ -85,6 +88,98 @@ function normalizePhaseUsage(usage: PhaseUsageMetrics | undefined): PhaseUsageMe
   };
 }
 
+function summarizeMemoryDecisions(decisions: LoopMinerMemoryDecision[]): NonNullable<LoopMinerSummary["memorySelection"]> {
+  return {
+    considered: decisions.length,
+    included: decisions.filter((decision) => decision.status === "included").length,
+    excluded: decisions.filter((decision) => decision.status === "excluded").length,
+    sourceImportsIncluded: decisions.filter((decision) => decision.status === "included" && decision.sourceImport).length,
+    unbucketedIncluded: decisions.filter((decision) => decision.status === "included" && !decision.sourceImport && !decision.cleanupBucket).length,
+    bucketedExcluded: decisions.filter((decision) => decision.status === "excluded" && decision.reason === "bucketed_memory_deprioritized").length,
+    decryptFailures: decisions.filter((decision) => decision.reason === "decrypt_failed").length,
+  };
+}
+
+function countEventsByType(events: MinerEvent[]): { total: number; aiActivity: number; collabTask: number; memoryRecord: number } {
+  return {
+    total: events.length,
+    aiActivity: events.filter((event) => event.sourceEventType === "ai_activity_event").length,
+    collabTask: events.filter((event) => event.sourceEventType === "collab_task").length,
+    memoryRecord: events.filter((event) => event.sourceEventType === "memory_record").length,
+  };
+}
+
+function memoryDecisionToFallbackEvent(decision: LoopMinerMemoryDecision): MinerEvent | null {
+  if (decision.status !== "included") return null;
+  if (!decision.contentPreview || decision.contentPreview === "[Encrypted memory unavailable]") return null;
+  return {
+    id: decision.memoryId,
+    sourceEventType: "memory_record",
+    createdAt: decision.selectedAt || decision.createdAt,
+    platform: decision.sourcePlatform ?? "chatgpt",
+    role: "user",
+    contentSummary: [
+      decision.sourceImport ? "Imported ChatGPT memory" : "Memory",
+      `Type: ${decision.detectedMemoryType ?? decision.memoryType}`,
+      decision.category ? `Category: ${decision.category}` : null,
+      decision.sourceDateTime ? `Source datetime: ${decision.sourceDateTime}` : null,
+      decision.contentPreview,
+    ].filter((part): part is string => Boolean(part)).join("\n"),
+    metadata: {
+      memoryType: decision.memoryType,
+      detectedMemoryType: decision.detectedMemoryType,
+      category: decision.category,
+      isPinned: decision.isPinned,
+      sourceImport: decision.sourceImport,
+      sourceImportBatchId: decision.sourceImportBatchId,
+      sourceImportMode: decision.sourceImportMode,
+      sourceDateTime: decision.sourceDateTime,
+      observedAt: decision.observedAt,
+      cleanupAppliedAt: decision.cleanupAppliedAt,
+      cleanupAction: decision.cleanupAction,
+      cleanupTargetMemoryId: decision.cleanupTargetMemoryId,
+      cleanupSourceMemoryIds: decision.cleanupSourceMemoryIds,
+      cleanupBucket: decision.cleanupBucket,
+      minerImportance: decision.minerImportance,
+      memoryImportance: decision.memoryImportance,
+      fallbackFromDecisionLog: true,
+    },
+  };
+}
+
+function applyMemoryDecisionFallbackEvents(
+  events: MinerEvent[],
+  decisions: LoopMinerMemoryDecision[] | undefined
+): { events: MinerEvent[]; added: number; replaced: number } {
+  if (!decisions || decisions.length === 0) return { events, added: 0, replaced: 0 };
+  const fallbackEvents = decisions
+    .map(memoryDecisionToFallbackEvent)
+    .filter((event): event is MinerEvent => {
+      if (!event) return false;
+      return true;
+    });
+  if (fallbackEvents.length === 0) return { events, added: 0, replaced: 0 };
+
+  const fallbackById = new Map(fallbackEvents.map((event) => [event.id, event]));
+  let replaced = 0;
+  const canonicalEvents = events.map((event) => {
+    const fallback = fallbackById.get(event.id);
+    if (!fallback) return event;
+    fallbackById.delete(event.id);
+    if (event.sourceEventType === "memory_record") {
+      replaced += 1;
+      return fallback;
+    }
+    return event;
+  });
+  const addedEvents = [...fallbackById.values()];
+  return {
+    events: addedEvents.length > 0 ? [...canonicalEvents, ...addedEvents] : canonicalEvents,
+    added: addedEvents.length,
+    replaced,
+  };
+}
+
 function keyForLoop(loop: CandidateLoop): string {
   return [...loop.episodeIds].sort().join("|");
 }
@@ -94,6 +189,21 @@ function findCandidateForEvaluation(candidates: CandidateLoop[], evaluation: Loo
   return candidates.find((candidate) => keyForLoop(candidate) === evaluationKey)
     ?? candidates.find((candidate) => evaluation.episodeIds.every((id) => candidate.episodeIds.includes(id)))
     ?? null;
+}
+
+function isSingleMemoryDeclaredLoop(candidateLoop: CandidateLoop, episodes: EpisodeRecord[]): boolean {
+  return candidateLoop.episodeIds.length === 1
+    && episodes.length === 1
+    && episodes[0]?.outputType === "workflow_memory"
+    && episodes[0]?.turns.some((turn) => turn.sourceEventType === "memory_record") === true;
+}
+
+function loggableSummary(summary: LoopMinerSummary): Omit<LoopMinerSummary, "memoryDecisionLog"> & { memoryDecisionLogCount: number } {
+  const { memoryDecisionLog: _memoryDecisionLog, ...rest } = summary;
+  return {
+    ...rest,
+    memoryDecisionLogCount: summary.memoryDecisionLog?.length ?? 0,
+  };
 }
 
 export async function runLoopMinerForUser(
@@ -128,7 +238,57 @@ export async function runLoopMinerForUser(
   let summary = emptySummary();
   try {
     logger.info("loop miner run started", { runId, runReason, lookbackDays });
-    const events = await deps.repository.listRecentEvents(auth, lookbackDays);
+    let events = await deps.repository.listRecentEvents(auth, lookbackDays);
+    const eventCountsBeforeFallback = countEventsByType(events);
+    if (deps.repository.listMemoryDecisionLog) {
+      try {
+        const memoryDecisionLog = await deps.repository.listMemoryDecisionLog(auth, lookbackDays);
+        summary.memoryDecisionLog = memoryDecisionLog;
+        summary.memorySelection = summarizeMemoryDecisions(memoryDecisionLog);
+        summary.cleanupSuppressedSeeds = memoryDecisionLog.filter((decision) =>
+          decision.status === "excluded" && decision.reason === "bucketed_memory_deprioritized"
+        ).length;
+        logger.info("loop miner memory decision trace", {
+          runId,
+          ...summary.memorySelection,
+          reasonCounts: memoryDecisionLog.reduce<Record<string, number>>((counts, decision) => {
+            counts[decision.reason] = (counts[decision.reason] ?? 0) + 1;
+            return counts;
+          }, {}),
+        });
+        const memoryFallback = applyMemoryDecisionFallbackEvents(events, memoryDecisionLog);
+        events = memoryFallback.events;
+        const eventCountsAfterFallback = countEventsByType(events);
+        summary.memorySelection = {
+          ...summary.memorySelection,
+          fallbackEventsAdded: memoryFallback.added,
+          fallbackEventsReplaced: memoryFallback.replaced,
+          eventFeedAfterFallback: events.length,
+        };
+        summary.debugTrace = {
+          ...(summary.debugTrace ?? {}),
+          eventIngest: {
+            beforeFallback: eventCountsBeforeFallback,
+            afterFallback: eventCountsAfterFallback,
+            fallbackEventsAdded: memoryFallback.added,
+            fallbackEventsReplaced: memoryFallback.replaced,
+            includedMemoryIdsSample: memoryDecisionLog
+              .filter((decision) => decision.status === "included")
+              .slice(0, 12)
+              .map((decision) => decision.memoryId),
+            memoryEventIdsSample: events
+              .filter((event) => event.sourceEventType === "memory_record")
+              .slice(0, 12)
+              .map((event) => event.id),
+          },
+        };
+      } catch (memoryDecisionError) {
+        summary.warnings = [
+          ...(summary.warnings ?? []),
+          `Memory decision log unavailable: ${errorJson(memoryDecisionError).message ?? "unknown error"}`,
+        ];
+      }
+    }
     const built = await deps.episodeBuilder.execute({ auth, runId, events });
     mergeCleanupAiUsage(summary.usage, built.usage);
     summary.aiCalls += built.aiCalls;
@@ -140,11 +300,53 @@ export async function runLoopMinerForUser(
     if (built.warnings.length > 0) {
       summary.warnings = [...(summary.warnings ?? []), ...built.warnings];
     }
+    const deterministicSamples = built.raw
+      .filter((row): row is Record<string, unknown> => {
+        return Boolean(row)
+          && typeof row === "object"
+          && !Array.isArray(row)
+          && (row as Record<string, unknown>).source === "deterministic_memory_workflow_extraction";
+      })
+      .slice(0, 12)
+      .map((row) => ({
+        eventId: typeof row.eventId === "string" ? row.eventId : "",
+        title: typeof row.title === "string" ? row.title : undefined,
+        outputType: typeof row.outputType === "string" ? row.outputType : undefined,
+        cadence: typeof row.cadence === "string" ? row.cadence : undefined,
+      }));
+    summary.debugTrace = {
+      ...(summary.debugTrace ?? {}),
+      episodeBuilder: {
+        inputEvents: events.length,
+        deterministicMemoryExtractions: deterministicSamples.length,
+        llmInputEvents: events.length - deterministicSamples.length,
+        rawDeterministicSamples: deterministicSamples,
+        builtEpisodeSamples: built.episodes.slice(0, 12).map((episode) => ({
+          id: episode.id,
+          title: episode.title ?? episode.intent,
+          outputType: episode.outputType,
+          sourceEventTypes: [...new Set(episode.turns.map((turn) => turn.sourceEventType))],
+          eventIds: episode.eventIds.slice(0, 12),
+        })),
+      },
+    };
 
     const detected = await deps.loopDetector.execute(built.episodes);
     mergeCleanupAiUsage(summary.usage, detected.usage);
     summary.aiCalls += detected.aiCalls;
     summary.loopsDetected = detected.loops.length;
+    summary.loopsProposed = detected.patternTrace.candidateGroups.length;
+    summary.loopsApproved = detected.patternTrace.approvedGroups.length;
+    summary.loopsRejected = detected.patternTrace.rejectedGroups.length;
+    summary.loopsContested = detected.patternTrace.adversaryFindings.filter((finding) => finding.contested).length;
+    summary.loopsAutoApproved = detected.patternTrace.judgeDecisions.filter((decision) => decision.status === "approved_loop" && decision.confidence >= 0.85).length;
+    summary.cleanupEvidenceUsed = built.episodes.filter((episode) =>
+      episode.turns.some((turn) => turn.sourceEventType === "memory_record")
+    ).length;
+    summary.timeSignalsUsed = built.episodes.filter((episode) =>
+      episode.turns.some((turn) => /Source datetime:/i.test(turn.contentSummary))
+    ).length;
+    summary.patternTrace = detected.patternTrace;
     summary.phaseUsage = {
       ...(summary.phaseUsage ?? {}),
       loopDetector: normalizePhaseUsage(detected.phaseUsage),
@@ -152,6 +354,16 @@ export async function runLoopMinerForUser(
     if (detected.warnings.length > 0) {
       summary.warnings = [...(summary.warnings ?? []), ...detected.warnings];
     }
+    summary.debugTrace = {
+      ...(summary.debugTrace ?? {}),
+      detector: {
+        inputEpisodes: built.episodes.length,
+        candidateGroups: detected.patternTrace.candidateGroups.length,
+        approvedGroups: detected.patternTrace.approvedGroups.length,
+        rejectedGroups: detected.patternTrace.rejectedGroups.length,
+        warningCount: detected.warnings.length,
+      },
+    };
 
     const episodesByLoop = new Map<string, EpisodeRecord[]>();
     for (const loop of detected.loops) {
@@ -184,7 +396,7 @@ export async function runLoopMinerForUser(
         };
       })
       .filter((item): item is { candidateLoop: CandidateLoop; evaluation: LoopEvaluation; episodes: EpisodeRecord[] } => {
-        return item !== null && item.episodes.length >= 2;
+        return item !== null && (item.episodes.length >= 2 || isSingleMemoryDeclaredLoop(item.candidateLoop, item.episodes));
       });
 
     const generated = await deps.dnaGenerator.execute({ qualifiedLoops });
@@ -215,7 +427,7 @@ export async function runLoopMinerForUser(
     summary.suggestionsCreated = suggestions.length;
     summary = finalizeSummary(summary, startedAt);
     await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-    logger.info("loop miner run completed", { runId, ...summary });
+    logger.info("loop miner run completed", { runId, ...loggableSummary(summary) });
     return { id: runId, status: "completed", summary, suggestions };
   } catch (error) {
     summary = finalizeSummary(summary, startedAt);

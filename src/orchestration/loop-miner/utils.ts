@@ -99,7 +99,21 @@ export function compactMinerEvent(
     : `${event.contentSummary.slice(0, cap - 3)}...`;
   const rawMetadata = readObject(event.metadata);
   const allowlistedMetadata: Record<string, unknown> = {};
-  for (const key of ["state", "iteration", "lastActor", "updatedAt", "activityType", "source"]) {
+  for (const key of [
+    "state",
+    "iteration",
+    "lastActor",
+    "updatedAt",
+    "activityType",
+    "source",
+    "memoryType",
+    "detectedMemoryType",
+    "category",
+    "sourceImport",
+    "sourceDateTime",
+    "cleanupBucket",
+    "minerImportance",
+  ]) {
     if (rawMetadata[key] !== undefined) {
       allowlistedMetadata[key] = rawMetadata[key];
     }
@@ -112,6 +126,107 @@ export function compactMinerEvent(
     role: event.role,
     contentSummary,
     metadata: allowlistedMetadata,
+  };
+}
+
+function memoryStatementFromSummary(contentSummary: string): string {
+  const lines = contentSummary
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(Imported ChatGPT memory|Memory|Type:|Category:|Source datetime:)/i.test(line));
+  return lines.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function titleFromMemoryStatement(statement: string): string {
+  const compact = statement.replace(/^I\s+/i, "");
+  const title = compact.charAt(0).toUpperCase() + compact.slice(1);
+  return title.length <= 82 ? title : `${title.slice(0, 79)}...`;
+}
+
+function cadenceFromMemoryStatement(statement: string): Cadence {
+  const text = statement.toLowerCase();
+  if (/\b(every friday|weekly|every week|each week)\b/.test(text)) return "weekly";
+  if (/\b(daily|every day|each day|morning checklist|every morning|evening block|every evening)\b/.test(text)) return "daily";
+  if (/\b(monthly|every month|each month)\b/.test(text)) return "monthly";
+  if (/\b(after every|before writing|before planning|when planning|before scaling|before launch|sales or support conversation)\b/.test(text)) return "event_based";
+  return "unknown";
+}
+
+function outputTypeFromMemoryStatement(statement: string): string {
+  const text = statement.toLowerCase();
+  if (/\bnewsletter\b/.test(text)) return "newsletter";
+  if (/\b(email|reply|inbox)\b/.test(text)) return "email";
+  if (/\bproposal|pitch deck|deck\b/.test(text)) return "proposal";
+  if (/\bcode|architecture|technical\b/.test(text)) return "unknown";
+  return "workflow_memory";
+}
+
+export function explicitWorkflowMemoryExtraction(event: MinerEvent): EpisodeExtraction | null {
+  if (event.sourceEventType !== "memory_record") return null;
+  const metadata = readObject(event.metadata);
+  const sourceImport = metadata.sourceImport === true;
+  const statement = memoryStatementFromSummary(event.contentSummary);
+  if (!statement) return null;
+  const text = statement.toLowerCase();
+  const hasExplicitWorkflowSignal = /\b(every|weekly|daily|monthly|morning checklist|checklist|after every|before writing|when planning|maintain a list|keep a running|decision log|failed experiments|batch .* tasks|review .* analytics|customer objections|launches?)\b/.test(text);
+  const hasWorkActivitySignal = /\b(newsletter|am writing|writing a|wrote|used chatgpt|collaborated with chatgpt|brainstorm hooks|technical explanations|help structure|refine|product copy|marketing copy|product philosophy|architecture ideas)\b/.test(text);
+  const isProfileOnly = /\b(founder|engineer from|focused on|lives in|based in|from sri lanka|location)\b/.test(text) && !hasExplicitWorkflowSignal && !hasWorkActivitySignal;
+  if ((!hasExplicitWorkflowSignal && !hasWorkActivitySignal) || isProfileOnly) return null;
+
+  const cadence = cadenceFromMemoryStatement(statement);
+  const title = titleFromMemoryStatement(statement);
+  const memoryImportance = normalizeConfidence(metadata.minerImportance ?? 0.7);
+  const inferredOutputType = outputTypeFromMemoryStatement(statement);
+  const outputType = inferredOutputType !== "workflow_memory"
+    ? inferredOutputType
+    : hasExplicitWorkflowSignal
+      ? "workflow_memory"
+      : inferredOutputType;
+  return {
+    title,
+    summary: hasExplicitWorkflowSignal
+      ? `Imported memory describes a recurring workflow or reusable work routine: ${statement}`
+      : `Imported memory describes an AI-assisted work episode: ${statement}`,
+    intent: statement,
+    intentDetails: {
+      label: hasExplicitWorkflowSignal ? "memory_declared_recurring_workflow" : "memory_imported_work_episode",
+      goal: statement,
+      confidence: sourceImport ? 0.9 : 0.78,
+    },
+    sources: [sourceImport ? "Imported ChatGPT memory" : "Memory record"],
+    sourceDetails: [{
+      type: "memory",
+      name: sourceImport ? "Imported ChatGPT memory" : "Memory record",
+      id: event.id,
+      importance: memoryImportance,
+    }],
+    outputType,
+    output: {
+      type: outputType === "newsletter" ? "newsletter" : "unknown",
+      description: hasExplicitWorkflowSignal
+        ? "Memory-derived recurring workflow evidence"
+        : "Memory-derived AI-assisted work evidence",
+    },
+    toolNames: [event.platform],
+    steps: [statement],
+    styleHints: [],
+    userBehavior: {
+      accepted: true,
+      edited: null,
+      regenerated: null,
+      ignored: false,
+      approvalSignal: "approved",
+    },
+    automationSignals: {
+      repeatable: true,
+      likelyCadence: cadence,
+      businessValue: sourceImport ? 0.72 : 0.62,
+      automationReadiness: 0.72,
+    },
+    confidence: sourceImport ? 0.9 : 0.78,
+    approved: true,
+    eventIds: [event.id],
   };
 }
 

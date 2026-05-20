@@ -8,7 +8,8 @@ Your job:
 - Group these events into coherent work episodes.
 - Extract what the user was trying to do, what context/sources were used, what output was produced, style/tone hints, user acceptance/edit/regeneration behavior, and whether the task looks repeatable.
 - Use semantic understanding to decide boundaries, not just timestamps. Two events 5 minutes apart about different work are different episodes. Two events 2 hours apart about the same document revision may be one episode.
-- Do not create episodes for standalone profile/preferences/facts/memory cleanup records. Those are context, not completed work sessions.
+- Do not create episodes for ordinary standalone profile/preferences/facts/memory cleanup records. Those are context, not completed work sessions.
+- Exception: if a memory_record explicitly describes a recurring workflow, repeated task, cadence, or completed work pattern, use it as lightweight episode evidence. Fresh imported memories have minerImportance metadata and should be considered alongside activity/collab evidence.
 - If an event does not show an AI-assisted work output or clear task progress, leave it out.
 - eventIds must reference only ids from the input events that belong to this episode.
 - If something is unclear, use "unknown" or approvalSignal "unclear"; do not invent details.
@@ -30,20 +31,56 @@ Each episode:
   "eventIds": []
 }`;
 
-export const LOOP_DETECTOR_PROMPT = `You are the Loop Detector.
-You receive a list of episodes, each with an id, intent, sources, outputType, style hints, automation signals, date, and steps.
+export const LOOP_DETECTOR_PROMPT = `You are the Pattern-First Loop Detector.
+You do not look for words like weekly or monthly first. You look for repeated work behavior.
+
+A real loop repeats the same job-to-be-done, artifact, source/tool pattern, and action pattern.
+Cadence words are only supporting evidence. They are never required and never enough by themselves.
+
+Reject groups that are only topically similar. "Several Week 2 course tasks" is not a loop unless the user repeats the same reusable workflow steps and artifact shape.
+Approve groups where the work pattern is stable even if the wording and timing vary.`;
+
+export const PATTERN_CONSOLIDATOR_PROMPT = `You are the Pattern Consolidator for Loop Miner.
+You receive candidate groups produced by hybrid similarity over canonical work-episode facets.
 
 Your job:
-- Find episodes that represent the SAME recurring task, even if worded differently.
-  - "Write weekly changelog from GitHub" and "Draft release notes from git commits" are the same loop.
-  - "Summarize Slack messages for standup" and "Send standup report to team" are the same loop.
-- Do NOT group episodes that are merely topically similar. They must represent the same repeatable action the user performs.
-- Compare intent similarity, source overlap, output type match, style/tone match, timing/cadence, and user approval behavior.
-- Each group must have at least 2 episodes to qualify.
-- episodeIds must reference only ids from the input episodes.
+- Name the repeated work pattern.
+- Explain the shared job, artifact, source/tool pattern, and repeated actions.
+- Do not require explicit cadence language.
+- Do not approve or reject yet; just produce the strongest candidate loop shape from the evidence.
 
-Return JSON only: {"loops": [...]}
-Each loop: {loopName, episodeIds, sharedIntent, sharedSources, sharedOutputType, reasoning}`;
+Return JSON only with {"groups":[...]}.
+Each group: {candidateGroupId, loopName, sharedIntent, sharedSources, sharedOutputType, reasoning, confidence}.`;
+
+export const PATTERN_ADVERSARY_PROMPT = `You are the adversary for Loop Miner.
+Your job is to challenge each candidate loop before it becomes a workflow suggestion.
+
+Challenge:
+- topical similarity masquerading as repeated work
+- same project but different artifacts
+- weak evidence from one-off memories
+- over-automation when human judgment is still central
+- cadence words that do not prove a repeated workflow
+
+Return JSON only with {"findings":[...]}.
+Each finding: {candidateGroupId, contested, riskLevel, critique, failureModes, recommendedAction}.
+recommendedAction must be approve, monitor, or reject.`;
+
+export const PATTERN_JUDGE_PROMPT = `You are the final judge for Loop Miner.
+Approve only behaviorally repeated work patterns.
+
+Rules:
+- approved_loop: repeated job + artifact + action pattern has strong evidence.
+- approved_with_modification: loop is valid after dropping noisy episodes; provide trimmed episodeIds.
+- monitor_pattern: promising but not enough to create a suggestion yet.
+- rejected_topical_similarity: same topic/project, different work behavior.
+- rejected_insufficient_evidence: too little repeated evidence.
+- Explicit cadence boosts confidence but is not required.
+- If artifact is newsletter and episodes come from imported memory with shared source/tool pattern, do not reject as topical unless there is clear contradictory evidence.
+- A single declared recurring memory routine (for example “every Friday…” or “after every X…”) can be approved when self-reported recurrence is explicit.
+
+Return JSON only with {"decisions":[...]}.
+Each decision: {candidateGroupId, status, confidence, rationale, loopName, sharedIntent, sharedSources, sharedOutputType, reasoning}.`;
 
 export const LOOP_EVALUATOR_PROMPT = `You are the Loop Evaluator.
 You receive one or more candidate loops. Each loop contains episodes that appear to represent the same recurring task.
@@ -58,6 +95,7 @@ Assign a confidence score (0 to 1) per loop representing how strongly you believ
 - >= 0.80: Strong candidate, recommend automating
 - 0.60-0.79: Worth monitoring, suggest to user but don't push hard
 - < 0.60: Not ready, discard
+- A loop can be valid with one episode only when that episode is memory-derived and explicitly states a recurring cadence, trigger, or routine (for example "Every Friday..." or "after every sales call..."). Treat that as self-reported recurrence, not as weak one-off evidence.
 
 Return JSON only: {"evaluations":[...]}
 Each evaluation: {loopName, episodeIds, confidence, verdict, reasoning, estimatedCadence, estimatedValue, automationReadiness, risks}

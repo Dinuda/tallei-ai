@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
+import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 import { pool } from "../db/index.js";
 import type {
   CandidateLoop,
@@ -8,6 +9,7 @@ import type {
   EpisodeRecord,
   EpisodeTurnRecord,
   LoopEvaluation,
+  LoopMinerMemoryDecision,
   LoopMinerRepository as LoopMinerRepositoryContract,
   LoopMinerRunView,
   LoopMinerRunReason,
@@ -38,6 +40,18 @@ interface CollabTaskRow {
   transcript: unknown;
   created_at: string;
   updated_at: string;
+}
+
+interface MemoryRecordEventRow {
+  id: string;
+  content_ciphertext: string;
+  platform: string;
+  memory_type: string;
+  category: string | null;
+  is_pinned: boolean;
+  importance: string | number;
+  summary_json: unknown;
+  created_at: string;
 }
 
 interface EpisodeRow {
@@ -133,6 +147,156 @@ function collabTaskSummary(row: CollabTaskRow): string {
   ].filter((part): part is string => Boolean(part)).join("\n"), 900);
 }
 
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readBoolean(value: unknown): boolean {
+  return value === true || value === "true";
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((item) => item.trim());
+}
+
+function validIsoLike(value: unknown): string | null {
+  const raw = readString(value);
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+}
+
+function memoryEventDate(row: MemoryRecordEventRow, summary: Record<string, unknown>): string {
+  return validIsoLike(summary.source_datetime)
+    ?? validIsoLike(summary.observed_at)
+    ?? validIsoLike(summary.created_at)
+    ?? row.created_at;
+}
+
+function memoryLoopImportance(row: MemoryRecordEventRow, summary: Record<string, unknown>): number {
+  if (readBoolean(summary.source_import)) return 0.72;
+  if (!readString(summary.cleanup_bucket)) return 0.64;
+  return Math.max(0.45, Math.min(0.6, Number(row.importance) || 0.5));
+}
+
+function isLoopEvidenceMemoryType(memoryType: string): boolean {
+  return memoryType === "fact" || memoryType === "decision" || memoryType === "preference";
+}
+
+function shouldIncludeMemoryForLoopMining(row: MemoryRecordEventRow, summary: Record<string, unknown>): boolean {
+  if (readBoolean(summary.source_import)) return true;
+  const bucket = readString(summary.cleanup_bucket);
+  if (!isLoopEvidenceMemoryType(row.memory_type)) return false;
+  if (!bucket) return true;
+  return bucket === "long_term" || bucket === "permanent";
+}
+
+function memoryDecisionReason(summary: Record<string, unknown>, decryptFailed: boolean, includedByMetadata: boolean): string {
+  if (decryptFailed) return "decrypt_failed";
+  if (!includedByMetadata) {
+    const bucket = readString(summary.cleanup_bucket);
+    return bucket ? "bucketed_memory_deprioritized" : "unbucketed_memory_deprioritized";
+  }
+  if (readBoolean(summary.source_import)) return "fresh_source_import_selected";
+  const bucket = readString(summary.cleanup_bucket);
+  if (!bucket) return "unbucketed_memory_selected";
+  if (bucket === "long_term" || bucket === "permanent") return "bucketed_memory_selected";
+  return "bucketed_memory_deprioritized";
+}
+
+function memoryRecordSummary(row: MemoryRecordEventRow): MinerEvent | null {
+  let content = "";
+  try {
+    content = decryptMemoryContent(row.content_ciphertext);
+  } catch {
+    return null;
+  }
+  const summary = readRecord(row.summary_json);
+  const sourceImport = readBoolean(summary.source_import);
+  const sourceDateTime = readString(summary.source_datetime);
+  const observedAt = validIsoLike(summary.source_datetime)
+    ?? validIsoLike(summary.observed_at)
+    ?? null;
+  const detectedMemoryType = readString(summary.import_detected_memory_type);
+  const cleanupBucket = readString(summary.cleanup_bucket);
+  const minerImportance = memoryLoopImportance(row, summary);
+  return {
+    id: row.id,
+    sourceEventType: "memory_record",
+    createdAt: memoryEventDate(row, summary),
+    platform: row.platform,
+    contentSummary: safeSummary([
+      sourceImport ? "Imported ChatGPT memory" : "Memory",
+      `Type: ${detectedMemoryType ?? row.memory_type}`,
+      row.category ? `Category: ${row.category}` : null,
+      sourceDateTime ? `Source datetime: ${sourceDateTime}` : null,
+      content,
+    ].filter((part): part is string => Boolean(part)).join("\n"), 900),
+    role: "user",
+    metadata: {
+      memoryType: row.memory_type,
+      detectedMemoryType,
+      category: row.category,
+      isPinned: row.is_pinned,
+      sourceImport,
+      sourceImportBatchId: readString(summary.source_import_batch_id),
+      sourceImportMode: readString(summary.source_import_mode),
+      sourceDateTime,
+      observedAt,
+      cleanupAppliedAt: validIsoLike(summary.cleanup_bucketed_at),
+      cleanupAction: readString(summary.cleanup_action),
+      cleanupTargetMemoryId: readString(summary.cleanup_target_memory_id),
+      cleanupSourceMemoryIds: readStringArray(summary.cleanup_source_memory_ids),
+      cleanupBucket,
+      minerImportance,
+      memoryImportance: Number(row.importance) || 0,
+    },
+  };
+}
+
+function memoryDecisionForRow(row: MemoryRecordEventRow): LoopMinerMemoryDecision {
+  const summary = readRecord(row.summary_json);
+  let content = "";
+  let decryptFailed = false;
+  try {
+    content = decryptMemoryContent(row.content_ciphertext);
+  } catch {
+    decryptFailed = true;
+  }
+  const sourceImport = readBoolean(summary.source_import);
+  const cleanupBucket = readString(summary.cleanup_bucket);
+  const includedByMetadata = shouldIncludeMemoryForLoopMining(row, summary);
+  const status = includedByMetadata && !decryptFailed ? "included" : "excluded";
+  return {
+    memoryId: row.id,
+    status,
+    reason: memoryDecisionReason(summary, decryptFailed, includedByMetadata),
+    contentPreview: decryptFailed ? "[Encrypted memory unavailable]" : truncateText(content, 280),
+    createdAt: row.created_at,
+    selectedAt: memoryEventDate(row, summary),
+    memoryType: row.memory_type,
+    detectedMemoryType: readString(summary.import_detected_memory_type),
+    category: row.category,
+    cleanupBucket,
+    isPinned: row.is_pinned,
+    sourceImport,
+    sourcePlatform: readString(summary.source_platform),
+    sourceImportMode: readString(summary.source_import_mode),
+    sourceImportBatchId: readString(summary.source_import_batch_id),
+    sourceDateTime: readString(summary.source_datetime),
+    observedAt: validIsoLike(summary.source_datetime) ?? validIsoLike(summary.observed_at),
+    cleanupAppliedAt: validIsoLike(summary.cleanup_bucketed_at),
+    cleanupAction: readString(summary.cleanup_action),
+    cleanupTargetMemoryId: readString(summary.cleanup_target_memory_id),
+    cleanupSourceMemoryIds: readStringArray(summary.cleanup_source_memory_ids),
+    minerImportance: memoryLoopImportance(row, summary),
+    memoryImportance: Number(row.importance) || 0,
+  };
+}
+
 function mapEpisode(row: EpisodeRow, turns: EpisodeTurnRecord[]): EpisodeRecord {
   const extraction = row.extraction_json && typeof row.extraction_json === "object" && !Array.isArray(row.extraction_json)
     ? row.extraction_json as Partial<EpisodeRecord>
@@ -162,13 +326,56 @@ function mapEpisode(row: EpisodeRow, turns: EpisodeTurnRecord[]): EpisodeRecord 
 }
 
 function readSummary(value: unknown): LoopMinerSummary {
-  const row = value && typeof value === "object" && !Array.isArray(value) ? value as Partial<LoopMinerSummary> : {};
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const row = raw as Partial<LoopMinerSummary>;
   const usage = row.usage && typeof row.usage === "object" && !Array.isArray(row.usage)
     ? row.usage as Partial<LoopMinerSummary["usage"]>
     : {};
   const phaseUsageRow = row.phaseUsage && typeof row.phaseUsage === "object" && !Array.isArray(row.phaseUsage)
     ? row.phaseUsage as Record<string, unknown>
     : {};
+  const memorySelectionRow = raw.memorySelection && typeof raw.memorySelection === "object" && !Array.isArray(raw.memorySelection)
+    ? raw.memorySelection as Record<string, unknown>
+    : null;
+  const patternTrace = raw.patternTrace && typeof raw.patternTrace === "object" && !Array.isArray(raw.patternTrace)
+    ? raw.patternTrace as LoopMinerSummary["patternTrace"]
+    : undefined;
+  const memoryDecisionLog: LoopMinerMemoryDecision[] | undefined = Array.isArray(raw.memoryDecisionLog)
+    ? raw.memoryDecisionLog
+        .map((value): LoopMinerMemoryDecision | null => {
+          const decision = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+          if (!decision || typeof decision.memoryId !== "string") return null;
+          const status = decision.status === "included" || decision.status === "excluded" ? decision.status : "excluded";
+          return {
+            memoryId: decision.memoryId,
+            status,
+            reason: typeof decision.reason === "string" ? decision.reason : "unknown",
+            contentPreview: typeof decision.contentPreview === "string" ? decision.contentPreview : "",
+            createdAt: typeof decision.createdAt === "string" ? decision.createdAt : "",
+            selectedAt: typeof decision.selectedAt === "string" ? decision.selectedAt : "",
+            memoryType: typeof decision.memoryType === "string" ? decision.memoryType : "unknown",
+            detectedMemoryType: typeof decision.detectedMemoryType === "string" ? decision.detectedMemoryType : null,
+            category: typeof decision.category === "string" ? decision.category : null,
+            cleanupBucket: typeof decision.cleanupBucket === "string" ? decision.cleanupBucket : null,
+            isPinned: Boolean(decision.isPinned),
+            sourceImport: Boolean(decision.sourceImport),
+            sourcePlatform: typeof decision.sourcePlatform === "string" ? decision.sourcePlatform : null,
+            sourceImportMode: typeof decision.sourceImportMode === "string" ? decision.sourceImportMode : null,
+            sourceImportBatchId: typeof decision.sourceImportBatchId === "string" ? decision.sourceImportBatchId : null,
+            sourceDateTime: typeof decision.sourceDateTime === "string" ? decision.sourceDateTime : null,
+            observedAt: typeof decision.observedAt === "string" ? decision.observedAt : null,
+            cleanupAppliedAt: typeof decision.cleanupAppliedAt === "string" ? decision.cleanupAppliedAt : null,
+            cleanupAction: typeof decision.cleanupAction === "string" ? decision.cleanupAction : null,
+            cleanupTargetMemoryId: typeof decision.cleanupTargetMemoryId === "string" ? decision.cleanupTargetMemoryId : null,
+            cleanupSourceMemoryIds: Array.isArray(decision.cleanupSourceMemoryIds)
+              ? decision.cleanupSourceMemoryIds.filter((id): id is string => typeof id === "string")
+              : null,
+            minerImportance: Number(decision.minerImportance ?? 0),
+            memoryImportance: Number(decision.memoryImportance ?? 0),
+          };
+        })
+        .filter((decision): decision is LoopMinerMemoryDecision => decision !== null)
+    : undefined;
   const readPhase = (value: unknown) => {
     const phase = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
     return {
@@ -194,6 +401,14 @@ function readSummary(value: unknown): LoopMinerSummary {
   return {
     episodesBuilt: Number(row.episodesBuilt ?? 0),
     loopsDetected: Number(row.loopsDetected ?? 0),
+    loopsProposed: Number(row.loopsProposed ?? 0),
+    loopsApproved: Number(row.loopsApproved ?? 0),
+    loopsContested: Number(row.loopsContested ?? 0),
+    loopsAutoApproved: Number(row.loopsAutoApproved ?? 0),
+    loopsRejected: Number(row.loopsRejected ?? 0),
+    cleanupEvidenceUsed: Number(row.cleanupEvidenceUsed ?? 0),
+    cleanupSuppressedSeeds: Number(row.cleanupSuppressedSeeds ?? 0),
+    timeSignalsUsed: Number(row.timeSignalsUsed ?? 0),
     loopsQualified: Number(row.loopsQualified ?? 0),
     suggestionsCreated: Number(row.suggestionsCreated ?? 0),
     durationMs: Number(row.durationMs ?? 0),
@@ -214,6 +429,20 @@ function readSummary(value: unknown): LoopMinerSummary {
     skipped: typeof row.skipped === "boolean" ? row.skipped : undefined,
     skipReason: typeof row.skipReason === "string" ? row.skipReason : undefined,
     warnings: Array.isArray(row.warnings) ? row.warnings.filter((warning): warning is string => typeof warning === "string") : undefined,
+    memorySelection: memorySelectionRow ? {
+      considered: Number(memorySelectionRow.considered ?? 0),
+      included: Number(memorySelectionRow.included ?? 0),
+      excluded: Number(memorySelectionRow.excluded ?? 0),
+      sourceImportsIncluded: Number(memorySelectionRow.sourceImportsIncluded ?? 0),
+      unbucketedIncluded: Number(memorySelectionRow.unbucketedIncluded ?? 0),
+      bucketedExcluded: Number(memorySelectionRow.bucketedExcluded ?? 0),
+      decryptFailures: Number(memorySelectionRow.decryptFailures ?? 0),
+      fallbackEventsAdded: Number(memorySelectionRow.fallbackEventsAdded ?? 0),
+      fallbackEventsReplaced: Number(memorySelectionRow.fallbackEventsReplaced ?? 0),
+      eventFeedAfterFallback: Number(memorySelectionRow.eventFeedAfterFallback ?? 0),
+    } : undefined,
+    memoryDecisionLog,
+    patternTrace,
     phaseUsage: {
       episodeBuilder: phaseUsageRow.episodeBuilder ? readPhase(phaseUsageRow.episodeBuilder) : undefined,
       loopDetector: phaseUsageRow.loopDetector ? readPhase(phaseUsageRow.loopDetector) : undefined,
@@ -341,6 +570,31 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
       [auth.tenantId, auth.userId, days]
     );
 
+    const memoryResult = await pool.query<MemoryRecordEventRow>(
+      `SELECT id, content_ciphertext, platform, memory_type, category, is_pinned, importance, summary_json, created_at
+       FROM memory_records
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND superseded_by IS NULL
+         AND created_at >= NOW() - ($3::text || ' days')::interval
+         AND (
+           summary_json->>'source_import' = 'true'
+           OR (
+             memory_type IN ('fact', 'decision', 'preference')
+             AND (
+               NOT (summary_json ? 'cleanup_bucket')
+               OR summary_json->>'cleanup_bucket' IN ('long_term', 'permanent')
+             )
+           )
+         )
+       ORDER BY
+         CASE WHEN summary_json->>'source_import' = 'true' THEN 0 ELSE 1 END,
+         created_at ASC
+       LIMIT 300`,
+      [auth.tenantId, auth.userId, days]
+    );
+
     const activities: MinerEvent[] = activityResult.rows.map((row) => ({
       id: row.id,
       sourceEventType: "ai_activity_event",
@@ -369,7 +623,36 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
       },
     }));
 
-    return [...activities, ...collabTasks].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    const memoryEvents = memoryResult.rows
+      .map((row) => memoryRecordSummary(row))
+      .filter((event): event is MinerEvent => event !== null);
+
+    return [...activities, ...collabTasks, ...memoryEvents].sort((a, b) => {
+      const byTime = Date.parse(a.createdAt) - Date.parse(b.createdAt);
+      if (byTime !== 0) return byTime;
+      const aImportance = readRecord(a.metadata).minerImportance;
+      const bImportance = readRecord(b.metadata).minerImportance;
+      return Number(bImportance ?? 0) - Number(aImportance ?? 0);
+    });
+  }
+
+  async listMemoryDecisionLog(auth: AuthContext, days: number): Promise<LoopMinerMemoryDecision[]> {
+    const result = await pool.query<MemoryRecordEventRow>(
+      `SELECT id, content_ciphertext, platform, memory_type, category, is_pinned, importance, summary_json, created_at
+       FROM memory_records
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND superseded_by IS NULL
+         AND created_at >= NOW() - ($3::text || ' days')::interval
+       ORDER BY
+         CASE WHEN summary_json->>'source_import' = 'true' THEN 0 ELSE 1 END,
+         CASE WHEN NOT (summary_json ? 'cleanup_bucket') THEN 0 ELSE 1 END,
+         created_at DESC
+       LIMIT 500`,
+      [auth.tenantId, auth.userId, days]
+    );
+    return result.rows.map((row) => memoryDecisionForRow(row));
   }
 
   async createEpisode(input: {

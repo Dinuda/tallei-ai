@@ -76,10 +76,36 @@ type LoopMinerSuggestion = {
   metadata?: unknown;
 };
 
+type LoopMinerMemoryDecision = {
+  memoryId: string;
+  status: "included" | "excluded";
+  reason: string;
+  contentPreview: string;
+  selectedAt?: string;
+  sourceImport?: boolean;
+  sourceDateTime?: string | null;
+  cleanupBucket?: string | null;
+  minerImportance?: number;
+};
+
+type LoopMinerMemorySelection = {
+  considered: number;
+  included: number;
+  excluded: number;
+  sourceImportsIncluded: number;
+  unbucketedIncluded: number;
+  bucketedExcluded: number;
+  decryptFailures: number;
+};
+
 type LoopMinerRun = {
   id: string;
   createdAt: string;
   completedAt: string | null;
+  summary?: {
+    memorySelection?: LoopMinerMemorySelection;
+    memoryDecisionLog?: LoopMinerMemoryDecision[];
+  };
   episodes: LoopMinerEpisode[];
   suggestions: LoopMinerSuggestion[];
 };
@@ -716,6 +742,7 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
 
 export default function LoopsPage() {
   const [loops, setLoops] = useState<LoopInsight[]>([]);
+  const [latestRun, setLatestRun] = useState<LoopMinerRun | null>(null);
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -728,9 +755,11 @@ export default function LoopsPage() {
       const payload = (await response.json().catch(() => ({}))) as LoopMinerRunsPayload;
       if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      setLatestRun(runs[0] ?? null);
       setLoops(buildLoopInsights(runs));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
+      setLatestRun(null);
       setLoops([]);
     } finally {
       setLoading(false);
@@ -809,6 +838,40 @@ export default function LoopsPage() {
                 {error}
               </span>
             </div>
+          ) : null}
+          {latestRun?.summary?.memorySelection ? (
+            <details className="mx-auto mb-5 max-w-5xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
+              <summary className="cursor-pointer font-semibold text-[var(--text)]">
+                Memory evidence trace: {latestRun.summary.memorySelection.included} included,{" "}
+                {latestRun.summary.memorySelection.excluded} excluded
+              </summary>
+              <div className="mt-3 grid gap-3">
+                <div className="grid grid-cols-2 gap-2 text-xs text-[var(--text-2)] md:grid-cols-4">
+                  <div>Considered: {latestRun.summary.memorySelection.considered}</div>
+                  <div>Fresh imports: {latestRun.summary.memorySelection.sourceImportsIncluded}</div>
+                  <div>Unbucketed: {latestRun.summary.memorySelection.unbucketedIncluded}</div>
+                  <div>Bucketed excluded: {latestRun.summary.memorySelection.bucketedExcluded}</div>
+                </div>
+                <div className="max-h-72 overflow-y-auto border-t border-slate-100 pt-2">
+                  {(latestRun.summary.memoryDecisionLog ?? []).slice(0, 40).map((decision) => (
+                    <div key={decision.memoryId} className="grid gap-1 border-b border-slate-100 py-2 text-xs md:grid-cols-[120px_220px_1fr]">
+                      <div className={decision.status === "included" ? "font-semibold text-emerald-700" : "font-semibold text-slate-500"}>
+                        {decision.status}
+                      </div>
+                      <div className="text-[var(--text-muted)]">
+                        {decision.reason}
+                        {decision.sourceImport ? " · import" : ""}
+                        {decision.cleanupBucket ? ` · ${decision.cleanupBucket}` : ""}
+                      </div>
+                      <div className="text-[var(--text-2)]">
+                        {decision.sourceDateTime ? `${formatDate(decision.sourceDateTime)} · ` : ""}
+                        {decision.contentPreview}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </details>
           ) : null}
           <AnimatePresence mode="popLayout">
             {filtered.length === 0 ? (

@@ -12,6 +12,7 @@ import {
   compactMinerEvent,
   estimatePromptTokensFromRequest,
   estimateTokens,
+  explicitWorkflowMemoryExtraction,
   normalizeEpisodeExtraction,
   packByEstimatedPromptBudget,
   readJsonObject,
@@ -76,9 +77,38 @@ export class EpisodeBuilderUseCase {
     let batchesSkipped = 0;
     let maxEstimatedPromptTokensPerCall = 0;
 
+    const deterministicMemoryEventIds = new Set<string>();
+    for (const event of input.events) {
+      const extraction = explicitWorkflowMemoryExtraction(event);
+      if (!extraction) continue;
+      deterministicMemoryEventIds.add(event.id);
+      rawResponses.push({
+        source: "deterministic_memory_workflow_extraction",
+        eventId: event.id,
+        title: extraction.title,
+        outputType: extraction.outputType,
+        cadence: extraction.automationSignals?.likelyCadence ?? "unknown",
+      });
+      episodes.push(await this.repository.createEpisode({
+        auth: input.auth,
+        runId: input.runId,
+        extraction,
+        turns: [{
+          role: event.role,
+          contentSummary: event.contentSummary,
+          sourceEventType: event.sourceEventType,
+          sourceEventId: event.id,
+          createdAt: event.createdAt,
+        }],
+      }));
+    }
+
     const compactSummaryCap = Math.max(160, config.loopMinerEventSummaryCharCap);
     const promptBudgetTokens = Math.max(1200, config.loopMinerPromptBudgetTokens);
-    const preChunks = chunkEventsByTimeGap(input.events, 4);
+    const llmEvents = input.events.filter((event) =>
+      event.sourceEventType !== "memory_record" && !deterministicMemoryEventIds.has(event.id)
+    );
+    const preChunks = chunkEventsByTimeGap(llmEvents, 4);
 
     for (const [chunkIndex, chunk] of preChunks.entries()) {
       const compacted = chunk.map((event) => compactMinerEvent(event, { contentSummaryCharCap: compactSummaryCap }));

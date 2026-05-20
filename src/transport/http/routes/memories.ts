@@ -8,6 +8,7 @@ import {
   listPreferences,
   forgetPreference,
   deleteMemory,
+  importChatGptMemories,
 } from "../../../services/memory.js";
 import {
   getMemoryCleanupRun,
@@ -63,6 +64,11 @@ const loopMinerRunSchema = z.object({
   lookbackDays: z.number().int().min(1).max(90).optional(),
 });
 
+const chatGptImportSchema = z.object({
+  input: z.string().min(1, "input is required"),
+  apply: z.boolean().optional(),
+});
+
 router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = saveSchema.parse(req.body);
@@ -98,6 +104,28 @@ router.post("/preferences", requireScopes(["memory:write"]), async (req: AuthReq
     }
     console.error("Error saving preference:", error);
     res.status(500).json({ error: "Failed to save preference" });
+  }
+});
+
+router.post("/import/chatgpt", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = chatGptImportSchema.parse(req.body ?? {});
+    const result = await importChatGptMemories(req.authContext!, {
+      input: body.input,
+      apply: body.apply ?? false,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error importing ChatGPT memories:", error);
+    const detail = error instanceof Error ? error.message : undefined;
+    res.status(500).json({
+      error: "Failed to import ChatGPT memories",
+      ...(detail ? { detail } : {}),
+    });
   }
 });
 

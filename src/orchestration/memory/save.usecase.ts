@@ -102,6 +102,7 @@ export interface SaveMemoryUseCaseInput {
   readonly category?: string | null;
   readonly isPinned?: boolean;
   readonly preferenceKey?: string | null;
+  readonly summaryMetadata?: Record<string, unknown>;
   readonly runFactExtraction?: boolean;
   readonly runVectorDedup?: boolean;
 }
@@ -279,8 +280,12 @@ export class SaveMemoryUseCase {
       : memoryType === "preference";
     const preferenceKey = input.preferenceKey ?? null;
 
-    const summaryForStorage: ConversationSummary & { provenance?: { platform: string; written_at: string } } = {
+    const summaryForStorage: ConversationSummary & {
+      provenance?: { platform: string; written_at: string };
+      [key: string]: unknown;
+    } = {
       ...summary,
+      ...(input.summaryMetadata ?? {}),
       memory_type: memoryType,
       category,
       is_pinned_suggested: isPinned,

@@ -29,6 +29,11 @@ import { setRequestTimingFields } from "../observability/request-timing.js";
 import { extractFacts } from "../orchestration/ai/fact-extract.usecase.js";
 import { SaveMemoryUseCase } from "../orchestration/memory/save.usecase.js";
 import type { SaveMemoryResult } from "../orchestration/memory/save.usecase.js";
+import {
+  ChatGptMemoryImportUseCase,
+  type ChatGptImportRequest,
+  type ChatGptImportResult,
+} from "../orchestration/memory/chatgpt-import.usecase.js";
 import { RecallMemoryUseCase } from "../orchestration/memory/recall.usecase.js";
 import type { RecallResult } from "../orchestration/memory/recall.usecase.js";
 import { ListMemoriesUseCase } from "../orchestration/memory/list.usecase.js";
@@ -38,7 +43,7 @@ import type { RecallSource } from "../orchestration/memory/fallback-policy.js";
 import type { MemoryType } from "../orchestration/memory/memory-types.js";
 import { PlanRequiredError, QuotaExceededError } from "../shared/errors/index.js";
 
-export type { RecallResult, SaveMemoryResult };
+export type { RecallResult, SaveMemoryResult, ChatGptImportRequest, ChatGptImportResult };
 export { QuotaExceededError, PlanRequiredError };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -304,6 +309,74 @@ const deleteMemoryUseCase = new DeleteMemoryUseCase({
   ipHash,
 });
 
+const chatGptMemoryImportUseCase = new ChatGptMemoryImportUseCase({
+  listExistingMemories: async (auth) => {
+    const rows = await memoryRepository.listAll(auth, {
+      includeSuperseded: false,
+    });
+    return rows.map((row) => {
+      let text = "";
+      try {
+        text = decryptMemoryContent(row.content_ciphertext);
+      } catch {
+        text = "";
+      }
+      const summaryMeta = row.summary_json && typeof row.summary_json === "object"
+        ? (row.summary_json as Record<string, unknown>)
+        : {};
+      return {
+        id: row.id,
+        text,
+        memoryType: row.memory_type as MemoryType,
+        preferenceKey: typeof summaryMeta["preference_key"] === "string" ? summaryMeta["preference_key"] : null,
+        category: row.category,
+      };
+    });
+  },
+  persistMemory: async ({
+    auth,
+    content,
+    memoryType,
+    category,
+    isPinned,
+    preferenceKey,
+    sourceImportBatchId,
+    sourceImportMode,
+    sourceDateTime,
+    importDetectedCategory,
+    importEntityKey,
+  }) => {
+    const persistedMemoryType: MemoryType =
+      memoryType === "lesson" || memoryType === "failure" || memoryType === "collab"
+        ? "fact"
+        : memoryType;
+
+    const result = await saveMemoryUseCase.execute({
+      content,
+      auth,
+      platform: "chatgpt",
+      memoryType: persistedMemoryType,
+      isPinned,
+      preferenceKey,
+      category,
+      runFactExtraction: false,
+      runVectorDedup: false,
+      summaryMetadata: {
+        source_platform: "chatgpt",
+        source_import: true,
+        source_import_batch_id: sourceImportBatchId,
+        source_import_mode: sourceImportMode,
+        source_datetime: sourceDateTime,
+        import_detected_memory_type: memoryType,
+        import_persisted_memory_type: persistedMemoryType,
+        import_detected_category: importDetectedCategory,
+        import_entity_key: importEntityKey,
+      },
+    });
+    return { memoryId: result.memoryId, deduped: result.deduped };
+  },
+});
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function saveMemory(
@@ -316,6 +389,7 @@ export async function saveMemory(
     category?: string | null;
     isPinned?: boolean;
     preferenceKey?: string | null;
+    summaryMetadata?: Record<string, unknown>;
     runFactExtraction?: boolean;
     runVectorDedup?: boolean;
   }
@@ -329,6 +403,7 @@ export async function saveMemory(
     category: options?.category,
     isPinned: options?.isPinned,
     preferenceKey: options?.preferenceKey,
+    summaryMetadata: options?.summaryMetadata,
     runFactExtraction: options?.runFactExtraction,
     runVectorDedup: options?.runVectorDedup,
   });
@@ -386,6 +461,7 @@ export async function savePreference(
   options?: {
     category?: string | null;
     preferenceKey?: string | null;
+    summaryMetadata?: Record<string, unknown>;
     runFactExtraction?: boolean;
     runVectorDedup?: boolean;
   }
@@ -395,9 +471,17 @@ export async function savePreference(
     isPinned: true,
     category: options?.category ?? null,
     preferenceKey: options?.preferenceKey ?? null,
+    summaryMetadata: options?.summaryMetadata,
     runFactExtraction: options?.runFactExtraction,
     runVectorDedup: options?.runVectorDedup,
   });
+}
+
+export async function importChatGptMemories(
+  auth: AuthContext,
+  input: ChatGptImportRequest
+): Promise<ChatGptImportResult> {
+  return chatGptMemoryImportUseCase.execute(auth, input);
 }
 
 export async function listPreferences(auth: AuthContext) {

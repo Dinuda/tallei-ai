@@ -95,7 +95,55 @@ export class MemoryRepository {
     await pool.query(
       `INSERT INTO memory_records
        (id, tenant_id, user_id, content_ciphertext, content_hash, platform, summary_json, qdrant_point_id, memory_type, category, is_pinned, reference_count, tier, segment, importance, decay_rate, access_count, lifecycle, last_referenced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, COALESCE($13, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 'permanent' WHEN $9 IN ('event', 'note') THEN 'short_term' ELSE 'long_term' END), COALESCE($14, $10, $9), COALESCE($15, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 0.9500 WHEN $9 IN ('decision', 'checkpoint') THEN 0.7500 WHEN $9 IN ('event', 'note') THEN 0.3500 ELSE 0.6000 END), COALESCE($16, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 0.000000 WHEN $9 IN ('event', 'note') THEN 0.080000 ELSE 0.010000 END), COALESCE($17, $12), COALESCE($18, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 'protected' ELSE 'active' END), $19)`,
+       VALUES (
+         $1::uuid,
+         $2::uuid,
+         $3::uuid,
+         $4::text,
+         $5::text,
+         $6::text,
+         $7::jsonb,
+         $8::text,
+         $9::text,
+         $10::text,
+         $11::boolean,
+         $12::integer,
+         COALESCE(
+           $13::text,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 'permanent'
+             WHEN $9::text IN ('event', 'note') THEN 'short_term'
+             ELSE 'long_term'
+           END
+         ),
+         COALESCE($14::text, $10::text, $9::text),
+         COALESCE(
+           $15::numeric,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 0.9500
+             WHEN $9::text IN ('decision', 'checkpoint') THEN 0.7500
+             WHEN $9::text IN ('event', 'note') THEN 0.3500
+             ELSE 0.6000
+           END
+         ),
+         COALESCE(
+           $16::numeric,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 0.000000
+             WHEN $9::text IN ('event', 'note') THEN 0.080000
+             ELSE 0.010000
+           END
+         ),
+         COALESCE($17::integer, $12::integer),
+         COALESCE(
+           $18::text,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 'protected'
+             ELSE 'active'
+           END
+         ),
+         $19::timestamptz
+       )`,
       [
         input.id,
         auth.tenantId,

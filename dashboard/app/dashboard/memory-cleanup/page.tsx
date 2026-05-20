@@ -154,6 +154,36 @@ type LoopMinerRun = {
     warnings?: string[];
     skipped?: boolean;
     skipReason?: string;
+    patternTrace?: {
+      candidateGroups: Array<{
+        id: string;
+        title: string;
+        episodeIds: string[];
+        sharedJob: string;
+        sharedArtifact: string;
+        sharedActions: string[];
+        confidence: number;
+        generationReason: string;
+      }>;
+      approvedGroups: string[];
+      rejectedGroups: Array<{
+        candidateGroupId: string;
+        status: string;
+        rationale: string;
+      }>;
+      adversaryFindings: Array<{
+        candidateGroupId: string;
+        contested: boolean;
+        critique: string;
+        recommendedAction: string;
+      }>;
+      judgeDecisions: Array<{
+        candidateGroupId: string;
+        status: string;
+        confidence: number;
+        rationale: string;
+      }>;
+    };
     phaseUsage?: {
       episodeBuilder?: {
         calls: number;
@@ -867,6 +897,51 @@ export default function MemoryCleanupPage() {
                           );
                         })}
                       </div>
+                    </div>
+                  ) : null}
+
+                  {latestLoopMinerRun.summary.patternTrace ? (
+                    <div className="space-y-2">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Pattern Trace</div>
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        {[
+                          ["candidates", latestLoopMinerRun.summary.patternTrace.candidateGroups.length],
+                          ["approved", latestLoopMinerRun.summary.patternTrace.approvedGroups.length],
+                          ["rejected", latestLoopMinerRun.summary.patternTrace.rejectedGroups.length],
+                        ].map(([label, value]) => (
+                          <div key={label} className="border border-slate-200 bg-white p-2">
+                            <div className="text-sm font-semibold text-slate-900">{value}</div>
+                            <div className="text-[11px] text-slate-500">{label}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {latestLoopMinerRun.summary.patternTrace.candidateGroups.length > 0 ? (
+                        <div className="space-y-1">
+                          {latestLoopMinerRun.summary.patternTrace.candidateGroups.slice(0, 4).map((group) => {
+                            const decision = latestLoopMinerRun.summary.patternTrace?.judgeDecisions.find((item) => item.candidateGroupId === group.id);
+                            const rejected = latestLoopMinerRun.summary.patternTrace?.rejectedGroups.find((item) => item.candidateGroupId === group.id);
+                            return (
+                              <div key={group.id} className="border border-slate-200 bg-white p-2 text-xs leading-5 text-slate-600">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="font-semibold text-slate-800">{group.title}</div>
+                                  <span className="shrink-0 border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-600">
+                                    {decision?.status ?? rejected?.status ?? "candidate"}
+                                  </span>
+                                </div>
+                                <div>{group.episodeIds.length} episodes | {Math.round(group.confidence * 100)}% pattern confidence</div>
+                                <div className="truncate">Artifact: {group.sharedArtifact} | Actions: {group.sharedActions.slice(0, 4).join(", ") || "unknown"}</div>
+                                {(decision?.rationale ?? rejected?.rationale) ? (
+                                  <div className="mt-1 border-l-2 border-slate-200 pl-2 text-slate-500">{decision?.rationale ?? rejected?.rationale}</div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : latestLoopMinerRun.summary.episodesBuilt > 0 ? (
+                        <div className="border border-dashed border-slate-200 bg-white p-3 text-sm text-slate-500">
+                          No candidate groups survived pattern similarity. This run built episodes but did not find repeated work behavior.
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
 

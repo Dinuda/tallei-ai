@@ -759,6 +759,106 @@
   font-family: var(--font-fustat), sans-serif;
 }
 
+.importActionsRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.importReport {
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.importReportHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: #475569;
+  font-family: var(--font-fustat), sans-serif;
+}
+
+.importSummaryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.importSummaryCell {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: white;
+  padding: 0.45rem 0.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+  color: #64748b;
+  font-family: var(--font-fustat), sans-serif;
+}
+
+.importSummaryCell strong {
+  color: #111827;
+  font-size: 0.85rem;
+}
+
+.importSection {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.importSection h3 {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #334155;
+  font-family: var(--font-fustat), sans-serif;
+}
+
+.importList {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 170px;
+  overflow: auto;
+}
+
+.importListItem {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: white;
+  padding: 0.45rem 0.52rem;
+  font-size: 0.76rem;
+  color: #334155;
+  line-height: 1.45;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-family: var(--font-fustat), sans-serif;
+}
+
+.importListItem em {
+  color: #64748b;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.importWarnings {
+  margin: 0;
+  padding-left: 1rem;
+  color: #64748b;
+  font-size: 0.76rem;
+  font-family: var(--font-fustat), sans-serif;
+  display: grid;
+  gap: 0.25rem;
+}
+
 .quickAddBlock {
   border-top: 1px solid var(--border-light);
   padding-top: 0.78rem;
@@ -826,6 +926,10 @@
 
   .memoryPreviewText {
     font-size: 0.82rem;
+  }
+
+  .importSummaryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

@@ -82,6 +82,71 @@ export interface CandidateLoop {
   sharedSources: string[];
   sharedOutputType: string;
   reasoning: string;
+  patternConfidence?: number;
+  patternStatus?: PatternJudgeStatus;
+}
+
+export interface WorkEpisodeFacet {
+  episodeId: string;
+  jobToBeDone: string;
+  artifactProduced: string;
+  inputSources: string[];
+  toolsUsed: string[];
+  actionPattern: string[];
+  stylePattern: string[];
+  outcomeSignal: string;
+  timeSignal: string;
+  rawEvidenceIds: string[];
+  lexicalSignature: string[];
+  embeddingText: string;
+}
+
+export interface PatternCandidateGroup {
+  id: string;
+  episodeIds: string[];
+  title: string;
+  sharedJob: string;
+  sharedArtifact: string;
+  sharedActions: string[];
+  sharedSources: string[];
+  sharedTools: string[];
+  evidenceSummary: string;
+  confidence: number;
+  cadenceSignal: string;
+  generationReason: string;
+  facets: WorkEpisodeFacet[];
+}
+
+export interface PatternAdversaryFinding {
+  candidateGroupId: string;
+  contested: boolean;
+  riskLevel: "low" | "medium" | "high";
+  critique: string;
+  failureModes: string[];
+  recommendedAction: "approve" | "monitor" | "reject";
+}
+
+export type PatternJudgeStatus =
+  | "approved_loop"
+  | "approved_with_modification"
+  | "monitor_pattern"
+  | "rejected_topical_similarity"
+  | "rejected_insufficient_evidence";
+
+export interface PatternJudgeDecision {
+  candidateGroupId: string;
+  status: PatternJudgeStatus;
+  confidence: number;
+  rationale: string;
+  candidateLoop?: CandidateLoop;
+}
+
+export interface PatternTrace {
+  candidateGroups: Array<Omit<PatternCandidateGroup, "facets"> & { episodeIds: string[] }>;
+  approvedGroups: string[];
+  rejectedGroups: Array<{ candidateGroupId: string; status: PatternJudgeStatus; rationale: string }>;
+  adversaryFindings: PatternAdversaryFinding[];
+  judgeDecisions: PatternJudgeDecision[];
 }
 
 export interface LoopEvaluation {
@@ -110,6 +175,14 @@ export interface WorkflowDNA {
 export interface LoopMinerSummary {
   episodesBuilt: number;
   loopsDetected: number;
+  loopsProposed?: number;
+  loopsApproved?: number;
+  loopsContested?: number;
+  loopsAutoApproved?: number;
+  loopsRejected?: number;
+  cleanupEvidenceUsed?: number;
+  cleanupSuppressedSeeds?: number;
+  timeSignalsUsed?: number;
   loopsQualified: number;
   suggestionsCreated: number;
   durationMs: number;
@@ -118,6 +191,54 @@ export interface LoopMinerSummary {
   warnings?: string[];
   skipped?: boolean;
   skipReason?: string;
+  memorySelection?: LoopMinerMemorySelectionSummary;
+  memoryDecisionLog?: LoopMinerMemoryDecision[];
+  debugTrace?: {
+    eventIngest?: {
+      beforeFallback: {
+        total: number;
+        aiActivity: number;
+        collabTask: number;
+        memoryRecord: number;
+      };
+      afterFallback: {
+        total: number;
+        aiActivity: number;
+        collabTask: number;
+        memoryRecord: number;
+      };
+      fallbackEventsAdded: number;
+      fallbackEventsReplaced: number;
+      includedMemoryIdsSample: string[];
+      memoryEventIdsSample: string[];
+    };
+    episodeBuilder?: {
+      inputEvents: number;
+      deterministicMemoryExtractions: number;
+      llmInputEvents: number;
+      rawDeterministicSamples: Array<{
+        eventId: string;
+        title?: string;
+        outputType?: string;
+        cadence?: string;
+      }>;
+      builtEpisodeSamples: Array<{
+        id: string;
+        title: string;
+        outputType: string;
+        sourceEventTypes: string[];
+        eventIds: string[];
+      }>;
+    };
+    detector?: {
+      inputEpisodes: number;
+      candidateGroups: number;
+      approvedGroups: number;
+      rejectedGroups: number;
+      warningCount: number;
+    };
+  };
+  patternTrace?: PatternTrace;
   phaseUsage?: {
     episodeBuilder?: EpisodeBuilderEfficiencyMetrics;
     loopDetector?: PhaseUsageMetrics;
@@ -147,6 +268,47 @@ export interface EpisodeBuilderEfficiencyMetrics extends PhaseUsageMetrics {
   tokensPerOutputEpisode: number;
   costPerOutputEpisodeUsd: number;
   maxEstimatedPromptTokensPerCall: number;
+}
+
+export type LoopMinerMemoryDecisionStatus = "included" | "excluded";
+
+export interface LoopMinerMemorySelectionSummary {
+  considered: number;
+  included: number;
+  excluded: number;
+  sourceImportsIncluded: number;
+  unbucketedIncluded: number;
+  bucketedExcluded: number;
+  decryptFailures: number;
+  fallbackEventsAdded?: number;
+  fallbackEventsReplaced?: number;
+  eventFeedAfterFallback?: number;
+}
+
+export interface LoopMinerMemoryDecision {
+  memoryId: string;
+  status: LoopMinerMemoryDecisionStatus;
+  reason: string;
+  contentPreview: string;
+  createdAt: string;
+  selectedAt: string;
+  memoryType: string;
+  detectedMemoryType?: string | null;
+  category?: string | null;
+  cleanupBucket?: string | null;
+  isPinned: boolean;
+  sourceImport: boolean;
+  sourcePlatform?: string | null;
+  sourceImportMode?: string | null;
+  sourceImportBatchId?: string | null;
+  sourceDateTime?: string | null;
+  observedAt?: string | null;
+  cleanupAppliedAt?: string | null;
+  cleanupAction?: string | null;
+  cleanupTargetMemoryId?: string | null;
+  cleanupSourceMemoryIds?: string[] | null;
+  minerImportance: number;
+  memoryImportance: number;
 }
 
 export interface LoopMinerSuggestion {
@@ -195,6 +357,7 @@ export interface LoopMinerRepository {
     error?: unknown;
   }): Promise<void>;
   listRecentEvents(auth: AuthContext, days: number): Promise<MinerEvent[]>;
+  listMemoryDecisionLog?(auth: AuthContext, days: number): Promise<LoopMinerMemoryDecision[]>;
   createEpisode(input: {
     auth: AuthContext;
     runId: string;
