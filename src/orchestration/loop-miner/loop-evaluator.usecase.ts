@@ -27,13 +27,6 @@ function loopKey(loop: CandidateLoop): string {
   return [...loop.episodeIds].sort().join("|");
 }
 
-function isSingleDeclaredPattern(loop: CandidateLoop, episodes: EpisodeRecord[]): boolean {
-  return loop.episodeIds.length === 1
-    && episodes.length === 1
-    && loop.patternStatus === "approved_loop"
-    && episodes[0]?.turns.some((turn) => turn.sourceEventType === "memory_record") === true;
-}
-
 function resolveFallbackLoop(value: unknown, loops: CandidateLoop[]): CandidateLoop | null {
   if (loops.length === 0) return null;
   const row = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -76,7 +69,7 @@ export class LoopEvaluatorUseCase {
     const loopPayloads = input.candidateLoops
       .map((loop) => {
         const episodes = input.episodesByLoop.get(loopKey(loop)) ?? [];
-        if (episodes.length < 2 && !isSingleDeclaredPattern(loop, episodes)) return null;
+        if (episodes.length < 2) return null;
         return {
           candidateLoop: loop,
           episodes: episodes.slice(0, 8).map((episode) => compactEpisodeForPrompt(episode, {

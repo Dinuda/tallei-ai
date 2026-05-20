@@ -169,7 +169,7 @@ export function explicitWorkflowMemoryExtraction(event: MinerEvent): EpisodeExtr
   const statement = memoryStatementFromSummary(event.contentSummary);
   if (!statement) return null;
   const text = statement.toLowerCase();
-  const hasExplicitWorkflowSignal = /\b(every|weekly|daily|monthly|morning checklist|checklist|after every|before writing|when planning|maintain a list|keep a running|decision log|failed experiments|batch .* tasks|review .* analytics|customer objections|launches?)\b/.test(text);
+  const hasExplicitWorkflowSignal = /\b(every|weekly|daily|monthly|recurring|routine|workflow|morning checklist|checklist|after every|before writing|when planning|maintain a list|keep a running|decision log|failed experiments|batch .* tasks|review .* analytics|customer objections|launches?)\b/.test(text);
   const hasWorkActivitySignal = /\b(newsletter|am writing|writing a|wrote|used chatgpt|collaborated with chatgpt|brainstorm hooks|technical explanations|help structure|refine|product copy|marketing copy|product philosophy|architecture ideas)\b/.test(text);
   const isProfileOnly = /\b(founder|engineer from|focused on|lives in|based in|from sri lanka|location)\b/.test(text) && !hasExplicitWorkflowSignal && !hasWorkActivitySignal;
   if ((!hasExplicitWorkflowSignal && !hasWorkActivitySignal) || isProfileOnly) return null;
@@ -219,7 +219,7 @@ export function explicitWorkflowMemoryExtraction(event: MinerEvent): EpisodeExtr
       approvalSignal: "approved",
     },
     automationSignals: {
-      repeatable: true,
+      repeatable: hasExplicitWorkflowSignal,
       likelyCadence: cadence,
       businessValue: sourceImport ? 0.72 : 0.62,
       automationReadiness: 0.72,

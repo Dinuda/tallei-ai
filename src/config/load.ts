@@ -348,7 +348,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
     plannerWebSearchBudget: readIntEnv(e, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
     plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000),
-    loopMinerModel: readStringEnv(e, "TALLEI_LOOP_MINER__MODEL", "gpt-4.1-nano"),
+    loopMinerModel: readStringEnv(e, "TALLEI_LOOP_MINER__MODEL", "gpt-4o-mini"),
     loopMinerEpisodeModel: readStringEnv(e, "TALLEI_LOOP_MINER__EPISODE_MODEL"),
     loopMinerDetectorModel: readStringEnv(e, "TALLEI_LOOP_MINER__DETECTOR_MODEL"),
     loopMinerEvaluatorModel: readStringEnv(e, "TALLEI_LOOP_MINER__EVALUATOR_MODEL"),

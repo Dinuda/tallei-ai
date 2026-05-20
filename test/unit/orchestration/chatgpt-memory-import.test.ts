@@ -57,6 +57,27 @@ test("parser handles key/value object and pasted line list", () => {
   assert.equal(pasted.items[2]?.raw, "My name is Dana");
 });
 
+test("parser recovers JSON-like object arrays that are not strict JSON", () => {
+  const recovered = parseChatGptImportInput(`
+    [
+      {
+        "memory":"User is a full-stack AI engineer with Node.js and AWS experience.",
+        "datetime":"2026-03-06"
+      },
+      {
+        "memory":"User is building Tallei, an open-source memory system.",
+        "datetime":"2026-04-06"
+      },
+    ]
+  `);
+
+  assert.equal(recovered.mode, "json_export");
+  assert.equal(recovered.items.length, 2);
+  assert.equal(recovered.items[0]?.sourceDateTime, "2026-03-06");
+  assert.equal(recovered.items[1]?.sourceDateTime, "2026-04-06");
+  assert.equal(recovered.invalid, 0);
+});
+
 test("use case accepts non-preference memories and dedupes intra-batch", async () => {
   const persisted: string[] = [];
   const useCase = new ChatGptMemoryImportUseCase({

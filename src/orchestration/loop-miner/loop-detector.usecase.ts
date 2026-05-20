@@ -52,14 +52,19 @@ const STOP_WORDS = new Set([
   "create",
   "created",
   "draft",
+  "each",
   "for",
   "from",
   "have",
+  "help",
   "imported",
   "into",
+  "involv",
   "make",
+  "me",
   "memory",
   "more",
+  "my",
   "needs",
   "should",
   "source",
@@ -69,9 +74,12 @@ const STOP_WORDS = new Set([
   "through",
   "turn",
   "type",
+  "use",
+  "used",
   "using",
   "with",
   "work",
+  "workflow",
   "week",
   "weekly",
   "monthly",
@@ -79,6 +87,20 @@ const STOP_WORDS = new Set([
 ]);
 
 const STRUCTURAL_ARTIFACT_ALLOWLIST = new Set(["newsletter", "changelog", "email", "proposal", "code", "summary"]);
+const ACTION_SIGNATURE_STOP_WORDS = new Set([
+  "artifact",
+  "chatgpt",
+  "claude",
+  "content",
+  "draft",
+  "imported",
+  "memory",
+  "process",
+  "source",
+  "support",
+  "task",
+  "workflow",
+]);
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -177,11 +199,6 @@ function isSeedEvidence(kind: EvidenceKind): boolean {
   return kind === "declared_routine" || kind === "observed_work_episode";
 }
 
-function actionSignature(facet: WorkEpisodeFacet): string {
-  const tokens = actionTokens(facet).slice(0, 4).sort();
-  return tokens.join("|");
-}
-
 function splitByArtifactAction(facets: WorkEpisodeFacet[]): WorkEpisodeFacet[][] {
   if (facets.length < 4) return [facets];
   const byKey = new Map<string, WorkEpisodeFacet[]>();
@@ -231,10 +248,12 @@ function hasMemoryTurn(episode: EpisodeRecord): boolean {
   return episode.turns.some((turn) => turn.sourceEventType === "memory_record");
 }
 
-function isDeclaredMemoryRoutine(episode: EpisodeRecord): boolean {
-  return episode.outputType === "workflow_memory"
-    && hasMemoryTurn(episode)
-    && episode.automationSignals?.repeatable === true;
+function isMemoryEpisode(episode: EpisodeRecord | undefined): boolean {
+  return episode?.turns.some((turn) => turn.sourceEventType === "memory_record") === true;
+}
+
+function isRepeatableEpisode(episode: EpisodeRecord | undefined): boolean {
+  return episode?.automationSignals?.repeatable === true;
 }
 
 function cadenceSignal(facets: readonly WorkEpisodeFacet[]): string {
@@ -257,6 +276,18 @@ function sharedTerms(facets: readonly WorkEpisodeFacet[], selector: (facet: Work
 
 function actionTokens(facet: WorkEpisodeFacet): string[] {
   return signatureTokens(facet.actionPattern.join(" "));
+}
+
+function matchingActionTokens(facet: WorkEpisodeFacet): string[] {
+  const artifact = new Set(artifactTokens(facet));
+  return actionTokens(facet)
+    .filter((token) => !artifact.has(token) && !ACTION_SIGNATURE_STOP_WORDS.has(token))
+    .slice(0, 6);
+}
+
+function actionSignature(facet: WorkEpisodeFacet): string {
+  const tokens = matchingActionTokens(facet).slice(0, 4).sort();
+  return tokens.join("|");
 }
 
 function artifactTokens(facet: WorkEpisodeFacet): string[] {
@@ -409,10 +440,38 @@ function generateCandidateGroups(episodes: EpisodeRecord[], facets: WorkEpisodeF
   });
   let index = 1;
   const structurallyAssigned = new Set<string>();
+  const memoryByActionKey = new Map<string, WorkEpisodeFacet[]>();
+  for (const facet of seedFacets) {
+    const episode = episodeById.get(facet.episodeId);
+    if (!isMemoryEpisode(episode)) continue;
+    const actionKey = actionSignature(facet);
+    if (!actionKey || actionKey.split("|").length < 2) continue;
+    const key = `${facet.artifactProduced}::${actionKey}`;
+    const current = memoryByActionKey.get(key) ?? [];
+    current.push(facet);
+    memoryByActionKey.set(key, current);
+  }
+  for (const groupFacets of memoryByActionKey.values()) {
+    if (groupFacets.length < 2) continue;
+    for (const facet of groupFacets) structurallyAssigned.add(facet.episodeId);
+    const hasDeclaredRepeatability = groupFacets.some((facet) =>
+      isRepeatableEpisode(episodeById.get(facet.episodeId))
+    );
+    groups.push(candidateFromFacets(
+      `pattern-${index}`,
+      groupFacets,
+      hasDeclaredRepeatability ? 0.72 : 0.64,
+      "matching_memory_entries"
+    ));
+    index += 1;
+  }
+
   const structuralByKey = new Map<string, WorkEpisodeFacet[]>();
   for (const facet of seedFacets) {
-    const primarySource = facet.inputSources[0] ?? "unknown";
-    const key = `${facet.artifactProduced}::${primarySource}`;
+    if (structurallyAssigned.has(facet.episodeId)) continue;
+    const actionKey = actionSignature(facet);
+    if (!actionKey || actionKey.split("|").length < 2) continue;
+    const key = `${facet.artifactProduced}::${actionKey}`;
     const current = structuralByKey.get(key) ?? [];
     current.push(facet);
     structuralByKey.set(key, current);
@@ -436,6 +495,14 @@ function generateCandidateGroups(episodes: EpisodeRecord[], facets: WorkEpisodeF
       const right = hybridSeedFacets[rightIndex];
       if (!left || !right) continue;
       const pair = scorePair(left, right, embeddings);
+      const leftEpisode = episodeById.get(left.episodeId);
+      const rightEpisode = episodeById.get(right.episodeId);
+      const bothMemoryEpisodes = isMemoryEpisode(leftEpisode) && isMemoryEpisode(rightEpisode);
+      if (bothMemoryEpisodes) {
+        const eitherDeclaresRepeatability = isRepeatableEpisode(leftEpisode) || isRepeatableEpisode(rightEpisode);
+        const hasMatchingActions = pair.actionSimilarity >= 0.22 || actionSignature(left) === actionSignature(right);
+        if (!hasMatchingActions || (!eitherDeclaresRepeatability && pair.artifactSimilarity < 0.9)) continue;
+      }
       if (!pairLooksLikeRepeatedWork(pair)) continue;
       uf.union(left.episodeId, right.episodeId);
       bestScores.set(left.episodeId, Math.max(bestScores.get(left.episodeId) ?? 0, pair.score));
@@ -457,20 +524,15 @@ function generateCandidateGroups(episodes: EpisodeRecord[], facets: WorkEpisodeF
     for (const refinedFacets of splitGroups) {
       if (refinedFacets.length < 2) continue;
       const confidence = refinedFacets.reduce((sum, facet) => sum + (bestScores.get(facet.episodeId) ?? 0.5), 0) / refinedFacets.length;
-      const reason = splitGroups.length > 1 ? "artifact_action_split_group" : "hybrid_similarity_group";
+      const allMemoryEntries = refinedFacets.every((facet) => isMemoryEpisode(episodeById.get(facet.episodeId)));
+      const reason = allMemoryEntries
+        ? "matching_memory_entries"
+        : splitGroups.length > 1
+          ? "artifact_action_split_group"
+          : "hybrid_similarity_group";
       groups.push(candidateFromFacets(`pattern-${index}`, refinedFacets, Math.max(0.5, Math.min(0.92, confidence)), reason));
       index += 1;
     }
-  }
-
-  for (const episode of episodes) {
-    if (!isDeclaredMemoryRoutine(episode)) continue;
-    const facet = facets.find((item) => item.episodeId === episode.id);
-    if (!facet) continue;
-    const alreadyGrouped = groups.some((group) => group.episodeIds.includes(episode.id));
-    if (alreadyGrouped) continue;
-    groups.push(candidateFromFacets(`pattern-${index}`, [facet], 0.74, "single_declared_memory_routine"));
-    index += 1;
   }
 
   return groups;
@@ -551,23 +613,6 @@ function normalizeJudgeDecision(value: unknown, group: PatternCandidateGroup, ad
 }
 
 function heuristicAdversary(group: PatternCandidateGroup): PatternAdversaryFinding {
-  const isNewsletterArtifactPattern = group.sharedArtifact === "newsletter"
-    && group.generationReason === "artifact_source_pattern"
-    && group.episodeIds.length >= 2
-    && group.sharedSources.some((source) => /imported chatgpt memory/i.test(source));
-  const isSingleDeclaredRoutine = group.generationReason === "single_declared_memory_routine"
-    && group.episodeIds.length === 1
-    && group.sharedArtifact === "workflow_memory";
-  if (isNewsletterArtifactPattern || isSingleDeclaredRoutine) {
-    return {
-      candidateGroupId: group.id,
-      contested: false,
-      riskLevel: "low",
-      critique: "The group represents a high-signal repeated workflow pattern with stable artifact/source evidence.",
-      failureModes: [],
-      recommendedAction: "approve",
-    };
-  }
   const weakMultiEpisode = group.episodeIds.length >= 2 && group.confidence < 0.5;
   const knownArtifactPattern = group.sharedArtifact !== "unknown" && group.sharedSources.length > 0;
   const weakActions = group.sharedActions.length < 2 && group.episodeIds.length >= 2 && !knownArtifactPattern;
@@ -610,25 +655,6 @@ function heuristicAdversary(group: PatternCandidateGroup): PatternAdversaryFindi
 
 function heuristicJudge(group: PatternCandidateGroup, adversary: PatternAdversaryFinding): PatternJudgeDecision {
   let status: PatternJudgeStatus;
-  const forceApproveSingleDeclaredRoutine = group.generationReason === "single_declared_memory_routine"
-    && group.episodeIds.length === 1
-    && group.sharedArtifact === "workflow_memory"
-    && group.confidence >= 0.7;
-  const forceApproveNewsletterPattern = group.generationReason === "artifact_source_pattern"
-    && group.sharedArtifact === "newsletter"
-    && group.episodeIds.length >= 2
-    && group.sharedSources.some((source) => /imported chatgpt memory/i.test(source))
-    && group.confidence >= 0.65;
-  if (forceApproveSingleDeclaredRoutine || forceApproveNewsletterPattern) {
-    const loop = fallbackLoop(group);
-    return {
-      candidateGroupId: group.id,
-      status: "approved_loop",
-      confidence: Math.max(group.confidence, 0.8),
-      rationale: "Deterministic approval: high-signal recurring memory workflow pattern.",
-      candidateLoop: { ...loop, patternStatus: "approved_loop" },
-    };
-  }
   const autoApproveEligible =
     !adversary.contested
     && adversary.recommendedAction === "approve"
@@ -642,9 +668,7 @@ function heuristicJudge(group: PatternCandidateGroup, adversary: PatternAdversar
   } else if (autoApproveEligible) {
     status = "approved_loop";
   } else if (adversary.recommendedAction === "monitor") {
-    status = group.generationReason === "single_declared_memory_routine" && group.confidence >= 0.7
-      ? "approved_loop"
-      : "monitor_pattern";
+    status = "monitor_pattern";
   } else {
     status = "approved_loop";
   }
@@ -656,21 +680,6 @@ function heuristicJudge(group: PatternCandidateGroup, adversary: PatternAdversar
     rationale: adversary.critique,
     candidateLoop: status === "approved_loop" ? { ...loop, patternStatus: status } : undefined,
   };
-}
-
-function shouldForceApproveDecision(group: PatternCandidateGroup, decision: PatternJudgeDecision): boolean {
-  if (decision.status === "approved_loop" || decision.status === "approved_with_modification") return false;
-  const isSingleDeclaredRoutine = group.generationReason === "single_declared_memory_routine"
-    && group.episodeIds.length === 1
-    && group.sharedArtifact === "workflow_memory"
-    && group.confidence >= 0.7;
-  if (isSingleDeclaredRoutine) return true;
-  const isNewsletterPattern = group.generationReason === "artifact_source_pattern"
-    && group.sharedArtifact === "newsletter"
-    && group.episodeIds.length >= 2
-    && group.sharedSources.some((source) => /imported chatgpt memory/i.test(source))
-    && group.confidence >= 0.65;
-  return isNewsletterPattern;
 }
 
 export class PatternConsolidatorUseCase {
@@ -891,28 +900,15 @@ export class LoopDetectorUseCase {
     rawResponses.push({ phase: "pattern_judge", raw: judged.raw });
     warnings.push(...judged.warnings);
 
-    const finalDecisions = judged.decisions.map((decision) => {
-      const group = candidateGroups.find((candidateGroup) => candidateGroup.id === decision.candidateGroupId);
-      if (!group || !shouldForceApproveDecision(group, decision)) return decision;
-      const loop = fallbackLoop(group);
-      return {
-        ...decision,
-        status: "approved_loop" as PatternJudgeStatus,
-        confidence: Math.max(decision.confidence, 0.8),
-        rationale: `${decision.rationale} | deterministic_override: high-signal loop pattern`,
-        candidateLoop: { ...loop, patternStatus: "approved_loop" as PatternJudgeStatus },
-      };
-    });
-
-  const loops = finalDecisions
-    .filter((decision) => (decision.status === "approved_loop" || decision.status === "approved_with_modification") && decision.candidateLoop)
-    .map((decision) => decision.candidateLoop as CandidateLoop);
+    const loops = judged.decisions
+      .filter((decision) => (decision.status === "approved_loop" || decision.status === "approved_with_modification") && decision.candidateLoop)
+      .map((decision) => decision.candidateLoop as CandidateLoop);
     const trace: PatternTrace = {
       candidateGroups: candidateGroups.map(traceCandidate),
-      approvedGroups: finalDecisions
+      approvedGroups: judged.decisions
         .filter((decision) => decision.status === "approved_loop" || decision.status === "approved_with_modification")
         .map((decision) => decision.candidateGroupId),
-      rejectedGroups: finalDecisions
+      rejectedGroups: judged.decisions
         .filter((decision) => decision.status !== "approved_loop" && decision.status !== "approved_with_modification")
         .map((decision) => ({
           candidateGroupId: decision.candidateGroupId,
@@ -920,7 +916,7 @@ export class LoopDetectorUseCase {
           rationale: decision.rationale,
         })),
       adversaryFindings: challenged.findings,
-      judgeDecisions: finalDecisions,
+      judgeDecisions: judged.decisions,
     };
     const aiCalls = consolidated.aiCalls + challenged.aiCalls + judged.aiCalls;
     return {

@@ -256,13 +256,110 @@ function collectStringCandidates(value: unknown): RawImportCandidate[] {
   const candidates: RawImportCandidate[] = [];
   for (const [key, nested] of Object.entries(object)) {
     if (isDateTimeKey(key)) continue;
-    if (typeof nested === "string") {
+    if (typeof nested === "string" && nested.trim().length > 0) {
       candidates.push({ text: `${key}: ${nested}`, sourceDateTime: readSourceDateTime(object) });
       continue;
     }
-    candidates.push(...collectStringCandidates(nested));
+    if (Array.isArray(nested)) {
+      candidates.push(...nested.flatMap((item) => collectStringCandidates(item)));
+      continue;
+    }
+    if (typeof nested === "object" && nested !== null) {
+      candidates.push(...collectStringCandidates(nested));
+    }
   }
   return candidates;
+}
+
+function stripMarkdownCodeBlocks(input: string): string {
+  const cleaned = input
+    .replace(/```(?:json)?\s*\n?/gi, "")
+    .replace(/```\s*$/g, "")
+    .trim();
+  return cleaned;
+}
+
+function fixTrailingCommas(json: string): string {
+  return json.replace(/,(\s*[}\]])/g, "$1");
+}
+
+function parseJsonLikeQuotedValue(value: string): string {
+  const compact = value.trim().replace(/,\s*$/, "");
+  if (!compact) return "";
+  if ((compact.startsWith('"') && compact.endsWith('"')) || (compact.startsWith("'") && compact.endsWith("'"))) {
+    const asJson = `"${compact.slice(1, -1).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    try {
+      return JSON.parse(asJson) as string;
+    } catch {
+      return compact.slice(1, -1).trim();
+    }
+  }
+  return compact;
+}
+
+function salvageJsonLikeObjects(input: string): RawImportCandidate[] {
+  const lines = input
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return [];
+
+  let sawObjectShape = false;
+  const candidates: RawImportCandidate[] = [];
+  let pendingMemory: string | null = null;
+  let pendingDateTime: string | null = null;
+
+  const flush = (): void => {
+    if (!pendingMemory) return;
+    candidates.push({ text: pendingMemory, sourceDateTime: pendingDateTime });
+    pendingMemory = null;
+    pendingDateTime = null;
+  };
+
+  for (const line of lines) {
+    if (line === "{" || line === "}," || line === "}") {
+      sawObjectShape = true;
+      if (line === "}" || line === "},") flush();
+      continue;
+    }
+
+    const pair = line.match(/^"([^"]+)"\s*:\s*(.+?)\s*,?$/);
+    if (!pair) continue;
+
+    sawObjectShape = true;
+    const key = pair[1]?.trim() ?? "";
+    const value = parseJsonLikeQuotedValue(pair[2] ?? "");
+    if (!value) continue;
+
+    if (/^(?:preference|value|text|content|memory|fact|note|summary)$/i.test(key)) {
+      if (pendingMemory) flush();
+      pendingMemory = value;
+      continue;
+    }
+
+    if (isDateTimeKey(key)) {
+      pendingDateTime = value;
+    }
+  }
+
+  flush();
+  if (!sawObjectShape || candidates.length === 0) return [];
+  return candidates;
+}
+
+function isStructuralJsonLine(line: string): boolean {
+  const stripped = line.replace(/\s/g, "");
+  // Pure structural tokens
+  if (/^[\[\]{}]+$/.test(stripped)) return true;
+  if (stripped === "{" || stripped === "}" || stripped === "[]" || stripped === "{}") return true;
+  // Object separators like  },  or  },
+  if (/^},?$/.test(stripped)) return true;
+  // Bare JSON property lines like  "memory": "..."  or  "datetime": "..."
+  // They start with a quote, contain a colon, and have no braces/brackets
+  if (/^["']/.test(line) && line.includes(":") && !/[{}\[\]]/.test(line)) {
+    return true;
+  }
+  return false;
 }
 
 export function parseChatGptImportInput(input: string): ParsedInputResult {
@@ -276,21 +373,44 @@ export function parseChatGptImportInput(input: string): ParsedInputResult {
   const warnings: string[] = [];
   let rawItems: RawImportCandidate[] = [];
 
+  const cleaned = stripMarkdownCodeBlocks(trimmed);
+  
   try {
-    const parsed = JSON.parse(trimmed) as unknown;
+    // Try to parse as-is first
+    let parsed = JSON.parse(cleaned) as unknown;
     mode = "json_export";
     rawItems = collectStringCandidates(parsed);
     if (rawItems.length === 0) {
       invalid += 1;
       warnings.push("No importable string candidates found in JSON payload.");
     }
-  } catch {
-    mode = "paste";
-    rawItems = trimmed
-      .split(/\r?\n/)
-      .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, "").trim())
-      .filter((line) => line.length > 0)
-      .map((line) => ({ text: line, sourceDateTime: null }));
+  } catch (firstError) {
+    // If that fails, try fixing trailing commas
+    try {
+      const fixed = fixTrailingCommas(cleaned);
+      const parsed = JSON.parse(fixed) as unknown;
+      mode = "json_export";
+      rawItems = collectStringCandidates(parsed);
+      if (rawItems.length === 0) {
+        invalid += 1;
+        warnings.push("No importable string candidates found in JSON payload.");
+      }
+    } catch {
+      const recovered = salvageJsonLikeObjects(cleaned);
+      if (recovered.length > 0) {
+        mode = "json_export";
+        rawItems = recovered;
+        warnings.push("Found JSON-like block but could not parse it as strict JSON. Recovered candidates from object lines.");
+      } else {
+        // Fall back to line-by-line parsing
+        mode = "paste";
+        rawItems = cleaned
+          .split(/\r?\n/)
+          .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, "").trim())
+          .filter((line) => line.length > 0 && !isStructuralJsonLine(line))
+          .map((line) => ({ text: line, sourceDateTime: null }));
+      }
+    }
   }
 
   const items = normalizeParsedItems(rawItems);

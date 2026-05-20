@@ -519,7 +519,7 @@ test("runLoopMinerForUser builds episodes, detects loop, evaluates, generates DN
   assert.equal(result.summary.suggestionsCreated, 1);
   assert.equal(result.suggestions[0]?.title, "Weekly changelog");
   assert.equal(repository.completedSummary?.usage.calls, 9);
-  assert.ok((result.summary.usage.models["gpt-4.1-nano"] ?? 0) > 0);
+  assert.ok(Object.values(result.summary.usage.models).some((count) => count > 0));
   assert.ok((result.summary.phaseUsage?.episodeBuilder?.tokensPerOutputEpisode ?? 0) > 0);
   assert.equal(result.summary.patternTrace?.approvedGroups.length, 1);
   assert.equal(responses.length, 0);
@@ -551,7 +551,7 @@ test("runLoopMinerForUser falls back to included memory decisions when memory ev
       memoryId: "memory-newsletter-2",
       status: "included",
       reason: "fresh_source_import_selected",
-      contentPreview: "I collaborated with ChatGPT to simplify technical explanations in a newsletter about autonomous AI orchestration and guardrails for agent loops.",
+      contentPreview: "My newsletter writing workflow uses ChatGPT to brainstorm hooks, sharpen product philosophy, and turn technical architecture ideas into readable narratives.",
       createdAt: "2026-05-20T14:03:03.557Z",
       selectedAt: "2026-05-19T15:18:00.000Z",
       memoryType: "fact",
@@ -651,7 +651,7 @@ test("runLoopMinerForUser completes with warnings when an episode-builder chunk 
   assert.equal(callCount, 2);
 });
 
-test("loop detector registers single explicit memory-derived workflow as a loop candidate", async () => {
+test("loop detector does not register a single explicit memory-derived workflow as a loop candidate", async () => {
   const memoryEpisode: EpisodeRecord = {
     id: "episode-memory-1",
     title: "Every Friday product analytics review",
@@ -680,13 +680,63 @@ test("loop detector registers single explicit memory-derived workflow as a loop 
     }],
   };
   const detector = new LoopDetectorUseCase(async () => {
-    throw new Error("detector LLM should not be called for single explicit memory loop");
+    throw new Error("detector LLM should not be called for a single memory entry");
   });
   const result = await detector.execute([memoryEpisode]);
-  assert.equal(result.loops.length, 1);
-  assert.equal(result.loops[0]?.episodeIds.length, 1);
-  assert.match(result.loops[0]?.reasoning ?? "", /single_declared_memory_routine/);
+  assert.equal(result.loops.length, 0);
+  assert.equal(result.patternTrace.candidateGroups.length, 0);
   assert.equal(result.aiCalls, 0);
+});
+
+test("loop detector groups multiple single memory entries when their workflows match", async () => {
+  const makeRoutineMemoryEpisode = (id: string, intent: string, createdAt: string): EpisodeRecord => ({
+    id,
+    title: intent,
+    summary: `Imported memory describes a recurring workflow or reusable work routine: ${intent}`,
+    intent,
+    sources: ["Imported ChatGPT memory"],
+    outputType: "workflow_memory",
+    toolNames: ["chatgpt"],
+    steps: [intent],
+    approved: true,
+    eventIds: [`memory-${id}`],
+    sealedAt: createdAt,
+    turnCount: 1,
+    automationSignals: {
+      repeatable: true,
+      likelyCadence: "weekly",
+      businessValue: 0.72,
+      automationReadiness: 0.72,
+    },
+    turns: [{
+      role: "user",
+      contentSummary: intent,
+      sourceEventType: "memory_record",
+      sourceEventId: `memory-${id}`,
+      createdAt,
+    }],
+  });
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({ loops: [] }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+  const result = await detector.execute([
+    makeRoutineMemoryEpisode(
+      "episode-memory-1",
+      "Every Friday afternoon I review product analytics and write down three experiments for the next week.",
+      "2026-05-03T10:30:00.000Z"
+    ),
+    makeRoutineMemoryEpisode(
+      "episode-memory-2",
+      "Each Friday I review product analytics and write down three experiments for the following week.",
+      "2026-05-17T10:30:00.000Z"
+    ),
+  ]);
+  assert.equal(result.loops.length, 1);
+  assert.deepEqual(result.loops[0]?.episodeIds, ["episode-memory-1", "episode-memory-2"]);
+  assert.equal(result.patternTrace.candidateGroups[0]?.generationReason, "matching_memory_entries");
 });
 
 test("loop detector groups repeated imported newsletter memories without explicit cadence", async () => {
@@ -724,14 +774,54 @@ test("loop detector groups repeated imported newsletter memories without explici
     usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
   }));
   const result = await detector.execute([
-    makeNewsletterEpisode("episode-newsletter-1", "I am writing a Tallei newsletter focused on AI memory systems."),
-    makeNewsletterEpisode("episode-newsletter-2", "I collaborated with ChatGPT to simplify technical explanations in a newsletter."),
+    makeNewsletterEpisode("episode-newsletter-1", "My newsletter writing workflow uses ChatGPT to brainstorm hooks, sharpen product philosophy, and turn technical architecture ideas into readable narratives."),
+    makeNewsletterEpisode("episode-newsletter-2", "My newsletter writing workflow uses ChatGPT to brainstorm hooks, sharpen product philosophy, and turn technical architecture ideas into readable narratives."),
   ]);
   const newsletterLoop = result.loops.find((loop) => loop.loopName.toLowerCase().includes("newsletter"));
   assert.ok(newsletterLoop);
   assert.equal(newsletterLoop.episodeIds.length, 2);
   assert.equal(result.patternTrace.approvedGroups.length, 1);
-  assert.equal(result.patternTrace.candidateGroups[0]?.generationReason, "artifact_source_pattern");
+  assert.equal(result.patternTrace.candidateGroups[0]?.generationReason, "matching_memory_entries");
+});
+
+test("loop detector rejects imported memory entries that only share artifact/source or wow-factor wording", async () => {
+  const makeMemoryEpisode = (id: string, intent: string): EpisodeRecord => ({
+    id,
+    title: intent,
+    summary: `Imported memory describes an AI-assisted work episode: ${intent}`,
+    intent,
+    sources: ["Imported ChatGPT memory"],
+    outputType: "newsletter",
+    toolNames: ["chatgpt"],
+    steps: [intent],
+    approved: true,
+    eventIds: [`memory-${id}`],
+    sealedAt: "2026-05-20T10:30:00.000Z",
+    turnCount: 1,
+    automationSignals: {
+      repeatable: false,
+      likelyCadence: "unknown",
+      businessValue: 0.72,
+      automationReadiness: 0.72,
+    },
+    turns: [{
+      role: "user",
+      contentSummary: intent,
+      sourceEventType: "memory_record",
+      sourceEventId: `memory-${id}`,
+      createdAt: "2026-05-20T10:30:00.000Z",
+    }],
+  });
+  const detector = new LoopDetectorUseCase(async () => {
+    throw new Error("detector LLM should not be called for non-matching memory entries");
+  });
+  const result = await detector.execute([
+    makeMemoryEpisode("episode-wow-1", "The product launch newsletter needs a wow factor in the opening story."),
+    makeMemoryEpisode("episode-wow-2", "I used ChatGPT to rewrite a newsletter paragraph about pricing objections."),
+  ]);
+  assert.equal(result.loops.length, 0);
+  assert.equal(result.patternTrace.candidateGroups.length, 0);
+  assert.equal(result.aiCalls, 0);
 });
 
 test("loop detector rejects same-topic groups when judge identifies topical similarity", async () => {

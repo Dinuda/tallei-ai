@@ -76,8 +76,9 @@ Rules:
 - rejected_topical_similarity: same topic/project, different work behavior.
 - rejected_insufficient_evidence: too little repeated evidence.
 - Explicit cadence boosts confidence but is not required.
-- If artifact is newsletter and episodes come from imported memory with shared source/tool pattern, do not reject as topical unless there is clear contradictory evidence.
-- A single declared recurring memory routine (for example “every Friday…” or “after every X…”) can be approved when self-reported recurrence is explicit.
+- Imported memories with the same source/tool are not enough. Approve them only when the entries also share a concrete action pattern.
+- Multiple separately saved memory entries can qualify as loop evidence when they match on job-to-be-done and action pattern.
+- Do not approve a single memory entry by itself. Require matching entries or observed repeated workflow behavior.
 
 Return JSON only with {"decisions":[...]}.
 Each decision: {candidateGroupId, status, confidence, rationale, loopName, sharedIntent, sharedSources, sharedOutputType, reasoning}.`;
@@ -95,7 +96,7 @@ Assign a confidence score (0 to 1) per loop representing how strongly you believ
 - >= 0.80: Strong candidate, recommend automating
 - 0.60-0.79: Worth monitoring, suggest to user but don't push hard
 - < 0.60: Not ready, discard
-- A loop can be valid with one episode only when that episode is memory-derived and explicitly states a recurring cadence, trigger, or routine (for example "Every Friday..." or "after every sales call..."). Treat that as self-reported recurrence, not as weak one-off evidence.
+- Discard one-episode loops. A memory that claims recurrence is supporting evidence, not a loop by itself.
 
 Return JSON only: {"evaluations":[...]}
 Each evaluation: {loopName, episodeIds, confidence, verdict, reasoning, estimatedCadence, estimatedValue, automationReadiness, risks}

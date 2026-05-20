@@ -191,13 +191,6 @@ function findCandidateForEvaluation(candidates: CandidateLoop[], evaluation: Loo
     ?? null;
 }
 
-function isSingleMemoryDeclaredLoop(candidateLoop: CandidateLoop, episodes: EpisodeRecord[]): boolean {
-  return candidateLoop.episodeIds.length === 1
-    && episodes.length === 1
-    && episodes[0]?.outputType === "workflow_memory"
-    && episodes[0]?.turns.some((turn) => turn.sourceEventType === "memory_record") === true;
-}
-
 function loggableSummary(summary: LoopMinerSummary): Omit<LoopMinerSummary, "memoryDecisionLog"> & { memoryDecisionLogCount: number } {
   const { memoryDecisionLog: _memoryDecisionLog, ...rest } = summary;
   return {
@@ -396,7 +389,7 @@ export async function runLoopMinerForUser(
         };
       })
       .filter((item): item is { candidateLoop: CandidateLoop; evaluation: LoopEvaluation; episodes: EpisodeRecord[] } => {
-        return item !== null && (item.episodes.length >= 2 || isSingleMemoryDeclaredLoop(item.candidateLoop, item.episodes));
+        return item !== null && item.episodes.length >= 2;
       });
 
     const generated = await deps.dnaGenerator.execute({ qualifiedLoops });
