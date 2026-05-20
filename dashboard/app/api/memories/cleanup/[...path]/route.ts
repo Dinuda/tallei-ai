@@ -2,7 +2,22 @@ import { NextRequest } from "next/server";
 import { auth } from "../../../../../auth";
 
 const SECRET = process.env.INTERNAL_API_SECRET!;
-const BACKEND_TIMEOUT_MS = 120_000;
+const DEFAULT_BACKEND_TIMEOUT_MS = 120_000;
+const DEFAULT_RUN_TIMEOUT_MS = 900_000;
+
+function parseTimeout(rawValue: string | undefined, fallback: number): number {
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function timeoutForPath(path: string[]): number {
+  const isRunEndpoint = path.length > 0 && path[path.length - 1] === "run";
+  if (isRunEndpoint) {
+    return parseTimeout(process.env.MEMORY_CLEANUP_PROXY_RUN_TIMEOUT_MS, DEFAULT_RUN_TIMEOUT_MS);
+  }
+
+  return parseTimeout(process.env.MEMORY_CLEANUP_PROXY_TIMEOUT_MS, DEFAULT_BACKEND_TIMEOUT_MS);
+}
 
 function resolveBackendUrl(req?: NextRequest): string {
   const configured = process.env.BACKEND_URL || process.env.API_PROXY_TARGET || "http://127.0.0.1:3000";
@@ -21,9 +36,9 @@ function resolveBackendUrl(req?: NextRequest): string {
   return configured.replace(/\/$/, "");
 }
 
-async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs: number, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -53,9 +68,10 @@ async function proxy(
   const backend = resolveBackendUrl(req);
   const target = new URL(`${backend}/api/memories/cleanup/${path.map(encodeURIComponent).join("/")}`);
   req.nextUrl.searchParams.forEach((value, key) => target.searchParams.set(key, value));
+  const timeoutMs = timeoutForPath(path);
 
   try {
-    const res = await fetchWithTimeout(target.toString(), {
+    const res = await fetchWithTimeout(target.toString(), timeoutMs, {
       method,
       headers: {
         "content-type": "application/json",
@@ -82,4 +98,3 @@ export async function GET(req: NextRequest, context: { params: Promise<{ path?: 
 export async function POST(req: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
   return proxy(req, "POST", context);
 }
-

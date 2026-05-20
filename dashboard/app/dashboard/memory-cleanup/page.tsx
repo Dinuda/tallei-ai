@@ -11,6 +11,7 @@ import {
   Shield,
   Sparkles,
   Trash2,
+  Workflow,
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -113,6 +114,120 @@ type RunPayload = {
   error?: string;
 };
 
+type LoopMinerUsage = CleanupRun["summary"]["usage"];
+
+type LoopMinerEpisode = {
+  id: string;
+  intent: string;
+  sources: string[];
+  outputType: string;
+  toolNames: string[];
+  steps: string[];
+  approved: boolean;
+  sealedAt: string;
+  turnCount: number;
+};
+
+type LoopMinerSuggestion = {
+  id: string;
+  title: string;
+  reason: string;
+  suggestedPrompt: string;
+  confidence: number;
+  fingerprint: string;
+  triggerCount: number;
+  createdAt: string;
+  metadata: unknown;
+};
+
+type LoopMinerRun = {
+  id: string;
+  status: "running" | "completed" | "failed";
+  summary: {
+    episodesBuilt: number;
+    loopsDetected: number;
+    loopsQualified: number;
+    suggestionsCreated: number;
+    durationMs: number;
+    aiCalls: number;
+    usage: LoopMinerUsage;
+    warnings?: string[];
+    skipped?: boolean;
+    skipReason?: string;
+    phaseUsage?: {
+      episodeBuilder?: {
+        calls: number;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        estimatedTotalTokens: number;
+        estimatedCostUsd: number;
+        batchesProcessed: number;
+        batchesSkipped: number;
+        inputEvents: number;
+        outputEpisodes: number;
+        tokensPerInputEvent: number;
+        tokensPerOutputEpisode: number;
+        costPerOutputEpisodeUsd: number;
+        maxEstimatedPromptTokensPerCall: number;
+      };
+      loopDetector?: {
+        calls: number;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        estimatedTotalTokens: number;
+        estimatedCostUsd: number;
+        batchesProcessed: number;
+        batchesSkipped: number;
+        inputEpisodes?: number;
+        outputEpisodes?: number;
+        loopsInput?: number;
+        loopsOutput?: number;
+      };
+      loopEvaluator?: {
+        calls: number;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        estimatedTotalTokens: number;
+        estimatedCostUsd: number;
+        batchesProcessed: number;
+        batchesSkipped: number;
+        loopsInput?: number;
+        loopsOutput?: number;
+      };
+      dnaGenerator?: {
+        calls: number;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        estimatedTotalTokens: number;
+        estimatedCostUsd: number;
+        batchesProcessed: number;
+        batchesSkipped: number;
+        loopsInput?: number;
+        loopsOutput?: number;
+      };
+    };
+  };
+  error?: unknown;
+  createdAt: string;
+  completedAt: string | null;
+  episodes: LoopMinerEpisode[];
+  suggestions: LoopMinerSuggestion[];
+};
+
+type LoopMinerRunsPayload = {
+  runs?: LoopMinerRun[];
+  error?: string;
+};
+
+type LoopMinerRunPayload = {
+  run?: LoopMinerRun | null;
+  error?: string;
+};
+
 const PAGE_SIZE = 200;
 const BUCKETS: Array<{ id: DisplayBucket; title: string; caption: string; className: string; labelClassName: string }> = [
   {
@@ -187,6 +302,18 @@ function formatCost(value: number | undefined): string {
   return `$${(value ?? 0).toFixed(6)}`;
 }
 
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function readStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function suggestionDna(suggestion: LoopMinerSuggestion): Record<string, unknown> {
+  return readRecord(readRecord(suggestion.metadata).dna);
+}
+
 function phaseIcon(status: CleanupProposal["status"]) {
   if (status === "applied" || status === "approved") return <CheckCircle2 className="h-4 w-4" />;
   if (status === "failed" || status === "rejected") return <XCircle className="h-4 w-4" />;
@@ -196,11 +323,14 @@ function phaseIcon(status: CleanupProposal["status"]) {
 export default function MemoryCleanupPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [runs, setRuns] = useState<CleanupRun[]>([]);
+  const [loopMinerRuns, setLoopMinerRuns] = useState<LoopMinerRun[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [expandedTraceIds, setExpandedTraceIds] = useState<Set<string>>(new Set());
   const [activeRun, setActiveRun] = useState<CleanupRun | null>(null);
+  const [activeLoopMinerRun, setActiveLoopMinerRun] = useState<LoopMinerRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [runningMode, setRunningMode] = useState<"dry" | "apply" | null>(null);
+  const [loopMinerRunning, setLoopMinerRunning] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [adminEmailStatus, setAdminEmailStatus] = useState<RunPayload["adminEmail"] | null>(null);
@@ -234,6 +364,8 @@ export default function MemoryCleanupPage() {
     return grouped;
   }, [bucketProposalByMemoryId, sortedMemories]);
 
+  const latestLoopMinerRun = activeLoopMinerRun ?? loopMinerRuns[0] ?? null;
+
   const fetchMemories = useCallback(async () => {
     const nextMemories: MemoryItem[] = [];
     let offset = 0;
@@ -261,17 +393,29 @@ export default function MemoryCleanupPage() {
     }
   }, []);
 
+  const fetchLoopMinerRuns = useCallback(async (options: { activateLatest?: boolean } = {}) => {
+    const activateLatest = options.activateLatest ?? true;
+    const response = await fetch("/api/memories/cleanup/loop-miner/runs", { cache: "no-store" });
+    const payload = (await response.json().catch(() => ({}))) as LoopMinerRunsPayload;
+    if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
+    const nextRuns = Array.isArray(payload.runs) ? payload.runs : [];
+    setLoopMinerRuns(nextRuns);
+    if (activateLatest) {
+      setActiveLoopMinerRun((current) => current ?? nextRuns[0] ?? null);
+    }
+  }, []);
+
   const refreshAll = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      await Promise.all([fetchMemories(), fetchRuns()]);
+      await Promise.all([fetchMemories(), fetchRuns(), fetchLoopMinerRuns()]);
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh cleanup view");
     } finally {
       setLoading(false);
     }
-  }, [fetchMemories, fetchRuns]);
+  }, [fetchLoopMinerRuns, fetchMemories, fetchRuns]);
 
   useEffect(() => {
     void refreshAll();
@@ -291,13 +435,33 @@ export default function MemoryCleanupPage() {
       if (!response.ok || !payload.run) throw new Error(payload.error ?? "Failed to run cleanup");
       setActiveRun(payload.run);
       setAdminEmailStatus(payload.adminEmail ?? null);
-      await Promise.all([fetchMemories(), fetchRuns()]);
+      await Promise.all([fetchMemories(), fetchRuns(), fetchLoopMinerRuns()]);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Failed to run cleanup");
     } finally {
       setRunningMode(null);
     }
-  }, [fetchMemories, fetchRuns]);
+  }, [fetchLoopMinerRuns, fetchMemories, fetchRuns]);
+
+  const runLoopMiner = useCallback(async () => {
+    setLoopMinerRunning(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/memories/cleanup/loop-miner/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lookbackDays: 30 }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as LoopMinerRunPayload;
+      if (!response.ok || !payload.run) throw new Error(payload.error ?? "Failed to run Loop Miner");
+      setActiveLoopMinerRun(payload.run);
+      await fetchLoopMinerRuns();
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Failed to run Loop Miner");
+    } finally {
+      setLoopMinerRunning(false);
+    }
+  }, [fetchLoopMinerRuns]);
 
   const resetCleanupFlags = useCallback(async () => {
     setError(null);
@@ -307,11 +471,11 @@ export default function MemoryCleanupPage() {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(typeof payload.error === "string" ? payload.error : "Failed to reset cleanup flags");
       setActiveRun(null);
-      await Promise.all([fetchMemories(), fetchRuns({ activateLatest: false })]);
+      await Promise.all([fetchMemories(), fetchRuns({ activateLatest: false }), fetchLoopMinerRuns({ activateLatest: false })]);
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : "Failed to reset cleanup flags");
     }
-  }, [fetchMemories, fetchRuns]);
+  }, [fetchLoopMinerRuns, fetchMemories, fetchRuns]);
 
   const deleteMemory = useCallback(async (id: string) => {
     setDeletingId(id);
@@ -387,6 +551,10 @@ export default function MemoryCleanupPage() {
             <Button type="button" variant="outline" onClick={refreshAll} disabled={loading || Boolean(runningMode)}>
               <RefreshCw className="mr-1.5 h-4 w-4" />
               Refresh
+            </Button>
+            <Button type="button" variant="outline" onClick={runLoopMiner} disabled={loopMinerRunning || Boolean(runningMode)}>
+              {loopMinerRunning ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Workflow className="mr-1.5 h-4 w-4" />}
+              Run Loop Miner
             </Button>
             <Button type="button" variant="outline" onClick={resetCleanupFlags} disabled={Boolean(runningMode)}>
               <RotateCcw className="mr-1.5 h-4 w-4" />
@@ -603,6 +771,205 @@ export default function MemoryCleanupPage() {
                       </div>
                     ))}
                   </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-200">
+            <CardHeader className="border-b border-slate-100 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <Workflow className="h-4 w-4 text-slate-600" />
+                  Loop Miner
+                </CardTitle>
+                <Button type="button" variant="outline" size="sm" onClick={runLoopMiner} disabled={loopMinerRunning || Boolean(runningMode)}>
+                  {loopMinerRunning ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+                  Run
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4 p-4">
+              {!latestLoopMinerRun ? (
+                <div className="text-sm text-slate-500">No Loop Miner runs yet. The nightly daily intelligence pass will populate this view.</div>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`border px-2 py-0.5 text-xs font-medium ${pillClass(latestLoopMinerRun.status)}`}>{latestLoopMinerRun.status}</span>
+                    <span className="text-xs text-slate-400">{dateLabel(latestLoopMinerRun.createdAt)}</span>
+                    <span className="text-xs text-slate-400">{latestLoopMinerRun.summary.durationMs ?? 0}ms</span>
+                    {latestLoopMinerRun.summary.skipped ? (
+                      <span className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600">{latestLoopMinerRun.summary.skipReason ?? "skipped"}</span>
+                    ) : null}
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-2 text-center">
+                    {[
+                      ["episodes", latestLoopMinerRun.summary.episodesBuilt],
+                      ["loops", latestLoopMinerRun.summary.loopsDetected],
+                      ["qualified", latestLoopMinerRun.summary.loopsQualified],
+                      ["suggestions", latestLoopMinerRun.summary.suggestionsCreated],
+                    ].map(([label, value]) => (
+                      <div key={label} className="border border-slate-200 bg-white p-2">
+                        <div className="text-lg font-semibold text-slate-900">{value}</div>
+                        <div className="text-[11px] text-slate-500">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    {[
+                      ["ai calls", latestLoopMinerRun.summary.usage?.calls ?? latestLoopMinerRun.summary.aiCalls ?? 0],
+                      ["cost", formatCost(latestLoopMinerRun.summary.usage?.estimatedCostUsd)],
+                    ].map(([label, value]) => (
+                      <div key={label} className="border border-slate-200 bg-white p-2">
+                        <div className="text-sm font-semibold text-slate-900">{value}</div>
+                        <div className="text-[11px] text-slate-500">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {latestLoopMinerRun.summary.phaseUsage ? (
+                    <div className="space-y-2">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Phase Efficiency</div>
+                      {latestLoopMinerRun.summary.phaseUsage.episodeBuilder ? (
+                        <div className="grid grid-cols-2 gap-2 text-center">
+                          {[
+                            ["events", latestLoopMinerRun.summary.phaseUsage.episodeBuilder.inputEvents],
+                            ["episodes", latestLoopMinerRun.summary.phaseUsage.episodeBuilder.outputEpisodes],
+                            ["tok/event", latestLoopMinerRun.summary.phaseUsage.episodeBuilder.tokensPerInputEvent],
+                            ["tok/episode", latestLoopMinerRun.summary.phaseUsage.episodeBuilder.tokensPerOutputEpisode],
+                            ["cost/episode", formatCost(latestLoopMinerRun.summary.phaseUsage.episodeBuilder.costPerOutputEpisodeUsd)],
+                            ["max prompt tok", latestLoopMinerRun.summary.phaseUsage.episodeBuilder.maxEstimatedPromptTokensPerCall],
+                          ].map(([label, value]) => (
+                            <div key={label} className="border border-slate-200 bg-white p-2">
+                              <div className="text-sm font-semibold text-slate-900">{value}</div>
+                              <div className="text-[11px] text-slate-500">{label}</div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="space-y-1">
+                        {[
+                          { label: "episodeBuilder", phase: latestLoopMinerRun.summary.phaseUsage.episodeBuilder },
+                          { label: "loopDetector", phase: latestLoopMinerRun.summary.phaseUsage.loopDetector },
+                          { label: "loopEvaluator", phase: latestLoopMinerRun.summary.phaseUsage.loopEvaluator },
+                          { label: "dnaGenerator", phase: latestLoopMinerRun.summary.phaseUsage.dnaGenerator },
+                        ].map(({ label, phase }) => {
+                          if (!phase) return null;
+                          return (
+                            <div key={label} className="border border-slate-200 bg-white p-2 text-xs leading-5 text-slate-600">
+                              <div className="font-semibold text-slate-800">{label}</div>
+                              <div>calls {phase.calls} | batches {phase.batchesProcessed} (skipped {phase.batchesSkipped})</div>
+                              <div>tokens provider {phase.totalTokens} | estimated {phase.estimatedTotalTokens}</div>
+                              <div>cost {formatCost(phase.estimatedCostUsd)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {latestLoopMinerRun.summary.warnings && latestLoopMinerRun.summary.warnings.length > 0 ? (
+                    <div className="border border-amber-200 bg-amber-50 p-2 text-xs leading-5 text-amber-800">
+                      <div className="font-semibold">Warnings</div>
+                      {latestLoopMinerRun.summary.warnings.slice(0, 3).map((warning) => (
+                        <div key={warning}>{warning}</div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {latestLoopMinerRun.status === "failed" && Object.keys(readRecord(latestLoopMinerRun.error)).length > 0 ? (
+                    <div className="border border-rose-200 bg-rose-50 p-2 text-xs leading-5 text-rose-700">
+                      <div className="font-semibold">Error</div>
+                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(latestLoopMinerRun.error, null, 2)}</pre>
+                    </div>
+                  ) : null}
+
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Generated Suggestions</div>
+                    {latestLoopMinerRun.suggestions.length === 0 ? (
+                      <div className="border border-dashed border-slate-200 bg-white p-3 text-sm text-slate-500">No workflow suggestions created by this run.</div>
+                    ) : (
+                      latestLoopMinerRun.suggestions.map((suggestion) => {
+                        const dna = suggestionDna(suggestion);
+                        const trigger = readRecord(dna.trigger);
+                        const steps = readStringList(dna.stepPattern);
+                        return (
+                          <div key={suggestion.id} className="border border-slate-200 bg-white p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-slate-900">{suggestion.title}</div>
+                                <div className="truncate font-mono text-[11px] text-slate-400">{suggestion.fingerprint}</div>
+                              </div>
+                              <span className="shrink-0 border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700">{Math.round(suggestion.confidence * 100)}%</span>
+                            </div>
+                            <p className="mt-2 text-sm leading-5 text-slate-600">{suggestion.reason}</p>
+                            <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                              <span className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">{String(trigger.type ?? "schedule")}</span>
+                              <span className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">{String(trigger.cadence ?? "unknown cadence")}</span>
+                              <span className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">{suggestion.triggerCount} episodes</span>
+                              {typeof dna.approvalBehavior === "string" ? (
+                                <span className="border border-amber-200 bg-amber-50 px-2 py-0.5 text-amber-700">{dna.approvalBehavior}</span>
+                              ) : null}
+                            </div>
+                            {steps.length > 0 ? (
+                              <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs leading-5 text-slate-600">
+                                {steps.slice(0, 4).map((step) => (
+                                  <li key={step}>{step}</li>
+                                ))}
+                              </ol>
+                            ) : null}
+                            <div className="mt-2 border border-slate-100 bg-slate-50 p-2 text-xs leading-5 text-slate-600">{suggestion.suggestedPrompt}</div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Episodes</div>
+                    {latestLoopMinerRun.episodes.length === 0 ? (
+                      <div className="border border-dashed border-slate-200 bg-white p-3 text-sm text-slate-500">No episodes were built in this run.</div>
+                    ) : (
+                      latestLoopMinerRun.episodes.slice(0, 6).map((episode) => (
+                        <div key={episode.id} className="border border-slate-200 bg-white p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium text-slate-900">{episode.intent}</div>
+                              <div className="text-[11px] text-slate-400">{dateLabel(episode.sealedAt)} · {episode.turnCount} turns</div>
+                            </div>
+                            <span className="shrink-0 border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-600">{episode.outputType}</span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                            {episode.sources.slice(0, 4).map((source) => (
+                              <span key={source} className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">{source}</span>
+                            ))}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {loopMinerRuns.length > 1 ? (
+                    <div className="space-y-2">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recent Loop Miner Runs</div>
+                      {loopMinerRuns.slice(0, 5).map((run) => (
+                        <button
+                          key={run.id}
+                          type="button"
+                          className="flex w-full items-center justify-between border border-slate-200 bg-white px-3 py-2 text-left text-sm hover:bg-slate-50"
+                          onClick={() => setActiveLoopMinerRun(run)}
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate font-mono text-[11px] text-slate-500">{run.id}</span>
+                            <span className="text-xs text-slate-400">{run.summary.episodesBuilt} episodes · {run.summary.suggestionsCreated} suggestions</span>
+                          </span>
+                          <span className={`ml-2 shrink-0 border px-2 py-0.5 text-[11px] ${pillClass(run.status)}`}>{run.status}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </>
               )}
             </CardContent>

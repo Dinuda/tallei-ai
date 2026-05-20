@@ -16,6 +16,7 @@ import {
   runMemoryCleanupForUser,
   sendMemoryCleanupAdminEmail,
 } from "../../../services/memory-cleanup.js";
+import { listLoopMinerRunsForUser, runLoopMinerForUser } from "../../../orchestration/loop-miner/loop-miner.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -58,6 +59,9 @@ const cleanupRunSchema = z.object({
   emailAdmin: z.boolean().optional(),
 });
 
+const loopMinerRunSchema = z.object({
+  lookbackDays: z.number().int().min(1).max(90).optional(),
+});
 
 router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
@@ -198,6 +202,35 @@ router.get("/cleanup/runs/:id", requireScopes(["memory:read"]), async (req: Auth
   } catch (error) {
     console.error("Error reading memory cleanup run:", error);
     res.status(500).json({ error: "Failed to read memory cleanup run" });
+  }
+});
+
+router.get("/cleanup/loop-miner/runs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const runs = await listLoopMinerRunsForUser(req.authContext!);
+    res.json({ runs });
+  } catch (error) {
+    console.error("Error listing loop miner runs:", error);
+    res.status(500).json({ error: "Failed to list loop miner runs" });
+  }
+});
+
+router.post("/cleanup/loop-miner/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = loopMinerRunSchema.parse(req.body ?? {});
+    const result = await runLoopMinerForUser(req.authContext!, {
+      runReason: "manual",
+      lookbackDays: body.lookbackDays ?? 30,
+    });
+    const runs = await listLoopMinerRunsForUser(req.authContext!, 1);
+    res.status(201).json({ run: runs[0] ?? null, result });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error running loop miner:", error);
+    res.status(500).json({ error: "Failed to run loop miner" });
   }
 });
 

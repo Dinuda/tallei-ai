@@ -1,10 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { randomUUID } from "crypto";
 import type { AuthContext } from "../../../domain/auth/index.js";
 import { hasRequiredScopes } from "../../../infrastructure/auth/oauth-tokens.js";
-import { pool } from "../../../infrastructure/db/index.js";
 import {
   saveMemory,
   savePreference,

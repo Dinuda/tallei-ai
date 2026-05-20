@@ -772,6 +772,73 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_miner_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+        episodes_built INTEGER NOT NULL DEFAULT 0,
+        loops_detected INTEGER NOT NULL DEFAULT 0,
+        loops_qualified INTEGER NOT NULL DEFAULT 0,
+        suggestions_created INTEGER NOT NULL DEFAULT 0,
+        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_miner_runs_scope
+        ON loop_miner_runs(tenant_id, user_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS episodes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        intent TEXT NOT NULL,
+        sources TEXT[] NOT NULL DEFAULT '{}',
+        output_type TEXT NOT NULL,
+        tool_names TEXT[] NOT NULL DEFAULT '{}',
+        turn_count INTEGER NOT NULL DEFAULT 0,
+        approved BOOLEAN NOT NULL DEFAULT TRUE,
+        extraction_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        miner_run_id UUID REFERENCES loop_miner_runs(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        sealed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_episodes_scope_sealed
+        ON episodes(tenant_id, user_id, sealed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_episodes_miner_run
+        ON episodes(miner_run_id);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS episode_turns (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        episode_id UUID NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+        content_summary TEXT NOT NULL,
+        source_event_type TEXT NOT NULL CHECK (source_event_type IN ('ai_activity_event', 'collab_task', 'memory_record')),
+        source_event_id UUID,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_episode_turns_episode
+        ON episode_turns(episode_id, created_at ASC);
+    `);
+
+    await client.query(`
+      ALTER TABLE episode_turns
+      DROP CONSTRAINT IF EXISTS episode_turns_source_event_type_check;
+      ALTER TABLE episode_turns
+      ADD CONSTRAINT episode_turns_source_event_type_check
+      CHECK (source_event_type IN ('ai_activity_event', 'collab_task', 'memory_record'));
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS patterns (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

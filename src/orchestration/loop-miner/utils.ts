@@ -1,0 +1,396 @@
+import { createHash } from "crypto";
+
+import type {
+  CandidateLoop,
+  EpisodeExtraction,
+  EpisodeRecord,
+  EpisodeTurnRecord,
+  LoopEvaluation,
+  LoopVerdict,
+  MinerEvent,
+  WorkflowDNA,
+} from "./types.js";
+
+type SourceType = NonNullable<EpisodeExtraction["sourceDetails"]>[number]["type"];
+type OutputType = NonNullable<EpisodeExtraction["output"]>["type"];
+type ApprovalSignal = NonNullable<EpisodeExtraction["userBehavior"]>["approvalSignal"];
+type Cadence = NonNullable<EpisodeExtraction["automationSignals"]>["likelyCadence"];
+
+export interface CompactMinerEventOptions {
+  contentSummaryCharCap: number;
+}
+
+export interface TokenPackResult<T> {
+  batches: T[][];
+  maxEstimatedTokensPerBatch: number;
+}
+
+export function readJsonObject(text: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+    if (!fenced) return {};
+    try {
+      const parsed = JSON.parse(fenced);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  }
+}
+
+export function readString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+export function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()))];
+}
+
+export function normalizeConfidence(value: unknown): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.min(1, numeric));
+}
+
+function isSourceType(value: unknown): value is SourceType {
+  return value === "memory" || value === "document" || value === "conversation" || value === "integration" || value === "manual_input";
+}
+
+function isOutputType(value: unknown): value is OutputType {
+  return value === "newsletter" || value === "email" || value === "summary" || value === "proposal" || value === "code" || value === "changelog" || value === "unknown";
+}
+
+function isApprovalSignal(value: unknown): value is ApprovalSignal {
+  return value === "approved" || value === "rejected" || value === "unclear";
+}
+
+function isCadence(value: unknown): value is Cadence {
+  return value === "daily" || value === "weekly" || value === "monthly" || value === "event_based" || value === "unknown";
+}
+
+function normalizeNullableBoolean(value: unknown): boolean | null | undefined {
+  if (value === null) return null;
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+export function estimatePromptTokensFromRequest(request: { messages: readonly { content: string }[] }): number {
+  return request.messages.reduce((sum, message) => sum + estimateTokens(message.content), 0);
+}
+
+export function compactMinerEvent(
+  event: MinerEvent,
+  options: CompactMinerEventOptions
+): Pick<MinerEvent, "id" | "sourceEventType" | "createdAt" | "platform" | "role" | "contentSummary" | "metadata"> {
+  const cap = Math.max(160, options.contentSummaryCharCap);
+  const contentSummary = event.contentSummary.length <= cap
+    ? event.contentSummary
+    : `${event.contentSummary.slice(0, cap - 3)}...`;
+  const rawMetadata = readObject(event.metadata);
+  const allowlistedMetadata: Record<string, unknown> = {};
+  for (const key of ["state", "iteration", "lastActor", "updatedAt", "activityType", "source"]) {
+    if (rawMetadata[key] !== undefined) {
+      allowlistedMetadata[key] = rawMetadata[key];
+    }
+  }
+  return {
+    id: event.id,
+    sourceEventType: event.sourceEventType,
+    createdAt: event.createdAt,
+    platform: event.platform,
+    role: event.role,
+    contentSummary,
+    metadata: allowlistedMetadata,
+  };
+}
+
+export function packByEstimatedPromptBudget<T>(
+  items: readonly T[],
+  options: {
+    maxTokens: number;
+    baseTokens: number;
+    estimateItemTokens: (item: T) => number;
+  }
+): TokenPackResult<T> {
+  const batches: T[][] = [];
+  const maxTokens = Math.max(1200, options.maxTokens);
+  const baseTokens = Math.max(0, options.baseTokens);
+  let current: T[] = [];
+  let currentTokens = baseTokens;
+  let maxEstimatedTokensPerBatch = 0;
+
+  const pushBatch = () => {
+    if (current.length === 0) return;
+    batches.push(current);
+    maxEstimatedTokensPerBatch = Math.max(maxEstimatedTokensPerBatch, currentTokens);
+    current = [];
+    currentTokens = baseTokens;
+  };
+
+  for (const item of items) {
+    const itemTokens = Math.max(1, options.estimateItemTokens(item));
+    if (current.length === 0 && baseTokens + itemTokens > maxTokens) {
+      batches.push([item]);
+      maxEstimatedTokensPerBatch = Math.max(maxEstimatedTokensPerBatch, baseTokens + itemTokens);
+      continue;
+    }
+    if (current.length > 0 && currentTokens + itemTokens > maxTokens) {
+      pushBatch();
+    }
+    current.push(item);
+    currentTokens += itemTokens;
+  }
+
+  pushBatch();
+  return { batches, maxEstimatedTokensPerBatch };
+}
+
+export function compactEpisodeForPrompt(
+  episode: EpisodeRecord,
+  options: { maxTurns: number; maxTurnSummaryChars: number }
+): Record<string, unknown> {
+  const maxTurns = Math.max(1, options.maxTurns);
+  const maxTurnSummaryChars = Math.max(120, options.maxTurnSummaryChars);
+  const turns = episode.turns.slice(-maxTurns).map((turn: EpisodeTurnRecord) => ({
+    role: turn.role,
+    contentSummary: turn.contentSummary.length <= maxTurnSummaryChars
+      ? turn.contentSummary
+      : `${turn.contentSummary.slice(0, maxTurnSummaryChars - 3)}...`,
+    createdAt: turn.createdAt,
+    sourceEventType: turn.sourceEventType,
+  }));
+  return {
+    id: episode.id,
+    intent: episode.intent,
+    sources: episode.sources,
+    outputType: episode.outputType,
+    steps: episode.steps,
+    styleHints: episode.styleHints ?? [],
+    automationSignals: episode.automationSignals ?? null,
+    userBehavior: episode.userBehavior ?? null,
+    sealedAt: episode.sealedAt,
+    approved: episode.approved,
+    turns,
+  };
+}
+
+export function chunkEventsByTimeGap(events: MinerEvent[], gapHours = 4): MinerEvent[][] {
+  const sorted = [...events].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  const chunks: MinerEvent[][] = [];
+  const gapMs = gapHours * 60 * 60_000;
+  for (const event of sorted) {
+    const current = chunks[chunks.length - 1];
+    if (!current || current.length === 0) {
+      chunks.push([event]);
+      continue;
+    }
+    const prev = current[current.length - 1];
+    const prevTime = Date.parse(prev.createdAt);
+    const currentTime = Date.parse(event.createdAt);
+    if (Number.isFinite(prevTime) && Number.isFinite(currentTime) && currentTime - prevTime > gapMs) {
+      chunks.push([event]);
+    } else {
+      current.push(event);
+    }
+  }
+  return chunks;
+}
+
+export function normalizeEpisodeExtraction(value: unknown, validEventIds: Set<string>): EpisodeExtraction | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const eventIds = readStringArray(row.eventIds ?? row.event_ids).filter((id) => validEventIds.has(id));
+  if (eventIds.length === 0) return null;
+  const intentRow = readObject(row.intent);
+  const outputRow = readObject(row.output);
+  const behaviorRow = readObject(row.userBehavior ?? row.user_behavior);
+  const automationRow = readObject(row.automationSignals ?? row.automation_signals);
+  const sourceRows = Array.isArray(row.sources) ? row.sources : [];
+  const sourceDetails = sourceRows
+    .map((source): NonNullable<EpisodeExtraction["sourceDetails"]>[number] | null => {
+      if (typeof source === "string") {
+        return { type: "manual_input", name: source.trim(), importance: 0.5 };
+      }
+      const sourceRow = readObject(source);
+      const name = readString(sourceRow.name ?? sourceRow.source, "");
+      if (!name) return null;
+      const rawType = sourceRow.type ?? sourceRow.source_type;
+      return {
+        type: isSourceType(rawType) ? rawType : "manual_input",
+        name,
+        id: typeof sourceRow.id === "string" && sourceRow.id.trim() ? sourceRow.id.trim() : undefined,
+        importance: normalizeConfidence(sourceRow.importance ?? 0.5),
+      };
+    })
+    .filter((source): source is NonNullable<EpisodeExtraction["sourceDetails"]>[number] => Boolean(source));
+  const intentGoal = readString(intentRow.goal, typeof row.intent === "string" ? row.intent : "Untitled work episode");
+  const outputType = isOutputType(outputRow.type) ? outputRow.type : readString(row.outputType ?? row.output_type, "unknown");
+  if (/\b(preference|profile|memory|fact)\b/i.test(outputType)) return null;
+  const rawApprovalSignal = behaviorRow.approvalSignal ?? behaviorRow.approval_signal;
+  const approvalSignal = isApprovalSignal(rawApprovalSignal) ? rawApprovalSignal : "unclear";
+  const accepted = normalizeNullableBoolean(behaviorRow.accepted);
+  const approved = accepted ?? (typeof row.approved === "boolean" ? row.approved : approvalSignal === "approved");
+  return {
+    title: readString(row.title, intentGoal),
+    summary: readString(row.summary, intentGoal),
+    intent: intentGoal,
+    intentDetails: {
+      label: readString(intentRow.label ?? row.intentLabel ?? row.intent_label, "unknown"),
+      goal: intentGoal,
+      confidence: normalizeConfidence(intentRow.confidence ?? row.confidence),
+    },
+    sources: sourceDetails.map((source) => source.name),
+    sourceDetails,
+    outputType,
+    output: {
+      type: isOutputType(outputRow.type) ? outputRow.type : isOutputType(outputType) ? outputType : "unknown",
+      description: readString(outputRow.description, outputType),
+      finalArtifact: typeof outputRow.finalArtifact === "string" && outputRow.finalArtifact.trim()
+        ? outputRow.finalArtifact.trim()
+        : undefined,
+    },
+    toolNames: readStringArray(row.toolNames ?? row.tool_names),
+    steps: readStringArray(row.steps),
+    styleHints: readStringArray(row.styleHints ?? row.style_hints),
+    userBehavior: {
+      accepted,
+      edited: normalizeNullableBoolean(behaviorRow.edited),
+      regenerated: normalizeNullableBoolean(behaviorRow.regenerated),
+      ignored: normalizeNullableBoolean(behaviorRow.ignored),
+      approvalSignal,
+    },
+    automationSignals: {
+      repeatable: typeof automationRow.repeatable === "boolean" ? automationRow.repeatable : false,
+      likelyCadence: (() => {
+        const rawCadence = automationRow.likelyCadence ?? automationRow.likely_cadence;
+        return isCadence(rawCadence) ? rawCadence : "unknown";
+      })(),
+      businessValue: normalizeConfidence(automationRow.businessValue ?? automationRow.business_value),
+      automationReadiness: normalizeConfidence(automationRow.automationReadiness ?? automationRow.automation_readiness),
+    },
+    confidence: normalizeConfidence(row.confidence),
+    approved,
+    eventIds,
+  };
+}
+
+export function prefilterEpisodesByOutputType(episodes: EpisodeRecord[]): EpisodeRecord[] {
+  const counts = new Map<string, number>();
+  for (const episode of episodes) {
+    const key = episode.outputType.trim().toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return episodes.filter((episode) => (counts.get(episode.outputType.trim().toLowerCase()) ?? 0) >= 2);
+}
+
+export function normalizeCandidateLoop(value: unknown, validEpisodeIds: Set<string>): CandidateLoop | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const episodeIds = readStringArray(row.episodeIds ?? row.episode_ids).filter((id) => validEpisodeIds.has(id));
+  if (episodeIds.length < 2) return null;
+  return {
+    loopName: readString(row.loopName ?? row.loop_name, "Recurring workflow"),
+    episodeIds,
+    sharedIntent: readString(row.sharedIntent ?? row.shared_intent, "Repeated user workflow"),
+    sharedSources: readStringArray(row.sharedSources ?? row.shared_sources),
+    sharedOutputType: readString(row.sharedOutputType ?? row.shared_output_type, "unknown"),
+    reasoning: readString(row.reasoning, "Episodes repeat the same workflow pattern."),
+  };
+}
+
+export function normalizeLoopEvaluation(value: unknown, fallback: CandidateLoop): LoopEvaluation {
+  const row = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const rawVerdict = row.verdict;
+  const verdict: LoopVerdict = rawVerdict === "automate" || rawVerdict === "monitor" || rawVerdict === "discard"
+    ? rawVerdict
+    : "discard";
+  const rawEstimatedValue = row.estimatedValue ?? row.estimated_value;
+  const estimatedValue = rawEstimatedValue === "low" || rawEstimatedValue === "medium" || rawEstimatedValue === "high"
+    ? rawEstimatedValue
+    : "medium";
+  const rawReadiness = row.automationReadiness ?? row.automation_readiness;
+  const automationReadiness = rawReadiness === "full" || rawReadiness === "partial" || rawReadiness === "manual"
+    ? rawReadiness
+    : "partial";
+  return {
+    loopName: readString(row.loopName ?? row.loop_name, fallback.loopName),
+    episodeIds: readStringArray(row.episodeIds ?? row.episode_ids).filter((id) => fallback.episodeIds.includes(id)).length > 0
+      ? readStringArray(row.episodeIds ?? row.episode_ids).filter((id) => fallback.episodeIds.includes(id))
+      : fallback.episodeIds,
+    confidence: normalizeConfidence(row.confidence),
+    verdict,
+    reasoning: readString(row.reasoning, "No evaluator reasoning provided."),
+    estimatedCadence: readString(row.estimatedCadence ?? row.estimated_cadence, "ad-hoc"),
+    estimatedValue,
+    automationReadiness,
+    risks: readStringArray(row.risks),
+  };
+}
+
+function requiresApproval(dna: WorkflowDNA): boolean {
+  const text = [
+    dna.outputType,
+    dna.stepPattern.join(" "),
+    dna.reasoning,
+    dna.name,
+  ].join(" ").toLowerCase();
+  return /\b(send|email|publish|post|submit|modify|update|delete|remove|archive|deploy|merge|approve|payment|production)\b/.test(text);
+}
+
+export function normalizeWorkflowDna(value: unknown, fallback: { loop: CandidateLoop; evaluation: LoopEvaluation; episodes: EpisodeRecord[] }): WorkflowDNA {
+  const row = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const triggerRow = row.trigger && typeof row.trigger === "object" && !Array.isArray(row.trigger)
+    ? row.trigger as Record<string, unknown>
+    : {};
+  const rawTriggerType = triggerRow.type;
+  const triggerType = rawTriggerType === "event" ? "event" : "schedule";
+  const rawApproval = row.approvalBehavior ?? row.approval_behavior;
+  const dna: WorkflowDNA = {
+    name: readString(row.name, fallback.loop.loopName),
+    trigger: {
+      type: triggerType,
+      cadence: readString(triggerRow.cadence, fallback.evaluation.estimatedCadence),
+    },
+    sources: readStringArray(row.sources).length > 0 ? readStringArray(row.sources) : fallback.loop.sharedSources,
+    outputType: readString(row.outputType ?? row.output_type, fallback.loop.sharedOutputType),
+    stepPattern: readStringArray(row.stepPattern ?? row.step_pattern).length > 0
+      ? readStringArray(row.stepPattern ?? row.step_pattern)
+      : [...new Set(fallback.episodes.flatMap((episode) => episode.steps))],
+    style: readString(row.style, "Match the user's prior outputs for this workflow."),
+    approvalBehavior: rawApproval === "auto" || rawApproval === "require_explicit_approval"
+      ? rawApproval
+      : "auto",
+    reasoning: readString(row.reasoning, fallback.evaluation.reasoning),
+  };
+  if (requiresApproval(dna)) {
+    return { ...dna, approvalBehavior: "require_explicit_approval" };
+  }
+  return dna;
+}
+
+export function workflowDnaFingerprint(dna: WorkflowDNA): string {
+  const normalized = JSON.stringify({
+    name: dna.name.toLowerCase(),
+    sources: dna.sources.map((source) => source.toLowerCase()).sort(),
+    outputType: dna.outputType.toLowerCase(),
+    stepPattern: dna.stepPattern.map((step) => step.toLowerCase()),
+  });
+  return `loop-miner-${createHash("sha256").update(normalized).digest("hex").slice(0, 24)}`;
+}
+
+export function workflowDnaPrompt(dna: WorkflowDNA): string {
+  const trigger = `${dna.trigger.type}: ${dna.trigger.cadence}`;
+  const steps = dna.stepPattern.length > 0 ? dna.stepPattern.join("; ") : "Follow the user's established repeatable workflow pattern.";
+  return `Automate "${dna.name}" on ${trigger}. Use sources: ${dna.sources.join(", ") || "the relevant connected sources"}. Produce ${dna.outputType}. Steps: ${steps}. Style: ${dna.style}. Approval: ${dna.approvalBehavior}.`;
+}

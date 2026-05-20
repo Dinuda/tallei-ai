@@ -17,6 +17,7 @@ import type {
   MemoryCleanupRunView,
   MemoryCleanupSummary,
 } from "../orchestration/memory-cleanup/types.js";
+import type { LoopMinerSummary } from "../orchestration/loop-miner/types.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage } from "../orchestration/memory-cleanup/usage.js";
 import { invalidateRecallCache } from "./memory.js";
 import { sendResendEmail } from "./resend-email.js";
@@ -124,6 +125,7 @@ export async function sendMemoryCleanupAdminEmail(input: {
   source: "manual" | "daily_intelligence";
   dailyRunId?: string;
   suggestionCount?: number;
+  loopMiner?: { runId: string; status: string; summary: LoopMinerSummary };
 }): Promise<MemoryCleanupAdminEmailResult> {
   if (!config.adminEmail) {
     return { sent: false, skipped: true, to: null, error: "TALLEI_ADMIN_EMAIL is not configured" };
@@ -151,6 +153,14 @@ export async function sendMemoryCleanupAdminEmail(input: {
     `Rejected: ${input.run.summary.rejected}`,
     `Failed: ${input.run.summary.failed}`,
     input.suggestionCount === undefined ? null : `Workflow suggestions: ${input.suggestionCount}`,
+    input.loopMiner ? "" : null,
+    input.loopMiner ? `Loop miner run: ${input.loopMiner.runId}` : null,
+    input.loopMiner ? `Loop miner status: ${input.loopMiner.status}` : null,
+    input.loopMiner ? `Loop miner episodes: ${input.loopMiner.summary.episodesBuilt}` : null,
+    input.loopMiner ? `Loop miner loops detected: ${input.loopMiner.summary.loopsDetected}` : null,
+    input.loopMiner ? `Loop miner loops qualified: ${input.loopMiner.summary.loopsQualified}` : null,
+    input.loopMiner ? `Loop miner suggestions: ${input.loopMiner.summary.suggestionsCreated}` : null,
+    input.loopMiner?.summary.skipped ? `Loop miner skipped: ${input.loopMiner.summary.skipReason ?? "unknown"}` : null,
     "",
     `AI calls: ${usage?.calls ?? input.run.summary.aiCalls ?? 0}`,
     `Provider prompt tokens: ${usage?.promptTokens ?? 0}`,

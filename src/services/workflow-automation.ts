@@ -23,6 +23,7 @@ import {
 } from "./workflow-sdk-runtime.js";
 import { encryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { runMemoryCleanupForUser, sendMemoryCleanupAdminEmail } from "./memory-cleanup.js";
+import { runLoopMinerForUser } from "../orchestration/loop-miner/loop-miner.js";
 
 export type ConnectorSetupState =
   | "not_required"
@@ -2512,6 +2513,16 @@ export async function runDailyIntelligencePassForUserInternal(
     ...memoryCleanupRun.summary,
   };
 
+  const loopMinerRun = await runLoopMinerForUser(auth, {
+    runReason: "daily_intelligence",
+    lookbackDays: 30,
+  });
+  const loopMiner = {
+    runId: loopMinerRun.id,
+    status: loopMinerRun.status,
+    ...loopMinerRun.summary,
+  };
+
   const recentActivities = await pool.query<{ content_text: string }>(
     `SELECT content_text
      FROM ai_activity_events
@@ -2523,7 +2534,7 @@ export async function runDailyIntelligencePassForUserInternal(
     [auth.tenantId, auth.userId]
   );
 
-  const suggestions: WorkflowSuggestion[] = [];
+  const suggestions: WorkflowSuggestion[] = [...loopMinerRun.suggestions];
   for (const row of recentActivities.rows) {
     const found = await discoverInlineWorkflowSuggestions({
       auth,
@@ -2564,7 +2575,7 @@ export async function runDailyIntelligencePassForUserInternal(
       runId,
       auth.tenantId,
       auth.userId,
-      JSON.stringify({ suggestionCount: suggestions.length, memoryCleanup }),
+      JSON.stringify({ suggestionCount: suggestions.length, memoryCleanup, loopMiner }),
     ]
   );
 
@@ -2574,6 +2585,11 @@ export async function runDailyIntelligencePassForUserInternal(
     source: "daily_intelligence",
     dailyRunId: runId,
     suggestionCount: suggestions.length,
+    loopMiner: {
+      runId: loopMinerRun.id,
+      status: loopMinerRun.status,
+      summary: loopMinerRun.summary,
+    },
   });
 
   if (isWorkflowSdkEnabled()) {
@@ -2595,6 +2611,7 @@ export async function runDailyIntelligencePassForUserInternal(
             sdkRunId,
           },
           memoryCleanup,
+          loopMiner,
         }),
       ]
     );
@@ -2605,6 +2622,7 @@ export async function runDailyIntelligencePassForUserInternal(
       tenantId: auth.tenantId,
       userId: auth.userId,
       suggestionCount: suggestions.length,
+      loopMinerSuggestionCount: loopMinerRun.suggestions.length,
     });
   }
 
