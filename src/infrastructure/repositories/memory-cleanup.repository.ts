@@ -206,16 +206,38 @@ export class MemoryCleanupRepository {
          - 'cleanup_bucket'
          - 'cleanup_bucket_reason'
          - 'cleanup_bucket_confidence'
-         - 'cleanup_bucketed_at'
+         - 'cleanup_bucketed_at',
+           tier = CASE
+             WHEN is_pinned = TRUE OR memory_type = 'preference'
+               OR lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account')
+               THEN 'permanent'
+             WHEN memory_type IN ('event', 'note') THEN 'short_term'
+             ELSE 'long_term'
+           END,
+           segment = COALESCE(category, memory_type),
+           importance = CASE
+             WHEN is_pinned = TRUE OR memory_type = 'preference' THEN 0.9500
+             WHEN lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account') THEN 0.9500
+             WHEN memory_type IN ('decision', 'checkpoint') THEN 0.7500
+             WHEN memory_type IN ('event', 'note') THEN 0.3500
+             ELSE 0.6000
+           END,
+           decay_rate = CASE
+             WHEN is_pinned = TRUE OR memory_type = 'preference'
+               OR lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account')
+               THEN 0.000000
+             WHEN memory_type IN ('event', 'note') THEN 0.080000
+             ELSE 0.010000
+           END,
+           lifecycle = CASE
+             WHEN is_pinned = TRUE OR memory_type = 'preference'
+               OR lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account')
+               THEN 'protected'
+             ELSE 'active'
+           END
        WHERE tenant_id = $1
          AND user_id = $2
-         AND deleted_at IS NULL
-         AND (
-           summary_json ? 'cleanup_bucket'
-           OR summary_json ? 'cleanup_bucket_reason'
-           OR summary_json ? 'cleanup_bucket_confidence'
-           OR summary_json ? 'cleanup_bucketed_at'
-         )`,
+         AND deleted_at IS NULL`,
       [auth.tenantId, auth.userId]
     );
     return result.rowCount ?? 0;

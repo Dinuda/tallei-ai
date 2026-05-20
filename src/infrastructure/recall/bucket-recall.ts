@@ -119,6 +119,12 @@ function toMeta(row: MemoryRecordRow): Record<string, unknown> {
     category: row.category,
     is_pinned: row.is_pinned,
     reference_count: row.reference_count,
+    tier: row.tier,
+    segment: row.segment,
+    importance: Number(row.importance),
+    decayRate: Number(row.decay_rate),
+    accessCount: row.access_count,
+    lifecycle: row.lifecycle,
   };
 }
 

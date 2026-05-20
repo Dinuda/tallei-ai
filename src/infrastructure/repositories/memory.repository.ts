@@ -14,6 +14,12 @@ export interface MemoryRecordRow {
   category: string | null;
   is_pinned: boolean;
   reference_count: number;
+  tier: string;
+  segment: string | null;
+  importance: string | number;
+  decay_rate: string | number;
+  access_count: number;
+  lifecycle: string;
   last_referenced_at: string | null;
   superseded_by: string | null;
   created_at: string;
@@ -31,6 +37,12 @@ interface CreateMemoryRecordInput {
   category?: string | null;
   isPinned?: boolean;
   referenceCount?: number;
+  tier?: string;
+  segment?: string | null;
+  importance?: number;
+  decayRate?: number;
+  accessCount?: number;
+  lifecycle?: string;
   lastReferencedAt?: string | null;
 }
 
@@ -82,8 +94,8 @@ export class MemoryRepository {
   async create(auth: AuthContext, input: CreateMemoryRecordInput): Promise<void> {
     await pool.query(
       `INSERT INTO memory_records
-       (id, tenant_id, user_id, content_ciphertext, content_hash, platform, summary_json, qdrant_point_id, memory_type, category, is_pinned, reference_count, last_referenced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13)`,
+       (id, tenant_id, user_id, content_ciphertext, content_hash, platform, summary_json, qdrant_point_id, memory_type, category, is_pinned, reference_count, tier, segment, importance, decay_rate, access_count, lifecycle, last_referenced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, COALESCE($13, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 'permanent' WHEN $9 IN ('event', 'note') THEN 'short_term' ELSE 'long_term' END), COALESCE($14, $10, $9), COALESCE($15, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 0.9500 WHEN $9 IN ('decision', 'checkpoint') THEN 0.7500 WHEN $9 IN ('event', 'note') THEN 0.3500 ELSE 0.6000 END), COALESCE($16, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 0.000000 WHEN $9 IN ('event', 'note') THEN 0.080000 ELSE 0.010000 END), COALESCE($17, $12), COALESCE($18, CASE WHEN $11 = TRUE OR $9 = 'preference' THEN 'protected' ELSE 'active' END), $19)`,
       [
         input.id,
         auth.tenantId,
@@ -97,6 +109,12 @@ export class MemoryRepository {
         input.category ?? null,
         input.isPinned ?? false,
         input.referenceCount ?? 1,
+        input.tier ?? null,
+        input.segment ?? null,
+        input.importance ?? null,
+        input.decayRate ?? null,
+        input.accessCount ?? input.referenceCount ?? 1,
+        input.lifecycle ?? null,
         input.lastReferencedAt ?? null,
       ]
     );
@@ -153,6 +171,7 @@ export class MemoryRepository {
     const result = await pool.query(
       `UPDATE memory_records
        SET reference_count = reference_count + GREATEST($1, 1),
+           access_count = access_count + GREATEST($1, 1),
            last_referenced_at = $2::timestamptz
        WHERE id = $3
          AND tenant_id = $4

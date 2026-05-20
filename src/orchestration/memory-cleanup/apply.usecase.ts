@@ -41,6 +41,24 @@ function bucketMetadata(proposal: CleanupProposalInput): Record<string, unknown>
   };
 }
 
+function retentionForBucket(bucket: CleanupProposalInput["bucket"]): {
+  tier: string;
+  importance: number;
+  decayRate: number;
+  lifecycle: string;
+} | null {
+  if (bucket === "permanent") {
+    return { tier: "permanent", importance: 0.95, decayRate: 0, lifecycle: "protected" };
+  }
+  if (bucket === "long_term") {
+    return { tier: "long_term", importance: 0.6, decayRate: 0.01, lifecycle: "active" };
+  }
+  if (bucket === "short_term") {
+    return { tier: "short_term", importance: 0.35, decayRate: 0.08, lifecycle: "active" };
+  }
+  return null;
+}
+
 async function updateBucketMetadata(
   client: pg.PoolClient,
   auth: AuthContext,
@@ -49,14 +67,30 @@ async function updateBucketMetadata(
 ): Promise<void> {
   const metadata = bucketMetadata(proposal);
   if (Object.keys(metadata).length === 0) return;
+  const retention = retentionForBucket(proposal.bucket);
+  if (!retention) return;
   await client.query(
     `UPDATE memory_records
-     SET summary_json = summary_json || $4::jsonb
+     SET summary_json = summary_json || $4::jsonb,
+         tier = $5,
+         segment = COALESCE(category, memory_type),
+         importance = GREATEST(importance, $6),
+         decay_rate = $7,
+         lifecycle = CASE WHEN lifecycle = 'archived' THEN lifecycle ELSE $8 END
      WHERE id = $1
        AND tenant_id = $2
        AND user_id = $3
        AND deleted_at IS NULL`,
-    [memoryId, auth.tenantId, auth.userId, JSON.stringify(metadata)]
+    [
+      memoryId,
+      auth.tenantId,
+      auth.userId,
+      JSON.stringify(metadata),
+      retention.tier,
+      retention.importance,
+      retention.decayRate,
+      retention.lifecycle,
+    ]
   );
 }
 
@@ -127,6 +161,11 @@ export class ApplyCleanupProposalUseCase {
         await client.query(
           `UPDATE memory_records
            SET is_pinned = TRUE,
+               tier = 'permanent',
+               segment = COALESCE(category, memory_type),
+               importance = GREATEST(importance, 0.9500),
+               decay_rate = 0.000000,
+               lifecycle = 'protected',
                summary_json = summary_json || $4::jsonb
            WHERE id = $1
              AND tenant_id = $2
@@ -179,6 +218,7 @@ export class ApplyCleanupProposalUseCase {
             }),
           ]
         );
+        await updateBucketMetadata(client, input.auth, memoryId, input.proposal);
         applyJson.rewrittenMemoryId = memoryId;
         await logMemoryEvent(client, input.auth, {
           memoryId,
@@ -217,6 +257,7 @@ export class ApplyCleanupProposalUseCase {
             ]
           );
         }
+        await updateBucketMetadata(client, input.auth, targetMemoryId, input.proposal);
         const redundantIds = input.proposal.sourceMemoryIds.filter((id) => id !== targetMemoryId);
         if (redundantIds.length > 0) {
           await client.query(

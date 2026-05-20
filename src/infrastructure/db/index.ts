@@ -473,6 +473,12 @@ export async function initDb() {
         category TEXT,
         is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
         reference_count INTEGER NOT NULL DEFAULT 1,
+        tier TEXT NOT NULL DEFAULT 'long_term',
+        segment TEXT,
+        importance NUMERIC(5,4) NOT NULL DEFAULT 0.5000,
+        decay_rate NUMERIC(8,6) NOT NULL DEFAULT 0.010000,
+        access_count INTEGER NOT NULL DEFAULT 1,
+        lifecycle TEXT NOT NULL DEFAULT 'active',
         last_referenced_at TIMESTAMP WITH TIME ZONE,
         superseded_by UUID NULL REFERENCES memory_records(id) ON DELETE SET NULL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -562,6 +568,12 @@ export async function initDb() {
     const hadCategoryColumn = await hasColumn(client, "memory_records", "category");
     const hadPinnedColumn = await hasColumn(client, "memory_records", "is_pinned");
     const hadReferenceCountColumn = await hasColumn(client, "memory_records", "reference_count");
+    const hadTierColumn = await hasColumn(client, "memory_records", "tier");
+    const hadSegmentColumn = await hasColumn(client, "memory_records", "segment");
+    const hadImportanceColumn = await hasColumn(client, "memory_records", "importance");
+    const hadDecayRateColumn = await hasColumn(client, "memory_records", "decay_rate");
+    const hadAccessCountColumn = await hasColumn(client, "memory_records", "access_count");
+    const hadLifecycleColumn = await hasColumn(client, "memory_records", "lifecycle");
     const hadLastReferencedAtColumn = await hasColumn(client, "memory_records", "last_referenced_at");
     const hadSupersededByColumn = await hasColumn(client, "memory_records", "superseded_by");
 
@@ -571,6 +583,12 @@ export async function initDb() {
       ADD COLUMN IF NOT EXISTS category TEXT,
       ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS reference_count INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'long_term',
+      ADD COLUMN IF NOT EXISTS segment TEXT,
+      ADD COLUMN IF NOT EXISTS importance NUMERIC(5,4) DEFAULT 0.5000,
+      ADD COLUMN IF NOT EXISTS decay_rate NUMERIC(8,6) DEFAULT 0.010000,
+      ADD COLUMN IF NOT EXISTS access_count INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS lifecycle TEXT DEFAULT 'active',
       ADD COLUMN IF NOT EXISTS last_referenced_at TIMESTAMP WITH TIME ZONE,
       ADD COLUMN IF NOT EXISTS superseded_by UUID NULL REFERENCES memory_records(id) ON DELETE SET NULL;
     `);
@@ -585,6 +603,43 @@ export async function initDb() {
       UPDATE memory_records
       SET reference_count = 1
       WHERE reference_count IS NULL;
+      UPDATE memory_records
+      SET tier = CASE
+            WHEN is_pinned = TRUE OR memory_type = 'preference'
+              OR lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account')
+              THEN 'permanent'
+            WHEN memory_type IN ('event', 'note') THEN 'short_term'
+            ELSE 'long_term'
+          END
+      WHERE tier IS NULL OR tier NOT IN ('short_term', 'long_term', 'permanent');
+      UPDATE memory_records
+      SET segment = COALESCE(segment, category, memory_type)
+      WHERE segment IS NULL;
+      UPDATE memory_records
+      SET importance = CASE
+            WHEN is_pinned = TRUE OR memory_type = 'preference' THEN 0.9500
+            WHEN lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account') THEN 0.9500
+            WHEN memory_type IN ('decision', 'checkpoint') THEN 0.7500
+            WHEN memory_type IN ('event', 'note') THEN 0.3500
+            ELSE 0.6000
+          END
+      WHERE importance IS NULL;
+      UPDATE memory_records
+      SET decay_rate = CASE
+            WHEN tier = 'permanent' THEN 0.000000
+            WHEN tier = 'short_term' THEN 0.080000
+            ELSE 0.010000
+          END
+      WHERE decay_rate IS NULL;
+      UPDATE memory_records
+      SET access_count = reference_count
+      WHERE access_count IS NULL;
+      UPDATE memory_records
+      SET lifecycle = CASE
+            WHEN tier = 'permanent' THEN 'protected'
+            ELSE 'active'
+          END
+      WHERE lifecycle IS NULL OR lifecycle NOT IN ('active', 'cooling', 'stale', 'archived', 'protected');
     `);
 
     await client.query(`
@@ -594,7 +649,17 @@ export async function initDb() {
       ALTER COLUMN is_pinned SET DEFAULT FALSE,
       ALTER COLUMN is_pinned SET NOT NULL,
       ALTER COLUMN reference_count SET DEFAULT 1,
-      ALTER COLUMN reference_count SET NOT NULL;
+      ALTER COLUMN reference_count SET NOT NULL,
+      ALTER COLUMN tier SET DEFAULT 'long_term',
+      ALTER COLUMN tier SET NOT NULL,
+      ALTER COLUMN importance SET DEFAULT 0.5000,
+      ALTER COLUMN importance SET NOT NULL,
+      ALTER COLUMN decay_rate SET DEFAULT 0.010000,
+      ALTER COLUMN decay_rate SET NOT NULL,
+      ALTER COLUMN access_count SET DEFAULT 1,
+      ALTER COLUMN access_count SET NOT NULL,
+      ALTER COLUMN lifecycle SET DEFAULT 'active',
+      ALTER COLUMN lifecycle SET NOT NULL;
     `);
 
     await client.query(`
@@ -603,6 +668,31 @@ export async function initDb() {
       ALTER TABLE memory_records
       ADD CONSTRAINT memory_records_memory_type_check
       CHECK (memory_type IN (${MEMORY_TYPE_CHECK}));
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_tier_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_tier_check
+      CHECK (tier IN ('short_term', 'long_term', 'permanent'));
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_lifecycle_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_lifecycle_check
+      CHECK (lifecycle IN ('active', 'cooling', 'stale', 'archived', 'protected'));
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_importance_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_importance_check
+      CHECK (importance >= 0 AND importance <= 1);
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_decay_rate_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_decay_rate_check
+      CHECK (decay_rate >= 0);
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_access_count_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_access_count_check
+      CHECK (access_count >= 0);
     `);
 
     await client.query(`
@@ -611,6 +701,9 @@ export async function initDb() {
         WHERE deleted_at IS NULL AND superseded_by IS NULL;
       CREATE INDEX IF NOT EXISTS idx_memory_records_reference_count
         ON memory_records(tenant_id, user_id, reference_count DESC, last_referenced_at DESC)
+        WHERE deleted_at IS NULL AND superseded_by IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_memory_records_retention
+        ON memory_records(tenant_id, user_id, tier, lifecycle, importance DESC, access_count DESC)
         WHERE deleted_at IS NULL AND superseded_by IS NULL;
       CREATE INDEX IF NOT EXISTS idx_memory_records_superseded_by
         ON memory_records(tenant_id, user_id, superseded_by)
@@ -625,6 +718,12 @@ export async function initDb() {
       !hadCategoryColumn ||
       !hadPinnedColumn ||
       !hadReferenceCountColumn ||
+      !hadTierColumn ||
+      !hadSegmentColumn ||
+      !hadImportanceColumn ||
+      !hadDecayRateColumn ||
+      !hadAccessCountColumn ||
+      !hadLifecycleColumn ||
       !hadLastReferencedAtColumn ||
       !hadSupersededByColumn
     ) {

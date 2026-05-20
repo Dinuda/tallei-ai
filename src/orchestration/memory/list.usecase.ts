@@ -32,6 +32,12 @@ interface ListMemoriesUseCaseDeps {
       category: string | null;
       is_pinned: boolean;
       reference_count: number;
+      tier: string;
+      segment: string | null;
+      importance: string | number;
+      decay_rate: string | number;
+      access_count: number;
+      lifecycle: string;
       created_at: string;
     }>>;
     count(auth: AuthContext): Promise<number>;
@@ -93,6 +99,12 @@ export class ListMemoriesUseCase {
           category: row.category,
           is_pinned: row.is_pinned,
           reference_count: row.reference_count,
+          tier: row.tier,
+          segment: row.segment,
+          importance: Number(row.importance),
+          decayRate: Number(row.decay_rate),
+          accessCount: row.access_count,
+          lifecycle: row.lifecycle,
         },
         createdAt: row.created_at,
       };

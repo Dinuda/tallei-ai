@@ -419,8 +419,22 @@ export async function listPreferences(auth: AuthContext) {
       isPinned: row.is_pinned,
       preferenceKey: typeof summaryMeta["preference_key"] === "string" ? summaryMeta["preference_key"] : null,
       referenceCount: row.reference_count,
+      tier: row.tier,
+      segment: row.segment,
+      importance: Number(row.importance),
+      decayRate: Number(row.decay_rate),
+      accessCount: row.access_count,
+      lifecycle: row.lifecycle,
       createdAt: row.created_at,
-      metadata: summaryMeta,
+      metadata: {
+        ...summaryMeta,
+        tier: row.tier,
+        segment: row.segment,
+        importance: Number(row.importance),
+        decayRate: Number(row.decay_rate),
+        accessCount: row.access_count,
+        lifecycle: row.lifecycle,
+      },
     };
   });
 }
