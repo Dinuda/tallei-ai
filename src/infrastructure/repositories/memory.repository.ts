@@ -211,7 +211,9 @@ export class MemoryRepository {
     let sql = `SELECT *
        FROM memory_records
        WHERE ${clauses.join("\n         AND ")}
-       ORDER BY is_pinned DESC, last_referenced_at DESC NULLS LAST, created_at DESC`;
+       ORDER BY is_pinned DESC,
+                GREATEST(COALESCE(last_referenced_at, created_at), created_at) DESC,
+                created_at DESC`;
 
     if (typeof limit === "number") {
       values.push(limit);

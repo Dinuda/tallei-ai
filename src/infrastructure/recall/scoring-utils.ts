@@ -12,6 +12,13 @@ export function activitySignal(referenceCount: number, lastReferencedAt: string 
   return refBoost * freshnessMult;
 }
 
+export function freshnessSignal(createdAt: string): number {
+  const createdTime = new Date(createdAt).getTime();
+  if (!Number.isFinite(createdTime)) return 1;
+  const ageDays = Math.max(0, (Date.now() - createdTime) / 86_400_000);
+  return 1 + 0.35 * Math.exp(-ageDays / 7);
+}
+
 export function confidenceTier(referenceCount: unknown): "HIGH" | "MED" | "UNCONFIRMED" {
   const count = typeof referenceCount === "number" ? referenceCount : 0;
   if (count >= 5) return "HIGH";

@@ -21,7 +21,7 @@ import { MemoryRepository, type MemoryRecordRow } from "../repositories/memory.r
 import { VectorRepository } from "../repositories/vector.repository.js";
 import { config } from "../../config/index.js";
 import type { MemoryType } from "../../orchestration/memory/memory-types.js";
-import { activitySignal, confidenceTier } from "./scoring-utils.js";
+import { activitySignal, confidenceTier, freshnessSignal } from "./scoring-utils.js";
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -483,7 +483,8 @@ export async function hybridRecall(
     const score = Number((
       rrfScore *
       memoryDecay(doc.row.memory_type, doc.row.created_at) *
-      activitySignal(doc.row.reference_count ?? 1, doc.row.last_referenced_at ?? null)
+      activitySignal(doc.row.reference_count ?? 1, doc.row.last_referenced_at ?? null) *
+      freshnessSignal(doc.row.created_at)
     ).toFixed(6));
 
     return [{

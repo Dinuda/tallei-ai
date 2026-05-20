@@ -6,7 +6,6 @@ import { encryptMemoryContent, hashMemoryContent } from "../../infrastructure/cr
 import type { ExtractedFact } from "../../orchestration/ai/fact-extract.usecase.js";
 import { summarizeConversation, type ConversationSummary } from "../../orchestration/ai/summarize.usecase.js";
 import type { AuthContext } from "../../domain/auth/index.js";
-import { classifyMemory } from "./memory-classification.js";
 import { normalizeMemoryType, type MemoryType } from "./memory-types.js";
 
 export interface SaveMemoryResult {
@@ -273,18 +272,12 @@ export class SaveMemoryUseCase {
       }
     }
 
-    const classified = classifyMemory(normalizedContent, {
-      memory_type: summary.memory_type,
-      category: summary.category,
-      is_pinned_suggested: summary.is_pinned_suggested,
-    });
-
-    const memoryType = normalizeMemoryType(input.memoryType, classified.memoryType);
-    const category = input.category ?? classified.category;
+    const memoryType = normalizeMemoryType(input.memoryType, "fact");
+    const category = input.category ?? null;
     const isPinned = typeof input.isPinned === "boolean"
       ? input.isPinned || memoryType === "preference"
-      : (classified.isPinned || memoryType === "preference");
-    const preferenceKey = input.preferenceKey ?? summary.preference_key ?? classified.preferenceKey;
+      : memoryType === "preference";
+    const preferenceKey = input.preferenceKey ?? null;
 
     const summaryForStorage: ConversationSummary & { provenance?: { platform: string; written_at: string } } = {
       ...summary,
