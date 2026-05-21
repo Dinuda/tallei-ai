@@ -1,4 +1,5 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
+import { createHash } from "crypto";
 
 import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
@@ -12,6 +13,11 @@ interface LoopEpisodeVectorResult {
 let _client: QdrantClient | null = null;
 let _initialized = false;
 let _ensureInFlight: Promise<void> | null = null;
+
+function deterministicPointUuid(value: string): string {
+  const hex = createHash("sha256").update(value).digest("hex").slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 
 function getClient(): QdrantClient {
   if (!_client) {
@@ -59,6 +65,10 @@ async function ensureCollection(): Promise<void> {
 }
 
 export class LoopEpisodeVectorRepository {
+  async ensureReady(): Promise<void> {
+    await ensureCollection();
+  }
+
   async upsertEpisodeVector(input: {
     auth: AuthContext;
     episodeId: string;
@@ -72,7 +82,7 @@ export class LoopEpisodeVectorRepository {
   }): Promise<void> {
     await ensureCollection();
     const client = getClient();
-    const pointId = `loop-episode:${input.auth.tenantId}:${input.auth.userId}:${input.episodeId}`;
+    const pointId = deterministicPointUuid(`loop-episode:${input.auth.tenantId}:${input.auth.userId}:${input.episodeId}`);
     await client.upsert(config.loopQdrantCollectionName, {
       wait: false,
       points: [{

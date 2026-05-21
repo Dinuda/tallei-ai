@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test, { after } from "node:test";
 
 import type { AuthContext } from "../../../src/domain/auth/index.js";
@@ -18,6 +19,7 @@ import type {
   LoopEvaluation,
   LoopMinerMemoryDecision,
   LoopMinerRepository as LoopMinerRepositoryContract,
+  LoopMinerSuggestion,
   LoopMinerSummary,
   MinerEvent,
   WorkflowDNA,
@@ -27,12 +29,14 @@ import {
   compactMinerEvent,
   estimateTokens,
   explicitWorkflowMemoryExtraction,
+  LOOP_EPISODE_EXTRACTION_VERSION,
   normalizeEpisodeExtraction,
   normalizeCandidateLoop,
   normalizeLoopEvaluation,
   normalizeWorkflowDna,
   packByEstimatedPromptBudget,
   prefilterEpisodesByOutputType,
+  sourceFingerprintFromEvent,
 } from "../../../src/orchestration/loop-miner/utils.js";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "../../../src/providers/ai/types.js";
 
@@ -66,6 +70,18 @@ function event(id: string, createdAt: string, contentSummary = "Draft weekly cha
   };
 }
 
+function memoryEvent(id: string, createdAt: string, contentSummary = "Memory\nType: fact\nDraft weekly changelog from GitHub commits"): MinerEvent {
+  return {
+    id,
+    sourceEventType: "memory_record",
+    createdAt,
+    platform: "chatgpt",
+    contentSummary,
+    role: "user",
+    metadata: { sourceImport: true, minerImportance: 0.8 },
+  };
+}
+
 function episode(id: string, outputType: string): EpisodeRecord {
   return {
     id,
@@ -85,6 +101,51 @@ function episode(id: string, outputType: string): EpisodeRecord {
       sourceEventId: `event-${id}`,
       createdAt: "2026-05-01T09:00:00.000Z",
     }],
+  };
+}
+
+function evidenceFingerprintForTest(events: MinerEvent[]): string {
+  const fingerprints = events
+    .filter((item) => item.sourceEventType === "memory_record")
+    .map((item) => sourceFingerprintFromEvent(item, LOOP_EPISODE_EXTRACTION_VERSION))
+    .sort();
+  return createHash("sha256").update(JSON.stringify({
+    extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+    fingerprints,
+  })).digest("hex");
+}
+
+function completedIncrementalSummary(evidenceFingerprint: string): LoopMinerSummary {
+  return {
+    episodesBuilt: 0,
+    loopsDetected: 0,
+    loopsQualified: 0,
+    suggestionsCreated: 0,
+    durationMs: 0,
+    aiCalls: 0,
+    usage: {
+      calls: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      estimatedPromptTokens: 0,
+      estimatedCompletionTokens: 0,
+      estimatedTotalTokens: 0,
+      estimatedCostUsd: 0,
+      models: {},
+    },
+    incremental: {
+      mode: "full",
+      evidenceFingerprint,
+      extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+      totalEvidenceEvents: 0,
+      newEvidenceEvents: 0,
+      reusedEpisodes: 0,
+      newEpisodes: 0,
+      reusedSuggestions: 0,
+      suggestionsUpdated: 0,
+    },
+    phaseUsage: {},
   };
 }
 
@@ -193,7 +254,7 @@ test("loop miner converts imported newsletter work memories into newsletter epis
   assert.deepEqual(extraction.eventIds, ["memory-newsletter-1"]);
 });
 
-test("episode builder reuses deterministic memory episode by source fingerprint", async () => {
+test("episode builder reuses LLM memory episode by source fingerprint", async () => {
   const existing: EpisodeRecord = {
     id: "episode-reused-1",
     title: "Weekly analytics routine",
@@ -229,9 +290,22 @@ test("episode builder reuses deterministic memory episode by source fingerprint"
     },
   };
 
-  const useCase = new EpisodeBuilderUseCase(repository, async () => {
-    throw new Error("LLM should not be called for deterministic memory reuse");
-  });
+  const useCase = new EpisodeBuilderUseCase(repository, async () => ({
+    text: JSON.stringify({
+      episodes: [{
+        intent: "Every Friday review product analytics and write experiments",
+        sources: ["Imported ChatGPT memory"],
+        outputType: "workflow_memory",
+        toolNames: ["chatgpt"],
+        steps: ["Review analytics", "Write experiments"],
+        approved: true,
+        eventIds: ["memory-1"],
+      }],
+    }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+  }));
 
   const result = await useCase.execute({
     auth,
@@ -498,7 +572,10 @@ class InMemoryLoopMinerRepository implements LoopMinerRepositoryContract {
   events: MinerEvent[];
   memoryDecisions: LoopMinerMemoryDecision[];
   episodes = new Map<string, EpisodeRecord>();
+  reusableSuggestions: LoopMinerSuggestion[] = [];
+  latestIncrementalState: { evidenceFingerprint: string; summary: LoopMinerSummary } | null = null;
   suggestionsCreated = 0;
+  suggestionsUpdated = 0;
   completedSummary: LoopMinerSummary | null = null;
 
   constructor(events: MinerEvent[], memoryDecisions: LoopMinerMemoryDecision[] = []) {
@@ -530,14 +607,56 @@ class InMemoryLoopMinerRepository implements LoopMinerRepositoryContract {
     return this.memoryDecisions;
   }
 
+  async getLatestCompletedIncrementalState(): Promise<{ evidenceFingerprint: string; summary: LoopMinerSummary } | null> {
+    return this.latestIncrementalState;
+  }
+
+  async findEpisodesBySourceFingerprints(input: {
+    sourceFingerprints: string[];
+    extractionVersion: string;
+  }): Promise<Map<string, EpisodeRecord>> {
+    const requested = new Set(input.sourceFingerprints);
+    const result = new Map<string, EpisodeRecord>();
+    for (const episode of this.episodes.values()) {
+      if (!episode.sourceFingerprint || !requested.has(episode.sourceFingerprint)) continue;
+      if (episode.extractionVersion !== input.extractionVersion) continue;
+      result.set(episode.sourceFingerprint, episode);
+    }
+    return result;
+  }
+
+  async findEpisodesBySourceEventIds(input: {
+    sourceEventIds: string[];
+    sourceEventType?: string;
+  }): Promise<Map<string, EpisodeRecord>> {
+    const requested = new Set(input.sourceEventIds);
+    const result = new Map<string, EpisodeRecord>();
+    for (const episode of this.episodes.values()) {
+      for (const turn of episode.turns) {
+        if (!requested.has(turn.sourceEventId)) continue;
+        if (input.sourceEventType && turn.sourceEventType !== input.sourceEventType) continue;
+        if (!result.has(turn.sourceEventId)) result.set(turn.sourceEventId, episode);
+      }
+    }
+    return result;
+  }
+
+  async listReusableLoopMinerSuggestions(): Promise<LoopMinerSuggestion[]> {
+    return this.reusableSuggestions;
+  }
+
   async createEpisode(input: {
     extraction: EpisodeExtraction;
     turns: EpisodeTurnRecord[];
+    sourceFingerprint?: string;
+    extractionVersion?: string;
   }): Promise<EpisodeRecord> {
     const id = `episode-${this.episodes.size + 1}`;
     const record: EpisodeRecord = {
       id,
       ...input.extraction,
+      sourceFingerprint: input.sourceFingerprint,
+      extractionVersion: input.extractionVersion,
       sealedAt: input.turns.map((turn) => turn.createdAt).sort().at(-1) ?? "2026-05-01T00:00:00.000Z",
       turnCount: input.turns.length,
       turns: input.turns,
@@ -557,7 +676,7 @@ class InMemoryLoopMinerRepository implements LoopMinerRepositoryContract {
     fingerprint: string;
   }) {
     this.suggestionsCreated += 1;
-    return {
+    const suggestion = {
       id: `suggestion-${this.suggestionsCreated}`,
       title: input.dna.name,
       reason: input.evaluation.reasoning,
@@ -568,8 +687,146 @@ class InMemoryLoopMinerRepository implements LoopMinerRepositoryContract {
       triggerCount: input.evaluation.episodeIds.length,
       createdAt: "2026-05-20T00:00:00.000Z",
     };
+    this.reusableSuggestions.push(suggestion);
+    return suggestion;
+  }
+
+  async createOrUpdateWorkflowSuggestion(input: {
+    evaluation: LoopEvaluation;
+    dna: WorkflowDNA;
+    suggestedPrompt: string;
+    fingerprint: string;
+  }) {
+    const existing = this.reusableSuggestions.find((suggestion) => suggestion.fingerprint === input.fingerprint);
+    if (existing) {
+      this.suggestionsUpdated += 1;
+      const updated = {
+        ...existing,
+        reason: input.evaluation.reasoning,
+        suggestedPrompt: input.suggestedPrompt,
+        confidence: Math.max(existing.confidence, input.evaluation.confidence),
+        triggerCount: Math.max(existing.triggerCount, input.evaluation.episodeIds.length),
+      };
+      this.reusableSuggestions = this.reusableSuggestions.map((suggestion) => suggestion.id === existing.id ? updated : suggestion);
+      return { suggestion: updated, created: false, updated: true };
+    }
+    const suggestion = await this.createWorkflowSuggestion(input);
+    return { suggestion, created: true, updated: false };
   }
 }
+
+test("runLoopMinerForUser skips heavy phases when loop evidence is unchanged", async () => {
+  const events = [
+    memoryEvent("e1", "2026-05-04T09:00:00.000Z"),
+    memoryEvent("e2", "2026-05-11T09:00:00.000Z"),
+    event("activity-new", "2026-05-18T09:00:00.000Z"),
+  ];
+  const evidenceFingerprint = evidenceFingerprintForTest(events.slice(0, 2));
+  const repository = new InMemoryLoopMinerRepository(events);
+  repository.latestIncrementalState = {
+    evidenceFingerprint,
+    summary: completedIncrementalSummary(evidenceFingerprint),
+  };
+  repository.reusableSuggestions = [{
+    id: "suggestion-existing",
+    title: "Weekly changelog",
+    reason: "Already detected",
+    suggestedPrompt: "Automate weekly changelog",
+    status: "pending",
+    confidence: 0.91,
+    fingerprint: "loop-miner-existing",
+    triggerCount: 4,
+    createdAt: "2026-05-20T00:00:00.000Z",
+  }];
+  const chat = async (): Promise<ChatCompletionResponse> => {
+    throw new Error("unexpected LLM call");
+  };
+
+  const result = await runLoopMinerForUser(auth, { runReason: "manual" }, {
+    repository,
+    episodeBuilder: new EpisodeBuilderUseCase(repository, chat),
+    loopDetector: new LoopDetectorUseCase(chat),
+    loopEvaluator: new LoopEvaluatorUseCase(chat),
+    dnaGenerator: new DnaGeneratorUseCase(chat),
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.summary.skipped, true);
+  assert.equal(result.summary.skipReason, "no_new_loop_evidence");
+  assert.equal(result.summary.aiCalls, 0);
+  assert.equal(result.summary.incremental?.mode, "skipped_no_new_evidence");
+  assert.equal(result.summary.incremental?.reusedSuggestions, 1);
+  assert.equal(result.suggestions[0]?.id, "suggestion-existing");
+  assert.equal(repository.episodes.size, 0);
+});
+
+test("runLoopMinerForUser only builds new evidence and evaluates loops containing it", async () => {
+  const oldEvent = memoryEvent("e-old", "2026-05-04T09:00:00.000Z");
+  const newEvent = memoryEvent("e-new", "2026-05-11T09:00:00.000Z");
+  const unrelatedNewActivity = event("activity-new", "2026-05-18T09:00:00.000Z");
+  const oldFingerprint = sourceFingerprintFromEvent(oldEvent, LOOP_EPISODE_EXTRACTION_VERSION);
+  const previousFingerprint = evidenceFingerprintForTest([oldEvent]);
+  const repository = new InMemoryLoopMinerRepository([oldEvent, newEvent, unrelatedNewActivity]);
+  repository.latestIncrementalState = {
+    evidenceFingerprint: previousFingerprint,
+    summary: completedIncrementalSummary(previousFingerprint),
+  };
+  repository.episodes.set("episode-old", {
+    ...episode("old", "changelog"),
+    id: "episode-old",
+    eventIds: [oldEvent.id],
+    sourceFingerprint: oldFingerprint,
+    extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+    turns: [{
+      role: oldEvent.role,
+      contentSummary: oldEvent.contentSummary,
+      sourceEventType: "memory_record",
+      sourceEventId: oldEvent.id,
+      createdAt: oldEvent.createdAt,
+    }],
+  });
+
+  const responses = [
+    { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e-new"] }] },
+    { groups: [
+      { episodeIds: ["episode-old", "episode-2"], loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "new evidence reinforces existing loop", status: "approved_loop", confidence: 0.9 },
+      { episodeIds: ["episode-old", "episode-stale"], loopName: "Old only", sharedIntent: "Old work", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "should be invalid because stale id is unknown", status: "approved_loop", confidence: 0.9 },
+    ] },
+    { evaluations: [{ loopName: "Weekly changelog", episodeIds: ["episode-old", "episode-2"], confidence: 0.91, verdict: "automate", reasoning: "new evidence confirms recurrence", estimatedCadence: "weekly", estimatedValue: "high", automationReadiness: "full", risks: [] }] },
+    { workflows: [{ name: "Weekly changelog", trigger: { type: "schedule", cadence: "weekly" }, sources: ["github"], outputType: "changelog", stepPattern: ["Collect commits", "Draft notes"], style: "concise", approvalBehavior: "auto", reasoning: "weekly cadence", episodeIds: ["episode-old", "episode-2"] }] },
+  ];
+  const chat = async (request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
+    const next = responses.shift();
+    assert.ok(next, "unexpected LLM call");
+    return {
+      text: JSON.stringify(next),
+      model: request.model ?? "gpt-4.1-nano",
+      finishReason: "stop",
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+    };
+  };
+
+  const result = await runLoopMinerForUser(auth, { runReason: "manual" }, {
+    repository,
+    episodeBuilder: new EpisodeBuilderUseCase(repository, chat),
+    loopDetector: new LoopDetectorUseCase(chat),
+    loopEvaluator: new LoopEvaluatorUseCase(chat),
+    dnaGenerator: new DnaGeneratorUseCase(chat),
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.summary.incremental?.mode, "incremental");
+  assert.equal(result.summary.incremental?.newEvidenceEvents, 1);
+  assert.equal(result.summary.incremental?.reusedEpisodes, 1);
+  assert.equal(result.summary.incremental?.newEpisodes, 1);
+  assert.equal(result.summary.episodesBuilt, 1);
+  assert.equal(result.summary.phaseUsage?.episodeBuilder?.inputEvents, 1);
+  assert.equal(result.summary.phaseUsage?.loopDetector?.inputEpisodes, 2);
+  assert.equal(result.summary.loopsDetected, 1);
+  assert.equal(result.summary.suggestionsCreated, 1);
+  assert.equal(result.suggestions[0]?.title, "Weekly changelog");
+  assert.equal(responses.length, 0);
+});
 
 test("runLoopMinerForUser builds episodes, detects loop, evaluates, generates DNA, and creates suggestion", async () => {
   const repository = new InMemoryLoopMinerRepository([
@@ -663,6 +920,8 @@ test("runLoopMinerForUser falls back to included memory decisions when memory ev
     },
   ]);
   const responses = [
+    { episodes: [{ intent: "Write Tallei newsletters with ChatGPT support", sources: ["Imported ChatGPT memory"], outputType: "newsletter", toolNames: ["chatgpt"], steps: ["Brainstorm hooks", "Sharpen product philosophy", "Draft readable narratives"], approved: true, eventIds: ["memory-newsletter-2"] }] },
+    { episodes: [{ intent: "Write Tallei newsletters with ChatGPT support", sources: ["Imported ChatGPT memory"], outputType: "newsletter", toolNames: ["chatgpt"], steps: ["Brainstorm hooks", "Sharpen product philosophy", "Draft readable narratives"], approved: true, eventIds: ["memory-newsletter-1"] }] },
     { groups: [{ episodeIds: ["episode-1", "episode-2"], loopName: "Newsletter writing pattern", sharedIntent: "Write Tallei newsletters with ChatGPT support", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "newsletter", reasoning: "shared newsletter artifact and AI-assisted writing workflow", status: "approved_loop", confidence: 0.84 }] },
     { evaluations: [{ loopName: "Newsletter writing pattern", episodeIds: ["episode-1", "episode-2"], confidence: 0.5, verdict: "discard", reasoning: "test stops before suggestion creation", estimatedCadence: "implicit", estimatedValue: "medium", automationReadiness: "partial", risks: [] }] },
   ];
@@ -1078,6 +1337,9 @@ test("repository createWorkflowSuggestion skips existing pending duplicate and i
 
   try {
     (pool as unknown as { query: typeof pool.query }).query = (async (sql: string) => {
+      if (sql.includes("FROM workflow_suggestions") && sql.includes("status IN ('pending', 'approved', 'dismissed')")) {
+        return { rows: [{ id: "existing", status: "approved" }], rowCount: 1 } as unknown;
+      }
       if (sql.includes("status = 'pending'")) return { rows: [{ id: "existing" }], rowCount: 1 } as unknown;
       return { rows: [], rowCount: 0 } as unknown;
     }) as typeof pool.query;
@@ -1112,6 +1374,109 @@ test("repository createWorkflowSuggestion skips existing pending duplicate and i
     });
     assert.equal(inserted?.title, "Weekly changelog");
     assert.deepEqual((insertedMetadata as { episodeIds?: string[] }).episodeIds, ["episode-1", "episode-2"]);
+  } finally {
+    (pool as unknown as { query: typeof pool.query }).query = originalQuery;
+  }
+});
+
+test("repository getRunView returns pending loop suggestions and referenced episodes for skipped reruns", async () => {
+  const originalQuery = pool.query.bind(pool);
+  const repository = new LoopMinerRepository();
+  const runId = "11111111-1111-4111-8111-111111111111";
+  const episodeId = "22222222-2222-4222-8222-222222222222";
+  const suggestionId = "33333333-3333-4333-8333-333333333333";
+
+  try {
+    (pool as unknown as { query: typeof pool.query }).query = (async (sql: string) => {
+      if (sql.includes("FROM loop_miner_runs")) {
+        return {
+          rows: [{
+            id: runId,
+            status: "completed",
+            summary_json: {
+              skipped: true,
+              skipReason: "no_new_loop_evidence",
+              episodesBuilt: 0,
+              loopsDetected: 0,
+              loopsQualified: 0,
+              suggestionsCreated: 0,
+              durationMs: 1,
+              aiCalls: 0,
+              usage: { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedPromptTokens: 0, estimatedCompletionTokens: 0, estimatedTotalTokens: 0, estimatedCostUsd: 0, models: {} },
+            },
+            error_json: {},
+            created_at: "2026-05-21T10:00:00.000Z",
+            completed_at: "2026-05-21T10:00:01.000Z",
+          }],
+          rowCount: 1,
+        } as unknown;
+      }
+      if (sql.includes("FROM episodes") && sql.includes("miner_run_id")) {
+        return { rows: [], rowCount: 0 } as unknown;
+      }
+      if (sql.includes("FROM workflow_suggestions")) {
+        return {
+          rows: [{
+            id: suggestionId,
+            title: "Weekly changelog",
+            reason: "Existing loop should remain visible",
+            suggested_prompt: "Automate weekly changelog",
+            confidence: 0.91,
+            fingerprint: "loop-miner-existing",
+            trigger_count: 2,
+            created_at: "2026-05-20T00:00:00.000Z",
+            metadata_json: {
+              loopMinerRunId: "older-run",
+              episodeIds: [episodeId],
+              evaluation: { episodeIds: [episodeId], estimatedCadence: "weekly" },
+              candidateLoop: { episodeIds: [episodeId] },
+            },
+          }],
+          rowCount: 1,
+        } as unknown;
+      }
+      if (sql.includes("FROM episodes") && sql.includes("id = ANY")) {
+        return {
+          rows: [{
+            id: episodeId,
+            intent: "Draft weekly changelog",
+            sources: ["github"],
+            output_type: "changelog",
+            tool_names: ["github"],
+            turn_count: 1,
+            approved: true,
+            extraction_json: { intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits"], approved: true, eventIds: ["memory-1"] },
+            source_fingerprint: "fp-old",
+            extraction_version: LOOP_EPISODE_EXTRACTION_VERSION,
+            embedding_text_hash: "hash",
+            embedding_status: "ready",
+            embedded_at: "2026-05-20T00:00:00.000Z",
+            sealed_at: "2026-05-20T00:00:00.000Z",
+          }],
+          rowCount: 1,
+        } as unknown;
+      }
+      if (sql.includes("FROM episode_turns")) {
+        return {
+          rows: [{
+            episode_id: episodeId,
+            role: "user",
+            content_summary: "Memory\nType: fact\nDraft weekly changelog from GitHub commits",
+            source_event_type: "memory_record",
+            source_event_id: "memory-1",
+            created_at: "2026-05-20T00:00:00.000Z",
+          }],
+          rowCount: 1,
+        } as unknown;
+      }
+      return { rows: [], rowCount: 0 } as unknown;
+    }) as typeof pool.query;
+
+    const view = await repository.getRunView(auth, runId);
+    assert.equal(view?.suggestions.length, 1);
+    assert.equal(view?.suggestions[0]?.id, suggestionId);
+    assert.equal(view?.episodes.length, 1);
+    assert.equal(view?.episodes[0]?.id, episodeId);
   } finally {
     (pool as unknown as { query: typeof pool.query }).query = originalQuery;
   }

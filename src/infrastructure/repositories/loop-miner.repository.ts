@@ -13,7 +13,9 @@ import type {
   LoopMinerRepository as LoopMinerRepositoryContract,
   LoopMinerRunView,
   LoopMinerRunReason,
+  LoopMinerSourceEventType,
   LoopMinerSuggestion,
+  LoopMinerSuggestionWriteResult,
   LoopMinerSummary,
   LoopMinerWorkflowSuggestionView,
   MinerEvent,
@@ -366,6 +368,9 @@ function readSummary(value: unknown): LoopMinerSummary {
   const patternTrace = raw.patternTrace && typeof raw.patternTrace === "object" && !Array.isArray(raw.patternTrace)
     ? raw.patternTrace as LoopMinerSummary["patternTrace"]
     : undefined;
+  const incrementalRow = raw.incremental && typeof raw.incremental === "object" && !Array.isArray(raw.incremental)
+    ? raw.incremental as Record<string, unknown>
+    : null;
   const memoryDecisionLog: LoopMinerMemoryDecision[] | undefined = Array.isArray(raw.memoryDecisionLog)
     ? raw.memoryDecisionLog
         .map((value): LoopMinerMemoryDecision | null => {
@@ -452,6 +457,20 @@ function readSummary(value: unknown): LoopMinerSummary {
         ? Object.fromEntries(Object.entries(usage.models).map(([model, count]) => [model, Number(count ?? 0)]))
         : {},
     },
+    incremental: incrementalRow ? {
+      mode:
+        incrementalRow.mode === "incremental" || incrementalRow.mode === "skipped_no_new_evidence"
+          ? incrementalRow.mode
+          : "full",
+      evidenceFingerprint: typeof incrementalRow.evidenceFingerprint === "string" ? incrementalRow.evidenceFingerprint : "",
+      extractionVersion: typeof incrementalRow.extractionVersion === "string" ? incrementalRow.extractionVersion : "",
+      totalEvidenceEvents: Number(incrementalRow.totalEvidenceEvents ?? 0),
+      newEvidenceEvents: Number(incrementalRow.newEvidenceEvents ?? 0),
+      reusedEpisodes: Number(incrementalRow.reusedEpisodes ?? 0),
+      newEpisodes: Number(incrementalRow.newEpisodes ?? 0),
+      reusedSuggestions: Number(incrementalRow.reusedSuggestions ?? 0),
+      suggestionsUpdated: Number(incrementalRow.suggestionsUpdated ?? 0),
+    } : undefined,
     skipped: typeof row.skipped === "boolean" ? row.skipped : undefined,
     skipReason: typeof row.skipReason === "string" ? row.skipReason : undefined,
     warnings: Array.isArray(row.warnings) ? row.warnings.filter((warning): warning is string => typeof warning === "string") : undefined,
@@ -491,6 +510,45 @@ function mapSuggestion(row: WorkflowSuggestionRow): LoopMinerWorkflowSuggestionV
     createdAt: row.created_at,
     metadata: row.metadata_json,
   };
+}
+
+function suggestionEpisodeIdsFromMetadata(metadataJson: unknown): string[] {
+  const metadata = readRecord(metadataJson);
+  const evaluation = readRecord(metadata.evaluation);
+  const candidateLoop = readRecord(metadata.candidateLoop);
+  return [...new Set([
+    ...readStringArray(metadata.episodeIds),
+    ...readStringArray(evaluation.episodeIds),
+    ...readStringArray(candidateLoop.episodeIds),
+  ])].sort();
+}
+
+function suggestionLogicalKey(row: WorkflowSuggestionRow): string {
+  const episodeIds = suggestionEpisodeIdsFromMetadata(row.metadata_json);
+  if (episodeIds.length >= 2) return `episodes:${episodeIds.join("|")}`;
+  const normalizedTitle = row.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+  return `title:${normalizedTitle || row.fingerprint}`;
+}
+
+function dedupeSuggestionRows(rows: WorkflowSuggestionRow[]): WorkflowSuggestionRow[] {
+  const byKey = new Map<string, WorkflowSuggestionRow>();
+  for (const row of rows) {
+    const key = suggestionLogicalKey(row);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, row);
+      continue;
+    }
+    const rowScore = Number(row.confidence) * 1000 + Number(row.trigger_count ?? 0);
+    const existingScore = Number(existing.confidence) * 1000 + Number(existing.trigger_count ?? 0);
+    if (rowScore > existingScore) byKey.set(key, row);
+  }
+  return [...byKey.values()];
+}
+
+function logicalEpisodeKeyFromIds(ids: string[]): string | null {
+  const normalized = [...new Set(ids.filter(Boolean))].sort();
+  return normalized.length >= 2 ? normalized.join("|") : null;
 }
 
 export class LoopMinerRepository implements LoopMinerRepositoryContract {
@@ -710,6 +768,29 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     return result.rows.map((row) => memoryDecisionForRow(row));
   }
 
+  async getLatestCompletedIncrementalState(auth: AuthContext, lookbackDays: number): Promise<{
+    evidenceFingerprint: string;
+    summary: LoopMinerSummary;
+  } | null> {
+    const result = await pool.query<LoopMinerRunRow>(
+      `SELECT id, status, summary_json, error_json, created_at, completed_at
+       FROM loop_miner_runs
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND status = 'completed'
+         AND created_at >= NOW() - ($3::text || ' days')::interval
+         AND summary_json->'incremental'->>'evidenceFingerprint' IS NOT NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [auth.tenantId, auth.userId, lookbackDays]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const summary = readSummary(row.summary_json);
+    const evidenceFingerprint = summary.incremental?.evidenceFingerprint;
+    return evidenceFingerprint ? { evidenceFingerprint, summary } : null;
+  }
+
   async createEpisode(input: {
     auth: AuthContext;
     runId: string;
@@ -880,6 +961,153 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     })));
   }
 
+  async findEpisodesBySourceFingerprints(input: {
+    auth: AuthContext;
+    sourceFingerprints: string[];
+    extractionVersion: string;
+  }): Promise<Map<string, EpisodeRecord>> {
+    const fingerprints = [...new Set(input.sourceFingerprints.filter(Boolean))];
+    const byFingerprint = new Map<string, EpisodeRecord>();
+    if (fingerprints.length === 0) return byFingerprint;
+
+    let rows;
+    try {
+      rows = await pool.query<EpisodeRow>(
+        `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+         FROM episodes
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND source_fingerprint = ANY($3::text[])
+           AND extraction_version = $4
+         ORDER BY sealed_at DESC`,
+        [input.auth.tenantId, input.auth.userId, fingerprints, input.extractionVersion]
+      );
+    } catch (error) {
+      const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+      if (!upgraded) return byFingerprint;
+      rows = await pool.query<EpisodeRow>(
+        `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+         FROM episodes
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND source_fingerprint = ANY($3::text[])
+           AND extraction_version = $4
+         ORDER BY sealed_at DESC`,
+        [input.auth.tenantId, input.auth.userId, fingerprints, input.extractionVersion]
+      );
+    }
+
+    const selectedRows: EpisodeRow[] = [];
+    const selectedIds: string[] = [];
+    for (const row of rows.rows) {
+      const fingerprint = row.source_fingerprint;
+      if (!fingerprint || byFingerprint.has(fingerprint)) continue;
+      selectedRows.push(row);
+      selectedIds.push(row.id);
+      byFingerprint.set(fingerprint, mapEpisode(row, []));
+    }
+    if (selectedIds.length === 0) return byFingerprint;
+
+    const turns = await pool.query<EpisodeTurnRow>(
+      `SELECT episode_id, role, content_summary, source_event_type, source_event_id, created_at
+       FROM episode_turns
+       WHERE episode_id = ANY($1::uuid[])
+       ORDER BY created_at ASC`,
+      [selectedIds]
+    );
+    const turnsByEpisode = new Map<string, EpisodeTurnRecord[]>();
+    for (const turn of turns.rows) {
+      const current = turnsByEpisode.get(turn.episode_id) ?? [];
+      current.push({
+        role: turn.role,
+        contentSummary: turn.content_summary,
+        sourceEventType: turn.source_event_type,
+        sourceEventId: turn.source_event_id,
+        createdAt: turn.created_at,
+      });
+      turnsByEpisode.set(turn.episode_id, current);
+    }
+
+    byFingerprint.clear();
+    for (const row of selectedRows) {
+      if (!row.source_fingerprint) continue;
+      byFingerprint.set(row.source_fingerprint, mapEpisode(row, turnsByEpisode.get(row.id) ?? []));
+    }
+    return byFingerprint;
+  }
+
+  async findEpisodesBySourceEventIds(input: {
+    auth: AuthContext;
+    sourceEventIds: string[];
+    sourceEventType?: LoopMinerSourceEventType;
+  }): Promise<Map<string, EpisodeRecord>> {
+    const sourceEventIds = [...new Set(input.sourceEventIds.filter(Boolean))];
+    const bySourceEventId = new Map<string, EpisodeRecord>();
+    if (sourceEventIds.length === 0) return bySourceEventId;
+
+    let rows;
+    try {
+      rows = await pool.query<EpisodeRow & { matched_source_event_id: string }>(
+        `SELECT DISTINCT ON (et.source_event_id)
+           e.id, e.intent, e.sources, e.output_type, e.tool_names, e.turn_count, e.approved, e.extraction_json,
+           e.source_fingerprint, e.extraction_version, e.embedding_text_hash, e.embedding_status, e.embedded_at, e.sealed_at,
+           et.source_event_id AS matched_source_event_id
+         FROM episode_turns et
+         JOIN episodes e ON e.id = et.episode_id
+         WHERE e.tenant_id = $1
+           AND e.user_id = $2
+           AND et.source_event_id = ANY($3::text[])
+           AND ($4::text IS NULL OR et.source_event_type = $4)
+         ORDER BY et.source_event_id, e.sealed_at DESC`,
+        [input.auth.tenantId, input.auth.userId, sourceEventIds, input.sourceEventType ?? null]
+      );
+    } catch (error) {
+      const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+      if (!upgraded) return bySourceEventId;
+      rows = await pool.query<EpisodeRow & { matched_source_event_id: string }>(
+        `SELECT DISTINCT ON (et.source_event_id)
+           e.id, e.intent, e.sources, e.output_type, e.tool_names, e.turn_count, e.approved, e.extraction_json,
+           e.source_fingerprint, e.extraction_version, e.embedding_text_hash, e.embedding_status, e.embedded_at, e.sealed_at,
+           et.source_event_id AS matched_source_event_id
+         FROM episode_turns et
+         JOIN episodes e ON e.id = et.episode_id
+         WHERE e.tenant_id = $1
+           AND e.user_id = $2
+           AND et.source_event_id = ANY($3::text[])
+           AND ($4::text IS NULL OR et.source_event_type = $4)
+         ORDER BY et.source_event_id, e.sealed_at DESC`,
+        [input.auth.tenantId, input.auth.userId, sourceEventIds, input.sourceEventType ?? null]
+      );
+    }
+
+    const selectedIds = [...new Set(rows.rows.map((row) => row.id))];
+    if (selectedIds.length === 0) return bySourceEventId;
+    const turns = await pool.query<EpisodeTurnRow>(
+      `SELECT episode_id, role, content_summary, source_event_type, source_event_id, created_at
+       FROM episode_turns
+       WHERE episode_id = ANY($1::uuid[])
+       ORDER BY created_at ASC`,
+      [selectedIds]
+    );
+    const turnsByEpisode = new Map<string, EpisodeTurnRecord[]>();
+    for (const turn of turns.rows) {
+      const current = turnsByEpisode.get(turn.episode_id) ?? [];
+      current.push({
+        role: turn.role,
+        contentSummary: turn.content_summary,
+        sourceEventType: turn.source_event_type,
+        sourceEventId: turn.source_event_id,
+        createdAt: turn.created_at,
+      });
+      turnsByEpisode.set(turn.episode_id, current);
+    }
+
+    for (const row of rows.rows) {
+      bySourceEventId.set(row.matched_source_event_id, mapEpisode(row, turnsByEpisode.get(row.id) ?? []));
+    }
+    return bySourceEventId;
+  }
+
   async updateEpisodeEmbeddingMetadata(input: {
     auth: AuthContext;
     episodeId: string;
@@ -1002,17 +1230,18 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     suggestedPrompt: string;
     fingerprint: string;
   }): Promise<LoopMinerSuggestion | null> {
-    const existingPending = await pool.query<{ id: string }>(
-      `SELECT id
+    const existingSuggestion = await pool.query<{ id: string; status: string }>(
+      `SELECT id, status
        FROM workflow_suggestions
        WHERE tenant_id = $1
          AND user_id = $2
          AND fingerprint = $3
-         AND status = 'pending'
+         AND status IN ('pending', 'approved', 'dismissed')
+       ORDER BY updated_at DESC, created_at DESC
        LIMIT 1`,
       [input.auth.tenantId, input.auth.userId, input.fingerprint]
     );
-    if (existingPending.rows.length > 0) return null;
+    if (existingSuggestion.rows.length > 0) return null;
 
     const existingWorkflow = await pool.query<{ id: string }>(
       `SELECT id
@@ -1063,6 +1292,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
           evaluation: input.evaluation,
           candidateLoop: input.candidateLoop,
           episodeIds: input.evaluation.episodeIds,
+          logicalEpisodeKey: logicalEpisodeKeyFromIds([...input.evaluation.episodeIds, ...input.candidateLoop.episodeIds]),
           metadataHash: createHash("sha256").update(JSON.stringify(input.dna)).digest("hex"),
         }),
         createdAt,
@@ -1080,6 +1310,188 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
       triggerCount: input.evaluation.episodeIds.length,
       createdAt,
     };
+  }
+
+  async listReusableLoopMinerSuggestions(auth: AuthContext): Promise<LoopMinerSuggestion[]> {
+    const result = await pool.query<WorkflowSuggestionRow>(
+      `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
+       FROM workflow_suggestions
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND source = 'loop_miner'
+         AND status = 'pending'
+       ORDER BY updated_at DESC, created_at DESC
+       LIMIT 50`,
+      [auth.tenantId, auth.userId]
+    );
+    return dedupeSuggestionRows(result.rows).map(mapSuggestion);
+  }
+
+  async createOrUpdateWorkflowSuggestion(input: {
+    auth: AuthContext;
+    runId: string;
+    candidateLoop: CandidateLoop;
+    evaluation: LoopEvaluation;
+    dna: WorkflowDNA;
+    suggestedPrompt: string;
+    fingerprint: string;
+  }): Promise<LoopMinerSuggestionWriteResult> {
+    const existingPending = await pool.query<WorkflowSuggestionRow>(
+      `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
+       FROM workflow_suggestions
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND fingerprint = $3
+         AND status = 'pending'
+       LIMIT 1`,
+      [input.auth.tenantId, input.auth.userId, input.fingerprint]
+    );
+    const pending = existingPending.rows[0];
+    if (pending) {
+      const existingMetadata = readRecord(pending.metadata_json);
+      const existingEpisodeIds = readStringArray(existingMetadata.episodeIds);
+      const episodeIds = [...new Set([...existingEpisodeIds, ...input.evaluation.episodeIds])];
+      const confidence = Math.max(Number(pending.confidence) || 0, input.evaluation.confidence);
+      const triggerCount = Math.max(Number(pending.trigger_count) || 0, episodeIds.length);
+      const metadata = {
+        ...existingMetadata,
+        latestLoopMinerRunId: input.runId,
+        dna: input.dna,
+        evaluation: input.evaluation,
+        candidateLoop: input.candidateLoop,
+        episodeIds,
+        metadataHash: createHash("sha256").update(JSON.stringify(input.dna)).digest("hex"),
+      };
+      await pool.query(
+        `UPDATE workflow_suggestions
+         SET reason = $4,
+             suggested_prompt = $5,
+             confidence = $6,
+             trigger_count = $7,
+             metadata_json = $8::jsonb,
+             updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3`,
+        [
+          pending.id,
+          input.auth.tenantId,
+          input.auth.userId,
+          input.evaluation.reasoning.slice(0, 1000),
+          input.suggestedPrompt,
+          confidence,
+          triggerCount,
+          JSON.stringify(metadata),
+        ]
+      );
+      return {
+        suggestion: {
+          id: pending.id,
+          title: pending.title,
+          reason: input.evaluation.reasoning.slice(0, 1000),
+          suggestedPrompt: input.suggestedPrompt,
+          status: "pending",
+          confidence,
+          fingerprint: pending.fingerprint,
+          triggerCount,
+          createdAt: pending.created_at,
+        },
+        created: false,
+        updated: true,
+      };
+    }
+
+    const incomingEpisodeKey = logicalEpisodeKeyFromIds([
+      ...input.evaluation.episodeIds,
+      ...input.candidateLoop.episodeIds,
+    ]);
+    if (incomingEpisodeKey) {
+      const pendingLoopMinerSuggestions = await pool.query<WorkflowSuggestionRow>(
+        `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
+         FROM workflow_suggestions
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND source = 'loop_miner'
+           AND status = 'pending'
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 100`,
+        [input.auth.tenantId, input.auth.userId]
+      );
+      const existingLogicalDuplicate = pendingLoopMinerSuggestions.rows.find((row) =>
+        logicalEpisodeKeyFromIds(suggestionEpisodeIdsFromMetadata(row.metadata_json)) === incomingEpisodeKey
+      );
+      if (existingLogicalDuplicate) {
+        const existingMetadata = readRecord(existingLogicalDuplicate.metadata_json);
+        const existingEpisodeIds = readStringArray(existingMetadata.episodeIds);
+        const episodeIds = [...new Set([...existingEpisodeIds, ...input.evaluation.episodeIds])];
+        const confidence = Math.max(Number(existingLogicalDuplicate.confidence) || 0, input.evaluation.confidence);
+        const triggerCount = Math.max(Number(existingLogicalDuplicate.trigger_count) || 0, episodeIds.length);
+        const metadata = {
+          ...existingMetadata,
+          latestLoopMinerRunId: input.runId,
+          dna: input.dna,
+          evaluation: input.evaluation,
+          candidateLoop: input.candidateLoop,
+          episodeIds,
+          logicalEpisodeKey: incomingEpisodeKey,
+          metadataHash: createHash("sha256").update(JSON.stringify(input.dna)).digest("hex"),
+        };
+        await pool.query(
+          `UPDATE workflow_suggestions
+           SET reason = $4,
+               suggested_prompt = $5,
+               confidence = $6,
+               trigger_count = $7,
+               metadata_json = $8::jsonb,
+               updated_at = NOW()
+           WHERE id = $1
+             AND tenant_id = $2
+             AND user_id = $3`,
+          [
+            existingLogicalDuplicate.id,
+            input.auth.tenantId,
+            input.auth.userId,
+            input.evaluation.reasoning.slice(0, 1000),
+            input.suggestedPrompt,
+            confidence,
+            triggerCount,
+            JSON.stringify(metadata),
+          ]
+        );
+        return {
+          suggestion: {
+            id: existingLogicalDuplicate.id,
+            title: existingLogicalDuplicate.title,
+            reason: input.evaluation.reasoning.slice(0, 1000),
+            suggestedPrompt: input.suggestedPrompt,
+            status: "pending",
+            confidence,
+            fingerprint: existingLogicalDuplicate.fingerprint,
+            triggerCount,
+            createdAt: existingLogicalDuplicate.created_at,
+          },
+          created: false,
+          updated: true,
+        };
+      }
+    }
+
+    const existingNonPending = await pool.query<{ id: string }>(
+      `SELECT id
+       FROM workflow_suggestions
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND fingerprint = $3
+         AND status IN ('approved', 'dismissed')
+       LIMIT 1`,
+      [input.auth.tenantId, input.auth.userId, input.fingerprint]
+    );
+    if (existingNonPending.rows.length > 0) {
+      return { suggestion: null, created: false, updated: false };
+    }
+
+    const created = await this.createWorkflowSuggestion(input);
+    return { suggestion: created, created: created !== null, updated: false };
   }
 
   async listRunViews(auth: AuthContext, limit = 10): Promise<LoopMinerRunView[]> {
@@ -1110,6 +1522,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     );
     const run = runResult.rows[0];
     if (!run) return null;
+    const summary = readSummary(run.summary_json);
 
     let episodeRows;
     try {
@@ -1175,26 +1588,106 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
       turnsByEpisode.set(turn.episode_id, current);
     }
 
-    const suggestions = await pool.query<WorkflowSuggestionRow>(
-      `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
-       FROM workflow_suggestions
-       WHERE tenant_id = $1
-         AND user_id = $2
-         AND source = 'loop_miner'
-         AND metadata_json->>'loopMinerRunId' = $3
-       ORDER BY created_at ASC`,
-      [auth.tenantId, auth.userId, runId]
-    );
+    const suggestions = summary.skipped
+      ? await (async () => {
+          const previousRun = await pool.query<{ id: string }>(
+            `SELECT id
+             FROM loop_miner_runs
+             WHERE tenant_id = $1
+               AND user_id = $2
+               AND status = 'completed'
+               AND id <> $3
+               AND created_at <= $4::timestamptz
+               AND COALESCE((summary_json->>'skipped')::boolean, false) = false
+               AND EXISTS (
+                 SELECT 1
+                 FROM workflow_suggestions ws
+                 WHERE ws.tenant_id = loop_miner_runs.tenant_id
+                   AND ws.user_id = loop_miner_runs.user_id
+                   AND ws.source = 'loop_miner'
+                   AND ws.status = 'pending'
+                   AND (
+                     ws.metadata_json->>'loopMinerRunId' = loop_miner_runs.id::text
+                     OR ws.metadata_json->>'latestLoopMinerRunId' = loop_miner_runs.id::text
+                   )
+               )
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [auth.tenantId, auth.userId, runId, run.created_at]
+          );
+          const previousRunId = previousRun.rows[0]?.id;
+          if (!previousRunId) {
+            return pool.query<WorkflowSuggestionRow>(
+              `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
+               FROM workflow_suggestions
+               WHERE tenant_id = $1
+                 AND user_id = $2
+                 AND source = 'loop_miner'
+                 AND status = 'pending'
+               ORDER BY updated_at DESC, created_at DESC
+               LIMIT 50`,
+              [auth.tenantId, auth.userId]
+            );
+          }
+          return pool.query<WorkflowSuggestionRow>(
+            `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
+             FROM workflow_suggestions
+             WHERE tenant_id = $1
+               AND user_id = $2
+               AND source = 'loop_miner'
+               AND status = 'pending'
+               AND (
+                 metadata_json->>'loopMinerRunId' = $3
+                 OR metadata_json->>'latestLoopMinerRunId' = $3
+               )
+             ORDER BY updated_at DESC, created_at DESC`,
+            [auth.tenantId, auth.userId, previousRunId]
+          );
+        })()
+      : await pool.query<WorkflowSuggestionRow>(
+          `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
+           FROM workflow_suggestions
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND source = 'loop_miner'
+             AND status = 'pending'
+             AND (
+               metadata_json->>'loopMinerRunId' = $3
+               OR metadata_json->>'latestLoopMinerRunId' = $3
+             )
+           ORDER BY updated_at DESC, created_at DESC`,
+          [auth.tenantId, auth.userId, runId]
+        );
+
+    const currentEpisodes = episodeRows.rows.map((episode) => mapEpisode(episode, turnsByEpisode.get(episode.id) ?? []));
+    const currentEpisodeIds = new Set(currentEpisodes.map((episode) => episode.id));
+    const referencedEpisodeIds = new Set<string>();
+    const suggestionRows = dedupeSuggestionRows(suggestions.rows);
+    for (const suggestion of suggestionRows) {
+      const metadata = readRecord(suggestion.metadata_json);
+      const evaluation = readRecord(metadata.evaluation);
+      const candidateLoop = readRecord(metadata.candidateLoop);
+      for (const id of [
+        ...readStringArray(metadata.episodeIds),
+        ...readStringArray(evaluation.episodeIds),
+        ...readStringArray(candidateLoop.episodeIds),
+      ]) {
+        if (!currentEpisodeIds.has(id)) referencedEpisodeIds.add(id);
+      }
+    }
+    const referencedEpisodes = referencedEpisodeIds.size > 0
+      ? await this.listEpisodeContext(auth, [...referencedEpisodeIds])
+      : [];
 
     return {
       id: run.id,
       status: run.status,
-      summary: readSummary(run.summary_json),
+      summary,
       error: run.error_json,
       createdAt: run.created_at,
       completedAt: run.completed_at,
-      episodes: episodeRows.rows.map((episode) => mapEpisode(episode, turnsByEpisode.get(episode.id) ?? [])),
-      suggestions: suggestions.rows.map(mapSuggestion),
+      episodes: [...currentEpisodes, ...referencedEpisodes],
+      suggestions: suggestionRows.map(mapSuggestion),
     };
   }
 }

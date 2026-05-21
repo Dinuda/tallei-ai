@@ -892,6 +892,8 @@ export async function initDb() {
         ON workflow_suggestions(tenant_id, user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_workflow_suggestions_fingerprint
         ON workflow_suggestions(tenant_id, user_id, fingerprint, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_suggestions_loop_miner_pending
+        ON workflow_suggestions(tenant_id, user_id, source, status, updated_at DESC);
     `);
 
     await client.query(`

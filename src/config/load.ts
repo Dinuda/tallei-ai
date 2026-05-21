@@ -181,7 +181,7 @@ function resolveEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const deprecated: string[] = [];
 
   for (const { newKey, oldKey } of ALIAS_MAP) {
-    if (!resolved[newKey] && resolved[oldKey]) {
+    if (resolved[newKey] === undefined && resolved[oldKey]) {
       resolved[newKey] = resolved[oldKey];
       deprecated.push(oldKey);
     }

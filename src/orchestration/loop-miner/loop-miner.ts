@@ -1,5 +1,6 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 
+import { createHash } from "crypto";
 import { config } from "../../config/index.js";
 import { embedText } from "../../infrastructure/cache/embedding-cache.js";
 import { LoopEpisodeVectorRepository } from "../../infrastructure/repositories/loop-episode-vector.repository.js";
@@ -26,7 +27,14 @@ import type {
   LoopMinerRunView,
   LoopMinerSummary,
 } from "./types.js";
-import { episodeEmbeddingText, episodeEmbeddingTextHash, workflowDnaFingerprint, workflowDnaPrompt } from "./utils.js";
+import {
+  LOOP_EPISODE_EXTRACTION_VERSION,
+  episodeEmbeddingText,
+  episodeEmbeddingTextHash,
+  sourceFingerprintFromEvent,
+  workflowDnaFingerprint,
+  workflowDnaPrompt,
+} from "./utils.js";
 
 export interface RunLoopMinerOptions {
   runReason?: LoopMinerRunReason;
@@ -49,6 +57,11 @@ function errorJson(error: unknown): Record<string, unknown> {
     return { name: error.name, message: error.message, stack: error.stack };
   }
   return { message: String(error) };
+}
+
+function errorMessage(error: unknown): string {
+  const message = errorJson(error).message;
+  return typeof message === "string" ? message : String(message ?? "unknown error");
 }
 
 function emptySummary(overrides: Partial<LoopMinerSummary> = {}): LoopMinerSummary {
@@ -223,6 +236,46 @@ function dedupeEpisodesById(episodes: EpisodeRecord[]): EpisodeRecord[] {
   return [...byId.values()].sort((left, right) => Date.parse(left.sealedAt) - Date.parse(right.sealedAt));
 }
 
+function memoryEvidenceEvents(events: MinerEvent[]): MinerEvent[] {
+  return events.filter((event) => event.sourceEventType === "memory_record");
+}
+
+function evidenceFingerprintFor(fingerprints: string[]): string {
+  const normalized = [...new Set(fingerprints)].sort();
+  return createHash("sha256").update(JSON.stringify({
+    extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+    fingerprints: normalized,
+  })).digest("hex");
+}
+
+function relatedReusedEpisodeContext(newEpisodes: EpisodeRecord[], reusedEpisodes: EpisodeRecord[]): EpisodeRecord[] {
+  if (newEpisodes.length === 0) return reusedEpisodes;
+  const outputTypes = new Set(newEpisodes.map((episode) => episode.outputType.trim().toLowerCase()).filter(Boolean));
+  const sources = new Set(newEpisodes.flatMap((episode) => episode.sources.map((source) => source.trim().toLowerCase())).filter(Boolean));
+  return reusedEpisodes
+    .filter((episode) => {
+      if (outputTypes.has(episode.outputType.trim().toLowerCase())) return true;
+      return episode.sources.some((source) => sources.has(source.trim().toLowerCase()));
+    })
+    .slice(0, 20);
+}
+
+function filterPatternTraceToNewEvidence(
+  trace: LoopMinerSummary["patternTrace"],
+  newEpisodeIds: Set<string>
+): LoopMinerSummary["patternTrace"] {
+  if (!trace || newEpisodeIds.size === 0) return trace;
+  const keepGroup = (episodeIds: string[]) => episodeIds.some((id) => newEpisodeIds.has(id));
+  const keptCandidateIds = new Set(trace.candidateGroups.filter((group) => keepGroup(group.episodeIds)).map((group) => group.id));
+  return {
+    candidateGroups: trace.candidateGroups.filter((group) => keptCandidateIds.has(group.id)),
+    approvedGroups: trace.approvedGroups.filter((id) => keptCandidateIds.has(id)),
+    rejectedGroups: trace.rejectedGroups.filter((group) => keptCandidateIds.has(group.candidateGroupId)),
+    adversaryFindings: trace.adversaryFindings.filter((finding) => keptCandidateIds.has(finding.candidateGroupId)),
+    judgeDecisions: trace.judgeDecisions.filter((decision) => keptCandidateIds.has(decision.candidateGroupId)),
+  };
+}
+
 export async function runLoopMinerForUser(
   auth: AuthContext,
   options: RunLoopMinerOptions = {},
@@ -306,10 +359,107 @@ export async function runLoopMinerForUser(
         ];
       }
     }
-    const built = await deps.episodeBuilder.execute({ auth, runId, events });
+    const memoryEvents = memoryEvidenceEvents(events);
+    const memoryEventFingerprints = new Map(memoryEvents.map((event) => [
+      event.id,
+      sourceFingerprintFromEvent(event, LOOP_EPISODE_EXTRACTION_VERSION),
+    ]));
+    const evidenceFingerprint = evidenceFingerprintFor([...memoryEventFingerprints.values()]);
+    const latestIncremental = deps.repository.getLatestCompletedIncrementalState
+      ? await deps.repository.getLatestCompletedIncrementalState(auth, lookbackDays)
+      : null;
+
+    if (latestIncremental?.evidenceFingerprint === evidenceFingerprint) {
+      const suggestions = deps.repository.listReusableLoopMinerSuggestions
+        ? await deps.repository.listReusableLoopMinerSuggestions(auth)
+        : [];
+      summary = finalizeSummary({
+        ...summary,
+        skipped: true,
+        skipReason: "no_new_loop_evidence",
+        incremental: {
+          mode: "skipped_no_new_evidence",
+          evidenceFingerprint,
+          extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+          totalEvidenceEvents: memoryEvents.length,
+          newEvidenceEvents: 0,
+          reusedEpisodes: latestIncremental.summary.incremental?.reusedEpisodes ?? 0,
+          newEpisodes: 0,
+          reusedSuggestions: suggestions.length,
+          suggestionsUpdated: 0,
+        },
+      }, startedAt);
+      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
+      logger.info("loop miner run skipped with no new evidence", { runId, reusedSuggestions: suggestions.length });
+      return { id: runId, status: "completed", summary, suggestions };
+    }
+
+    const reusableEpisodeByFingerprint = deps.repository.findEpisodesBySourceFingerprints
+      ? await deps.repository.findEpisodesBySourceFingerprints({
+          auth,
+          sourceFingerprints: [...memoryEventFingerprints.values()],
+          extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+        })
+      : new Map<string, EpisodeRecord>();
+    const reusableEpisodeBySourceEventId = deps.repository.findEpisodesBySourceEventIds
+      ? await deps.repository.findEpisodesBySourceEventIds({
+          auth,
+          sourceEventIds: memoryEvents.map((event) => event.id),
+          sourceEventType: "memory_record",
+        })
+      : new Map<string, EpisodeRecord>();
+    const reusedEpisodes = dedupeEpisodesById([
+      ...reusableEpisodeByFingerprint.values(),
+      ...reusableEpisodeBySourceEventId.values(),
+    ]);
+    const newMemoryEvents = memoryEvents.filter((event) => {
+      const fingerprint = memoryEventFingerprints.get(event.id);
+      return (!fingerprint || !reusableEpisodeByFingerprint.has(fingerprint))
+        && !reusableEpisodeBySourceEventId.has(event.id);
+    });
+    const incrementalMode = latestIncremental ? "incremental" : "full";
+    const eventsForEpisodeBuilder = latestIncremental ? newMemoryEvents : events;
+
+    if (latestIncremental && newMemoryEvents.length === 0) {
+      const suggestions = deps.repository.listReusableLoopMinerSuggestions
+        ? await deps.repository.listReusableLoopMinerSuggestions(auth)
+        : [];
+      summary = finalizeSummary({
+        ...summary,
+        skipped: true,
+        skipReason: "no_new_loop_evidence",
+        incremental: {
+          mode: "skipped_no_new_evidence",
+          evidenceFingerprint,
+          extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+          totalEvidenceEvents: memoryEvents.length,
+          newEvidenceEvents: 0,
+          reusedEpisodes: reusedEpisodes.length,
+          newEpisodes: 0,
+          reusedSuggestions: suggestions.length,
+          suggestionsUpdated: 0,
+        },
+      }, startedAt);
+      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
+      logger.info("loop miner run skipped with no new memory evidence", { runId, reusedSuggestions: suggestions.length });
+      return { id: runId, status: "completed", summary, suggestions };
+    }
+
+    const built = await deps.episodeBuilder.execute({ auth, runId, events: eventsForEpisodeBuilder });
     mergeCleanupAiUsage(summary.usage, built.usage);
     summary.aiCalls += built.aiCalls;
     summary.episodesBuilt = built.episodes.length;
+    summary.incremental = {
+      mode: incrementalMode,
+      evidenceFingerprint,
+      extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+      totalEvidenceEvents: memoryEvents.length,
+      newEvidenceEvents: latestIncremental ? newMemoryEvents.length : memoryEvents.length,
+      reusedEpisodes: reusedEpisodes.length,
+      newEpisodes: built.episodes.length,
+      reusedSuggestions: 0,
+      suggestionsUpdated: 0,
+    };
     summary.phaseUsage = {
       ...(summary.phaseUsage ?? {}),
       episodeBuilder: built.phaseUsage,
@@ -334,9 +484,9 @@ export async function runLoopMinerForUser(
     summary.debugTrace = {
       ...(summary.debugTrace ?? {}),
       episodeBuilder: {
-        inputEvents: events.length,
+        inputEvents: eventsForEpisodeBuilder.length,
         deterministicMemoryExtractions: deterministicSamples.length,
-        llmInputEvents: events.length - deterministicSamples.length,
+        llmInputEvents: eventsForEpisodeBuilder.length - deterministicSamples.length,
         rawDeterministicSamples: deterministicSamples,
         builtEpisodeSamples: built.episodes.slice(0, 12).map((episode) => ({
           id: episode.id,
@@ -348,53 +498,57 @@ export async function runLoopMinerForUser(
       },
     };
 
-    const similarEpisodeIds = new Set<string>();
-    if (config.qdrantUrl && deps.repository.updateEpisodeEmbeddingMetadata) {
-      for (const episode of built.episodes) {
-      const embeddingText = episodeEmbeddingText(episode);
-      const embeddingHash = episodeEmbeddingTextHash(embeddingText);
-      try {
-        const vector = await embedText(embeddingText);
-        const shouldUpsert = episode.embeddingTextHash !== embeddingHash || episode.embeddingStatus !== "ready";
-        if (shouldUpsert) {
-          await loopEpisodeVectorRepository.upsertEpisodeVector({
-            auth,
-            episodeId: episode.id,
-            outputType: episode.outputType,
-            sealedAt: episode.sealedAt,
-            sources: episode.sources,
-            tools: episode.toolNames,
-            sourceFingerprint: episode.sourceFingerprint,
-            extractionVersion: episode.extractionVersion,
-            vector,
-          });
-          if (deps.repository.updateEpisodeEmbeddingMetadata) {
-            await deps.repository.updateEpisodeEmbeddingMetadata({
-              auth,
-              episodeId: episode.id,
-              embeddingTextHash: embeddingHash,
-              status: "ready",
-              embeddedAt: new Date().toISOString(),
-            });
-          }
-        }
+    if (latestIncremental && newMemoryEvents.length > 0 && built.episodes.length === 0) {
+      const suggestions = deps.repository.listReusableLoopMinerSuggestions
+        ? await deps.repository.listReusableLoopMinerSuggestions(auth)
+        : [];
+      if (summary.incremental) {
+        summary.incremental.reusedSuggestions = suggestions.length;
+      }
+      summary = finalizeSummary({
+        ...summary,
+        skipped: true,
+        skipReason: "no_new_loop_episodes",
+      }, startedAt);
+      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
+      logger.info("loop miner run skipped because new evidence produced no episodes", { runId, newMemoryEvents: newMemoryEvents.length });
+      return { id: runId, status: "completed", summary, suggestions };
+    }
 
-        const similar = await loopEpisodeVectorRepository.searchSimilarEpisodes({
-          auth,
-          vector,
-          limit: 20,
-          outputType: episode.outputType,
-          excludeEpisodeId: episode.id,
-        });
-        for (const hit of similar) {
-          if (hit.score >= 0.72) similarEpisodeIds.add(hit.episodeId);
-        }
+    const similarEpisodeIds = new Set<string>();
+    let loopVectorSearchEnabled = false;
+    if (config.qdrantUrl && deps.repository.updateEpisodeEmbeddingMetadata) {
+      try {
+        await loopEpisodeVectorRepository.ensureReady();
+        loopVectorSearchEnabled = true;
       } catch (error) {
+        const message = errorMessage(error);
+        logger.warn("loop episode vector retrieval skipped", { runId, error: message });
         summary.warnings = [
           ...(summary.warnings ?? []),
-          `Loop episode vector retrieval degraded for episode ${episode.id}: ${errorJson(error).message ?? "unknown error"}`,
+          `Loop episode vector retrieval skipped: ${message}`,
         ];
-        if (deps.repository.updateEpisodeEmbeddingMetadata) {
+        summary.debugTrace = {
+          ...(summary.debugTrace ?? {}),
+          vectorRetrieval: {
+            status: "skipped",
+            reason: message,
+          },
+        };
+      }
+    }
+    if (loopVectorSearchEnabled && deps.repository.updateEpisodeEmbeddingMetadata) {
+      for (const episode of built.episodes) {
+        const embeddingText = episodeEmbeddingText(episode);
+        const embeddingHash = episodeEmbeddingTextHash(embeddingText);
+        let vector: number[];
+        try {
+          vector = await embedText(embeddingText);
+        } catch (error) {
+          summary.warnings = [
+            ...(summary.warnings ?? []),
+            `Loop episode embedding failed for episode ${episode.id}: ${errorMessage(error)}`,
+          ];
           try {
             await deps.repository.updateEpisodeEmbeddingMetadata({
               auth,
@@ -406,33 +560,99 @@ export async function runLoopMinerForUser(
           } catch {
             // Non-fatal metadata write failure.
           }
+          continue;
+        }
+
+        const shouldUpsert = episode.embeddingTextHash !== embeddingHash || episode.embeddingStatus !== "ready";
+        try {
+          if (shouldUpsert) {
+            await loopEpisodeVectorRepository.upsertEpisodeVector({
+              auth,
+              episodeId: episode.id,
+              outputType: episode.outputType,
+              sealedAt: episode.sealedAt,
+              sources: episode.sources,
+              tools: episode.toolNames,
+              sourceFingerprint: episode.sourceFingerprint,
+              extractionVersion: episode.extractionVersion,
+              vector,
+            });
+            await deps.repository.updateEpisodeEmbeddingMetadata({
+              auth,
+              episodeId: episode.id,
+              embeddingTextHash: embeddingHash,
+              status: "ready",
+              embeddedAt: new Date().toISOString(),
+            });
+          }
+
+          const similar = await loopEpisodeVectorRepository.searchSimilarEpisodes({
+            auth,
+            vector,
+            limit: 20,
+            outputType: episode.outputType,
+            excludeEpisodeId: episode.id,
+          });
+          for (const hit of similar) {
+            if (hit.score >= 0.72) similarEpisodeIds.add(hit.episodeId);
+          }
+        } catch (error) {
+          const message = errorMessage(error);
+          summary.warnings = [
+            ...(summary.warnings ?? []),
+            `Loop episode vector retrieval degraded for episode ${episode.id}: ${message}`,
+          ];
+          logger.warn("loop episode vector retrieval disabled after error", { runId, episodeId: episode.id, error: message });
+          try {
+            await deps.repository.updateEpisodeEmbeddingMetadata({
+              auth,
+              episodeId: episode.id,
+              embeddingTextHash: embeddingHash,
+              status: "failed",
+              embeddedAt: null,
+            });
+          } catch {
+            // Non-fatal metadata write failure.
+          }
+          break;
         }
       }
     }
-    }
 
-    const additionalContextIds = [...similarEpisodeIds].filter((id) => !built.episodes.some((episode) => episode.id === id));
+    const allEvidenceEpisodes = dedupeEpisodesById([...reusedEpisodes, ...built.episodes]);
+    const newEpisodeIds = new Set(built.episodes.map((episode) => episode.id));
+    const baseDetectorEpisodes = latestIncremental && built.episodes.length > 0
+      ? dedupeEpisodesById([...built.episodes, ...relatedReusedEpisodeContext(built.episodes, reusedEpisodes)])
+      : allEvidenceEpisodes;
+    const additionalContextIds = [...similarEpisodeIds].filter((id) => !baseDetectorEpisodes.some((episode) => episode.id === id));
     const additionalEpisodes = additionalContextIds.length > 0
       ? await deps.repository.listEpisodeContext(auth, additionalContextIds)
       : [];
-    const detectorEpisodes = dedupeEpisodesById([...built.episodes, ...additionalEpisodes]);
+    const detectorEpisodes = dedupeEpisodesById([...baseDetectorEpisodes, ...additionalEpisodes]);
 
     const detected = await deps.loopDetector.execute(detectorEpisodes);
+    const restrictToNewEvidence = latestIncremental !== null && newEpisodeIds.size > 0;
+    const candidateLoops = restrictToNewEvidence
+      ? detected.loops.filter((loop) => loop.episodeIds.some((id) => newEpisodeIds.has(id)))
+      : detected.loops;
+    const patternTrace = restrictToNewEvidence
+      ? filterPatternTraceToNewEvidence(detected.patternTrace, newEpisodeIds)
+      : detected.patternTrace;
     mergeCleanupAiUsage(summary.usage, detected.usage);
     summary.aiCalls += detected.aiCalls;
-    summary.loopsDetected = detected.loops.length;
-    summary.loopsProposed = detected.patternTrace.candidateGroups.length;
-    summary.loopsApproved = detected.patternTrace.approvedGroups.length;
-    summary.loopsRejected = detected.patternTrace.rejectedGroups.length;
-    summary.loopsContested = detected.patternTrace.adversaryFindings.filter((finding) => finding.contested).length;
-    summary.loopsAutoApproved = detected.patternTrace.judgeDecisions.filter((decision) => decision.status === "approved_loop" && decision.confidence >= 0.85).length;
+    summary.loopsDetected = candidateLoops.length;
+    summary.loopsProposed = patternTrace?.candidateGroups.length ?? 0;
+    summary.loopsApproved = patternTrace?.approvedGroups.length ?? 0;
+    summary.loopsRejected = patternTrace?.rejectedGroups.length ?? 0;
+    summary.loopsContested = patternTrace?.adversaryFindings.filter((finding) => finding.contested).length ?? 0;
+    summary.loopsAutoApproved = patternTrace?.judgeDecisions.filter((decision) => decision.status === "approved_loop" && decision.confidence >= 0.85).length ?? 0;
     summary.cleanupEvidenceUsed = built.episodes.filter((episode) =>
       episode.turns.some((turn) => turn.sourceEventType === "memory_record")
     ).length;
     summary.timeSignalsUsed = built.episodes.filter((episode) =>
       episode.turns.some((turn) => /Source datetime:/i.test(turn.contentSummary))
     ).length;
-    summary.patternTrace = detected.patternTrace;
+    summary.patternTrace = patternTrace;
     summary.phaseUsage = {
       ...(summary.phaseUsage ?? {}),
       loopDetector: normalizePhaseUsage(detected.phaseUsage),
@@ -444,20 +664,20 @@ export async function runLoopMinerForUser(
       ...(summary.debugTrace ?? {}),
       detector: {
         inputEpisodes: detectorEpisodes.length,
-        candidateGroups: detected.patternTrace.candidateGroups.length,
-        approvedGroups: detected.patternTrace.approvedGroups.length,
-        rejectedGroups: detected.patternTrace.rejectedGroups.length,
+        candidateGroups: patternTrace?.candidateGroups.length ?? 0,
+        approvedGroups: patternTrace?.approvedGroups.length ?? 0,
+        rejectedGroups: patternTrace?.rejectedGroups.length ?? 0,
         warningCount: detected.warnings.length,
       },
     };
 
     const episodesByLoop = new Map<string, EpisodeRecord[]>();
-    for (const loop of detected.loops) {
+    for (const loop of candidateLoops) {
       episodesByLoop.set(keyForLoop(loop), await deps.repository.listEpisodeContext(auth, loop.episodeIds));
     }
 
     const evaluated = await deps.loopEvaluator.execute({
-      candidateLoops: detected.loops,
+      candidateLoops,
       episodesByLoop,
     });
     mergeCleanupAiUsage(summary.usage, evaluated.usage);
@@ -473,7 +693,7 @@ export async function runLoopMinerForUser(
 
     const qualifiedLoops = evaluated.evaluations
       .map((evaluation) => {
-        const candidateLoop = findCandidateForEvaluation(detected.loops, evaluation);
+        const candidateLoop = findCandidateForEvaluation(candidateLoops, evaluation);
         if (!candidateLoop) return null;
         return {
           candidateLoop,
@@ -497,20 +717,39 @@ export async function runLoopMinerForUser(
     }
 
     const suggestions = [];
+    let suggestionsUpdated = 0;
     for (const item of generated.dna) {
       const suggestedPrompt = workflowDnaPrompt(item.workflowDna);
-      const suggestion = await deps.repository.createWorkflowSuggestion({
-        auth,
-        runId,
-        candidateLoop: item.candidateLoop,
-        evaluation: item.evaluation,
-        dna: item.workflowDna,
-        suggestedPrompt,
-        fingerprint: workflowDnaFingerprint(item.workflowDna),
-      });
-      if (suggestion) suggestions.push(suggestion);
+      const writeResult = deps.repository.createOrUpdateWorkflowSuggestion
+        ? await deps.repository.createOrUpdateWorkflowSuggestion({
+            auth,
+            runId,
+            candidateLoop: item.candidateLoop,
+            evaluation: item.evaluation,
+            dna: item.workflowDna,
+            suggestedPrompt,
+            fingerprint: workflowDnaFingerprint(item.workflowDna),
+          })
+        : {
+            suggestion: await deps.repository.createWorkflowSuggestion({
+              auth,
+              runId,
+              candidateLoop: item.candidateLoop,
+              evaluation: item.evaluation,
+              dna: item.workflowDna,
+              suggestedPrompt,
+              fingerprint: workflowDnaFingerprint(item.workflowDna),
+            }),
+            created: false,
+            updated: false,
+          };
+      if (writeResult.suggestion) suggestions.push(writeResult.suggestion);
+      if (writeResult.updated) suggestionsUpdated += 1;
     }
-    summary.suggestionsCreated = suggestions.length;
+    summary.suggestionsCreated = suggestions.length - suggestionsUpdated;
+    if (summary.incremental) {
+      summary.incremental.suggestionsUpdated = suggestionsUpdated;
+    }
     summary = finalizeSummary(summary, startedAt);
     await deps.repository.completeRun({ auth, runId, status: "completed", summary });
     logger.info("loop miner run completed", { runId, ...loggableSummary(summary) });

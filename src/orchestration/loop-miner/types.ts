@@ -177,6 +177,20 @@ export interface WorkflowDNA {
   reasoning: string;
 }
 
+export type LoopMinerIncrementalMode = "full" | "incremental" | "skipped_no_new_evidence";
+
+export interface LoopMinerIncrementalSummary {
+  mode: LoopMinerIncrementalMode;
+  evidenceFingerprint: string;
+  extractionVersion: string;
+  totalEvidenceEvents: number;
+  newEvidenceEvents: number;
+  reusedEpisodes: number;
+  newEpisodes: number;
+  reusedSuggestions: number;
+  suggestionsUpdated?: number;
+}
+
 export interface LoopMinerSummary {
   episodesBuilt: number;
   loopsDetected: number;
@@ -193,6 +207,7 @@ export interface LoopMinerSummary {
   durationMs: number;
   aiCalls: number;
   usage: CleanupAiUsage;
+  incremental?: LoopMinerIncrementalSummary;
   warnings?: string[];
   skipped?: boolean;
   skipReason?: string;
@@ -241,6 +256,10 @@ export interface LoopMinerSummary {
       approvedGroups: number;
       rejectedGroups: number;
       warningCount: number;
+    };
+    vectorRetrieval?: {
+      status: "skipped";
+      reason: string;
     };
   };
   patternTrace?: PatternTrace;
@@ -328,6 +347,12 @@ export interface LoopMinerSuggestion {
   createdAt: string;
 }
 
+export interface LoopMinerSuggestionWriteResult {
+  suggestion: LoopMinerSuggestion | null;
+  created: boolean;
+  updated: boolean;
+}
+
 export interface LoopMinerRunResult {
   id: string;
   status: LoopMinerRunStatus;
@@ -363,6 +388,21 @@ export interface LoopMinerRepository {
   }): Promise<void>;
   listRecentEvents(auth: AuthContext, days: number): Promise<MinerEvent[]>;
   listMemoryDecisionLog?(auth: AuthContext, days: number): Promise<LoopMinerMemoryDecision[]>;
+  getLatestCompletedIncrementalState?(auth: AuthContext, lookbackDays: number): Promise<{
+    evidenceFingerprint: string;
+    summary: LoopMinerSummary;
+  } | null>;
+  findEpisodesBySourceFingerprints?(input: {
+    auth: AuthContext;
+    sourceFingerprints: string[];
+    extractionVersion: string;
+  }): Promise<Map<string, EpisodeRecord>>;
+  findEpisodesBySourceEventIds?(input: {
+    auth: AuthContext;
+    sourceEventIds: string[];
+    sourceEventType?: LoopMinerSourceEventType;
+  }): Promise<Map<string, EpisodeRecord>>;
+  listReusableLoopMinerSuggestions?(auth: AuthContext): Promise<LoopMinerSuggestion[]>;
   createEpisode(input: {
     auth: AuthContext;
     runId: string;
@@ -393,4 +433,13 @@ export interface LoopMinerRepository {
     suggestedPrompt: string;
     fingerprint: string;
   }): Promise<LoopMinerSuggestion | null>;
+  createOrUpdateWorkflowSuggestion?(input: {
+    auth: AuthContext;
+    runId: string;
+    candidateLoop: CandidateLoop;
+    evaluation: LoopEvaluation;
+    dna: WorkflowDNA;
+    suggestedPrompt: string;
+    fingerprint: string;
+  }): Promise<LoopMinerSuggestionWriteResult>;
 }
