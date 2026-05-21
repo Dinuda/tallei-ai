@@ -816,6 +816,20 @@ export async function initDb() {
     `);
 
     await client.query(`
+      ALTER TABLE episodes
+      ADD COLUMN IF NOT EXISTS source_fingerprint TEXT,
+      ADD COLUMN IF NOT EXISTS extraction_version TEXT,
+      ADD COLUMN IF NOT EXISTS embedding_text_hash TEXT,
+      ADD COLUMN IF NOT EXISTS embedding_status TEXT NOT NULL DEFAULT 'pending',
+      ADD COLUMN IF NOT EXISTS embedded_at TIMESTAMPTZ;
+
+      CREATE INDEX IF NOT EXISTS idx_episodes_source_fingerprint
+        ON episodes(tenant_id, user_id, source_fingerprint, extraction_version, sealed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_episodes_embedding_status
+        ON episodes(tenant_id, user_id, embedding_status, sealed_at DESC);
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS episode_turns (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         episode_id UUID NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,

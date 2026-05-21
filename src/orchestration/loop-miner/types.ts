@@ -62,6 +62,11 @@ export interface EpisodeExtraction {
 
 export interface EpisodeRecord extends EpisodeExtraction {
   id: string;
+  sourceFingerprint?: string;
+  extractionVersion?: string;
+  embeddingTextHash?: string;
+  embeddingStatus?: "pending" | "ready" | "failed";
+  embeddedAt?: string | null;
   sealedAt: string;
   turnCount: number;
   turns: EpisodeTurnRecord[];
@@ -363,7 +368,21 @@ export interface LoopMinerRepository {
     runId: string;
     extraction: EpisodeExtraction;
     turns: EpisodeTurnRecord[];
+    sourceFingerprint?: string;
+    extractionVersion?: string;
   }): Promise<EpisodeRecord>;
+  findReusableEpisodeBySourceFingerprint?(input: {
+    auth: AuthContext;
+    sourceFingerprint: string;
+    extractionVersion: string;
+  }): Promise<EpisodeRecord | null>;
+  updateEpisodeEmbeddingMetadata?(input: {
+    auth: AuthContext;
+    episodeId: string;
+    embeddingTextHash: string;
+    status: "pending" | "ready" | "failed";
+    embeddedAt?: string | null;
+  }): Promise<void>;
   listEpisodeContext(auth: AuthContext, episodeIds: string[]): Promise<EpisodeRecord[]>;
   createWorkflowSuggestion(input: {
     auth: AuthContext;

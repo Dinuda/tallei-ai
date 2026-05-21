@@ -62,6 +62,7 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_QDRANT__URL",              oldKey: "QDRANT_URL" },
   { newKey: "TALLEI_QDRANT__API_KEY",           oldKey: "QDRANT_API_KEY" },
   { newKey: "TALLEI_QDRANT__COLLECTION",        oldKey: "QDRANT_COLLECTION_NAME" },
+  { newKey: "TALLEI_QDRANT__LOOP_COLLECTION",   oldKey: "QDRANT_LOOP_COLLECTION_NAME" },
   { newKey: "TALLEI_QDRANT__TIMEOUT_MS",        oldKey: "QDRANT_TIMEOUT_MS" },
   // Redis
   { newKey: "TALLEI_REDIS__URL",               oldKey: "REDIS_URL" },
@@ -211,6 +212,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const defaultEmbeddingModel = localModelMode ? "nomic-embed-text" : "text-embedding-3-small";
   const defaultEmbeddingDims = localModelMode ? 768 : 1536;
   const defaultQdrantCollectionName = localModelMode ? "memories_local_v1" : "memories_v1";
+  const defaultLoopQdrantCollectionName = `${defaultQdrantCollectionName}_loop_episodes`;
   const localBaseUrl = `http://localhost:${port}`;
   const configuredPublicBaseUrl = e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl;
   const publicBaseUrl = normalizeBaseUrl(configuredPublicBaseUrl);
@@ -286,6 +288,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     qdrantUrl: readStringEnv(e, "TALLEI_QDRANT__URL"),
     qdrantApiKey: readStringEnv(e, "TALLEI_QDRANT__API_KEY"),
     qdrantCollectionName: readStringEnv(e, "TALLEI_QDRANT__COLLECTION", defaultQdrantCollectionName),
+    loopQdrantCollectionName: readStringEnv(e, "TALLEI_QDRANT__LOOP_COLLECTION", defaultLoopQdrantCollectionName),
     memoryVectorUpsertTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__VECTOR_UPSERT_TIMEOUT_MS",
@@ -363,6 +366,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       64,
       Math.min(readIntEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_MAX_CHARS", 2000), 20_000)
     ),
+    logLevel: readStringEnv(e, "TALLEI_OBS__LOG_LEVEL", "info") as "debug" | "info" | "warn" | "error",
+    prettyLogsEnabled: readBooleanEnv(e, "TALLEI_OBS__PRETTY_LOGS", nodeEnv === "development"),
     vertexSearchVerboseLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__VERTEX_SEARCH_VERBOSE", false),
     ollamaBaseUrl: readStringEnv(e, "TALLEI_LLM__OLLAMA_BASE_URL", "http://localhost:11434/v1"),
     ollamaModel: readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen2.5:7b"),

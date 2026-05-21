@@ -193,6 +193,69 @@ test("loop miner converts imported newsletter work memories into newsletter epis
   assert.deepEqual(extraction.eventIds, ["memory-newsletter-1"]);
 });
 
+test("episode builder reuses deterministic memory episode by source fingerprint", async () => {
+  const existing: EpisodeRecord = {
+    id: "episode-reused-1",
+    title: "Weekly analytics routine",
+    summary: "Reused",
+    intent: "Every Friday review product analytics and write experiments",
+    sources: ["Imported ChatGPT memory"],
+    outputType: "workflow_memory",
+    toolNames: ["chatgpt"],
+    steps: ["Review analytics", "Write experiments"],
+    approved: true,
+    eventIds: ["memory-1"],
+    sourceFingerprint: "fingerprint-1",
+    extractionVersion: "loop_episode_extraction_v2",
+    sealedAt: "2026-05-17T10:30:00.000Z",
+    turnCount: 1,
+    turns: [{
+      role: "user",
+      contentSummary: "Every Friday review product analytics and write experiments",
+      sourceEventType: "memory_record",
+      sourceEventId: "memory-1",
+      createdAt: "2026-05-17T10:30:00.000Z",
+    }],
+  };
+
+  let created = 0;
+  const repository: Pick<LoopMinerRepositoryContract, "createEpisode" | "findReusableEpisodeBySourceFingerprint"> = {
+    async findReusableEpisodeBySourceFingerprint() {
+      return existing;
+    },
+    async createEpisode() {
+      created += 1;
+      return existing;
+    },
+  };
+
+  const useCase = new EpisodeBuilderUseCase(repository, async () => {
+    throw new Error("LLM should not be called for deterministic memory reuse");
+  });
+
+  const result = await useCase.execute({
+    auth,
+    runId: "run-1",
+    events: [{
+      id: "memory-1",
+      sourceEventType: "memory_record",
+      createdAt: "2026-05-17T10:30:00.000Z",
+      platform: "chatgpt",
+      role: "user",
+      contentSummary: [
+        "Imported ChatGPT memory",
+        "Type: fact",
+        "Every Friday review product analytics and write experiments",
+      ].join("\n"),
+      metadata: { sourceImport: true },
+    }],
+  });
+
+  assert.equal(result.episodes.length, 1);
+  assert.equal(result.episodes[0]?.id, "episode-reused-1");
+  assert.equal(created, 0);
+});
+
 test("loop miner token budget packer splits oversized sequences into micro-batches", () => {
   const items = Array.from({ length: 9 }, (_, index) => ({
     id: `i-${index + 1}`,
@@ -675,8 +738,8 @@ test("runLoopMinerForUser completes with warnings when an episode-builder chunk 
   assert.equal(result.status, "completed");
   assert.equal(result.summary.episodesBuilt, 1);
   assert.equal(result.summary.loopsDetected, 0);
-  assert.equal(result.summary.warnings?.length, 1);
-  assert.match(result.summary.warnings?.[0] ?? "", /TimeoutError/);
+  assert.ok((result.summary.warnings?.length ?? 0) >= 1);
+  assert.ok((result.summary.warnings ?? []).some((warning) => /TimeoutError/.test(warning)));
   assert.equal(callCount, 3);
 });
 

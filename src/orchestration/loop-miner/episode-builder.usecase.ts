@@ -15,9 +15,12 @@ import {
   estimatePromptTokensFromRequest,
   estimateTokens,
   explicitWorkflowMemoryExtraction,
+  LOOP_EPISODE_EXTRACTION_VERSION,
   normalizeEpisodeExtraction,
   packByEstimatedPromptBudget,
   readJsonObject,
+  sourceFingerprintFromEvent,
+  sourceFingerprintFromTurns,
 } from "./utils.js";
 
 type ChatFn = (request: ChatCompletionRequest) => Promise<ChatCompletionResponse>;
@@ -58,7 +61,7 @@ async function chatWithRetry(
 
 export class EpisodeBuilderUseCase {
   constructor(
-    private readonly repository: Pick<LoopMinerRepository, "createEpisode">,
+    private readonly repository: Pick<LoopMinerRepository, "createEpisode" | "findReusableEpisodeBySourceFingerprint">,
     private readonly chat: ChatFn = (request) => aiProviderRegistry.chat(request)
   ) {}
 
@@ -114,6 +117,7 @@ export class EpisodeBuilderUseCase {
       const extraction = explicitWorkflowMemoryExtraction(event);
       if (!extraction) continue;
       deterministicMemoryEventIds.add(event.id);
+      const sourceFingerprint = sourceFingerprintFromEvent(event, LOOP_EPISODE_EXTRACTION_VERSION);
       rawResponses.push({
         source: "deterministic_memory_workflow_extraction",
         eventId: event.id,
@@ -121,10 +125,29 @@ export class EpisodeBuilderUseCase {
         outputType: extraction.outputType,
         cadence: extraction.automationSignals?.likelyCadence ?? "unknown",
       });
+      const reusable = this.repository.findReusableEpisodeBySourceFingerprint
+        ? await this.repository.findReusableEpisodeBySourceFingerprint({
+            auth: input.auth,
+            sourceFingerprint,
+            extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+          })
+        : null;
+      if (reusable) {
+        episodes.push(reusable);
+        rawResponses.push({
+          source: "episode_reused_by_source_fingerprint",
+          sourceFingerprint,
+          episodeId: reusable.id,
+          eventIds: reusable.eventIds,
+        });
+        continue;
+      }
       episodes.push(await this.repository.createEpisode({
         auth: input.auth,
         runId: input.runId,
         extraction,
+        sourceFingerprint,
+        extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
         turns: [{
           role: event.role,
           contentSummary: event.contentSummary,
@@ -211,10 +234,30 @@ export class EpisodeBuilderUseCase {
               createdAt: event.createdAt,
             }));
           if (turns.length === 0) continue;
+          const sourceFingerprint = sourceFingerprintFromTurns(turns, LOOP_EPISODE_EXTRACTION_VERSION);
+          const reusable = this.repository.findReusableEpisodeBySourceFingerprint
+            ? await this.repository.findReusableEpisodeBySourceFingerprint({
+                auth: input.auth,
+                sourceFingerprint,
+                extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+              })
+            : null;
+          if (reusable) {
+            episodes.push(reusable);
+            rawResponses.push({
+              source: "episode_reused_by_source_fingerprint",
+              sourceFingerprint,
+              episodeId: reusable.id,
+              eventIds: reusable.eventIds,
+            });
+            continue;
+          }
           episodes.push(await this.repository.createEpisode({
             auth: input.auth,
             runId: input.runId,
             extraction,
+            sourceFingerprint,
+            extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
             turns,
           }));
         }

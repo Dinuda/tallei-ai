@@ -1,4 +1,5 @@
 import { currentCorrelationId } from "./tracing.js";
+import { config } from "../config/load.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -32,12 +33,23 @@ interface LogRecord {
   readonly [key: string]: unknown;
 }
 
+function formatPretty(record: LogRecord): string {
+  const { timestamp, level, message, ...fields } = record;
+  const suffix =
+    Object.keys(fields).length > 0
+      ? ` ${Object.entries(fields)
+          .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+          .join(" ")}`
+      : "";
+  return `[${timestamp}] ${level.toUpperCase()} ${message}${suffix}`;
+}
+
 function shouldEmit(currentLevel: LogLevel, level: LogLevel): boolean {
   return levelOrder[level] >= levelOrder[currentLevel];
 }
 
 function emit(level: LogLevel, record: LogRecord): void {
-  const serialized = JSON.stringify(record);
+  const serialized = config.prettyLogsEnabled ? formatPretty(record) : JSON.stringify(record);
   if (level === "error") {
     console.error(serialized);
     return;
@@ -96,5 +108,5 @@ class JsonLogger implements Logger {
 }
 
 export function createLogger(options: LoggerOptions = {}): Logger {
-  return new JsonLogger(options.level ?? "info", options.baseFields ?? {});
+  return new JsonLogger(options.level ?? config.logLevel, options.baseFields ?? {});
 }

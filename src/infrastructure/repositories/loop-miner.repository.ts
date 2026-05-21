@@ -63,6 +63,11 @@ interface EpisodeRow {
   turn_count: number;
   approved: boolean;
   extraction_json: unknown;
+  source_fingerprint: string | null;
+  extraction_version: string | null;
+  embedding_text_hash: string | null;
+  embedding_status: "pending" | "ready" | "failed" | null;
+  embedded_at: string | null;
   sealed_at: string;
 }
 
@@ -94,6 +99,22 @@ interface WorkflowSuggestionRow {
   trigger_count: number;
   created_at: string;
   metadata_json: unknown;
+}
+
+const EPISODE_AUGMENTED_COLUMN_NAMES = [
+  "source_fingerprint",
+  "extraction_version",
+  "embedding_text_hash",
+  "embedding_status",
+  "embedded_at",
+] as const;
+
+function isMissingEpisodeAugmentedColumn(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: string }).code;
+  if (code !== "42703") return false;
+  const message = error.message.toLowerCase();
+  return EPISODE_AUGMENTED_COLUMN_NAMES.some((column) => message.includes(column));
 }
 
 function safeSummary(value: string, limit = 1600): string {
@@ -312,6 +333,11 @@ function mapEpisode(row: EpisodeRow, turns: EpisodeTurnRecord[]): EpisodeRecord 
     outputType: row.output_type,
     output: extraction.output,
     toolNames: row.tool_names,
+    sourceFingerprint: row.source_fingerprint ?? undefined,
+    extractionVersion: row.extraction_version ?? undefined,
+    embeddingTextHash: row.embedding_text_hash ?? undefined,
+    embeddingStatus: row.embedding_status ?? undefined,
+    embeddedAt: row.embedded_at ?? undefined,
     steps: Array.isArray(extraction.steps) ? extraction.steps.filter((step): step is string => typeof step === "string") : [],
     styleHints: extraction.styleHints,
     userBehavior: extraction.userBehavior,
@@ -468,6 +494,35 @@ function mapSuggestion(row: WorkflowSuggestionRow): LoopMinerWorkflowSuggestionV
 }
 
 export class LoopMinerRepository implements LoopMinerRepositoryContract {
+  private episodeAugmentedColumnsAvailable: boolean | null = null;
+
+  private async ensureEpisodeAugmentedColumns(): Promise<boolean> {
+    if (this.episodeAugmentedColumnsAvailable === false) return false;
+    try {
+      await pool.query(`
+        ALTER TABLE episodes
+        ADD COLUMN IF NOT EXISTS source_fingerprint TEXT,
+        ADD COLUMN IF NOT EXISTS extraction_version TEXT,
+        ADD COLUMN IF NOT EXISTS embedding_text_hash TEXT,
+        ADD COLUMN IF NOT EXISTS embedding_status TEXT NOT NULL DEFAULT 'pending',
+        ADD COLUMN IF NOT EXISTS embedded_at TIMESTAMPTZ;
+      `);
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_episodes_source_fingerprint
+          ON episodes(tenant_id, user_id, source_fingerprint, extraction_version, sealed_at DESC);
+      `);
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_episodes_embedding_status
+          ON episodes(tenant_id, user_id, embedding_status, sealed_at DESC);
+      `);
+      this.episodeAugmentedColumnsAvailable = true;
+      return true;
+    } catch {
+      this.episodeAugmentedColumnsAvailable = false;
+      return false;
+    }
+  }
+
   async hasRunningDailyRun(auth: AuthContext): Promise<boolean> {
     const result = await pool.query<{ id: string }>(
       `SELECT id
@@ -660,32 +715,92 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     runId: string;
     extraction: EpisodeExtraction;
     turns: EpisodeTurnRecord[];
+    sourceFingerprint?: string;
+    extractionVersion?: string;
   }): Promise<EpisodeRecord> {
     const client = await pool.connect();
     const episodeId = randomUUID();
     try {
       await client.query("BEGIN");
       const sealedAt = input.turns.map((turn) => turn.createdAt).sort().at(-1) ?? new Date().toISOString();
-      const row = await client.query<EpisodeRow>(
-        `INSERT INTO episodes
-         (id, tenant_id, user_id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, miner_run_id, sealed_at)
-         VALUES ($1, $2, $3, $4, $5::text[], $6, $7::text[], $8, $9, $10::jsonb, $11, $12::timestamptz)
-         RETURNING id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, sealed_at`,
-        [
-          episodeId,
-          input.auth.tenantId,
-          input.auth.userId,
-          input.extraction.intent,
-          input.extraction.sources,
-          input.extraction.outputType,
-          input.extraction.toolNames,
-          input.turns.length,
-          input.extraction.approved,
-          JSON.stringify(input.extraction),
-          input.runId,
-          sealedAt,
-        ]
-      );
+      let row;
+      try {
+        row = await client.query<EpisodeRow>(
+          `INSERT INTO episodes
+           (id, tenant_id, user_id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, miner_run_id, source_fingerprint, extraction_version, sealed_at)
+           VALUES ($1, $2, $3, $4, $5::text[], $6, $7::text[], $8, $9, $10::jsonb, $11, $12, $13, $14::timestamptz)
+           RETURNING id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at`,
+          [
+            episodeId,
+            input.auth.tenantId,
+            input.auth.userId,
+            input.extraction.intent,
+            input.extraction.sources,
+            input.extraction.outputType,
+            input.extraction.toolNames,
+            input.turns.length,
+            input.extraction.approved,
+            JSON.stringify(input.extraction),
+            input.runId,
+            input.sourceFingerprint ?? null,
+            input.extractionVersion ?? null,
+            sealedAt,
+          ]
+        );
+      } catch (error) {
+        const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+        if (upgraded) {
+          row = await client.query<EpisodeRow>(
+            `INSERT INTO episodes
+             (id, tenant_id, user_id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, miner_run_id, source_fingerprint, extraction_version, sealed_at)
+             VALUES ($1, $2, $3, $4, $5::text[], $6, $7::text[], $8, $9, $10::jsonb, $11, $12, $13, $14::timestamptz)
+             RETURNING id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at`,
+            [
+              episodeId,
+              input.auth.tenantId,
+              input.auth.userId,
+              input.extraction.intent,
+              input.extraction.sources,
+              input.extraction.outputType,
+              input.extraction.toolNames,
+              input.turns.length,
+              input.extraction.approved,
+              JSON.stringify(input.extraction),
+              input.runId,
+              input.sourceFingerprint ?? null,
+              input.extractionVersion ?? null,
+              sealedAt,
+            ]
+          );
+        } else {
+          row = await client.query<EpisodeRow>(
+            `INSERT INTO episodes
+             (id, tenant_id, user_id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, miner_run_id, sealed_at)
+             VALUES ($1, $2, $3, $4, $5::text[], $6, $7::text[], $8, $9, $10::jsonb, $11, $12::timestamptz)
+             RETURNING id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json,
+                       NULL::text AS source_fingerprint,
+                       NULL::text AS extraction_version,
+                       NULL::text AS embedding_text_hash,
+                       'pending'::text AS embedding_status,
+                       NULL::timestamptz AS embedded_at,
+                       sealed_at`,
+            [
+              episodeId,
+              input.auth.tenantId,
+              input.auth.userId,
+              input.extraction.intent,
+              input.extraction.sources,
+              input.extraction.outputType,
+              input.extraction.toolNames,
+              input.turns.length,
+              input.extraction.approved,
+              JSON.stringify(input.extraction),
+              input.runId,
+              sealedAt,
+            ]
+          );
+        }
+      }
 
       for (const turn of input.turns) {
         await client.query(
@@ -714,17 +829,148 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     }
   }
 
+  async findReusableEpisodeBySourceFingerprint(input: {
+    auth: AuthContext;
+    sourceFingerprint: string;
+    extractionVersion: string;
+  }): Promise<EpisodeRecord | null> {
+    let row;
+    try {
+      row = await pool.query<EpisodeRow>(
+        `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+         FROM episodes
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND source_fingerprint = $3
+           AND extraction_version = $4
+         ORDER BY sealed_at DESC
+         LIMIT 1`,
+        [input.auth.tenantId, input.auth.userId, input.sourceFingerprint, input.extractionVersion]
+      );
+    } catch (error) {
+      const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+      if (!upgraded) return null;
+      row = await pool.query<EpisodeRow>(
+        `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+         FROM episodes
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND source_fingerprint = $3
+           AND extraction_version = $4
+         ORDER BY sealed_at DESC
+         LIMIT 1`,
+        [input.auth.tenantId, input.auth.userId, input.sourceFingerprint, input.extractionVersion]
+      );
+    }
+    const episode = row.rows[0];
+    if (!episode) return null;
+    const turns = await pool.query<EpisodeTurnRow>(
+      `SELECT episode_id, role, content_summary, source_event_type, source_event_id, created_at
+       FROM episode_turns
+       WHERE episode_id = $1
+       ORDER BY created_at ASC`,
+      [episode.id]
+    );
+    return mapEpisode(episode, turns.rows.map((turn) => ({
+      role: turn.role,
+      contentSummary: turn.content_summary,
+      sourceEventType: turn.source_event_type,
+      sourceEventId: turn.source_event_id,
+      createdAt: turn.created_at,
+    })));
+  }
+
+  async updateEpisodeEmbeddingMetadata(input: {
+    auth: AuthContext;
+    episodeId: string;
+    embeddingTextHash: string;
+    status: "pending" | "ready" | "failed";
+    embeddedAt?: string | null;
+  }): Promise<void> {
+    try {
+      await pool.query(
+        `UPDATE episodes
+         SET embedding_text_hash = $4,
+             embedding_status = $5,
+             embedded_at = $6::timestamptz
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3`,
+        [
+          input.episodeId,
+          input.auth.tenantId,
+          input.auth.userId,
+          input.embeddingTextHash,
+          input.status,
+          input.embeddedAt ?? null,
+        ]
+      );
+    } catch (error) {
+      const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+      if (!upgraded) return;
+      await pool.query(
+        `UPDATE episodes
+         SET embedding_text_hash = $4,
+             embedding_status = $5,
+             embedded_at = $6::timestamptz
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3`,
+        [
+          input.episodeId,
+          input.auth.tenantId,
+          input.auth.userId,
+          input.embeddingTextHash,
+          input.status,
+          input.embeddedAt ?? null,
+        ]
+      );
+    }
+  }
+
   async listEpisodeContext(auth: AuthContext, episodeIds: string[]): Promise<EpisodeRecord[]> {
     if (episodeIds.length === 0) return [];
-    const episodes = await pool.query<EpisodeRow>(
-      `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, sealed_at
-       FROM episodes
-       WHERE tenant_id = $1
-         AND user_id = $2
-         AND id = ANY($3::uuid[])
-       ORDER BY sealed_at ASC`,
-      [auth.tenantId, auth.userId, episodeIds]
-    );
+    let episodes;
+    try {
+      episodes = await pool.query<EpisodeRow>(
+        `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+         FROM episodes
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND id = ANY($3::uuid[])
+         ORDER BY sealed_at ASC`,
+        [auth.tenantId, auth.userId, episodeIds]
+      );
+    } catch (error) {
+      const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+      if (upgraded) {
+        episodes = await pool.query<EpisodeRow>(
+          `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+           FROM episodes
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND id = ANY($3::uuid[])
+           ORDER BY sealed_at ASC`,
+          [auth.tenantId, auth.userId, episodeIds]
+        );
+      } else {
+        episodes = await pool.query<EpisodeRow>(
+          `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json,
+                  NULL::text AS source_fingerprint,
+                  NULL::text AS extraction_version,
+                  NULL::text AS embedding_text_hash,
+                  'pending'::text AS embedding_status,
+                  NULL::timestamptz AS embedded_at,
+                  sealed_at
+           FROM episodes
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND id = ANY($3::uuid[])
+           ORDER BY sealed_at ASC`,
+          [auth.tenantId, auth.userId, episodeIds]
+        );
+      }
+    }
     const turns = await pool.query<EpisodeTurnRow>(
       `SELECT episode_id, role, content_summary, source_event_type, source_event_id, created_at
        FROM episode_turns
@@ -865,15 +1111,47 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     const run = runResult.rows[0];
     if (!run) return null;
 
-    const episodeRows = await pool.query<EpisodeRow>(
-      `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, sealed_at
-       FROM episodes
-       WHERE tenant_id = $1
-         AND user_id = $2
-         AND miner_run_id = $3
-       ORDER BY sealed_at ASC`,
-      [auth.tenantId, auth.userId, runId]
-    );
+    let episodeRows;
+    try {
+      episodeRows = await pool.query<EpisodeRow>(
+        `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+         FROM episodes
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND miner_run_id = $3
+         ORDER BY sealed_at ASC`,
+        [auth.tenantId, auth.userId, runId]
+      );
+    } catch (error) {
+      const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+      if (upgraded) {
+        episodeRows = await pool.query<EpisodeRow>(
+          `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+           FROM episodes
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND miner_run_id = $3
+           ORDER BY sealed_at ASC`,
+          [auth.tenantId, auth.userId, runId]
+        );
+      } else {
+        episodeRows = await pool.query<EpisodeRow>(
+          `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json,
+                  NULL::text AS source_fingerprint,
+                  NULL::text AS extraction_version,
+                  NULL::text AS embedding_text_hash,
+                  'pending'::text AS embedding_status,
+                  NULL::timestamptz AS embedded_at,
+                  sealed_at
+           FROM episodes
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND miner_run_id = $3
+           ORDER BY sealed_at ASC`,
+          [auth.tenantId, auth.userId, runId]
+        );
+      }
+    }
     const episodeIds = episodeRows.rows.map((episode) => episode.id);
     const turnRows = episodeIds.length === 0
       ? { rows: [] as EpisodeTurnRow[] }

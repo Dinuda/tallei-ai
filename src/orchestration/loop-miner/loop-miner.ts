@@ -1,6 +1,8 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 
 import { config } from "../../config/index.js";
+import { embedText } from "../../infrastructure/cache/embedding-cache.js";
+import { LoopEpisodeVectorRepository } from "../../infrastructure/repositories/loop-episode-vector.repository.js";
 import { LoopMinerRepository as PgLoopMinerRepository } from "../../infrastructure/repositories/loop-miner.repository.js";
 import { createLogger } from "../../observability/index.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
@@ -24,7 +26,7 @@ import type {
   LoopMinerRunView,
   LoopMinerSummary,
 } from "./types.js";
-import { workflowDnaFingerprint, workflowDnaPrompt } from "./utils.js";
+import { episodeEmbeddingText, episodeEmbeddingTextHash, workflowDnaFingerprint, workflowDnaPrompt } from "./utils.js";
 
 export interface RunLoopMinerOptions {
   runReason?: LoopMinerRunReason;
@@ -40,6 +42,7 @@ export interface LoopMinerDeps {
 }
 
 const logger = createLogger({ baseFields: { component: "loop_miner" } });
+const loopEpisodeVectorRepository = new LoopEpisodeVectorRepository();
 
 function errorJson(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
@@ -212,6 +215,14 @@ function loggableSummary(summary: LoopMinerSummary): Omit<LoopMinerSummary, "mem
   };
 }
 
+function dedupeEpisodesById(episodes: EpisodeRecord[]): EpisodeRecord[] {
+  const byId = new Map<string, EpisodeRecord>();
+  for (const episode of episodes) {
+    byId.set(episode.id, episode);
+  }
+  return [...byId.values()].sort((left, right) => Date.parse(left.sealedAt) - Date.parse(right.sealedAt));
+}
+
 export async function runLoopMinerForUser(
   auth: AuthContext,
   options: RunLoopMinerOptions = {},
@@ -337,7 +348,76 @@ export async function runLoopMinerForUser(
       },
     };
 
-    const detected = await deps.loopDetector.execute(built.episodes);
+    const similarEpisodeIds = new Set<string>();
+    if (config.qdrantUrl && deps.repository.updateEpisodeEmbeddingMetadata) {
+      for (const episode of built.episodes) {
+      const embeddingText = episodeEmbeddingText(episode);
+      const embeddingHash = episodeEmbeddingTextHash(embeddingText);
+      try {
+        const vector = await embedText(embeddingText);
+        const shouldUpsert = episode.embeddingTextHash !== embeddingHash || episode.embeddingStatus !== "ready";
+        if (shouldUpsert) {
+          await loopEpisodeVectorRepository.upsertEpisodeVector({
+            auth,
+            episodeId: episode.id,
+            outputType: episode.outputType,
+            sealedAt: episode.sealedAt,
+            sources: episode.sources,
+            tools: episode.toolNames,
+            sourceFingerprint: episode.sourceFingerprint,
+            extractionVersion: episode.extractionVersion,
+            vector,
+          });
+          if (deps.repository.updateEpisodeEmbeddingMetadata) {
+            await deps.repository.updateEpisodeEmbeddingMetadata({
+              auth,
+              episodeId: episode.id,
+              embeddingTextHash: embeddingHash,
+              status: "ready",
+              embeddedAt: new Date().toISOString(),
+            });
+          }
+        }
+
+        const similar = await loopEpisodeVectorRepository.searchSimilarEpisodes({
+          auth,
+          vector,
+          limit: 20,
+          outputType: episode.outputType,
+          excludeEpisodeId: episode.id,
+        });
+        for (const hit of similar) {
+          if (hit.score >= 0.72) similarEpisodeIds.add(hit.episodeId);
+        }
+      } catch (error) {
+        summary.warnings = [
+          ...(summary.warnings ?? []),
+          `Loop episode vector retrieval degraded for episode ${episode.id}: ${errorJson(error).message ?? "unknown error"}`,
+        ];
+        if (deps.repository.updateEpisodeEmbeddingMetadata) {
+          try {
+            await deps.repository.updateEpisodeEmbeddingMetadata({
+              auth,
+              episodeId: episode.id,
+              embeddingTextHash: embeddingHash,
+              status: "failed",
+              embeddedAt: null,
+            });
+          } catch {
+            // Non-fatal metadata write failure.
+          }
+        }
+      }
+    }
+    }
+
+    const additionalContextIds = [...similarEpisodeIds].filter((id) => !built.episodes.some((episode) => episode.id === id));
+    const additionalEpisodes = additionalContextIds.length > 0
+      ? await deps.repository.listEpisodeContext(auth, additionalContextIds)
+      : [];
+    const detectorEpisodes = dedupeEpisodesById([...built.episodes, ...additionalEpisodes]);
+
+    const detected = await deps.loopDetector.execute(detectorEpisodes);
     mergeCleanupAiUsage(summary.usage, detected.usage);
     summary.aiCalls += detected.aiCalls;
     summary.loopsDetected = detected.loops.length;
@@ -363,7 +443,7 @@ export async function runLoopMinerForUser(
     summary.debugTrace = {
       ...(summary.debugTrace ?? {}),
       detector: {
-        inputEpisodes: built.episodes.length,
+        inputEpisodes: detectorEpisodes.length,
         candidateGroups: detected.patternTrace.candidateGroups.length,
         approvedGroups: detected.patternTrace.approvedGroups.length,
         rejectedGroups: detected.patternTrace.rejectedGroups.length,

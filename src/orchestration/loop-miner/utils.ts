@@ -536,3 +536,58 @@ export function workflowDnaPrompt(dna: WorkflowDNA): string {
   const steps = dna.stepPattern.length > 0 ? dna.stepPattern.join("; ") : "Follow the user's established repeatable workflow pattern.";
   return `Automate "${dna.name}" on ${trigger}. Use sources: ${dna.sources.join(", ") || "the relevant connected sources"}. Produce ${dna.outputType}. Steps: ${steps}. Style: ${dna.style}. Approval: ${dna.approvalBehavior}.`;
 }
+
+export const LOOP_EPISODE_EXTRACTION_VERSION = "loop_episode_extraction_v2";
+export const LOOP_EPISODE_EMBEDDING_VERSION = "loop_episode_embedding_v1";
+
+function stableHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export function sourceFingerprintFromTurns(
+  turns: readonly Pick<EpisodeTurnRecord, "sourceEventId" | "sourceEventType" | "createdAt" | "contentSummary">[],
+  extractionVersion = LOOP_EPISODE_EXTRACTION_VERSION
+): string {
+  const normalizedTurns = [...turns]
+    .map((turn) => ({
+      sourceEventId: turn.sourceEventId,
+      sourceEventType: turn.sourceEventType,
+      createdAt: turn.createdAt,
+      // Keep summaries compact but content-sensitive so true updates invalidate the fingerprint.
+      contentSummary: turn.contentSummary.slice(0, 600),
+    }))
+    .sort((left, right) => left.sourceEventId.localeCompare(right.sourceEventId));
+  return stableHash(JSON.stringify({ extractionVersion, turns: normalizedTurns }));
+}
+
+export function sourceFingerprintFromEvent(
+  event: Pick<MinerEvent, "id" | "sourceEventType" | "createdAt" | "contentSummary">,
+  extractionVersion = LOOP_EPISODE_EXTRACTION_VERSION
+): string {
+  return sourceFingerprintFromTurns([{
+    sourceEventId: event.id,
+    sourceEventType: event.sourceEventType,
+    createdAt: event.createdAt,
+    contentSummary: event.contentSummary,
+  }], extractionVersion);
+}
+
+export function episodeEmbeddingText(episode: EpisodeRecord): string {
+  const turns = episode.turns
+    .slice(-4)
+    .map((turn) => `${turn.sourceEventType}:${turn.role}:${turn.contentSummary.slice(0, 240)}`);
+  return [
+    `version=${LOOP_EPISODE_EMBEDDING_VERSION}`,
+    `intent=${episode.intent}`,
+    `outputType=${episode.outputType}`,
+    `sources=${episode.sources.join(", ")}`,
+    `tools=${episode.toolNames.join(", ")}`,
+    `steps=${episode.steps.join(" | ")}`,
+    `style=${(episode.styleHints ?? []).join(", ")}`,
+    `turns=${turns.join(" || ")}`,
+  ].join("\n");
+}
+
+export function episodeEmbeddingTextHash(text: string): string {
+  return stableHash(text);
+}
