@@ -3,7 +3,6 @@ import { auth } from "../../../../../auth";
 
 const SECRET = process.env.INTERNAL_API_SECRET!;
 const DEFAULT_BACKEND_TIMEOUT_MS = 120_000;
-const DEFAULT_RUN_TIMEOUT_MS = 900_000;
 
 function parseTimeout(rawValue: string | undefined, fallback: number): number {
   const parsed = Number(rawValue);
@@ -11,11 +10,6 @@ function parseTimeout(rawValue: string | undefined, fallback: number): number {
 }
 
 function timeoutForPath(path: string[]): number {
-  const isRunEndpoint = path.length > 0 && path[path.length - 1] === "run";
-  if (isRunEndpoint) {
-    return parseTimeout(process.env.MEMORY_CLEANUP_PROXY_RUN_TIMEOUT_MS, DEFAULT_RUN_TIMEOUT_MS);
-  }
-
   return parseTimeout(process.env.MEMORY_CLEANUP_PROXY_TIMEOUT_MS, DEFAULT_BACKEND_TIMEOUT_MS);
 }
 
@@ -81,11 +75,32 @@ async function proxy(
       body: method === "POST" ? JSON.stringify(await req.json().catch(() => ({}))) : undefined,
     });
     const data = await safeJson(res);
+    if (!res.ok) {
+      console.error("[memory-cleanup-proxy] backend returned error", {
+        method,
+        path: path.join("/"),
+        status: res.status,
+        target: target.toString(),
+        data,
+      });
+    }
     return Response.json(data, { status: res.status });
   } catch (error) {
     const isAbort = error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
+    console.error("[memory-cleanup-proxy] backend request failed", {
+      method,
+      path: path.join("/"),
+      target: target.toString(),
+      timeoutMs,
+      error: error instanceof Error
+        ? { name: error.name, message: error.message, stack: error.stack }
+        : error,
+    });
     return Response.json(
-      { error: isAbort ? "Timed out contacting backend memory cleanup API" : "Failed to reach backend memory cleanup API" },
+      {
+        error: isAbort ? "Timed out contacting backend memory cleanup API" : "Failed to reach backend memory cleanup API",
+        details: error instanceof Error ? error.message : String(error),
+      },
       { status: isAbort ? 504 : 502 }
     );
   }

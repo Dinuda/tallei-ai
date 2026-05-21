@@ -17,10 +17,15 @@ import {
   runMemoryCleanupForUser,
   sendMemoryCleanupAdminEmail,
 } from "../../../services/memory-cleanup.js";
-import { listLoopMinerRunsForUser, runLoopMinerForUser } from "../../../orchestration/loop-miner/loop-miner.js";
+import {
+  listLoopMinerRunsForUser,
+  queueLoopMinerRunForUser,
+} from "../../../orchestration/loop-miner/loop-miner.js";
+import { createLogger } from "../../../observability/index.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
+const logger = createLogger({ baseFields: { component: "memories_http_routes" } });
 
 router.use(authMiddleware);
 
@@ -246,19 +251,50 @@ router.get("/cleanup/loop-miner/runs", requireScopes(["memory:read"]), async (re
 router.post("/cleanup/loop-miner/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = loopMinerRunSchema.parse(req.body ?? {});
-    const result = await runLoopMinerForUser(req.authContext!, {
+    logger.info("loop miner run requested", {
+      userId: req.authContext?.userId,
+      tenantId: req.authContext?.tenantId,
+      lookbackDays: body.lookbackDays ?? 30,
+    });
+
+    const existingRuns = await listLoopMinerRunsForUser(req.authContext!, 5);
+    const activeRun = existingRuns.find((run) => run.status === "running") ?? null;
+    if (activeRun) {
+      res.status(202).json({
+        run: activeRun,
+        queued: false,
+        message: "Loop miner run already in progress. Poll /api/memories/cleanup/loop-miner/runs for completion.",
+      });
+      return;
+    }
+
+    const run = await queueLoopMinerRunForUser(req.authContext!, {
       runReason: "manual",
       lookbackDays: body.lookbackDays ?? 30,
     });
-    const runs = await listLoopMinerRunsForUser(req.authContext!, 1);
-    res.status(201).json({ run: runs[0] ?? null, result });
+    logger.info("loop miner run queued response", {
+      runId: run?.id ?? null,
+      status: run?.status ?? null,
+    });
+    res.status(202).json({
+      run: run ?? null,
+      queued: true,
+      message: "Loop miner run queued. Poll /api/memories/cleanup/loop-miner/runs for completion.",
+    });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
-    console.error("Error running loop miner:", error);
-    res.status(500).json({ error: "Failed to run loop miner" });
+    logger.error("loop miner run request failed", {
+      error: error instanceof Error
+        ? { name: error.name, message: error.message, stack: error.stack }
+        : error,
+    });
+    res.status(500).json({
+      error: "Failed to run loop miner",
+      details: error instanceof Error ? error.message : String(error),
+    });
   }
 });
 

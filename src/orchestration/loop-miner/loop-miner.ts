@@ -3,7 +3,10 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { createHash } from "crypto";
 import { config } from "../../config/index.js";
 import { embedText } from "../../infrastructure/cache/embedding-cache.js";
-import { LoopEpisodeVectorRepository } from "../../infrastructure/repositories/loop-episode-vector.repository.js";
+import {
+  LoopEpisodeGroupedResult,
+  LoopEpisodeVectorRepository,
+} from "../../infrastructure/repositories/loop-episode-vector.repository.js";
 import { LoopMinerRepository as PgLoopMinerRepository } from "../../infrastructure/repositories/loop-miner.repository.js";
 import { createLogger } from "../../observability/index.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
@@ -26,9 +29,13 @@ import type {
   LoopMinerRunResult,
   LoopMinerRunView,
   LoopMinerSummary,
+  WorkspaceLoopParent,
 } from "./types.js";
 import {
   LOOP_EPISODE_EXTRACTION_VERSION,
+  consolidateWorkspaceGroupedHits,
+  deriveCanonicalLoopFacet,
+  deriveWorkspaceTracePayload,
   episodeEmbeddingText,
   episodeEmbeddingTextHash,
   sourceFingerprintFromEvent,
@@ -39,6 +46,7 @@ import {
 export interface RunLoopMinerOptions {
   runReason?: LoopMinerRunReason;
   lookbackDays?: number;
+  runId?: string;
 }
 
 export interface LoopMinerDeps {
@@ -62,6 +70,10 @@ function errorJson(error: unknown): Record<string, unknown> {
 function errorMessage(error: unknown): string {
   const message = errorJson(error).message;
   return typeof message === "string" ? message : String(message ?? "unknown error");
+}
+
+function vectorNormSquared(vector: number[]): number {
+  return vector.reduce((sum, value) => sum + value * value, 0);
 }
 
 function emptySummary(overrides: Partial<LoopMinerSummary> = {}): LoopMinerSummary {
@@ -276,6 +288,45 @@ function filterPatternTraceToNewEvidence(
   };
 }
 
+function mergeGroupedResults(current: LoopEpisodeGroupedResult[], incoming: LoopEpisodeGroupedResult[]): LoopEpisodeGroupedResult[] {
+  const byAnchor = new Map<string, LoopEpisodeGroupedResult>();
+  for (const row of [...current, ...incoming]) {
+    const key = row.subjectAnchor.trim().toLowerCase() || "unlabeled loop";
+    const existing = byAnchor.get(key);
+    if (!existing) {
+      byAnchor.set(key, {
+        subjectAnchor: row.subjectAnchor,
+        runs: [...row.runs],
+      });
+      continue;
+    }
+    const byRunId = new Map(existing.runs.map((run) => [run.episodeId, run]));
+    for (const run of row.runs) {
+      const prior = byRunId.get(run.episodeId);
+      if (!prior || run.score > prior.score) byRunId.set(run.episodeId, run);
+    }
+    byAnchor.set(key, {
+      subjectAnchor: existing.subjectAnchor,
+      runs: [...byRunId.values()],
+    });
+  }
+  return [...byAnchor.values()];
+}
+
+function pickLoopParentForCandidate(
+  candidateLoop: CandidateLoop,
+  loopParents: WorkspaceLoopParent[]
+): WorkspaceLoopParent | undefined {
+  const episodeIds = new Set(candidateLoop.episodeIds);
+  const direct = loopParents.find((parent) =>
+    parent.historicalRuns.some((run) => episodeIds.has(run.episodeId))
+  );
+  if (direct) return direct;
+  const sourceKey = candidateLoop.sharedSources[0]?.trim().toLowerCase();
+  if (!sourceKey) return undefined;
+  return loopParents.find((parent) => parent.subjectAnchor.trim().toLowerCase() === sourceKey);
+}
+
 export async function runLoopMinerForUser(
   auth: AuthContext,
   options: RunLoopMinerOptions = {},
@@ -304,7 +355,7 @@ export async function runLoopMinerForUser(
     }
   }
 
-  const runId = await deps.repository.createRun({ auth, runReason });
+  const runId = options.runId ?? await deps.repository.createRun({ auth, runReason });
   let summary = emptySummary();
   try {
     logger.info("loop miner run started", { runId, runReason, lookbackDays });
@@ -516,6 +567,7 @@ export async function runLoopMinerForUser(
     }
 
     const similarEpisodeIds = new Set<string>();
+    let groupedLoopResults: LoopEpisodeGroupedResult[] = [];
     let loopVectorSearchEnabled = false;
     if (config.qdrantUrl && deps.repository.updateEpisodeEmbeddingMetadata) {
       try {
@@ -539,6 +591,7 @@ export async function runLoopMinerForUser(
     }
     if (loopVectorSearchEnabled && deps.repository.updateEpisodeEmbeddingMetadata) {
       for (const episode of built.episodes) {
+        const canonicalFacet = deriveCanonicalLoopFacet(episode);
         const embeddingText = episodeEmbeddingText(episode);
         const embeddingHash = episodeEmbeddingTextHash(embeddingText);
         let vector: number[];
@@ -562,14 +615,56 @@ export async function runLoopMinerForUser(
           }
           continue;
         }
+        const invalidVectorReason = (() => {
+          if (vector.length !== config.embeddingDims) {
+            return `dimension_mismatch expected=${config.embeddingDims} got=${vector.length}`;
+          }
+          if (vector.some((value) => !Number.isFinite(value))) {
+            return "non_finite_vector_values";
+          }
+          if (vectorNormSquared(vector) <= 1e-12) {
+            return "zero_norm_vector";
+          }
+          return null;
+        })();
+        if (invalidVectorReason) {
+          const reason = invalidVectorReason;
+          summary.warnings = [
+            ...(summary.warnings ?? []),
+            `Loop episode embedding invalid for episode ${episode.id}: ${reason}`,
+          ];
+          try {
+            await deps.repository.updateEpisodeEmbeddingMetadata({
+              auth,
+              episodeId: episode.id,
+              embeddingTextHash: embeddingHash,
+              status: "failed",
+              embeddedAt: null,
+            });
+          } catch {
+            // Non-fatal metadata write failure.
+          }
+          continue;
+        }
 
         const shouldUpsert = episode.embeddingTextHash !== embeddingHash || episode.embeddingStatus !== "ready";
-        try {
-          if (shouldUpsert) {
+        const workspacePayload = deriveWorkspaceTracePayload(episode, vector);
+        if (shouldUpsert) {
+          try {
             await loopEpisodeVectorRepository.upsertEpisodeVector({
               auth,
               episodeId: episode.id,
               outputType: episode.outputType,
+              canonicalDomain: canonicalFacet.operationalDomain,
+              mechanismSignature: canonicalFacet.mechanismSignature,
+              abstractedJtbd: canonicalFacet.abstractedJtbd,
+              subjectAnchor: workspacePayload.metadata.subject_anchor,
+              operationalDomain: workspacePayload.metadata.operational_domain,
+              inputArtifactClasses: workspacePayload.metadata.input_artifact_classes,
+              outputArtifactClasses: workspacePayload.metadata.output_artifact_classes,
+              category: workspacePayload.metadata.category,
+              platform: workspacePayload.provenance.platform,
+              writtenAt: workspacePayload.provenance.written_at,
               sealedAt: episode.sealedAt,
               sources: episode.sources,
               tools: episode.toolNames,
@@ -584,13 +679,45 @@ export async function runLoopMinerForUser(
               status: "ready",
               embeddedAt: new Date().toISOString(),
             });
+          } catch (error) {
+            const message = errorMessage(error);
+            summary.warnings = [
+              ...(summary.warnings ?? []),
+              `Loop episode vector upsert failed for episode ${episode.id}: ${message}`,
+            ];
+            logger.warn("loop episode vector upsert failed", {
+              runId,
+              episodeId: episode.id,
+              error: message,
+              vectorDims: vector.length,
+              vectorNormSquared: vectorNormSquared(vector),
+              subjectAnchor: workspacePayload.metadata.subject_anchor,
+              operationalDomain: workspacePayload.metadata.operational_domain,
+              outputType: episode.outputType,
+            });
+            try {
+              await deps.repository.updateEpisodeEmbeddingMetadata({
+                auth,
+                episodeId: episode.id,
+                embeddingTextHash: embeddingHash,
+                status: "failed",
+                embeddedAt: null,
+              });
+            } catch {
+              // Non-fatal metadata write failure.
+            }
+            continue;
           }
+        }
 
+        try {
           const similar = await loopEpisodeVectorRepository.searchSimilarEpisodes({
             auth,
             vector,
             limit: 20,
             outputType: episode.outputType,
+            canonicalDomain: canonicalFacet.operationalDomain,
+            mechanismSignature: canonicalFacet.mechanismSignature,
             excludeEpisodeId: episode.id,
           });
           for (const hit of similar) {
@@ -600,21 +727,48 @@ export async function runLoopMinerForUser(
           const message = errorMessage(error);
           summary.warnings = [
             ...(summary.warnings ?? []),
-            `Loop episode vector retrieval degraded for episode ${episode.id}: ${message}`,
+            `Loop episode vector search failed for episode ${episode.id}: ${message}`,
           ];
-          logger.warn("loop episode vector retrieval disabled after error", { runId, episodeId: episode.id, error: message });
-          try {
-            await deps.repository.updateEpisodeEmbeddingMetadata({
-              auth,
-              episodeId: episode.id,
-              embeddingTextHash: embeddingHash,
-              status: "failed",
-              embeddedAt: null,
-            });
-          } catch {
-            // Non-fatal metadata write failure.
+          logger.warn("loop episode vector search failed", {
+            runId,
+            episodeId: episode.id,
+            error: message,
+            vectorDims: vector.length,
+            vectorNormSquared: vectorNormSquared(vector),
+            outputType: episode.outputType,
+            canonicalDomain: canonicalFacet.operationalDomain,
+            mechanismSignature: canonicalFacet.mechanismSignature,
+          });
+        }
+
+        try {
+          const grouped = await loopEpisodeVectorRepository.searchGroupedEpisodesBySubjectAnchor({
+            auth,
+            vector,
+            limit: 20,
+            groupSize: 20,
+            scoreThreshold: 0.65,
+            excludeEpisodeId: episode.id,
+          });
+          groupedLoopResults = mergeGroupedResults(groupedLoopResults, grouped);
+          for (const group of grouped) {
+            for (const run of group.runs) {
+              similarEpisodeIds.add(run.episodeId);
+            }
           }
-          break;
+        } catch (error) {
+          const message = errorMessage(error);
+          summary.warnings = [
+            ...(summary.warnings ?? []),
+            `Loop episode vector grouped search failed for episode ${episode.id}: ${message}`,
+          ];
+          logger.warn("loop episode vector grouped search failed", {
+            runId,
+            episodeId: episode.id,
+            error: message,
+            vectorDims: vector.length,
+            vectorNormSquared: vectorNormSquared(vector),
+          });
         }
       }
     }
@@ -629,6 +783,28 @@ export async function runLoopMinerForUser(
       ? await deps.repository.listEpisodeContext(auth, additionalContextIds)
       : [];
     const detectorEpisodes = dedupeEpisodesById([...baseDetectorEpisodes, ...additionalEpisodes]);
+    const loopParents = consolidateWorkspaceGroupedHits(
+      groupedLoopResults.map((group) => ({
+        subjectAnchor: group.subjectAnchor,
+        runs: group.runs.map((run) => ({
+          id: run.pointId,
+          episodeId: run.episodeId,
+          text: run.text,
+          score: run.score,
+          metadata: {
+            subject_anchor: run.metadata.subjectAnchor,
+            operational_domain: run.metadata.operationalDomain as "Copywriting" | "System_Design" | "Calculations" | "Visual_Enhancement",
+            input_artifact_classes: run.metadata.inputArtifactClasses,
+            output_artifact_classes: run.metadata.outputArtifactClasses,
+            category: run.metadata.category,
+          },
+          provenance: {
+            platform: run.provenance.platform,
+            written_at: run.provenance.writtenAt,
+          },
+        })),
+      }))
+    );
 
     const detected = await deps.loopDetector.execute(detectorEpisodes);
     const restrictToNewEvidence = latestIncremental !== null && newEpisodeIds.size > 0;
@@ -669,6 +845,13 @@ export async function runLoopMinerForUser(
         rejectedGroups: patternTrace?.rejectedGroups.length ?? 0,
         warningCount: detected.warnings.length,
       },
+      vectorRetrieval: loopParents.length > 0
+        ? {
+            status: "grouped",
+            groupCount: loopParents.length,
+            runCount: loopParents.reduce((sum, parent) => sum + parent.historicalRuns.length, 0),
+          }
+        : (summary.debugTrace?.vectorRetrieval ?? undefined),
     };
 
     const episodesByLoop = new Map<string, EpisodeRecord[]>();
@@ -729,6 +912,7 @@ export async function runLoopMinerForUser(
             dna: item.workflowDna,
             suggestedPrompt,
             fingerprint: workflowDnaFingerprint(item.workflowDna),
+            loopParent: pickLoopParentForCandidate(item.candidateLoop, loopParents),
           })
         : {
             suggestion: await deps.repository.createWorkflowSuggestion({
@@ -739,6 +923,7 @@ export async function runLoopMinerForUser(
               dna: item.workflowDna,
               suggestedPrompt,
               fingerprint: workflowDnaFingerprint(item.workflowDna),
+              loopParent: pickLoopParentForCandidate(item.candidateLoop, loopParents),
             }),
             created: false,
             updated: false,
@@ -770,4 +955,36 @@ export async function runLoopMinerForUser(
 
 export async function listLoopMinerRunsForUser(auth: AuthContext, limit = 10): Promise<LoopMinerRunView[]> {
   return new PgLoopMinerRepository().listRunViews(auth, limit);
+}
+
+export async function queueLoopMinerRunForUser(
+  auth: AuthContext,
+  options: RunLoopMinerOptions = {}
+): Promise<LoopMinerRunView | null> {
+  const runReason = options.runReason ?? "manual";
+  const lookbackDays = Math.max(1, Math.min(options.lookbackDays ?? 30, 90));
+  const deps = createDefaultDeps();
+  const runId = await deps.repository.createRun({ auth, runReason });
+  logger.info("loop miner background run queued", { runId, runReason, lookbackDays });
+
+  void runLoopMinerForUser(auth, { ...options, runReason, lookbackDays, runId }, deps)
+    .then((result) => {
+      logger.info("loop miner background run settled", {
+        runId,
+        status: result.status,
+        durationMs: result.summary.durationMs,
+        warnings: result.summary.warnings?.length ?? 0,
+        loopsQualified: result.summary.loopsQualified,
+        suggestionsCreated: result.summary.suggestionsCreated,
+      });
+    })
+    .catch((error) => {
+      logger.error("loop miner background run crashed", {
+        runId,
+        error: errorJson(error),
+      });
+    });
+
+  const repo = new PgLoopMinerRepository();
+  return repo.getRunView(auth, runId);
 }

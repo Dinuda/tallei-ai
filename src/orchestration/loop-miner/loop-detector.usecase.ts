@@ -12,7 +12,14 @@ import type {
   PatternTrace,
   PhaseUsageMetrics,
 } from "./types.js";
-import { estimatePromptTokensFromRequest, readJsonObject, readString, readStringArray } from "./utils.js";
+import {
+  deriveCanonicalLoopFacet,
+  estimatePromptTokensFromRequest,
+  evaluateProjectProgression,
+  readJsonObject,
+  readString,
+  readStringArray,
+} from "./utils.js";
 
 type ChatFn = (request: ChatCompletionRequest) => Promise<ChatCompletionResponse>;
 
@@ -21,6 +28,7 @@ function errorMessage(error: unknown): string {
 }
 
 function compactEpisodeForDetection(episode: EpisodeRecord): Record<string, unknown> {
+  const canonical = deriveCanonicalLoopFacet(episode);
   const intent = episode.intent.length <= 120 ? episode.intent : `${episode.intent.slice(0, 117)}...`;
   const steps = episode.steps.slice(0, 4).join(" | ");
   const stepsCompact = steps.length <= 80 ? steps : `${steps.slice(0, 77)}...`;
@@ -35,6 +43,9 @@ function compactEpisodeForDetection(episode: EpisodeRecord): Record<string, unkn
     id: episode.id,
     intent,
     outputType: episode.outputType,
+    abstractedJtbd: canonical.abstractedJtbd,
+    operationalDomain: canonical.operationalDomain,
+    mechanismSignature: canonical.mechanismSignature,
     steps: stepsCompact || "none",
     sources: episode.sources.slice(0, 4),
     tools: episode.toolNames.slice(0, 4),
@@ -192,6 +203,90 @@ function dedupeStrictSubsetGroups(groups: LlmGroup[]): LlmGroup[] {
     }
   }
   return groups.filter((_, index) => !dropped.has(index));
+}
+
+function hasConcreteRepeatedAction(episodes: EpisodeRecord[]): boolean {
+  const signatures = episodes.map((episode) => deriveCanonicalLoopFacet(episode).mechanismSignature);
+  if (signatures.length < 2) return false;
+  const unique = new Set(signatures);
+  if (unique.size === 1) return true;
+  const normalizedStepBlocks = episodes
+    .map((episode) => episode.steps.join(" ").toLowerCase().replace(/\s+/g, " ").trim())
+    .filter((value) => value.length > 0);
+  if (normalizedStepBlocks.length < 2) return false;
+  const stepSet = new Set(normalizedStepBlocks);
+  if (stepSet.size === 1 && (normalizedStepBlocks[0]?.length ?? 0) >= 24) return true;
+  return false;
+}
+
+function isLookupOnlyEpisode(episode: EpisodeRecord): boolean {
+  const signal = `${episode.intent} ${episode.steps.join(" ")}`.toLowerCase();
+  return /\b(lookup|look up|search|find|retrieve)\b/.test(signal) && episode.steps.length <= 1;
+}
+
+function hasRepeatedCopywritingMemoryWorkflow(episodes: EpisodeRecord[]): boolean {
+  if (episodes.length < 2) return false;
+  const copywritingEpisodes = episodes.filter((episode) => {
+    const signal = `${episode.outputType} ${episode.intent} ${episode.steps.join(" ")}`.toLowerCase();
+    const hasArtifact = /\b(newsletter|email|copy|copywriting|positioning|product philosophy|technical explanations?)\b/.test(signal);
+    const hasAction = /\b(write|writing|draft|brainstorm|hooks?|structure|refine|sharpen|finalize|turn .* into|product copy)\b/.test(signal);
+    return hasArtifact && hasAction;
+  });
+  return copywritingEpisodes.length >= 2;
+}
+
+function applyDeterministicGuards(
+  groups: LlmGroup[],
+  episodesById: Map<string, EpisodeRecord>
+): LlmGroup[] {
+  return groups.map((group) => {
+    const groupEpisodes = group.episodeIds
+      .map((id) => episodesById.get(id))
+      .filter((episode): episode is EpisodeRecord => Boolean(episode));
+    if (groupEpisodes.length < 2) {
+      return {
+        ...group,
+        status: "rejected_insufficient_evidence",
+        confidence: 0.2,
+        reasoning: `${group.reasoning} Rejected: fewer than 2 valid episodes.`,
+      };
+    }
+
+    const progression = evaluateProjectProgression(groupEpisodes);
+    if (progression.isProjectProgression) {
+      return {
+        ...group,
+        status: "rejected_topical_similarity",
+        confidence: Math.min(group.confidence, 0.2),
+        reasoning: `${group.reasoning} Rejected as project progression (${progression.reason}).`,
+      };
+    }
+
+    const memoryOnly = groupEpisodes.every((episode) =>
+      episode.turns.every((turn) => turn.sourceEventType === "memory_record")
+    );
+    const lookupOnly = groupEpisodes.every(isLookupOnlyEpisode);
+    const repeatedCopywritingMemoryWorkflow = memoryOnly && hasRepeatedCopywritingMemoryWorkflow(groupEpisodes);
+    if ((memoryOnly || lookupOnly) && !hasConcreteRepeatedAction(groupEpisodes) && !repeatedCopywritingMemoryWorkflow) {
+      return {
+        ...group,
+        status: "rejected_insufficient_evidence",
+        confidence: Math.min(group.confidence, 0.25),
+        reasoning: `${group.reasoning} Rejected: memory/lookup-only evidence without repeated concrete action pattern.`,
+      };
+    }
+
+    const mechanisms = new Set(groupEpisodes.map((episode) => deriveCanonicalLoopFacet(episode).mechanismSignature));
+    if (mechanisms.size === 1 || repeatedCopywritingMemoryWorkflow) {
+      return {
+        ...group,
+        status: "approved_loop",
+        confidence: 1,
+        reasoning: `${group.reasoning} Approved by deterministic ${repeatedCopywritingMemoryWorkflow ? "copywriting memory workflow" : "canonical mechanism match"}.`,
+      };
+    }
+    return group;
+  });
 }
 
 function buildPatternTrace(
@@ -362,12 +457,14 @@ export class LoopDetectorUseCase {
 
     const mergedGroups = mergeGroupsAcrossBatches(allGroups);
     const dedupedGroups = dedupeStrictSubsetGroups(mergedGroups);
+    const episodesById = new Map(episodes.map((episode) => [episode.id, episode]));
+    const guardedGroups = applyDeterministicGuards(dedupedGroups, episodesById);
 
-    const approvedGroups = dedupedGroups.filter((g) => g.status === "approved_loop");
+    const approvedGroups = guardedGroups.filter((g) => g.status === "approved_loop");
     const approvedIds = approvedGroups.map((g) => groupKey(g));
     const loops = approvedGroups.map(buildCandidateLoop);
 
-    const patternTrace = buildPatternTrace(dedupedGroups, approvedIds);
+    const patternTrace = buildPatternTrace(guardedGroups, approvedIds);
 
     return {
       loops,

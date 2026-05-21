@@ -27,6 +27,11 @@ import type {
 import {
   chunkEventsByTimeGap,
   compactMinerEvent,
+  consolidateWorkspaceGroupedHits,
+  deriveCanonicalLoopFacet,
+  deriveWorkspaceTracePayload,
+  episodeEmbeddingText,
+  evaluateProjectProgression,
   estimateTokens,
   explicitWorkflowMemoryExtraction,
   LOOP_EPISODE_EXTRACTION_VERSION,
@@ -424,6 +429,129 @@ test("loop miner normalizer preserves expanded collab output types", () => {
   assert.equal(extraction?.output?.type, "slides");
 });
 
+test("loop canonicalization strips structural tokens and flags sequential project progression", () => {
+  const week2: EpisodeRecord = {
+    ...episode("w2", "slides"),
+    title: "Week 2 slide pack",
+    intent: "Create Week 2 slide pack for AI course module",
+    steps: ["Draft lesson layout", "Refine slide copy"],
+    turns: [{
+      role: "user",
+      contentSummary: "Create Week 2 slide pack for AI course module",
+      sourceEventType: "collab_task",
+      sourceEventId: "event-w2",
+      createdAt: "2026-05-01T09:00:00.000Z",
+    }],
+  };
+  const week3: EpisodeRecord = {
+    ...episode("w3", "slides"),
+    title: "Week 3 course material",
+    intent: "Create Week 3 course material for AI course module",
+    steps: ["Draft lesson layout", "Refine slide copy"],
+    turns: [{
+      role: "user",
+      contentSummary: "Create Week 3 course material for AI course module",
+      sourceEventType: "collab_task",
+      sourceEventId: "event-w3",
+      createdAt: "2026-05-08T09:00:00.000Z",
+    }],
+  };
+
+  const facet2 = deriveCanonicalLoopFacet(week2);
+  const facet3 = deriveCanonicalLoopFacet(week3);
+  assert.ok(!/\bweek\s*2\b/.test(facet2.abstractedJtbd));
+  assert.ok(!/\bweek\s*3\b/.test(facet3.abstractedJtbd));
+  const progression = evaluateProjectProgression([week2, week3]);
+  assert.equal(progression.isProjectProgression, true);
+});
+
+test("loop canonicalization maps different topics to one mechanism signature", () => {
+  const episodeA: EpisodeRecord = {
+    ...episode("m1", "document"),
+    intent: "Turn vague orchestration input into clean copy-pastable workflow instructions",
+    steps: ["Expand into structure", "Debloat copy", "Finalize deliverable"],
+  };
+  const episodeB: EpisodeRecord = {
+    ...episode("m2", "document"),
+    intent: "Turn rough MCP notes into clean copy-pastable operating instructions",
+    steps: ["Expand into structure", "Debloat copy", "Finalize deliverable"],
+  };
+  const facetA = deriveCanonicalLoopFacet(episodeA);
+  const facetB = deriveCanonicalLoopFacet(episodeB);
+  assert.equal(facetA.mechanismSignature, facetB.mechanismSignature);
+  assert.match(episodeEmbeddingText(episodeA), /mechanismSignature=/);
+});
+
+test("workspace trace payload derives canonical metadata and provenance", () => {
+  const row: EpisodeRecord = {
+    ...episode("trace-1", "spreadsheet"),
+    title: "Quarterly spreadsheet audit run",
+    intent: "Audit spreadsheet formulas and reconcile budget variance for finance ops",
+    sources: ["Finance Ops Sheet"],
+    toolNames: ["chatgpt"],
+    sealedAt: "2026-05-21T08:30:00.000Z",
+  };
+
+  const payload = deriveWorkspaceTracePayload(row, [0.1, 0.2, 0.3]);
+  assert.equal(payload.id, "trace-1");
+  assert.equal(payload.metadata.subject_anchor, "Finance Ops Sheet");
+  assert.equal(payload.metadata.operational_domain, "Calculations");
+  assert.ok(payload.metadata.input_artifact_classes.includes("spreadsheet"));
+  assert.ok(payload.metadata.output_artifact_classes.includes("spreadsheet"));
+  assert.equal(payload.provenance.platform, "chatgpt");
+  assert.equal(payload.provenance.written_at, "2026-05-21T08:30:00.000Z");
+});
+
+test("workspace grouped-hit consolidation merges >92% artifact-overlap groups and sorts runs chronologically", () => {
+  const consolidated = consolidateWorkspaceGroupedHits([
+    {
+      subjectAnchor: "AI Makers Curriculum",
+      runs: [{
+        id: "point-2",
+        episodeId: "episode-2",
+        text: "Run 2",
+        score: 0.82,
+        metadata: {
+          subject_anchor: "AI Makers Curriculum",
+          operational_domain: "System_Design",
+          input_artifact_classes: ["docx", "blueprint_notes"],
+          output_artifact_classes: ["markdown"],
+          category: "document",
+        },
+        provenance: {
+          platform: "chatgpt",
+          written_at: "2026-05-22T08:00:00.000Z",
+        },
+      }],
+    },
+    {
+      subjectAnchor: "MCP Orchestration Notes",
+      runs: [{
+        id: "point-1",
+        episodeId: "episode-1",
+        text: "Run 1",
+        score: 0.86,
+        metadata: {
+          subject_anchor: "MCP Orchestration Notes",
+          operational_domain: "System_Design",
+          input_artifact_classes: ["docx", "blueprint_notes"],
+          output_artifact_classes: ["markdown"],
+          category: "document",
+        },
+        provenance: {
+          platform: "chatgpt",
+          written_at: "2026-05-21T08:00:00.000Z",
+        },
+      }],
+    },
+  ]);
+
+  assert.equal(consolidated.length, 1);
+  assert.equal(consolidated[0]?.historicalRuns.length, 2);
+  assert.equal(consolidated[0]?.historicalRuns[0]?.episodeId, "episode-1");
+  assert.equal(consolidated[0]?.historicalRuns[1]?.episodeId, "episode-2");
+});
+
 test("repository listRecentEvents gives fresh imports higher memory evidence importance", async () => {
   const originalQuery = pool.query.bind(pool);
   const repository = new LoopMinerRepository();
@@ -787,7 +915,6 @@ test("runLoopMinerForUser only builds new evidence and evaluates loops containin
   });
 
   const responses = [
-    { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e-new"] }] },
     { groups: [
       { episodeIds: ["episode-old", "episode-2"], loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "new evidence reinforces existing loop", status: "approved_loop", confidence: 0.9 },
       { episodeIds: ["episode-old", "episode-stale"], loopName: "Old only", sharedIntent: "Old work", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "should be invalid because stale id is unknown", status: "approved_loop", confidence: 0.9 },
@@ -920,8 +1047,6 @@ test("runLoopMinerForUser falls back to included memory decisions when memory ev
     },
   ]);
   const responses = [
-    { episodes: [{ intent: "Write Tallei newsletters with ChatGPT support", sources: ["Imported ChatGPT memory"], outputType: "newsletter", toolNames: ["chatgpt"], steps: ["Brainstorm hooks", "Sharpen product philosophy", "Draft readable narratives"], approved: true, eventIds: ["memory-newsletter-2"] }] },
-    { episodes: [{ intent: "Write Tallei newsletters with ChatGPT support", sources: ["Imported ChatGPT memory"], outputType: "newsletter", toolNames: ["chatgpt"], steps: ["Brainstorm hooks", "Sharpen product philosophy", "Draft readable narratives"], approved: true, eventIds: ["memory-newsletter-1"] }] },
     { groups: [{ episodeIds: ["episode-1", "episode-2"], loopName: "Newsletter writing pattern", sharedIntent: "Write Tallei newsletters with ChatGPT support", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "newsletter", reasoning: "shared newsletter artifact and AI-assisted writing workflow", status: "approved_loop", confidence: 0.84 }] },
     { evaluations: [{ loopName: "Newsletter writing pattern", episodeIds: ["episode-1", "episode-2"], confidence: 0.5, verdict: "discard", reasoning: "test stops before suggestion creation", estimatedCadence: "implicit", estimatedValue: "medium", automationReadiness: "partial", risks: [] }] },
   ];
@@ -1087,7 +1212,7 @@ test("loop detector groups multiple single memory entries when their workflows m
   ]);
   assert.equal(result.loops.length, 1);
   assert.deepEqual(result.loops[0]?.episodeIds, ["episode-memory-1", "episode-memory-2"]);
-  assert.equal(result.patternTrace.candidateGroups[0]?.generationReason, "matching_memory_entries");
+  assert.match(result.patternTrace.candidateGroups[0]?.generationReason ?? "", /matching_memory_entries/);
 });
 
 test("loop detector groups repeated imported newsletter memories without explicit cadence", async () => {
@@ -1132,7 +1257,7 @@ test("loop detector groups repeated imported newsletter memories without explici
   assert.ok(newsletterLoop);
   assert.equal(newsletterLoop.episodeIds.length, 2);
   assert.equal(result.patternTrace.approvedGroups.length, 1);
-  assert.equal(result.patternTrace.candidateGroups[0]?.generationReason, "matching_memory_entries");
+  assert.match(result.patternTrace.candidateGroups[0]?.generationReason ?? "", /matching_memory_entries/);
 });
 
 test("loop detector rejects imported memory entries that only share artifact/source or wow-factor wording", async () => {
@@ -1210,6 +1335,103 @@ test("loop detector rejects same-topic groups when judge identifies topical simi
   assert.equal(result.loops.length, 0);
   assert.equal(result.patternTrace.candidateGroups.length, 1);
   assert.equal(result.patternTrace.rejectedGroups[0]?.status, "rejected_topical_similarity");
+});
+
+test("loop detector rejects sequential project progression even when LLM approves", async () => {
+  const makeCourseEpisode = (id: string, intent: string): EpisodeRecord => ({
+    id,
+    title: intent,
+    summary: intent,
+    intent,
+    sources: ["AI Makers course"],
+    outputType: "slides",
+    toolNames: ["chatgpt"],
+    steps: ["Draft lesson layout", "Refine slide copy"],
+    approved: true,
+    eventIds: [`event-${id}`],
+    sealedAt: "2026-05-20T10:30:00.000Z",
+    turnCount: 1,
+    turns: [{
+      role: "user",
+      contentSummary: intent,
+      sourceEventType: "collab_task",
+      sourceEventId: `event-${id}`,
+      createdAt: "2026-05-20T10:30:00.000Z",
+    }],
+  });
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({
+      groups: [{
+        episodeIds: ["course-2", "course-3"],
+        loopName: "AI course slide work",
+        sharedIntent: "Create AI course materials",
+        sharedSources: ["AI Makers course"],
+        sharedOutputType: "slides",
+        reasoning: "llm approved",
+        status: "approved_loop",
+        confidence: 0.92,
+      }],
+    }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+
+  const result = await detector.execute([
+    makeCourseEpisode("course-2", "Create Week 2 slide pack for AI Makers"),
+    makeCourseEpisode("course-3", "Create Week 3 course material for AI Makers"),
+  ]);
+  assert.equal(result.loops.length, 0);
+  assert.equal(result.patternTrace.rejectedGroups[0]?.status, "rejected_topical_similarity");
+});
+
+test("loop detector upgrades exact mechanism matches to approved_loop with max confidence", async () => {
+  const makeMechanismEpisode = (id: string, intent: string): EpisodeRecord => ({
+    id,
+    title: intent,
+    summary: intent,
+    intent,
+    sources: ["chatgpt"],
+    outputType: "document",
+    toolNames: ["chatgpt"],
+    steps: ["Expand into structure", "Debloat copy", "Finalize deliverable"],
+    approved: true,
+    eventIds: [`event-${id}`],
+    sealedAt: "2026-05-20T10:30:00.000Z",
+    turnCount: 1,
+    turns: [{
+      role: "user",
+      contentSummary: intent,
+      sourceEventType: "ai_activity_event",
+      sourceEventId: `event-${id}`,
+      createdAt: "2026-05-20T10:30:00.000Z",
+    }],
+  });
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({
+      groups: [{
+        episodeIds: ["mech-1", "mech-2"],
+        loopName: "Doc prep pattern",
+        sharedIntent: "Operational writing",
+        sharedSources: ["chatgpt"],
+        sharedOutputType: "document",
+        reasoning: "candidate monitor",
+        status: "monitor_pattern",
+        confidence: 0.65,
+      }],
+    }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+
+  const result = await detector.execute([
+    makeMechanismEpisode("mech-1", "Turn vague orchestration input into clean copy-pastable workflow instructions"),
+    makeMechanismEpisode("mech-2", "Turn rough MCP notes into clean copy-pastable operating instructions"),
+  ]);
+  assert.equal(result.loops.length, 1);
+  assert.equal(result.loops[0]?.patternConfidence, 1);
+  assert.equal(result.patternTrace.approvedGroups.length, 1);
 });
 
 test("loop evaluator parses batched array output and tolerates malformed rows", async () => {

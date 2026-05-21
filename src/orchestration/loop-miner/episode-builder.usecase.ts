@@ -1,7 +1,6 @@
 import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
-import { isRetriableProviderError } from "../../providers/ai/index.js";
+import { aiProviderRegistry, isRetriableProviderError } from "../../providers/ai/index.js";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "../../providers/ai/types.js";
 import { TimeoutError } from "../../resilience/timeout.js";
 import type { CleanupAiUsage } from "../memory-cleanup/types.js";
@@ -14,6 +13,7 @@ import {
   compactMinerEvent,
   estimatePromptTokensFromRequest,
   estimateTokens,
+  explicitWorkflowMemoryExtraction,
   LOOP_EPISODE_EXTRACTION_VERSION,
   normalizeEpisodeExtraction,
   packByEstimatedPromptBudget,
@@ -112,7 +112,78 @@ export class EpisodeBuilderUseCase {
 
     const compactSummaryCap = Math.max(160, config.loopMinerEventSummaryCharCap);
     const promptBudgetTokens = Math.max(1200, config.loopMinerPromptBudgetTokens);
-    const llmEvents = input.events;
+    const llmEvents: MinerEvent[] = [];
+    for (const event of input.events) {
+      const extraction = explicitWorkflowMemoryExtraction(event);
+      if (!extraction) {
+        llmEvents.push(event);
+        continue;
+      }
+      const turns = [{
+        role: event.role,
+        contentSummary: event.contentSummary,
+        sourceEventType: event.sourceEventType,
+        sourceEventId: event.id,
+        createdAt: event.createdAt,
+      }] as const;
+      const sourceFingerprint = sourceFingerprintFromTurns(turns, LOOP_EPISODE_EXTRACTION_VERSION);
+      const reusable = this.repository.findReusableEpisodeBySourceFingerprint
+        ? await this.repository.findReusableEpisodeBySourceFingerprint({
+            auth: input.auth,
+            sourceFingerprint,
+            extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+          })
+        : null;
+      if (reusable) {
+        episodes.push(reusable);
+        rawResponses.push({
+          source: "episode_reused_by_source_fingerprint",
+          sourceFingerprint,
+          episodeId: reusable.id,
+          eventIds: reusable.eventIds,
+        });
+        continue;
+      }
+      episodes.push(await this.repository.createEpisode({
+        auth: input.auth,
+        runId: input.runId,
+        extraction,
+        sourceFingerprint,
+        extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+        turns: [...turns],
+      }));
+      rawResponses.push({
+        source: "deterministic_memory_workflow_extraction",
+        eventId: event.id,
+        title: extraction.title ?? extraction.intent,
+        outputType: extraction.outputType,
+        cadence: extraction.automationSignals?.likelyCadence ?? "unknown",
+      });
+    }
+
+    if (llmEvents.length === 0) {
+      const inputEvents = input.events.length;
+      const outputEpisodes = episodes.length;
+      const estimatedTokens = usage.estimatedTotalTokens;
+      const estimatedCostUsd = Number(usage.estimatedCostUsd.toFixed(6));
+      const phaseUsage: EpisodeBuilderEfficiencyMetrics = {
+        calls: aiCalls,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
+        estimatedTotalTokens: estimatedTokens,
+        estimatedCostUsd,
+        batchesProcessed,
+        batchesSkipped,
+        inputEvents,
+        outputEpisodes,
+        tokensPerInputEvent: inputEvents > 0 ? Number((estimatedTokens / inputEvents).toFixed(2)) : 0,
+        tokensPerOutputEpisode: outputEpisodes > 0 ? Number((estimatedTokens / outputEpisodes).toFixed(2)) : 0,
+        costPerOutputEpisodeUsd: outputEpisodes > 0 ? Number((estimatedCostUsd / outputEpisodes).toFixed(6)) : 0,
+        maxEstimatedPromptTokensPerCall,
+      };
+      return { episodes, raw: rawResponses, aiCalls, usage, warnings, phaseUsage };
+    }
     const preChunks = chunkEventsByTimeGap(llmEvents, 4);
 
     for (const [chunkIndex, chunk] of preChunks.entries()) {

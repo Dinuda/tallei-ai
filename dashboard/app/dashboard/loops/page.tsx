@@ -47,6 +47,7 @@ type LoopInsight = {
   id: string;
   name: string;
   description: string;
+  primarySourceFile: string;
   frequency: string;
   conversationCount: number;
   lastOccurred: string;
@@ -108,6 +109,31 @@ type LoopMinerRun = {
   };
   episodes: LoopMinerEpisode[];
   suggestions: LoopMinerSuggestion[];
+  loopParents?: Array<{
+    id: string;
+    subjectAnchor: string;
+    confidenceScore: number;
+    primarySourceFile: string;
+    totalRunsCount: number;
+    operationalDomain: "Copywriting" | "System_Design" | "Calculations" | "Visual_Enhancement";
+    historicalRuns: Array<{
+      id: string;
+      episodeId: string;
+      text: string;
+      score: number;
+      metadata: {
+        subject_anchor: string;
+        operational_domain: "Copywriting" | "System_Design" | "Calculations" | "Visual_Enhancement";
+        input_artifact_classes: string[];
+        output_artifact_classes: string[];
+        category: string | null;
+      };
+      provenance: {
+        platform: string;
+        written_at: string;
+      };
+    }>;
+  }>;
 };
 
 type LoopMinerRunsPayload = {
@@ -189,11 +215,28 @@ function episodeToConversation(episode: LoopMinerEpisode): Conversation {
   };
 }
 
-function buildLoopInsights(runs: LoopMinerRun[]): LoopInsight[] {
-  if (runs.length === 0) return [];
-  const latest = runs[0];
-  const episodes = latest.episodes ?? [];
-  const suggestions = latest.suggestions ?? [];
+function runHasDisplayableLoopData(run: LoopMinerRun): boolean {
+  return (run.suggestions?.length ?? 0) > 0
+    || (Array.isArray(run.loopParents) && run.loopParents.length > 0)
+    || (run.episodes?.length ?? 0) > 0;
+}
+
+function pickRunForDisplay(runs: LoopMinerRun[]): LoopMinerRun | null {
+  if (runs.length === 0) return null;
+  const withSuggestions = runs.find((run) => (run.suggestions?.length ?? 0) > 0);
+  if (withSuggestions) return withSuggestions;
+  const withLoopParents = runs.find((run) => Array.isArray(run.loopParents) && run.loopParents.length > 0);
+  if (withLoopParents) return withLoopParents;
+  const withLoopData = runs.find(runHasDisplayableLoopData);
+  if (withLoopData) return withLoopData;
+  const completed = runs.find((run) => run.status === "completed");
+  return completed ?? runs[0] ?? null;
+}
+
+function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
+  const episodes = run.episodes ?? [];
+  const suggestions = run.suggestions ?? [];
+  const loopParents = Array.isArray(run.loopParents) ? run.loopParents : [];
   const episodeById = new Map(episodes.map((episode) => [episode.id, episode]));
 
   if (suggestions.length > 0) {
@@ -216,18 +259,47 @@ function buildLoopInsights(runs: LoopMinerRun[]): LoopInsight[] {
 
       const lastOccurred = conversations
         .map((conversation) => conversation.date)
-        .sort((a, b) => b.localeCompare(a))[0] ?? latest.completedAt ?? latest.createdAt;
+        .sort((a, b) => b.localeCompare(a))[0] ?? run.completedAt ?? run.createdAt;
 
       const cadence = cadenceLabel(evaluation.estimatedCadence);
       return {
         id: suggestion.id,
         name: suggestion.title,
         description: suggestion.reason,
+        primarySourceFile: conversations[0]?.platform ?? "unknown",
         frequency: cadence,
         conversationCount: Math.max(suggestion.triggerCount, conversations.length),
         lastOccurred,
         nextPredicted: inferNextPredictionFromCadence(lastOccurred, cadence),
         confidence: Math.max(1, Math.min(99, Math.round((suggestion.confidence ?? 0.5) * 100))),
+        status: "detected",
+        conversations,
+      };
+    });
+  }
+
+  if (loopParents.length > 0) {
+    return loopParents.map((parent) => {
+      const conversations = parent.historicalRuns.map((run) => ({
+        id: run.id,
+        title: run.metadata.subject_anchor,
+        date: run.provenance.written_at,
+        platform: inferPlatform([run.provenance.platform]),
+        snippet: run.text || "Historical run",
+      }));
+      const lastOccurred = conversations
+        .map((conversation) => conversation.date)
+        .sort((a, b) => b.localeCompare(a))[0] ?? run.completedAt ?? run.createdAt;
+      return {
+        id: parent.id,
+        name: parent.subjectAnchor,
+        description: `${parent.operationalDomain.replace(/_/g, " ")} loop`,
+        primarySourceFile: parent.primarySourceFile,
+        frequency: "Grouped pattern",
+        conversationCount: parent.totalRunsCount,
+        lastOccurred,
+        nextPredicted: inferNextPredictionFromCadence(lastOccurred, "weekly"),
+        confidence: Math.max(1, Math.min(99, Math.round(parent.confidenceScore * 100))),
         status: "detected",
         conversations,
       };
@@ -247,11 +319,12 @@ function buildLoopInsights(runs: LoopMinerRun[]): LoopInsight[] {
       const conversations = groupedEpisodes
         .sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""))
         .map(episodeToConversation);
-      const lastOccurred = conversations[0]?.date ?? latest.completedAt ?? latest.createdAt;
+      const lastOccurred = conversations[0]?.date ?? run.completedAt ?? run.createdAt;
       return {
         id: `episode-group-${index}-${key}`,
         name: conversations[0]?.title ?? "Detected Episode Pattern",
         description: conversations[0]?.snippet ?? "Pattern inferred from built episodes.",
+        primarySourceFile: conversations[0]?.platform ?? "unknown",
         frequency: "Detected pattern",
         conversationCount: conversations.length,
         lastOccurred,
@@ -537,6 +610,7 @@ function LoopCard({
   onLoop: (id: string) => void;
 }) {
   const [looped, setLooped] = useState(loop.status === "looped");
+  const [expanded, setExpanded] = useState(false);
   const days = daysUntil(loop.nextPredicted);
 
   return (
@@ -574,18 +648,19 @@ function LoopCard({
           {/* Title + meta */}
           <div className="mb-1">
             <h3 className="text-base font-bold text-[var(--text)]">{loop.name}</h3>
-            <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
-              <MessageCircle size={11} />
-              {loop.conversationCount} conversations
-            </p>
+            <div className="mt-2 grid grid-cols-3 gap-2 text-[10px] text-[var(--text-muted)]">
+              <div className="rounded bg-slate-50 px-2 py-1">Confidence {loop.confidence}%</div>
+              <div className="rounded bg-slate-50 px-2 py-1 truncate" title={loop.primarySourceFile}>
+                Source {loop.primarySourceFile}
+              </div>
+              <div className="rounded bg-slate-50 px-2 py-1">{loop.conversationCount} runs</div>
+            </div>
           </div>
 
-          {/* Deck */}
           <div className="mb-1 mt-4">
             <ConversationDeck conversations={loop.conversations} />
           </div>
 
-          {/* Creative timeline */}
           <div className="mb-2 mt-3 flex justify-center">
             <CreativeTimeline
               conversations={loop.conversations}
@@ -593,6 +668,41 @@ function LoopCard({
               loopId={loop.id}
             />
           </div>
+
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="mt-3 inline-flex items-center gap-2 text-xs font-medium text-[var(--text-2)] hover:text-[var(--text)]"
+          >
+            <MessageCircle size={12} />
+            {expanded ? "Hide historical runs" : "Show historical runs"}
+          </button>
+          <AnimatePresence initial={false}>
+            {expanded ? (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="mt-3 max-h-44 overflow-y-auto border border-[var(--border-light)] bg-white">
+                  {loop.conversations
+                    .slice()
+                    .sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
+                    .map((conversation) => (
+                      <div key={conversation.id} className="border-b border-[var(--border-light)] px-3 py-2 text-xs last:border-b-0">
+                        <div className="flex items-center justify-between text-[var(--text-muted)]">
+                          <span>{formatDate(conversation.date)}</span>
+                          <span>{conversation.platform}</span>
+                        </div>
+                        <div className="mt-1 font-medium text-[var(--text)]">{conversation.title}</div>
+                        <div className="mt-0.5 text-[var(--text-2)]">{conversation.snippet}</div>
+                      </div>
+                    ))}
+                </div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
 
           {/* Footer */}
           <div className="flex items-center justify-between gap-3 border-t border-[var(--border-light)] pt-4">
@@ -743,6 +853,7 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
 export default function LoopsPage() {
   const [loops, setLoops] = useState<LoopInsight[]>([]);
   const [latestRun, setLatestRun] = useState<LoopMinerRun | null>(null);
+  const [latestObservedRun, setLatestObservedRun] = useState<LoopMinerRun | null>(null);
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -755,11 +866,14 @@ export default function LoopsPage() {
       const payload = (await response.json().catch(() => ({}))) as LoopMinerRunsPayload;
       if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
-      setLatestRun(runs[0] ?? null);
-      setLoops(buildLoopInsights(runs));
+      const displayRun = pickRunForDisplay(runs);
+      setLatestObservedRun(runs[0] ?? null);
+      setLatestRun(displayRun);
+      setLoops(displayRun ? buildLoopInsightsFromRun(displayRun) : []);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
       setLatestRun(null);
+      setLatestObservedRun(null);
       setLoops([]);
     } finally {
       setLoading(false);
@@ -769,6 +883,14 @@ export default function LoopsPage() {
   useEffect(() => {
     void loadLoopMinerRuns();
   }, [loadLoopMinerRuns]);
+
+  useEffect(() => {
+    if (latestObservedRun?.status !== "running") return;
+    const timer = setInterval(() => {
+      void loadLoopMinerRuns();
+    }, 5_000);
+    return () => clearInterval(timer);
+  }, [latestObservedRun?.status, loadLoopMinerRuns]);
 
   const dismissLoop = useCallback((id: string) => {
     setLoops((prev) => prev.filter((l) => l.id !== id));

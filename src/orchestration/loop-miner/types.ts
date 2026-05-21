@@ -6,6 +6,17 @@ export type LoopMinerRunReason = "daily_intelligence" | "manual";
 export type LoopMinerSourceEventType = "ai_activity_event" | "collab_task" | "memory_record";
 export type EpisodeTurnRole = "user" | "assistant" | "system";
 export type LoopVerdict = "automate" | "monitor" | "discard";
+export type LoopOperationalDomain =
+  | "copywriting_translation"
+  | "operational_document_scoping"
+  | "financial_calculation_spreadsheet_audit"
+  | "asset_visual_enhancement"
+  | "administrative_billing";
+export type WorkspaceTraceOperationalDomain =
+  | "Copywriting"
+  | "System_Design"
+  | "Calculations"
+  | "Visual_Enhancement";
 
 export interface MinerEvent {
   id: string;
@@ -78,6 +89,61 @@ export interface EpisodeTurnRecord {
   sourceEventType: LoopMinerSourceEventType;
   sourceEventId: string;
   createdAt: string;
+}
+
+export interface CanonicalLoopFacet {
+  abstractedJtbd: string;
+  operationalDomain: LoopOperationalDomain;
+  mechanismSignature: string;
+  artifactClass: string;
+  actionClass: string;
+  sequenceSignal: {
+    hasSequentialMarkers: boolean;
+    markers: string[];
+    markerType?: string;
+    markerValue?: number;
+  };
+}
+
+export interface ProjectProgressionVerdict {
+  isProjectProgression: boolean;
+  reason: string;
+}
+
+export interface WorkspaceTracePayload {
+  id: string;
+  text: string;
+  vector: number[];
+  metadata: {
+    subject_anchor: string;
+    operational_domain: WorkspaceTraceOperationalDomain;
+    input_artifact_classes: string[];
+    output_artifact_classes: string[];
+    category: string | null;
+  };
+  provenance: {
+    platform: string;
+    written_at: string;
+  };
+}
+
+export interface WorkspaceHistoricalRun {
+  id: string;
+  episodeId: string;
+  text: string;
+  score: number;
+  metadata: WorkspaceTracePayload["metadata"];
+  provenance: WorkspaceTracePayload["provenance"];
+}
+
+export interface WorkspaceLoopParent {
+  id: string;
+  subjectAnchor: string;
+  confidenceScore: number;
+  primarySourceFile: string;
+  totalRunsCount: number;
+  operationalDomain: WorkspaceTraceOperationalDomain;
+  historicalRuns: WorkspaceHistoricalRun[];
 }
 
 export interface CandidateLoop {
@@ -257,10 +323,16 @@ export interface LoopMinerSummary {
       rejectedGroups: number;
       warningCount: number;
     };
-    vectorRetrieval?: {
-      status: "skipped";
-      reason: string;
-    };
+    vectorRetrieval?:
+      | {
+          status: "skipped";
+          reason: string;
+        }
+      | {
+          status: "grouped";
+          groupCount: number;
+          runCount: number;
+        };
   };
   patternTrace?: PatternTrace;
   phaseUsage?: {
@@ -373,6 +445,7 @@ export interface LoopMinerRunView {
   completedAt: string | null;
   episodes: EpisodeRecord[];
   suggestions: LoopMinerWorkflowSuggestionView[];
+  loopParents?: WorkspaceLoopParent[];
 }
 
 export interface LoopMinerRepository {
@@ -432,6 +505,7 @@ export interface LoopMinerRepository {
     dna: WorkflowDNA;
     suggestedPrompt: string;
     fingerprint: string;
+    loopParent?: WorkspaceLoopParent;
   }): Promise<LoopMinerSuggestion | null>;
   createOrUpdateWorkflowSuggestion?(input: {
     auth: AuthContext;
@@ -441,5 +515,6 @@ export interface LoopMinerRepository {
     dna: WorkflowDNA;
     suggestedPrompt: string;
     fingerprint: string;
+    loopParent?: WorkspaceLoopParent;
   }): Promise<LoopMinerSuggestionWriteResult>;
 }

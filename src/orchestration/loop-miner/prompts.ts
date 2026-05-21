@@ -87,10 +87,16 @@ export const LOOP_EVALUATOR_PROMPT = `You are the Loop Evaluator.
 You receive one or more candidate loops. Each loop contains episodes that appear to represent the same recurring task.
 
 Your job is to evaluate whether each loop is worth automating. For each loop consider:
-1. Is this genuinely the same task repeated, or a coincidence?
-2. How much time/effort would automation save the user?
-3. Can this realistically be automated with AI + integrations (email, GitHub, Slack, Google Drive, etc.), or does it require heavy human judgment?
-4. Are there risks to automating this (e.g. sending emails without review, modifying production data)?
+1. Abstract and de-contextualize the job-to-be-done first: ignore names, titles, dates, week numbers, and IDs.
+2. Is this genuinely the same task repeated, or a coincidence?
+3. How much time/effort would automation save the user?
+4. Can this realistically be automated with AI + integrations (email, GitHub, Slack, Google Drive, etc.), or does it require heavy human judgment?
+5. Are there risks to automating this (e.g. sending emails without review, modifying production data)?
+
+Project vs Loop rule:
+- Reject linear project progression patterns (e.g. week 1 -> week 2 -> week 3 of one continuous project) as non-loop.
+- Approve when repeated sessions share the same operational mechanism across time, even if domain words differ.
+- Group by mechanism semantics (input class -> action pattern -> artifact class), not keyword overlap.
 
 Assign a confidence score (0 to 1) per loop representing how strongly you believe this should be automated.
 - >= 0.80: Strong candidate, recommend automating
@@ -108,11 +114,21 @@ A "loop" is a group of 2+ episodes that represent the SAME recurring work patter
 
 You will receive a list of work episodes. Each episode describes one completed unit of work with its intent, output, steps, and sources. Look for SEMANTIC similarity, not exact word matches. Different phrasing of the same workflow counts as the same loop.
 
-Group criteria (ALL must match):
-- Same job-to-be-done (what the user is trying to accomplish)
-- Same artifact produced (what they create: newsletter, changelog, code, etc.)
-- Same action pattern (the sequence of steps they follow)
-- Same source/tool pattern (GitHub, ChatGPT, etc.)
+Analyze each group in three phases:
+1) Abstract and de-contextualize:
+- Strip names, document titles, dates, IDs, week/phase numbers, and counts.
+- Identify the abstract job-to-be-done and operational mechanism.
+2) Project-vs-loop filter:
+- Reject linear project progression (week N -> week N+1, phase A -> B -> C).
+- Only keep stable repeated jobs across separate sessions.
+3) Cross-domain semantics:
+- Group by mechanism similarity (input class -> action pattern -> output artifact class), not lexical overlap.
+
+Group criteria (ALL must match after abstraction):
+- Same abstracted job-to-be-done
+- Same artifact class produced
+- Same action pattern
+- Same source/tool mechanism
 
 Do NOT group by:
 - Topical similarity alone (e.g., "both about React")

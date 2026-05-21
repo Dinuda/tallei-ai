@@ -2,12 +2,19 @@ import { createHash } from "crypto";
 
 import type {
   CandidateLoop,
+  CanonicalLoopFacet,
   EpisodeExtraction,
   EpisodeRecord,
   EpisodeTurnRecord,
+  LoopOperationalDomain,
   LoopEvaluation,
   LoopVerdict,
   MinerEvent,
+  ProjectProgressionVerdict,
+  WorkspaceHistoricalRun,
+  WorkspaceLoopParent,
+  WorkspaceTraceOperationalDomain,
+  WorkspaceTracePayload,
   WorkflowDNA,
 } from "./types.js";
 
@@ -182,6 +189,7 @@ function cadenceFromMemoryStatement(statement: string): Cadence {
 
 function outputTypeFromMemoryStatement(statement: string): string {
   const text = statement.toLowerCase();
+  if (/\b(changelog|release notes?)\b/.test(text)) return "changelog";
   if (/\bnewsletter\b/.test(text)) return "newsletter";
   if (/\b(email|reply|inbox)\b/.test(text)) return "email";
   if (/\bproposal|pitch deck|deck\b/.test(text)) return "proposal";
@@ -572,12 +580,287 @@ export function sourceFingerprintFromEvent(
   }], extractionVersion);
 }
 
+function normalizeTextSignal(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function stripStructuralTokens(value: string): string {
+  return value
+    .replace(/\b(week|wk|phase|part|module|milestone|lesson|sprint)\s*\d+\b/gi, " ")
+    .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, " ")
+    .replace(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g, " ")
+    .replace(/\b(?:id|ticket|doc|task|issue|ref)\s*[:#-]?\s*[a-z0-9_-]{3,}\b/gi, " ")
+    .replace(/\b\d+\b/g, " ")
+    .replace(/["'`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function domainFromSignals(text: string): LoopOperationalDomain {
+  if (/\b(invoice|billing|payment|receipt|charge|subscription|refund|past due)\b/.test(text)) {
+    return "administrative_billing";
+  }
+  if (/\b(spreadsheet|sheet|excel|formula|audit|reconcile|variance|ledger|forecast|budget|p&l)\b/.test(text)) {
+    return "financial_calculation_spreadsheet_audit";
+  }
+  if (/\b(image|visual|render|thumbnail|mockup|retouch|upscale|crop|color|asset)\b/.test(text)) {
+    return "asset_visual_enhancement";
+  }
+  if (/\b(translate|localize|copywriting|newsletter|email|copy|rewrite|tone|hook|headline|draft)\b/.test(text)) {
+    return "copywriting_translation";
+  }
+  return "operational_document_scoping";
+}
+
+function artifactClassFromEpisode(episode: EpisodeRecord, text: string): string {
+  const output = episode.outputType.trim().toLowerCase();
+  if (output && output !== "unknown") return output;
+  if (/\b(slides?|deck|course material|lesson)\b/.test(text)) return "slides";
+  if (/\b(newsletter|email|copy)\b/.test(text)) return "copy";
+  if (/\b(invoice|billing|payment)\b/.test(text)) return "billing_record";
+  if (/\b(spreadsheet|sheet|excel|model)\b/.test(text)) return "spreadsheet";
+  if (/\b(image|visual|asset)\b/.test(text)) return "visual_asset";
+  return "document";
+}
+
+function actionClassFromSignals(text: string): string {
+  if (/\b(translate|localize)\b/.test(text)) return "translate_localize";
+  if (/\b(calc|calculate|audit|reconcile|validate|cross-check)\b/.test(text)) return "numeric_audit";
+  if (/\b(enhance|retouch|upscale|clean up image|adjust color)\b/.test(text)) return "asset_enhance";
+  if (/\b(invoice|bill|charge|collect payment|reconcile billing)\b/.test(text)) return "billing_reconcile";
+  if (/\b(brainstorm|outline|structure|expand|layout)\b/.test(text)) return "layout_expansion";
+  if (/\b(debloat|trim|simplify|tighten|edit|refine|polish)\b/.test(text)) return "copy_debloat";
+  return "draft_refine_finalize";
+}
+
+function inputClassFromEpisode(episode: EpisodeRecord, text: string): string {
+  const sources = episode.sources.join(" ").toLowerCase();
+  const tools = episode.toolNames.join(" ").toLowerCase();
+  if (/\b(github|gitlab|commit|pull request)\b/.test(`${sources} ${tools} ${text}`)) return "repo_delta";
+  if (/\b(sheet|spreadsheet|csv|excel)\b/.test(`${sources} ${text}`)) return "tabular_input";
+  if (/\b(invoice|billing|payment)\b/.test(text)) return "billing_record";
+  if (/\b(image|asset|screenshot|design)\b/.test(text)) return "visual_asset";
+  if (/\b(memory|notes|brief|conversation|instruction|instructions|outline|context)\b/.test(`${sources} ${text}`)) return "text_context";
+  return "vague_input";
+}
+
+function extractSequenceSignal(text: string): CanonicalLoopFacet["sequenceSignal"] {
+  const match = text.match(/\b(week|phase|part|module|milestone|lesson|sprint)\s*(\d+)\b/i);
+  if (!match) {
+    return { hasSequentialMarkers: false, markers: [] };
+  }
+  const markerType = match[1]?.toLowerCase();
+  const markerValue = Number(match[2]);
+  return {
+    hasSequentialMarkers: Number.isFinite(markerValue),
+    markers: [`${markerType}:${markerValue}`],
+    markerType: markerType || undefined,
+    markerValue: Number.isFinite(markerValue) ? markerValue : undefined,
+  };
+}
+
+export function deriveCanonicalLoopFacet(episode: EpisodeRecord): CanonicalLoopFacet {
+  const raw = [
+    episode.title ?? "",
+    episode.summary ?? "",
+    episode.intent,
+    episode.steps.join(" "),
+    episode.turns.map((turn) => turn.contentSummary).join(" "),
+  ].join(" ");
+  const normalized = normalizeTextSignal(raw);
+  const decontextualized = stripStructuralTokens(normalized);
+  const operationalDomain = domainFromSignals(decontextualized);
+  const artifactClass = artifactClassFromEpisode(episode, decontextualized);
+  const actionClass = actionClassFromSignals(decontextualized);
+  const inputClass = inputClassFromEpisode(episode, decontextualized);
+  const sequenceSignal = extractSequenceSignal(normalized);
+  const mechanismSignature = `input:${inputClass}|action:${actionClass}|artifact:${artifactClass}`;
+  const abstractedJtbd = decontextualized || "general recurring workflow";
+  return {
+    abstractedJtbd,
+    operationalDomain,
+    mechanismSignature,
+    artifactClass,
+    actionClass,
+    sequenceSignal,
+  };
+}
+
+export function evaluateProjectProgression(episodes: EpisodeRecord[]): ProjectProgressionVerdict {
+  if (episodes.length < 2) {
+    return { isProjectProgression: false, reason: "insufficient_episodes" };
+  }
+  const facets = episodes.map(deriveCanonicalLoopFacet);
+  const markers = facets
+    .map((facet) => ({ type: facet.sequenceSignal.markerType, value: facet.sequenceSignal.markerValue }))
+    .filter((marker): marker is { type: string; value: number } => Boolean(marker.type) && Number.isFinite(marker.value));
+  if (markers.length < 2) {
+    return { isProjectProgression: false, reason: "no_linear_markers" };
+  }
+  const grouped = new Map<string, number[]>();
+  for (const marker of markers) {
+    const values = grouped.get(marker.type) ?? [];
+    values.push(marker.value);
+    grouped.set(marker.type, values);
+  }
+  for (const [type, values] of grouped.entries()) {
+    if (values.length < 2) continue;
+    const sorted = [...values].sort((a, b) => a - b);
+    let adjacentCount = 0;
+    for (let i = 1; i < sorted.length; i += 1) {
+      if (sorted[i] === sorted[i - 1] + 1) adjacentCount += 1;
+    }
+    if (adjacentCount >= 1) {
+      return { isProjectProgression: true, reason: `${type}_sequential_progression` };
+    }
+  }
+  return { isProjectProgression: false, reason: "marker_non_linear" };
+}
+
+function mapOperationalDomainToWorkspace(domain: LoopOperationalDomain): WorkspaceTraceOperationalDomain {
+  if (domain === "copywriting_translation") return "Copywriting";
+  if (domain === "financial_calculation_spreadsheet_audit") return "Calculations";
+  if (domain === "asset_visual_enhancement") return "Visual_Enhancement";
+  return "System_Design";
+}
+
+function uniqueLower(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
+}
+
+function inferInputArtifactClasses(episode: EpisodeRecord): string[] {
+  const signal = `${episode.sources.join(" ")} ${episode.intent} ${episode.steps.join(" ")}`.toLowerCase();
+  const classes = new Set<string>();
+  if (/\bdocx|word|document\b/.test(signal)) classes.add("docx");
+  if (/\bpdf\b/.test(signal)) classes.add("pdf");
+  if (/\bspreadsheet|sheet|excel|csv\b/.test(signal)) classes.add("spreadsheet");
+  if (/\bblueprint|notes|brief|context|conversation\b/.test(signal)) classes.add("blueprint_notes");
+  if (/\bimage|asset|screenshot|design\b/.test(signal)) classes.add("image");
+  if (classes.size === 0) classes.add("text_context");
+  return [...classes];
+}
+
+function inferOutputArtifactClasses(episode: EpisodeRecord): string[] {
+  const output = episode.outputType.trim().toLowerCase();
+  if (!output || output === "unknown") return ["markdown"];
+  if (output === "slides" || output === "deck") return ["slides"];
+  if (output === "email" || output === "newsletter") return ["copy_paste_text"];
+  if (output === "document" || output === "brief" || output === "plan") return ["markdown"];
+  return [output];
+}
+
+export function deriveWorkspaceTracePayload(
+  episode: EpisodeRecord,
+  vector: number[]
+): WorkspaceTracePayload {
+  const canonical = deriveCanonicalLoopFacet(episode);
+  const subjectAnchor = (episode.sources[0] ?? episode.title ?? episode.intent ?? "Unlabeled Loop")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+  return {
+    id: episode.id,
+    text: [
+      episode.title ?? "",
+      episode.summary ?? "",
+      episode.intent,
+      episode.steps.join(" | "),
+    ].filter(Boolean).join("\n"),
+    vector,
+    metadata: {
+      subject_anchor: subjectAnchor || "Unlabeled Loop",
+      operational_domain: mapOperationalDomainToWorkspace(canonical.operationalDomain),
+      input_artifact_classes: inferInputArtifactClasses(episode),
+      output_artifact_classes: inferOutputArtifactClasses(episode),
+      category: episode.outputType && episode.outputType !== "unknown" ? episode.outputType : null,
+    },
+    provenance: {
+      platform: episode.toolNames[0] ?? "unknown",
+      written_at: episode.sealedAt,
+    },
+  };
+}
+
+export interface WorkspaceGroupedHit {
+  subjectAnchor: string;
+  runs: WorkspaceHistoricalRun[];
+}
+
+function artifactOverlapScore(left: WorkspaceHistoricalRun, right: WorkspaceHistoricalRun): number {
+  const leftSignature = uniqueLower([
+    ...left.metadata.input_artifact_classes,
+    ...left.metadata.output_artifact_classes,
+  ]);
+  const rightSignature = uniqueLower([
+    ...right.metadata.input_artifact_classes,
+    ...right.metadata.output_artifact_classes,
+  ]);
+  if (leftSignature.length === 0 || rightSignature.length === 0) return 0;
+  const rightSet = new Set(rightSignature);
+  const intersection = leftSignature.filter((value) => rightSet.has(value)).length;
+  const denominator = Math.max(leftSignature.length, rightSignature.length);
+  return denominator === 0 ? 0 : intersection / denominator;
+}
+
+function dedupeHistoricalRuns(runs: WorkspaceHistoricalRun[]): WorkspaceHistoricalRun[] {
+  const byEpisodeId = new Map<string, WorkspaceHistoricalRun>();
+  for (const run of runs) {
+    const existing = byEpisodeId.get(run.episodeId);
+    if (!existing || run.score > existing.score) {
+      byEpisodeId.set(run.episodeId, run);
+    }
+  }
+  return [...byEpisodeId.values()].sort((left, right) =>
+    Date.parse(left.provenance.written_at) - Date.parse(right.provenance.written_at)
+  );
+}
+
+export function consolidateWorkspaceGroupedHits(groups: WorkspaceGroupedHit[]): WorkspaceLoopParent[] {
+  const parents = groups
+    .map((group) => ({
+      id: stableHash(`loop-parent:${group.subjectAnchor}`).slice(0, 24),
+      subjectAnchor: group.subjectAnchor,
+      confidenceScore: Math.max(
+        0,
+        Math.min(1, group.runs.reduce((sum, run) => sum + run.score, 0) / Math.max(1, group.runs.length))
+      ),
+      primarySourceFile: group.runs[0]?.metadata.input_artifact_classes[0] ?? "unknown",
+      totalRunsCount: group.runs.length,
+      operationalDomain: group.runs[0]?.metadata.operational_domain ?? "System_Design",
+      historicalRuns: dedupeHistoricalRuns(group.runs),
+    }))
+    .filter((group) => group.historicalRuns.length > 0);
+
+  const merged: WorkspaceLoopParent[] = [];
+  for (const parent of parents) {
+    const mergeInto = merged.find((candidate) =>
+      candidate.historicalRuns.some((existingRun) =>
+        parent.historicalRuns.some((incomingRun) => artifactOverlapScore(existingRun, incomingRun) > 0.92)
+      )
+    );
+    if (!mergeInto) {
+      merged.push(parent);
+      continue;
+    }
+    mergeInto.historicalRuns = dedupeHistoricalRuns([...mergeInto.historicalRuns, ...parent.historicalRuns]);
+    mergeInto.totalRunsCount = mergeInto.historicalRuns.length;
+    mergeInto.confidenceScore = Math.max(mergeInto.confidenceScore, parent.confidenceScore);
+  }
+  return merged.sort((left, right) => right.confidenceScore - left.confidenceScore);
+}
+
 export function episodeEmbeddingText(episode: EpisodeRecord): string {
+  const canonical = deriveCanonicalLoopFacet(episode);
   const turns = episode.turns
     .slice(-4)
     .map((turn) => `${turn.sourceEventType}:${turn.role}:${turn.contentSummary.slice(0, 240)}`);
   return [
     `version=${LOOP_EPISODE_EMBEDDING_VERSION}`,
+    `abstractedJtbd=${canonical.abstractedJtbd}`,
+    `operationalDomain=${canonical.operationalDomain}`,
+    `mechanismSignature=${canonical.mechanismSignature}`,
+    `artifactClass=${canonical.artifactClass}`,
+    `actionClass=${canonical.actionClass}`,
     `intent=${episode.intent}`,
     `outputType=${episode.outputType}`,
     `sources=${episode.sources.join(", ")}`,

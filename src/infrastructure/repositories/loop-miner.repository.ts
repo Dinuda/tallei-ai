@@ -18,6 +18,7 @@ import type {
   LoopMinerSuggestionWriteResult,
   LoopMinerSummary,
   LoopMinerWorkflowSuggestionView,
+  WorkspaceLoopParent,
   MinerEvent,
   WorkflowDNA,
 } from "../../orchestration/loop-miner/types.js";
@@ -544,6 +545,80 @@ function dedupeSuggestionRows(rows: WorkflowSuggestionRow[]): WorkflowSuggestion
     if (rowScore > existingScore) byKey.set(key, row);
   }
   return [...byKey.values()];
+}
+
+function readLoopParent(value: unknown): WorkspaceLoopParent | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const subjectAnchor = readString(row.subjectAnchor);
+  if (!subjectAnchor) return null;
+  const historicalRunsRaw = Array.isArray(row.historicalRuns) ? row.historicalRuns : [];
+  const historicalRuns = historicalRunsRaw
+    .map((run): WorkspaceLoopParent["historicalRuns"][number] | null => {
+      if (!run || typeof run !== "object" || Array.isArray(run)) return null;
+      const r = run as Record<string, unknown>;
+      const metadata = readRecord(r.metadata);
+      const provenance = readRecord(r.provenance);
+      const episodeId = readString(r.episodeId) ?? readString(r.id);
+      if (!episodeId) return null;
+      return {
+        id: readString(r.id) ?? episodeId,
+        episodeId,
+        text: readString(r.text) ?? "",
+        score: Number(r.score ?? 0),
+        metadata: {
+          subject_anchor: readString(metadata.subject_anchor) ?? subjectAnchor,
+          operational_domain: (readString(metadata.operational_domain) as WorkspaceLoopParent["operationalDomain"]) ?? "System_Design",
+          input_artifact_classes: readStringArray(metadata.input_artifact_classes),
+          output_artifact_classes: readStringArray(metadata.output_artifact_classes),
+          category: readString(metadata.category) ?? null,
+        },
+        provenance: {
+          platform: readString(provenance.platform) ?? "unknown",
+          written_at: readString(provenance.written_at) ?? new Date().toISOString(),
+        },
+      };
+    })
+    .filter((run): run is WorkspaceLoopParent["historicalRuns"][number] => Boolean(run))
+    .sort((left, right) => Date.parse(left.provenance.written_at) - Date.parse(right.provenance.written_at));
+  if (historicalRuns.length === 0) return null;
+  return {
+    id: readString(row.id) ?? subjectAnchor.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    subjectAnchor,
+    confidenceScore: Math.max(0, Math.min(1, Number(row.confidenceScore ?? 0.5))),
+    primarySourceFile: readString(row.primarySourceFile) ?? historicalRuns[0]?.metadata.input_artifact_classes[0] ?? "unknown",
+    totalRunsCount: Number(row.totalRunsCount ?? historicalRuns.length),
+    operationalDomain: (readString(row.operationalDomain) as WorkspaceLoopParent["operationalDomain"]) ?? "System_Design",
+    historicalRuns,
+  };
+}
+
+function collectLoopParentsFromSuggestions(rows: WorkflowSuggestionRow[]): WorkspaceLoopParent[] {
+  const parents = rows
+    .map((row) => readLoopParent(readRecord(row.metadata_json).loopParent))
+    .filter((parent): parent is WorkspaceLoopParent => Boolean(parent));
+  const byId = new Map<string, WorkspaceLoopParent>();
+  for (const parent of parents) {
+    const existing = byId.get(parent.id);
+    if (!existing) {
+      byId.set(parent.id, parent);
+      continue;
+    }
+    const runsByEpisodeId = new Map(existing.historicalRuns.map((run) => [run.episodeId, run]));
+    for (const run of parent.historicalRuns) {
+      const prior = runsByEpisodeId.get(run.episodeId);
+      if (!prior || run.score > prior.score) runsByEpisodeId.set(run.episodeId, run);
+    }
+    byId.set(parent.id, {
+      ...existing,
+      confidenceScore: Math.max(existing.confidenceScore, parent.confidenceScore),
+      totalRunsCount: runsByEpisodeId.size,
+      historicalRuns: [...runsByEpisodeId.values()].sort((left, right) =>
+        Date.parse(left.provenance.written_at) - Date.parse(right.provenance.written_at)
+      ),
+    });
+  }
+  return [...byId.values()].sort((left, right) => right.confidenceScore - left.confidenceScore);
 }
 
 function logicalEpisodeKeyFromIds(ids: string[]): string | null {
@@ -1229,6 +1304,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     dna: WorkflowDNA;
     suggestedPrompt: string;
     fingerprint: string;
+    loopParent?: WorkspaceLoopParent;
   }): Promise<LoopMinerSuggestion | null> {
     const existingSuggestion = await pool.query<{ id: string; status: string }>(
       `SELECT id, status
@@ -1292,6 +1368,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
           evaluation: input.evaluation,
           candidateLoop: input.candidateLoop,
           episodeIds: input.evaluation.episodeIds,
+          loopParent: input.loopParent ?? null,
           logicalEpisodeKey: logicalEpisodeKeyFromIds([...input.evaluation.episodeIds, ...input.candidateLoop.episodeIds]),
           metadataHash: createHash("sha256").update(JSON.stringify(input.dna)).digest("hex"),
         }),
@@ -1335,6 +1412,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     dna: WorkflowDNA;
     suggestedPrompt: string;
     fingerprint: string;
+    loopParent?: WorkspaceLoopParent;
   }): Promise<LoopMinerSuggestionWriteResult> {
     const existingPending = await pool.query<WorkflowSuggestionRow>(
       `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
@@ -1360,6 +1438,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
         evaluation: input.evaluation,
         candidateLoop: input.candidateLoop,
         episodeIds,
+        loopParent: input.loopParent ?? existingMetadata.loopParent ?? null,
         metadataHash: createHash("sha256").update(JSON.stringify(input.dna)).digest("hex"),
       };
       await pool.query(
@@ -1433,6 +1512,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
           evaluation: input.evaluation,
           candidateLoop: input.candidateLoop,
           episodeIds,
+          loopParent: input.loopParent ?? existingMetadata.loopParent ?? null,
           logicalEpisodeKey: incomingEpisodeKey,
           metadataHash: createHash("sha256").update(JSON.stringify(input.dna)).digest("hex"),
         };
@@ -1678,6 +1758,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     const referencedEpisodes = referencedEpisodeIds.size > 0
       ? await this.listEpisodeContext(auth, [...referencedEpisodeIds])
       : [];
+    const loopParents = collectLoopParentsFromSuggestions(suggestionRows);
 
     return {
       id: run.id,
@@ -1688,6 +1769,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
       completedAt: run.completed_at,
       episodes: [...currentEpisodes, ...referencedEpisodes],
       suggestions: suggestionRows.map(mapSuggestion),
+      loopParents,
     };
   }
 }

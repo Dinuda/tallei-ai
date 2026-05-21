@@ -255,6 +255,8 @@ type LoopMinerRunsPayload = {
 
 type LoopMinerRunPayload = {
   run?: LoopMinerRun | null;
+  queued?: boolean;
+  message?: string;
   error?: string;
 };
 
@@ -364,6 +366,7 @@ export default function MemoryCleanupPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [adminEmailStatus, setAdminEmailStatus] = useState<RunPayload["adminEmail"] | null>(null);
+  const [loopMinerNotice, setLoopMinerNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedCount = selectedIds.size;
@@ -395,6 +398,7 @@ export default function MemoryCleanupPage() {
   }, [bucketProposalByMemoryId, sortedMemories]);
 
   const latestLoopMinerRun = activeLoopMinerRun ?? loopMinerRuns[0] ?? null;
+  const loopMinerInProgress = latestLoopMinerRun?.status === "running";
 
   const fetchMemories = useCallback(async () => {
     const nextMemories: MemoryItem[] = [];
@@ -476,6 +480,7 @@ export default function MemoryCleanupPage() {
   const runLoopMiner = useCallback(async () => {
     setLoopMinerRunning(true);
     setError(null);
+    setLoopMinerNotice(null);
     try {
       const response = await fetch("/api/memories/cleanup/loop-miner/run", {
         method: "POST",
@@ -485,13 +490,24 @@ export default function MemoryCleanupPage() {
       const payload = (await response.json().catch(() => ({}))) as LoopMinerRunPayload;
       if (!response.ok || !payload.run) throw new Error(payload.error ?? "Failed to run Loop Miner");
       setActiveLoopMinerRun(payload.run);
-      await fetchLoopMinerRuns();
+      if (payload.message) setLoopMinerNotice(payload.message);
+      await fetchLoopMinerRuns({ activateLatest: true });
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Failed to run Loop Miner");
     } finally {
       setLoopMinerRunning(false);
     }
   }, [fetchLoopMinerRuns]);
+
+  useEffect(() => {
+    if (!loopMinerInProgress) return;
+    const timer = setInterval(() => {
+      void fetchLoopMinerRuns({ activateLatest: true }).catch((pollError) => {
+        setError(pollError instanceof Error ? pollError.message : "Failed to poll loop miner runs");
+      });
+    }, 5_000);
+    return () => clearInterval(timer);
+  }, [fetchLoopMinerRuns, loopMinerInProgress]);
 
   const resetCleanupFlags = useCallback(async () => {
     setError(null);
@@ -582,8 +598,8 @@ export default function MemoryCleanupPage() {
               <RefreshCw className="mr-1.5 h-4 w-4" />
               Refresh
             </Button>
-            <Button type="button" variant="outline" onClick={runLoopMiner} disabled={loopMinerRunning || Boolean(runningMode)}>
-              {loopMinerRunning ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Workflow className="mr-1.5 h-4 w-4" />}
+            <Button type="button" variant="outline" onClick={runLoopMiner} disabled={loopMinerRunning || loopMinerInProgress || Boolean(runningMode)}>
+              {loopMinerRunning || loopMinerInProgress ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Workflow className="mr-1.5 h-4 w-4" />}
               Run Loop Miner
             </Button>
             <Button type="button" variant="outline" onClick={resetCleanupFlags} disabled={Boolean(runningMode)}>
@@ -606,6 +622,9 @@ export default function MemoryCleanupPage() {
         <section className="space-y-4">
           {error ? (
             <div className="border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>
+          ) : null}
+          {loopMinerNotice ? (
+            <div className="border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">{loopMinerNotice}</div>
           ) : null}
 
           <div className="grid gap-3 sm:grid-cols-4">
@@ -813,8 +832,8 @@ export default function MemoryCleanupPage() {
                   <Workflow className="h-4 w-4 text-slate-600" />
                   Loop Miner
                 </CardTitle>
-                <Button type="button" variant="outline" size="sm" onClick={runLoopMiner} disabled={loopMinerRunning || Boolean(runningMode)}>
-                  {loopMinerRunning ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+                <Button type="button" variant="outline" size="sm" onClick={runLoopMiner} disabled={loopMinerRunning || loopMinerInProgress || Boolean(runningMode)}>
+                  {loopMinerRunning || loopMinerInProgress ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
                   Run
                 </Button>
               </div>
