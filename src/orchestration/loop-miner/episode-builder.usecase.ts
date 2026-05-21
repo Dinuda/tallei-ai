@@ -1,7 +1,9 @@
 import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { isRetriableProviderError } from "../../providers/ai/index.js";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "../../providers/ai/types.js";
+import { TimeoutError } from "../../resilience/timeout.js";
 import type { CleanupAiUsage } from "../memory-cleanup/types.js";
 import { emptyCleanupAiUsage, recordCleanupAiUsage } from "../memory-cleanup/usage.js";
 import { loopMinerModelForPhase } from "./model.js";
@@ -22,6 +24,36 @@ type ChatFn = (request: ChatCompletionRequest) => Promise<ChatCompletionResponse
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+function isRetriableError(error: unknown): boolean {
+  if (error instanceof TimeoutError) return true;
+  return isRetriableProviderError(error);
+}
+
+async function chatWithRetry(
+  chat: ChatFn,
+  request: ChatCompletionRequest,
+  maxAttempts = 2,
+  baseDelayMs = 3000
+): Promise<ChatCompletionResponse> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await chat(request);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isRetriableError(error)) {
+        throw error;
+      }
+      await sleep(baseDelayMs * attempt);
+    }
+  }
+  throw lastError;
 }
 
 export class EpisodeBuilderUseCase {
@@ -141,7 +173,7 @@ export class EpisodeBuilderUseCase {
         maxEstimatedPromptTokensPerCall = Math.max(maxEstimatedPromptTokensPerCall, estimatedPromptTokens);
         let response: ChatCompletionResponse;
         try {
-          response = await this.chat(request);
+          response = await chatWithRetry(this.chat, request);
         } catch (error) {
           batchesSkipped += 1;
           const warning =

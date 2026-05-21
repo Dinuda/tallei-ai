@@ -1,7 +1,11 @@
 import type { AuthContext } from "../../domain/auth/index.js";
-import { embedText } from "../../infrastructure/cache/embedding-cache.js";
+
+import { config } from "../../config/index.js";
 import { LoopMinerRepository as PgLoopMinerRepository } from "../../infrastructure/repositories/loop-miner.repository.js";
 import { createLogger } from "../../observability/index.js";
+import { aiProviderRegistry } from "../../providers/ai/index.js";
+import type { ChatCompletionRequest, ChatCompletionResponse } from "../../providers/ai/types.js";
+import { withTimeout } from "../../resilience/timeout.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage } from "../memory-cleanup/usage.js";
 import { DnaGeneratorUseCase } from "./dna-generator.usecase.js";
 import { EpisodeBuilderUseCase } from "./episode-builder.usecase.js";
@@ -69,14 +73,23 @@ function finalizeSummary(summary: LoopMinerSummary, startedAt: number): LoopMine
   };
 }
 
+async function loopMinerChat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+  return withTimeout(
+    (signal) => aiProviderRegistry.chatDirect({ ...request, signal }),
+    config.loopMinerChatTimeoutMs,
+    { message: `Loop miner chat timed out after ${config.loopMinerChatTimeoutMs}ms` }
+  );
+}
+
 function createDefaultDeps(): LoopMinerDeps {
   const repository = new PgLoopMinerRepository();
+  const chat = loopMinerChat;
   return {
     repository,
-    episodeBuilder: new EpisodeBuilderUseCase(repository),
-    loopDetector: new LoopDetectorUseCase(undefined, async (text) => embedText(text)),
+    episodeBuilder: new EpisodeBuilderUseCase(repository, chat),
+    loopDetector: new LoopDetectorUseCase(chat),
     loopEvaluator: new LoopEvaluatorUseCase(),
-    dnaGenerator: new DnaGeneratorUseCase(),
+    dnaGenerator: new DnaGeneratorUseCase(chat),
   };
 }
 

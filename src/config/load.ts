@@ -353,10 +353,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     loopMinerDetectorModel: readStringEnv(e, "TALLEI_LOOP_MINER__DETECTOR_MODEL"),
     loopMinerEvaluatorModel: readStringEnv(e, "TALLEI_LOOP_MINER__EVALUATOR_MODEL"),
     loopMinerDnaModel: readStringEnv(e, "TALLEI_LOOP_MINER__DNA_MODEL"),
-    loopMinerPromptBudgetTokens: readIntEnv(e, "TALLEI_LOOP_MINER__PROMPT_BUDGET_TOKENS", 6000),
+    loopMinerPromptBudgetTokens: readIntEnv(e, "TALLEI_LOOP_MINER__PROMPT_BUDGET_TOKENS", 4000),
     loopMinerEventSummaryCharCap: readIntEnv(e, "TALLEI_LOOP_MINER__EVENT_SUMMARY_CHAR_CAP", 900),
     loopMinerTranscriptSnippetsMax: readIntEnv(e, "TALLEI_LOOP_MINER__TRANSCRIPT_SNIPPETS_MAX", 2),
     loopMinerTranscriptSnippetCharCap: readIntEnv(e, "TALLEI_LOOP_MINER__TRANSCRIPT_SNIPPET_CHAR_CAP", 220),
+    loopMinerChatTimeoutMs: readIntEnv(e, "TALLEI_LOOP_MINER__CHAT_TIMEOUT_MS", 30_000),
     openaiPayloadLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_ENABLED", false),
     openaiPayloadLoggingMaxChars: Math.max(
       64,

@@ -61,7 +61,19 @@ function isSourceType(value: unknown): value is SourceType {
 }
 
 function isOutputType(value: unknown): value is OutputType {
-  return value === "newsletter" || value === "email" || value === "summary" || value === "proposal" || value === "code" || value === "changelog" || value === "unknown";
+  return value === "newsletter"
+    || value === "email"
+    || value === "summary"
+    || value === "proposal"
+    || value === "code"
+    || value === "changelog"
+    || value === "slides"
+    || value === "deck"
+    || value === "course_material"
+    || value === "document"
+    || value === "brief"
+    || value === "plan"
+    || value === "unknown";
 }
 
 function isApprovalSignal(value: unknown): value is ApprovalSignal {
@@ -94,9 +106,24 @@ export function compactMinerEvent(
   options: CompactMinerEventOptions
 ): Pick<MinerEvent, "id" | "sourceEventType" | "createdAt" | "platform" | "role" | "contentSummary" | "metadata"> {
   const cap = Math.max(160, options.contentSummaryCharCap);
-  const contentSummary = event.contentSummary.length <= cap
-    ? event.contentSummary
-    : `${event.contentSummary.slice(0, cap - 3)}...`;
+  const contentSummary = (() => {
+    if (event.sourceEventType !== "collab_task") {
+      return event.contentSummary.length <= cap
+        ? event.contentSummary
+        : `${event.contentSummary.slice(0, cap - 3)}...`;
+    }
+    const lines = event.contentSummary
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const highSignal = lines.filter((line) =>
+      /^(title|goal|objective|task|output|artifact|result|plan|status|next step|decision|summary)\s*:/i.test(line)
+      || /\b(newsletter|deck|slides?|course|series a|proposal|brief|document|plan)\b/i.test(line)
+    );
+    const merged = [...highSignal, ...lines.filter((line) => !highSignal.includes(line))];
+    const compacted = merged.join(" | ");
+    return compacted.length <= cap ? compacted : `${compacted.slice(0, cap - 3)}...`;
+  })();
   const rawMetadata = readObject(event.metadata);
   const allowlistedMetadata: Record<string, unknown> = {};
   for (const key of [

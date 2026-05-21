@@ -35,7 +35,7 @@ export interface EpisodeExtraction {
   }>;
   outputType: string;
   output?: {
-    type: "newsletter" | "email" | "summary" | "proposal" | "code" | "changelog" | "unknown";
+    type: "newsletter" | "email" | "summary" | "proposal" | "code" | "changelog" | "slides" | "deck" | "course_material" | "document" | "brief" | "plan" | "unknown";
     description: string;
     finalArtifact?: string;
   };

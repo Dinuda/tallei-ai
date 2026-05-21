@@ -118,6 +118,11 @@ export class ProviderRegistry {
     }));
   }
 
+  async chatDirect(req: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+    const provider = this.getProvider(this.chatProviderName);
+    return provider.chat(req);
+  }
+
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
     const provider = this.getProvider(this.embeddingProviderName);
     const policy = this.embedPolicies.get(provider.name);

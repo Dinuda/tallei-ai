@@ -123,6 +123,28 @@ test("loop miner compacts long events and preserves allowlisted metadata only", 
   assert.equal((compacted.metadata as Record<string, unknown>).ignoredField, undefined);
 });
 
+test("loop miner compacts collab task summaries by prioritizing high-signal lines", () => {
+  const contentSummary = [
+    "raw transcript paragraph ".repeat(80),
+    "Title: Series A narrative deck",
+    "Goal: Build investor-ready storyline",
+    "Output: slides",
+    "raw transcript paragraph ".repeat(80),
+  ].join("\n");
+  const compacted = compactMinerEvent({
+    id: "collab-1",
+    sourceEventType: "collab_task",
+    createdAt: "2026-05-01T09:00:00.000Z",
+    platform: "chatgpt",
+    contentSummary,
+    role: "user",
+    metadata: {},
+  }, { contentSummaryCharCap: 260 });
+  assert.ok(compacted.contentSummary.length <= 260);
+  assert.match(compacted.contentSummary, /Title: Series A narrative deck/);
+  assert.match(compacted.contentSummary, /Output: slides/);
+});
+
 test("loop miner converts explicit recurring imported memories into workflow episodes", () => {
   const extraction = explicitWorkflowMemoryExtraction({
     id: "memory-1",
@@ -252,6 +274,17 @@ test("loop miner normalizers validate ids, clamp confidence, and force approval 
     episodes: [episode("ep-1", "changelog"), episode("ep-2", "changelog")],
   });
   assert.equal(dna.approvalBehavior, "require_explicit_approval");
+});
+
+test("loop miner normalizer preserves expanded collab output types", () => {
+  const extraction = normalizeEpisodeExtraction({
+    intent: "Build week 2 course deck",
+    output: { type: "slides", description: "AI course lesson slides" },
+    eventIds: ["event-1"],
+  }, new Set(["event-1"]));
+  assert.ok(extraction);
+  assert.equal(extraction?.outputType, "slides");
+  assert.equal(extraction?.output?.type, "slides");
 });
 
 test("repository listRecentEvents gives fresh imports higher memory evidence importance", async () => {
@@ -487,9 +520,7 @@ test("runLoopMinerForUser builds episodes, detects loop, evaluates, generates DN
     { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e2"] }] },
     { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e3"] }] },
     { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e4"] }] },
-    { groups: [{ candidateGroupId: "pattern-1", loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "same repeated output", confidence: 0.88 }] },
-    { findings: [{ candidateGroupId: "pattern-1", contested: false, riskLevel: "low", critique: "same workflow", failureModes: [], recommendedAction: "approve" }] },
-    { decisions: [{ candidateGroupId: "pattern-1", status: "approved_loop", confidence: 0.9, rationale: "repeated job, artifact, and action pattern", loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "same repeated output" }] },
+    { groups: [{ episodeIds: ["episode-1", "episode-2", "episode-3", "episode-4"], loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "same repeated output", status: "approved_loop", confidence: 0.9 }] },
     { loopName: "Weekly changelog", episodeIds: ["episode-1", "episode-2", "episode-3", "episode-4"], confidence: 0.91, verdict: "automate", reasoning: "high value repeated workflow", estimatedCadence: "weekly", estimatedValue: "high", automationReadiness: "full", risks: ["needs review before sending"] },
     { name: "Weekly changelog", trigger: { type: "schedule", cadence: "0 9 * * 1" }, sources: ["github"], outputType: "changelog", stepPattern: ["Collect GitHub commits", "Draft release notes"], style: "concise", approvalBehavior: "auto", reasoning: "weekly cadence" },
   ];
@@ -518,7 +549,7 @@ test("runLoopMinerForUser builds episodes, detects loop, evaluates, generates DN
   assert.equal(result.summary.loopsQualified, 1);
   assert.equal(result.summary.suggestionsCreated, 1);
   assert.equal(result.suggestions[0]?.title, "Weekly changelog");
-  assert.equal(repository.completedSummary?.usage.calls, 9);
+  assert.equal(repository.completedSummary?.usage.calls, 7);
   assert.ok(Object.values(result.summary.usage.models).some((count) => count > 0));
   assert.ok((result.summary.phaseUsage?.episodeBuilder?.tokensPerOutputEpisode ?? 0) > 0);
   assert.equal(result.summary.patternTrace?.approvedGroups.length, 1);
@@ -569,9 +600,7 @@ test("runLoopMinerForUser falls back to included memory decisions when memory ev
     },
   ]);
   const responses = [
-    { groups: [{ candidateGroupId: "pattern-1", loopName: "Newsletter writing pattern", sharedIntent: "Write Tallei newsletters with ChatGPT support", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "newsletter", reasoning: "shared newsletter artifact and AI-assisted writing workflow", confidence: 0.82 }] },
-    { findings: [{ candidateGroupId: "pattern-1", contested: false, riskLevel: "low", critique: "same repeated writing workflow", failureModes: [], recommendedAction: "approve" }] },
-    { decisions: [{ candidateGroupId: "pattern-1", status: "approved_loop", confidence: 0.84, rationale: "repeated newsletter work behavior", loopName: "Newsletter writing pattern", sharedIntent: "Write Tallei newsletters with ChatGPT support", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "newsletter", reasoning: "same repeated writing workflow" }] },
+    { groups: [{ episodeIds: ["episode-1", "episode-2"], loopName: "Newsletter writing pattern", sharedIntent: "Write Tallei newsletters with ChatGPT support", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "newsletter", reasoning: "shared newsletter artifact and AI-assisted writing workflow", status: "approved_loop", confidence: 0.84 }] },
     { evaluations: [{ loopName: "Newsletter writing pattern", episodeIds: ["episode-1", "episode-2"], confidence: 0.5, verdict: "discard", reasoning: "test stops before suggestion creation", estimatedCadence: "implicit", estimatedValue: "medium", automationReadiness: "partial", risks: [] }] },
   ];
   const chat = async (request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
@@ -588,7 +617,7 @@ test("runLoopMinerForUser falls back to included memory decisions when memory ev
   const result = await runLoopMinerForUser(auth, { runReason: "manual" }, {
     repository,
     episodeBuilder: new EpisodeBuilderUseCase(repository, chat),
-    loopDetector: new LoopDetectorUseCase(chat, async () => null),
+    loopDetector: new LoopDetectorUseCase(chat),
     loopEvaluator: new LoopEvaluatorUseCase(chat),
     dnaGenerator: new DnaGeneratorUseCase(chat),
   });
@@ -612,7 +641,7 @@ test("runLoopMinerForUser completes with warnings when an episode-builder chunk 
   let callCount = 0;
   const chat = async (_request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
     callCount += 1;
-    if (callCount === 2) {
+    if (callCount === 2 || callCount === 3) {
       const error = new Error("Operation timed out after 15000ms");
       error.name = "TimeoutError";
       throw error;
@@ -648,7 +677,7 @@ test("runLoopMinerForUser completes with warnings when an episode-builder chunk 
   assert.equal(result.summary.loopsDetected, 0);
   assert.equal(result.summary.warnings?.length, 1);
   assert.match(result.summary.warnings?.[0] ?? "", /TimeoutError/);
-  assert.equal(callCount, 2);
+  assert.equal(callCount, 3);
 });
 
 test("loop detector does not register a single explicit memory-derived workflow as a loop candidate", async () => {
@@ -717,7 +746,7 @@ test("loop detector groups multiple single memory entries when their workflows m
     }],
   });
   const detector = new LoopDetectorUseCase(async () => ({
-    text: JSON.stringify({ loops: [] }),
+    text: JSON.stringify({ groups: [{ episodeIds: ["episode-memory-1", "episode-memory-2"], loopName: "Product analytics review", sharedIntent: "Review product analytics and write experiments", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "workflow_memory", reasoning: "matching_memory_entries", status: "approved_loop", confidence: 0.9 }] }),
     model: "gpt-4.1-nano",
     finishReason: "stop",
     usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
@@ -768,7 +797,7 @@ test("loop detector groups repeated imported newsletter memories without explici
     }],
   });
   const detector = new LoopDetectorUseCase(async () => ({
-    text: JSON.stringify({ loops: [] }),
+    text: JSON.stringify({ groups: [{ episodeIds: ["episode-newsletter-1", "episode-newsletter-2"], loopName: "Newsletter writing pattern", sharedIntent: "Write newsletter with ChatGPT", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "newsletter", reasoning: "matching_memory_entries", status: "approved_loop", confidence: 0.84 }] }),
     model: "gpt-4.1-nano",
     finishReason: "stop",
     usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
@@ -846,32 +875,12 @@ test("loop detector rejects same-topic groups when judge identifies topical simi
       createdAt: "2026-05-20T10:30:00.000Z",
     }],
   });
-  let call = 0;
-  const detector = new LoopDetectorUseCase(async () => {
-    call += 1;
-    if (call === 1) {
-      return {
-        text: JSON.stringify({ groups: [{ candidateGroupId: "pattern-1", loopName: "AI course slide work", sharedIntent: "Create AI course materials", sharedSources: ["AI Makers course"], sharedOutputType: "slides", reasoning: "same course topic", confidence: 0.62 }] }),
-        model: "gpt-4.1-nano",
-        finishReason: "stop",
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-      };
-    }
-    if (call === 2) {
-      return {
-        text: JSON.stringify({ findings: [{ candidateGroupId: "pattern-1", contested: true, riskLevel: "high", critique: "same course topic, different workflow", failureModes: ["topical_similarity"], recommendedAction: "reject" }] }),
-        model: "gpt-4.1-nano",
-        finishReason: "stop",
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-      };
-    }
-    return {
-      text: JSON.stringify({ decisions: [{ candidateGroupId: "pattern-1", status: "rejected_topical_similarity", confidence: 0.78, rationale: "same topic but not the same repeated behavior" }] }),
-      model: "gpt-4.1-nano",
-      finishReason: "stop",
-      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-    };
-  });
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({ groups: [{ episodeIds: ["episode-course-1", "episode-course-2"], loopName: "AI course slide work", sharedIntent: "Create AI course materials", sharedSources: ["AI Makers course"], sharedOutputType: "slides", reasoning: "same course topic", status: "rejected_topical_similarity", confidence: 0.78 }] }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
   const result = await detector.execute([
     makeCourseEpisode("episode-course-1", "Create Week 2 AI Makers slide content about context", ["Draft lesson story", "Create slide copy"]),
     makeCourseEpisode("episode-course-2", "Create Week 3 AI Makers slide content about context", ["Review prior deck", "Create activity slides"]),
@@ -1043,4 +1052,85 @@ test("repository createWorkflowSuggestion skips existing pending duplicate and i
   } finally {
     (pool as unknown as { query: typeof pool.query }).query = originalQuery;
   }
+});
+
+test("loop detector removes strict subset duplicates when intent/output/source match", async () => {
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({
+      groups: [
+        {
+          episodeIds: ["1", "2", "3"],
+          loopName: "Tallei newsletter creation",
+          sharedIntent: "Create Tallei weekly newsletter",
+          sharedSources: ["chatgpt", "memory"],
+          sharedOutputType: "newsletter",
+          reasoning: "dominant group",
+          status: "approved_loop",
+          confidence: 0.9,
+        },
+        {
+          episodeIds: ["1", "2"],
+          loopName: "Newsletter subset",
+          sharedIntent: "Create Tallei weekly newsletter",
+          sharedSources: ["chatgpt"],
+          sharedOutputType: "newsletter",
+          reasoning: "subset group",
+          status: "approved_loop",
+          confidence: 0.88,
+        },
+      ],
+    }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+
+  const result = await detector.execute([
+    episode("1", "newsletter"),
+    episode("2", "newsletter"),
+    episode("3", "newsletter"),
+  ]);
+
+  assert.equal(result.loops.length, 1);
+  assert.deepEqual(result.loops[0]?.episodeIds, ["1", "2", "3"]);
+});
+
+test("loop detector keeps subset group when intent/output/source do not match", async () => {
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({
+      groups: [
+        {
+          episodeIds: ["1", "2", "3"],
+          loopName: "AI course content development",
+          sharedIntent: "Develop AI course materials",
+          sharedSources: ["course docs"],
+          sharedOutputType: "slides",
+          reasoning: "course loop",
+          status: "approved_loop",
+          confidence: 0.86,
+        },
+        {
+          episodeIds: ["1", "2"],
+          loopName: "Series A deck prep",
+          sharedIntent: "Build series A presentation",
+          sharedSources: ["investor notes"],
+          sharedOutputType: "deck",
+          reasoning: "different loop despite overlap",
+          status: "approved_loop",
+          confidence: 0.84,
+        },
+      ],
+    }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+
+  const result = await detector.execute([
+    episode("1", "slides"),
+    episode("2", "slides"),
+    episode("3", "slides"),
+  ]);
+
+  assert.equal(result.loops.length, 2);
 });

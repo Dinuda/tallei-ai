@@ -21,7 +21,7 @@ Each episode:
   "summary": "1-2 sentence summary",
   "intent": {"label": "snake_case_intent", "goal": "what the user wanted", "confidence": 0-1},
   "sources": [{"type": "memory|document|conversation|integration|manual_input", "name": "source name", "importance": 0-1}],
-  "output": {"type": "newsletter|email|summary|proposal|code|changelog|unknown", "description": "what was produced"},
+  "output": {"type": "newsletter|email|summary|proposal|code|changelog|slides|deck|course_material|document|brief|plan|unknown", "description": "what was produced"},
   "toolNames": [],
   "steps": [],
   "styleHints": [],
@@ -101,6 +101,33 @@ Assign a confidence score (0 to 1) per loop representing how strongly you believ
 Return JSON only: {"evaluations":[...]}
 Each evaluation: {loopName, episodeIds, confidence, verdict, reasoning, estimatedCadence, estimatedValue, automationReadiness, risks}
 verdict must be "automate", "monitor", or "discard".`;
+
+export const LLM_LOOP_DETECTOR_PROMPT = `You are the Loop Detector for Tallei. You discover repeated work patterns in a user's AI-assisted work history.
+
+A "loop" is a group of 2+ episodes that represent the SAME recurring work pattern. The user repeatedly does the same job, produces the same artifact, and follows the same action pattern.
+
+You will receive a list of work episodes. Each episode describes one completed unit of work with its intent, output, steps, and sources. Look for SEMANTIC similarity, not exact word matches. Different phrasing of the same workflow counts as the same loop.
+
+Group criteria (ALL must match):
+- Same job-to-be-done (what the user is trying to accomplish)
+- Same artifact produced (what they create: newsletter, changelog, code, etc.)
+- Same action pattern (the sequence of steps they follow)
+- Same source/tool pattern (GitHub, ChatGPT, etc.)
+
+Do NOT group by:
+- Topical similarity alone (e.g., "both about React")
+- Same project but different tasks
+- Coincidental timing
+- One-off events
+
+For each proposed group, assign a status:
+- approved_loop: strong evidence of repeated work pattern
+- monitor_pattern: promising but not enough evidence to create a suggestion yet
+- rejected_topical_similarity: same topic/project, different actual work behavior
+- rejected_insufficient_evidence: too little repeated evidence
+
+Return JSON only:
+{"groups": [{"episodeIds": [...], "loopName": "...", "sharedIntent": "...", "sharedOutputType": "...", "sharedSources": [...], "reasoning": "...", "status": "approved_loop|monitor_pattern|rejected_topical_similarity|rejected_insufficient_evidence", "confidence": 0.0-1.0}]}`;
 
 export const DNA_GENERATOR_PROMPT = `You are the Workflow DNA Generator.
 You receive one or more qualified loops (confirmed recurring task patterns) with episode evidence and evaluation reasoning.
