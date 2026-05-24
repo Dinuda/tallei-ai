@@ -18,6 +18,7 @@ import type {
   MemoryCleanupSummary,
 } from "../orchestration/memory-cleanup/types.js";
 import type { LoopMinerSummary } from "../orchestration/loop-miner/types.js";
+import type { MemorySelectionStrategy } from "../orchestration/memory/hybrid-memory-selection.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage } from "../orchestration/memory-cleanup/usage.js";
 import { invalidateRecallCache } from "./memory.js";
 import { sendResendEmail } from "./resend-email.js";
@@ -29,9 +30,15 @@ export interface RunMemoryCleanupOptions {
   processAll?: boolean;
   includeReviewed?: boolean;
   logImplicitKeeps?: boolean;
+  selectionStrategy?: MemorySelectionStrategy;
+  newestLimit?: number;
+  interestingLimit?: number;
+  candidateLimit?: number;
 }
 
 const DEFAULT_MAX_MEMORIES = 200;
+const DEFAULT_NEWEST_LIMIT = 150;
+const DEFAULT_INTERESTING_LIMIT = 50;
 const logger = createLogger({ baseFields: { component: "memory_cleanup" } });
 
 const cleanupRepository = new MemoryCleanupRepository();
@@ -210,6 +217,10 @@ export async function runMemoryCleanupForUser(
   const processAll = options.processAll ?? true;
   const includeReviewed = options.includeReviewed ?? false;
   const logImplicitKeeps = options.logImplicitKeeps ?? false;
+  const selectionStrategy = options.selectionStrategy ?? "current_priority";
+  const newestLimit = Math.max(1, Math.min(options.newestLimit ?? DEFAULT_NEWEST_LIMIT, maxMemories));
+  const interestingLimit = Math.max(0, Math.min(options.interestingLimit ?? DEFAULT_INTERESTING_LIMIT, maxMemories - newestLimit));
+  const candidateLimit = Math.max(maxMemories, options.candidateLimit ?? 2_000);
   const startedAt = Date.now();
 
   if (runReason === "daily_intelligence") {
@@ -247,7 +258,12 @@ export async function runMemoryCleanupForUser(
     let batchCount = 0;
 
     while (true) {
-      const snapshot = await snapshotUseCase.execute(auth, maxMemories, includeReviewed, [...seenMemoryIds]);
+      const snapshot = await snapshotUseCase.execute(auth, maxMemories, includeReviewed, [...seenMemoryIds], {
+        strategy: selectionStrategy,
+        newestLimit,
+        interestingLimit,
+        candidateLimit,
+      });
       if (snapshot.memoryCount === 0) break;
       for (const memoryId of snapshot.selectedMemoryIds) seenMemoryIds.add(memoryId);
 
@@ -261,8 +277,27 @@ export async function runMemoryCleanupForUser(
         conflictCandidateIds: snapshot.conflictCandidateIds,
         protectedMemoryIds: snapshot.protectedMemoryIds,
         bucketCounts: snapshot.bucketCounts,
+        selection: snapshot.selection,
       });
       summary.selectedMemories = (summary.selectedMemories ?? 0) + snapshot.memoryCount;
+      if (snapshot.selection) {
+        summary.memorySelection = {
+          ...(summary.memorySelection ?? {
+            considered: 0,
+            selected: 0,
+            newestSelected: 0,
+            interestingSelected: 0,
+            candidateLimit: snapshot.selection.candidateLimit,
+            truncated: false,
+          }),
+          considered: (summary.memorySelection?.considered ?? 0) + snapshot.selection.considered,
+          selected: (summary.memorySelection?.selected ?? 0) + snapshot.selection.selected,
+          newestSelected: (summary.memorySelection?.newestSelected ?? 0) + snapshot.selection.newestSelected,
+          interestingSelected: (summary.memorySelection?.interestingSelected ?? 0) + snapshot.selection.interestingSelected,
+          candidateLimit: Math.max(summary.memorySelection?.candidateLimit ?? 0, snapshot.selection.candidateLimit),
+          truncated: Boolean(summary.memorySelection?.truncated || snapshot.selection.truncated),
+        };
+      }
       logger.info("cleanup snapshot built", { runId, batch: batchCount, selectedMemories: snapshot.memoryCount });
 
       const consolidated = await consolidatorUseCase.execute(snapshot);

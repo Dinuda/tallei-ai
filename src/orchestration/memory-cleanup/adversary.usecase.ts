@@ -44,10 +44,21 @@ export class CleanupAdversaryUseCase {
     }
 
     const deterministic = fallbackAdversary(input.proposal, input.snapshot);
+
+    // Fast-path: skip LLM when deterministic result is already clearly safe
+    if (!deterministic.contested && deterministic.recommendedAction === "approve" && deterministic.riskLevel !== "high") {
+      return {
+        result: deterministic,
+        raw: { skipped: "deterministic_approve", deterministic },
+        aiCalls: 0,
+        usage: emptyCleanupAiUsage(),
+      };
+    }
+
     const request = {
       model: aiProviderRegistry.chatModelName(),
       temperature: 0,
-      maxTokens: 900,
+      maxTokens: 600,
       responseFormat: "json_object",
       messages: [
         { role: "system", content: ADVERSARY_SYSTEM_PROMPT },

@@ -2,7 +2,7 @@ import { aiProviderRegistry } from "../../providers/ai/index.js";
 import { CONSOLIDATOR_SYSTEM_PROMPT } from "./prompts.js";
 import { compactSnapshotForAi, findCandidate, normalizeProposal, readJsonObject, validateProposal } from "./proposal-utils.js";
 import type { CleanupAiUsage, CleanupProposalInput, CleanupSnapshot } from "./types.js";
-import { emptyCleanupAiUsage, recordCleanupAiUsage } from "./usage.js";
+import { emptyCleanupAiUsage, mergeCleanupAiUsage, recordCleanupAiUsage } from "./usage.js";
 
 function deterministicProposals(snapshot: CleanupSnapshot): CleanupProposalInput[] {
   const proposals: CleanupProposalInput[] = [];
@@ -74,50 +74,75 @@ function proposalKey(proposal: CleanupProposalInput): string {
   return `${proposal.proposalType}:${[...proposal.sourceMemoryIds].sort().join(",")}:${proposal.targetMemoryId ?? ""}`;
 }
 
+const CONSOLIDATOR_SUB_BATCH_SIZE = 20;
+
+function subSnapshot(snapshot: CleanupSnapshot, batchMemories: CleanupSnapshot["memories"]): CleanupSnapshot {
+  const batchIds = new Set(batchMemories.map((memory) => memory.id));
+  return {
+    ...snapshot,
+    memoryCount: batchMemories.length,
+    memories: batchMemories,
+    selectedMemoryIds: snapshot.selectedMemoryIds.filter((id) => batchIds.has(id)),
+    duplicateGroups: snapshot.duplicateGroups.filter((group) =>
+      group.memoryIds.some((id) => batchIds.has(id))
+    ),
+    staleCandidateIds: snapshot.staleCandidateIds.filter((id) => batchIds.has(id)),
+    conflictCandidateIds: snapshot.conflictCandidateIds.filter((id) => batchIds.has(id)),
+    protectedMemoryIds: snapshot.protectedMemoryIds.filter((id) => batchIds.has(id)),
+  };
+}
+
 export class CleanupConsolidatorUseCase {
   async execute(snapshot: CleanupSnapshot): Promise<{ proposals: CleanupProposalInput[]; raw: unknown; aiCalls: number; usage: CleanupAiUsage }> {
     if (snapshot.memoryCount === 0) return { proposals: [], raw: { skipped: "empty_snapshot" }, aiCalls: 0, usage: emptyCleanupAiUsage() };
     const deterministic = deterministicProposals(snapshot);
 
-    const request = {
-      model: aiProviderRegistry.chatModelName(),
-      temperature: 0,
-      maxTokens: 1800,
-      responseFormat: "json_object",
-      messages: [
-        { role: "system", content: CONSOLIDATOR_SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: JSON.stringify({
-            snapshot: compactSnapshotForAi(snapshot),
-            outputSchema: {
-              proposals: [{
-                proposalType: "merge",
-                sourceMemoryIds: ["uuid"],
-                targetMemoryId: "uuid-or-null",
-                proposedContent: "canonical memory text or null",
-                rationale: "why this is safe",
-                confidence: 0.87,
-                riskLevel: "medium",
-                bucket: "short_term",
-                bucketReason: "why this bucket fits",
-                bucketConfidence: 0.92,
-              }],
-            },
-          }),
-        },
-      ],
-    } as const;
-    const response = await aiProviderRegistry.chat(request);
-    const usage = emptyCleanupAiUsage();
-    recordCleanupAiUsage(usage, request, response);
+    // Split into small sub-batches and run in parallel to avoid timeout
+    const subBatches: CleanupSnapshot["memories"][] = [];
+    for (let i = 0; i < snapshot.memories.length; i += CONSOLIDATOR_SUB_BATCH_SIZE) {
+      subBatches.push(snapshot.memories.slice(i, i + CONSOLIDATOR_SUB_BATCH_SIZE));
+    }
 
-    const raw = readJsonObject(response.text);
-    const proposalsRaw = Array.isArray(raw.proposals) ? raw.proposals : [];
-    const aiProposals = proposalsRaw
-      .map(normalizeProposal)
-      .filter((proposal): proposal is CleanupProposalInput => Boolean(proposal))
-      .filter((proposal) => validateProposal(proposal, snapshot) === null);
+    const batchResults = await Promise.all(subBatches.map(async (batchMemories, batchIdx) => {
+      const sub = subSnapshot(snapshot, batchMemories);
+      const request = {
+        model: aiProviderRegistry.chatModelName(),
+        temperature: 0,
+        maxTokens: 900,
+        responseFormat: "json_object",
+        messages: [
+          { role: "system", content: CONSOLIDATOR_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: JSON.stringify({
+              snapshot: compactSnapshotForAi(sub),
+              batch: `${batchIdx + 1}/${subBatches.length}`,
+            }),
+          },
+        ],
+      } as const;
+      const response = await aiProviderRegistry.chat(request);
+      const callUsage = emptyCleanupAiUsage();
+      recordCleanupAiUsage(callUsage, request, response);
+      const raw = readJsonObject(response.text);
+      const rawProposals = Array.isArray(raw.proposals) ? raw.proposals : [];
+      return { raw, rawProposals, usage: callUsage };
+    }));
+
+    const usage = emptyCleanupAiUsage();
+    const allRaw: unknown[] = [];
+    const aiProposals: CleanupProposalInput[] = [];
+    for (const batch of batchResults) {
+      mergeCleanupAiUsage(usage, batch.usage);
+      allRaw.push(batch.raw);
+      for (const item of batch.rawProposals) {
+        const proposal = normalizeProposal(item);
+        if (proposal && validateProposal(proposal, snapshot) === null) {
+          aiProposals.push(proposal);
+        }
+      }
+    }
+
     const seen = new Set<string>();
     const proposals = [...deterministic, ...aiProposals].filter((proposal) => {
       const key = proposalKey(proposal);
@@ -128,11 +153,8 @@ export class CleanupConsolidatorUseCase {
 
     return {
       proposals,
-      raw: {
-        deterministic,
-        ai: raw,
-      },
-      aiCalls: 1,
+      raw: { deterministic, ai: allRaw },
+      aiCalls: subBatches.length,
       usage,
     };
   }

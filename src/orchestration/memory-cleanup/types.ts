@@ -1,4 +1,5 @@
 import type { MemoryRecordRow } from "../../infrastructure/repositories/memory.repository.js";
+import type { HybridMemorySelectionSummary } from "../memory/hybrid-memory-selection.js";
 
 export const CLEANUP_BUCKETS = ["short_term", "long_term", "permanent"] as const;
 export const CLEANUP_PROPOSAL_TYPES = ["bucket", "keep", "promote", "merge", "rewrite", "prune"] as const;
@@ -24,6 +25,7 @@ export interface CleanupMemoryCandidate {
   category: string | null;
   isPinned: boolean;
   referenceCount: number;
+  importance?: string | number;
   lastReferencedAt: string | null;
   createdAt: string;
   protected: boolean;
@@ -36,6 +38,7 @@ export interface CleanupMemoryCandidate {
 export interface CleanupSnapshot {
   memoryCount: number;
   selectedMemoryIds: string[];
+  selection?: HybridMemorySelectionSummary;
   duplicateGroups: Array<{ contentHash: string; memoryIds: string[] }>;
   staleCandidateIds: string[];
   conflictCandidateIds: string[];
@@ -139,6 +142,7 @@ export interface MemoryCleanupSummary {
   selectedMemories?: number;
   batches?: number;
   remainingUnreviewed?: number;
+  memorySelection?: HybridMemorySelectionSummary;
   usage?: CleanupAiUsage;
   skipped?: boolean;
   skipReason?: string;

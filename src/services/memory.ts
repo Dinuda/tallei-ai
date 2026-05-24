@@ -345,6 +345,7 @@ const chatGptMemoryImportUseCase = new ChatGptMemoryImportUseCase({
     sourceDateTime,
     importDetectedCategory,
     importEntityKey,
+    skipSummary,
   }) => {
     const persistedMemoryType: MemoryType =
       memoryType === "lesson" || memoryType === "failure" || memoryType === "collab"
@@ -360,7 +361,9 @@ const chatGptMemoryImportUseCase = new ChatGptMemoryImportUseCase({
       preferenceKey,
       category,
       runFactExtraction: false,
+      runVectorUpsert: true,
       runVectorDedup: false,
+      skipSummary,
       summaryMetadata: {
         source_platform: "chatgpt",
         source_import: true,
@@ -391,7 +394,13 @@ export async function saveMemory(
     preferenceKey?: string | null;
     summaryMetadata?: Record<string, unknown>;
     runFactExtraction?: boolean;
+    runVectorUpsert?: boolean;
     runVectorDedup?: boolean;
+    tier?: "short_term" | "long_term" | "permanent";
+    segment?: string | null;
+    importance?: number;
+    decayRate?: number;
+    lifecycle?: string;
   }
 ): Promise<SaveMemoryResult> {
   return saveMemoryUseCase.execute({
@@ -405,7 +414,13 @@ export async function saveMemory(
     preferenceKey: options?.preferenceKey,
     summaryMetadata: options?.summaryMetadata,
     runFactExtraction: options?.runFactExtraction,
+    runVectorUpsert: options?.runVectorUpsert,
     runVectorDedup: options?.runVectorDedup,
+    tier: options?.tier,
+    segment: options?.segment,
+    importance: options?.importance,
+    decayRate: options?.decayRate,
+    lifecycle: options?.lifecycle,
   });
 }
 
@@ -463,7 +478,13 @@ export async function savePreference(
     preferenceKey?: string | null;
     summaryMetadata?: Record<string, unknown>;
     runFactExtraction?: boolean;
+    runVectorUpsert?: boolean;
     runVectorDedup?: boolean;
+    tier?: "short_term" | "long_term" | "permanent";
+    segment?: string | null;
+    importance?: number;
+    decayRate?: number;
+    lifecycle?: string;
   }
 ): Promise<SaveMemoryResult> {
   return saveMemory(content, auth, platform, requesterIp, {
@@ -473,7 +494,13 @@ export async function savePreference(
     preferenceKey: options?.preferenceKey ?? null,
     summaryMetadata: options?.summaryMetadata,
     runFactExtraction: options?.runFactExtraction,
+    runVectorUpsert: options?.runVectorUpsert,
     runVectorDedup: options?.runVectorDedup,
+    tier: options?.tier,
+    segment: options?.segment,
+    importance: options?.importance,
+    decayRate: options?.decayRate,
+    lifecycle: options?.lifecycle,
   });
 }
 
@@ -482,6 +509,22 @@ export async function importChatGptMemories(
   input: ChatGptImportRequest
 ): Promise<ChatGptImportResult> {
   return chatGptMemoryImportUseCase.execute(auth, input);
+}
+
+export async function persistChatGptImportPreview(
+  auth: AuthContext,
+  input: {
+    preview: ChatGptImportResult["preview"];
+    batchId: string;
+    mode: ChatGptImportResult["mode"];
+    onProgress?: ChatGptImportRequest["onProgress"];
+  }
+): Promise<{
+  persisted: number;
+  duplicates: number;
+  duplicateRows: ChatGptImportResult["duplicates"];
+}> {
+  return chatGptMemoryImportUseCase.persistImportPreview(auth, input);
 }
 
 export async function listPreferences(auth: AuthContext) {

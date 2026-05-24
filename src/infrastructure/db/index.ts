@@ -4,6 +4,9 @@ import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 
 const { Pool } = pg;
 
+const POOL_STATEMENT_TIMEOUT_MS = 5000;
+const POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS = 5000;
+
 function createPool(connectionString: string): pg.Pool {
   const dbPool = new Pool({
     connectionString,
@@ -12,8 +15,8 @@ function createPool(connectionString: string): pg.Pool {
     max: 30,
     idleTimeoutMillis: 30000,
     keepAlive: true,
-    statement_timeout: 5000,
-    idle_in_transaction_session_timeout: 5000,
+    statement_timeout: POOL_STATEMENT_TIMEOUT_MS,
+    idle_in_transaction_session_timeout: POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS,
   });
 
   dbPool.on("error", (error: Error & { code?: string }) => {
@@ -344,8 +347,21 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
   }
 }
 
+async function configureMigrationSession(client: DbClient): Promise<void> {
+  // Boot-time DDL (CREATE INDEX, ALTER TABLE, backfills) can exceed the pool's
+  // 5s statement timeout on non-trivial databases.
+  await client.query("SET statement_timeout = 0");
+  await client.query("SET idle_in_transaction_session_timeout = 0");
+}
+
+async function restorePoolSessionTimeouts(client: DbClient): Promise<void> {
+  await client.query(`SET statement_timeout = ${POOL_STATEMENT_TIMEOUT_MS}`);
+  await client.query(`SET idle_in_transaction_session_timeout = ${POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
+}
+
 export async function initDb() {
   const client = await connectWithFallback();
+  let migrationSessionConfigured = false;
   try {
     if (!config.dbAutoMigrateOnBoot) {
       await client.query("SELECT 1");
@@ -353,6 +369,8 @@ export async function initDb() {
       return;
     }
 
+    await configureMigrationSession(client);
+    migrationSessionConfigured = true;
     await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 
     await client.query(`
@@ -1448,6 +1466,44 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS chatgpt_import_jobs (
+        ref TEXT PRIMARY KEY,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL
+          CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+        request_json JSONB NOT NULL,
+        progress_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        result_json JSONB,
+        error_json JSONB,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 4,
+        next_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_attempt_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP WITH TIME ZONE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_tenant_user_created
+        ON chatgpt_import_jobs(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_tenant_user_status
+        ON chatgpt_import_jobs(tenant_id, user_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_pending
+        ON chatgpt_import_jobs(status, next_attempt_at ASC, created_at ASC)
+        WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_status_attempts
+        ON chatgpt_import_jobs(status, attempt_count, max_attempts, next_attempt_at ASC)
+        WHERE status IN ('pending', 'failed');
+    `);
+
+    await client.query(`
+      ALTER TABLE chatgpt_import_jobs
+      ADD COLUMN IF NOT EXISTS storage_ref TEXT,
+      ADD COLUMN IF NOT EXISTS original_filename TEXT;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS integration_asset_acknowledgements (
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         asset_key TEXT NOT NULL,
@@ -1953,6 +2009,15 @@ export async function initDb() {
     console.error("Error initializing database schema:", error);
     throw error;
   } finally {
+    if (migrationSessionConfigured) {
+      try {
+        await restorePoolSessionTimeouts(client);
+      } catch {
+        // Discard broken connections instead of returning them to the pool.
+        client.release(true);
+        return;
+      }
+    }
     client.release();
   }
 }

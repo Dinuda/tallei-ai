@@ -14,6 +14,7 @@ import type {
   MemoryCleanupRunView,
   MemoryCleanupSummary,
 } from "../../orchestration/memory-cleanup/types.js";
+import type { MemorySelectionStrategy } from "../../orchestration/memory/hybrid-memory-selection.js";
 import type { MemoryRecordRow } from "./memory.repository.js";
 
 interface CleanupRunRow {
@@ -70,6 +71,9 @@ function readSummary(value: unknown): MemoryCleanupSummary {
     selectedMemories: typeof row.selectedMemories === "number" ? row.selectedMemories : undefined,
     batches: typeof row.batches === "number" ? row.batches : undefined,
     remainingUnreviewed: typeof row.remainingUnreviewed === "number" ? row.remainingUnreviewed : undefined,
+    memorySelection: row.memorySelection && typeof row.memorySelection === "object" && !Array.isArray(row.memorySelection)
+      ? row.memorySelection as MemoryCleanupSummary["memorySelection"]
+      : undefined,
     usage: usageRow ? {
       calls: Number(usageRow.calls ?? 0),
       promptTokens: Number(usageRow.promptTokens ?? 0),
@@ -117,9 +121,13 @@ export class MemoryCleanupRepository {
     limit: number;
     includeReviewed?: boolean;
     excludeMemoryIds?: string[];
+    selectionStrategy?: MemorySelectionStrategy;
   }): Promise<MemoryRecordRow[]> {
     const includeReviewed = input.includeReviewed === true;
     const excludeMemoryIds = input.excludeMemoryIds ?? [];
+    const orderBy = input.selectionStrategy === "newest_hybrid"
+      ? "mr.created_at DESC"
+      : "mr.is_pinned DESC, mr.last_referenced_at DESC NULLS LAST, mr.created_at DESC";
     const result = await pool.query<MemoryRecordRow>(
       `SELECT mr.*
        FROM memory_records mr
@@ -135,7 +143,7 @@ export class MemoryCleanupRepository {
          AND mr.superseded_by IS NULL
          ${includeReviewed ? "" : "AND mcr.memory_id IS NULL"}
          AND (cardinality($4::uuid[]) = 0 OR mr.id <> ALL($4::uuid[]))
-       ORDER BY mr.is_pinned DESC, mr.last_referenced_at DESC NULLS LAST, mr.created_at DESC
+       ORDER BY ${orderBy}
        LIMIT $3`,
       [auth.tenantId, auth.userId, input.limit, excludeMemoryIds]
     );

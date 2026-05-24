@@ -34,6 +34,11 @@ interface SaveMemoryUseCaseDeps {
       isPinned?: boolean;
       referenceCount?: number;
       lastReferencedAt?: string | null;
+      tier?: "short_term" | "long_term" | "permanent";
+      segment?: string | null;
+      importance?: number;
+      decayRate?: number;
+      lifecycle?: string;
     }): Promise<void>;
     findActiveByContentHash(auth: AuthContext, contentHash: string): Promise<{
       id: string;
@@ -104,7 +109,14 @@ export interface SaveMemoryUseCaseInput {
   readonly preferenceKey?: string | null;
   readonly summaryMetadata?: Record<string, unknown>;
   readonly runFactExtraction?: boolean;
+  readonly runVectorUpsert?: boolean;
   readonly runVectorDedup?: boolean;
+  readonly tier?: "short_term" | "long_term" | "permanent";
+  readonly segment?: string | null;
+  readonly importance?: number;
+  readonly decayRate?: number;
+  readonly lifecycle?: string;
+  readonly skipSummary?: boolean;
 }
 
 const DEFAULT_MEMORY_EMBED_TIMEOUT_MS = config.nodeEnv === "production" ? 4_000 : 2_500;
@@ -257,7 +269,7 @@ export class SaveMemoryUseCase {
     let summary: ConversationSummary = buildFallbackSummary(normalizedContent);
     let summaryFromModel = false;
     let summaryMs = 0;
-    if (!this.deps.isEvalMode) {
+    if (!this.deps.isEvalMode && input.skipSummary !== true) {
       try {
         const summaryStartedAt = process.hrtime.bigint();
         summary = await withTimeout(
@@ -337,6 +349,11 @@ export class SaveMemoryUseCase {
         isPinned,
         referenceCount: 1,
         lastReferencedAt: null,
+        tier: input.tier,
+        segment: input.segment,
+        importance: input.importance,
+        decayRate: input.decayRate,
+        lifecycle: input.lifecycle,
       });
       return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
     })();
@@ -384,13 +401,18 @@ export class SaveMemoryUseCase {
       save_db_write_ms: insertMs,
       save_service_ms: saveTotalMs,
       save_quota_mode: quotaMode,
-      save_vector_mode: this.deps.shouldBypassVector() ? "bypass" : "background",
+      save_vector_mode: input.runVectorUpsert === false
+        ? "skipped"
+        : this.deps.shouldBypassVector()
+          ? "bypass"
+          : "background",
       save_memory_type: memoryType,
       save_memory_pinned: isPinned,
     });
 
     void (async () => {
       const embedAndUpsert = async () => {
+        if (input.runVectorUpsert === false) return;
         if (this.deps.shouldBypassVector()) return;
         try {
           const vector = await withTimeout(

@@ -546,7 +546,7 @@ export function workflowDnaPrompt(dna: WorkflowDNA): string {
 }
 
 export const LOOP_EPISODE_EXTRACTION_VERSION = "loop_episode_extraction_v2";
-export const LOOP_EPISODE_EMBEDDING_VERSION = "loop_episode_embedding_v1";
+export const LOOP_EPISODE_EMBEDDING_VERSION = "loop_episode_embedding_v2";
 
 function stableHash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -851,9 +851,6 @@ export function consolidateWorkspaceGroupedHits(groups: WorkspaceGroupedHit[]): 
 
 export function episodeEmbeddingText(episode: EpisodeRecord): string {
   const canonical = deriveCanonicalLoopFacet(episode);
-  const turns = episode.turns
-    .slice(-4)
-    .map((turn) => `${turn.sourceEventType}:${turn.role}:${turn.contentSummary.slice(0, 240)}`);
   return [
     `version=${LOOP_EPISODE_EMBEDDING_VERSION}`,
     `abstractedJtbd=${canonical.abstractedJtbd}`,
@@ -865,9 +862,6 @@ export function episodeEmbeddingText(episode: EpisodeRecord): string {
     `outputType=${episode.outputType}`,
     `sources=${episode.sources.join(", ")}`,
     `tools=${episode.toolNames.join(", ")}`,
-    `steps=${episode.steps.join(" | ")}`,
-    `style=${(episode.styleHints ?? []).join(", ")}`,
-    `turns=${turns.join(" || ")}`,
   ].join("\n");
 }
 

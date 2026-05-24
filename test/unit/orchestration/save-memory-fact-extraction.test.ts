@@ -21,6 +21,7 @@ function createSaveUseCaseForTest(
   options?: {
     shouldBypassVector?: () => boolean;
     searchVectors?: () => Promise<unknown[]>;
+    upsertMemoryVector?: () => Promise<unknown>;
     noteVectorFailure?: (error: unknown, context: string) => void;
   }
 ) {
@@ -39,7 +40,7 @@ function createSaveUseCaseForTest(
       logEvent: async () => {},
     },
     vectorRepository: {
-      upsertMemoryVector: async () => ({}),
+      upsertMemoryVector: async () => options?.upsertMemoryVector?.() ?? ({}),
       searchVectors: async () => options?.searchVectors?.() ?? [],
     },
     shouldBypassVector: options?.shouldBypassVector ?? (() => true),
@@ -131,4 +132,30 @@ test("save memory writes extracted facts when runFactExtraction is enabled", asy
 
   assert.equal(extractFactsCalls.count, 1);
   assert.equal(createdRows.some((row) => row["category"] === "fact_extract"), true);
+});
+
+test("save memory skips vector upsert when runVectorUpsert is false", async () => {
+  const extractFactsCalls = { count: 0 };
+  const createdRows: Array<Record<string, unknown>> = [];
+  let upsertCalls = 0;
+  const saveUseCase = createSaveUseCaseForTest(extractFactsCalls, createdRows, {
+    shouldBypassVector: () => false,
+    upsertMemoryVector: async () => {
+      upsertCalls += 1;
+      return {};
+    },
+  });
+
+  await saveUseCase.execute({
+    content: "Durable memory row.",
+    auth,
+    platform: "chatgpt",
+    runFactExtraction: false,
+    runVectorUpsert: false,
+  });
+
+  await sleep(40);
+
+  assert.equal(upsertCalls, 0);
+  assert.equal(createdRows.length, 1);
 });

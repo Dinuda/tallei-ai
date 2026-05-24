@@ -2,14 +2,15 @@ import type { AuthContext } from "../../domain/auth/index.js";
 
 import { createHash } from "crypto";
 import { config } from "../../config/index.js";
-import { embedText } from "../../infrastructure/cache/embedding-cache.js";
+import { sendAdminSlackMessage } from "../../infrastructure/notifications/admin-slack.js";
 import {
   LoopEpisodeGroupedResult,
   LoopEpisodeVectorRepository,
 } from "../../infrastructure/repositories/loop-episode-vector.repository.js";
 import { LoopMinerRepository as PgLoopMinerRepository } from "../../infrastructure/repositories/loop-miner.repository.js";
 import { createLogger } from "../../observability/index.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { aiProviderRegistry, isRetriableProviderError } from "../../providers/ai/index.js";
+import { CircuitOpenError } from "../../shared/errors/provider-errors.js";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "../../providers/ai/types.js";
 import { withTimeout } from "../../resilience/timeout.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage } from "../memory-cleanup/usage.js";
@@ -47,6 +48,9 @@ export interface RunLoopMinerOptions {
   runReason?: LoopMinerRunReason;
   lookbackDays?: number;
   runId?: string;
+  memoryNewestLimit?: number;
+  memoryInterestingLimit?: number;
+  memoryCandidateLimit?: number;
 }
 
 export interface LoopMinerDeps {
@@ -59,6 +63,13 @@ export interface LoopMinerDeps {
 
 const logger = createLogger({ baseFields: { component: "loop_miner" } });
 const loopEpisodeVectorRepository = new LoopEpisodeVectorRepository();
+const DEFAULT_MEMORY_NEWEST_LIMIT = 150;
+const DEFAULT_MEMORY_INTERESTING_LIMIT = 50;
+const STALE_RUNNING_MAX_AGE_MS = 60 * 60 * 1000;
+const LOOP_EPISODE_EMBED_MAX_ATTEMPTS = 4;
+const LOOP_EPISODE_EMBED_BASE_DELAY_MS = 1_000;
+const LOOP_EPISODE_EMBED_CIRCUIT_COOLDOWN_MS = 22_000;
+const LOOP_EPISODE_EMBED_MAX_DELAY_MS = 16_000;
 
 function errorJson(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
@@ -70,6 +81,82 @@ function errorJson(error: unknown): Record<string, unknown> {
 function errorMessage(error: unknown): string {
   const message = errorJson(error).message;
   return typeof message === "string" ? message : String(message ?? "unknown error");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+function isRetriableEmbeddingError(error: unknown): boolean {
+  if (isRetriableProviderError(error)) return true;
+  const message = errorMessage(error).toLowerCase();
+  return /connection error|fetch failed|network|socket|econn|enotfound|eai_again|timeout|temporar/i.test(message);
+}
+
+function embedRetryDelayMs(error: unknown, attempt: number): number {
+  if (error instanceof CircuitOpenError) {
+    return LOOP_EPISODE_EMBED_CIRCUIT_COOLDOWN_MS;
+  }
+  return Math.min(
+    LOOP_EPISODE_EMBED_MAX_DELAY_MS,
+    LOOP_EPISODE_EMBED_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)
+  );
+}
+
+async function batchEmbedTextsWithRetry(texts: string[]): Promise<(readonly number[])[]> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= LOOP_EPISODE_EMBED_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await aiProviderRegistry.embed({ input: texts });
+      return [...response.vectors];
+    } catch (error) {
+      lastError = error;
+      if (attempt >= LOOP_EPISODE_EMBED_MAX_ATTEMPTS || !isRetriableEmbeddingError(error)) {
+        throw error;
+      }
+      await sleep(embedRetryDelayMs(error, attempt));
+    }
+  }
+  throw lastError;
+}
+
+function modelRejectsExplicitTemperature(model: string | undefined): boolean {
+  if (!model) return false;
+  const normalized = model.toLowerCase();
+  return normalized.startsWith("gpt-5");
+}
+
+function isUnsupportedTemperatureError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return message.includes("unsupported value: 'temperature'")
+    || (message.includes("temperature") && message.includes("only the default (1) value is supported"));
+}
+
+async function sendLoopMinerCompletionSlack(input: {
+  auth: AuthContext;
+  runId: string;
+  status: string;
+  summary: LoopMinerSummary;
+}): Promise<void> {
+  const dashboardUrl = new URL("/dashboard/memory-cleanup", config.dashboardBaseUrl).toString();
+  const warnings = input.summary.warnings?.length ?? 0;
+  const text = [
+    `Tallei Loop Miner ${input.status}`,
+    `Tenant: ${input.auth.tenantId}`,
+    `User: ${input.auth.userId}`,
+    `Run: ${input.runId}`,
+    `Duration: ${input.summary.durationMs ?? 0}ms`,
+    `Episodes: ${input.summary.episodesBuilt}`,
+    `Loops detected: ${input.summary.loopsDetected}`,
+    `Loops qualified: ${input.summary.loopsQualified}`,
+    `Suggestions: ${input.summary.suggestionsCreated}`,
+    `Warnings: ${warnings}`,
+    `Dashboard: ${dashboardUrl}`,
+  ].join("\n");
+  const result = await sendAdminSlackMessage({ text });
+  if (!result.sent && !result.skipped) {
+    logger.warn("loop miner slack notification failed", { runId: input.runId, error: result.error, status: result.status });
+  }
 }
 
 function vectorNormSquared(vector: number[]): number {
@@ -102,11 +189,24 @@ function finalizeSummary(summary: LoopMinerSummary, startedAt: number): LoopMine
 }
 
 async function loopMinerChat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
-  return withTimeout(
-    (signal) => aiProviderRegistry.chatDirect({ ...request, signal }),
-    config.loopMinerChatTimeoutMs,
-    { message: `Loop miner chat timed out after ${config.loopMinerChatTimeoutMs}ms` }
-  );
+  const baseRequest = modelRejectsExplicitTemperature(request.model)
+    ? { ...request, temperature: undefined }
+    : request;
+  try {
+    return await withTimeout(
+      (signal) => aiProviderRegistry.chatDirect({ ...baseRequest, signal }),
+      config.loopMinerChatTimeoutMs,
+      { message: `Loop miner chat timed out after ${config.loopMinerChatTimeoutMs}ms` }
+    );
+  } catch (error) {
+    if (!isUnsupportedTemperatureError(error)) throw error;
+    const fallbackRequest: ChatCompletionRequest = { ...baseRequest, temperature: undefined };
+    return withTimeout(
+      (signal) => aiProviderRegistry.chatDirect({ ...fallbackRequest, signal }),
+      config.loopMinerChatTimeoutMs,
+      { message: `Loop miner chat timed out after ${config.loopMinerChatTimeoutMs}ms` }
+    );
+  }
 }
 
 function createDefaultDeps(): LoopMinerDeps {
@@ -130,14 +230,19 @@ function normalizePhaseUsage(usage: PhaseUsageMetrics | undefined): PhaseUsageMe
 }
 
 function summarizeMemoryDecisions(decisions: LoopMinerMemoryDecision[]): NonNullable<LoopMinerSummary["memorySelection"]> {
+  const firstSelection = decisions.find((decision) => decision.selectionConsidered !== undefined);
   return {
-    considered: decisions.length,
+    considered: firstSelection?.selectionConsidered ?? decisions.length,
     included: decisions.filter((decision) => decision.status === "included").length,
     excluded: decisions.filter((decision) => decision.status === "excluded").length,
     sourceImportsIncluded: decisions.filter((decision) => decision.status === "included" && decision.sourceImport).length,
     unbucketedIncluded: decisions.filter((decision) => decision.status === "included" && !decision.sourceImport && !decision.cleanupBucket).length,
     bucketedExcluded: decisions.filter((decision) => decision.status === "excluded" && decision.reason === "bucketed_memory_deprioritized").length,
     decryptFailures: decisions.filter((decision) => decision.reason === "decrypt_failed").length,
+    newestSelected: decisions.filter((decision) => decision.selectionRole === "newest").length,
+    interestingSelected: decisions.filter((decision) => decision.selectionRole === "interesting").length,
+    candidateLimit: firstSelection?.selectionCandidateLimit,
+    truncated: firstSelection?.selectionTruncated,
   };
 }
 
@@ -334,6 +439,14 @@ export async function runLoopMinerForUser(
 ): Promise<LoopMinerRunResult> {
   const runReason = options.runReason ?? "manual";
   const lookbackDays = Math.max(1, Math.min(options.lookbackDays ?? 30, 90));
+  const memorySelectionOptions = {
+    newestLimit: Math.max(1, options.memoryNewestLimit ?? DEFAULT_MEMORY_NEWEST_LIMIT),
+    interestingLimit: Math.max(0, options.memoryInterestingLimit ?? DEFAULT_MEMORY_INTERESTING_LIMIT),
+    candidateLimit: Math.max(
+      (options.memoryNewestLimit ?? DEFAULT_MEMORY_NEWEST_LIMIT) + (options.memoryInterestingLimit ?? DEFAULT_MEMORY_INTERESTING_LIMIT),
+      options.memoryCandidateLimit ?? 2_000
+    ),
+  };
   const startedAt = Date.now();
 
   if (runReason === "daily_intelligence") {
@@ -359,11 +472,11 @@ export async function runLoopMinerForUser(
   let summary = emptySummary();
   try {
     logger.info("loop miner run started", { runId, runReason, lookbackDays });
-    let events = await deps.repository.listRecentEvents(auth, lookbackDays);
+    let events = await deps.repository.listRecentEvents(auth, lookbackDays, memorySelectionOptions);
     const eventCountsBeforeFallback = countEventsByType(events);
     if (deps.repository.listMemoryDecisionLog) {
       try {
-        const memoryDecisionLog = await deps.repository.listMemoryDecisionLog(auth, lookbackDays);
+        const memoryDecisionLog = await deps.repository.listMemoryDecisionLog(auth, lookbackDays, memorySelectionOptions);
         summary.memoryDecisionLog = memoryDecisionLog;
         summary.memorySelection = summarizeMemoryDecisions(memoryDecisionLog);
         summary.cleanupSuppressedSeeds = memoryDecisionLog.filter((decision) =>
@@ -590,29 +703,59 @@ export async function runLoopMinerForUser(
       }
     }
     if (loopVectorSearchEnabled && deps.repository.updateEpisodeEmbeddingMetadata) {
-      for (const episode of built.episodes) {
-        const canonicalFacet = deriveCanonicalLoopFacet(episode);
-        const embeddingText = episodeEmbeddingText(episode);
-        const embeddingHash = episodeEmbeddingTextHash(embeddingText);
-        let vector: number[];
+      // Determine which episodes need (re)embedding
+      type EpisodePlan = {
+        episode: EpisodeRecord;
+        text: string;
+        hash: string;
+        shouldUpsert: boolean;
+      };
+      const plans: EpisodePlan[] = built.episodes.map((episode) => {
+        const text = episodeEmbeddingText(episode);
+        const hash = episodeEmbeddingTextHash(text);
+        return {
+          episode,
+          text,
+          hash,
+          shouldUpsert: episode.embeddingTextHash !== hash || episode.embeddingStatus !== "ready",
+        };
+      });
+      const toEmbed = plans.filter((plan) => plan.shouldUpsert);
+
+      // Batch all embedding texts into one API call
+      let batchVectors: (readonly number[])[] = [];
+      if (toEmbed.length > 0) {
         try {
-          vector = await embedText(embeddingText);
+          batchVectors = await batchEmbedTextsWithRetry(toEmbed.map((plan) => plan.text));
         } catch (error) {
+          const message = errorMessage(error);
           summary.warnings = [
             ...(summary.warnings ?? []),
-            `Loop episode embedding failed for episode ${episode.id}: ${errorMessage(error)}`,
+            `Loop episode batch embedding failed (${toEmbed.length} episode(s)): ${message}`,
           ];
-          try {
-            await deps.repository.updateEpisodeEmbeddingMetadata({
+          // Mark all pending episodes as failed
+          await Promise.allSettled(toEmbed.map((plan) =>
+            deps.repository.updateEpisodeEmbeddingMetadata!({
               auth,
-              episodeId: episode.id,
-              embeddingTextHash: embeddingHash,
+              episodeId: plan.episode.id,
+              embeddingTextHash: plan.hash,
               status: "failed",
               embeddedAt: null,
-            });
-          } catch {
-            // Non-fatal metadata write failure.
-          }
+            })
+          ));
+        }
+      }
+
+      const vectorByEpisodeId = new Map<string, number[]>(
+        toEmbed.map((plan, idx) => [plan.episode.id, [...(batchVectors[idx] ?? [])]])
+      );
+
+      for (const { episode, hash: embeddingHash, shouldUpsert } of plans) {
+        const canonicalFacet = deriveCanonicalLoopFacet(episode);
+        const vector = vectorByEpisodeId.get(episode.id) ?? [];
+
+        if (shouldUpsert && vector.length === 0) {
+          // Batch failed for this episode — already marked failed above, skip to vector search
           continue;
         }
         const invalidVectorReason = (() => {
@@ -647,7 +790,6 @@ export async function runLoopMinerForUser(
           continue;
         }
 
-        const shouldUpsert = episode.embeddingTextHash !== embeddingHash || episode.embeddingStatus !== "ready";
         const workspacePayload = deriveWorkspaceTracePayload(episode, vector);
         if (shouldUpsert) {
           try {
@@ -954,7 +1096,8 @@ export async function runLoopMinerForUser(
 }
 
 export async function listLoopMinerRunsForUser(auth: AuthContext, limit = 10): Promise<LoopMinerRunView[]> {
-  return new PgLoopMinerRepository().listRunViews(auth, limit);
+  const repo = new PgLoopMinerRepository();
+  return repo.listRunViews(auth, limit);
 }
 
 export async function queueLoopMinerRunForUser(
@@ -964,11 +1107,12 @@ export async function queueLoopMinerRunForUser(
   const runReason = options.runReason ?? "manual";
   const lookbackDays = Math.max(1, Math.min(options.lookbackDays ?? 30, 90));
   const deps = createDefaultDeps();
+  await deps.repository.markStaleRunningRunsFailed?.(auth, STALE_RUNNING_MAX_AGE_MS).catch(() => {});
   const runId = await deps.repository.createRun({ auth, runReason });
   logger.info("loop miner background run queued", { runId, runReason, lookbackDays });
 
   void runLoopMinerForUser(auth, { ...options, runReason, lookbackDays, runId }, deps)
-    .then((result) => {
+    .then(async (result) => {
       logger.info("loop miner background run settled", {
         runId,
         status: result.status,
@@ -977,12 +1121,30 @@ export async function queueLoopMinerRunForUser(
         loopsQualified: result.summary.loopsQualified,
         suggestionsCreated: result.summary.suggestionsCreated,
       });
+      await sendLoopMinerCompletionSlack({
+        auth,
+        runId,
+        status: result.status,
+        summary: result.summary,
+      }).catch((error) => {
+        logger.warn("loop miner slack notification crashed", { runId, error: errorJson(error) });
+      });
     })
     .catch((error) => {
       logger.error("loop miner background run crashed", {
         runId,
         error: errorJson(error),
       });
+      void sendAdminSlackMessage({
+        text: [
+          "Tallei Loop Miner crashed",
+          `Tenant: ${auth.tenantId}`,
+          `User: ${auth.userId}`,
+          `Run: ${runId}`,
+          `Error: ${errorMessage(error)}`,
+          `Dashboard: ${new URL("/dashboard/memory-cleanup", config.dashboardBaseUrl).toString()}`,
+        ].join("\n"),
+      }).catch(() => {});
     });
 
   const repo = new PgLoopMinerRepository();

@@ -4,6 +4,9 @@ import type { CleanupAiUsage } from "./types.js";
 type Pricing = { inputPerMillion: number; outputPerMillion: number };
 
 const PRICING_BY_MODEL: Record<string, Pricing> = {
+  "gpt-5-nano": { inputPerMillion: 0.05, outputPerMillion: 0.4 },
+  "gpt-5-mini": { inputPerMillion: 0.25, outputPerMillion: 2 },
+  "gpt-5": { inputPerMillion: 1.25, outputPerMillion: 10 },
   "gpt-4o": { inputPerMillion: 2.5, outputPerMillion: 10 },
   "gpt-4o-mini": { inputPerMillion: 0.15, outputPerMillion: 0.6 },
   "gpt-4.1": { inputPerMillion: 2, outputPerMillion: 8 },

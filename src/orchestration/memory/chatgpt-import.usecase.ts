@@ -1,8 +1,41 @@
 import { randomUUID } from "crypto";
 
+import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
+import type { BulkIngestDocument, BulkIngestSummary } from "./chatgpt-bulk-ingest.js";
+import {
+  extractBulkConversationBundles,
+  looksLikeBinaryText,
+  type BulkConversationBundle,
+} from "./chatgpt-bulk-parser.js";
+import {
+  extractHighSignalImportMemories,
+  mapExtractTypeToMemoryType,
+  type ExtractedImportMemory,
+  type ExtractHighSignalMemoriesOptions,
+  type ExtractHighSignalMemoriesResult,
+} from "./chatgpt-import-extract.usecase.js";
+import { extractHighSignalImportMemoriesHeuristic } from "./chatgpt-import-heuristic-extract.usecase.js";
+import {
+  bundlesToImportConversations,
+  classifyBulkImportCandidates,
+  type ClassifiedImportConversations,
+  type ScoredImportConversation,
+} from "./chatgpt-import-signal.usecase.js";
+import { promoteWeakSignals } from "./chatgpt-import-weak-signal.usecase.js";
 import { classifyMemory } from "./memory-classification.js";
 import type { MemoryType } from "./memory-types.js";
+import {
+  buildStreamIngestWarnings,
+  readProfileDocumentFromZip,
+  streamConversationsFromBulkFile,
+  streamConversationsFromJsonFiles,
+  streamStatsToIngestSummary,
+  type StreamIngestSkipStats,
+} from "./chatgpt-bulk-stream-ingest.js";
+import { resolveStoragePath } from "../../services/chatgpt-import-storage.js";
+import { basename } from "node:path";
+import { extractProfileImportItems } from "./chatgpt-bulk-parser.js";
 
 export type ChatGptImportStatus =
   | "accepted"
@@ -17,11 +50,37 @@ export type ChatGptImportReasonCode =
   | "invalid_input"
   | "deduped_on_persist";
 
-export type ChatGptImportMode = "json_export" | "paste";
+export type ChatGptImportMode = "json_export" | "paste" | "bulk_export";
+
+export type ChatGptImportProgressStage =
+  | "ingesting"
+  | "filtering"
+  | "aggregating"
+  | "extracting"
+  | "promoting"
+  | "persisting";
+
+export interface ChatGptImportProgress {
+  stage: ChatGptImportProgressStage;
+  message?: string;
+}
+
+export type ChatGptImportProfile = "curated" | "inclusive";
 
 export interface ChatGptImportRequest {
-  input: string;
+  mode?: "bulk_file" | "conversation_json_files";
+  storageRef?: string;
+  storageRefs?: string[];
+  originalFilename?: string;
+  originalFilenames?: string[];
+  importProfile?: ChatGptImportProfile;
+  input?: string;
   apply?: boolean;
+  modeHint?: ChatGptImportMode;
+  bulkDocuments?: BulkIngestDocument[];
+  ingestSummary?: BulkIngestSummary;
+  ingestWarnings?: string[];
+  onProgress?: (progress: ChatGptImportProgress) => void | Promise<void>;
 }
 
 export interface ChatGptImportCandidate {
@@ -36,6 +95,10 @@ export interface ChatGptImportCandidate {
   preferenceKey: string | null;
   status: ChatGptImportStatus;
   reason?: ChatGptImportReasonCode;
+  extractConfidence?: number;
+  extractStability?: number;
+  extractType?: string;
+  sourceReason?: string;
 }
 
 export interface ChatGptImportConflict {
@@ -77,11 +140,19 @@ export interface ChatGptImportDuplicate {
 
 export interface ChatGptImportSummary {
   parsed: number;
+  selected: number;
+  skipped: number;
+  hardDropped: number;
+  keepHigh: number;
+  keepWeak: number;
+  dropped: number;
+  extracted: number;
   accepted: number;
   duplicates: number;
   conflicts: number;
   invalid: number;
   persisted: number;
+  embedded: number;
 }
 
 export interface ChatGptImportResult {
@@ -92,6 +163,7 @@ export interface ChatGptImportResult {
   conflicts: ChatGptImportConflict[];
   duplicates: ChatGptImportDuplicate[];
   warnings: string[];
+  ingestSummary?: BulkIngestSummary;
 }
 
 interface ParsedImportItem {
@@ -100,13 +172,34 @@ interface ParsedImportItem {
   detectedValue: string;
   normalized: string;
   sourceDateTime: string | null;
+  sourceFile: string | null;
+  memoryTypeOverride?: MemoryType;
+  categoryOverride?: string | null;
+  extractConfidence?: number;
+  extractStability?: number;
+  extractType?: string;
+  sourceReason?: string;
 }
 
 interface ParsedInputResult {
   mode: ChatGptImportMode;
   items: ParsedImportItem[];
+  bundles: BulkConversationBundle[];
+  useBulkPipeline: boolean;
+  useBulkFilePipeline: boolean;
+  useConversationJsonFilesPipeline: boolean;
   invalid: number;
   warnings: string[];
+}
+
+interface BulkPipelineStats {
+  parsedConversations: number;
+  hardDropped: number;
+  keepHigh: number;
+  keepWeak: number;
+  dropped: number;
+  extracted: number;
+  sentToExtractor: number;
 }
 
 interface ExistingMemory {
@@ -131,12 +224,40 @@ interface UseCaseDeps {
     sourceDateTime: string | null;
     importDetectedCategory: string | null;
     importEntityKey: string | null;
+    skipSummary?: boolean;
   }): Promise<{ memoryId: string; deduped?: boolean }>;
+  extractHighSignalMemories?: (
+    conversations: ScoredImportConversation[],
+    options?: ExtractHighSignalMemoriesOptions
+  ) => Promise<ExtractHighSignalMemoriesResult>;
+}
+
+interface ParseImportOptions {
+  modeHint?: ChatGptImportMode;
 }
 
 interface RawImportCandidate {
   text: string;
   sourceDateTime: string | null;
+}
+
+const LEGACY_BULK_MAX_CANDIDATES = 5_000;
+const IMPORT_PERSIST_CONCURRENCY = 8;
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>
+): Promise<void> {
+  let index = 0;
+  async function worker(): Promise<void> {
+    while (index < items.length) {
+      const current = index++;
+      await fn(items[current]!);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
 }
 
 function normalizeWhitespace(value: string): string {
@@ -190,8 +311,10 @@ function readSourceDateTime(item: unknown): string | null {
     "source_datetime",
     "sourceDateTime",
     "created_at",
+    "create_time",
     "createdAt",
     "updated_at",
+    "update_time",
     "updatedAt",
     "timestamp",
     "date",
@@ -200,6 +323,11 @@ function readSourceDateTime(item: unknown): string | null {
   ]) {
     const value = row[key];
     if (typeof value === "string" && value.trim().length > 0) return normalizeWhitespace(value);
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const asMs = value > 1e12 ? value : value * 1000;
+      const date = new Date(asMs);
+      if (!Number.isNaN(date.getTime())) return date.toISOString();
+    }
   }
   return null;
 }
@@ -224,6 +352,7 @@ function normalizeParsedItems(rawItems: RawImportCandidate[]): ParsedImportItem[
       return {
         raw: inline.text,
         sourceDateTime: sourceDateTime ?? inline.sourceDateTime,
+        sourceFile: null,
       };
     })
     .filter((item) => item.raw.length > 0)
@@ -235,12 +364,13 @@ function normalizeParsedItems(rawItems: RawImportCandidate[]): ParsedImportItem[
         detectedValue: value,
         normalized: normalizeValue(item.raw),
         sourceDateTime: item.sourceDateTime,
+        sourceFile: item.sourceFile,
       };
     });
 }
 
 function isDateTimeKey(key: string): boolean {
-  return /^(?:date|datetime|dateTime|timestamp|created_at|createdAt|updated_at|updatedAt|observed_at|observedAt|source_datetime|sourceDateTime)$/i.test(key);
+  return /^(?:date|datetime|dateTime|timestamp|created_at|create_time|createdAt|updated_at|update_time|updatedAt|observed_at|observedAt|source_datetime|sourceDateTime)$/i.test(key);
 }
 
 function collectStringCandidates(value: unknown): RawImportCandidate[] {
@@ -272,11 +402,10 @@ function collectStringCandidates(value: unknown): RawImportCandidate[] {
 }
 
 function stripMarkdownCodeBlocks(input: string): string {
-  const cleaned = input
+  return input
     .replace(/```(?:json)?\s*\n?/gi, "")
     .replace(/```\s*$/g, "")
     .trim();
-  return cleaned;
 }
 
 function fixTrailingCommas(json: string): string {
@@ -349,75 +478,323 @@ function salvageJsonLikeObjects(input: string): RawImportCandidate[] {
 
 function isStructuralJsonLine(line: string): boolean {
   const stripped = line.replace(/\s/g, "");
-  // Pure structural tokens
   if (/^[\[\]{}]+$/.test(stripped)) return true;
   if (stripped === "{" || stripped === "}" || stripped === "[]" || stripped === "{}") return true;
-  // Object separators like  },  or  },
   if (/^},?$/.test(stripped)) return true;
-  // Bare JSON property lines like  "memory": "..."  or  "datetime": "..."
-  // They start with a quote, contain a colon, and have no braces/brackets
   if (/^["']/.test(line) && line.includes(":") && !/[{}\[\]]/.test(line)) {
     return true;
   }
   return false;
 }
 
-export function parseChatGptImportInput(input: string): ParsedInputResult {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return { mode: "paste", items: [], invalid: 1, warnings: ["Input is empty."] };
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function messagePartToText(part: unknown): string[] {
+  if (typeof part === "string") return [part];
+  const record = asRecord(part);
+  if (!record) return [];
+  const text = record["text"];
+  if (typeof text === "string") return [text];
+  const segments = record["segments"];
+  if (Array.isArray(segments)) {
+    return segments.filter((value): value is string => typeof value === "string");
+  }
+  return [];
+}
+
+function splitLongLine(line: string): string[] {
+  if (line.length <= 360) return [line];
+  return line
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => normalizeWhitespace(part))
+    .filter((part) => part.length >= 12 && part.length <= 280);
+}
+
+function sanitizeConversationText(raw: string): string[] {
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, ""))
+    .map((line) => normalizeWhitespace(line))
+    .filter((line) => line.length >= 8)
+    .filter((line) => !/^[`"'[\]{}()<>]+$/.test(line))
+    .flatMap((line) => splitLongLine(line));
+}
+
+function collectConversationCandidatesFromMapping(mapping: Record<string, unknown>): RawImportCandidate[] {
+  const candidates: RawImportCandidate[] = [];
+  for (const node of Object.values(mapping)) {
+    const nodeRecord = asRecord(node);
+    if (!nodeRecord) continue;
+    const message = asRecord(nodeRecord["message"]);
+    if (!message) continue;
+    const content = asRecord(message["content"]);
+    if (!content) continue;
+    const parts = Array.isArray(content["parts"]) ? content["parts"] : [];
+    const sourceDateTime = readSourceDateTime(message) ?? readSourceDateTime(nodeRecord);
+    for (const part of parts) {
+      const partTexts = messagePartToText(part);
+      for (const line of partTexts.flatMap((value) => sanitizeConversationText(value))) {
+        candidates.push({ text: line, sourceDateTime });
+      }
+    }
+  }
+  return candidates;
+}
+
+function collectConversationCandidates(value: unknown): RawImportCandidate[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectConversationCandidates(item));
+  const object = asRecord(value);
+  if (!object) return [];
+
+  const mapping = asRecord(object["mapping"]);
+  if (mapping) {
+    const fromMapping = collectConversationCandidatesFromMapping(mapping);
+    if (fromMapping.length > 0) return fromMapping;
   }
 
-  let mode: ChatGptImportMode = "paste";
+  const messages = Array.isArray(object["messages"]) ? object["messages"] : null;
+  if (messages) {
+    const candidates: RawImportCandidate[] = [];
+    for (const item of messages) {
+      const row = asRecord(item);
+      if (!row) continue;
+      const sourceDateTime = readSourceDateTime(row);
+      const content = row["content"];
+      if (typeof content === "string") {
+        for (const line of sanitizeConversationText(content)) {
+          candidates.push({ text: line, sourceDateTime });
+        }
+        continue;
+      }
+      const contentObj = asRecord(content);
+      if (contentObj && Array.isArray(contentObj["parts"])) {
+        for (const part of contentObj["parts"]) {
+          const lines = messagePartToText(part).flatMap((value) => sanitizeConversationText(value));
+          for (const line of lines) candidates.push({ text: line, sourceDateTime });
+        }
+      }
+    }
+    if (candidates.length > 0) return candidates;
+  }
+
+  return [];
+}
+
+function bundlesFromParsedJson(parsed: unknown, sourceFile: string): BulkConversationBundle[] {
+  return extractBulkConversationBundles([{
+    path: sourceFile,
+    role: "conversations",
+    data: parsed,
+  }]);
+}
+
+function extractedToParsedItem(row: ExtractedImportMemory): ParsedImportItem {
+  const mapped = mapExtractTypeToMemoryType(row.type);
+  const { key, value } = parseKeyValue(row.memory);
+  return {
+    raw: row.memory,
+    detectedKey: key,
+    detectedValue: value,
+    normalized: normalizeValue(row.memory),
+    sourceDateTime: row.sourceDateTime,
+    sourceFile: row.sourceFile,
+    memoryTypeOverride: mapped.memoryType,
+    categoryOverride: mapped.category,
+    extractConfidence: row.confidence,
+    extractStability: row.stability,
+    extractType: row.type,
+    sourceReason: row.sourceReason,
+  };
+}
+
+function resolveClassification(candidate: ParsedImportItem): ReturnType<typeof classifyMemory> {
+  const heuristic = classifyMemory(candidate.raw);
+  if (!candidate.memoryTypeOverride) {
+    return heuristic;
+  }
+  return {
+    memoryType: candidate.memoryTypeOverride,
+    category: candidate.categoryOverride ?? heuristic.category,
+    isPinned: heuristic.isPinned,
+    preferenceKey: heuristic.preferenceKey,
+    isIdentityFact: heuristic.isIdentityFact,
+  };
+}
+
+export function parseChatGptImportInput(input: string, options?: ParseImportOptions): ParsedInputResult {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return {
+      mode: options?.modeHint ?? "paste",
+      items: [],
+      bundles: [],
+      useBulkPipeline: false,
+      useBulkFilePipeline: false,
+      useConversationJsonFilesPipeline: false,
+      invalid: 1,
+      warnings: ["Input is empty."],
+    };
+  }
+
+  let mode: ChatGptImportMode = options?.modeHint ?? "paste";
   let invalid = 0;
   const warnings: string[] = [];
   let rawItems: RawImportCandidate[] = [];
+  let bundles: BulkConversationBundle[] = [];
+  let useBulkPipeline = false;
 
   const cleaned = stripMarkdownCodeBlocks(trimmed);
-  
+
   try {
-    // Try to parse as-is first
-    let parsed = JSON.parse(cleaned) as unknown;
-    mode = "json_export";
-    rawItems = collectStringCandidates(parsed);
-    if (rawItems.length === 0) {
+    const parsed = JSON.parse(cleaned) as unknown;
+    mode = options?.modeHint ?? "json_export";
+    if (mode === "bulk_export") {
+      bundles = bundlesFromParsedJson(parsed, "pasted-export.json");
+      if (bundles.length > 0) {
+        useBulkPipeline = true;
+      } else {
+        const conversationRows = collectConversationCandidates(parsed);
+        if (conversationRows.length > 0) rawItems = conversationRows;
+      }
+    }
+    if (!useBulkPipeline) {
+      rawItems = collectStringCandidates(parsed);
+    }
+    if (!useBulkPipeline && rawItems.length === 0) {
       invalid += 1;
       warnings.push("No importable string candidates found in JSON payload.");
     }
-  } catch (firstError) {
-    // If that fails, try fixing trailing commas
+    if (useBulkPipeline && bundles.length === 0) {
+      invalid += 1;
+      warnings.push("No importable conversations found in bulk export JSON.");
+    }
+  } catch {
     try {
       const fixed = fixTrailingCommas(cleaned);
       const parsed = JSON.parse(fixed) as unknown;
-      mode = "json_export";
-      rawItems = collectStringCandidates(parsed);
-      if (rawItems.length === 0) {
+      mode = options?.modeHint ?? "json_export";
+      if (mode === "bulk_export") {
+        bundles = bundlesFromParsedJson(parsed, "pasted-export.json");
+        if (bundles.length > 0) {
+          useBulkPipeline = true;
+        } else {
+          const conversationRows = collectConversationCandidates(parsed);
+          if (conversationRows.length > 0) rawItems = conversationRows;
+        }
+      }
+      if (!useBulkPipeline) {
+        rawItems = collectStringCandidates(parsed);
+      }
+      if (!useBulkPipeline && rawItems.length === 0) {
         invalid += 1;
         warnings.push("No importable string candidates found in JSON payload.");
       }
     } catch {
       const recovered = salvageJsonLikeObjects(cleaned);
       if (recovered.length > 0) {
-        mode = "json_export";
+        mode = options?.modeHint ?? "json_export";
         rawItems = recovered;
         warnings.push("Found JSON-like block but could not parse it as strict JSON. Recovered candidates from object lines.");
       } else {
-        // Fall back to line-by-line parsing
-        mode = "paste";
+        mode = options?.modeHint ?? "paste";
         rawItems = cleaned
           .split(/\r?\n/)
           .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, "").trim())
           .filter((line) => line.length > 0 && !isStructuralJsonLine(line))
+          .filter((line) => mode !== "bulk_export" || !looksLikeBinaryText(line))
           .map((line) => ({ text: line, sourceDateTime: null }));
       }
     }
   }
 
-  const items = normalizeParsedItems(rawItems);
-  if (items.length === 0 && invalid > 0) {
+  let items = normalizeParsedItems(rawItems);
+  if (!useBulkPipeline && mode === "bulk_export" && items.length > LEGACY_BULK_MAX_CANDIDATES) {
+    warnings.push(`Capped bulk export candidates at ${LEGACY_BULK_MAX_CANDIDATES} from ${items.length} detected rows.`);
+    items = items.slice(0, LEGACY_BULK_MAX_CANDIDATES);
+  }
+  if (!useBulkPipeline && items.length === 0 && invalid > 0) {
     warnings.push("No importable memory candidates found in input.");
   }
-  return { mode, items, invalid, warnings };
+  if (useBulkPipeline && bundles.length === 0 && invalid === 0) {
+    invalid = 1;
+    warnings.push("No importable conversations found in bulk export.");
+  }
+
+  return { mode, items, bundles, useBulkPipeline, useBulkFilePipeline: false, useConversationJsonFilesPipeline: false, invalid, warnings };
+}
+
+function parseBulkDocuments(
+  documents: BulkIngestDocument[],
+  extraWarnings: string[] = []
+): ParsedInputResult {
+  const bundles = extractBulkConversationBundles(documents);
+  const warnings = [...extraWarnings];
+  if (bundles.length === 0) {
+    warnings.push("No importable memory candidates found in bulk export JSON.");
+  }
+  return {
+    mode: "bulk_export",
+    items: [],
+    bundles,
+    useBulkPipeline: true,
+    useBulkFilePipeline: false,
+    useConversationJsonFilesPipeline: false,
+    invalid: bundles.length === 0 ? 1 : 0,
+    warnings,
+  };
+}
+
+function resolveParsedInput(request: ChatGptImportRequest): ParsedInputResult {
+  if (request.mode === "conversation_json_files" && request.storageRefs && request.storageRefs.length > 0) {
+    return {
+      mode: "bulk_export",
+      items: [],
+      bundles: [],
+      useBulkPipeline: true,
+      useBulkFilePipeline: false,
+      useConversationJsonFilesPipeline: true,
+      invalid: 0,
+      warnings: request.ingestWarnings ?? [],
+    };
+  }
+  if (request.mode === "bulk_file" && request.storageRef) {
+    return {
+      mode: "bulk_export",
+      items: [],
+      bundles: [],
+      useBulkPipeline: true,
+      useBulkFilePipeline: true,
+      useConversationJsonFilesPipeline: false,
+      invalid: 0,
+      warnings: request.ingestWarnings ?? [],
+    };
+  }
+  if (request.bulkDocuments && request.bulkDocuments.length > 0) {
+    return parseBulkDocuments(request.bulkDocuments, request.ingestWarnings ?? []);
+  }
+  const pasted = (request.input ?? "").trim();
+  if (!pasted && request.modeHint === "bulk_export") {
+    return {
+      mode: "bulk_export",
+      items: [],
+      bundles: [],
+      useBulkPipeline: true,
+      useBulkFilePipeline: false,
+      useConversationJsonFilesPipeline: false,
+      invalid: 1,
+      warnings: [
+        ...(request.ingestWarnings ?? []),
+        request.ingestWarnings?.length
+          ? "No importable memory candidates found in uploaded export files."
+          : "No importable JSON found in upload.",
+      ],
+    };
+  }
+  return parseChatGptImportInput(request.input ?? "", { modeHint: request.modeHint });
 }
 
 function resolveEntityKey(candidate: {
@@ -441,13 +818,529 @@ function normalizeExisting(text: string): { normalizedRaw: string; detectedValue
   };
 }
 
+function emptyPipelineStats(): BulkPipelineStats {
+  return {
+    parsedConversations: 0,
+    hardDropped: 0,
+    keepHigh: 0,
+    keepWeak: 0,
+    dropped: 0,
+    extracted: 0,
+    sentToExtractor: 0,
+  };
+}
+
+function emptyClassifiedImport(): ClassifiedImportConversations {
+  return {
+    parsedConversations: 0,
+    parsedMessages: 0,
+    hardDropped: 0,
+    keepHigh: [],
+    keepWeak: [],
+    dropped: [],
+    warnings: [],
+  };
+}
+
+function mergeClassifiedImport(
+  left: ClassifiedImportConversations,
+  right: ClassifiedImportConversations,
+  maxKeepHigh: number
+): ClassifiedImportConversations {
+  const keepHigh = [...left.keepHigh, ...right.keepHigh]
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+    .slice(0, maxKeepHigh);
+  return {
+    parsedConversations: left.parsedConversations + right.parsedConversations,
+    parsedMessages: left.parsedMessages + right.parsedMessages,
+    hardDropped: left.hardDropped + right.hardDropped,
+    keepHigh,
+    keepWeak: [...left.keepWeak, ...right.keepWeak],
+    dropped: [...left.dropped, ...right.dropped],
+    warnings: [...left.warnings, ...right.warnings],
+  };
+}
+
+function profileCandidatesToParsedItems(
+  data: unknown,
+  sourceFile: string
+): ParsedImportItem[] {
+  return extractProfileImportItems(data, sourceFile).map((row) => {
+    const { key, value } = parseKeyValue(row.text);
+    return {
+      raw: row.text,
+      detectedKey: key,
+      detectedValue: value,
+      normalized: normalizeValue(row.text),
+      sourceDateTime: row.sourceDateTime,
+      sourceFile: row.sourceFile,
+    };
+  });
+}
+
 export class ChatGptMemoryImportUseCase {
   constructor(private readonly deps: UseCaseDeps) {}
+
+  private async runBulkFilePipeline(
+    request: ChatGptImportRequest
+  ): Promise<{
+    items: ParsedImportItem[];
+    stats: BulkPipelineStats;
+    warnings: string[];
+    ingestSummary: BulkIngestSummary;
+  }> {
+    const storageRef = request.storageRef;
+    if (!storageRef) {
+      throw new Error("Missing storage reference for bulk file import.");
+    }
+
+    const warnings: string[] = [];
+    const stats = emptyPipelineStats();
+    const streamStats: StreamIngestSkipStats = {
+      skippedDatFiles: 0,
+      skippedMediaFiles: 0,
+      skippedOtherBinary: 0,
+      skippedOldConversations: 0,
+      parsedConversations: 0,
+      hasConversationsJson: false,
+      sourcesParsed: [],
+    };
+    const batchSize = Math.max(50, config.importBatchSize);
+    const maxExtract = Math.max(1, config.importMaxExtractConversations);
+    let classified = emptyClassifiedImport();
+    let batchIndex = 0;
+    let currentBatch: BulkConversationBundle[] = [];
+
+    await request.onProgress?.({
+      stage: "ingesting",
+      message: "Streaming export from disk (skipping media and old chats)",
+    });
+
+    const profile = await readProfileDocumentFromZip(resolveStoragePath(storageRef));
+    const profileItems = profile
+      ? profileCandidatesToParsedItems(profile.data, profile.path)
+      : [];
+
+    const flushBatch = async (): Promise<void> => {
+      if (currentBatch.length === 0) return;
+      batchIndex += 1;
+      await request.onProgress?.({
+        stage: "filtering",
+        message: `Filtering batch ${batchIndex} (${currentBatch.length} conversations)`,
+      });
+      const conversations = bundlesToImportConversations(currentBatch);
+      const batchClassified = classifyBulkImportCandidates(conversations);
+      classified = mergeClassifiedImport(classified, batchClassified, maxExtract);
+      stats.parsedConversations += currentBatch.length;
+      currentBatch = [];
+    };
+
+    for await (const bundle of streamConversationsFromBulkFile(storageRef, { stats: streamStats })) {
+      currentBatch.push(bundle);
+      if (currentBatch.length >= batchSize) {
+        await flushBatch();
+      }
+    }
+    await flushBatch();
+
+    warnings.push(...buildStreamIngestWarnings(streamStats));
+    const ingestSummary = streamStatsToIngestSummary(streamStats);
+
+    if (stats.parsedConversations === 0 && profileItems.length === 0) {
+      warnings.push("No importable conversations found in export after media and date filters.");
+      return { items: [], stats, warnings, ingestSummary };
+    }
+
+    await request.onProgress?.({
+      stage: "aggregating",
+      message: "Aggregating cross-conversation style signals",
+    });
+
+    const promoted = promoteWeakSignals(classified);
+    stats.hardDropped = promoted.hardDropped;
+    stats.keepHigh = promoted.keepHigh.length;
+    stats.keepWeak = promoted.keepWeak.length;
+    stats.dropped = promoted.dropped.length;
+    warnings.push(...promoted.warnings);
+
+    if (promoted.keepHigh.length === 0) {
+      warnings.push("No KEEP_HIGH conversations to promote into memories.");
+      return { items: profileItems, stats, warnings, ingestSummary };
+    }
+
+    const rankedHigh = [...promoted.keepHigh].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    const toExtract = rankedHigh.slice(0, maxExtract);
+    if (toExtract.length < rankedHigh.length) {
+      warnings.push(
+        `Capped extraction to top ${toExtract.length}/${rankedHigh.length} KEEP_HIGH conversation(s) by score.`
+      );
+    }
+
+    const extractStage = config.importExtractMode === "llm" ? "extracting" : "promoting";
+    await request.onProgress?.({
+      stage: extractStage,
+      message: config.importExtractMode === "llm"
+        ? `Extracting memories from ${toExtract.length} high-signal conversation(s) via LLM`
+        : `Promoting memories from ${toExtract.length} high-signal conversation(s) (no LLM)`,
+    });
+
+    const extractOptions: ExtractHighSignalMemoriesOptions = {
+      concurrency: config.importExtractConcurrency,
+      onProgress: async ({ completed, total }) => {
+        await request.onProgress?.({
+          stage: extractStage,
+          message: config.importExtractMode === "llm"
+            ? `Extracting memories ${completed}/${total}`
+            : `Promoting memories ${completed}/${total}`,
+        });
+      },
+    };
+
+    const extraction = config.importExtractMode === "llm"
+      ? await (this.deps.extractHighSignalMemories ?? extractHighSignalImportMemories)(toExtract, extractOptions)
+      : await extractHighSignalImportMemoriesHeuristic(toExtract, extractOptions);
+    stats.sentToExtractor = extraction.sentToExtractor;
+    stats.extracted = extraction.extracted.length;
+    warnings.push(...extraction.warnings);
+
+    const items = [...profileItems, ...extraction.extracted.map(extractedToParsedItem)];
+    return { items, stats, warnings, ingestSummary };
+  }
+
+  private resolveBulkClassifyOptions(request: ChatGptImportRequest) {
+    const importProfile = request.importProfile ?? "curated";
+    const isInclusive = importProfile === "inclusive";
+    return {
+      importProfile,
+      keepHighThreshold: isInclusive
+        ? config.importInclusiveKeepHighThreshold
+        : config.importKeepHighThreshold,
+      keepWeakThreshold: isInclusive
+        ? config.importInclusiveKeepWeakThreshold
+        : config.importKeepWeakThreshold,
+    };
+  }
+
+  private async runConversationJsonFilesPipeline(
+    request: ChatGptImportRequest
+  ): Promise<{
+    items: ParsedImportItem[];
+    stats: BulkPipelineStats;
+    warnings: string[];
+    ingestSummary: BulkIngestSummary;
+  }> {
+    const storageRefs = request.storageRefs;
+    if (!storageRefs || storageRefs.length === 0) {
+      throw new Error("Missing storage references for conversation JSON import.");
+    }
+
+    const importProfile = request.importProfile ?? "inclusive";
+    const isInclusive = importProfile === "inclusive";
+    const classifyOptions = this.resolveBulkClassifyOptions({ ...request, importProfile });
+    const warnings: string[] = [];
+    const stats = emptyPipelineStats();
+    const streamStats: StreamIngestSkipStats = {
+      skippedDatFiles: 0,
+      skippedMediaFiles: 0,
+      skippedOtherBinary: 0,
+      skippedOldConversations: 0,
+      parsedConversations: 0,
+      hasConversationsJson: false,
+      sourcesParsed: [],
+    };
+    const batchSize = Math.max(50, config.importBatchSize);
+    const maxExtract = isInclusive
+      ? Math.max(1, config.importInclusiveMaxExtractConversations)
+      : Math.max(1, config.importMaxExtractConversations);
+    let classified = emptyClassifiedImport();
+    let batchIndex = 0;
+    let currentBatch: BulkConversationBundle[] = [];
+
+    const profileItems: ParsedImportItem[] = [];
+    const originalFilenames = request.originalFilenames ?? [];
+    for (let index = 0; index < storageRefs.length; index += 1) {
+      const filename = originalFilenames[index] ?? basename(storageRefs[index]!);
+      if (!/^(user|user_settings)\.json$/i.test(filename)) continue;
+      try {
+        const { readFile } = await import("node:fs/promises");
+        const data = JSON.parse(await readFile(resolveStoragePath(storageRefs[index]!), "utf8")) as unknown;
+        profileItems.push(...profileCandidatesToParsedItems(data, filename));
+      } catch {
+        warnings.push(`Could not parse profile file ${filename}.`);
+      }
+    }
+
+    const conversationFileCount = storageRefs.filter((ref, index) => {
+      const filename = originalFilenames[index] ?? basename(ref);
+      return /^conversations(?:-\d+)?\.json$/i.test(filename) || /^shared_conversations\.json$/i.test(filename);
+    }).length;
+
+    await request.onProgress?.({
+      stage: "ingesting",
+      message: `Streaming ${conversationFileCount} conversation JSON file(s) (no date filter)`,
+    });
+
+    const flushBatch = async (): Promise<void> => {
+      if (currentBatch.length === 0) return;
+      batchIndex += 1;
+      await request.onProgress?.({
+        stage: "filtering",
+        message: `Filtering batch ${batchIndex} (${currentBatch.length} conversations)`,
+      });
+      const conversations = bundlesToImportConversations(currentBatch);
+      const batchClassified = classifyBulkImportCandidates(conversations, classifyOptions);
+      classified = mergeClassifiedImport(classified, batchClassified, maxExtract);
+      stats.parsedConversations += currentBatch.length;
+      currentBatch = [];
+    };
+
+    for await (const bundle of streamConversationsFromJsonFiles(storageRefs, { stats: streamStats, maxAgeDays: null })) {
+      currentBatch.push(bundle);
+      if (currentBatch.length >= batchSize) {
+        await flushBatch();
+      }
+    }
+    await flushBatch();
+
+    warnings.push(...buildStreamIngestWarnings(streamStats));
+    const ingestSummary = streamStatsToIngestSummary(streamStats);
+
+    if (stats.parsedConversations === 0 && profileItems.length === 0) {
+      warnings.push("No importable conversations found in uploaded JSON files.");
+      return { items: [], stats, warnings, ingestSummary };
+    }
+
+    await request.onProgress?.({
+      stage: "aggregating",
+      message: "Aggregating cross-conversation style signals",
+    });
+
+    const promoted = promoteWeakSignals(classified);
+    stats.hardDropped = promoted.hardDropped;
+    stats.keepHigh = promoted.keepHigh.length;
+    stats.keepWeak = promoted.keepWeak.length;
+    stats.dropped = promoted.dropped.length;
+    warnings.push(...promoted.warnings);
+
+    const extractionPool = isInclusive
+      ? [...promoted.keepHigh, ...promoted.keepWeak]
+      : promoted.keepHigh;
+    if (extractionPool.length === 0) {
+      warnings.push("No conversations matched inclusive filters for memory extraction.");
+      return { items: profileItems, stats, warnings, ingestSummary };
+    }
+
+    const ranked = [...extractionPool].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    const toExtract = ranked.slice(0, maxExtract);
+    if (toExtract.length < ranked.length) {
+      warnings.push(
+        `Capped extraction to top ${toExtract.length}/${ranked.length} conversation(s) by score.`
+      );
+    }
+
+    const extractStage = config.importExtractMode === "llm" ? "extracting" : "promoting";
+    await request.onProgress?.({
+      stage: extractStage,
+      message: config.importExtractMode === "llm"
+        ? `Extracting memories from ${toExtract.length} conversation(s) via LLM`
+        : `Promoting memories from ${toExtract.length} conversation(s) (no LLM)`,
+    });
+
+    const extractOptions: ExtractHighSignalMemoriesOptions = {
+      concurrency: config.importExtractConcurrency,
+      importProfile,
+      onProgress: async ({ completed, total }) => {
+        await request.onProgress?.({
+          stage: extractStage,
+          message: config.importExtractMode === "llm"
+            ? `Extracting memories ${completed}/${total}`
+            : `Promoting memories ${completed}/${total}`,
+        });
+      },
+    };
+
+    const extraction = config.importExtractMode === "llm"
+      ? await (this.deps.extractHighSignalMemories ?? extractHighSignalImportMemories)(toExtract, extractOptions)
+      : await extractHighSignalImportMemoriesHeuristic(toExtract, extractOptions);
+    stats.sentToExtractor = extraction.sentToExtractor;
+    stats.extracted = extraction.extracted.length;
+    warnings.push(...extraction.warnings);
+
+    const items = [...profileItems, ...extraction.extracted.map(extractedToParsedItem)];
+    return { items, stats, warnings, ingestSummary };
+  }
+
+  async persistImportPreview(
+    auth: AuthContext,
+    input: {
+      preview: ChatGptImportCandidate[];
+      batchId: string;
+      mode: ChatGptImportMode;
+      onProgress?: (progress: ChatGptImportProgress) => void | Promise<void>;
+    }
+  ): Promise<{
+    persisted: number;
+    duplicates: number;
+    duplicateRows: ChatGptImportDuplicate[];
+  }> {
+    const acceptedPreview = input.preview.filter((row) => row.status === "accepted");
+    if (acceptedPreview.length === 0) {
+      return { persisted: 0, duplicates: 0, duplicateRows: [] };
+    }
+
+    await input.onProgress?.({
+      stage: "persisting",
+      message: `Persisting ${acceptedPreview.length} preview memory(ies)`,
+    });
+
+    const duplicateRows: ChatGptImportDuplicate[] = [];
+
+    await runWithConcurrency(acceptedPreview, IMPORT_PERSIST_CONCURRENCY, async (candidate) => {
+      const entityKey = resolveEntityKey({
+        preferenceKey: candidate.preferenceKey,
+        detectedKey: candidate.detectedKey,
+        memoryType: candidate.memoryType,
+        category: candidate.category,
+      });
+
+      const persistedRow = await this.deps.persistMemory({
+        auth,
+        content: candidate.raw,
+        memoryType: candidate.memoryType,
+        category: candidate.category,
+        isPinned: candidate.isPinned,
+        preferenceKey: candidate.preferenceKey,
+        sourceImportBatchId: input.batchId,
+        sourceImportMode: input.mode,
+        sourceDateTime: candidate.sourceDateTime,
+        importDetectedCategory: candidate.category,
+        importEntityKey: entityKey,
+        skipSummary: true,
+      });
+
+      if (persistedRow.deduped) {
+        duplicateRows.push({
+          reason: "deduped_on_persist",
+          existingMemoryId: persistedRow.memoryId,
+          candidate: {
+            raw: candidate.raw,
+            normalized: candidate.normalized,
+            sourceDateTime: candidate.sourceDateTime,
+            memoryType: candidate.memoryType,
+            category: candidate.category,
+            preferenceKey: candidate.preferenceKey,
+            detectedKey: candidate.detectedKey,
+          },
+        });
+      }
+    });
+
+    const dedupedOnPersist = duplicateRows.filter((row) => row.reason === "deduped_on_persist").length;
+    const persisted = acceptedPreview.length - dedupedOnPersist;
+
+    return {
+      persisted,
+      duplicates: dedupedOnPersist,
+      duplicateRows,
+    };
+  }
+
+  private async runBulkPipeline(
+    bundles: BulkConversationBundle[],
+    request: ChatGptImportRequest
+  ): Promise<{ items: ParsedImportItem[]; stats: BulkPipelineStats; warnings: string[] }> {
+    const warnings: string[] = [];
+    const stats = emptyPipelineStats();
+    stats.parsedConversations = bundles.length;
+
+    if (bundles.length === 0) {
+      return { items: [], stats, warnings };
+    }
+
+    await request.onProgress?.({ stage: "filtering", message: "Applying deterministic filters" });
+
+    const conversations = bundlesToImportConversations(bundles);
+    const classified = classifyBulkImportCandidates(conversations);
+    const promoted = promoteWeakSignals(classified);
+
+    stats.hardDropped = promoted.hardDropped;
+    stats.keepHigh = promoted.keepHigh.length;
+    stats.keepWeak = promoted.keepWeak.length;
+    stats.dropped = promoted.dropped.length;
+    warnings.push(...promoted.warnings);
+
+    if (promoted.keepHigh.length === 0) {
+      warnings.push("No KEEP_HIGH conversations to send to memory extractor.");
+      return { items: [], stats, warnings };
+    }
+
+    const maxExtract = Math.max(1, config.importMaxExtractConversations);
+    const rankedHigh = [...promoted.keepHigh].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    const toExtract = rankedHigh.slice(0, maxExtract);
+    if (toExtract.length < rankedHigh.length) {
+      warnings.push(
+        `Capped LLM extraction to top ${toExtract.length}/${rankedHigh.length} KEEP_HIGH conversation(s) by score.`
+      );
+    }
+
+    await request.onProgress?.({
+      stage: "extracting",
+      message: config.importExtractMode === "llm"
+        ? `Extracting memories from ${toExtract.length} high-signal conversation(s) via LLM`
+        : `Promoting memories from ${toExtract.length} high-signal conversation(s) (no LLM)`,
+    });
+
+    const extractOptions: ExtractHighSignalMemoriesOptions = {
+      concurrency: config.importExtractConcurrency,
+      onProgress: async ({ completed, total }) => {
+        await request.onProgress?.({
+          stage: "extracting",
+          message: config.importExtractMode === "llm"
+            ? `Extracting memories ${completed}/${total}`
+            : `Promoting memories ${completed}/${total}`,
+        });
+      },
+    };
+
+    const extraction = config.importExtractMode === "llm"
+      ? await (this.deps.extractHighSignalMemories ?? extractHighSignalImportMemories)(toExtract, extractOptions)
+      : await extractHighSignalImportMemoriesHeuristic(toExtract, extractOptions);
+    stats.sentToExtractor = extraction.sentToExtractor;
+    stats.extracted = extraction.extracted.length;
+    warnings.push(...extraction.warnings);
+
+    const items = extraction.extracted.map(extractedToParsedItem);
+    return { items, stats, warnings };
+  }
 
   async execute(auth: AuthContext, request: ChatGptImportRequest): Promise<ChatGptImportResult> {
     const batchId = randomUUID();
     const apply = request.apply === true;
-    const parsed = parseChatGptImportInput(request.input);
+    const parsed = resolveParsedInput(request);
+    const warnings = [...parsed.warnings];
+
+    let activeItems = parsed.items;
+    let pipelineStats = emptyPipelineStats();
+    let ingestSummary = request.ingestSummary;
+
+    if (parsed.useBulkFilePipeline) {
+      const pipeline = await this.runBulkFilePipeline(request);
+      activeItems = pipeline.items;
+      pipelineStats = pipeline.stats;
+      ingestSummary = pipeline.ingestSummary;
+      warnings.push(...pipeline.warnings);
+    } else if (parsed.useConversationJsonFilesPipeline) {
+      const pipeline = await this.runConversationJsonFilesPipeline(request);
+      activeItems = pipeline.items;
+      pipelineStats = pipeline.stats;
+      ingestSummary = pipeline.ingestSummary;
+      warnings.push(...pipeline.warnings);
+    } else if (parsed.useBulkPipeline) {
+      const pipeline = await this.runBulkPipeline(parsed.bundles, request);
+      activeItems = pipeline.items;
+      pipelineStats = pipeline.stats;
+      warnings.push(...pipeline.warnings);
+    }
 
     const existingMemories = await this.deps.listExistingMemories(auth);
     const existingByNormalizedRaw = new Map<string, ExistingMemory>();
@@ -481,12 +1374,18 @@ export class ChatGptMemoryImportUseCase {
     const preview: ChatGptImportCandidate[] = [];
     const conflictRows: ChatGptImportConflict[] = [];
     const duplicateRows: ChatGptImportDuplicate[] = [];
-    const warnings = [...parsed.warnings];
-
     const seenInBatch = new Set<string>();
 
-    for (const candidate of parsed.items) {
-      const classification = classifyMemory(candidate.raw);
+    interface PersistTask {
+      candidate: ParsedImportItem;
+      classification: ReturnType<typeof classifyMemory>;
+      entityKey: string | null;
+      acceptedCandidate: ChatGptImportCandidate;
+    }
+    const persistTasks: PersistTask[] = [];
+
+    for (const candidate of activeItems) {
+      const classification = resolveClassification(candidate);
       const normalizedCategory = classification.category ? normalizeKey(classification.category) || null : null;
       const entityKey = resolveEntityKey({
         preferenceKey: classification.preferenceKey,
@@ -587,12 +1486,20 @@ export class ChatGptMemoryImportUseCase {
 
       accepted += 1;
       const acceptedCandidate: ChatGptImportCandidate = {
-        ...candidate,
+        raw: candidate.raw,
+        normalized: candidate.normalized,
+        detectedKey: candidate.detectedKey,
+        detectedValue: candidate.detectedValue,
+        sourceDateTime: candidate.sourceDateTime,
         memoryType: classification.memoryType,
         category: classification.category,
         isPinned: classification.isPinned,
         preferenceKey: classification.preferenceKey,
         status: "accepted",
+        extractConfidence: candidate.extractConfidence,
+        extractStability: candidate.extractStability,
+        extractType: candidate.extractType,
+        sourceReason: candidate.sourceReason,
       };
 
       if (!apply) {
@@ -600,49 +1507,80 @@ export class ChatGptMemoryImportUseCase {
         continue;
       }
 
-      const persistedRow = await this.deps.persistMemory({
-        auth,
-        content: candidate.raw,
-        memoryType: classification.memoryType,
-        category: classification.category,
-        isPinned: classification.isPinned,
-        preferenceKey: classification.preferenceKey,
-        sourceImportBatchId: batchId,
-        sourceImportMode: parsed.mode,
-        sourceDateTime: candidate.sourceDateTime,
-        importDetectedCategory: classification.category,
-        importEntityKey: entityKey,
+      persistTasks.push({
+        candidate,
+        classification,
+        entityKey,
+        acceptedCandidate,
       });
-
-      if (persistedRow.deduped) {
-        duplicates += 1;
-        duplicateRows.push({
-          reason: "deduped_on_persist",
-          existingMemoryId: persistedRow.memoryId,
-          candidate: {
-            raw: candidate.raw,
-            normalized: candidate.normalized,
-            sourceDateTime: candidate.sourceDateTime,
-            memoryType: classification.memoryType,
-            category: classification.category,
-            preferenceKey: classification.preferenceKey,
-            detectedKey: candidate.detectedKey,
-          },
-        });
-        warnings.push(`Candidate deduped at persist time: "${candidate.raw.slice(0, 80)}"`);
-        continue;
-      }
-
-      persisted += 1;
     }
 
+    if (apply && persistTasks.length > 0) {
+      await request.onProgress?.({
+        stage: "persisting",
+        message: `Persisting ${persistTasks.length} extracted memory(ies)`,
+      });
+
+      await runWithConcurrency(persistTasks, IMPORT_PERSIST_CONCURRENCY, async (task) => {
+        const { candidate, classification, entityKey } = task;
+        const persistedRow = await this.deps.persistMemory({
+          auth,
+          content: candidate.raw,
+          memoryType: classification.memoryType,
+          category: classification.category,
+          isPinned: classification.isPinned,
+          preferenceKey: classification.preferenceKey,
+          sourceImportBatchId: batchId,
+          sourceImportMode: parsed.mode,
+          sourceDateTime: candidate.sourceDateTime,
+          importDetectedCategory: classification.category,
+          importEntityKey: entityKey,
+          skipSummary: true,
+        });
+
+        if (persistedRow.deduped) {
+          duplicateRows.push({
+            reason: "deduped_on_persist",
+            existingMemoryId: persistedRow.memoryId,
+            candidate: {
+              raw: candidate.raw,
+              normalized: candidate.normalized,
+              sourceDateTime: candidate.sourceDateTime,
+              memoryType: classification.memoryType,
+              category: classification.category,
+              preferenceKey: classification.preferenceKey,
+              detectedKey: candidate.detectedKey,
+            },
+          });
+          warnings.push(`Candidate deduped at persist time: "${candidate.raw.slice(0, 80)}"`);
+        }
+      });
+
+      const postPersistDedupes = duplicateRows.filter((d) => d.reason === "deduped_on_persist").length;
+      persisted = persistTasks.length - postPersistDedupes;
+      duplicates += postPersistDedupes;
+    }
+
+    const parsedCount = parsed.useBulkPipeline ? pipelineStats.parsedConversations : parsed.items.length;
+    const skippedCount = parsed.useBulkPipeline
+      ? pipelineStats.keepWeak + pipelineStats.dropped
+      : Math.max(0, parsed.items.length - activeItems.length);
+
     const summary: ChatGptImportSummary = {
-      parsed: parsed.items.length,
+      parsed: parsedCount,
+      selected: activeItems.length,
+      skipped: skippedCount,
+      hardDropped: pipelineStats.hardDropped,
+      keepHigh: pipelineStats.keepHigh,
+      keepWeak: pipelineStats.keepWeak,
+      dropped: pipelineStats.dropped,
+      extracted: pipelineStats.extracted,
       accepted,
       duplicates,
       conflicts,
       invalid: parsed.invalid,
       persisted,
+      embedded: persisted,
     };
 
     return {
@@ -653,6 +1591,9 @@ export class ChatGptMemoryImportUseCase {
       conflicts: conflictRows,
       duplicates: duplicateRows,
       warnings,
+      ...(ingestSummary ? { ingestSummary } : {}),
     };
   }
 }
+
+export type { ClassifiedImportConversations, BulkPipelineStats };

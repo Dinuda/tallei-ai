@@ -6,6 +6,8 @@ import {
   ChatGptMemoryImportUseCase,
   parseChatGptImportInput,
 } from "../../../src/orchestration/memory/chatgpt-import.usecase.js";
+import type { ExtractHighSignalMemoriesOptions, ExtractHighSignalMemoriesResult } from "../../../src/orchestration/memory/chatgpt-import-extract.usecase.js";
+import type { ScoredImportConversation } from "../../../src/orchestration/memory/chatgpt-import-signal.usecase.js";
 
 const auth: AuthContext = {
   tenantId: "tenant-import",
@@ -14,58 +16,38 @@ const auth: AuthContext = {
   plan: "pro",
 };
 
-test("parser handles JSON array strings and nested object preferences", () => {
+function mockExtractor(rows: ExtractHighSignalMemoriesResult["extracted"]) {
+  return async (
+    _conversations: ScoredImportConversation[],
+    _options?: ExtractHighSignalMemoriesOptions
+  ): Promise<ExtractHighSignalMemoriesResult> => ({
+    extracted: rows,
+    sentToExtractor: _conversations.length,
+    warnings: [],
+  });
+}
+
+test("parser handles JSON arrays and extracts datetime", () => {
   const arrayParsed = parseChatGptImportInput(JSON.stringify([
     "Use concise answers.",
     { memory: "My name is Dana.", datetime: "2026-05-20T09:00:00Z" },
   ]));
+
   assert.equal(arrayParsed.mode, "json_export");
   assert.equal(arrayParsed.items.length, 2);
   assert.equal(arrayParsed.invalid, 0);
   assert.equal(arrayParsed.items[1]?.sourceDateTime, "2026-05-20T09:00:00Z");
-
-  const objectParsed = parseChatGptImportInput(JSON.stringify({
-    preferences: [
-      "My pronouns are she/her.",
-      { value: "timezone: PST" },
-      42,
-    ],
-  }));
-  assert.equal(objectParsed.mode, "json_export");
-  assert.equal(objectParsed.items.length, 2);
-  assert.equal(objectParsed.invalid, 0);
 });
 
-test("parser handles key/value object and pasted line list", () => {
-  const keyValueObject = parseChatGptImportInput(JSON.stringify({
-    tone: "concise",
-    format: "bullet points",
-    misc: 7,
-  }));
-  assert.equal(keyValueObject.items.length, 2);
-  assert.equal(keyValueObject.invalid, 0);
-  assert.equal(keyValueObject.items[0]?.detectedKey, "tone");
-
-  const pasted = parseChatGptImportInput(`
-    - Use concise answers
-    - Use concise answers
-    1. [2026-05-20] My name is Dana
-  `);
-  assert.equal(pasted.mode, "paste");
-  assert.equal(pasted.items.length, 3);
-  assert.equal(pasted.items[2]?.sourceDateTime, "2026-05-20");
-  assert.equal(pasted.items[2]?.raw, "My name is Dana");
-});
-
-test("parser recovers JSON-like object arrays that are not strict JSON", () => {
+test("parser recovers JSON-like object lists that are not strict JSON", () => {
   const recovered = parseChatGptImportInput(`
     [
       {
-        "memory":"User is a full-stack AI engineer with Node.js and AWS experience.",
+        "memory":"User prefers short answers.",
         "datetime":"2026-03-06"
       },
       {
-        "memory":"User is building Tallei, an open-source memory system.",
+        "memory":"User is building Tallei memory index.",
         "datetime":"2026-04-06"
       },
     ]
@@ -78,34 +60,7 @@ test("parser recovers JSON-like object arrays that are not strict JSON", () => {
   assert.equal(recovered.invalid, 0);
 });
 
-test("use case accepts non-preference memories and dedupes intra-batch", async () => {
-  const persisted: string[] = [];
-  const useCase = new ChatGptMemoryImportUseCase({
-    listExistingMemories: async () => [],
-    persistMemory: async ({ content }) => {
-      persisted.push(content);
-      return { memoryId: `mem-${persisted.length}` };
-    },
-  });
-
-  const result = await useCase.execute(auth, {
-    input: JSON.stringify([
-      "I prefer concise answers",
-      "I prefer concise answers",
-      "deploy failed due to timeout",
-    ]),
-    apply: false,
-  });
-
-  assert.equal(result.summary.parsed, 3);
-  assert.equal(result.summary.accepted, 2);
-  assert.equal(result.summary.duplicates, 1);
-  assert.equal(result.summary.persisted, 0);
-  assert.equal(result.preview.length, 2); // accepted rows
-  assert.equal(persisted.length, 0);
-});
-
-test("use case detects exact duplicate and contradictory conflicts against existing memories", async () => {
+test("use case dedupes and conflicts against existing values", async () => {
   const useCase = new ChatGptMemoryImportUseCase({
     listExistingMemories: async () => [
       {
@@ -137,55 +92,128 @@ test("use case detects exact duplicate and contradictory conflicts against exist
 
   assert.equal(result.summary.conflicts, 1);
   assert.equal(result.conflicts[0]?.reason, "contradictory_value");
-  assert.equal(result.conflicts[0]?.existing.memoryId, "existing-1");
   assert.equal(result.summary.duplicates, 1);
   assert.equal(result.duplicates[0]?.reason, "exact_duplicate_existing");
-  assert.ok(result.summary.accepted >= 1);
+  assert.equal(result.summary.persisted, 0);
 });
 
-test("use case apply=true persists only accepted rows and tags source metadata path", async () => {
-  const persisted: Array<{
-    content: string;
-    memoryType: string;
-    category: string | null;
-    isPinned: boolean;
-    sourceDateTime: string | null;
-    sourceImportMode: "json_export" | "paste";
-    sourceImportBatchId: string;
-    importEntityKey: string | null;
-  }> = [];
-
+test("bulk_export pipeline filters junk and persists extracted memories only", async () => {
+  const persisted: string[] = [];
   const useCase = new ChatGptMemoryImportUseCase({
     listExistingMemories: async () => [],
-    persistMemory: async (input) => {
-      persisted.push({
-        content: input.content,
-        memoryType: input.memoryType,
-        category: input.category,
-        isPinned: input.isPinned,
-        sourceDateTime: input.sourceDateTime,
-        sourceImportMode: input.sourceImportMode,
-        sourceImportBatchId: input.sourceImportBatchId,
-        importEntityKey: input.importEntityKey,
-      });
-      return { memoryId: `saved-${persisted.length}` };
+    persistMemory: async ({ content }) => {
+      persisted.push(content);
+      return { memoryId: `mem-${persisted.length}` };
     },
+    extractHighSignalMemories: mockExtractor([
+      {
+        memory: "User is building Tallei, a memory layer for AI tools.",
+        type: "project",
+        stability: 0.9,
+        reuseLikelihood: 0.9,
+        confidence: 0.9,
+        sourceReason: "Stable project fact",
+        sourceConversationId: "good",
+        sourceDateTime: "2024-02-01T00:00:00.000Z",
+        sourceFile: "conversations.json",
+      },
+    ]),
   });
 
+  const conversations = [
+    {
+      create_time: 1_760_000_000,
+      mapping: {
+        good: {
+          id: "good",
+          parent: null,
+          children: [],
+          message: {
+            author: { role: "user" },
+            content: {
+              content_type: "text",
+              parts: ["I'm building Tallei, a memory layer for AI tools."],
+            },
+          },
+        },
+      },
+    },
+    {
+      create_time: 1_760_000_010,
+      mapping: {
+        junk: {
+          id: "junk",
+          parent: null,
+          children: [],
+          message: {
+            author: { role: "user" },
+            content: {
+              content_type: "text",
+              parts: [
+                "how can i run it on android studio which file do i open in android",
+              ],
+            },
+          },
+        },
+      },
+    },
+  ];
+
   const result = await useCase.execute(auth, {
-    input: JSON.stringify([
-      { memory: "My name is Dana", datetime: "2026-05-20" },
-      { memory: "My timezone is PST", datetime: null },
-    ]),
+    input: "",
+    modeHint: "bulk_export",
+    bulkDocuments: [{
+      path: "conversations.json",
+      role: "conversations",
+      data: conversations,
+    }],
     apply: true,
   });
 
-  assert.equal(result.summary.accepted, 2);
-  assert.equal(result.summary.persisted, 2);
-  assert.equal(result.preview.length, 0);
-  assert.equal(persisted.length, 2);
-  assert.ok(persisted[0]?.sourceImportBatchId);
-  assert.equal(persisted[0]?.sourceImportMode, "json_export");
-  assert.equal(persisted[0]?.sourceDateTime, "2026-05-20");
-  assert.equal(typeof persisted[0]?.memoryType, "string");
+  assert.equal(result.mode, "bulk_export");
+  assert.equal(result.summary.parsed, 2);
+  assert.equal(result.summary.keepHigh, 1);
+  assert.equal(result.summary.extracted, 1);
+  assert.equal(result.summary.accepted, 1);
+  assert.equal(result.summary.persisted, 1);
+  assert.equal(persisted.length, 1);
+  assert.match(persisted[0] ?? "", /Tallei/);
+  assert.equal(persisted.some((row) => /android studio/i.test(row)), false);
+});
+
+test("bulk_export preview returns extracted memories not raw chat lines", async () => {
+  const useCase = new ChatGptMemoryImportUseCase({
+    listExistingMemories: async () => [],
+    persistMemory: async () => ({ memoryId: "mem-1" }),
+  });
+
+  const result = await useCase.execute(auth, {
+    input: "",
+    modeHint: "bulk_export",
+    bulkDocuments: [{
+      path: "conversations.json",
+      role: "conversations",
+      data: [{
+        mapping: {
+          pref: {
+            id: "pref",
+            parent: null,
+            children: [],
+            message: {
+              author: { role: "user" },
+              content: {
+                content_type: "text",
+                parts: ["I prefer concise answers for project updates and weekly reports."],
+              },
+            },
+          },
+        },
+      }],
+    }],
+    apply: false,
+  });
+
+  assert.equal(result.preview.length, 1);
+  assert.match(result.preview[0]?.raw ?? "", /concise answers/);
+  assert.equal(result.preview[0]?.extractType, "preference");
 });

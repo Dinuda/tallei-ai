@@ -753,6 +753,82 @@
   flex-wrap: wrap;
 }
 
+.importFileRow {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.importSection {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-bottom: 0.85rem;
+}
+
+.importSectionTitle {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-2, #3d5c18);
+  font-family: var(--font-fustat), sans-serif;
+}
+
+.importPasteSection {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+  margin-bottom: 0.85rem;
+  background: #fafbfd;
+}
+
+.importPasteSection > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.importPasteSection > summary::-webkit-details-marker {
+  display: none;
+}
+
+.importFileInput {
+  display: none;
+}
+
+.importFileHint {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-family: var(--font-fustat), sans-serif;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.importUploadProgress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 160px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: var(--font-fustat), sans-serif;
+}
+
+.importUploadProgressBar {
+  height: 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.importUploadProgressFill {
+  height: 100%;
+  background: var(--accent, #7eb71b);
+  transition: width 0.15s ease;
+}
+
 .parsedHint {
   color: var(--text-muted);
   font-size: 0.8rem;
@@ -764,6 +840,27 @@
   align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
+}
+
+.importJobStatus {
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 0.5rem 0.6rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.76rem;
+  color: #475569;
+  font-family: var(--font-fustat), sans-serif;
+}
+
+.importJobError {
+  width: 100%;
+  color: #b42318;
+  font-weight: 600;
 }
 
 .importReport {
@@ -783,6 +880,26 @@
   font-size: 0.78rem;
   color: #475569;
   font-family: var(--font-fustat), sans-serif;
+}
+
+.ingestSummary {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0.55rem 0.65rem;
+  font-size: 0.76rem;
+  color: #475569;
+  font-family: var(--font-fustat), sans-serif;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.ingestSummary p {
+  margin: 0;
+}
+
+.ingestWarning {
+  color: #b45309;
 }
 
 .importSummaryGrid {

@@ -106,6 +106,13 @@ function decryptSafe(row: MemoryRecordRow): string | null {
   }
 }
 
+function isArchiveImportRow(row: MemoryRecordRow): boolean {
+  if (!row.summary_json || typeof row.summary_json !== "object") return false;
+  const summary = row.summary_json as Record<string, unknown>;
+  if (summary["source_import_archive_excluded_recall"] === true) return true;
+  return summary["source_import_processing_tier"] === "archive";
+}
+
 function toMeta(row: MemoryRecordRow): Record<string, unknown> {
   const summary =
     row.summary_json && typeof row.summary_json === "object"
@@ -276,6 +283,7 @@ export async function bucketRecall(
 
   // Decrypt once
   const decrypted = allRows.flatMap((row) => {
+    if (isArchiveImportRow(row)) return [];
     const text = decryptSafe(row);
     return text !== null ? [{ row, text }] : [];
   });

@@ -44,10 +44,30 @@ export class CleanupJudgeUseCase {
     adversary: AdversaryResult;
     debate: DebateResult;
   }): Promise<{ result: JudgeResult; raw: unknown; aiCalls: number; usage: CleanupAiUsage }> {
+    // Fast-path: if adversary was not contested and debate was skipped, decide deterministically
+    if (!input.adversary.contested && input.debate.rounds.length === 0) {
+      const proposal = input.debate.finalProposal;
+      const confidence = proposal.confidence;
+      const policyAllows = applyAllowedByPolicy(proposal, confidence, input.snapshot);
+      const applyAllowed = policyAllows && input.adversary.recommendedAction !== "reject";
+      return {
+        result: {
+          decision: applyAllowed ? "approve" : "reject",
+          finalProposal: proposal,
+          confidence,
+          rationale: applyAllowed ? "Approved: adversary fast-path, no contest." : "Rejected by cleanup safety policy.",
+          applyAllowed,
+        },
+        raw: { skipped: "adversary_fast_path" },
+        aiCalls: 0,
+        usage: emptyCleanupAiUsage(),
+      };
+    }
+
     const request = {
       model: aiProviderRegistry.chatModelName(),
       temperature: 0,
-      maxTokens: 1000,
+      maxTokens: 600,
       responseFormat: "json_object",
       messages: [
         { role: "system", content: JUDGE_SYSTEM_PROMPT },

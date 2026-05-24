@@ -376,6 +376,10 @@ export interface LoopMinerMemorySelectionSummary {
   unbucketedIncluded: number;
   bucketedExcluded: number;
   decryptFailures: number;
+  newestSelected?: number;
+  interestingSelected?: number;
+  candidateLimit?: number;
+  truncated?: boolean;
   fallbackEventsAdded?: number;
   fallbackEventsReplaced?: number;
   eventFeedAfterFallback?: number;
@@ -405,6 +409,16 @@ export interface LoopMinerMemoryDecision {
   cleanupSourceMemoryIds?: string[] | null;
   minerImportance: number;
   memoryImportance: number;
+  selectionRole?: "newest" | "interesting";
+  selectionConsidered?: number;
+  selectionCandidateLimit?: number;
+  selectionTruncated?: boolean;
+}
+
+export interface LoopMinerMemorySelectionOptions {
+  newestLimit?: number;
+  interestingLimit?: number;
+  candidateLimit?: number;
 }
 
 export interface LoopMinerSuggestion {
@@ -459,8 +473,9 @@ export interface LoopMinerRepository {
     summary: LoopMinerSummary;
     error?: unknown;
   }): Promise<void>;
-  listRecentEvents(auth: AuthContext, days: number): Promise<MinerEvent[]>;
-  listMemoryDecisionLog?(auth: AuthContext, days: number): Promise<LoopMinerMemoryDecision[]>;
+  listRecentEvents(auth: AuthContext, days: number, options?: LoopMinerMemorySelectionOptions): Promise<MinerEvent[]>;
+  listMemoryDecisionLog?(auth: AuthContext, days: number, options?: LoopMinerMemorySelectionOptions): Promise<LoopMinerMemoryDecision[]>;
+  markStaleRunningRunsFailed?(auth: AuthContext, maxAgeMs: number): Promise<number>;
   getLatestCompletedIncrementalState?(auth: AuthContext, lookbackDays: number): Promise<{
     evidenceFingerprint: string;
     summary: LoopMinerSummary;

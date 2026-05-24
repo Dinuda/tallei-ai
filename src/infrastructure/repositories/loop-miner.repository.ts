@@ -10,6 +10,7 @@ import type {
   EpisodeTurnRecord,
   LoopEvaluation,
   LoopMinerMemoryDecision,
+  LoopMinerMemorySelectionOptions,
   LoopMinerRepository as LoopMinerRepositoryContract,
   LoopMinerRunView,
   LoopMinerRunReason,
@@ -22,6 +23,7 @@ import type {
   MinerEvent,
   WorkflowDNA,
 } from "../../orchestration/loop-miner/types.js";
+import { interestingMemoryScore, selectNewestHybrid } from "../../orchestration/memory/hybrid-memory-selection.js";
 
 interface AiActivityRow {
   id: string;
@@ -319,6 +321,80 @@ function memoryDecisionForRow(row: MemoryRecordEventRow): LoopMinerMemoryDecisio
     minerImportance: memoryLoopImportance(row, summary),
     memoryImportance: Number(row.importance) || 0,
   };
+}
+
+function boundedMemorySelectionOptions(options: LoopMinerMemorySelectionOptions | undefined): Required<LoopMinerMemorySelectionOptions> {
+  const newestLimit = Math.max(1, options?.newestLimit ?? 150);
+  const interestingLimit = Math.max(0, options?.interestingLimit ?? 50);
+  return {
+    newestLimit,
+    interestingLimit,
+    candidateLimit: Math.max(newestLimit + interestingLimit, options?.candidateLimit ?? 2_000),
+  };
+}
+
+function selectMemoryEventsForMining(events: MinerEvent[], options: Required<LoopMinerMemorySelectionOptions>): MinerEvent[] {
+  const result = selectNewestHybrid({
+    items: events,
+    newestLimit: options.newestLimit,
+    interestingLimit: options.interestingLimit,
+    candidateLimit: options.candidateLimit,
+    getId: (event) => event.id,
+    getCreatedAt: (event) => event.createdAt,
+    scoreInteresting: (event) => {
+      const metadata = readRecord(event.metadata);
+      return interestingMemoryScore({
+        contentSummary: event.contentSummary,
+        summaryJson: metadata,
+        memoryType: readString(metadata.memoryType),
+        detectedMemoryType: readString(metadata.detectedMemoryType),
+        category: readString(metadata.category),
+        importance: Number(metadata.memoryImportance ?? 0),
+        isPinned: metadata.isPinned === true,
+        sourceImport: metadata.sourceImport === true,
+      });
+    },
+  });
+  return result.selected.map((event, index) => ({
+    ...event,
+    metadata: {
+      ...readRecord(event.metadata),
+      selectionRole: index < result.summary.newestSelected ? "newest" : "interesting",
+      selectionConsidered: result.summary.considered,
+      selectionCandidateLimit: result.summary.candidateLimit,
+      selectionTruncated: result.summary.truncated,
+    },
+  }));
+}
+
+function selectMemoryDecisionsForMining(
+  decisions: LoopMinerMemoryDecision[],
+  options: Required<LoopMinerMemorySelectionOptions>
+): LoopMinerMemoryDecision[] {
+  const result = selectNewestHybrid({
+    items: decisions,
+    newestLimit: options.newestLimit,
+    interestingLimit: options.interestingLimit,
+    candidateLimit: options.candidateLimit,
+    getId: (decision) => decision.memoryId,
+    getCreatedAt: (decision) => decision.selectedAt || decision.createdAt,
+    scoreInteresting: (decision) => interestingMemoryScore({
+      content: decision.contentPreview,
+      memoryType: decision.memoryType,
+      detectedMemoryType: decision.detectedMemoryType,
+      category: decision.category,
+      importance: decision.memoryImportance,
+      isPinned: decision.isPinned,
+      sourceImport: decision.sourceImport,
+    }),
+  });
+  return result.selected.map((decision, index) => ({
+    ...decision,
+    selectionRole: index < result.summary.newestSelected ? "newest" : "interesting",
+    selectionConsidered: result.summary.considered,
+    selectionCandidateLimit: result.summary.candidateLimit,
+    selectionTruncated: result.summary.truncated,
+  }));
 }
 
 function mapEpisode(row: EpisodeRow, turns: EpisodeTurnRecord[]): EpisodeRecord {
@@ -700,6 +776,30 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     return id;
   }
 
+  async markStaleRunningRunsFailed(auth: AuthContext, maxAgeMs: number): Promise<number> {
+    const safeAgeMs = Math.max(60_000, maxAgeMs);
+    const result = await pool.query(
+      `UPDATE loop_miner_runs
+       SET status = 'failed',
+           completed_at = NOW(),
+           summary_json = COALESCE(summary_json, '{}'::jsonb) || jsonb_build_object(
+             'skipped', true,
+             'skipReason', 'stale_running_timeout',
+             'durationMs', GREATEST(EXTRACT(EPOCH FROM (NOW() - created_at)) * 1000, 0)::int
+           ),
+           error_json = COALESCE(error_json, '{}'::jsonb) || jsonb_build_object(
+             'name', 'StaleRunTimeout',
+             'message', 'Loop miner run exceeded maximum running age and was auto-failed.'
+           )
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND status = 'running'
+         AND created_at <= NOW() - ($3::double precision * INTERVAL '1 millisecond')`,
+      [auth.tenantId, auth.userId, safeAgeMs]
+    );
+    return result.rowCount ?? 0;
+  }
+
   async completeRun(input: {
     auth: AuthContext;
     runId: string;
@@ -735,7 +835,12 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     );
   }
 
-  async listRecentEvents(auth: AuthContext, days: number): Promise<MinerEvent[]> {
+  async listRecentEvents(
+    auth: AuthContext,
+    days: number,
+    options?: LoopMinerMemorySelectionOptions
+  ): Promise<MinerEvent[]> {
+    const memorySelection = boundedMemorySelectionOptions(options);
     const activityResult = await pool.query<AiActivityRow>(
       `SELECT id, source, activity_type, content_text, metadata_json, created_at
        FROM ai_activity_events
@@ -754,8 +859,8 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
          AND user_id = $2
          AND created_at >= NOW() - ($3::text || ' days')::interval
        ORDER BY created_at ASC
-       LIMIT 300`,
-      [auth.tenantId, auth.userId, days]
+       LIMIT $4`,
+      [auth.tenantId, auth.userId, days, memorySelection.candidateLimit]
     );
 
     const memoryResult = await pool.query<MemoryRecordEventRow>(
@@ -811,9 +916,9 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
       },
     }));
 
-    const memoryEvents = memoryResult.rows
+    const memoryEvents = selectMemoryEventsForMining(memoryResult.rows
       .map((row) => memoryRecordSummary(row))
-      .filter((event): event is MinerEvent => event !== null);
+      .filter((event): event is MinerEvent => event !== null), memorySelection);
 
     return [...activities, ...collabTasks, ...memoryEvents].sort((a, b) => {
       const byTime = Date.parse(a.createdAt) - Date.parse(b.createdAt);
@@ -824,7 +929,12 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     });
   }
 
-  async listMemoryDecisionLog(auth: AuthContext, days: number): Promise<LoopMinerMemoryDecision[]> {
+  async listMemoryDecisionLog(
+    auth: AuthContext,
+    days: number,
+    options?: LoopMinerMemorySelectionOptions
+  ): Promise<LoopMinerMemoryDecision[]> {
+    const memorySelection = boundedMemorySelectionOptions(options);
     const result = await pool.query<MemoryRecordEventRow>(
       `SELECT id, content_ciphertext, platform, memory_type, category, is_pinned, importance, summary_json, created_at
        FROM memory_records
@@ -837,10 +947,10 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
          CASE WHEN summary_json->>'source_import' = 'true' THEN 0 ELSE 1 END,
          CASE WHEN NOT (summary_json ? 'cleanup_bucket') THEN 0 ELSE 1 END,
          created_at DESC
-       LIMIT 500`,
-      [auth.tenantId, auth.userId, days]
+       LIMIT $4`,
+      [auth.tenantId, auth.userId, days, memorySelection.candidateLimit]
     );
-    return result.rows.map((row) => memoryDecisionForRow(row));
+    return selectMemoryDecisionsForMining(result.rows.map((row) => memoryDecisionForRow(row)), memorySelection);
   }
 
   async getLatestCompletedIncrementalState(auth: AuthContext, lookbackDays: number): Promise<{

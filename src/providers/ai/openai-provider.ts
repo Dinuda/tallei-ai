@@ -209,15 +209,19 @@ export class OpenAiProvider implements AiProvider {
     const model = req.model ?? this.defaultChatModel;
     const effectiveReq = this.withJsonObjectHint(req);
     const startedAt = process.hrtime.bigint();
+    const useCompletionTokensParam = model.toLowerCase().startsWith("gpt-5");
     try {
+      const requestBody: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
+        model,
+        messages: [...effectiveReq.messages],
+        temperature: effectiveReq.temperature,
+        response_format: effectiveReq.responseFormat === "json_object" ? { type: "json_object" } : undefined,
+        ...(useCompletionTokensParam
+          ? { max_completion_tokens: effectiveReq.maxTokens }
+          : { max_tokens: effectiveReq.maxTokens }),
+      };
       const response = await this.client.chat.completions.create(
-        {
-          model,
-          messages: [...effectiveReq.messages],
-          temperature: effectiveReq.temperature,
-          max_tokens: effectiveReq.maxTokens,
-          response_format: effectiveReq.responseFormat === "json_object" ? { type: "json_object" } : undefined,
-        },
+        requestBody,
         effectiveReq.signal ? { signal: effectiveReq.signal } : undefined
       );
 

@@ -1,5 +1,11 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { MemoryRecordRow } from "../../infrastructure/repositories/memory.repository.js";
+import {
+  interestingMemoryScore,
+  selectNewestHybrid,
+  type HybridMemorySelectionSummary,
+  type MemorySelectionStrategy,
+} from "../memory/hybrid-memory-selection.js";
 import { classifyCleanupBucket } from "./bucket-classifier.js";
 import type { CleanupMemoryCandidate, CleanupSnapshot } from "./types.js";
 
@@ -8,8 +14,16 @@ interface SnapshotDeps {
     limit: number;
     includeReviewed?: boolean;
     excludeMemoryIds?: string[];
+    selectionStrategy?: MemorySelectionStrategy;
   }): Promise<MemoryRecordRow[]>;
   decryptMemoryContent(ciphertext: string): string;
+}
+
+export interface CleanupSnapshotSelectionOptions {
+  strategy?: MemorySelectionStrategy;
+  newestLimit?: number;
+  interestingLimit?: number;
+  candidateLimit?: number;
 }
 
 const PROTECTED_CATEGORIES = new Set([
@@ -111,12 +125,20 @@ export class BuildCleanupSnapshotUseCase {
     auth: AuthContext,
     maxMemories = 200,
     includeReviewed = false,
-    excludeMemoryIds: string[] = []
+    excludeMemoryIds: string[] = [],
+    selectionOptions: CleanupSnapshotSelectionOptions = {}
   ): Promise<CleanupSnapshot> {
+    const strategy = selectionOptions.strategy ?? "current_priority";
+    const newestLimit = Math.max(1, selectionOptions.newestLimit ?? 150);
+    const interestingLimit = Math.max(0, selectionOptions.interestingLimit ?? 50);
+    const candidateLimit = strategy === "newest_hybrid"
+      ? Math.max(maxMemories, selectionOptions.candidateLimit ?? 2_000)
+      : maxMemories;
     const rows = await this.deps.listCandidateMemories(auth, {
-      limit: maxMemories,
+      limit: candidateLimit,
       includeReviewed,
       excludeMemoryIds,
+      selectionStrategy: strategy,
     });
     const nowMs = Date.now();
     const memories: CleanupMemoryCandidate[] = [];
@@ -146,6 +168,7 @@ export class BuildCleanupSnapshotUseCase {
         category: row.category,
         isPinned: row.is_pinned,
         referenceCount: row.reference_count,
+        importance: row.importance,
         lastReferencedAt: row.last_referenced_at,
         createdAt: row.created_at,
         protected: reasons.length > 0,
@@ -156,28 +179,55 @@ export class BuildCleanupSnapshotUseCase {
       });
     }
 
-    const duplicateGroups = buildDuplicateGroups(memories);
-    const staleCandidateIds = memories.filter((memory) => {
+    let selectedMemories = memories;
+    let selection: HybridMemorySelectionSummary | undefined;
+    if (strategy === "newest_hybrid") {
+      const clampedNewestLimit = Math.min(newestLimit, maxMemories);
+      const result = selectNewestHybrid({
+        items: memories,
+        newestLimit: clampedNewestLimit,
+        interestingLimit: Math.min(interestingLimit, Math.max(0, maxMemories - clampedNewestLimit)),
+        candidateLimit,
+        getId: (memory) => memory.id,
+        getCreatedAt: (memory) => memory.createdAt,
+        scoreInteresting: (memory) => interestingMemoryScore({
+          content: memory.content,
+          summaryJson: memory.summaryJson,
+          memoryType: memory.memoryType,
+          category: memory.category,
+          importance: memory.importance,
+          isPinned: memory.isPinned,
+        }),
+      });
+      selectedMemories = result.selected;
+      selection = result.summary;
+    } else if (memories.length > maxMemories) {
+      selectedMemories = memories.slice(0, maxMemories);
+    }
+
+    const duplicateGroups = buildDuplicateGroups(selectedMemories);
+    const staleCandidateIds = selectedMemories.filter((memory) => {
       const row = rows.find((candidate) => candidate.id === memory.id);
       return row ? isStaleCandidate(row, nowMs) : false;
     }).map((memory) => memory.id);
-    const conflictCandidateIds = buildConflictCandidateIds(memories);
-    const protectedMemoryIds = memories.filter((memory) => memory.protected).map((memory) => memory.id);
+    const conflictCandidateIds = buildConflictCandidateIds(selectedMemories);
+    const protectedMemoryIds = selectedMemories.filter((memory) => memory.protected).map((memory) => memory.id);
     const bucketCounts = {
-      short_term: memories.filter((memory) => memory.bucket === "short_term").length,
-      long_term: memories.filter((memory) => memory.bucket === "long_term").length,
-      permanent: memories.filter((memory) => memory.bucket === "permanent").length,
+      short_term: selectedMemories.filter((memory) => memory.bucket === "short_term").length,
+      long_term: selectedMemories.filter((memory) => memory.bucket === "long_term").length,
+      permanent: selectedMemories.filter((memory) => memory.bucket === "permanent").length,
     };
 
     return {
-      memoryCount: memories.length,
-      selectedMemoryIds: memories.map((memory) => memory.id),
+      memoryCount: selectedMemories.length,
+      selectedMemoryIds: selectedMemories.map((memory) => memory.id),
+      selection,
       duplicateGroups,
       staleCandidateIds,
       conflictCandidateIds,
       protectedMemoryIds,
       bucketCounts,
-      memories,
+      memories: selectedMemories,
     };
   }
 }

@@ -682,15 +682,87 @@ test("repository listMemoryDecisionLog explains included and excluded memories",
 
     const decisions = await repository.listMemoryDecisionLog(auth, 30);
     assert.equal(decisions.length, 3);
-    assert.equal(decisions[0]?.status, "included");
-    assert.equal(decisions[0]?.reason, "fresh_source_import_selected");
-    assert.equal(decisions[0]?.sourceImportBatchId, "batch-1");
-    assert.equal(decisions[0]?.sourceDateTime, "2026-05-04");
-    assert.match(decisions[0]?.contentPreview ?? "", /product metrics report/);
-    assert.equal(decisions[1]?.status, "excluded");
-    assert.equal(decisions[1]?.reason, "unbucketed_memory_deprioritized");
-    assert.equal(decisions[2]?.status, "excluded");
-    assert.equal(decisions[2]?.reason, "bucketed_memory_deprioritized");
+    const imported = decisions.find((decision) => decision.memoryId === "33333333-3333-4333-8333-333333333333");
+    const unbucketed = decisions.find((decision) => decision.memoryId === "44444444-4444-4444-8444-444444444444");
+    const bucketed = decisions.find((decision) => decision.memoryId === "55555555-5555-4555-8555-555555555555");
+    assert.equal(imported?.status, "included");
+    assert.equal(imported?.reason, "fresh_source_import_selected");
+    assert.equal(imported?.sourceImportBatchId, "batch-1");
+    assert.equal(imported?.sourceDateTime, "2026-05-04");
+    assert.match(imported?.contentPreview ?? "", /product metrics report/);
+    assert.equal(unbucketed?.status, "excluded");
+    assert.equal(unbucketed?.reason, "unbucketed_memory_deprioritized");
+    assert.equal(bucketed?.status, "excluded");
+    assert.equal(bucketed?.reason, "bucketed_memory_deprioritized");
+  } finally {
+    (pool as unknown as { query: typeof pool.query }).query = originalQuery;
+  }
+});
+
+test("repository bounds Loop Miner memory evidence with newest plus interesting older memories", async () => {
+  const originalQuery = pool.query.bind(pool);
+  const repository = new LoopMinerRepository();
+  try {
+    (pool as unknown as { query: typeof pool.query }).query = (async (sql: string) => {
+      if (sql.includes("FROM ai_activity_events") || sql.includes("FROM collab_tasks")) {
+        return { rows: [], rowCount: 0 } as unknown;
+      }
+      const rows = Array.from({ length: 210 }, (_, index) => ({
+        id: `33333333-3333-4333-8333-${String(index).padStart(12, "0")}`,
+        content_ciphertext: encryptMemoryContent(`Low signal profile memory ${index}`),
+        platform: "chatgpt",
+        memory_type: "note",
+        category: "profile",
+        is_pinned: false,
+        importance: "0.1000",
+        summary_json: {},
+        created_at: `2026-05-${String((index % 28) + 1).padStart(2, "0")}T09:00:00.000Z`,
+      }));
+      rows[0] = {
+        ...rows[0],
+        id: "33333333-3333-4333-8333-999999999999",
+        content_ciphertext: encryptMemoryContent("Every Friday I review analytics and draft the customer newsletter."),
+        memory_type: "fact",
+        category: "workflow",
+        importance: "0.9000",
+        summary_json: { source_import: true, import_detected_memory_type: "workflow" },
+        created_at: "2025-01-01T09:00:00.000Z",
+      };
+      return { rows, rowCount: rows.length } as unknown;
+    }) as typeof pool.query;
+
+    const events = await repository.listRecentEvents(auth, 30, {
+      newestLimit: 150,
+      interestingLimit: 50,
+      candidateLimit: 500,
+    });
+    const memoryEvents = events.filter((event) => event.sourceEventType === "memory_record");
+    assert.ok(memoryEvents.length <= 200);
+    assert.ok(memoryEvents.some((event) => event.id === "33333333-3333-4333-8333-999999999999"));
+  } finally {
+    (pool as unknown as { query: typeof pool.query }).query = originalQuery;
+  }
+});
+
+test("repository marks stale running loop miner runs as failed", async () => {
+  const originalQuery = pool.query.bind(pool);
+  const repository = new LoopMinerRepository();
+  let updateSeen = false;
+  try {
+    (pool as unknown as { query: typeof pool.query }).query = (async (sql: string, params?: unknown[]) => {
+      if (sql.includes("UPDATE loop_miner_runs")) {
+        updateSeen = true;
+        assert.equal(Array.isArray(params), true);
+        assert.equal((params as unknown[])[0], auth.tenantId);
+        assert.equal((params as unknown[])[1], auth.userId);
+        return { rowCount: 2, rows: [] } as unknown;
+      }
+      throw new Error("Unexpected query");
+    }) as typeof pool.query;
+
+    const updated = await repository.markStaleRunningRunsFailed(auth, 1_200_000);
+    assert.equal(updateSeen, true);
+    assert.equal(updated, 2);
   } finally {
     (pool as unknown as { query: typeof pool.query }).query = originalQuery;
   }

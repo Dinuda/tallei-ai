@@ -3,6 +3,10 @@ import {
   stopUploadedFileIngestWorker,
 } from "../services/uploaded-file-ingest-jobs.js";
 import {
+  startChatGptImportWorker,
+  stopChatGptImportWorker,
+} from "../services/chatgpt-import-jobs.js";
+import {
   startVertexDocumentBackfillWorker,
   stopVertexDocumentBackfillWorker,
 } from "../services/vertex-document-backfill.js";
@@ -75,6 +79,7 @@ export function startWorkers(): void {
   void startWorkflowSdkRuntime().catch((error) => {
     console.error("[workflow-sdk] failed to start runtime:", error);
   });
+  startChatGptImportWorker();
   startUploadedFileIngestWorker();
   startVertexDocumentBackfillWorker();
   startDailyIntelligenceWorker();
@@ -83,6 +88,7 @@ export function startWorkers(): void {
 export function stopWorkers(): void {
   if (!workersRunning) return;
   workersRunning = false;
+  stopChatGptImportWorker();
   stopUploadedFileIngestWorker();
   stopVertexDocumentBackfillWorker();
   stopDailyIntelligenceWorker();

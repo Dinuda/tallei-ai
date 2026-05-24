@@ -91,6 +91,52 @@ test("cleanup snapshot identifies duplicate, stale, conflict, and protected memo
   assert.equal(snapshot.memories.find((memory) => memory.id === "00000000-0000-4000-8000-000000000001")?.bucket, "long_term");
 });
 
+test("cleanup snapshot hybrid selection keeps newest memories and older action memories", async () => {
+  const rows = Array.from({ length: 8 }, (_, index) => row({
+    id: `00000000-0000-4000-8000-0000000001${String(index).padStart(2, "0")}`,
+    content_ciphertext: `enc:low-signal-${index}`,
+    content_hash: `hash-${index}`,
+    memory_type: "note",
+    category: "profile",
+    importance: "0.1000",
+    created_at: `2026-01-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+  }));
+  rows.unshift(row({
+    id: "00000000-0000-4000-8000-000000000199",
+    content_ciphertext: "enc:Every Friday I review analytics and draft the customer newsletter.",
+    content_hash: "hash-interesting",
+    memory_type: "fact",
+    category: "workflow",
+    importance: "0.9000",
+    summary_json: { source_import: true, import_detected_memory_type: "workflow" },
+    created_at: "2025-01-01T00:00:00.000Z",
+  }));
+
+  const useCase = new BuildCleanupSnapshotUseCase({
+    listCandidateMemories: async (_auth, input) => {
+      assert.equal(input.selectionStrategy, "newest_hybrid");
+      return rows;
+    },
+    decryptMemoryContent: (ciphertext) => ciphertext.replace("enc:", ""),
+  });
+
+  const snapshot = await useCase.execute(auth, 5, false, [], {
+    strategy: "newest_hybrid",
+    newestLimit: 3,
+    interestingLimit: 2,
+  });
+
+  assert.equal(snapshot.memoryCount, 4);
+  assert.equal(snapshot.selection?.newestSelected, 3);
+  assert.equal(snapshot.selection?.interestingSelected, 1);
+  assert.ok(snapshot.selectedMemoryIds.includes("00000000-0000-4000-8000-000000000199"));
+  assert.deepEqual(snapshot.selectedMemoryIds.slice(0, 3), [
+    "00000000-0000-4000-8000-000000000107",
+    "00000000-0000-4000-8000-000000000106",
+    "00000000-0000-4000-8000-000000000105",
+  ]);
+});
+
 test("proposal validation rejects protected prune and malformed merge", () => {
   const snapshot = {
     memoryCount: 2,

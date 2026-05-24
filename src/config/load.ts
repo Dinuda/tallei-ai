@@ -45,6 +45,19 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_LLM__OLLAMA_MODEL",         oldKey: "OLLAMA_MODEL" },
   { newKey: "TALLEI_LLM__LOCAL_MODEL_MODE",     oldKey: "LOCAL_MODEL_MODE" },
   { newKey: "TALLEI_LLM__GOOGLE_MODEL",         oldKey: "GOOGLE_MODEL" },
+  { newKey: "TALLEI_IMPORT__MEMORY_EXTRACT_MODEL", oldKey: "IMPORT_MEMORY_EXTRACT_MODEL" },
+  { newKey: "TALLEI_IMPORT__KEEP_HIGH_THRESHOLD", oldKey: "IMPORT_KEEP_HIGH_THRESHOLD" },
+  { newKey: "TALLEI_IMPORT__KEEP_WEAK_THRESHOLD", oldKey: "IMPORT_KEEP_WEAK_THRESHOLD" },
+  { newKey: "TALLEI_IMPORT__MAX_EXTRACT_CONVERSATIONS", oldKey: "IMPORT_MAX_EXTRACT_CONVERSATIONS" },
+  { newKey: "TALLEI_IMPORT__EXTRACT_CONCURRENCY", oldKey: "IMPORT_EXTRACT_CONCURRENCY" },
+  { newKey: "TALLEI_IMPORT__EXTRACT_MODE", oldKey: "IMPORT_EXTRACT_MODE" },
+  { newKey: "TALLEI_IMPORT__STORAGE_DIR", oldKey: "IMPORT_STORAGE_DIR" },
+  { newKey: "TALLEI_IMPORT__MAX_UPLOAD_BYTES", oldKey: "IMPORT_MAX_UPLOAD_BYTES" },
+  { newKey: "TALLEI_IMPORT__BATCH_SIZE", oldKey: "IMPORT_BATCH_SIZE" },
+  { newKey: "TALLEI_IMPORT__MAX_AGE_DAYS", oldKey: "IMPORT_MAX_AGE_DAYS" },
+  { newKey: "TALLEI_IMPORT__INCLUSIVE_KEEP_HIGH_THRESHOLD", oldKey: "IMPORT_INCLUSIVE_KEEP_HIGH_THRESHOLD" },
+  { newKey: "TALLEI_IMPORT__INCLUSIVE_KEEP_WEAK_THRESHOLD", oldKey: "IMPORT_INCLUSIVE_KEEP_WEAK_THRESHOLD" },
+  { newKey: "TALLEI_IMPORT__INCLUSIVE_MAX_EXTRACT_CONVERSATIONS", oldKey: "IMPORT_INCLUSIVE_MAX_EXTRACT_CONVERSATIONS" },
   { newKey: "TALLEI_LOOP_MINER__MODEL",         oldKey: "LOOP_MINER_MODEL" },
   { newKey: "TALLEI_LOOP_MINER__EPISODE_MODEL", oldKey: "LOOP_MINER_EPISODE_MODEL" },
   { newKey: "TALLEI_LOOP_MINER__DETECTOR_MODEL", oldKey: "LOOP_MINER_DETECTOR_MODEL" },
@@ -101,6 +114,8 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_NOTIFICATIONS__DELIVERY_RETRY_BASE_MS", oldKey: "NOTIFICATIONS_DELIVERY_RETRY_BASE_MS" },
   { newKey: "TALLEI_ADMIN__EMAIL", oldKey: "TALLEI_ADMIN_EMAIL" },
   { newKey: "TALLEI_ADMIN__EMAIL", oldKey: "ADMIN_EMAIL" },
+  { newKey: "TALLEI_ADMIN__SLACK_WEBHOOK_URL", oldKey: "TALLEI_ADMIN_SLACK_WEBHOOK_URL" },
+  { newKey: "TALLEI_ADMIN__SLACK_WEBHOOK_URL", oldKey: "ADMIN_SLACK_WEBHOOK_URL" },
   // Browser automation
   { newKey: "TALLEI_BROWSER__WORKER_BASE_URL",  oldKey: "BROWSER_WORKER_BASE_URL" },
   { newKey: "TALLEI_BROWSER__WORKER_API_KEY",   oldKey: "BROWSER_WORKER_API_KEY" },
@@ -120,6 +135,13 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_MAX_ATTEMPTS", oldKey: "UPLOAD_INGEST_WORKER_MAX_ATTEMPTS" },
   { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_BASE_MS", oldKey: "UPLOAD_INGEST_WORKER_RETRY_BASE_MS" },
   { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_MAX_MS", oldKey: "UPLOAD_INGEST_WORKER_RETRY_MAX_MS" },
+  { newKey: "TALLEI_WORKERS__CHATGPT_IMPORT_ENABLED", oldKey: "CHATGPT_IMPORT_WORKER_ENABLED" },
+  { newKey: "TALLEI_WORKERS__CHATGPT_IMPORT_POLL_MS", oldKey: "CHATGPT_IMPORT_WORKER_POLL_MS" },
+  { newKey: "TALLEI_WORKERS__CHATGPT_IMPORT_BATCH_SIZE", oldKey: "CHATGPT_IMPORT_WORKER_BATCH_SIZE" },
+  { newKey: "TALLEI_WORKERS__CHATGPT_IMPORT_CONCURRENCY", oldKey: "CHATGPT_IMPORT_WORKER_CONCURRENCY" },
+  { newKey: "TALLEI_WORKERS__CHATGPT_IMPORT_MAX_ATTEMPTS", oldKey: "CHATGPT_IMPORT_WORKER_MAX_ATTEMPTS" },
+  { newKey: "TALLEI_WORKERS__CHATGPT_IMPORT_RETRY_BASE_MS", oldKey: "CHATGPT_IMPORT_WORKER_RETRY_BASE_MS" },
+  { newKey: "TALLEI_WORKERS__CHATGPT_IMPORT_RETRY_MAX_MS", oldKey: "CHATGPT_IMPORT_WORKER_RETRY_MAX_MS" },
   { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_ENABLED", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_ENABLED" },
   { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_POLL_MS", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_POLL_MS" },
   { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_BATCH_SIZE", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_BATCH_SIZE" },
@@ -198,6 +220,14 @@ function resolveEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   }
 
   return resolved;
+}
+
+export type ImportExtractMode = "heuristic" | "llm";
+
+function readImportExtractMode(env: NodeJS.ProcessEnv): ImportExtractMode {
+  const raw = readStringEnv(env, "TALLEI_IMPORT__EXTRACT_MODE", "heuristic").trim().toLowerCase();
+  if (raw === "llm" || raw === "openai" || raw === "model") return "llm";
+  return "heuristic";
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -329,6 +359,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google",
     openaiModel: readStringEnv(e, "TALLEI_LLM__CHAT_MODEL", "gpt-4o-mini"),
     googleModel: readStringEnv(e, "TALLEI_LLM__GOOGLE_MODEL", "gemini-2.0-flash"),
+    importMemoryExtractModel: readStringEnv(e, "TALLEI_IMPORT__MEMORY_EXTRACT_MODEL", "gpt-5-nano"),
+    importKeepHighThreshold: readFloatEnv(e, "TALLEI_IMPORT__KEEP_HIGH_THRESHOLD", 0.45),
+    importKeepWeakThreshold: readFloatEnv(e, "TALLEI_IMPORT__KEEP_WEAK_THRESHOLD", 0.35),
+    importMaxExtractConversations: readIntEnv(e, "TALLEI_IMPORT__MAX_EXTRACT_CONVERSATIONS", 120),
+    importExtractConcurrency: readIntEnv(e, "TALLEI_IMPORT__EXTRACT_CONCURRENCY", 6),
+    importExtractMode: readImportExtractMode(e),
+    importStorageDir: readStringEnv(e, "TALLEI_IMPORT__STORAGE_DIR", ""),
+    importMaxUploadBytes: readIntEnv(e, "TALLEI_IMPORT__MAX_UPLOAD_BYTES", 1_610_612_736),
+    importBatchSize: readIntEnv(e, "TALLEI_IMPORT__BATCH_SIZE", 500),
+    importMaxAgeDays: readIntEnv(e, "TALLEI_IMPORT__MAX_AGE_DAYS", 365),
+    importInclusiveKeepHighThreshold: readFloatEnv(e, "TALLEI_IMPORT__INCLUSIVE_KEEP_HIGH_THRESHOLD", 0.30),
+    importInclusiveKeepWeakThreshold: readFloatEnv(e, "TALLEI_IMPORT__INCLUSIVE_KEEP_WEAK_THRESHOLD", 0.20),
+    importInclusiveMaxExtractConversations: readIntEnv(e, "TALLEI_IMPORT__INCLUSIVE_MAX_EXTRACT_CONVERSATIONS", 500),
     googleApiKey: readStringEnv(e, "TALLEI_GOOGLE__API_KEY"),
     googleProjectId: readStringEnv(e, "TALLEI_GOOGLE__PROJECT_ID"),
     googleLocation: readStringEnv(e, "TALLEI_GOOGLE__LOCATION", "us-central1"),
@@ -406,6 +449,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     uploadIngestWorkerMaxAttempts: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_MAX_ATTEMPTS", 4),
     uploadIngestWorkerRetryBaseMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_BASE_MS", 5_000),
     uploadIngestWorkerRetryMaxMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_MAX_MS", 300_000),
+    chatGptImportWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_ENABLED", true),
+    chatGptImportWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_POLL_MS", 200),
+    chatGptImportWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_BATCH_SIZE", 2),
+    chatGptImportWorkerConcurrency: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_CONCURRENCY", 1),
+    chatGptImportWorkerMaxAttempts: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_MAX_ATTEMPTS", 4),
+    chatGptImportWorkerRetryBaseMs: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_RETRY_BASE_MS", 3_000),
+    chatGptImportWorkerRetryMaxMs: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_RETRY_MAX_MS", 120_000),
     vertexDocumentBackfillWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_ENABLED", false),
     vertexDocumentBackfillWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_POLL_MS", 60_000),
     vertexDocumentBackfillWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_BATCH_SIZE", 10),
@@ -420,6 +470,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     notificationsDeliveryMaxAttempts: readIntEnv(e, "TALLEI_NOTIFICATIONS__DELIVERY_MAX_ATTEMPTS", 3),
     notificationsDeliveryRetryBaseMs: readIntEnv(e, "TALLEI_NOTIFICATIONS__DELIVERY_RETRY_BASE_MS", 2_000),
     adminEmail: readStringEnv(e, "TALLEI_ADMIN__EMAIL"),
+    adminSlackWebhookUrl: readStringEnv(e, "TALLEI_ADMIN__SLACK_WEBHOOK_URL"),
     composioApiKey: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_API_KEY"),
     composioBaseUrl: normalizeBaseUrl(readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_BASE_URL", "https://backend.composio.dev")),
     composioAuthConfigId: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_AUTH_CONFIG_ID"),

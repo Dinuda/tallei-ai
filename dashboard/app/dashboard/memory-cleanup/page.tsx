@@ -261,6 +261,7 @@ type LoopMinerRunPayload = {
 };
 
 const PAGE_SIZE = 200;
+const LOOP_MINER_STALE_MS = 60 * 60 * 1000;
 const BUCKETS: Array<{ id: DisplayBucket; title: string; caption: string; className: string; labelClassName: string }> = [
   {
     id: "unbucketed",
@@ -398,7 +399,9 @@ export default function MemoryCleanupPage() {
   }, [bucketProposalByMemoryId, sortedMemories]);
 
   const latestLoopMinerRun = activeLoopMinerRun ?? loopMinerRuns[0] ?? null;
-  const loopMinerInProgress = latestLoopMinerRun?.status === "running";
+  const loopMinerRunAgeMs = latestLoopMinerRun ? Date.now() - Date.parse(latestLoopMinerRun.createdAt) : 0;
+  const loopMinerRunStale = latestLoopMinerRun?.status === "running" && Number.isFinite(loopMinerRunAgeMs) && loopMinerRunAgeMs > LOOP_MINER_STALE_MS;
+  const loopMinerInProgress = latestLoopMinerRun?.status === "running" && !loopMinerRunStale;
 
   const fetchMemories = useCallback(async () => {
     const nextMemories: MemoryItem[] = [];
@@ -435,7 +438,7 @@ export default function MemoryCleanupPage() {
     const nextRuns = Array.isArray(payload.runs) ? payload.runs : [];
     setLoopMinerRuns(nextRuns);
     if (activateLatest) {
-      setActiveLoopMinerRun((current) => current ?? nextRuns[0] ?? null);
+      setActiveLoopMinerRun(nextRuns[0] ?? null);
     }
   }, []);
 
@@ -463,7 +466,15 @@ export default function MemoryCleanupPage() {
       const response = await fetch("/api/memories/cleanup/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dryRun, maxMemories: PAGE_SIZE, processAll: true, includeReviewed: false }),
+        body: JSON.stringify({
+          dryRun,
+          maxMemories: PAGE_SIZE,
+          processAll: false,
+          includeReviewed: false,
+          selectionStrategy: "newest_hybrid",
+          newestLimit: 150,
+          interestingLimit: 50,
+        }),
       });
       const payload = (await response.json().catch(() => ({}))) as RunPayload;
       if (!response.ok || !payload.run) throw new Error(payload.error ?? "Failed to run cleanup");
@@ -485,7 +496,7 @@ export default function MemoryCleanupPage() {
       const response = await fetch("/api/memories/cleanup/loop-miner/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lookbackDays: 30 }),
+        body: JSON.stringify({ lookbackDays: 30, memoryNewestLimit: 150, memoryInterestingLimit: 50 }),
       });
       const payload = (await response.json().catch(() => ({}))) as LoopMinerRunPayload;
       if (!response.ok || !payload.run) throw new Error(payload.error ?? "Failed to run Loop Miner");
@@ -498,16 +509,6 @@ export default function MemoryCleanupPage() {
       setLoopMinerRunning(false);
     }
   }, [fetchLoopMinerRuns]);
-
-  useEffect(() => {
-    if (!loopMinerInProgress) return;
-    const timer = setInterval(() => {
-      void fetchLoopMinerRuns({ activateLatest: true }).catch((pollError) => {
-        setError(pollError instanceof Error ? pollError.message : "Failed to poll loop miner runs");
-      });
-    }, 5_000);
-    return () => clearInterval(timer);
-  }, [fetchLoopMinerRuns, loopMinerInProgress]);
 
   const resetCleanupFlags = useCallback(async () => {
     setError(null);
@@ -847,6 +848,9 @@ export default function MemoryCleanupPage() {
                     <span className={`border px-2 py-0.5 text-xs font-medium ${pillClass(latestLoopMinerRun.status)}`}>{latestLoopMinerRun.status}</span>
                     <span className="text-xs text-slate-400">{dateLabel(latestLoopMinerRun.createdAt)}</span>
                     <span className="text-xs text-slate-400">{latestLoopMinerRun.summary.durationMs ?? 0}ms</span>
+                    {loopMinerRunStale ? (
+                      <span className="border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700">stale run recovered on next refresh</span>
+                    ) : null}
                     {latestLoopMinerRun.summary.skipped ? (
                       <span className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600">{latestLoopMinerRun.summary.skipReason ?? "skipped"}</span>
                     ) : null}
@@ -870,12 +874,19 @@ export default function MemoryCleanupPage() {
                     {[
                       ["ai calls", latestLoopMinerRun.summary.usage?.calls ?? latestLoopMinerRun.summary.aiCalls ?? 0],
                       ["cost", formatCost(latestLoopMinerRun.summary.usage?.estimatedCostUsd)],
+                      ["tokens", latestLoopMinerRun.summary.usage?.totalTokens ?? 0],
+                      ["est tokens", latestLoopMinerRun.summary.usage?.estimatedTotalTokens ?? 0],
                     ].map(([label, value]) => (
                       <div key={label} className="border border-slate-200 bg-white p-2">
                         <div className="text-sm font-semibold text-slate-900">{value}</div>
                         <div className="text-[11px] text-slate-500">{label}</div>
                       </div>
                     ))}
+                  </div>
+                  <div className="border border-slate-200 bg-white p-2 text-xs leading-5 text-slate-600">
+                    <div>Prompt: {latestLoopMinerRun.summary.usage?.promptTokens ?? 0} provider / {latestLoopMinerRun.summary.usage?.estimatedPromptTokens ?? 0} estimated</div>
+                    <div>Completion: {latestLoopMinerRun.summary.usage?.completionTokens ?? 0} provider / {latestLoopMinerRun.summary.usage?.estimatedCompletionTokens ?? 0} estimated</div>
+                    <div>Models: {Object.entries(latestLoopMinerRun.summary.usage?.models ?? {}).map(([model, count]) => `${model} x${count}`).join(", ") || "none"}</div>
                   </div>
 
                   {latestLoopMinerRun.summary.phaseUsage ? (

@@ -111,22 +111,27 @@ export function validateProposal(proposal: CleanupProposalInput, snapshot: Clean
   return null;
 }
 
+function relativeAgeDays(isoDate: string | null | undefined): string | null {
+  if (!isoDate) return null;
+  const days = Math.round((Date.now() - new Date(isoDate).getTime()) / 86_400_000);
+  if (!Number.isFinite(days)) return null;
+  return `${days}d`;
+}
+
 export function compactSnapshotForAi(snapshot: CleanupSnapshot): Record<string, unknown> {
   const memories = snapshot.memories.map((memory) => ({
     id: memory.id,
-    content: memory.content.slice(0, 1200),
+    content: memory.content.slice(0, 200),
     memoryType: memory.memoryType,
-    category: memory.category,
+    category: memory.category ?? null,
     isPinned: memory.isPinned,
-    referenceCount: memory.referenceCount,
-    lastReferencedAt: memory.lastReferencedAt,
-    createdAt: memory.createdAt,
+    refs: memory.referenceCount,
+    ageCreated: relativeAgeDays(memory.createdAt),
+    ageLastRef: relativeAgeDays(memory.lastReferencedAt),
     protected: memory.protected,
-    protectionReasons: memory.protectionReasons,
+    protectionReasons: memory.protectionReasons.length > 0 ? memory.protectionReasons : undefined,
     bucket: memory.bucket,
     bucketReason: memory.bucketReason,
-    bucketConfidence: memory.bucketConfidence,
-    summaryJson: memory.summaryJson,
   }));
   return {
     memoryCount: snapshot.memoryCount,
