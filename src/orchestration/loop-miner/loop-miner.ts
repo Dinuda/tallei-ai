@@ -18,6 +18,7 @@ import { LoopMinerRunProgress } from "./run-progress.js";
 import type {
   CandidateLoop,
   EpisodeRecord,
+  LoopImplementabilityAssessment,
   LoopMinerEpisodeEmbeddingMapView,
   LoopEvaluation,
   PhaseUsageMetrics,
@@ -25,7 +26,10 @@ import type {
   LoopMinerRunReason,
   LoopMinerRunResult,
   LoopMinerRunView,
+  LoopMinerSuggestion,
   LoopMinerSummary,
+  MinerEvent,
+  WorkflowDNA,
 } from "./types.js";
 import {
   workflowDnaFingerprint,
@@ -274,6 +278,322 @@ function candidateLoopsFromMemoryGroups(
   return loops;
 }
 
+interface LoopMinerRunContext {
+  auth: AuthContext;
+  runId: string;
+  deps: LoopMinerDeps;
+  progress: LoopMinerRunProgress;
+  startedAt: number;
+}
+
+interface QualifiedLoopPayload {
+  candidateLoop: CandidateLoop;
+  evaluation: LoopEvaluation;
+  episodes: EpisodeRecord[];
+}
+
+interface PersistedSuggestions {
+  suggestions: LoopMinerSuggestion[];
+  suggestionsUpdated: number;
+}
+
+function flushRunProgress(context: LoopMinerRunContext): void {
+  flushProgress(context.deps, context.auth, context.runId, context.progress);
+}
+
+function appendWarnings(summary: LoopMinerSummary, warnings: string[]): void {
+  if (warnings.length === 0) return;
+  summary.warnings = [...(summary.warnings ?? []), ...warnings];
+}
+
+function mergeAiUsage(summary: LoopMinerSummary, usage: LoopMinerSummary["usage"], aiCalls: number): void {
+  mergeCleanupAiUsage(summary.usage, usage);
+  summary.aiCalls += aiCalls;
+}
+
+function withFinalizedSummary(context: LoopMinerRunContext, summary: LoopMinerSummary): LoopMinerSummary {
+  return attachProgressTrace(finalizeSummary(summary, context.startedAt), context.progress);
+}
+
+async function completeRun(
+  context: LoopMinerRunContext,
+  summary: LoopMinerSummary,
+  suggestions: LoopMinerSuggestion[],
+  logMessage: string,
+  logFields: Record<string, unknown> = {}
+): Promise<LoopMinerRunResult> {
+  const finalizedSummary = withFinalizedSummary(context, summary);
+  await context.deps.repository.completeRun({
+    auth: context.auth,
+    runId: context.runId,
+    status: "completed",
+    summary: finalizedSummary,
+  });
+  logger.info(logMessage, { runId: context.runId, ...logFields });
+  return { id: context.runId, status: "completed", summary: finalizedSummary, suggestions };
+}
+
+async function failRun(
+  context: LoopMinerRunContext,
+  summary: LoopMinerSummary,
+  error: unknown
+): Promise<LoopMinerRunResult> {
+  const finalizedSummary = withFinalizedSummary(context, summary);
+  await context.deps.repository.completeRun({
+    auth: context.auth,
+    runId: context.runId,
+    status: "failed",
+    summary: finalizedSummary,
+    error: errorJson(error),
+  }).catch(() => {});
+  logger.error("loop miner run failed", { runId: context.runId, error: errorJson(error), ...context.progress.snapshot() });
+  return { id: context.runId, status: "failed", summary: finalizedSummary, suggestions: [] };
+}
+
+async function ingestMemoriesPhase(
+  context: LoopMinerRunContext,
+  lookbackDays: number
+): Promise<MinerEvent[]> {
+  context.progress.startPhase("memory_ingest", { lookbackDays });
+  const memories = await context.deps.repository.listRecentEvents(context.auth, lookbackDays, { processAll: true });
+  context.progress.endPhase("memory_ingest", { memoryCount: memories.length });
+  flushRunProgress(context);
+  logger.info("loop miner memories ingested", { runId: context.runId, memoryCount: memories.length });
+  return memories;
+}
+
+async function detectLoopsFromMemoriesPhase(
+  context: LoopMinerRunContext,
+  summary: LoopMinerSummary,
+  memories: MinerEvent[]
+): Promise<{
+  approvedGroups: Array<{
+    episodeIds: string[];
+    loopName: string;
+    sharedIntent: string;
+    sharedSources: string[];
+    sharedOutputType: string;
+    reasoning: string;
+    loopLayer?: CandidateLoop["loopLayer"];
+    confidence: number;
+    status: CandidateLoop["patternStatus"];
+  }>;
+}> {
+  context.progress.startPhase("loop_detector", { inputMemories: memories.length });
+  flushRunProgress(context);
+  const detected = await context.deps.loopDetector.executeOnMemories(memories, { runId: context.runId, progress: context.progress });
+  context.progress.endPhase("loop_detector", {
+    candidateGroups: detected.patternTrace.candidateGroups.length,
+    approvedLoops: detected.approvedGroups.length,
+    aiCalls: detected.aiCalls,
+    batchesProcessed: detected.phaseUsage.batchesProcessed,
+    batchesSkipped: detected.phaseUsage.batchesSkipped,
+  });
+  flushRunProgress(context);
+
+  mergeAiUsage(summary, detected.usage, detected.aiCalls);
+  summary.loopsDetected = detected.approvedGroups.length;
+  summary.loopsProposed = detected.patternTrace.candidateGroups.length;
+  summary.loopsApproved = detected.patternTrace.approvedGroups.length;
+  summary.loopsRejected = detected.patternTrace.rejectedGroups.length;
+  summary.loopsContested = detected.patternTrace.adversaryFindings.filter((finding) => finding.contested).length;
+  summary.loopsAutoApproved = detected.patternTrace.judgeDecisions
+    .filter((decision) => decision.status === "approved_loop" && decision.confidence >= 0.85).length;
+  summary.patternTrace = detected.patternTrace;
+  summary.phaseUsage = { ...(summary.phaseUsage ?? {}), loopDetector: normalizePhaseUsage(detected.phaseUsage) };
+  appendWarnings(summary, detected.warnings);
+  return detected;
+}
+
+function selectLoopMemories(memories: MinerEvent[], approvedGroups: Array<{ episodeIds: string[] }>): MinerEvent[] {
+  const loopMemoryIds = memoryIdsFromLoopGroups(approvedGroups);
+  return memories.filter((memory) => loopMemoryIds.has(memory.id));
+}
+
+async function buildEpisodesPhase(
+  context: LoopMinerRunContext,
+  summary: LoopMinerSummary,
+  loopMemories: MinerEvent[],
+  loopCount: number
+): Promise<EpisodeRecord[]> {
+  context.progress.startPhase("episode_builder", { inputEvents: loopMemories.length, loopCount });
+  flushRunProgress(context);
+  const built = await context.deps.episodeBuilder.execute({
+    auth: context.auth,
+    runId: context.runId,
+    events: loopMemories,
+    progress: context.progress,
+    disableEpisodeReuse: true,
+    forceDeterministicPerMemory: true,
+  });
+  context.progress.endPhase("episode_builder", {
+    episodesBuilt: built.episodes.length,
+    aiCalls: built.aiCalls,
+    batchesProcessed: built.phaseUsage.batchesProcessed,
+    batchesSkipped: built.phaseUsage.batchesSkipped,
+  });
+  flushRunProgress(context);
+
+  mergeAiUsage(summary, built.usage, built.aiCalls);
+  summary.episodesBuilt = new Set(built.episodes.map((episode) => episode.id)).size;
+  summary.phaseUsage = { ...(summary.phaseUsage ?? {}), episodeBuilder: built.phaseUsage };
+  appendWarnings(summary, built.warnings);
+  return built.episodes;
+}
+
+async function evaluateCandidateLoopsPhase(
+  context: LoopMinerRunContext,
+  summary: LoopMinerSummary,
+  candidateLoops: CandidateLoop[]
+): Promise<QualifiedLoopPayload[]> {
+  const episodesByLoop = new Map<string, EpisodeRecord[]>();
+  for (const loop of candidateLoops) {
+    episodesByLoop.set(keyForLoop(loop), await context.deps.repository.listEpisodeContext(context.auth, loop.episodeIds));
+  }
+
+  context.progress.startPhase("loop_evaluator", { candidateLoops: candidateLoops.length });
+  flushRunProgress(context);
+  const evaluated = await context.deps.loopEvaluator.execute({
+    candidateLoops,
+    episodesByLoop,
+    progress: context.progress,
+  });
+  context.progress.endPhase("loop_evaluator", {
+    qualifiedLoops: evaluated.evaluations.length,
+    aiCalls: evaluated.aiCalls,
+    batchesProcessed: evaluated.phaseUsage.batchesProcessed,
+    batchesSkipped: evaluated.phaseUsage.batchesSkipped,
+  });
+  flushRunProgress(context);
+
+  mergeAiUsage(summary, evaluated.usage, evaluated.aiCalls);
+  summary.loopsQualified = evaluated.evaluations.length;
+  summary.phaseUsage = { ...(summary.phaseUsage ?? {}), loopEvaluator: normalizePhaseUsage(evaluated.phaseUsage) };
+  appendWarnings(summary, evaluated.warnings);
+
+  return evaluated.evaluations
+    .map((evaluation) => {
+      const candidateLoop = findCandidateForEvaluation(candidateLoops, evaluation);
+      if (!candidateLoop) return null;
+      return {
+        candidateLoop,
+        evaluation,
+        episodes: episodesByLoop.get(keyForLoop(candidateLoop)) ?? [],
+      };
+    })
+    .filter((item): item is QualifiedLoopPayload => item !== null && item.episodes.length >= 2);
+}
+
+function filterImplementableLoopsPhase(
+  deps: LoopMinerDeps,
+  summary: LoopMinerSummary,
+  qualifiedLoops: QualifiedLoopPayload[],
+  activeCapabilities: string[]
+): {
+  implementable: Array<QualifiedLoopPayload & { implementability: LoopImplementabilityAssessment }>;
+  blocked: Array<QualifiedLoopPayload & { implementability: LoopImplementabilityAssessment }>;
+} {
+  const implementabilityFilter = deps.implementabilityFilter ?? new LoopImplementabilityFilterUseCase();
+  const implementability = implementabilityFilter.execute({
+    qualifiedLoops,
+    activeCapabilities,
+  });
+
+  summary.loopsImplementable = implementability.implementable.length;
+  summary.loopsBlocked = implementability.blocked.length;
+  summary.debugTrace = {
+    ...(summary.debugTrace ?? {}),
+    implementability: {
+      activeCapabilities,
+      loopsInput: qualifiedLoops.length,
+      loopsImplementable: implementability.implementable.length,
+      loopsBlocked: implementability.blocked.length,
+      blocked: implementability.blocked.slice(0, 12).map((item) => ({
+        loopName: item.candidateLoop.loopName,
+        missingCapabilities: item.implementability.missingCapabilities,
+        blockers: item.implementability.blockers,
+      })),
+    },
+  };
+  return { implementable: implementability.implementable, blocked: implementability.blocked };
+}
+
+async function generateWorkflowDnaPhase(
+  context: LoopMinerRunContext,
+  summary: LoopMinerSummary,
+  qualifiedLoops: Array<QualifiedLoopPayload & { implementability: LoopImplementabilityAssessment }>
+): Promise<Array<QualifiedLoopPayload & { workflowDna: WorkflowDNA }>> {
+  context.progress.startPhase("dna_generator", { qualifiedLoops: qualifiedLoops.length });
+  flushRunProgress(context);
+  const generated = await context.deps.dnaGenerator.execute({ qualifiedLoops, progress: context.progress });
+  context.progress.endPhase("dna_generator", {
+    workflowsGenerated: generated.dna.length,
+    aiCalls: generated.aiCalls,
+    batchesProcessed: generated.phaseUsage.batchesProcessed,
+    batchesSkipped: generated.phaseUsage.batchesSkipped,
+  });
+  flushRunProgress(context);
+
+  mergeAiUsage(summary, generated.usage, generated.aiCalls);
+  summary.phaseUsage = { ...(summary.phaseUsage ?? {}), dnaGenerator: normalizePhaseUsage(generated.phaseUsage) };
+  appendWarnings(summary, generated.warnings);
+  return generated.dna;
+}
+
+async function persistSuggestionsPhase(
+  context: LoopMinerRunContext,
+  generatedDna: Array<{
+    candidateLoop: CandidateLoop;
+    evaluation: LoopEvaluation;
+    workflowDna: Parameters<typeof workflowDnaPrompt>[0];
+  }>,
+  implementabilityByLoopKey: Map<string, LoopImplementabilityAssessment>
+): Promise<PersistedSuggestions> {
+  context.progress.startPhase("persist_suggestions", { workflowsToPersist: generatedDna.length });
+  const suggestions: LoopMinerSuggestion[] = [];
+  let suggestionsUpdated = 0;
+
+  for (const item of generatedDna) {
+    const suggestedPrompt = workflowDnaPrompt(item.workflowDna);
+    const fingerprint = workflowDnaFingerprint(item.workflowDna);
+    const writeResult = context.deps.repository.createOrUpdateWorkflowSuggestion
+      ? await context.deps.repository.createOrUpdateWorkflowSuggestion({
+          auth: context.auth,
+          runId: context.runId,
+          candidateLoop: item.candidateLoop,
+          evaluation: item.evaluation,
+          dna: item.workflowDna,
+          suggestedPrompt,
+          fingerprint,
+          implementability: implementabilityByLoopKey.get(keyForLoop(item.candidateLoop)),
+        })
+      : {
+          suggestion: await context.deps.repository.createWorkflowSuggestion({
+            auth: context.auth,
+            runId: context.runId,
+            candidateLoop: item.candidateLoop,
+            evaluation: item.evaluation,
+            dna: item.workflowDna,
+            suggestedPrompt,
+            fingerprint,
+            implementability: implementabilityByLoopKey.get(keyForLoop(item.candidateLoop)),
+          }),
+          created: false,
+          updated: false,
+        };
+    if (writeResult.suggestion) suggestions.push(writeResult.suggestion);
+    if (writeResult.updated) suggestionsUpdated += 1;
+  }
+
+  context.progress.endPhase("persist_suggestions", {
+    suggestionsPersisted: suggestions.length,
+    suggestionsUpdated,
+  });
+  flushRunProgress(context);
+
+  return { suggestions, suggestionsUpdated };
+}
+
 export async function runLoopMinerForUser(
   auth: AuthContext,
   options: RunLoopMinerOptions = {},
@@ -281,7 +601,6 @@ export async function runLoopMinerForUser(
 ): Promise<LoopMinerRunResult> {
   const runReason = options.runReason ?? "manual";
   const lookbackDays = Math.max(1, Math.min(options.lookbackDays ?? 30, 90));
-  const startedAt = Date.now();
 
   if (runReason === "daily_intelligence") {
     if (await deps.repository.hasRunningDailyRun(auth)) {
@@ -303,303 +622,143 @@ export async function runLoopMinerForUser(
   }
 
   const runId = options.runId ?? await deps.repository.createRun({ auth, runReason });
-  let summary = emptySummary();
-  const progress = new LoopMinerRunProgress(runId);
+  const context: LoopMinerRunContext = {
+    auth,
+    runId,
+    deps,
+    progress: new LoopMinerRunProgress(runId),
+    startedAt: Date.now(),
+  };
+  const summary = emptySummary();
 
   try {
     logger.info("loop miner run started", { runId, runReason, lookbackDays });
-
-    // Phase 1: Ingest memories (source of truth)
-    progress.startPhase("memory_ingest", { lookbackDays });
-    const memories = await deps.repository.listRecentEvents(auth, lookbackDays, { processAll: true });
-    progress.endPhase("memory_ingest", { memoryCount: memories.length });
-    flushProgress(deps, auth, runId, progress);
-    logger.info("loop miner memories ingested", { runId, memoryCount: memories.length });
+    const memories = await ingestMemoriesPhase(context, lookbackDays);
 
     if (memories.length === 0) {
-      summary = attachProgressTrace(finalizeSummary({
-        ...summary,
-        skipped: true,
-        skipReason: "no_memories",
-      }, startedAt), progress);
-      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run skipped: no memories", { runId });
-      return { id: runId, status: "completed", summary, suggestions: [] };
+      return completeRun(
+        context,
+        {
+          ...summary,
+          skipped: true,
+          skipReason: "no_memories",
+        },
+        [],
+        "loop miner run skipped: no memories"
+      );
     }
 
     if (memories.length < 2) {
-      summary = attachProgressTrace(finalizeSummary({
-        ...summary,
-        skipped: true,
-        skipReason: "insufficient_memories_for_loops",
-      }, startedAt), progress);
-      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run skipped: need at least 2 memories", { runId, memoryCount: memories.length });
-      return { id: runId, status: "completed", summary, suggestions: [] };
+      return completeRun(
+        context,
+        {
+          ...summary,
+          skipped: true,
+          skipReason: "insufficient_memories_for_loops",
+        },
+        [],
+        "loop miner run skipped: need at least 2 memories",
+        { memoryCount: memories.length }
+      );
     }
 
-    // Phase 2: Detect loops directly in memories
-    progress.startPhase("loop_detector", { inputMemories: memories.length });
-    flushProgress(deps, auth, runId, progress);
-    const detectedFromMemories = await deps.loopDetector.executeOnMemories(memories, { runId, progress });
-    progress.endPhase("loop_detector", {
-      candidateGroups: detectedFromMemories.patternTrace.candidateGroups.length,
-      approvedLoops: detectedFromMemories.approvedGroups.length,
-      aiCalls: detectedFromMemories.aiCalls,
-      batchesProcessed: detectedFromMemories.phaseUsage.batchesProcessed,
-      batchesSkipped: detectedFromMemories.phaseUsage.batchesSkipped,
-    });
-    flushProgress(deps, auth, runId, progress);
-    mergeCleanupAiUsage(summary.usage, detectedFromMemories.usage);
-    summary.aiCalls += detectedFromMemories.aiCalls;
-    summary.loopsDetected = detectedFromMemories.approvedGroups.length;
-    summary.loopsProposed = detectedFromMemories.patternTrace.candidateGroups.length;
-    summary.loopsApproved = detectedFromMemories.patternTrace.approvedGroups.length;
-    summary.loopsRejected = detectedFromMemories.patternTrace.rejectedGroups.length;
-    summary.loopsContested = detectedFromMemories.patternTrace.adversaryFindings.filter((f) => f.contested).length;
-    summary.loopsAutoApproved = detectedFromMemories.patternTrace.judgeDecisions.filter((d) => d.status === "approved_loop" && d.confidence >= 0.85).length;
-    summary.patternTrace = detectedFromMemories.patternTrace;
-    summary.phaseUsage = { ...(summary.phaseUsage ?? {}), loopDetector: normalizePhaseUsage(detectedFromMemories.phaseUsage) };
-    if (detectedFromMemories.warnings.length > 0) {
-      summary.warnings = [...(summary.warnings ?? []), ...detectedFromMemories.warnings];
-    }
-
+    const detectedFromMemories = await detectLoopsFromMemoriesPhase(context, summary, memories);
     if (detectedFromMemories.approvedGroups.length === 0) {
-      summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
-      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run completed: no loops found in memories", { runId, memoryCount: memories.length });
-      return { id: runId, status: "completed", summary, suggestions: [] };
+      return completeRun(
+        context,
+        summary,
+        [],
+        "loop miner run completed: no loops found in memories",
+        { memoryCount: memories.length }
+      );
     }
 
-    const loopMemoryIds = memoryIdsFromLoopGroups(detectedFromMemories.approvedGroups);
-    const loopMemories = memories.filter((memory) => loopMemoryIds.has(memory.id));
-    progress.step("loop memories selected for episode building", {
+    const loopMemories = selectLoopMemories(memories, detectedFromMemories.approvedGroups);
+    context.progress.step("loop memories selected for episode building", {
       loopMemories: loopMemories.length,
       totalMemories: memories.length,
     });
-    flushProgress(deps, auth, runId, progress);
+    flushRunProgress(context);
 
-    // Phase 3: Build episodes only for memories in detected loops
-    progress.startPhase("episode_builder", { inputEvents: loopMemories.length, loopCount: detectedFromMemories.approvedGroups.length });
-    flushProgress(deps, auth, runId, progress);
-    const built = await deps.episodeBuilder.execute({
-      auth,
-      runId,
-      events: loopMemories,
-      progress,
-      disableEpisodeReuse: true,
-      forceDeterministicPerMemory: true,
-    });
-    progress.endPhase("episode_builder", {
-      episodesBuilt: built.episodes.length,
-      aiCalls: built.aiCalls,
-      batchesProcessed: built.phaseUsage.batchesProcessed,
-      batchesSkipped: built.phaseUsage.batchesSkipped,
-    });
-    flushProgress(deps, auth, runId, progress);
-    mergeCleanupAiUsage(summary.usage, built.usage);
-    summary.aiCalls += built.aiCalls;
-    summary.episodesBuilt = new Set(built.episodes.map((episode) => episode.id)).size;
-    summary.phaseUsage = { ...(summary.phaseUsage ?? {}), episodeBuilder: built.phaseUsage };
-    if (built.warnings.length > 0) {
-      summary.warnings = [...(summary.warnings ?? []), ...built.warnings];
+    const episodes = await buildEpisodesPhase(context, summary, loopMemories, detectedFromMemories.approvedGroups.length);
+    if (episodes.length === 0) {
+      return completeRun(
+        context,
+        {
+          ...summary,
+          skipped: true,
+          skipReason: "no_episodes_from_loop_memories",
+        },
+        [],
+        "loop miner run skipped: no episodes built from loop memories",
+        { loopMemories: loopMemories.length }
+      );
     }
 
-    if (built.episodes.length === 0) {
-      summary = attachProgressTrace(finalizeSummary({
-        ...summary,
-        skipped: true,
-        skipReason: "no_episodes_from_loop_memories",
-      }, startedAt), progress);
-      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run skipped: no episodes built from loop memories", { runId, loopMemories: loopMemories.length });
-      return { id: runId, status: "completed", summary, suggestions: [] };
-    }
-
-    const candidateLoops = candidateLoopsFromMemoryGroups(detectedFromMemories.approvedGroups, built.episodes);
+    const candidateLoops = candidateLoopsFromMemoryGroups(detectedFromMemories.approvedGroups, episodes);
     summary.loopsEpisodeAligned = candidateLoops.length;
     if (candidateLoops.length === 0) {
-      summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
-      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run completed: loops found in memories but episodes did not align", { runId, episodesBuilt: built.episodes.length });
-      return { id: runId, status: "completed", summary, suggestions: [] };
+      return completeRun(
+        context,
+        summary,
+        [],
+        "loop miner run completed: loops found in memories but episodes did not align",
+        { episodesBuilt: episodes.length }
+      );
     }
 
-    // Phase 4: Evaluate and qualify loops
-    const episodesByLoop = new Map<string, EpisodeRecord[]>();
-    for (const loop of candidateLoops) {
-      episodesByLoop.set(keyForLoop(loop), await deps.repository.listEpisodeContext(auth, loop.episodeIds));
-    }
-
-    progress.startPhase("loop_evaluator", { candidateLoops: candidateLoops.length });
-    flushProgress(deps, auth, runId, progress);
-    const evaluated = await deps.loopEvaluator.execute({
-      candidateLoops,
-      episodesByLoop,
-      progress,
-    });
-    progress.endPhase("loop_evaluator", {
-      qualifiedLoops: evaluated.evaluations.length,
-      aiCalls: evaluated.aiCalls,
-      batchesProcessed: evaluated.phaseUsage.batchesProcessed,
-      batchesSkipped: evaluated.phaseUsage.batchesSkipped,
-    });
-    flushProgress(deps, auth, runId, progress);
-    mergeCleanupAiUsage(summary.usage, evaluated.usage);
-    summary.aiCalls += evaluated.aiCalls;
-    summary.loopsQualified = evaluated.evaluations.length;
-    summary.phaseUsage = { ...(summary.phaseUsage ?? {}), loopEvaluator: normalizePhaseUsage(evaluated.phaseUsage) };
-    if (evaluated.warnings.length > 0) {
-      summary.warnings = [...(summary.warnings ?? []), ...evaluated.warnings];
-    }
-
-    const qualifiedLoops = evaluated.evaluations
-      .map((evaluation) => {
-        const candidateLoop = findCandidateForEvaluation(candidateLoops, evaluation);
-        if (!candidateLoop) return null;
-        return {
-          candidateLoop,
-          evaluation,
-          episodes: episodesByLoop.get(keyForLoop(candidateLoop)) ?? [],
-        };
-      })
-      .filter((item): item is { candidateLoop: CandidateLoop; evaluation: LoopEvaluation; episodes: EpisodeRecord[] } => {
-        return item !== null && item.episodes.length >= 2;
-      });
-
+    const qualifiedLoops = await evaluateCandidateLoopsPhase(context, summary, candidateLoops);
     if (qualifiedLoops.length === 0) {
-      summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
-      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run completed: no qualified loops", { runId, loopsDetected: candidateLoops.length });
-      return { id: runId, status: "completed", summary, suggestions: [] };
+      return completeRun(
+        context,
+        summary,
+        [],
+        "loop miner run completed: no qualified loops",
+        { loopsDetected: candidateLoops.length }
+      );
     }
 
-    // Phase 5: Filter out loops that cannot be implemented with available integrations.
     const activeCapabilities = deps.repository.listActiveImplementationCapabilities
       ? await deps.repository.listActiveImplementationCapabilities(auth)
       : [];
-    const implementabilityFilter = deps.implementabilityFilter ?? new LoopImplementabilityFilterUseCase();
-    progress.startPhase("implementability_filter", {
+    context.progress.startPhase("implementability_filter", {
       qualifiedLoops: qualifiedLoops.length,
       activeCapabilities: activeCapabilities.length,
     });
-    const implementability = implementabilityFilter.execute({
-      qualifiedLoops,
-      activeCapabilities,
-    });
-    progress.endPhase("implementability_filter", {
+    const implementability = filterImplementableLoopsPhase(deps, summary, qualifiedLoops, activeCapabilities);
+    context.progress.endPhase("implementability_filter", {
       implementableLoops: implementability.implementable.length,
       blockedLoops: implementability.blocked.length,
     });
-    flushProgress(deps, auth, runId, progress);
-
-    summary.loopsImplementable = implementability.implementable.length;
-    summary.loopsBlocked = implementability.blocked.length;
-    summary.debugTrace = {
-      ...(summary.debugTrace ?? {}),
-      implementability: {
-        activeCapabilities,
-        loopsInput: qualifiedLoops.length,
-        loopsImplementable: implementability.implementable.length,
-        loopsBlocked: implementability.blocked.length,
-        blocked: implementability.blocked.slice(0, 12).map((item) => ({
-          loopName: item.candidateLoop.loopName,
-          missingCapabilities: item.implementability.missingCapabilities,
-          blockers: item.implementability.blockers,
-        })),
-      },
-    };
+    flushRunProgress(context);
 
     if (implementability.implementable.length === 0) {
-      summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
-      await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run completed: no implementable loops", {
-        runId,
-        qualifiedLoops: qualifiedLoops.length,
-        blockedLoops: implementability.blocked.length,
-      });
-      return { id: runId, status: "completed", summary, suggestions: [] };
+      return completeRun(
+        context,
+        summary,
+        [],
+        "loop miner run completed: no implementable loops",
+        {
+          qualifiedLoops: qualifiedLoops.length,
+          blockedLoops: implementability.blocked.length,
+        }
+      );
     }
 
     const implementabilityByLoopKey = new Map(
       implementability.implementable.map((item) => [keyForLoop(item.candidateLoop), item.implementability])
     );
 
-    // Phase 6: Generate workflow DNA
-    progress.startPhase("dna_generator", { qualifiedLoops: implementability.implementable.length });
-    flushProgress(deps, auth, runId, progress);
-    const generated = await deps.dnaGenerator.execute({ qualifiedLoops: implementability.implementable, progress });
-    progress.endPhase("dna_generator", {
-      workflowsGenerated: generated.dna.length,
-      aiCalls: generated.aiCalls,
-      batchesProcessed: generated.phaseUsage.batchesProcessed,
-      batchesSkipped: generated.phaseUsage.batchesSkipped,
-    });
-    flushProgress(deps, auth, runId, progress);
-    mergeCleanupAiUsage(summary.usage, generated.usage);
-    summary.aiCalls += generated.aiCalls;
-    summary.phaseUsage = { ...(summary.phaseUsage ?? {}), dnaGenerator: normalizePhaseUsage(generated.phaseUsage) };
-    if (generated.warnings.length > 0) {
-      summary.warnings = [...(summary.warnings ?? []), ...generated.warnings];
-    }
+    const generated = await generateWorkflowDnaPhase(context, summary, implementability.implementable);
+    const persisted = await persistSuggestionsPhase(context, generated, implementabilityByLoopKey);
+    summary.suggestionsCreated = persisted.suggestions.length - persisted.suggestionsUpdated;
 
-    // Phase 7: Persist suggestions
-    progress.startPhase("persist_suggestions", { workflowsToPersist: generated.dna.length });
-    const suggestions = [];
-    let suggestionsUpdated = 0;
-    for (const item of generated.dna) {
-      const suggestedPrompt = workflowDnaPrompt(item.workflowDna);
-      const fingerprint = workflowDnaFingerprint(item.workflowDna);
-      const writeResult = deps.repository.createOrUpdateWorkflowSuggestion
-        ? await deps.repository.createOrUpdateWorkflowSuggestion({
-            auth,
-            runId,
-            candidateLoop: item.candidateLoop,
-            evaluation: item.evaluation,
-            dna: item.workflowDna,
-            suggestedPrompt,
-            fingerprint,
-            implementability: implementabilityByLoopKey.get(keyForLoop(item.candidateLoop)),
-          })
-        : {
-            suggestion: await deps.repository.createWorkflowSuggestion({
-              auth,
-              runId,
-              candidateLoop: item.candidateLoop,
-              evaluation: item.evaluation,
-              dna: item.workflowDna,
-              suggestedPrompt,
-              fingerprint,
-              implementability: implementabilityByLoopKey.get(keyForLoop(item.candidateLoop)),
-            }),
-            created: false,
-            updated: false,
-          };
-      if (writeResult.suggestion) suggestions.push(writeResult.suggestion);
-      if (writeResult.updated) suggestionsUpdated += 1;
-    }
-    summary.suggestionsCreated = suggestions.length - suggestionsUpdated;
-    progress.endPhase("persist_suggestions", {
-      suggestionsPersisted: suggestions.length,
-      suggestionsUpdated,
-    });
-    flushProgress(deps, auth, runId, progress);
-
-    summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
-    await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-    logger.info("loop miner run completed", { runId, ...loggableSummary(summary), ...progress.snapshot() });
-    return { id: runId, status: "completed", summary, suggestions };
+    const finalizedSummary = withFinalizedSummary(context, summary);
+    await context.deps.repository.completeRun({ auth, runId, status: "completed", summary: finalizedSummary });
+    logger.info("loop miner run completed", { runId, ...loggableSummary(finalizedSummary), ...context.progress.snapshot() });
+    return { id: runId, status: "completed", summary: finalizedSummary, suggestions: persisted.suggestions };
   } catch (error) {
-    summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
-    await deps.repository.completeRun({
-      auth,
-      runId,
-      status: "failed",
-      summary,
-      error: errorJson(error),
-    }).catch(() => {});
-    logger.error("loop miner run failed", { runId, error: errorJson(error), ...progress.snapshot() });
-    return { id: runId, status: "failed", summary, suggestions: [] };
+    return failRun(context, summary, error);
   }
 }
 
