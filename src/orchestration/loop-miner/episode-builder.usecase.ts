@@ -15,6 +15,8 @@ import {
   estimatePromptTokensFromRequest,
   estimateTokens,
   explicitWorkflowMemoryExtraction,
+  loopMemoryEpisodeExtraction,
+  loopMinerFallbackEpisodeExtraction,
   LOOP_EPISODE_EXTRACTION_VERSION,
   normalizeEpisodeExtraction,
   packByEstimatedPromptBudget,
@@ -35,6 +37,53 @@ function sleep(ms: number): Promise<void> {
 function isRetriableError(error: unknown): boolean {
   if (error instanceof TimeoutError) return true;
   return isRetriableProviderError(error);
+}
+
+function hasRecurringSignal(text: string): boolean {
+  return /\b(every|weekly|daily|monthly|recurring|routine|each week|each month|each day)\b/.test(text);
+}
+
+function nonLoopableReason(extraction: {
+  intent: string;
+  summary?: string;
+  steps: string[];
+  outputType: string;
+  confidence?: number;
+  approved: boolean;
+  automationSignals?: {
+    repeatable: boolean;
+    likelyCadence?: "daily" | "weekly" | "monthly" | "event_based" | "unknown";
+    businessValue: number;
+    automationReadiness: number;
+  };
+}): string | null {
+  const signalText = [
+    extraction.intent,
+    extraction.summary ?? "",
+    extraction.outputType,
+    ...extraction.steps,
+  ].join(" ").toLowerCase();
+
+  const hasOneOffLanguage = /\b(one[- ]off|one[- ]time|single launch|single migration|ad hoc|unique request|just this once|exception case)\b/.test(signalText);
+  if (hasOneOffLanguage && !hasRecurringSignal(signalText)) {
+    return "one_off_language";
+  }
+
+  const automationSignals = extraction.automationSignals;
+  if (!automationSignals) return null;
+  const cadenceUnknown = (automationSignals.likelyCadence ?? "unknown") === "unknown";
+  const lowReadiness = automationSignals.automationReadiness <= 0.35;
+  const lowValue = automationSignals.businessValue <= 0.35;
+  const lowConfidence = (extraction.confidence ?? 0.5) < 0.45;
+  if (automationSignals.repeatable === false && cadenceUnknown && lowReadiness && lowValue && !extraction.approved && lowConfidence) {
+    return "repeatability_signals_low";
+  }
+
+  if (cadenceUnknown && lowReadiness && lowConfidence && !extraction.approved && !hasRecurringSignal(signalText)) {
+    return "low_confidence_unknown_cadence";
+  }
+
+  return null;
 }
 
 async function chatWithRetry(
@@ -69,6 +118,8 @@ export class EpisodeBuilderUseCase {
     runId: string;
     events: MinerEvent[];
     progress?: LoopMinerRunProgress;
+    disableEpisodeReuse?: boolean;
+    forceDeterministicPerMemory?: boolean;
   }): Promise<{
     episodes: EpisodeRecord[];
     raw: unknown[];
@@ -99,6 +150,7 @@ export class EpisodeBuilderUseCase {
           tokensPerOutputEpisode: 0,
           costPerOutputEpisodeUsd: 0,
           maxEstimatedPromptTokensPerCall: 0,
+          episodesDroppedNonLoopable: 0,
         },
       };
     }
@@ -107,6 +159,7 @@ export class EpisodeBuilderUseCase {
     const episodes: EpisodeRecord[] = [];
     const rawResponses: unknown[] = [];
     const warnings: string[] = [];
+    let episodesDroppedNonLoopable = 0;
     let aiCalls = 0;
     let batchesProcessed = 0;
     let batchesSkipped = 0;
@@ -114,11 +167,88 @@ export class EpisodeBuilderUseCase {
 
     const compactSummaryCap = Math.max(160, config.loopMinerEventSummaryCharCap);
     const promptBudgetTokens = Math.max(1200, config.loopMinerPromptBudgetTokens);
+
+    if (input.forceDeterministicPerMemory) {
+      for (const event of input.events) {
+        const extraction = explicitWorkflowMemoryExtraction(event)
+          ?? loopMemoryEpisodeExtraction(event)
+          ?? loopMinerFallbackEpisodeExtraction(event);
+        if (!extraction) {
+          rawResponses.push({
+            source: "episode_skipped_no_memory_extraction",
+            eventId: event.id,
+          });
+          continue;
+        }
+        const turns = [{
+          role: event.role,
+          contentSummary: event.contentSummary,
+          sourceEventType: event.sourceEventType,
+          sourceEventId: event.id,
+          createdAt: event.createdAt,
+        }] as const;
+        const sourceFingerprint = sourceFingerprintFromTurns(turns, LOOP_EPISODE_EXTRACTION_VERSION);
+        episodes.push(await this.repository.createEpisode({
+          auth: input.auth,
+          runId: input.runId,
+          extraction,
+          sourceFingerprint,
+          extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
+          turns: [...turns],
+        }));
+        rawResponses.push({
+          source: "loop_memory_episode_extraction",
+          eventId: event.id,
+          title: extraction.title ?? extraction.intent,
+          outputType: extraction.outputType,
+        });
+      }
+
+      const inputEvents = input.events.length;
+      const outputEpisodes = episodes.length;
+      return {
+        episodes,
+        raw: rawResponses,
+        aiCalls,
+        usage,
+        warnings,
+        phaseUsage: {
+          calls: aiCalls,
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
+          estimatedTotalTokens: usage.estimatedTotalTokens,
+          estimatedCostUsd: Number(usage.estimatedCostUsd.toFixed(6)),
+          batchesProcessed: 0,
+          batchesSkipped: 0,
+          inputEvents,
+          outputEpisodes,
+          tokensPerInputEvent: 0,
+          tokensPerOutputEpisode: 0,
+          costPerOutputEpisodeUsd: 0,
+          maxEstimatedPromptTokensPerCall: 0,
+          episodesDroppedNonLoopable,
+        },
+      };
+    }
+
     const llmEvents: MinerEvent[] = [];
     for (const event of input.events) {
       const extraction = explicitWorkflowMemoryExtraction(event);
       if (!extraction) {
         llmEvents.push(event);
+        continue;
+      }
+      const droppedReason = nonLoopableReason(extraction);
+      if (droppedReason) {
+        episodesDroppedNonLoopable += 1;
+        rawResponses.push({
+          source: "episode_dropped_non_loopable",
+          reason: droppedReason,
+          eventId: event.id,
+          title: extraction.title ?? extraction.intent,
+          outputType: extraction.outputType,
+        });
         continue;
       }
       const turns = [{
@@ -129,7 +259,7 @@ export class EpisodeBuilderUseCase {
         createdAt: event.createdAt,
       }] as const;
       const sourceFingerprint = sourceFingerprintFromTurns(turns, LOOP_EPISODE_EXTRACTION_VERSION);
-      const reusable = this.repository.findReusableEpisodeBySourceFingerprint
+      const reusable = !input.disableEpisodeReuse && this.repository.findReusableEpisodeBySourceFingerprint
         ? await this.repository.findReusableEpisodeBySourceFingerprint({
             auth: input.auth,
             sourceFingerprint,
@@ -183,6 +313,7 @@ export class EpisodeBuilderUseCase {
         tokensPerOutputEpisode: outputEpisodes > 0 ? Number((estimatedTokens / outputEpisodes).toFixed(2)) : 0,
         costPerOutputEpisodeUsd: outputEpisodes > 0 ? Number((estimatedCostUsd / outputEpisodes).toFixed(6)) : 0,
         maxEstimatedPromptTokensPerCall,
+        episodesDroppedNonLoopable,
       };
       return { episodes, raw: rawResponses, aiCalls, usage, warnings, phaseUsage };
     }
@@ -271,6 +402,18 @@ export class EpisodeBuilderUseCase {
         for (const rawEpisode of rawEpisodes) {
           const extraction = normalizeEpisodeExtraction(rawEpisode, validEventIds);
           if (!extraction) continue;
+          const droppedReason = nonLoopableReason(extraction);
+          if (droppedReason) {
+            episodesDroppedNonLoopable += 1;
+            rawResponses.push({
+              source: "episode_dropped_non_loopable",
+              reason: droppedReason,
+              eventIds: extraction.eventIds,
+              title: extraction.title ?? extraction.intent,
+              outputType: extraction.outputType,
+            });
+            continue;
+          }
           const turns = extraction.eventIds
             .map((eventId) => eventById.get(eventId))
             .filter((event): event is (typeof batch)[number] => Boolean(event))
@@ -283,7 +426,7 @@ export class EpisodeBuilderUseCase {
             }));
           if (turns.length === 0) continue;
           const sourceFingerprint = sourceFingerprintFromTurns(turns, LOOP_EPISODE_EXTRACTION_VERSION);
-          const reusable = this.repository.findReusableEpisodeBySourceFingerprint
+          const reusable = !input.disableEpisodeReuse && this.repository.findReusableEpisodeBySourceFingerprint
             ? await this.repository.findReusableEpisodeBySourceFingerprint({
                 auth: input.auth,
                 sourceFingerprint,
@@ -331,6 +474,7 @@ export class EpisodeBuilderUseCase {
       tokensPerOutputEpisode: outputEpisodes > 0 ? Number((estimatedTokens / outputEpisodes).toFixed(2)) : 0,
       costPerOutputEpisodeUsd: outputEpisodes > 0 ? Number((estimatedCostUsd / outputEpisodes).toFixed(6)) : 0,
       maxEstimatedPromptTokensPerCall,
+      episodesDroppedNonLoopable,
     };
 
     return { episodes, raw: rawResponses, aiCalls, usage, warnings, phaseUsage };

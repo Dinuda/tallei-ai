@@ -14,6 +14,7 @@ import type {
   LoopMinerRepository as LoopMinerRepositoryContract,
   LoopMinerRunView,
   LoopMinerRunReason,
+  LoopImplementabilityAssessment,
   LoopMinerSourceEventType,
   LoopMinerSuggestion,
   LoopMinerSuggestionWriteResult,
@@ -534,6 +535,7 @@ function readSummary(value: unknown): LoopMinerSummary {
       tokensPerOutputEpisode: Number(phase.tokensPerOutputEpisode ?? 0),
       costPerOutputEpisodeUsd: Number(phase.costPerOutputEpisodeUsd ?? 0),
       maxEstimatedPromptTokensPerCall: Number(phase.maxEstimatedPromptTokensPerCall ?? 0),
+      episodesDroppedNonLoopable: Number(phase.episodesDroppedNonLoopable ?? 0),
     };
   };
   return {
@@ -730,6 +732,29 @@ function collectLoopParentsFromSuggestions(rows: WorkflowSuggestionRow[]): Works
   return [...byId.values()].sort((left, right) => right.confidenceScore - left.confidenceScore);
 }
 
+function inferComposioAppKeyFromScopes(scopes: string[]): string | null {
+  const first = scopes.find((scope) => scope.trim().length > 0)?.trim().toLowerCase();
+  if (!first) return null;
+  if (first.startsWith("https://www.googleapis.com/auth/")) {
+    const service = first.replace("https://www.googleapis.com/auth/", "").split(".")[0];
+    if (service === "gmail" || service === "mail") return "gmail";
+    if (service === "calendar") return "googlecalendar";
+    if (service === "drive" || service === "docs" || service === "sheets" || service === "slides") return "google";
+    return service || null;
+  }
+  if (first.includes("google.com") || first.includes("googleapis.com")) {
+    if (first.includes("mail")) return "gmail";
+    if (first.includes("calendar")) return "googlecalendar";
+    if (first.includes("drive")) return "google";
+    return "google";
+  }
+  return first.split(/[.:/]/)[0] || null;
+}
+
+function normalizeCapability(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
 function logicalEpisodeKeyFromIds(ids: string[]): string | null {
   const normalized = [...new Set(ids.filter(Boolean))].sort();
   return normalized.length >= 2 ? normalized.join("|") : null;
@@ -885,34 +910,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     days: number,
     options?: LoopMinerMemorySelectionOptions
   ): Promise<MinerEvent[]> {
-    const memorySelection = boundedMemorySelectionOptions(options);
-    const fetchLimit = memorySelection.processAll ? null : memorySelection.candidateLimit;
-    const activityResult = await pool.query<AiActivityRow>(
-      `SELECT id, source, activity_type, content_text, metadata_json, created_at
-       FROM ai_activity_events
-       WHERE tenant_id = $1
-         AND user_id = $2
-         AND created_at >= NOW() - ($3::text || ' days')::interval
-       ORDER BY created_at ASC
-       ${fetchLimit ? "LIMIT $4" : ""}`,
-      fetchLimit
-        ? [auth.tenantId, auth.userId, days, fetchLimit]
-        : [auth.tenantId, auth.userId, days]
-    );
-
-    const collabResult = await pool.query<CollabTaskRow>(
-      `SELECT id, title, brief, state, last_actor, iteration, context, transcript, created_at, updated_at
-       FROM collab_tasks
-       WHERE tenant_id = $1
-         AND user_id = $2
-         AND created_at >= NOW() - ($3::text || ' days')::interval
-       ORDER BY created_at ASC
-       ${fetchLimit ? "LIMIT $4" : ""}`,
-      fetchLimit
-        ? [auth.tenantId, auth.userId, days, fetchLimit]
-        : [auth.tenantId, auth.userId, days]
-    );
-
+    const fetchLimit = options?.processAll ? null : (options?.candidateLimit ?? 2000);
     const memoryResult = await pool.query<MemoryRecordEventRow>(
       `SELECT id, content_ciphertext, platform, memory_type, category, is_pinned, importance, summary_json, created_at
        FROM memory_records
@@ -921,16 +919,6 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
          AND deleted_at IS NULL
          AND superseded_by IS NULL
          AND created_at >= NOW() - ($3::text || ' days')::interval
-         AND (
-           summary_json->>'source_import' = 'true'
-           OR (
-             memory_type IN ('fact', 'decision', 'preference')
-             AND (
-               NOT (summary_json ? 'cleanup_bucket')
-               OR summary_json->>'cleanup_bucket' IN ('long_term', 'permanent')
-             )
-           )
-         )
        ORDER BY
          CASE WHEN summary_json->>'source_import' = 'true' THEN 0 ELSE 1 END,
          created_at ASC
@@ -940,45 +928,16 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
         : [auth.tenantId, auth.userId, days]
     );
 
-    const activities: MinerEvent[] = activityResult.rows.map((row) => ({
-      id: row.id,
-      sourceEventType: "ai_activity_event",
-      createdAt: row.created_at,
-      platform: row.source,
-      contentSummary: safeSummary(row.content_text),
-      role: inferRole(row.metadata_json),
-      metadata: {
-        activityType: row.activity_type,
-        metadata: row.metadata_json,
-      },
-    }));
-
-    const collabTasks: MinerEvent[] = collabResult.rows.map((row) => ({
-      id: row.id,
-      sourceEventType: "collab_task",
-      createdAt: row.created_at,
-      platform: "tallei_collab",
-      contentSummary: collabTaskSummary(row),
-      role: "user",
-      metadata: {
-        state: row.state,
-        lastActor: row.last_actor,
-        iteration: row.iteration,
-        updatedAt: row.updated_at,
-      },
-    }));
-
-    const memoryEvents = selectMemoryEventsForMining(memoryResult.rows
+    return memoryResult.rows
       .map((row) => memoryRecordSummary(row))
-      .filter((event): event is MinerEvent => event !== null), memorySelection);
-
-    return [...activities, ...collabTasks, ...memoryEvents].sort((a, b) => {
-      const byTime = Date.parse(a.createdAt) - Date.parse(b.createdAt);
-      if (byTime !== 0) return byTime;
-      const aImportance = readRecord(a.metadata).minerImportance;
-      const bImportance = readRecord(b.metadata).minerImportance;
-      return Number(bImportance ?? 0) - Number(aImportance ?? 0);
-    });
+      .filter((event): event is MinerEvent => event !== null)
+      .sort((a, b) => {
+        const byTime = Date.parse(a.createdAt) - Date.parse(b.createdAt);
+        if (byTime !== 0) return byTime;
+        const aImportance = readRecord(a.metadata).minerImportance;
+        const bImportance = readRecord(b.metadata).minerImportance;
+        return Number(bImportance ?? 0) - Number(aImportance ?? 0);
+      });
   }
 
   async listMemoryDecisionLog(
@@ -1470,6 +1429,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     suggestedPrompt: string;
     fingerprint: string;
     loopParent?: WorkspaceLoopParent;
+    implementability?: LoopImplementabilityAssessment;
   }): Promise<LoopMinerSuggestion | null> {
     const existingSuggestion = await pool.query<{ id: string; status: string }>(
       `SELECT id, status
@@ -1532,6 +1492,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
           dna: input.dna,
           evaluation: input.evaluation,
           candidateLoop: input.candidateLoop,
+          implementability: input.implementability ?? null,
           episodeIds: input.evaluation.episodeIds,
           loopParent: input.loopParent ?? null,
           logicalEpisodeKey: logicalEpisodeKeyFromIds([...input.evaluation.episodeIds, ...input.candidateLoop.episodeIds]),
@@ -1578,6 +1539,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     suggestedPrompt: string;
     fingerprint: string;
     loopParent?: WorkspaceLoopParent;
+    implementability?: LoopImplementabilityAssessment;
   }): Promise<LoopMinerSuggestionWriteResult> {
     const existingPending = await pool.query<WorkflowSuggestionRow>(
       `SELECT id, title, reason, suggested_prompt, confidence, fingerprint, trigger_count, created_at, metadata_json
@@ -1602,6 +1564,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
         dna: input.dna,
         evaluation: input.evaluation,
         candidateLoop: input.candidateLoop,
+        implementability: input.implementability ?? existingMetadata.implementability ?? null,
         episodeIds,
         loopParent: input.loopParent ?? existingMetadata.loopParent ?? null,
         metadataHash: createHash("sha256").update(JSON.stringify(input.dna)).digest("hex"),
@@ -1676,6 +1639,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
           dna: input.dna,
           evaluation: input.evaluation,
           candidateLoop: input.candidateLoop,
+          implementability: input.implementability ?? existingMetadata.implementability ?? null,
           episodeIds,
           loopParent: input.loopParent ?? existingMetadata.loopParent ?? null,
           logicalEpisodeKey: incomingEpisodeKey,
@@ -1739,6 +1703,56 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     return { suggestion: created, created: created !== null, updated: false };
   }
 
+  async listActiveImplementationCapabilities(auth: AuthContext): Promise<string[]> {
+    const capabilitySet = new Set<string>();
+    const connectorResult = await pool.query<{
+      provider: string;
+      scopes_json: unknown;
+      metadata_json: unknown;
+    }>(
+      `SELECT provider, scopes_json, metadata_json
+       FROM connector_accounts
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND status = 'connected'
+       ORDER BY updated_at DESC`,
+      [auth.tenantId, auth.userId]
+    );
+
+    for (const row of connectorResult.rows) {
+      const provider = normalizeCapability(row.provider);
+      if (provider && provider !== "composio") capabilitySet.add(provider);
+      const metadata = readRecord(row.metadata_json);
+      const metadataAppKey = readString(metadata.appKey);
+      if (metadataAppKey) capabilitySet.add(normalizeCapability(metadataAppKey));
+      const scopes = Array.isArray(row.scopes_json)
+        ? row.scopes_json.filter((value): value is string => typeof value === "string")
+        : [];
+      const inferredFromScopes = inferComposioAppKeyFromScopes(scopes);
+      if (inferredFromScopes) capabilitySet.add(normalizeCapability(inferredFromScopes));
+    }
+
+    const notificationResult = await pool.query<{ kind: string }>(
+      `SELECT kind
+       FROM notification_channels
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND enabled = TRUE
+         AND kind IN ('email', 'whatsapp')
+       ORDER BY created_at ASC`,
+      [auth.tenantId, auth.userId]
+    );
+
+    for (const row of notificationResult.rows) {
+      const kind = normalizeCapability(row.kind);
+      if (!kind) continue;
+      capabilitySet.add(`notification:${kind}`);
+      capabilitySet.add(kind);
+    }
+
+    return [...capabilitySet].sort();
+  }
+
   async listRunViews(auth: AuthContext, limit = 10): Promise<LoopMinerRunView[]> {
     const result = await pool.query<LoopMinerRunRow>(
       `SELECT id, status, summary_json, error_json, created_at, completed_at
@@ -1753,6 +1767,63 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     return Promise.all(result.rows.map((row) => this.getRunView(auth, row.id))).then((runs) =>
       runs.filter((run): run is LoopMinerRunView => Boolean(run))
     );
+  }
+
+  async listEpisodesForMinerRun(auth: AuthContext, runId: string): Promise<EpisodeRecord[] | null> {
+    const runResult = await pool.query<{ id: string }>(
+      `SELECT id
+       FROM loop_miner_runs
+       WHERE id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+       LIMIT 1`,
+      [runId, auth.tenantId, auth.userId]
+    );
+    if (!runResult.rows[0]) return null;
+
+    let episodeRows;
+    try {
+      episodeRows = await pool.query<EpisodeRow>(
+        `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+         FROM episodes
+         WHERE tenant_id = $1
+           AND user_id = $2
+           AND miner_run_id = $3
+         ORDER BY sealed_at ASC`,
+        [auth.tenantId, auth.userId, runId]
+      );
+    } catch (error) {
+      const upgraded = isMissingEpisodeAugmentedColumn(error) ? await this.ensureEpisodeAugmentedColumns() : false;
+      if (upgraded) {
+        episodeRows = await pool.query<EpisodeRow>(
+          `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json, source_fingerprint, extraction_version, embedding_text_hash, embedding_status, embedded_at, sealed_at
+           FROM episodes
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND miner_run_id = $3
+           ORDER BY sealed_at ASC`,
+          [auth.tenantId, auth.userId, runId]
+        );
+      } else {
+        episodeRows = await pool.query<EpisodeRow>(
+          `SELECT id, intent, sources, output_type, tool_names, turn_count, approved, extraction_json,
+                  NULL::text AS source_fingerprint,
+                  NULL::text AS extraction_version,
+                  NULL::text AS embedding_text_hash,
+                  'pending'::text AS embedding_status,
+                  NULL::timestamptz AS embedded_at,
+                  sealed_at
+           FROM episodes
+           WHERE tenant_id = $1
+             AND user_id = $2
+             AND miner_run_id = $3
+           ORDER BY sealed_at ASC`,
+          [auth.tenantId, auth.userId, runId]
+        );
+      }
+    }
+
+    return episodeRows.rows.map((episode) => mapEpisode(episode, []));
   }
 
   async getRunView(auth: AuthContext, runId: string): Promise<LoopMinerRunView | null> {

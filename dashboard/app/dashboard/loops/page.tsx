@@ -63,8 +63,18 @@ type LoopMinerEpisode = {
   summary?: string;
   intent?: string;
   toolNames?: string[];
+  eventIds?: string[];
   sealedAt?: string;
   createdAt?: string;
+};
+
+type PatternTraceGroup = {
+  id: string;
+  title: string;
+  sharedJob: string;
+  sharedArtifact: string;
+  episodeIds: string[];
+  confidence: number;
 };
 
 type LoopMinerSuggestion = {
@@ -101,11 +111,23 @@ type LoopMinerMemorySelection = {
 
 type LoopMinerRun = {
   id: string;
+  status?: string;
   createdAt: string;
   completedAt: string | null;
   summary?: {
+    loopsDetected?: number;
     memorySelection?: LoopMinerMemorySelection;
     memoryDecisionLog?: LoopMinerMemoryDecision[];
+    patternTrace?: {
+      candidateGroups: PatternTraceGroup[];
+      approvedGroups: string[];
+      judgeDecisions?: Array<{
+        candidateGroupId: string;
+        status: string;
+        confidence: number;
+        rationale: string;
+      }>;
+    };
   };
   episodes: LoopMinerEpisode[];
   suggestions: LoopMinerSuggestion[];
@@ -215,22 +237,103 @@ function episodeToConversation(episode: LoopMinerEpisode): Conversation {
   };
 }
 
+function approvedLoopCount(run: LoopMinerRun): number {
+  return run.summary?.loopsDetected
+    ?? run.summary?.patternTrace?.approvedGroups.length
+    ?? 0;
+}
+
 function runHasDisplayableLoopData(run: LoopMinerRun): boolean {
   return (run.suggestions?.length ?? 0) > 0
+    || approvedLoopCount(run) > 0
     || (Array.isArray(run.loopParents) && run.loopParents.length > 0)
     || (run.episodes?.length ?? 0) > 0;
 }
 
 function pickRunForDisplay(runs: LoopMinerRun[]): LoopMinerRun | null {
   if (runs.length === 0) return null;
-  const withSuggestions = runs.find((run) => (run.suggestions?.length ?? 0) > 0);
+  const byRecency = [...runs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const withDetectedLoops = byRecency.find((run) => approvedLoopCount(run) > 0);
+  if (withDetectedLoops) return withDetectedLoops;
+  const withSuggestions = byRecency.find((run) => (run.suggestions?.length ?? 0) > 0);
   if (withSuggestions) return withSuggestions;
-  const withLoopParents = runs.find((run) => Array.isArray(run.loopParents) && run.loopParents.length > 0);
+  const withLoopParents = byRecency.find((run) => Array.isArray(run.loopParents) && run.loopParents.length > 0);
   if (withLoopParents) return withLoopParents;
-  const withLoopData = runs.find(runHasDisplayableLoopData);
+  const withLoopData = byRecency.find(runHasDisplayableLoopData);
   if (withLoopData) return withLoopData;
-  const completed = runs.find((run) => run.status === "completed");
-  return completed ?? runs[0] ?? null;
+  const completed = byRecency.find((run) => run.status === "completed");
+  return completed ?? byRecency[0] ?? null;
+}
+
+function episodesForMemoryIds(episodes: LoopMinerEpisode[], memoryIds: string[]): LoopMinerEpisode[] {
+  const memorySet = new Set(memoryIds);
+  return episodes.filter((episode) =>
+    (episode.eventIds ?? []).some((id) => memorySet.has(id))
+  );
+}
+
+function cleanLoopTitle(raw: string): string {
+  const stripped = raw
+    .replace(/^Imported ChatGPT memory\s*/i, "")
+    .replace(/^Type:\s*\w+\s*/i, "")
+    .replace(/^Category:\s*[\w\s]+\s*/i, "")
+    .replace(/^Source datetime:\s*[\d-]+\s*/i, "")
+    .trim();
+  if (stripped.length >= 12) return stripped.length <= 72 ? stripped : `${stripped.slice(0, 69)}...`;
+  return raw.length <= 72 ? raw : `${raw.slice(0, 69)}...`;
+}
+
+function buildLoopInsightsFromPatternTrace(run: LoopMinerRun): LoopInsight[] {
+  const patternTrace = run.summary?.patternTrace;
+  if (!patternTrace || patternTrace.approvedGroups.length === 0) return [];
+
+  const approvedSet = new Set(patternTrace.approvedGroups);
+  const episodes = run.episodes ?? [];
+
+  return patternTrace.candidateGroups
+    .filter((group) => approvedSet.has(group.id))
+    .map((group) => {
+      const decision = patternTrace.judgeDecisions?.find((item) => item.candidateGroupId === group.id);
+      const memoryIds = group.episodeIds;
+      const matchedEpisodes = episodesForMemoryIds(episodes, memoryIds);
+      const conversations = (matchedEpisodes.length > 0
+        ? matchedEpisodes
+        : memoryIds.map((memoryId) => ({
+            id: memoryId,
+            title: cleanLoopTitle(group.title),
+            summary: group.sharedJob,
+            intent: group.sharedJob,
+            toolNames: ["chatgpt"],
+            sealedAt: run.completedAt ?? run.createdAt,
+          }))
+      )
+        .sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""))
+        .map(episodeToConversation);
+
+      const lastOccurred = conversations
+        .map((conversation) => conversation.date)
+        .sort((a, b) => b.localeCompare(a))[0] ?? run.completedAt ?? run.createdAt;
+
+      const confidence = Math.max(
+        1,
+        Math.min(99, Math.round((decision?.confidence ?? group.confidence ?? 0.72) * 100)),
+      );
+
+      return {
+        id: group.id,
+        name: cleanLoopTitle(group.title),
+        description: decision?.rationale ?? group.sharedJob,
+        primarySourceFile: group.sharedArtifact || "memory",
+        frequency: cadenceLabel(group.sharedArtifact),
+        conversationCount: Math.max(memoryIds.length, conversations.length),
+        lastOccurred,
+        nextPredicted: inferNextPredictionFromCadence(lastOccurred, "weekly"),
+        confidence,
+        status: "detected" as const,
+        conversations,
+      };
+    })
+    .sort((a, b) => b.confidence - a.confidence || b.lastOccurred.localeCompare(a.lastOccurred));
 }
 
 function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
@@ -277,6 +380,9 @@ function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
       };
     });
   }
+
+  const fromPatternTrace = buildLoopInsightsFromPatternTrace(run);
+  if (fromPatternTrace.length > 0) return fromPatternTrace;
 
   if (loopParents.length > 0) {
     return loopParents.map((parent) => {
@@ -853,7 +959,6 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
 export default function LoopsPage() {
   const [loops, setLoops] = useState<LoopInsight[]>([]);
   const [latestRun, setLatestRun] = useState<LoopMinerRun | null>(null);
-  const [latestObservedRun, setLatestObservedRun] = useState<LoopMinerRun | null>(null);
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -867,13 +972,11 @@ export default function LoopsPage() {
       if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
       const displayRun = pickRunForDisplay(runs);
-      setLatestObservedRun(runs[0] ?? null);
       setLatestRun(displayRun);
       setLoops(displayRun ? buildLoopInsightsFromRun(displayRun) : []);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
       setLatestRun(null);
-      setLatestObservedRun(null);
       setLoops([]);
     } finally {
       setLoading(false);
@@ -883,14 +986,6 @@ export default function LoopsPage() {
   useEffect(() => {
     void loadLoopMinerRuns();
   }, [loadLoopMinerRuns]);
-
-  useEffect(() => {
-    if (latestObservedRun?.status !== "running") return;
-    const timer = setInterval(() => {
-      void loadLoopMinerRuns();
-    }, 5_000);
-    return () => clearInterval(timer);
-  }, [latestObservedRun?.status, loadLoopMinerRuns]);
 
   const dismissLoop = useCallback((id: string) => {
     setLoops((prev) => prev.filter((l) => l.id !== id));
@@ -960,40 +1055,6 @@ export default function LoopsPage() {
                 {error}
               </span>
             </div>
-          ) : null}
-          {latestRun?.summary?.memorySelection ? (
-            <details className="mx-auto mb-5 max-w-5xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
-              <summary className="cursor-pointer font-semibold text-[var(--text)]">
-                Memory evidence trace: {latestRun.summary.memorySelection.included} included,{" "}
-                {latestRun.summary.memorySelection.excluded} excluded
-              </summary>
-              <div className="mt-3 grid gap-3">
-                <div className="grid grid-cols-2 gap-2 text-xs text-[var(--text-2)] md:grid-cols-4">
-                  <div>Considered: {latestRun.summary.memorySelection.considered}</div>
-                  <div>Fresh imports: {latestRun.summary.memorySelection.sourceImportsIncluded}</div>
-                  <div>Unbucketed: {latestRun.summary.memorySelection.unbucketedIncluded}</div>
-                  <div>Bucketed excluded: {latestRun.summary.memorySelection.bucketedExcluded}</div>
-                </div>
-                <div className="max-h-72 overflow-y-auto border-t border-slate-100 pt-2">
-                  {(latestRun.summary.memoryDecisionLog ?? []).slice(0, 40).map((decision) => (
-                    <div key={decision.memoryId} className="grid gap-1 border-b border-slate-100 py-2 text-xs md:grid-cols-[120px_220px_1fr]">
-                      <div className={decision.status === "included" ? "font-semibold text-emerald-700" : "font-semibold text-slate-500"}>
-                        {decision.status}
-                      </div>
-                      <div className="text-[var(--text-muted)]">
-                        {decision.reason}
-                        {decision.sourceImport ? " · import" : ""}
-                        {decision.cleanupBucket ? ` · ${decision.cleanupBucket}` : ""}
-                      </div>
-                      <div className="text-[var(--text-2)]">
-                        {decision.sourceDateTime ? `${formatDate(decision.sourceDateTime)} · ` : ""}
-                        {decision.contentPreview}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </details>
           ) : null}
           <AnimatePresence mode="popLayout">
             {filtered.length === 0 ? (

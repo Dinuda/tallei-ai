@@ -3,11 +3,12 @@ import type { ChatCompletionRequest, ChatCompletionResponse } from "../../provid
 import type { CleanupAiUsage } from "../memory-cleanup/types.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage, recordCleanupAiUsage } from "../memory-cleanup/usage.js";
 import { loopMinerModelForPhase } from "./model.js";
-import { LLM_LOOP_DETECTOR_PROMPT } from "./prompts.js";
+import { LLM_LOOP_DETECTOR_PROMPT, MEMORY_LOOP_DETECTOR_PROMPT } from "./prompts.js";
 import type {
   CandidateLoop,
   EpisodeRecord,
   LoopLayer,
+  MinerEvent,
   PatternAdversaryFinding,
   PatternJudgeStatus,
   PatternTrace,
@@ -15,6 +16,7 @@ import type {
 } from "./types.js";
 import type { LoopMinerRunProgress } from "./run-progress.js";
 import {
+  compactMinerEvent,
   deriveCanonicalLoopFacet,
   coarseMechanismClusterKey,
   estimatePromptTokensFromRequest,
@@ -132,6 +134,94 @@ function parseLlmGroups(raw: Record<string, unknown>): LlmGroup[] {
       };
     })
     .filter((g): g is LlmGroup => g !== null);
+}
+
+function parseLlmMemoryGroups(raw: Record<string, unknown>): LlmGroup[] {
+  const groups = Array.isArray(raw.groups) ? raw.groups : [];
+  return groups
+    .map((g): LlmGroup | null => {
+      if (!g || typeof g !== "object" || Array.isArray(g)) return null;
+      const row = g as Record<string, unknown>;
+      const ids = readStringArray(row.memoryIds ?? row.memory_ids ?? row.episodeIds ?? row.episode_ids);
+      if (ids.length < 2) return null;
+      return {
+        episodeIds: ids,
+        loopName: readString(row.loopName ?? row.loop_name ?? row.name, "Unnamed loop"),
+        sharedIntent: readString(row.sharedIntent ?? row.shared_intent ?? row.intent, "Unknown intent"),
+        sharedOutputType: normalizeSharedOutputType(row.sharedOutputType ?? row.shared_output_type ?? row.outputType),
+        sharedSources: normalizeSharedSources(row.sharedSources ?? row.shared_sources ?? row.sources),
+        reasoning: readString(row.reasoning ?? row.reason, ""),
+        loopLayer: normalizeLoopLayer(row.loopLayer ?? row.loop_layer),
+        status: normalizeJudgeStatus(row.status),
+        confidence: normalizeConfidence(row.confidence),
+      };
+    })
+    .filter((g): g is LlmGroup => g !== null);
+}
+
+function compactMemoryForDetection(memory: MinerEvent): Record<string, unknown> {
+  const compact = compactMinerEvent(memory, { contentSummaryCharCap: 320 });
+  const summary = compact.contentSummary.length <= 200
+    ? compact.contentSummary
+    : `${compact.contentSummary.slice(0, 197)}...`;
+  return {
+    id: compact.id,
+    platform: compact.platform,
+    createdAt: compact.createdAt,
+    contentSummary: summary,
+    memoryType: readString(readObject(compact.metadata).detectedMemoryType ?? readObject(compact.metadata).memoryType, "unknown"),
+    sourceImport: readObject(compact.metadata).sourceImport === true,
+  };
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function memoryClusterSignature(memory: MinerEvent): string | null {
+  const text = memory.contentSummary.toLowerCase().replace(/\s+/g, " ");
+  const output = (() => {
+    if (/\bnewsletter\b/.test(text)) return "newsletter";
+    if (/\b(changelog|release notes?)\b/.test(text)) return "changelog";
+    if (/\b(whatsapp|email|reply|inbox|message)\b/.test(text)) return "message";
+    if (/\b(deck|slides?|presentation)\b/.test(text)) return "slides";
+    if (/\b(proposal|brief|plan|report|document|summary)\b/.test(text)) return "document";
+    return null;
+  })();
+  if (!output) return null;
+  const hasAction = /\b(create|creat(?:e|es|ing)|draft(?:ing)?|write|writ(?:e|es|ing)|generate|generat(?:e|es|ing)|send|review|summari[sz]e|prepare|publish|compile)\b/.test(text);
+  const hasRecurring = /\b(every|daily|weekly|monthly|recurring|routine|each week|each month)\b/.test(text);
+  if (!hasAction && !hasRecurring) return null;
+  return `${output}:${memory.platform.toLowerCase()}`;
+}
+
+function buildDeterministicMemoryGroups(memories: MinerEvent[]): LlmGroup[] {
+  const clusters = new Map<string, MinerEvent[]>();
+  for (const memory of memories) {
+    const signature = memoryClusterSignature(memory);
+    if (!signature) continue;
+    const bucket = clusters.get(signature) ?? [];
+    bucket.push(memory);
+    clusters.set(signature, bucket);
+  }
+
+  const groups: LlmGroup[] = [];
+  for (const [signature, clusterMemories] of clusters.entries()) {
+    const unique = [...new Map(clusterMemories.map((memory) => [memory.id, memory])).values()];
+    if (unique.length < 2) continue;
+    const preview = unique[0].contentSummary.replace(/\s+/g, " ").trim().slice(0, 80);
+    groups.push({
+      episodeIds: unique.map((memory) => memory.id),
+      loopName: preview || signature,
+      sharedIntent: preview || signature,
+      sharedOutputType: signature.split(":")[0] ?? "unknown",
+      sharedSources: [...new Set(unique.map((memory) => memory.platform))],
+      reasoning: `Deterministic memory cluster on ${signature}.`,
+      status: "monitor_pattern",
+      confidence: 0.72,
+    });
+  }
+  return groups;
 }
 
 function buildCandidateLoop(group: LlmGroup): CandidateLoop {
@@ -434,6 +524,84 @@ function applyDeterministicGuards(
   });
 }
 
+function hasRepeatedCopywritingMemoryContent(memories: MinerEvent[]): boolean {
+  if (memories.length < 2) return false;
+  const copywritingMemories = memories.filter((memory) => {
+    const signal = memory.contentSummary.toLowerCase();
+    const hasArtifact = /\b(newsletter|email|copy|copywriting|positioning|product philosophy|technical explanations?|slides?|deck|presentation)\b/.test(signal);
+    const hasAction = /\b(write|writing|draft(?:ing)?|brainstorm|hooks?|structure|refine|sharpen|finalize|create|creat(?:e|es|ing)|generate|generat(?:e|es|ing)|prepare|turn .* into)\b/.test(signal);
+    return hasArtifact && hasAction;
+  });
+  return copywritingMemories.length >= 2;
+}
+
+function hasConcreteRepeatedMemoryAction(memories: MinerEvent[]): boolean {
+  const normalizedSummaries = memories
+    .map((memory) => memory.contentSummary.toLowerCase().replace(/\s+/g, " ").trim())
+    .filter((value) => value.length > 0);
+  if (normalizedSummaries.length >= 2) {
+    const uniqueSummaries = new Set(normalizedSummaries);
+    if (uniqueSummaries.size === 1 && (normalizedSummaries[0]?.length ?? 0) >= 24) return true;
+  }
+  const signatures = memories
+    .map((memory) => memoryClusterSignature(memory))
+    .filter((signature): signature is string => Boolean(signature));
+  return signatures.length >= 2 && new Set(signatures).size === 1;
+}
+
+function applyMemoryDeterministicGuards(
+  groups: LlmGroup[],
+  memoriesById: Map<string, MinerEvent>
+): LlmGroup[] {
+  return groups.map((group) => {
+    const groupMemories = group.episodeIds
+      .map((id) => memoriesById.get(id))
+      .filter((memory): memory is MinerEvent => Boolean(memory));
+    if (groupMemories.length < 2) {
+      return {
+        ...group,
+        status: "rejected_insufficient_evidence",
+        confidence: 0.2,
+        reasoning: `${group.reasoning} Rejected: fewer than 2 valid memories.`,
+      };
+    }
+
+    if (group.status === "rejected_topical_similarity" || group.status === "rejected_insufficient_evidence") {
+      return group;
+    }
+
+    const lookupOnly = groupMemories.every((memory) =>
+      /\b(lookup|look up|search|find|retrieve)\b/.test(memory.contentSummary.toLowerCase())
+    );
+    const repeatedCopywriting = hasRepeatedCopywritingMemoryContent(groupMemories);
+    const concreteAction = hasConcreteRepeatedMemoryAction(groupMemories);
+
+    if (lookupOnly && !concreteAction && !repeatedCopywriting) {
+      return {
+        ...group,
+        status: "rejected_insufficient_evidence",
+        confidence: Math.min(group.confidence, 0.25),
+        reasoning: `${group.reasoning} Rejected: lookup-only memories without repeated action pattern.`,
+      };
+    }
+
+    if (group.status === "approved_loop") {
+      return group;
+    }
+
+    if (repeatedCopywriting || concreteAction) {
+      return {
+        ...group,
+        status: "approved_loop",
+        confidence: Math.max(group.confidence, repeatedCopywriting ? 0.9 : 0.82),
+        reasoning: `${group.reasoning} Approved by deterministic ${repeatedCopywriting ? "copywriting memory workflow" : "repeated memory action pattern"}.`,
+      };
+    }
+
+    return group;
+  });
+}
+
 function buildPatternTrace(
   groups: LlmGroup[],
   approvedIds: string[]
@@ -666,6 +834,168 @@ export class LoopDetectorUseCase {
         batchesSkipped,
         inputEpisodes: episodes.length,
         outputEpisodes: loops.length,
+      },
+    };
+  }
+
+  async executeOnMemories(
+    memories: MinerEvent[],
+    options?: { runId?: string; progress?: LoopMinerRunProgress }
+  ): Promise<{
+    memoryGroups: LlmGroup[];
+    approvedGroups: LlmGroup[];
+    patternTrace: PatternTrace;
+    raw: unknown[];
+    aiCalls: number;
+    usage: CleanupAiUsage;
+    warnings: string[];
+    phaseUsage: PhaseUsageMetrics;
+  }> {
+    const usage = emptyCleanupAiUsage();
+    const rawResponses: unknown[] = [];
+    const warnings: string[] = [];
+    let aiCalls = 0;
+    let batchesSkipped = 0;
+
+    if (memories.length < 2) {
+      return {
+        memoryGroups: [],
+        approvedGroups: [],
+        patternTrace: {
+          candidateGroups: [],
+          approvedGroups: [],
+          rejectedGroups: [],
+          adversaryFindings: [],
+          judgeDecisions: [],
+        },
+        raw: rawResponses,
+        aiCalls,
+        usage,
+        warnings,
+        phaseUsage: {
+          calls: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          estimatedTotalTokens: 0,
+          estimatedCostUsd: 0,
+          batchesProcessed: 0,
+          batchesSkipped: 0,
+          inputEpisodes: memories.length,
+          outputEpisodes: 0,
+        },
+      };
+    }
+
+    const compacted = memories.map(compactMemoryForDetection);
+    const memoryIdSet = new Set(memories.map((memory) => memory.id));
+    const deterministicGroups = buildDeterministicMemoryGroups(memories);
+    options?.progress?.step("loop detector deterministic memory clustering complete", {
+      inputMemories: memories.length,
+      deterministicGroups: deterministicGroups.length,
+    });
+
+    const BATCH_SIZE = 20;
+    const OVERLAP = 5;
+    const batches = createBatches(compacted, BATCH_SIZE, OVERLAP);
+    const allGroups: LlmGroup[] = [];
+
+    for (const [batchIndex, batch] of batches.entries()) {
+      const batchStartedAt = Date.now();
+      options?.progress?.step("loop detector memory batch started", {
+        batchIndex: batchIndex + 1,
+        batchTotal: batches.length,
+        memoryCount: batch.length,
+      });
+      const request: ChatCompletionRequest = {
+        model: loopMinerModelForPhase("detector"),
+        temperature: 0,
+        maxTokens: 2500,
+        responseFormat: "json_object",
+        messages: [
+          { role: "system", content: MEMORY_LOOP_DETECTOR_PROMPT },
+          {
+            role: "user",
+            content: JSON.stringify({
+              memories: batch,
+              context: `Batch ${batchIndex + 1}/${batches.length}. Only group memories within this batch.`,
+            }),
+          },
+        ],
+      };
+
+      let response: ChatCompletionResponse;
+      try {
+        response = await this.chat(request);
+      } catch (error) {
+        batchesSkipped += 1;
+        options?.progress?.step("loop detector memory batch failed", {
+          batchIndex: batchIndex + 1,
+          batchTotal: batches.length,
+          durationMs: Date.now() - batchStartedAt,
+          reason: errorMessage(error),
+        });
+        warnings.push(`phase=loop_detector batch=${batchIndex + 1}/${batches.length} reason=${errorMessage(error)}`);
+        rawResponses.push({
+          skipped: "loop_detector_memory_batch_failed",
+          batchIndex,
+          estimatedPromptTokens: estimatePromptTokensFromRequest(request),
+          error: errorMessage(error),
+        });
+        continue;
+      }
+
+      const callUsage = emptyCleanupAiUsage();
+      recordCleanupAiUsage(callUsage, request, response);
+      mergeCleanupAiUsage(usage, callUsage);
+      aiCalls += 1;
+
+      const raw = readJsonObject(response.text);
+      rawResponses.push(raw);
+      const groups = parseLlmMemoryGroups(raw);
+      const validGroups = groups.filter((group) => group.episodeIds.every((id) => memoryIdSet.has(id)));
+      options?.progress?.step("loop detector memory batch completed", {
+        batchIndex: batchIndex + 1,
+        batchTotal: batches.length,
+        durationMs: Date.now() - batchStartedAt,
+        groupsFound: validGroups.length,
+        groupsTotalSoFar: allGroups.length + validGroups.length,
+      });
+      allGroups.push(...validGroups);
+    }
+
+    const mergedGroups = mergeGroupsAcrossBatches([...deterministicGroups, ...allGroups]);
+    const dedupedGroups = dedupeStrictSubsetGroups(mergedGroups);
+    const memoriesById = new Map(memories.map((memory) => [memory.id, memory]));
+    const guardedGroups = applyMemoryDeterministicGuards(dedupedGroups, memoriesById);
+    const approvedGroups = guardedGroups.filter((group) => group.status === "approved_loop");
+    const approvedIds = approvedGroups.map((group) => groupKey(group));
+    const patternTrace = buildPatternTrace(guardedGroups, approvedIds);
+
+    options?.progress?.step("loop detector memory groups finalized", {
+      candidateGroups: guardedGroups.length,
+      approvedGroups: approvedGroups.length,
+    });
+
+    return {
+      memoryGroups: guardedGroups,
+      approvedGroups,
+      patternTrace,
+      raw: rawResponses,
+      aiCalls,
+      usage,
+      warnings,
+      phaseUsage: {
+        calls: aiCalls,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
+        estimatedTotalTokens: usage.estimatedTotalTokens,
+        estimatedCostUsd: Number(usage.estimatedCostUsd.toFixed(6)),
+        batchesProcessed: batches.length,
+        batchesSkipped,
+        inputEpisodes: memories.length,
+        outputEpisodes: approvedGroups.length,
       },
     };
   }

@@ -237,6 +237,120 @@ function outputTypeFromMemoryStatement(statement: string): string {
   return "workflow_memory";
 }
 
+export function loopMemoryEpisodeExtraction(event: MinerEvent): EpisodeExtraction | null {
+  if (event.sourceEventType !== "memory_record") return null;
+  const metadata = readObject(event.metadata);
+  const sourceImport = metadata.sourceImport === true;
+  let statement = memoryStatementFromSummary(event.contentSummary);
+  if (!statement) {
+    statement = event.contentSummary.replace(/\s+/g, " ").trim();
+  }
+  if (!statement || statement.length < 8) return null;
+
+  const text = statement.toLowerCase();
+  const cadence = cadenceFromMemoryStatement(statement);
+  const title = titleFromMemoryStatement(statement);
+  let outputType = outputTypeFromMemoryStatement(statement);
+  if (outputType === "workflow_memory") {
+    if (/\b(deck|slides?|presentation)\b/.test(text)) outputType = "slides";
+    else if (/\b(document|brief|plan|report|summary)\b/.test(text)) outputType = "document";
+    else if (/\b(message|whatsapp|inbox|reply)\b/.test(text)) outputType = "email";
+  }
+
+  const memoryImportance = normalizeConfidence(metadata.minerImportance ?? 0.75);
+  return {
+    title,
+    summary: `Loop mining memory evidence: ${statement}`,
+    intent: statement,
+    intentDetails: {
+      label: "loop_memory_evidence",
+      goal: statement,
+      confidence: sourceImport ? 0.85 : 0.72,
+    },
+    sources: [sourceImport ? "Imported ChatGPT memory" : "Memory record"],
+    sourceDetails: [{
+      type: "memory",
+      name: sourceImport ? "Imported ChatGPT memory" : "Memory record",
+      id: event.id,
+      importance: memoryImportance,
+    }],
+    outputType,
+    output: {
+      type: outputType === "newsletter" || outputType === "slides" || outputType === "changelog" || outputType === "email"
+        ? outputType
+        : "unknown",
+      description: "Memory evidence for detected work loop",
+    },
+    toolNames: [event.platform],
+    steps: [statement],
+    styleHints: [],
+    userBehavior: {
+      accepted: true,
+      edited: null,
+      regenerated: null,
+      ignored: false,
+      approvalSignal: "approved",
+    },
+    automationSignals: {
+      repeatable: true,
+      likelyCadence: cadence,
+      businessValue: 0.7,
+      automationReadiness: 0.68,
+    },
+    confidence: sourceImport ? 0.85 : 0.72,
+    approved: true,
+    eventIds: [event.id],
+  };
+}
+
+export function loopMinerFallbackEpisodeExtraction(event: MinerEvent): EpisodeExtraction | null {
+  const statement = event.contentSummary.replace(/\s+/g, " ").trim();
+  if (statement.length < 8) return null;
+  const title = titleFromMemoryStatement(statement);
+  const outputType = outputTypeFromMemoryStatement(statement);
+  return {
+    title,
+    summary: `Loop mining evidence: ${statement}`,
+    intent: statement,
+    intentDetails: {
+      label: "loop_event_evidence",
+      goal: statement,
+      confidence: 0.72,
+    },
+    sources: [event.platform],
+    sourceDetails: [{
+      type: event.sourceEventType === "memory_record" ? "memory" : "conversation",
+      name: event.platform,
+      id: event.id,
+      importance: 0.7,
+    }],
+    outputType,
+    output: {
+      type: outputType === "newsletter" || outputType === "changelog" ? outputType : "unknown",
+      description: "Loop mining event evidence",
+    },
+    toolNames: [event.platform],
+    steps: [statement],
+    styleHints: [],
+    userBehavior: {
+      accepted: true,
+      edited: null,
+      regenerated: null,
+      ignored: false,
+      approvalSignal: "approved",
+    },
+    automationSignals: {
+      repeatable: true,
+      likelyCadence: cadenceFromMemoryStatement(statement),
+      businessValue: 0.65,
+      automationReadiness: 0.65,
+    },
+    confidence: 0.72,
+    approved: true,
+    eventIds: [event.id],
+  };
+}
+
 export function explicitWorkflowMemoryExtraction(event: MinerEvent): EpisodeExtraction | null {
   if (event.sourceEventType !== "memory_record") return null;
   const metadata = readObject(event.metadata);

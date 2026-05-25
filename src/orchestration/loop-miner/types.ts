@@ -241,6 +241,14 @@ export interface LoopEvaluation {
   risks: string[];
 }
 
+export interface LoopImplementabilityAssessment {
+  status: "implementable" | "not_implementable";
+  matchedCapabilities: string[];
+  missingCapabilities: string[];
+  blockers: string[];
+  rationale: string;
+}
+
 export interface WorkflowDNA {
   name: string;
   trigger: { type: "schedule" | "event"; cadence: string };
@@ -269,11 +277,14 @@ export interface LoopMinerIncrementalSummary {
 export interface LoopMinerSummary {
   episodesBuilt: number;
   loopsDetected: number;
+  loopsEpisodeAligned?: number;
   loopsProposed?: number;
   loopsApproved?: number;
   loopsContested?: number;
   loopsAutoApproved?: number;
   loopsRejected?: number;
+  loopsImplementable?: number;
+  loopsBlocked?: number;
   cleanupEvidenceUsed?: number;
   cleanupSuppressedSeeds?: number;
   timeSignalsUsed?: number;
@@ -317,15 +328,46 @@ export interface LoopMinerSummary {
         cutoffDate: string;
       };
     };
+    loopabilityPrefilter?: {
+      inputEvents: number;
+      keptEvents: number;
+      droppedEvents: number;
+      inputMemoryEvents: number;
+      keptMemoryEvents: number;
+      droppedMemoryEvents: number;
+      repeatedSignatureEvents: number;
+      recurringSignalEvents: number;
+      candidateGroups: number;
+      loopsFound: boolean;
+      groupSamples: Array<{
+        signature: string;
+        eventCount: number;
+        reason: string;
+      }>;
+      droppedSamples: Array<{
+        eventId: string;
+        sourceEventType: LoopMinerSourceEventType;
+        reason: string;
+        preview: string;
+      }>;
+    };
     episodeBuilder?: {
       inputEvents: number;
       deterministicMemoryExtractions: number;
       llmInputEvents: number;
+      droppedNonLoopable: number;
       rawDeterministicSamples: Array<{
         eventId: string;
         title?: string;
         outputType?: string;
         cadence?: string;
+      }>;
+      droppedNonLoopableSamples?: Array<{
+        eventId?: string;
+        eventIds?: string[];
+        reason: string;
+        title?: string;
+        outputType?: string;
       }>;
       builtEpisodeSamples: Array<{
         id: string;
@@ -341,6 +383,17 @@ export interface LoopMinerSummary {
       approvedGroups: number;
       rejectedGroups: number;
       warningCount: number;
+    };
+    implementability?: {
+      activeCapabilities: string[];
+      loopsInput: number;
+      loopsImplementable: number;
+      loopsBlocked: number;
+      blocked: Array<{
+        loopName: string;
+        missingCapabilities: string[];
+        blockers: string[];
+      }>;
     };
     vectorRetrieval?:
       | {
@@ -403,6 +456,7 @@ export interface EpisodeBuilderEfficiencyMetrics extends PhaseUsageMetrics {
   tokensPerOutputEpisode: number;
   costPerOutputEpisodeUsd: number;
   maxEstimatedPromptTokensPerCall: number;
+  episodesDroppedNonLoopable: number;
 }
 
 export type LoopMinerMemoryDecisionStatus = "included" | "excluded";
@@ -587,6 +641,7 @@ export interface LoopMinerRepository {
     suggestedPrompt: string;
     fingerprint: string;
     loopParent?: WorkspaceLoopParent;
+    implementability?: LoopImplementabilityAssessment;
   }): Promise<LoopMinerSuggestion | null>;
   createOrUpdateWorkflowSuggestion?(input: {
     auth: AuthContext;
@@ -597,5 +652,7 @@ export interface LoopMinerRepository {
     suggestedPrompt: string;
     fingerprint: string;
     loopParent?: WorkspaceLoopParent;
+    implementability?: LoopImplementabilityAssessment;
   }): Promise<LoopMinerSuggestionWriteResult>;
+  listActiveImplementationCapabilities?(auth: AuthContext): Promise<string[]>;
 }

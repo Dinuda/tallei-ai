@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   GitMerge,
@@ -318,6 +318,8 @@ type LoopMinerRunStatus = {
   loopsDetected: number;
   loopsQualified: number;
   suggestionsCreated: number;
+  currentPhase: string | null;
+  memoryCount: number;
   liveProgress: { phaseTimings: LoopMinerPhaseTiming[]; totalElapsedMs: number } | null;
   warnings: string[];
 };
@@ -444,6 +446,20 @@ function outputTypeColor(outputType: string): string {
   return EMBEDDING_MAP_COLORS[Math.abs(hash) % EMBEDDING_MAP_COLORS.length] ?? EMBEDDING_MAP_COLORS[0];
 }
 
+const LOOP_MINER_PHASE_LABELS: Record<string, string> = {
+  memory_ingest: "Reading memories",
+  loop_detector: "Detecting loops",
+  episode_builder: "Building loop episodes",
+  loop_evaluator: "Evaluating loops",
+  implementability_filter: "Checking integrations",
+  dna_generator: "Generating workflow DNA",
+  persist_suggestions: "Saving suggestions",
+};
+
+function loopMinerPhaseLabel(phase: string): string {
+  return LOOP_MINER_PHASE_LABELS[phase] ?? phase.replace(/_/g, " ");
+}
+
 export default function MemoryCleanupPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [runs, setRuns] = useState<CleanupRun[]>([]);
@@ -464,6 +480,9 @@ export default function MemoryCleanupPage() {
   const [loopMinerEmbeddingErrorByRunId, setLoopMinerEmbeddingErrorByRunId] = useState<Record<string, string>>({});
   const [liveRunStatus, setLiveRunStatus] = useState<LoopMinerRunStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const loopMinerStatusStreamRef = useRef<EventSource | null>(null);
+  const loopMinerEmbeddingFetchRef = useRef<Set<string>>(new Set());
+  const loopMinerEmbeddingLoadedRef = useRef<Set<string>>(new Set());
 
   const selectedCount = selectedIds.size;
   const sortedMemories = useMemo(
@@ -559,9 +578,14 @@ export default function MemoryCleanupPage() {
   useEffect(() => {
     const runId = latestLoopMinerRun?.id;
     if (!runId) return;
-    if (loopMinerEmbeddingMaps[runId]) return;
-    if (loopMinerEmbeddingLoadingForRunId === runId) return;
+    if (loopMinerEmbeddingLoadedRef.current.has(runId)) return;
+    if (loopMinerEmbeddingMaps[runId]) {
+      loopMinerEmbeddingLoadedRef.current.add(runId);
+      return;
+    }
+    if (loopMinerEmbeddingFetchRef.current.has(runId)) return;
 
+    loopMinerEmbeddingFetchRef.current.add(runId);
     let cancelled = false;
     setLoopMinerEmbeddingLoadingForRunId(runId);
     setLoopMinerEmbeddingErrorByRunId((current) => {
@@ -577,48 +601,64 @@ export default function MemoryCleanupPage() {
         const payload = (await response.json().catch(() => ({}))) as LoopMinerEmbeddingMapPayload;
         if (!response.ok || !payload.map) throw new Error(payload.error ?? "Failed to load loop miner embedding map");
         if (cancelled) return;
+        loopMinerEmbeddingLoadedRef.current.add(runId);
         setLoopMinerEmbeddingMaps((current) => ({ ...current, [runId]: payload.map! }));
       } catch (mapError) {
         if (cancelled) return;
         const message = mapError instanceof Error ? mapError.message : "Failed to load loop miner embedding map";
         setLoopMinerEmbeddingErrorByRunId((current) => ({ ...current, [runId]: message }));
       } finally {
-        if (!cancelled) setLoopMinerEmbeddingLoadingForRunId((current) => (current === runId ? null : current));
+        loopMinerEmbeddingFetchRef.current.delete(runId);
+        if (!cancelled) {
+          setLoopMinerEmbeddingLoadingForRunId((current) => (current === runId ? null : current));
+        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [latestLoopMinerRun, loopMinerEmbeddingLoadingForRunId, loopMinerEmbeddingMaps]);
+  }, [latestLoopMinerRun?.id, loopMinerEmbeddingMaps]);
 
-  // Poll live progress every 5s while a run is active
+  // Stream live progress while a run is active
   useEffect(() => {
     const runId = latestLoopMinerRun?.id;
     if (!loopMinerInProgress || !runId) {
+      if (loopMinerStatusStreamRef.current) {
+        loopMinerStatusStreamRef.current.close();
+        loopMinerStatusStreamRef.current = null;
+      }
       setLiveRunStatus(null);
       return;
     }
-    let cancelled = false;
-    const poll = async () => {
+
+    if (loopMinerStatusStreamRef.current) return;
+
+    const stream = new EventSource(`/api/memories/cleanup/loop-miner/runs/${runId}/status/stream`);
+    loopMinerStatusStreamRef.current = stream;
+
+    stream.onmessage = (event) => {
       try {
-        const res = await fetch(`/api/memories/cleanup/loop-miner/runs/${runId}/status`, { cache: "no-store" });
-        const data = (await res.json().catch(() => null)) as LoopMinerRunStatus | null;
-        if (!cancelled && data) {
-          setLiveRunStatus(data);
-          if (data.status !== "running") {
-            await fetchLoopMinerRuns({ activateLatest: true });
-          }
+        const data = JSON.parse(event.data as string) as LoopMinerRunStatus;
+        setLiveRunStatus(data);
+        if (data.status !== "running") {
+          stream.close();
+          loopMinerStatusStreamRef.current = null;
+          void fetchLoopMinerRuns({ activateLatest: true });
         }
       } catch {
-        // ignore poll errors
+        // ignore malformed events
       }
     };
-    void poll();
-    const interval = setInterval(() => { void poll(); }, 5000);
+
+    stream.onerror = () => {
+      stream.close();
+      loopMinerStatusStreamRef.current = null;
+    };
+
     return () => {
-      cancelled = true;
-      clearInterval(interval);
+      stream.close();
+      loopMinerStatusStreamRef.current = null;
     };
   }, [loopMinerInProgress, latestLoopMinerRun?.id, fetchLoopMinerRuns]);
 
@@ -1021,7 +1061,7 @@ export default function MemoryCleanupPage() {
                   <div className="grid grid-cols-4 gap-2 text-center">
                     {[
                       ["episodes", latestLoopMinerRun.summary.episodesBuilt],
-                      ["loops", latestLoopMinerRun.summary.loopsDetected],
+                      ["loops", latestLoopMinerRun.summary.loopsDetected ?? latestLoopMinerRun.summary.patternTrace?.approvedGroups.length ?? 0],
                       ["qualified", latestLoopMinerRun.summary.loopsQualified],
                       ["suggestions", latestLoopMinerRun.summary.suggestionsCreated],
                     ].map(([label, value]) => (
@@ -1121,7 +1161,7 @@ export default function MemoryCleanupPage() {
                                 <div className="flex items-start justify-between gap-3">
                                   <div className="flex items-center gap-1.5 font-semibold text-slate-800">
                                     {phase.status === "running" ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-blue-500" /> : null}
-                                    {phase.phase}
+                                    {loopMinerPhaseLabel(phase.phase)}
                                   </div>
                                   <span className={`shrink-0 border px-1.5 py-0.5 text-[10px] ${pillClass(phase.status === "completed" ? "completed" : phase.status === "failed" ? "failed" : phase.status === "skipped" ? "rejected" : "running")}`}>
                                     {phase.status}

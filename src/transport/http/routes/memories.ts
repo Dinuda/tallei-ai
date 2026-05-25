@@ -658,6 +658,74 @@ router.get("/cleanup/loop-miner/runs/:id/status", requireScopes(["memory:read"])
   }
 });
 
+router.get("/cleanup/loop-miner/runs/:id/status/stream", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  const runId = String(req.params.id);
+  const maxStreamAgeMs = 10 * 60 * 1000;
+  const streamStartedAt = Date.now();
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  const send = (data: unknown) => {
+    try {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      // Client disconnected
+    }
+  };
+
+  let closed = false;
+  let polling = false;
+
+  const poll = async (): Promise<boolean> => {
+    if (polling) return false;
+    polling = true;
+    try {
+      if (Date.now() - streamStartedAt > maxStreamAgeMs) {
+        send({ error: "Loop miner status stream timed out" });
+        return true;
+      }
+      const status = await getLoopMinerRunStatusForUser(req.authContext!, runId);
+      if (!status) {
+        send({ error: "Run not found" });
+        return true;
+      }
+      send(status);
+      return status.status !== "running";
+    } catch (error) {
+      logger.error("loop miner status stream poll failed", { runId, error });
+      return true;
+    } finally {
+      polling = false;
+    }
+  };
+
+  const done = await poll();
+  if (done || closed) {
+    res.end();
+    return;
+  }
+
+  const interval = setInterval(async () => {
+    if (closed) {
+      clearInterval(interval);
+      return;
+    }
+    const done = await poll();
+    if (done) {
+      clearInterval(interval);
+      res.end();
+    }
+  }, 2000);
+
+  req.on("close", () => {
+    closed = true;
+    clearInterval(interval);
+  });
+});
+
 router.post("/cleanup/loop-miner/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = loopMinerRunSchema.parse(req.body ?? {});

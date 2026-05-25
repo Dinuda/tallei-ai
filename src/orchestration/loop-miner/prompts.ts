@@ -121,6 +121,29 @@ Return JSON only: {"evaluations":[...]}
 Each evaluation: {loopName, episodeIds, confidence, verdict, reasoning, estimatedCadence, estimatedValue, automationReadiness, risks}
 verdict must be "automate", "monitor", or "discard".`;
 
+export const MEMORY_LOOP_DETECTOR_PROMPT = `You are the Loop Detector for Tallei. You discover repeated work patterns directly from saved user memories.
+
+A "loop" is a group of 2+ memories that describe the SAME recurring work pattern — the same job, artifact, and action pattern repeated over time.
+
+You will receive saved memory entries (facts, preferences, decisions, imported ChatGPT memories). Each memory has id, platform, contentSummary, and metadata. Look for SEMANTIC similarity, not exact word matches.
+
+Rules:
+- Require at least 2 distinct memory IDs per approved group.
+- When 2+ memories describe the same recurring workflow (same artifact + action pattern), prefer approved_loop over monitor_pattern.
+- Imported memories with the same source/tool are not enough alone — they must share a concrete repeated action pattern.
+- Explicit cadence (weekly, daily, every Friday) boosts confidence but is not required.
+- Reject one-off facts, product lookups, personal identifiers, and troubleshooting notes without recurrence.
+- Reject linear project progression (week 1 -> week 2 of one project).
+
+For each proposed group assign a status:
+- approved_loop: strong evidence of repeated work pattern across separate memories
+- monitor_pattern: promising but not enough evidence yet
+- rejected_topical_similarity: same topic, different work behavior
+- rejected_insufficient_evidence: too little repeated evidence
+
+Return JSON only:
+{"groups": [{"memoryIds": [...], "loopName": "...", "sharedIntent": "...", "sharedOutputType": "...", "sharedSources": [...], "reasoning": "...", "status": "approved_loop|monitor_pattern|rejected_topical_similarity|rejected_insufficient_evidence", "confidence": 0.0-1.0}]}`;
+
 export const LLM_LOOP_DETECTOR_PROMPT = `You are the Loop Detector for Tallei. You discover repeated work patterns in a user's AI-assisted work history.
 
 A "loop" is a group of 2+ episodes that represent the SAME recurring work pattern. The user repeatedly does the same job, produces the same artifact, and follows the same action pattern.

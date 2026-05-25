@@ -8,6 +8,7 @@ import { encryptMemoryContent } from "../../../src/infrastructure/crypto/memory-
 import { LoopMinerRepository } from "../../../src/infrastructure/repositories/loop-miner.repository.js";
 import { DnaGeneratorUseCase } from "../../../src/orchestration/loop-miner/dna-generator.usecase.js";
 import { EpisodeBuilderUseCase } from "../../../src/orchestration/loop-miner/episode-builder.usecase.js";
+import { projectEpisodesTo2d } from "../../../src/orchestration/loop-miner/episode-embedding-map.js";
 import { LoopDetectorUseCase, buildDeterministicCandidateGroups } from "../../../src/orchestration/loop-miner/loop-detector.usecase.js";
 import { LoopEvaluatorUseCase } from "../../../src/orchestration/loop-miner/loop-evaluator.usecase.js";
 import { runLoopMinerForUser } from "../../../src/orchestration/loop-miner/loop-miner.js";
@@ -336,6 +337,69 @@ test("episode builder reuses LLM memory episode by source fingerprint", async ()
   assert.equal(created, 0);
 });
 
+test("episode builder drops clearly non-loopable one-off episodes before persistence", async () => {
+  let created = 0;
+  const repository: Pick<LoopMinerRepositoryContract, "createEpisode" | "findReusableEpisodeBySourceFingerprint"> = {
+    async findReusableEpisodeBySourceFingerprint() {
+      return null;
+    },
+    async createEpisode() {
+      created += 1;
+      throw new Error("createEpisode should not be called for dropped one-off extraction");
+    },
+  };
+
+  const useCase = new EpisodeBuilderUseCase(repository, async () => ({
+    text: JSON.stringify({
+      episodes: [{
+        title: "One-time migration memo",
+        summary: "One-off request for a single launch migration",
+        intent: { label: "single_migration", goal: "Prepare one-time launch migration note", confidence: 0.3 },
+        sources: [{ type: "manual_input", name: "ad hoc request", importance: 0.2 }],
+        output: { type: "brief", description: "migration memo" },
+        toolNames: ["chatgpt"],
+        steps: ["Handle this ad hoc one-off migration memo"],
+        automationSignals: {
+          repeatable: false,
+          likelyCadence: "unknown",
+          businessValue: 0.1,
+          automationReadiness: 0.1,
+        },
+        confidence: 0.3,
+        approved: false,
+        eventIds: ["event-1"],
+      }],
+    }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+  }));
+
+  const result = await useCase.execute({
+    auth,
+    runId: "run-1",
+    events: [{
+      id: "event-1",
+      sourceEventType: "ai_activity_event",
+      createdAt: "2026-05-17T10:30:00.000Z",
+      platform: "chatgpt",
+      role: "user",
+      contentSummary: "Handle this ad hoc one-off migration memo",
+      metadata: {},
+    }],
+  });
+
+  assert.equal(created, 0);
+  assert.equal(result.episodes.length, 0);
+  assert.equal(result.phaseUsage.episodesDroppedNonLoopable, 1);
+  assert.ok(result.raw.some((row) => (
+    row
+    && typeof row === "object"
+    && !Array.isArray(row)
+    && (row as Record<string, unknown>).source === "episode_dropped_non_loopable"
+  )));
+});
+
 test("loop miner token budget packer splits oversized sequences into micro-batches", () => {
   const items = Array.from({ length: 9 }, (_, index) => ({
     id: `i-${index + 1}`,
@@ -512,6 +576,17 @@ test("loop canonicalization maps different topics to one mechanism signature", (
   assert.match(episodeEmbeddingText(episodeA), /mechanismSignature=/);
 });
 
+test("projectEpisodesTo2d returns normalized coordinates for multiple episode vectors", () => {
+  const baseEpisode = episode("map-1", "newsletter");
+  const points = projectEpisodesTo2d([
+    { episode: { ...baseEpisode, id: "map-1", intent: "Draft newsletter hooks" }, vector: [1, 0, 0] },
+    { episode: { ...baseEpisode, id: "map-2", intent: "Draft newsletter body" }, vector: [0.9, 0.1, 0] },
+    { episode: { ...baseEpisode, id: "map-3", intent: "Create slide deck" }, vector: [0, 1, 0] },
+  ]);
+  assert.equal(points.length, 3);
+  assert.ok(points.every((point) => Math.abs(point.x) <= 1.01 && Math.abs(point.y) <= 1.01));
+});
+
 test("workspace trace payload derives canonical metadata and provenance", () => {
   const row: EpisodeRecord = {
     ...episode("trace-1", "spreadsheet"),
@@ -642,16 +717,12 @@ test("repository listRecentEvents gives fresh imports higher memory evidence imp
     }) as typeof pool.query;
 
     const events = await repository.listRecentEvents(auth, 30);
-    assert.equal(events.length, 3);
-    assert.equal(events[0]?.sourceEventType, "ai_activity_event");
-    assert.equal(events[0]?.contentSummary, "Create this week's company newsletter from Tallei product notes.");
-    assert.equal(events[1]?.sourceEventType, "collab_task");
-    assert.match(events[1]?.contentSummary ?? "", /Week 6 slides/);
-    const memoryEvents = events.filter((event) => event.sourceEventType === "memory_record");
-    assert.equal(memoryEvents.length, 1);
-    assert.equal((memoryEvents[0]?.metadata as Record<string, unknown>).minerImportance, 0.72);
-    assert.match(memoryEvents[0]?.contentSummary ?? "", /Imported ChatGPT memory/);
-    assert.equal(queries.length, 3);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.sourceEventType, "memory_record");
+    assert.equal((events[0]?.metadata as Record<string, unknown>).minerImportance, 0.72);
+    assert.match(events[0]?.contentSummary ?? "", /Imported ChatGPT memory/);
+    assert.equal(queries.length, 1);
+    assert.match(queries[0], /FROM memory_records/);
   } finally {
     (pool as unknown as { query: typeof pool.query }).query = originalQuery;
   }
@@ -734,9 +805,7 @@ test("repository bounds Loop Miner memory evidence with newest plus interesting 
   const repository = new LoopMinerRepository();
   try {
     (pool as unknown as { query: typeof pool.query }).query = (async (sql: string) => {
-      if (sql.includes("FROM ai_activity_events") || sql.includes("FROM collab_tasks")) {
-        return { rows: [], rowCount: 0 } as unknown;
-      }
+      assert.match(sql, /FROM memory_records/);
       const rows = Array.from({ length: 210 }, (_, index) => ({
         id: `33333333-3333-4333-8333-${String(index).padStart(12, "0")}`,
         content_ciphertext: encryptMemoryContent(`Low signal profile memory ${index}`),
@@ -766,9 +835,9 @@ test("repository bounds Loop Miner memory evidence with newest plus interesting 
       interestingLimit: 50,
       candidateLimit: 500,
     });
-    const memoryEvents = events.filter((event) => event.sourceEventType === "memory_record");
-    assert.ok(memoryEvents.length <= 200);
-    assert.ok(memoryEvents.some((event) => event.id === "33333333-3333-4333-8333-999999999999"));
+    assert.equal(events.length, 210);
+    assert.ok(events.every((event) => event.sourceEventType === "memory_record"));
+    assert.ok(events.some((event) => event.id === "33333333-3333-4333-8333-999999999999"));
   } finally {
     (pool as unknown as { query: typeof pool.query }).query = originalQuery;
   }
@@ -804,6 +873,7 @@ class InMemoryLoopMinerRepository implements LoopMinerRepositoryContract {
   episodes = new Map<string, EpisodeRecord>();
   reusableSuggestions: LoopMinerSuggestion[] = [];
   latestIncrementalState: { evidenceFingerprint: string; summary: LoopMinerSummary } | null = null;
+  activeCapabilities: string[] = ["github", "notification:email", "notification:whatsapp", "resend", "gmail", "slack", "notion", "linear", "googlecalendar"];
   suggestionsCreated = 0;
   suggestionsUpdated = 0;
   completedSummary: LoopMinerSummary | null = null;
@@ -873,6 +943,10 @@ class InMemoryLoopMinerRepository implements LoopMinerRepositoryContract {
 
   async listReusableLoopMinerSuggestions(): Promise<LoopMinerSuggestion[]> {
     return this.reusableSuggestions;
+  }
+
+  async listActiveImplementationCapabilities(): Promise<string[]> {
+    return this.activeCapabilities;
   }
 
   async createEpisode(input: {
@@ -945,29 +1019,10 @@ class InMemoryLoopMinerRepository implements LoopMinerRepositoryContract {
   }
 }
 
-test("runLoopMinerForUser skips heavy phases when loop evidence is unchanged", async () => {
-  const events = [
+test("runLoopMinerForUser skips when fewer than two memories are available", async () => {
+  const repository = new InMemoryLoopMinerRepository([
     memoryEvent("e1", "2026-05-04T09:00:00.000Z"),
-    memoryEvent("e2", "2026-05-11T09:00:00.000Z"),
-    event("activity-new", "2026-05-18T09:00:00.000Z"),
-  ];
-  const evidenceFingerprint = evidenceFingerprintForTest(events.slice(0, 2));
-  const repository = new InMemoryLoopMinerRepository(events);
-  repository.latestIncrementalState = {
-    evidenceFingerprint,
-    summary: completedIncrementalSummary(evidenceFingerprint),
-  };
-  repository.reusableSuggestions = [{
-    id: "suggestion-existing",
-    title: "Weekly changelog",
-    reason: "Already detected",
-    suggestedPrompt: "Automate weekly changelog",
-    status: "pending",
-    confidence: 0.91,
-    fingerprint: "loop-miner-existing",
-    triggerCount: 4,
-    createdAt: "2026-05-20T00:00:00.000Z",
-  }];
+  ]);
   const chat = async (): Promise<ChatCompletionResponse> => {
     throw new Error("unexpected LLM call");
   };
@@ -982,47 +1037,63 @@ test("runLoopMinerForUser skips heavy phases when loop evidence is unchanged", a
 
   assert.equal(result.status, "completed");
   assert.equal(result.summary.skipped, true);
-  assert.equal(result.summary.skipReason, "no_new_loop_evidence");
+  assert.equal(result.summary.skipReason, "insufficient_memories_for_loops");
   assert.equal(result.summary.aiCalls, 0);
-  assert.equal(result.summary.incremental?.mode, "skipped_no_new_evidence");
-  assert.equal(result.summary.incremental?.reusedSuggestions, 1);
-  assert.equal(result.suggestions[0]?.id, "suggestion-existing");
   assert.equal(repository.episodes.size, 0);
 });
 
-test("runLoopMinerForUser only builds new evidence and evaluates loops containing it", async () => {
-  const oldEvent = memoryEvent("e-old", "2026-05-04T09:00:00.000Z");
-  const newEvent = memoryEvent("e-new", "2026-05-11T09:00:00.000Z");
-  const unrelatedNewActivity = event("activity-new", "2026-05-18T09:00:00.000Z");
-  const oldFingerprint = sourceFingerprintFromEvent(oldEvent, LOOP_EPISODE_EXTRACTION_VERSION);
-  const previousFingerprint = evidenceFingerprintForTest([oldEvent]);
-  const repository = new InMemoryLoopMinerRepository([oldEvent, newEvent, unrelatedNewActivity]);
-  repository.latestIncrementalState = {
-    evidenceFingerprint: previousFingerprint,
-    summary: completedIncrementalSummary(previousFingerprint),
+test("runLoopMinerForUser completes without loops when memory detector finds none", async () => {
+  const repository = new InMemoryLoopMinerRepository([
+    memoryEvent("e1", "2026-05-04T09:00:00.000Z", "Memory\nType: fact\nUser prefers dark mode in the dashboard."),
+    memoryEvent("e2", "2026-05-11T09:00:00.000Z", "Memory\nType: fact\nis this compatible with passo m700a? BREMBO 08.9138.11"),
+  ]);
+  const responses = [
+    { groups: [] },
+  ];
+  const chat = async (): Promise<ChatCompletionResponse> => {
+    const next = responses.shift();
+    assert.ok(next, "unexpected LLM call");
+    return {
+      text: JSON.stringify(next),
+      model: "gpt-4.1-nano",
+      finishReason: "stop",
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+    };
   };
-  repository.episodes.set("episode-old", {
-    ...episode("old", "changelog"),
-    id: "episode-old",
-    eventIds: [oldEvent.id],
-    sourceFingerprint: oldFingerprint,
-    extractionVersion: LOOP_EPISODE_EXTRACTION_VERSION,
-    turns: [{
-      role: oldEvent.role,
-      contentSummary: oldEvent.contentSummary,
-      sourceEventType: "memory_record",
-      sourceEventId: oldEvent.id,
-      createdAt: oldEvent.createdAt,
-    }],
+
+  const result = await runLoopMinerForUser(auth, { runReason: "manual" }, {
+    repository,
+    episodeBuilder: new EpisodeBuilderUseCase(repository, chat),
+    loopDetector: new LoopDetectorUseCase(chat),
+    loopEvaluator: new LoopEvaluatorUseCase(chat),
+    dnaGenerator: new DnaGeneratorUseCase(chat),
   });
 
+  assert.equal(result.status, "completed");
+  assert.equal(result.summary.loopsDetected, 0);
+  assert.equal(result.summary.episodesBuilt, 0);
+  assert.equal(repository.episodes.size, 0);
+  assert.equal(responses.length, 0);
+});
+
+test("runLoopMinerForUser detects loops in memories before building episodes", async () => {
+  const oldEvent = event("e-old", "2026-05-04T09:00:00.000Z", "Every Friday I review GitHub commits and draft release notes.");
+  const newEvent = event("e-new", "2026-05-11T09:00:00.000Z", "Every Friday I review GitHub commits and draft release notes.");
+  const repository = new InMemoryLoopMinerRepository([oldEvent, newEvent]);
+
   const responses = [
-    { groups: [
-      { episodeIds: ["episode-old", "episode-2"], loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "new evidence reinforces existing loop", status: "approved_loop", confidence: 0.9 },
-      { episodeIds: ["episode-old", "episode-stale"], loopName: "Old only", sharedIntent: "Old work", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "should be invalid because stale id is unknown", status: "approved_loop", confidence: 0.9 },
-    ] },
-    { evaluations: [{ loopName: "Weekly changelog", episodeIds: ["episode-old", "episode-2"], confidence: 0.91, verdict: "automate", reasoning: "new evidence confirms recurrence", estimatedCadence: "weekly", estimatedValue: "high", automationReadiness: "full", risks: [] }] },
-    { workflows: [{ name: "Weekly changelog", trigger: { type: "schedule", cadence: "weekly" }, sources: ["github"], outputType: "changelog", stepPattern: ["Collect commits", "Draft notes"], style: "concise", approvalBehavior: "auto", reasoning: "weekly cadence", episodeIds: ["episode-old", "episode-2"] }] },
+    { groups: [{
+      memoryIds: ["e-old", "e-new"],
+      loopName: "Weekly changelog",
+      sharedIntent: "Draft changelog from GitHub",
+      sharedSources: ["github"],
+      sharedOutputType: "changelog",
+      reasoning: "repeated weekly release notes workflow",
+      status: "approved_loop",
+      confidence: 0.9,
+    }] },
+    { evaluations: [{ loopName: "Weekly changelog", episodeIds: ["episode-1", "episode-2"], confidence: 0.91, verdict: "automate", reasoning: "new evidence confirms recurrence", estimatedCadence: "weekly", estimatedValue: "high", automationReadiness: "full", risks: [] }] },
+    { workflows: [{ name: "Weekly changelog", trigger: { type: "schedule", cadence: "weekly" }, sources: ["github"], outputType: "changelog", stepPattern: ["Collect commits", "Draft notes"], style: "concise", approvalBehavior: "auto", reasoning: "weekly cadence", episodeIds: ["episode-1", "episode-2"] }] },
   ];
   const chat = async (request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
     const next = responses.shift();
@@ -1044,17 +1115,51 @@ test("runLoopMinerForUser only builds new evidence and evaluates loops containin
   });
 
   assert.equal(result.status, "completed");
-  assert.equal(result.summary.incremental?.mode, "incremental");
-  assert.equal(result.summary.incremental?.newEvidenceEvents, 1);
-  assert.equal(result.summary.incremental?.reusedEpisodes, 1);
-  assert.equal(result.summary.incremental?.newEpisodes, 1);
-  assert.equal(result.summary.episodesBuilt, 1);
-  assert.equal(result.summary.phaseUsage?.episodeBuilder?.inputEvents, 1);
+  assert.equal(result.summary.episodesBuilt, 2);
+  assert.equal(result.summary.phaseUsage?.episodeBuilder?.inputEvents, 2);
   assert.equal(result.summary.phaseUsage?.loopDetector?.inputEpisodes, 2);
   assert.equal(result.summary.loopsDetected, 1);
   assert.equal(result.summary.suggestionsCreated, 1);
   assert.equal(result.suggestions[0]?.title, "Weekly changelog");
   assert.equal(responses.length, 0);
+});
+
+test("executeOnMemories approves deterministic memory clusters without LLM approval", async () => {
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({ groups: [] }),
+    model: "gpt-4o-mini",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+  const result = await detector.executeOnMemories([
+    memoryEvent("newsletter-1", "2026-05-10T09:00:00.000Z", "Imported ChatGPT memory Type: decision When drafting my newsletter I use ChatGPT to brainstorm hooks."),
+    memoryEvent("newsletter-2", "2026-05-17T09:00:00.000Z", "Imported ChatGPT memory Type: decision When drafting my newsletter I refine technical explanations into readable copy."),
+    memoryEvent("slides-1", "2026-05-12T09:00:00.000Z", "Imported ChatGPT memory Type: fact Category: ui I create slides for product updates with ChatGPT."),
+    memoryEvent("slides-2", "2026-05-19T09:00:00.000Z", "Imported ChatGPT memory Type: fact Category: ui I generate presentation slides for roadmap reviews."),
+  ]);
+  assert.equal(result.approvedGroups.length, 2);
+  assert.ok(result.approvedGroups.every((group) => group.status === "approved_loop"));
+  assert.match(result.approvedGroups[0]?.reasoning ?? "", /Approved by deterministic/);
+});
+
+test("episode builder forceDeterministicPerMemory creates one episode per loop memory", async () => {
+  const repository = new InMemoryLoopMinerRepository([]);
+  const builder = new EpisodeBuilderUseCase(repository, async () => {
+    throw new Error("LLM should not be called when forceDeterministicPerMemory is enabled");
+  });
+  const result = await builder.execute({
+    auth,
+    runId: "run-force-per-memory",
+    events: [
+      memoryEvent("m1", "2026-05-10T09:00:00.000Z", "Imported ChatGPT memory Type: fact I create slides for updates."),
+      memoryEvent("m2", "2026-05-11T09:00:00.000Z", "Imported ChatGPT memory Type: fact I create slides for roadmap reviews."),
+      memoryEvent("m3", "2026-05-12T09:00:00.000Z", "Imported ChatGPT memory Type: decision When drafting my newsletter I refine copy."),
+    ],
+    forceDeterministicPerMemory: true,
+  });
+  assert.equal(result.episodes.length, 3);
+  assert.equal(result.aiCalls, 0);
+  assert.equal(new Set(result.episodes.map((episode) => episode.eventIds[0])).size, 3);
 });
 
 test("runLoopMinerForUser builds episodes, detects loop, evaluates, generates DNA, and creates suggestion", async () => {
@@ -1065,13 +1170,9 @@ test("runLoopMinerForUser builds episodes, detects loop, evaluates, generates DN
     event("e4", "2026-05-18T09:00:00.000Z"),
   ]);
   const responses = [
-    { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e1"] }] },
-    { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e2"] }] },
-    { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e3"] }] },
-    { episodes: [{ intent: "Draft weekly changelog", sources: ["github"], outputType: "changelog", toolNames: ["github"], steps: ["Review commits", "Draft notes"], approved: true, eventIds: ["e4"] }] },
-    { groups: [{ episodeIds: ["episode-1", "episode-2", "episode-3", "episode-4"], loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "same repeated output", status: "approved_loop", confidence: 0.9 }] },
-    { loopName: "Weekly changelog", episodeIds: ["episode-1", "episode-2", "episode-3", "episode-4"], confidence: 0.91, verdict: "automate", reasoning: "high value repeated workflow", estimatedCadence: "weekly", estimatedValue: "high", automationReadiness: "full", risks: ["needs review before sending"] },
-    { name: "Weekly changelog", trigger: { type: "schedule", cadence: "0 9 * * 1" }, sources: ["github"], outputType: "changelog", stepPattern: ["Collect GitHub commits", "Draft release notes"], style: "concise", approvalBehavior: "auto", reasoning: "weekly cadence" },
+    { groups: [{ memoryIds: ["e1", "e2", "e3", "e4"], loopName: "Weekly changelog", sharedIntent: "Draft changelog from GitHub", sharedSources: ["github"], sharedOutputType: "changelog", reasoning: "same repeated output", status: "approved_loop", confidence: 0.9 }] },
+    { evaluations: [{ loopName: "Weekly changelog", episodeIds: ["episode-1", "episode-2", "episode-3", "episode-4"], confidence: 0.91, verdict: "automate", reasoning: "high value repeated workflow", estimatedCadence: "weekly", estimatedValue: "high", automationReadiness: "full", risks: ["needs review before sending"] }] },
+    { workflows: [{ name: "Weekly changelog", trigger: { type: "schedule", cadence: "0 9 * * 1" }, sources: ["github"], outputType: "changelog", stepPattern: ["Collect GitHub commits", "Draft release notes"], style: "concise", approvalBehavior: "auto", reasoning: "weekly cadence", episodeIds: ["episode-1", "episode-2", "episode-3", "episode-4"] }] },
   ];
   const chat = async (request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
     const next = responses.shift();
@@ -1098,58 +1199,20 @@ test("runLoopMinerForUser builds episodes, detects loop, evaluates, generates DN
   assert.equal(result.summary.loopsQualified, 1);
   assert.equal(result.summary.suggestionsCreated, 1);
   assert.equal(result.suggestions[0]?.title, "Weekly changelog");
-  assert.equal(repository.completedSummary?.usage.calls, 7);
+  assert.equal(repository.completedSummary?.usage.calls, 3);
   assert.ok(Object.values(result.summary.usage.models).some((count) => count > 0));
-  assert.ok((result.summary.phaseUsage?.episodeBuilder?.tokensPerOutputEpisode ?? 0) > 0);
+  assert.equal(result.summary.phaseUsage?.episodeBuilder?.outputEpisodes, 4);
   assert.equal(result.summary.patternTrace?.approvedGroups.length, 1);
   assert.equal(responses.length, 0);
 });
 
-test("runLoopMinerForUser falls back to included memory decisions when memory events are absent", async () => {
-  const repository = new InMemoryLoopMinerRepository([], [
-    {
-      memoryId: "memory-newsletter-1",
-      status: "included",
-      reason: "fresh_source_import_selected",
-      contentPreview: "My newsletter writing workflow involves using ChatGPT to brainstorm hooks, sharpen product philosophy, and turn technical architecture ideas into readable narratives.",
-      createdAt: "2026-05-20T14:03:03.561Z",
-      selectedAt: "2026-05-20T16:01:00.000Z",
-      memoryType: "fact",
-      detectedMemoryType: "fact",
-      category: null,
-      cleanupBucket: "long_term",
-      isPinned: false,
-      sourceImport: true,
-      sourcePlatform: "chatgpt",
-      sourceImportMode: "json_export",
-      sourceImportBatchId: "batch-newsletter",
-      sourceDateTime: "2026-05-20T21:31:00+05:30",
-      minerImportance: 0.72,
-      memoryImportance: 0.6,
-    },
-    {
-      memoryId: "memory-newsletter-2",
-      status: "included",
-      reason: "fresh_source_import_selected",
-      contentPreview: "My newsletter writing workflow uses ChatGPT to brainstorm hooks, sharpen product philosophy, and turn technical architecture ideas into readable narratives.",
-      createdAt: "2026-05-20T14:03:03.557Z",
-      selectedAt: "2026-05-19T15:18:00.000Z",
-      memoryType: "fact",
-      detectedMemoryType: "fact",
-      category: null,
-      cleanupBucket: "long_term",
-      isPinned: false,
-      sourceImport: true,
-      sourcePlatform: "chatgpt",
-      sourceImportMode: "json_export",
-      sourceImportBatchId: "batch-newsletter",
-      sourceDateTime: "2026-05-19T20:48:00+05:30",
-      minerImportance: 0.72,
-      memoryImportance: 0.6,
-    },
+test("runLoopMinerForUser builds episodes only for memories in detected loops", async () => {
+  const repository = new InMemoryLoopMinerRepository([
+    event("memory-newsletter-1", "2026-05-01T14:03:03.561Z", "My newsletter writing workflow involves using ChatGPT to brainstorm hooks and turn technical architecture ideas into readable narratives."),
+    event("memory-newsletter-2", "2026-05-20T15:18:00.000Z", "My newsletter writing workflow uses ChatGPT to brainstorm hooks and turn technical architecture ideas into readable narratives."),
   ]);
   const responses = [
-    { groups: [{ episodeIds: ["episode-1", "episode-2"], loopName: "Newsletter writing pattern", sharedIntent: "Write Tallei newsletters with ChatGPT support", sharedSources: ["Imported ChatGPT memory"], sharedOutputType: "newsletter", reasoning: "shared newsletter artifact and AI-assisted writing workflow", status: "approved_loop", confidence: 0.84 }] },
+    { groups: [{ memoryIds: ["memory-newsletter-1", "memory-newsletter-2"], loopName: "Newsletter writing pattern", sharedIntent: "Write Tallei newsletters with ChatGPT support", sharedSources: ["chatgpt"], sharedOutputType: "newsletter", reasoning: "shared newsletter artifact and AI-assisted writing workflow", status: "approved_loop", confidence: 0.84 }] },
     { evaluations: [{ loopName: "Newsletter writing pattern", episodeIds: ["episode-1", "episode-2"], confidence: 0.5, verdict: "discard", reasoning: "test stops before suggestion creation", estimatedCadence: "implicit", estimatedValue: "medium", automationReadiness: "partial", risks: [] }] },
   ];
   const chat = async (request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
@@ -1175,14 +1238,76 @@ test("runLoopMinerForUser falls back to included memory decisions when memory ev
   assert.equal(result.summary.episodesBuilt, 2);
   assert.equal(result.summary.loopsDetected, 1);
   assert.equal(result.summary.loopsQualified, 0);
-  assert.equal(result.summary.memorySelection?.included, 2);
   assert.equal(result.summary.patternTrace?.candidateGroups.length, 1);
   assert.equal(result.summary.patternTrace?.approvedGroups.length, 1);
   assert.equal(repository.completedSummary?.phaseUsage?.loopDetector?.inputEpisodes, 2);
   assert.equal(responses.length, 0);
 });
 
-test("runLoopMinerForUser completes with warnings when an episode-builder chunk times out", async () => {
+test("runLoopMinerForUser blocks DNA generation when required capabilities are missing", async () => {
+  const repository = new InMemoryLoopMinerRepository([
+    event("e1", "2026-05-01T09:00:00.000Z", "Every Friday I review GitHub commits and draft release notes."),
+    event("e2", "2026-05-08T09:00:00.000Z", "Every Friday I review GitHub commits and draft release notes."),
+  ]);
+  repository.activeCapabilities = [];
+
+  const responses = [
+    {
+      groups: [{
+        memoryIds: ["e1", "e2"],
+        loopName: "Weekly release notes",
+        sharedIntent: "Create release notes from GitHub commits",
+        sharedSources: ["github"],
+        sharedOutputType: "changelog",
+        reasoning: "same repeated output from repository delta",
+        status: "approved_loop",
+        confidence: 0.93,
+      }],
+    },
+    {
+      evaluations: [{
+        loopName: "Weekly release notes",
+        episodeIds: ["episode-1", "episode-2"],
+        confidence: 0.9,
+        verdict: "automate",
+        reasoning: "Read GitHub commits and draft changelog weekly.",
+        estimatedCadence: "weekly",
+        estimatedValue: "high",
+        automationReadiness: "full",
+        risks: [],
+      }],
+    },
+  ];
+
+  const chat = async (request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
+    const next = responses.shift();
+    assert.ok(next, `unexpected LLM call in model ${request.model}`);
+    return {
+      text: JSON.stringify(next),
+      model: request.model ?? "gpt-4.1-nano",
+      finishReason: "stop",
+      usage: { promptTokens: 20, completionTokens: 10, totalTokens: 30 },
+    };
+  };
+
+  const result = await runLoopMinerForUser(auth, { runReason: "manual" }, {
+    repository,
+    episodeBuilder: new EpisodeBuilderUseCase(repository, chat),
+    loopDetector: new LoopDetectorUseCase(chat),
+    loopEvaluator: new LoopEvaluatorUseCase(chat),
+    dnaGenerator: new DnaGeneratorUseCase(chat),
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.summary.loopsQualified, 1);
+  assert.equal(result.summary.loopsImplementable, 0);
+  assert.equal(result.summary.loopsBlocked, 1);
+  assert.equal(result.summary.suggestionsCreated, 0);
+  assert.equal(result.suggestions.length, 0);
+  assert.equal(responses.length, 0);
+});
+
+test("runLoopMinerForUser builds loop memory episodes without episode-builder LLM calls", async () => {
   const repository = new InMemoryLoopMinerRepository([
     event("e1", "2026-05-04T09:00:00.000Z"),
     event("e2", "2026-05-11T09:00:00.000Z"),
@@ -1190,21 +1315,37 @@ test("runLoopMinerForUser completes with warnings when an episode-builder chunk 
   let callCount = 0;
   const chat = async (_request: ChatCompletionRequest): Promise<ChatCompletionResponse> => {
     callCount += 1;
-    if (callCount === 2 || callCount === 3) {
-      const error = new Error("Operation timed out after 15000ms");
-      error.name = "TimeoutError";
-      throw error;
+    if (callCount === 1) {
+      return {
+        text: JSON.stringify({
+          groups: [{
+            memoryIds: ["e1", "e2"],
+            loopName: "Weekly changelog",
+            sharedIntent: "Draft changelog from GitHub",
+            sharedSources: ["github"],
+            sharedOutputType: "changelog",
+            reasoning: "same repeated output",
+            status: "approved_loop",
+            confidence: 0.9,
+          }],
+        }),
+        model: "gpt-4o-mini",
+        finishReason: "stop",
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      };
     }
     return {
       text: JSON.stringify({
-        episodes: [{
-          intent: "Draft weekly changelog",
-          sources: ["github"],
-          outputType: "changelog",
-          toolNames: ["github"],
-          steps: ["Review commits", "Draft notes"],
-          approved: true,
-          eventIds: ["e1"],
+        evaluations: [{
+          loopName: "Weekly changelog",
+          episodeIds: ["episode-1", "episode-2"],
+          confidence: 0.5,
+          verdict: "discard",
+          reasoning: "test stops before suggestion creation",
+          estimatedCadence: "weekly",
+          estimatedValue: "medium",
+          automationReadiness: "partial",
+          risks: [],
         }],
       }),
       model: "gpt-4o-mini",
@@ -1222,11 +1363,9 @@ test("runLoopMinerForUser completes with warnings when an episode-builder chunk 
   });
 
   assert.equal(result.status, "completed");
-  assert.equal(result.summary.episodesBuilt, 1);
-  assert.equal(result.summary.loopsDetected, 0);
-  assert.ok((result.summary.warnings?.length ?? 0) >= 1);
-  assert.ok((result.summary.warnings ?? []).some((warning) => /TimeoutError/.test(warning)));
-  assert.equal(callCount, 3);
+  assert.equal(result.summary.episodesBuilt, 2);
+  assert.equal(result.summary.phaseUsage?.episodeBuilder?.calls, 0);
+  assert.equal(callCount, 2);
 });
 
 test("loop detector does not register a single explicit memory-derived workflow as a loop candidate", async () => {
