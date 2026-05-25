@@ -33,6 +33,8 @@ import {
   sendMemoryCleanupAdminEmail,
 } from "../../../services/memory-cleanup.js";
 import {
+  getLoopMinerRunEmbeddingMapForUser,
+  getLoopMinerRunStatusForUser,
   listLoopMinerRunsForUser,
   queueLoopMinerRunForUser,
 } from "../../../orchestration/loop-miner/loop-miner.js";
@@ -84,20 +86,21 @@ const listSchema = z.object({
 
 const cleanupRunSchema = z.object({
   dryRun: z.boolean().optional(),
-  maxMemories: z.number().int().min(1).max(500).optional(),
+  maxMemories: z.number().int().min(1).max(5000).optional(),
   processAll: z.boolean().optional(),
   includeReviewed: z.boolean().optional(),
   logImplicitKeeps: z.boolean().optional(),
   emailAdmin: z.boolean().optional(),
   selectionStrategy: z.enum(["newest_hybrid", "current_priority"]).optional(),
-  newestLimit: z.number().int().min(1).max(500).optional(),
-  interestingLimit: z.number().int().min(0).max(500).optional(),
+  newestLimit: z.number().int().min(1).max(5000).optional(),
+  interestingLimit: z.number().int().min(0).max(5000).optional(),
 });
 
 const loopMinerRunSchema = z.object({
   lookbackDays: z.number().int().min(1).max(90).optional(),
-  memoryNewestLimit: z.number().int().min(1).max(500).optional(),
-  memoryInterestingLimit: z.number().int().min(0).max(500).optional(),
+  processAll: z.boolean().optional(),
+  memoryNewestLimit: z.number().int().min(1).max(5000).optional(),
+  memoryInterestingLimit: z.number().int().min(0).max(5000).optional(),
 });
 
 const bulkJsonRoleSchema = z.enum([
@@ -625,6 +628,36 @@ router.get("/cleanup/loop-miner/runs", requireScopes(["memory:read"]), async (re
   }
 });
 
+router.get("/cleanup/loop-miner/runs/:id/embedding-map", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const runId = String(req.params.id);
+    const map = await getLoopMinerRunEmbeddingMapForUser(req.authContext!, runId);
+    if (!map) {
+      res.status(404).json({ error: "Loop miner run not found" });
+      return;
+    }
+    res.json({ map });
+  } catch (error) {
+    console.error("Error building loop miner embedding map:", error);
+    res.status(500).json({ error: "Failed to build loop miner embedding map" });
+  }
+});
+
+router.get("/cleanup/loop-miner/runs/:id/status", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const runId = String(req.params.id);
+    const status = await getLoopMinerRunStatusForUser(req.authContext!, runId);
+    if (!status) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+    res.json(status);
+  } catch (error) {
+    logger.error("loop miner run status request failed", { error });
+    res.status(500).json({ error: "Failed to get loop miner run status" });
+  }
+});
+
 router.post("/cleanup/loop-miner/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = loopMinerRunSchema.parse(req.body ?? {});
@@ -653,8 +686,9 @@ router.post("/cleanup/loop-miner/run", requireScopes(["memory:write"]), async (r
     const run = await queueLoopMinerRunForUser(req.authContext!, {
       runReason: "manual",
       lookbackDays: body.lookbackDays ?? 30,
-      memoryNewestLimit: body.memoryNewestLimit ?? 150,
-      memoryInterestingLimit: body.memoryInterestingLimit ?? 50,
+      processAll: body.processAll ?? true,
+      memoryNewestLimit: body.memoryNewestLimit,
+      memoryInterestingLimit: body.memoryInterestingLimit,
     });
     logger.info("loop miner run queued response", {
       runId: run?.id ?? null,

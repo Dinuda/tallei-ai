@@ -2,12 +2,14 @@ import type { AuthContext } from "../../domain/auth/index.js";
 
 import { createHash } from "crypto";
 import { config } from "../../config/index.js";
+import { embedText } from "../../infrastructure/cache/embedding-cache.js";
 import { sendAdminSlackMessage } from "../../infrastructure/notifications/admin-slack.js";
 import {
   LoopEpisodeGroupedResult,
   LoopEpisodeVectorRepository,
 } from "../../infrastructure/repositories/loop-episode-vector.repository.js";
 import { LoopMinerRepository as PgLoopMinerRepository } from "../../infrastructure/repositories/loop-miner.repository.js";
+import { pool } from "../../infrastructure/db/index.js";
 import { createLogger } from "../../observability/index.js";
 import { aiProviderRegistry, isRetriableProviderError } from "../../providers/ai/index.js";
 import { CircuitOpenError } from "../../shared/errors/provider-errors.js";
@@ -18,9 +20,12 @@ import { DnaGeneratorUseCase } from "./dna-generator.usecase.js";
 import { EpisodeBuilderUseCase } from "./episode-builder.usecase.js";
 import { LoopDetectorUseCase } from "./loop-detector.usecase.js";
 import { LoopEvaluatorUseCase } from "./loop-evaluator.usecase.js";
+import { LoopMinerRunProgress } from "./run-progress.js";
 import type {
   CandidateLoop,
   EpisodeRecord,
+  LoopMinerEpisodeEmbeddingMapView,
+  LoopMinerEpisodeEmbeddingPoint,
   LoopEvaluation,
   LoopMinerMemoryDecision,
   MinerEvent,
@@ -35,6 +40,7 @@ import type {
 import {
   LOOP_EPISODE_EXTRACTION_VERSION,
   consolidateWorkspaceGroupedHits,
+  capMinerEventsWhenOverloaded,
   deriveCanonicalLoopFacet,
   deriveWorkspaceTracePayload,
   episodeEmbeddingText,
@@ -48,6 +54,7 @@ export interface RunLoopMinerOptions {
   runReason?: LoopMinerRunReason;
   lookbackDays?: number;
   runId?: string;
+  processAll?: boolean;
   memoryNewestLimit?: number;
   memoryInterestingLimit?: number;
   memoryCandidateLimit?: number;
@@ -70,6 +77,8 @@ const LOOP_EPISODE_EMBED_MAX_ATTEMPTS = 4;
 const LOOP_EPISODE_EMBED_BASE_DELAY_MS = 1_000;
 const LOOP_EPISODE_EMBED_CIRCUIT_COOLDOWN_MS = 22_000;
 const LOOP_EPISODE_EMBED_MAX_DELAY_MS = 16_000;
+const LOOP_EPISODE_EMBED_CHUNK_SIZE = 10;
+const LOOP_EPISODE_EMBED_CHUNK_GAP_MS = 250;
 
 function errorJson(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
@@ -107,7 +116,14 @@ async function batchEmbedTextsWithRetry(texts: string[]): Promise<(readonly numb
   let lastError: unknown;
   for (let attempt = 1; attempt <= LOOP_EPISODE_EMBED_MAX_ATTEMPTS; attempt += 1) {
     try {
-      const response = await aiProviderRegistry.embed({ input: texts });
+      const response = await aiProviderRegistry.embed({
+        model: config.embeddingModel,
+        input: texts,
+        dimensions: config.embeddingDims,
+      });
+      if (response.vectors.length !== texts.length) {
+        throw new Error(`Embedding provider returned ${response.vectors.length} vectors for ${texts.length} inputs`);
+      }
       return [...response.vectors];
     } catch (error) {
       lastError = error;
@@ -118,6 +134,71 @@ async function batchEmbedTextsWithRetry(texts: string[]): Promise<(readonly numb
     }
   }
   throw lastError;
+}
+
+async function embedSingleTextWithRetry(text: string): Promise<number[]> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= LOOP_EPISODE_EMBED_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await embedText(text);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= LOOP_EPISODE_EMBED_MAX_ATTEMPTS || !isRetriableEmbeddingError(error)) {
+        throw error;
+      }
+      await sleep(embedRetryDelayMs(error, attempt));
+    }
+  }
+  throw lastError;
+}
+
+async function embedEpisodeTextsResilient(
+  texts: string[],
+  progress?: LoopMinerRunProgress,
+): Promise<{
+  vectors: Array<number[] | null>;
+  chunkFailures: number;
+  itemFailures: number;
+}> {
+  const vectors: Array<number[] | null> = new Array(texts.length).fill(null);
+  let chunkFailures = 0;
+  let itemFailures = 0;
+  const totalChunks = Math.ceil(texts.length / LOOP_EPISODE_EMBED_CHUNK_SIZE);
+
+  for (let offset = 0; offset < texts.length; offset += LOOP_EPISODE_EMBED_CHUNK_SIZE) {
+    const chunkIndex = Math.floor(offset / LOOP_EPISODE_EMBED_CHUNK_SIZE) + 1;
+    const chunk = texts.slice(offset, offset + LOOP_EPISODE_EMBED_CHUNK_SIZE);
+    const chunkStart = offset;
+    progress?.step("embedding episode text chunk", {
+      chunkIndex,
+      totalChunks,
+      chunkSize: chunk.length,
+      episodesEmbeddedSoFar: offset,
+      episodesTotal: texts.length,
+    });
+    try {
+      const chunkVectors = await batchEmbedTextsWithRetry(chunk);
+      for (let index = 0; index < chunkVectors.length; index += 1) {
+        vectors[chunkStart + index] = [...chunkVectors[index]];
+      }
+    } catch {
+      chunkFailures += 1;
+      for (let index = 0; index < chunk.length; index += 1) {
+        try {
+          vectors[chunkStart + index] = await embedSingleTextWithRetry(chunk[index]);
+        } catch {
+          itemFailures += 1;
+          vectors[chunkStart + index] = null;
+        }
+      }
+    }
+
+    if (offset + LOOP_EPISODE_EMBED_CHUNK_SIZE < texts.length) {
+      await sleep(LOOP_EPISODE_EMBED_CHUNK_GAP_MS);
+    }
+  }
+
+  return { vectors, chunkFailures, itemFailures };
 }
 
 function modelRejectsExplicitTemperature(model: string | undefined): boolean {
@@ -186,6 +267,28 @@ function finalizeSummary(summary: LoopMinerSummary, startedAt: number): LoopMine
       estimatedCostUsd: Number(summary.usage.estimatedCostUsd.toFixed(6)),
     },
   };
+}
+
+function attachProgressTrace(summary: LoopMinerSummary, progress: LoopMinerRunProgress): LoopMinerSummary {
+  const snapshot = progress.snapshot();
+  return {
+    ...summary,
+    debugTrace: {
+      ...(summary.debugTrace ?? {}),
+      phaseTimings: snapshot.phaseTimings,
+      totalElapsedMs: snapshot.totalElapsedMs,
+    },
+  };
+}
+
+function flushProgress(
+  deps: LoopMinerDeps,
+  auth: AuthContext,
+  runId: string,
+  progress: LoopMinerRunProgress
+): void {
+  if (!deps.repository.patchRunLiveProgress) return;
+  void deps.repository.patchRunLiveProgress(auth, runId, progress.snapshot()).catch(() => {});
 }
 
 async function loopMinerChat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
@@ -439,14 +542,17 @@ export async function runLoopMinerForUser(
 ): Promise<LoopMinerRunResult> {
   const runReason = options.runReason ?? "manual";
   const lookbackDays = Math.max(1, Math.min(options.lookbackDays ?? 30, 90));
-  const memorySelectionOptions = {
-    newestLimit: Math.max(1, options.memoryNewestLimit ?? DEFAULT_MEMORY_NEWEST_LIMIT),
-    interestingLimit: Math.max(0, options.memoryInterestingLimit ?? DEFAULT_MEMORY_INTERESTING_LIMIT),
-    candidateLimit: Math.max(
-      (options.memoryNewestLimit ?? DEFAULT_MEMORY_NEWEST_LIMIT) + (options.memoryInterestingLimit ?? DEFAULT_MEMORY_INTERESTING_LIMIT),
-      options.memoryCandidateLimit ?? 2_000
-    ),
-  };
+  const processAll = options.processAll ?? false;
+  const memorySelectionOptions = processAll
+    ? { processAll: true as const }
+    : {
+        newestLimit: Math.max(1, options.memoryNewestLimit ?? DEFAULT_MEMORY_NEWEST_LIMIT),
+        interestingLimit: Math.max(0, options.memoryInterestingLimit ?? DEFAULT_MEMORY_INTERESTING_LIMIT),
+        candidateLimit: Math.max(
+          (options.memoryNewestLimit ?? DEFAULT_MEMORY_NEWEST_LIMIT) + (options.memoryInterestingLimit ?? DEFAULT_MEMORY_INTERESTING_LIMIT),
+          options.memoryCandidateLimit ?? 2_000
+        ),
+      };
   const startedAt = Date.now();
 
   if (runReason === "daily_intelligence") {
@@ -470,10 +576,20 @@ export async function runLoopMinerForUser(
 
   const runId = options.runId ?? await deps.repository.createRun({ auth, runReason });
   let summary = emptySummary();
+  const progress = new LoopMinerRunProgress(runId);
   try {
     logger.info("loop miner run started", { runId, runReason, lookbackDays });
+    progress.startPhase("event_ingest", { lookbackDays });
     let events = await deps.repository.listRecentEvents(auth, lookbackDays, memorySelectionOptions);
     const eventCountsBeforeFallback = countEventsByType(events);
+    progress.endPhase("event_ingest", {
+      eventCount: events.length,
+      memoryRecords: eventCountsBeforeFallback.memoryRecord,
+      aiActivity: eventCountsBeforeFallback.aiActivity,
+    });
+    flushProgress(deps, auth, runId, progress);
+
+    progress.startPhase("memory_decisions");
     if (deps.repository.listMemoryDecisionLog) {
       try {
         const memoryDecisionLog = await deps.repository.listMemoryDecisionLog(auth, lookbackDays, memorySelectionOptions);
@@ -523,6 +639,68 @@ export async function runLoopMinerForUser(
         ];
       }
     }
+    progress.endPhase("memory_decisions", {
+      included: summary.memorySelection?.included ?? 0,
+      excluded: summary.memorySelection?.excluded ?? 0,
+      eventCountAfterFallback: events.length,
+    });
+    flushProgress(deps, auth, runId, progress);
+
+    const evidenceCap = processAll || config.loopMinerMaxEventsPerRun <= 0
+      ? { events, capped: false, beforeCap: events.length, afterCap: events.length, droppedByDate: 0, droppedByCount: 0, cutoffDate: new Date().toISOString() }
+      : capMinerEventsWhenOverloaded(events, {
+          maxEvidenceDays: config.loopMinerMaxEvidenceDays,
+          maxEventsPerRun: config.loopMinerMaxEventsPerRun,
+        });
+    events = evidenceCap.events;
+    if (evidenceCap.capped) {
+      summary.warnings = [
+        ...(summary.warnings ?? []),
+        `Loop miner evidence capped to ${evidenceCap.afterCap} newest events within the last ${config.loopMinerMaxEvidenceDays} days (dropped ${evidenceCap.droppedByDate} older, ${evidenceCap.droppedByCount} over limit).`,
+      ];
+      progress.step("loop miner evidence capped by date", {
+        beforeCap: evidenceCap.beforeCap,
+        afterCap: evidenceCap.afterCap,
+        maxEvidenceDays: config.loopMinerMaxEvidenceDays,
+        maxEventsPerRun: config.loopMinerMaxEventsPerRun,
+        cutoffDate: evidenceCap.cutoffDate,
+        droppedByDate: evidenceCap.droppedByDate,
+        droppedByCount: evidenceCap.droppedByCount,
+      });
+      logger.info("loop miner evidence capped", {
+        runId,
+        lookbackDays,
+        ...evidenceCap,
+        maxEvidenceDays: config.loopMinerMaxEvidenceDays,
+        maxEventsPerRun: config.loopMinerMaxEventsPerRun,
+      });
+    }
+    summary.debugTrace = {
+      ...(summary.debugTrace ?? {}),
+      eventIngest: {
+        beforeFallback: summary.debugTrace?.eventIngest?.beforeFallback ?? eventCountsBeforeFallback,
+        afterFallback: summary.debugTrace?.eventIngest?.afterFallback ?? eventCountsBeforeFallback,
+        fallbackEventsAdded: summary.debugTrace?.eventIngest?.fallbackEventsAdded ?? 0,
+        fallbackEventsReplaced: summary.debugTrace?.eventIngest?.fallbackEventsReplaced ?? 0,
+        includedMemoryIdsSample: summary.debugTrace?.eventIngest?.includedMemoryIdsSample ?? [],
+        memoryEventIdsSample: events
+          .filter((event) => event.sourceEventType === "memory_record")
+          .slice(0, 12)
+          .map((event) => event.id),
+        evidenceCap: {
+          requestedLookbackDays: lookbackDays,
+          maxEvidenceDays: config.loopMinerMaxEvidenceDays,
+          maxEventsPerRun: config.loopMinerMaxEventsPerRun,
+          beforeCap: evidenceCap.beforeCap,
+          afterCap: evidenceCap.afterCap,
+          droppedByDate: evidenceCap.droppedByDate,
+          droppedByCount: evidenceCap.droppedByCount,
+          cutoffDate: evidenceCap.cutoffDate,
+        },
+      },
+    };
+
+    progress.startPhase("incremental_check");
     const memoryEvents = memoryEvidenceEvents(events);
     const memoryEventFingerprints = new Map(memoryEvents.map((event) => [
       event.id,
@@ -534,10 +712,11 @@ export async function runLoopMinerForUser(
       : null;
 
     if (latestIncremental?.evidenceFingerprint === evidenceFingerprint) {
+      progress.skipPhase("incremental_check", "no_new_loop_evidence", { evidenceFingerprint });
       const suggestions = deps.repository.listReusableLoopMinerSuggestions
         ? await deps.repository.listReusableLoopMinerSuggestions(auth)
         : [];
-      summary = finalizeSummary({
+      summary = attachProgressTrace(finalizeSummary({
         ...summary,
         skipped: true,
         skipReason: "no_new_loop_evidence",
@@ -552,11 +731,13 @@ export async function runLoopMinerForUser(
           reusedSuggestions: suggestions.length,
           suggestionsUpdated: 0,
         },
-      }, startedAt);
+      }, startedAt), progress);
       await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run skipped with no new evidence", { runId, reusedSuggestions: suggestions.length });
+      logger.info("loop miner run skipped with no new evidence", { runId, reusedSuggestions: suggestions.length, ...progress.snapshot() });
       return { id: runId, status: "completed", summary, suggestions };
     }
+
+    progress.startPhase("episode_reuse_lookup");
 
     const reusableEpisodeByFingerprint = deps.repository.findEpisodesBySourceFingerprints
       ? await deps.repository.findEpisodesBySourceFingerprints({
@@ -583,12 +764,24 @@ export async function runLoopMinerForUser(
     });
     const incrementalMode = latestIncremental ? "incremental" : "full";
     const eventsForEpisodeBuilder = latestIncremental ? newMemoryEvents : events;
+    progress.endPhase("incremental_check", {
+      mode: incrementalMode,
+      totalMemoryEvents: memoryEvents.length,
+      newMemoryEvents: newMemoryEvents.length,
+      reusedEpisodes: reusedEpisodes.length,
+    });
+    progress.endPhase("episode_reuse_lookup", {
+      reusableByFingerprint: reusableEpisodeByFingerprint.size,
+      reusableBySourceEventId: reusableEpisodeBySourceEventId.size,
+    });
+    flushProgress(deps, auth, runId, progress);
 
     if (latestIncremental && newMemoryEvents.length === 0) {
+      progress.skipPhase("episode_builder", "no_new_memory_evidence");
       const suggestions = deps.repository.listReusableLoopMinerSuggestions
         ? await deps.repository.listReusableLoopMinerSuggestions(auth)
         : [];
-      summary = finalizeSummary({
+      summary = attachProgressTrace(finalizeSummary({
         ...summary,
         skipped: true,
         skipReason: "no_new_loop_evidence",
@@ -603,13 +796,22 @@ export async function runLoopMinerForUser(
           reusedSuggestions: suggestions.length,
           suggestionsUpdated: 0,
         },
-      }, startedAt);
+      }, startedAt), progress);
       await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run skipped with no new memory evidence", { runId, reusedSuggestions: suggestions.length });
+      logger.info("loop miner run skipped with no new memory evidence", { runId, reusedSuggestions: suggestions.length, ...progress.snapshot() });
       return { id: runId, status: "completed", summary, suggestions };
     }
 
-    const built = await deps.episodeBuilder.execute({ auth, runId, events: eventsForEpisodeBuilder });
+    progress.startPhase("episode_builder", { inputEvents: eventsForEpisodeBuilder.length, mode: incrementalMode });
+    flushProgress(deps, auth, runId, progress);
+    const built = await deps.episodeBuilder.execute({ auth, runId, events: eventsForEpisodeBuilder, progress });
+    progress.endPhase("episode_builder", {
+      episodesBuilt: built.episodes.length,
+      aiCalls: built.aiCalls,
+      batchesProcessed: built.phaseUsage.batchesProcessed,
+      batchesSkipped: built.phaseUsage.batchesSkipped,
+    });
+    flushProgress(deps, auth, runId, progress);
     mergeCleanupAiUsage(summary.usage, built.usage);
     summary.aiCalls += built.aiCalls;
     summary.episodesBuilt = built.episodes.length;
@@ -663,21 +865,24 @@ export async function runLoopMinerForUser(
     };
 
     if (latestIncremental && newMemoryEvents.length > 0 && built.episodes.length === 0) {
+      progress.skipPhase("loop_detector", "no_new_loop_episodes");
       const suggestions = deps.repository.listReusableLoopMinerSuggestions
         ? await deps.repository.listReusableLoopMinerSuggestions(auth)
         : [];
       if (summary.incremental) {
         summary.incremental.reusedSuggestions = suggestions.length;
       }
-      summary = finalizeSummary({
+      summary = attachProgressTrace(finalizeSummary({
         ...summary,
         skipped: true,
         skipReason: "no_new_loop_episodes",
-      }, startedAt);
+      }, startedAt), progress);
       await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-      logger.info("loop miner run skipped because new evidence produced no episodes", { runId, newMemoryEvents: newMemoryEvents.length });
+      logger.info("loop miner run skipped because new evidence produced no episodes", { runId, newMemoryEvents: newMemoryEvents.length, ...progress.snapshot() });
       return { id: runId, status: "completed", summary, suggestions };
     }
+
+    progress.startPhase("vector_setup");
 
     const similarEpisodeIds = new Set<string>();
     let groupedLoopResults: LoopEpisodeGroupedResult[] = [];
@@ -702,6 +907,8 @@ export async function runLoopMinerForUser(
         };
       }
     }
+    progress.endPhase("vector_setup", { vectorSearchEnabled: loopVectorSearchEnabled });
+    flushProgress(deps, auth, runId, progress);
     if (loopVectorSearchEnabled && deps.repository.updateEpisodeEmbeddingMetadata) {
       // Determine which episodes need (re)embedding
       type EpisodePlan = {
@@ -721,41 +928,107 @@ export async function runLoopMinerForUser(
         };
       });
       const toEmbed = plans.filter((plan) => plan.shouldUpsert);
+      progress.startPhase("episode_embedding", {
+        episodesTotal: plans.length,
+        episodesToEmbed: toEmbed.length,
+        episodesCached: plans.length - toEmbed.length,
+      });
 
-      // Batch all embedding texts into one API call
-      let batchVectors: (readonly number[])[] = [];
+      const vectorByEpisodeId = new Map<string, number[]>();
       if (toEmbed.length > 0) {
-        try {
-          batchVectors = await batchEmbedTextsWithRetry(toEmbed.map((plan) => plan.text));
-        } catch (error) {
-          const message = errorMessage(error);
+        const embedResult = await embedEpisodeTextsResilient(toEmbed.map((plan) => plan.text), progress);
+        let embeddedCount = 0;
+        for (const [index, plan] of toEmbed.entries()) {
+          const vector = embedResult.vectors[index];
+          if (vector && vector.length > 0) {
+            vectorByEpisodeId.set(plan.episode.id, vector);
+            embeddedCount += 1;
+            continue;
+          }
           summary.warnings = [
             ...(summary.warnings ?? []),
-            `Loop episode batch embedding failed (${toEmbed.length} episode(s)): ${message}`,
+            `Loop episode embedding failed for episode ${plan.episode.id}`,
           ];
-          // Mark all pending episodes as failed
-          await Promise.allSettled(toEmbed.map((plan) =>
-            deps.repository.updateEpisodeEmbeddingMetadata!({
+          try {
+            await deps.repository.updateEpisodeEmbeddingMetadata!({
               auth,
               episodeId: plan.episode.id,
               embeddingTextHash: plan.hash,
               status: "failed",
               embeddedAt: null,
-            })
-          ));
+            });
+          } catch {
+            // Non-fatal metadata write failure.
+          }
         }
+        if (embedResult.chunkFailures > 0) {
+          summary.warnings = [
+            ...(summary.warnings ?? []),
+            `Loop episode embedding used single-item fallback after ${embedResult.chunkFailures} batch chunk failure(s).`,
+          ];
+        }
+        if (embedResult.itemFailures > 0) {
+          summary.warnings = [
+            ...(summary.warnings ?? []),
+            `Loop episode embedding failed for ${embedResult.itemFailures} episode(s) after retries.`,
+          ];
+        }
+        if (embeddedCount === 0 && toEmbed.length > 0) {
+          summary.warnings = [
+            ...(summary.warnings ?? []),
+            `Loop episode vector retrieval skipped: all ${toEmbed.length} embedding attempt(s) failed.`,
+          ];
+        }
+        progress.endPhase("episode_embedding", {
+          embeddedCount,
+          chunkFailures: embedResult.chunkFailures,
+          itemFailures: embedResult.itemFailures,
+        });
+      } else {
+        progress.endPhase("episode_embedding", { embeddedCount: 0, skipped: true });
       }
+      flushProgress(deps, auth, runId, progress);
 
-      const vectorByEpisodeId = new Map<string, number[]>(
-        toEmbed.map((plan, idx) => [plan.episode.id, [...(batchVectors[idx] ?? [])]])
-      );
+      progress.startPhase("vector_index_and_search", { episodesTotal: plans.length });
+      let vectorUpserts = 0;
+      let vectorSearches = 0;
+      let vectorSearchHits = 0;
 
-      for (const { episode, hash: embeddingHash, shouldUpsert } of plans) {
+      for (const [planIndex, { episode, hash: embeddingHash, shouldUpsert }] of plans.entries()) {
+        if (planIndex === 0 || planIndex % 5 === 0 || planIndex === plans.length - 1) {
+          progress.step("vector index/search progress", {
+            episodeIndex: planIndex + 1,
+            episodesTotal: plans.length,
+            vectorUpserts,
+            vectorSearches,
+            similarEpisodeCount: similarEpisodeIds.size,
+          });
+        }
         const canonicalFacet = deriveCanonicalLoopFacet(episode);
-        const vector = vectorByEpisodeId.get(episode.id) ?? [];
+        let vector = vectorByEpisodeId.get(episode.id) ?? [];
+
+        if (!shouldUpsert && vector.length === 0) {
+          try {
+            const storedVector = await loopEpisodeVectorRepository.getEpisodeVector({
+              auth,
+              episodeId: episode.id,
+            });
+            if (storedVector && storedVector.length > 0) {
+              vector = storedVector;
+              vectorByEpisodeId.set(episode.id, storedVector);
+            }
+          } catch (error) {
+            summary.warnings = [
+              ...(summary.warnings ?? []),
+              `Loop episode vector load failed for episode ${episode.id}: ${errorMessage(error)}`,
+            ];
+          }
+        }
 
         if (shouldUpsert && vector.length === 0) {
-          // Batch failed for this episode — already marked failed above, skip to vector search
+          continue;
+        }
+        if (vector.length === 0) {
           continue;
         }
         const invalidVectorReason = (() => {
@@ -821,6 +1094,7 @@ export async function runLoopMinerForUser(
               status: "ready",
               embeddedAt: new Date().toISOString(),
             });
+            vectorUpserts += 1;
           } catch (error) {
             const message = errorMessage(error);
             summary.warnings = [
@@ -862,8 +1136,12 @@ export async function runLoopMinerForUser(
             mechanismSignature: canonicalFacet.mechanismSignature,
             excludeEpisodeId: episode.id,
           });
+          vectorSearches += 1;
           for (const hit of similar) {
-            if (hit.score >= 0.72) similarEpisodeIds.add(hit.episodeId);
+            if (hit.score >= 0.72) {
+              similarEpisodeIds.add(hit.episodeId);
+              vectorSearchHits += 1;
+            }
           }
         } catch (error) {
           const message = errorMessage(error);
@@ -913,8 +1191,24 @@ export async function runLoopMinerForUser(
           });
         }
       }
+      progress.endPhase("vector_index_and_search", {
+        vectorUpserts,
+        vectorSearches,
+        vectorSearchHits,
+        similarEpisodeCount: similarEpisodeIds.size,
+        groupedAnchorCount: groupedLoopResults.length,
+      });
+    } else {
+      progress.skipPhase("episode_embedding", "vector_search_disabled");
+      progress.skipPhase("vector_index_and_search", "vector_search_disabled");
     }
+    flushProgress(deps, auth, runId, progress);
 
+    progress.step("preparing loop detector input", {
+      builtEpisodes: built.episodes.length,
+      reusedEpisodes: reusedEpisodes.length,
+      similarEpisodesFromVectors: similarEpisodeIds.size,
+    });
     const allEvidenceEpisodes = dedupeEpisodesById([...reusedEpisodes, ...built.episodes]);
     const newEpisodeIds = new Set(built.episodes.map((episode) => episode.id));
     const baseDetectorEpisodes = latestIncremental && built.episodes.length > 0
@@ -948,7 +1242,20 @@ export async function runLoopMinerForUser(
       }))
     );
 
-    const detected = await deps.loopDetector.execute(detectorEpisodes);
+    progress.startPhase("loop_detector", {
+      inputEpisodes: detectorEpisodes.length,
+      additionalContextEpisodes: additionalEpisodes.length,
+      vectorGroupedParents: loopParents.length,
+    });
+    const detected = await deps.loopDetector.execute(detectorEpisodes, { runId, progress });
+    progress.endPhase("loop_detector", {
+      candidateGroups: detected.patternTrace.candidateGroups.length,
+      approvedLoops: detected.loops.length,
+      aiCalls: detected.aiCalls,
+      batchesProcessed: detected.phaseUsage.batchesProcessed,
+      batchesSkipped: detected.phaseUsage.batchesSkipped,
+    });
+    flushProgress(deps, auth, runId, progress);
     const restrictToNewEvidence = latestIncremental !== null && newEpisodeIds.size > 0;
     const candidateLoops = restrictToNewEvidence
       ? detected.loops.filter((loop) => loop.episodeIds.some((id) => newEpisodeIds.has(id)))
@@ -1001,10 +1308,19 @@ export async function runLoopMinerForUser(
       episodesByLoop.set(keyForLoop(loop), await deps.repository.listEpisodeContext(auth, loop.episodeIds));
     }
 
+    progress.startPhase("loop_evaluator", { candidateLoops: candidateLoops.length });
     const evaluated = await deps.loopEvaluator.execute({
       candidateLoops,
       episodesByLoop,
+      progress,
     });
+    progress.endPhase("loop_evaluator", {
+      qualifiedLoops: evaluated.evaluations.length,
+      aiCalls: evaluated.aiCalls,
+      batchesProcessed: evaluated.phaseUsage.batchesProcessed,
+      batchesSkipped: evaluated.phaseUsage.batchesSkipped,
+    });
+    flushProgress(deps, auth, runId, progress);
     mergeCleanupAiUsage(summary.usage, evaluated.usage);
     summary.aiCalls += evaluated.aiCalls;
     summary.loopsQualified = evaluated.evaluations.length;
@@ -1030,7 +1346,15 @@ export async function runLoopMinerForUser(
         return item !== null && item.episodes.length >= 2;
       });
 
-    const generated = await deps.dnaGenerator.execute({ qualifiedLoops });
+    progress.startPhase("dna_generator", { qualifiedLoops: qualifiedLoops.length });
+    const generated = await deps.dnaGenerator.execute({ qualifiedLoops, progress });
+    progress.endPhase("dna_generator", {
+      workflowsGenerated: generated.dna.length,
+      aiCalls: generated.aiCalls,
+      batchesProcessed: generated.phaseUsage.batchesProcessed,
+      batchesSkipped: generated.phaseUsage.batchesSkipped,
+    });
+    flushProgress(deps, auth, runId, progress);
     mergeCleanupAiUsage(summary.usage, generated.usage);
     summary.aiCalls += generated.aiCalls;
     summary.phaseUsage = {
@@ -1041,6 +1365,7 @@ export async function runLoopMinerForUser(
       summary.warnings = [...(summary.warnings ?? []), ...generated.warnings];
     }
 
+    progress.startPhase("persist_suggestions", { workflowsToPersist: generated.dna.length });
     const suggestions = [];
     let suggestionsUpdated = 0;
     for (const item of generated.dna) {
@@ -1077,12 +1402,16 @@ export async function runLoopMinerForUser(
     if (summary.incremental) {
       summary.incremental.suggestionsUpdated = suggestionsUpdated;
     }
-    summary = finalizeSummary(summary, startedAt);
+    progress.endPhase("persist_suggestions", {
+      suggestionsPersisted: suggestions.length,
+      suggestionsUpdated,
+    });
+    summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
     await deps.repository.completeRun({ auth, runId, status: "completed", summary });
-    logger.info("loop miner run completed", { runId, ...loggableSummary(summary) });
+    logger.info("loop miner run completed", { runId, ...loggableSummary(summary), ...progress.snapshot() });
     return { id: runId, status: "completed", summary, suggestions };
   } catch (error) {
-    summary = finalizeSummary(summary, startedAt);
+    summary = attachProgressTrace(finalizeSummary(summary, startedAt), progress);
     await deps.repository.completeRun({
       auth,
       runId,
@@ -1090,14 +1419,223 @@ export async function runLoopMinerForUser(
       summary,
       error: errorJson(error),
     }).catch(() => {});
-    logger.error("loop miner run failed", { runId, error: errorJson(error) });
+    logger.error("loop miner run failed", { runId, error: errorJson(error), ...progress.snapshot() });
     return { id: runId, status: "failed", summary, suggestions: [] };
+  }
+}
+
+function projectEpisodesTo2d(episodes: Array<{ episode: EpisodeRecord; vector: number[] }>): LoopMinerEpisodeEmbeddingPoint[] {
+  if (episodes.length === 0) return [];
+  if (episodes.length === 1) {
+    const only = episodes[0];
+    return [{
+      episodeId: only.episode.id,
+      intent: only.episode.intent,
+      outputType: only.episode.outputType,
+      sealedAt: only.episode.sealedAt,
+      turnCount: only.episode.turnCount,
+      sources: only.episode.sources,
+      embeddingStatus: only.episode.embeddingStatus,
+      x: 0,
+      y: 0,
+    }];
+  }
+
+  const sampleCount = episodes.length;
+  const dims = Math.max(...episodes.map(({ vector }) => vector.length));
+  if (dims <= 0) return [];
+
+  const matrix = episodes.map(({ vector }) => {
+    const row = new Array<number>(dims).fill(0);
+    for (let index = 0; index < vector.length; index += 1) row[index] = vector[index] ?? 0;
+    return row;
+  });
+
+  const means = new Array<number>(dims).fill(0);
+  for (const row of matrix) {
+    for (let dim = 0; dim < dims; dim += 1) means[dim] += row[dim];
+  }
+  for (let dim = 0; dim < dims; dim += 1) means[dim] /= sampleCount;
+  for (const row of matrix) {
+    for (let dim = 0; dim < dims; dim += 1) row[dim] -= means[dim];
+  }
+
+  const multiplyCovariance = (vector: number[]): number[] => {
+    const result = new Array<number>(dims).fill(0);
+    const scale = sampleCount > 1 ? 1 / (sampleCount - 1) : 1;
+    for (const row of matrix) {
+      let dot = 0;
+      for (let dim = 0; dim < dims; dim += 1) dot += row[dim] * vector[dim];
+      if (Math.abs(dot) <= 1e-12) continue;
+      for (let dim = 0; dim < dims; dim += 1) result[dim] += row[dim] * dot;
+    }
+    for (let dim = 0; dim < dims; dim += 1) result[dim] *= scale;
+    return result;
+  };
+
+  const normalizeVector = (vector: number[]): number[] => {
+    let normSquared = 0;
+    for (const value of vector) normSquared += value * value;
+    const norm = Math.sqrt(normSquared);
+    if (!Number.isFinite(norm) || norm <= 1e-12) return vector.map(() => 0);
+    return vector.map((value) => value / norm);
+  };
+
+  const powerIteration = (orthogonalTo?: number[]): number[] => {
+    let candidate = normalizeVector(new Array<number>(dims).fill(1 / Math.sqrt(Math.max(1, dims))));
+    for (let iteration = 0; iteration < 40; iteration += 1) {
+      let next = multiplyCovariance(candidate);
+      if (orthogonalTo) {
+        let projection = 0;
+        for (let dim = 0; dim < dims; dim += 1) projection += next[dim] * orthogonalTo[dim];
+        for (let dim = 0; dim < dims; dim += 1) next[dim] -= projection * orthogonalTo[dim];
+      }
+      candidate = normalizeVector(next);
+    }
+    return candidate;
+  };
+
+  const componentX = powerIteration();
+  const componentY = powerIteration(componentX);
+  const xValues = matrix.map((row) => row.reduce((sum, value, dim) => sum + (value * componentX[dim]), 0));
+  const yValues = matrix.map((row) => row.reduce((sum, value, dim) => sum + (value * componentY[dim]), 0));
+  const maxAbsX = Math.max(...xValues.map((value) => Math.abs(value)), 1e-9);
+  const maxAbsY = Math.max(...yValues.map((value) => Math.abs(value)), 1e-9);
+
+  return episodes.map(({ episode }, index) => ({
+    episodeId: episode.id,
+    intent: episode.intent,
+    outputType: episode.outputType,
+    sealedAt: episode.sealedAt,
+    turnCount: episode.turnCount,
+    sources: episode.sources,
+    embeddingStatus: episode.embeddingStatus,
+    x: xValues[index] / maxAbsX,
+    y: yValues[index] / maxAbsY,
+  }));
+}
+
+export async function getLoopMinerRunForUser(auth: AuthContext, runId: string): Promise<LoopMinerRunView | null> {
+  const repo = new PgLoopMinerRepository();
+  return repo.getRunView(auth, runId);
+}
+
+export async function getLoopMinerRunEmbeddingMapForUser(
+  auth: AuthContext,
+  runId: string
+): Promise<LoopMinerEpisodeEmbeddingMapView | null> {
+  const run = await getLoopMinerRunForUser(auth, runId);
+  if (!run) return null;
+
+  const episodes = run.episodes;
+  const episodeIds = episodes.map((episode) => episode.id);
+  if (!config.qdrantUrl) {
+    return {
+      runId,
+      points: [],
+      meta: {
+        totalEpisodes: episodes.length,
+        mappedEpisodes: 0,
+        missingEpisodeIds: episodeIds,
+        vectorStoreEnabled: false,
+        reason: "Loop vector store is disabled.",
+      },
+    };
+  }
+
+  try {
+    await loopEpisodeVectorRepository.ensureReady();
+    const vectors = await loopEpisodeVectorRepository.getEpisodeVectors({ auth, episodeIds });
+    const projected = projectEpisodesTo2d(
+      episodes
+        .map((episode) => {
+          const vector = vectors.get(episode.id) ?? null;
+          if (!vector || vector.length === 0) return null;
+          return { episode, vector };
+        })
+        .filter((value): value is { episode: EpisodeRecord; vector: number[] } => value !== null)
+    );
+    const mappedIds = new Set(projected.map((point) => point.episodeId));
+    return {
+      runId,
+      points: projected,
+      meta: {
+        totalEpisodes: episodes.length,
+        mappedEpisodes: projected.length,
+        missingEpisodeIds: episodeIds.filter((id) => !mappedIds.has(id)),
+        vectorStoreEnabled: true,
+      },
+    };
+  } catch (error) {
+    return {
+      runId,
+      points: [],
+      meta: {
+        totalEpisodes: episodes.length,
+        mappedEpisodes: 0,
+        missingEpisodeIds: episodeIds,
+        vectorStoreEnabled: true,
+        reason: `Failed to load episode vectors: ${errorMessage(error)}`,
+      },
+    };
   }
 }
 
 export async function listLoopMinerRunsForUser(auth: AuthContext, limit = 10): Promise<LoopMinerRunView[]> {
   const repo = new PgLoopMinerRepository();
   return repo.listRunViews(auth, limit);
+}
+
+export interface LoopMinerRunStatus {
+  id: string;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+  episodesBuilt: number;
+  loopsDetected: number;
+  loopsQualified: number;
+  suggestionsCreated: number;
+  liveProgress: LoopMinerSummary["liveProgress"] | null;
+  warnings: string[];
+}
+
+export async function getLoopMinerRunStatusForUser(auth: AuthContext, runId: string): Promise<LoopMinerRunStatus | null> {
+  const result = await pool.query<{
+    id: string;
+    status: string;
+    created_at: string;
+    completed_at: string | null;
+    episodes_built: number;
+    loops_detected: number;
+    loops_qualified: number;
+    suggestions_created: number;
+    summary_json: unknown;
+  }>(
+    `SELECT id, status, created_at, completed_at,
+            episodes_built, loops_detected, loops_qualified, suggestions_created,
+            summary_json
+     FROM loop_miner_runs
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+     LIMIT 1`,
+    [runId, auth.tenantId, auth.userId]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  const rawSummary = row.summary_json && typeof row.summary_json === "object" && !Array.isArray(row.summary_json)
+    ? row.summary_json as Record<string, unknown>
+    : {};
+  return {
+    id: row.id,
+    status: row.status,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+    episodesBuilt: Number(row.episodes_built ?? 0),
+    loopsDetected: Number(row.loops_detected ?? 0),
+    loopsQualified: Number(row.loops_qualified ?? 0),
+    suggestionsCreated: Number(row.suggestions_created ?? 0),
+    liveProgress: (rawSummary.liveProgress as LoopMinerSummary["liveProgress"]) ?? null,
+    warnings: Array.isArray(rawSummary.warnings) ? rawSummary.warnings.filter((w): w is string => typeof w === "string") : [],
+  };
 }
 
 export async function queueLoopMinerRunForUser(

@@ -240,6 +240,17 @@ type LoopMinerRun = {
         loopsOutput?: number;
       };
     };
+    debugTrace?: {
+      phaseTimings?: Array<{
+        phase: string;
+        startedAt: string;
+        endedAt?: string;
+        durationMs?: number;
+        status: "running" | "completed" | "failed" | "skipped";
+        details?: Record<string, unknown>;
+      }>;
+      totalElapsedMs?: number;
+    };
   };
   error?: unknown;
   createdAt: string;
@@ -258,6 +269,57 @@ type LoopMinerRunPayload = {
   queued?: boolean;
   message?: string;
   error?: string;
+};
+
+type LoopMinerEmbeddingPoint = {
+  episodeId: string;
+  intent: string;
+  outputType: string;
+  sealedAt: string;
+  turnCount: number;
+  sources: string[];
+  embeddingStatus?: "pending" | "ready" | "failed";
+  x: number;
+  y: number;
+};
+
+type LoopMinerEmbeddingMap = {
+  runId: string;
+  points: LoopMinerEmbeddingPoint[];
+  meta: {
+    totalEpisodes: number;
+    mappedEpisodes: number;
+    missingEpisodeIds: string[];
+    vectorStoreEnabled: boolean;
+    reason?: string;
+  };
+};
+
+type LoopMinerEmbeddingMapPayload = {
+  map?: LoopMinerEmbeddingMap;
+  error?: string;
+};
+
+type LoopMinerPhaseTiming = {
+  phase: string;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  status: "running" | "completed" | "failed" | "skipped";
+  details?: Record<string, unknown>;
+};
+
+type LoopMinerRunStatus = {
+  id: string;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+  episodesBuilt: number;
+  loopsDetected: number;
+  loopsQualified: number;
+  suggestionsCreated: number;
+  liveProgress: { phaseTimings: LoopMinerPhaseTiming[]; totalElapsedMs: number } | null;
+  warnings: string[];
 };
 
 const PAGE_SIZE = 200;
@@ -335,6 +397,16 @@ function formatCost(value: number | undefined): string {
   return `$${(value ?? 0).toFixed(6)}`;
 }
 
+function formatDuration(value: number | undefined): string {
+  const ms = value ?? 0;
+  if (ms <= 0) return "0ms";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
 function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -353,6 +425,25 @@ function phaseIcon(status: CleanupProposal["status"]) {
   return <GitMerge className="h-4 w-4" />;
 }
 
+const EMBEDDING_MAP_COLORS = [
+  "#2563eb",
+  "#0d9488",
+  "#c2410c",
+  "#be123c",
+  "#7c3aed",
+  "#4d7c0f",
+  "#0369a1",
+  "#b45309",
+];
+
+function outputTypeColor(outputType: string): string {
+  let hash = 0;
+  for (let index = 0; index < outputType.length; index += 1) {
+    hash = ((hash << 5) - hash + outputType.charCodeAt(index)) | 0;
+  }
+  return EMBEDDING_MAP_COLORS[Math.abs(hash) % EMBEDDING_MAP_COLORS.length] ?? EMBEDDING_MAP_COLORS[0];
+}
+
 export default function MemoryCleanupPage() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [runs, setRuns] = useState<CleanupRun[]>([]);
@@ -368,6 +459,10 @@ export default function MemoryCleanupPage() {
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [adminEmailStatus, setAdminEmailStatus] = useState<RunPayload["adminEmail"] | null>(null);
   const [loopMinerNotice, setLoopMinerNotice] = useState<string | null>(null);
+  const [loopMinerEmbeddingMaps, setLoopMinerEmbeddingMaps] = useState<Record<string, LoopMinerEmbeddingMap>>({});
+  const [loopMinerEmbeddingLoadingForRunId, setLoopMinerEmbeddingLoadingForRunId] = useState<string | null>(null);
+  const [loopMinerEmbeddingErrorByRunId, setLoopMinerEmbeddingErrorByRunId] = useState<Record<string, string>>({});
+  const [liveRunStatus, setLiveRunStatus] = useState<LoopMinerRunStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedCount = selectedIds.size;
@@ -402,6 +497,9 @@ export default function MemoryCleanupPage() {
   const loopMinerRunAgeMs = latestLoopMinerRun ? Date.now() - Date.parse(latestLoopMinerRun.createdAt) : 0;
   const loopMinerRunStale = latestLoopMinerRun?.status === "running" && Number.isFinite(loopMinerRunAgeMs) && loopMinerRunAgeMs > LOOP_MINER_STALE_MS;
   const loopMinerInProgress = latestLoopMinerRun?.status === "running" && !loopMinerRunStale;
+  const latestLoopEmbeddingMap = latestLoopMinerRun ? loopMinerEmbeddingMaps[latestLoopMinerRun.id] ?? null : null;
+  const latestLoopEmbeddingError = latestLoopMinerRun ? loopMinerEmbeddingErrorByRunId[latestLoopMinerRun.id] ?? null : null;
+  const latestLoopEmbeddingLoading = latestLoopMinerRun ? loopMinerEmbeddingLoadingForRunId === latestLoopMinerRun.id : false;
 
   const fetchMemories = useCallback(async () => {
     const nextMemories: MemoryItem[] = [];
@@ -458,6 +556,72 @@ export default function MemoryCleanupPage() {
     void refreshAll();
   }, [refreshAll]);
 
+  useEffect(() => {
+    const runId = latestLoopMinerRun?.id;
+    if (!runId) return;
+    if (loopMinerEmbeddingMaps[runId]) return;
+    if (loopMinerEmbeddingLoadingForRunId === runId) return;
+
+    let cancelled = false;
+    setLoopMinerEmbeddingLoadingForRunId(runId);
+    setLoopMinerEmbeddingErrorByRunId((current) => {
+      if (!current[runId]) return current;
+      const next = { ...current };
+      delete next[runId];
+      return next;
+    });
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/memories/cleanup/loop-miner/runs/${runId}/embedding-map`, { cache: "no-store" });
+        const payload = (await response.json().catch(() => ({}))) as LoopMinerEmbeddingMapPayload;
+        if (!response.ok || !payload.map) throw new Error(payload.error ?? "Failed to load loop miner embedding map");
+        if (cancelled) return;
+        setLoopMinerEmbeddingMaps((current) => ({ ...current, [runId]: payload.map! }));
+      } catch (mapError) {
+        if (cancelled) return;
+        const message = mapError instanceof Error ? mapError.message : "Failed to load loop miner embedding map";
+        setLoopMinerEmbeddingErrorByRunId((current) => ({ ...current, [runId]: message }));
+      } finally {
+        if (!cancelled) setLoopMinerEmbeddingLoadingForRunId((current) => (current === runId ? null : current));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [latestLoopMinerRun, loopMinerEmbeddingLoadingForRunId, loopMinerEmbeddingMaps]);
+
+  // Poll live progress every 5s while a run is active
+  useEffect(() => {
+    const runId = latestLoopMinerRun?.id;
+    if (!loopMinerInProgress || !runId) {
+      setLiveRunStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/memories/cleanup/loop-miner/runs/${runId}/status`, { cache: "no-store" });
+        const data = (await res.json().catch(() => null)) as LoopMinerRunStatus | null;
+        if (!cancelled && data) {
+          setLiveRunStatus(data);
+          if (data.status !== "running") {
+            await fetchLoopMinerRuns({ activateLatest: true });
+          }
+        }
+      } catch {
+        // ignore poll errors
+      }
+    };
+    void poll();
+    const interval = setInterval(() => { void poll(); }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [loopMinerInProgress, latestLoopMinerRun?.id, fetchLoopMinerRuns]);
+
   const runCleanup = useCallback(async (dryRun: boolean) => {
     setRunningMode(dryRun ? "dry" : "apply");
     setError(null);
@@ -468,12 +632,9 @@ export default function MemoryCleanupPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           dryRun,
-          maxMemories: PAGE_SIZE,
-          processAll: false,
+          processAll: true,
           includeReviewed: false,
           selectionStrategy: "newest_hybrid",
-          newestLimit: 150,
-          interestingLimit: 50,
         }),
       });
       const payload = (await response.json().catch(() => ({}))) as RunPayload;
@@ -492,11 +653,12 @@ export default function MemoryCleanupPage() {
     setLoopMinerRunning(true);
     setError(null);
     setLoopMinerNotice(null);
+    setLiveRunStatus(null);
     try {
       const response = await fetch("/api/memories/cleanup/loop-miner/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lookbackDays: 30, memoryNewestLimit: 150, memoryInterestingLimit: 50 }),
+        body: JSON.stringify({ lookbackDays: 30, processAll: true }),
       });
       const payload = (await response.json().catch(() => ({}))) as LoopMinerRunPayload;
       if (!response.ok || !payload.run) throw new Error(payload.error ?? "Failed to run Loop Miner");
@@ -930,6 +1092,74 @@ export default function MemoryCleanupPage() {
                     </div>
                   ) : null}
 
+                  {(() => {
+                    const livePhases = loopMinerInProgress ? (liveRunStatus?.liveProgress?.phaseTimings ?? null) : null;
+                    const finalPhases = latestLoopMinerRun.summary.debugTrace?.phaseTimings ?? null;
+                    const phases = livePhases ?? finalPhases;
+                    const totalElapsedMs = loopMinerInProgress
+                      ? (liveRunStatus?.liveProgress?.totalElapsedMs ?? null)
+                      : (latestLoopMinerRun.summary.debugTrace?.totalElapsedMs ?? latestLoopMinerRun.summary.durationMs ?? null);
+                    if (!phases?.length && !loopMinerInProgress) return null;
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Phase Timings
+                            {loopMinerInProgress ? <Loader2 className="h-3 w-3 animate-spin text-slate-400" /> : null}
+                          </div>
+                          <div className="text-xs text-slate-400">
+                            {totalElapsedMs != null ? `elapsed ${formatDuration(totalElapsedMs)}` : "waiting for first phase…"}
+                          </div>
+                        </div>
+                        {phases?.length ? (
+                          <div className="space-y-1">
+                            {phases.map((phase) => (
+                              <div
+                                key={`${phase.phase}-${phase.startedAt}`}
+                                className={`border p-2 text-xs leading-5 ${phase.status === "running" ? "border-blue-200 bg-blue-50" : "border-slate-200 bg-white"} text-slate-600`}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+                                    {phase.status === "running" ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-blue-500" /> : null}
+                                    {phase.phase}
+                                  </div>
+                                  <span className={`shrink-0 border px-1.5 py-0.5 text-[10px] ${pillClass(phase.status === "completed" ? "completed" : phase.status === "failed" ? "failed" : phase.status === "skipped" ? "rejected" : "running")}`}>
+                                    {phase.status}
+                                  </span>
+                                </div>
+                                {phase.durationMs != null ? <div>{formatDuration(phase.durationMs)}</div> : null}
+                                {phase.details ? (
+                                  <div className="mt-1 break-all text-[11px] text-slate-500">
+                                    {Object.entries(phase.details).slice(0, 6).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="border border-blue-100 bg-blue-50 p-3 text-xs text-blue-600">
+                            Starting up… first phase will appear here in a few seconds.
+                          </div>
+                        )}
+                        {loopMinerInProgress && liveRunStatus ? (
+                          <div className="grid grid-cols-4 gap-2 text-center">
+                            {[
+                              ["episodes", liveRunStatus.episodesBuilt],
+                              ["loops", liveRunStatus.loopsDetected],
+                              ["qualified", liveRunStatus.loopsQualified],
+                              ["suggestions", liveRunStatus.suggestionsCreated],
+                            ].map(([label, value]) => (
+                              <div key={label} className="border border-blue-100 bg-blue-50 p-2">
+                                <div className="text-lg font-semibold text-blue-800">{value}</div>
+                                <div className="text-[11px] text-blue-500">{label}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })()}
+
                   {latestLoopMinerRun.summary.patternTrace ? (
                     <div className="space-y-2">
                       <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Pattern Trace</div>
@@ -990,6 +1220,75 @@ export default function MemoryCleanupPage() {
                       <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(latestLoopMinerRun.error, null, 2)}</pre>
                     </div>
                   ) : null}
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Episode Embedding Map</div>
+                      {latestLoopEmbeddingMap ? (
+                        <div className="text-[11px] text-slate-400">
+                          {latestLoopEmbeddingMap.meta.mappedEpisodes}/{latestLoopEmbeddingMap.meta.totalEpisodes} mapped
+                        </div>
+                      ) : null}
+                    </div>
+                    {latestLoopEmbeddingLoading ? (
+                      <div className="border border-slate-200 bg-white p-3 text-sm text-slate-500">
+                        <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
+                        Loading embedding projection...
+                      </div>
+                    ) : latestLoopEmbeddingError ? (
+                      <div className="border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{latestLoopEmbeddingError}</div>
+                    ) : !latestLoopEmbeddingMap ? (
+                      <div className="border border-dashed border-slate-200 bg-white p-3 text-sm text-slate-500">
+                        Run Loop Miner to generate episode embeddings.
+                      </div>
+                    ) : latestLoopEmbeddingMap.points.length === 0 ? (
+                      <div className="border border-dashed border-slate-200 bg-white p-3 text-sm text-slate-500">
+                        {latestLoopEmbeddingMap.meta.reason ?? "No episode vectors available for this run yet."}
+                      </div>
+                    ) : (
+                      <>
+                        <div className="border border-slate-200 bg-white p-2">
+                          <svg viewBox="0 0 600 330" className="h-[220px] w-full">
+                            <rect x="0" y="0" width="600" height="330" fill="#ffffff" />
+                            <line x1="300" y1="24" x2="300" y2="306" stroke="#cbd5e1" strokeDasharray="4 4" />
+                            <line x1="24" y1="165" x2="576" y2="165" stroke="#cbd5e1" strokeDasharray="4 4" />
+                            {latestLoopEmbeddingMap.points.map((point) => {
+                              const x = 24 + (((point.x + 1) / 2) * 552);
+                              const y = 306 - (((point.y + 1) / 2) * 282);
+                              const radius = Math.max(4, Math.min(10, 4 + Math.sqrt(Math.max(1, point.turnCount))));
+                              const color = outputTypeColor(point.outputType);
+                              return (
+                                <circle key={point.episodeId} cx={x} cy={y} r={radius} fill={color} fillOpacity={0.82} stroke="#ffffff" strokeWidth="1.5">
+                                  <title>{`${point.intent} (${point.outputType}) · ${point.turnCount} turns`}</title>
+                                </circle>
+                              );
+                            })}
+                          </svg>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5 text-[11px]">
+                          {Object.entries(
+                            latestLoopEmbeddingMap.points.reduce<Record<string, number>>((counts, point) => {
+                              counts[point.outputType] = (counts[point.outputType] ?? 0) + 1;
+                              return counts;
+                            }, {})
+                          )
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 8)
+                            .map(([outputType, count]) => (
+                              <span key={outputType} className="inline-flex items-center gap-1 border border-slate-200 bg-white px-2 py-0.5 text-slate-600">
+                                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: outputTypeColor(outputType) }} />
+                                {outputType} ({count})
+                              </span>
+                            ))}
+                        </div>
+                        {latestLoopEmbeddingMap.meta.missingEpisodeIds.length > 0 ? (
+                          <div className="text-[11px] text-slate-400">
+                            {latestLoopEmbeddingMap.meta.missingEpisodeIds.length} episode(s) missing vectors
+                          </div>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
 
                   <div className="space-y-2">
                     <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Generated Suggestions</div>

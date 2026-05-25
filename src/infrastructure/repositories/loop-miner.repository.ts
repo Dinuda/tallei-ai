@@ -324,9 +324,18 @@ function memoryDecisionForRow(row: MemoryRecordEventRow): LoopMinerMemoryDecisio
 }
 
 function boundedMemorySelectionOptions(options: LoopMinerMemorySelectionOptions | undefined): Required<LoopMinerMemorySelectionOptions> {
+  if (options?.processAll) {
+    return {
+      processAll: true,
+      newestLimit: Number.MAX_SAFE_INTEGER,
+      interestingLimit: 0,
+      candidateLimit: options.candidateLimit ?? Number.MAX_SAFE_INTEGER,
+    };
+  }
   const newestLimit = Math.max(1, options?.newestLimit ?? 150);
   const interestingLimit = Math.max(0, options?.interestingLimit ?? 50);
   return {
+    processAll: false,
     newestLimit,
     interestingLimit,
     candidateLimit: Math.max(newestLimit + interestingLimit, options?.candidateLimit ?? 2_000),
@@ -334,6 +343,18 @@ function boundedMemorySelectionOptions(options: LoopMinerMemorySelectionOptions 
 }
 
 function selectMemoryEventsForMining(events: MinerEvent[], options: Required<LoopMinerMemorySelectionOptions>): MinerEvent[] {
+  if (options.processAll) {
+    return events.map((event) => ({
+      ...event,
+      metadata: {
+        ...readRecord(event.metadata),
+        selectionRole: "process_all",
+        selectionConsidered: events.length,
+        selectionCandidateLimit: events.length,
+        selectionTruncated: false,
+      },
+    }));
+  }
   const result = selectNewestHybrid({
     items: events,
     newestLimit: options.newestLimit,
@@ -371,6 +392,15 @@ function selectMemoryDecisionsForMining(
   decisions: LoopMinerMemoryDecision[],
   options: Required<LoopMinerMemorySelectionOptions>
 ): LoopMinerMemoryDecision[] {
+  if (options.processAll) {
+    return decisions.map((decision) => ({
+      ...decision,
+      selectionRole: "process_all" as const,
+      selectionConsidered: decisions.length,
+      selectionCandidateLimit: decisions.length,
+      selectionTruncated: false,
+    }));
+  }
   const result = selectNewestHybrid({
     items: decisions,
     newestLimit: options.newestLimit,
@@ -571,6 +601,9 @@ function readSummary(value: unknown): LoopMinerSummary {
       loopEvaluator: phaseUsageRow.loopEvaluator ? readPhase(phaseUsageRow.loopEvaluator) : undefined,
       dnaGenerator: phaseUsageRow.dnaGenerator ? readPhase(phaseUsageRow.dnaGenerator) : undefined,
     },
+    liveProgress: raw.liveProgress && typeof raw.liveProgress === "object" && !Array.isArray(raw.liveProgress)
+      ? raw.liveProgress as LoopMinerSummary["liveProgress"]
+      : undefined,
   };
 }
 
@@ -776,6 +809,18 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     return id;
   }
 
+  async patchRunLiveProgress(auth: AuthContext, runId: string, liveProgress: LoopMinerSummary["liveProgress"]): Promise<void> {
+    await pool.query(
+      `UPDATE loop_miner_runs
+       SET summary_json = COALESCE(summary_json, '{}'::jsonb) || jsonb_build_object('liveProgress', $4::jsonb)
+       WHERE id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+         AND status = 'running'`,
+      [runId, auth.tenantId, auth.userId, JSON.stringify(liveProgress)]
+    );
+  }
+
   async markStaleRunningRunsFailed(auth: AuthContext, maxAgeMs: number): Promise<number> {
     const safeAgeMs = Math.max(60_000, maxAgeMs);
     const result = await pool.query(
@@ -841,6 +886,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     options?: LoopMinerMemorySelectionOptions
   ): Promise<MinerEvent[]> {
     const memorySelection = boundedMemorySelectionOptions(options);
+    const fetchLimit = memorySelection.processAll ? null : memorySelection.candidateLimit;
     const activityResult = await pool.query<AiActivityRow>(
       `SELECT id, source, activity_type, content_text, metadata_json, created_at
        FROM ai_activity_events
@@ -848,8 +894,10 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
          AND user_id = $2
          AND created_at >= NOW() - ($3::text || ' days')::interval
        ORDER BY created_at ASC
-       LIMIT 500`,
-      [auth.tenantId, auth.userId, days]
+       ${fetchLimit ? "LIMIT $4" : ""}`,
+      fetchLimit
+        ? [auth.tenantId, auth.userId, days, fetchLimit]
+        : [auth.tenantId, auth.userId, days]
     );
 
     const collabResult = await pool.query<CollabTaskRow>(
@@ -859,8 +907,10 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
          AND user_id = $2
          AND created_at >= NOW() - ($3::text || ' days')::interval
        ORDER BY created_at ASC
-       LIMIT $4`,
-      [auth.tenantId, auth.userId, days, memorySelection.candidateLimit]
+       ${fetchLimit ? "LIMIT $4" : ""}`,
+      fetchLimit
+        ? [auth.tenantId, auth.userId, days, fetchLimit]
+        : [auth.tenantId, auth.userId, days]
     );
 
     const memoryResult = await pool.query<MemoryRecordEventRow>(
@@ -884,8 +934,10 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
        ORDER BY
          CASE WHEN summary_json->>'source_import' = 'true' THEN 0 ELSE 1 END,
          created_at ASC
-       LIMIT 300`,
-      [auth.tenantId, auth.userId, days]
+       ${fetchLimit ? "LIMIT $4" : ""}`,
+      fetchLimit
+        ? [auth.tenantId, auth.userId, days, fetchLimit]
+        : [auth.tenantId, auth.userId, days]
     );
 
     const activities: MinerEvent[] = activityResult.rows.map((row) => ({
@@ -935,6 +987,7 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
     options?: LoopMinerMemorySelectionOptions
   ): Promise<LoopMinerMemoryDecision[]> {
     const memorySelection = boundedMemorySelectionOptions(options);
+    const fetchLimit = memorySelection.processAll ? null : memorySelection.candidateLimit;
     const result = await pool.query<MemoryRecordEventRow>(
       `SELECT id, content_ciphertext, platform, memory_type, category, is_pinned, importance, summary_json, created_at
        FROM memory_records
@@ -947,8 +1000,10 @@ export class LoopMinerRepository implements LoopMinerRepositoryContract {
          CASE WHEN summary_json->>'source_import' = 'true' THEN 0 ELSE 1 END,
          CASE WHEN NOT (summary_json ? 'cleanup_bucket') THEN 0 ELSE 1 END,
          created_at DESC
-       LIMIT $4`,
-      [auth.tenantId, auth.userId, days, memorySelection.candidateLimit]
+       ${fetchLimit ? "LIMIT $4" : ""}`,
+      fetchLimit
+        ? [auth.tenantId, auth.userId, days, fetchLimit]
+        : [auth.tenantId, auth.userId, days]
     );
     return selectMemoryDecisionsForMining(result.rows.map((row) => memoryDecisionForRow(row)), memorySelection);
   }

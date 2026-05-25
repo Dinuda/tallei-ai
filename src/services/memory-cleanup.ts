@@ -36,7 +36,8 @@ export interface RunMemoryCleanupOptions {
   candidateLimit?: number;
 }
 
-const DEFAULT_MAX_MEMORIES = 200;
+const DEFAULT_MAX_MEMORIES = 500;
+const PROCESS_ALL_BATCH_SIZE = 500;
 const DEFAULT_NEWEST_LIMIT = 150;
 const DEFAULT_INTERESTING_LIMIT = 50;
 const logger = createLogger({ baseFields: { component: "memory_cleanup" } });
@@ -213,13 +214,19 @@ export async function runMemoryCleanupForUser(
 ): Promise<MemoryCleanupRunView> {
   const runReason = options.runReason ?? "manual";
   const dryRun = options.dryRun ?? (runReason === "manual");
-  const maxMemories = Math.max(1, Math.min(options.maxMemories ?? DEFAULT_MAX_MEMORIES, 500));
   const processAll = options.processAll ?? true;
   const includeReviewed = options.includeReviewed ?? false;
   const logImplicitKeeps = options.logImplicitKeeps ?? false;
   const selectionStrategy = options.selectionStrategy ?? "current_priority";
-  const newestLimit = Math.max(1, Math.min(options.newestLimit ?? DEFAULT_NEWEST_LIMIT, maxMemories));
-  const interestingLimit = Math.max(0, Math.min(options.interestingLimit ?? DEFAULT_INTERESTING_LIMIT, maxMemories - newestLimit));
+  const maxMemories = processAll
+    ? Math.max(1, options.maxMemories ?? PROCESS_ALL_BATCH_SIZE)
+    : Math.max(1, Math.min(options.maxMemories ?? DEFAULT_MAX_MEMORIES, 500));
+  const newestLimit = processAll
+    ? maxMemories
+    : Math.max(1, Math.min(options.newestLimit ?? DEFAULT_NEWEST_LIMIT, maxMemories));
+  const interestingLimit = processAll
+    ? 0
+    : Math.max(0, Math.min(options.interestingLimit ?? DEFAULT_INTERESTING_LIMIT, maxMemories - newestLimit));
   const candidateLimit = Math.max(maxMemories, options.candidateLimit ?? 2_000);
   const startedAt = Date.now();
 

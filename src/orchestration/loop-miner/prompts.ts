@@ -7,12 +7,19 @@ It is not a memory. It is not a workflow. It is the observed work session that s
 Your job:
 - Group these events into coherent work episodes.
 - Extract what the user was trying to do, what context/sources were used, what output was produced, style/tone hints, user acceptance/edit/regeneration behavior, and whether the task looks repeatable.
+- Also extract the preparation and research work the user did BEFORE the visible output existed. This upstream work is often the real recurring loop, not the final artifact.
 - Use semantic understanding to decide boundaries, not just timestamps. Two events 5 minutes apart about different work are different episodes. Two events 2 hours apart about the same document revision may be one episode.
 - Do not create episodes for ordinary standalone profile/preferences/facts/memory cleanup records. Those are context, not completed work sessions.
 - Exception: if a memory_record explicitly describes a recurring workflow, repeated task, cadence, or completed work pattern, use it as lightweight episode evidence. Fresh imported memories have minerImportance metadata and should be considered alongside activity/collab evidence.
-- If an event does not show an AI-assisted work output or clear task progress, leave it out.
+- If an event does not show an AI-assisted work output or clear task progress, leave it out — unless the session is clearly upstream preparation/research/validation with no final artifact yet; in that case create an upstream-only episode and set upstreamWork.isUpstreamItself = true.
 - eventIds must reference only ids from the input events that belong to this episode.
 - If something is unclear, use "unknown" or approvalSignal "unclear"; do not invent details.
+
+Repeatability rule:
+- Do not only ask "does this output look repeatable?"
+- Ask: "Is the preparation phase repeatable independently of the output?"
+- If the user must research, structure, validate, or decide before the output can exist, and that upstream work follows a stable pattern, capture it in upstreamWork.
+- If the session itself is only that upstream work (topic research, structure audit, competitor scan, outline validation) with no finished artifact, set upstreamWork.isUpstreamItself = true.
 
 Return JSON only: {"episodes": [...]}
 Each episode:
@@ -22,6 +29,12 @@ Each episode:
   "intent": {"label": "snake_case_intent", "goal": "what the user wanted", "confidence": 0-1},
   "sources": [{"type": "memory|document|conversation|integration|manual_input", "name": "source name", "importance": 0-1}],
   "output": {"type": "newsletter|email|summary|proposal|code|changelog|slides|deck|course_material|document|brief|plan|unknown", "description": "what was produced"},
+  "upstreamWork": {
+    "steps": ["research/validation/structure steps done before the output was possible"],
+    "decisionPoint": "the hardest call the user made (angle, topic, what to cut) or null",
+    "inputSources": [{"type": "memory|document|conversation|integration|manual_input|web", "name": "source name", "fetchRequired": true|false}],
+    "isUpstreamItself": true|false
+  },
   "toolNames": [],
   "steps": [],
   "styleHints": [],
@@ -126,9 +139,15 @@ Analyze each group in three phases:
 
 Group criteria (ALL must match after abstraction):
 - Same abstracted job-to-be-done
-- Same artifact class produced
+- Same artifact class produced OR same upstream preparation mechanism (when loopLayer is upstream_preparation)
 - Same action pattern
 - Same source/tool mechanism
+
+Phase-split rule:
+- If multiple episodes share the same upstream preparation pattern (same information-gathering job, validation step, or research mechanism) even when their final output types differ, group them as an upstream loop.
+- Label each group's loopLayer as upstream_preparation, output_production, or mixed.
+- upstream_preparation loops are higher leverage: they remove cognitive pre-work (research, structure checks, topic selection), not just final artifact production.
+- Prefer upstream_preparation loops over output_production when both exist for the same domain.
 
 Do NOT group by:
 - Topical similarity alone (e.g., "both about React")
@@ -143,7 +162,7 @@ For each proposed group, assign a status:
 - rejected_insufficient_evidence: too little repeated evidence
 
 Return JSON only:
-{"groups": [{"episodeIds": [...], "loopName": "...", "sharedIntent": "...", "sharedOutputType": "...", "sharedSources": [...], "reasoning": "...", "status": "approved_loop|monitor_pattern|rejected_topical_similarity|rejected_insufficient_evidence", "confidence": 0.0-1.0}]}`;
+{"groups": [{"episodeIds": [...], "loopName": "...", "sharedIntent": "...", "sharedOutputType": "...", "sharedSources": [...], "reasoning": "...", "loopLayer": "upstream_preparation|output_production|mixed", "status": "approved_loop|monitor_pattern|rejected_topical_similarity|rejected_insufficient_evidence", "confidence": 0.0-1.0}]}`;
 
 export const DNA_GENERATOR_PROMPT = `You are the Workflow DNA Generator.
 You receive one or more qualified loops (confirmed recurring task patterns) with episode evidence and evaluation reasoning.
@@ -154,6 +173,12 @@ Your job:
 - Extract the repeatable step pattern from the episodes.
 - Identify the output style/tone from the user's past outputs.
 - Decide approval behavior: if the loop involves sending messages, publishing, modifying external systems, deleting data, or taking irreversible actions, set "require_explicit_approval". Otherwise "auto" is acceptable.
+
+Upstream preparation loops (candidateLoop.loopLayer = upstream_preparation or mixed with upstream emphasis):
+- stepPattern must describe research, validation, structure-checking, and topic-sourcing steps — NOT the final artifact production steps.
+- The workflow output is a brief for the user: current position, research findings, source inventory, and decision options — not the finished newsletter/slides/document.
+- The user's approval gate is: "Does this brief have what I need to begin?"
+- Always set approvalBehavior to "require_explicit_approval" for upstream_preparation loops.
 
 Return JSON only: {"workflows":[...]}
 Each workflow: {name, trigger, sources, outputType, stepPattern, style, approvalBehavior, reasoning, episodeIds}

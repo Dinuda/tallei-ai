@@ -8,6 +8,7 @@ import { emptyCleanupAiUsage, recordCleanupAiUsage } from "../memory-cleanup/usa
 import { loopMinerModelForPhase } from "./model.js";
 import { EPISODE_BUILDER_PROMPT } from "./prompts.js";
 import type { EpisodeBuilderEfficiencyMetrics, EpisodeRecord, LoopMinerRepository, MinerEvent } from "./types.js";
+import type { LoopMinerRunProgress } from "./run-progress.js";
 import {
   chunkEventsByTimeGap,
   compactMinerEvent,
@@ -67,6 +68,7 @@ export class EpisodeBuilderUseCase {
     auth: AuthContext;
     runId: string;
     events: MinerEvent[];
+    progress?: LoopMinerRunProgress;
   }): Promise<{
     episodes: EpisodeRecord[];
     raw: unknown[];
@@ -185,6 +187,11 @@ export class EpisodeBuilderUseCase {
       return { episodes, raw: rawResponses, aiCalls, usage, warnings, phaseUsage };
     }
     const preChunks = chunkEventsByTimeGap(llmEvents, 4);
+    input.progress?.step("episode builder starting llm extraction", {
+      llmEvents: llmEvents.length,
+      deterministicEpisodes: episodes.length,
+      timeChunks: preChunks.length,
+    });
 
     for (const [chunkIndex, chunk] of preChunks.entries()) {
       const compacted = chunk.map((event) => compactMinerEvent(event, { contentSummaryCharCap: compactSummaryCap }));
@@ -196,6 +203,14 @@ export class EpisodeBuilderUseCase {
 
       for (const [batchIndex, batch] of packed.batches.entries()) {
         batchesProcessed += 1;
+        const batchStartedAt = Date.now();
+        input.progress?.step("episode builder batch started", {
+          chunkIndex: chunkIndex + 1,
+          chunkTotal: preChunks.length,
+          batchIndex: batchIndex + 1,
+          batchTotal: packed.batches.length,
+          eventCount: batch.length,
+        });
         const validEventIds = new Set(batch.map((event) => event.id));
         const request: ChatCompletionRequest = {
           model: loopMinerModelForPhase("episode"),
@@ -220,6 +235,12 @@ export class EpisodeBuilderUseCase {
           response = await chatWithRetry(this.chat, request);
         } catch (error) {
           batchesSkipped += 1;
+          input.progress?.step("episode builder batch failed", {
+            chunkIndex: chunkIndex + 1,
+            batchIndex: batchIndex + 1,
+            durationMs: Date.now() - batchStartedAt,
+            reason: errorMessage(error),
+          });
           const warning =
             `phase=episode_builder chunk=${chunkIndex + 1}/${preChunks.length} batch=${batchIndex + 1}/${packed.batches.length} items=${batch.length} estimatedPromptTokens=${estimatedPromptTokens} reason=${errorMessage(error)}`;
           warnings.push(warning);
@@ -236,6 +257,12 @@ export class EpisodeBuilderUseCase {
 
         recordCleanupAiUsage(usage, request, response);
         aiCalls += 1;
+        input.progress?.step("episode builder batch completed", {
+          chunkIndex: chunkIndex + 1,
+          batchIndex: batchIndex + 1,
+          durationMs: Date.now() - batchStartedAt,
+          episodesBuiltSoFar: episodes.length,
+        });
 
         const raw = readJsonObject(response.text);
         rawResponses.push(raw);

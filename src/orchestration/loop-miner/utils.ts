@@ -8,6 +8,7 @@ import type {
   EpisodeTurnRecord,
   LoopOperationalDomain,
   LoopEvaluation,
+  LoopLayer,
   LoopVerdict,
   MinerEvent,
   ProjectProgressionVerdict,
@@ -89,6 +90,45 @@ function isApprovalSignal(value: unknown): value is ApprovalSignal {
 
 function isCadence(value: unknown): value is Cadence {
   return value === "daily" || value === "weekly" || value === "monthly" || value === "event_based" || value === "unknown";
+}
+
+function isLoopLayer(value: unknown): value is LoopLayer {
+  return value === "upstream_preparation" || value === "output_production" || value === "mixed";
+}
+
+function normalizeUpstreamWork(value: unknown): EpisodeExtraction["upstreamWork"] | undefined {
+  const row = readObject(value);
+  if (Object.keys(row).length === 0) return undefined;
+  const inputSourcesRaw = row.inputSources ?? row.input_sources;
+  const inputSourceRows = Array.isArray(inputSourcesRaw) ? inputSourcesRaw : [];
+  const inputSources = (inputSourceRows as unknown[])
+    .map((source): NonNullable<EpisodeExtraction["upstreamWork"]>["inputSources"][number] | null => {
+      if (typeof source === "string") {
+        const name = source.trim();
+        return name ? { type: "manual_input", name, fetchRequired: false } : null;
+      }
+      const sourceRow = readObject(source);
+      const name = readString(sourceRow.name ?? sourceRow.source, "");
+      if (!name) return null;
+      const rawType = sourceRow.type ?? sourceRow.source_type;
+      return {
+        type: typeof rawType === "string" && rawType.trim() ? rawType.trim() : "manual_input",
+        name,
+        fetchRequired: sourceRow.fetchRequired === true || sourceRow.fetch_required === true,
+      };
+    })
+    .filter((source): source is NonNullable<EpisodeExtraction["upstreamWork"]>["inputSources"][number] => Boolean(source));
+  const decisionPointRaw = row.decisionPoint ?? row.decision_point;
+  const decisionPoint = typeof decisionPointRaw === "string" && decisionPointRaw.trim()
+    ? decisionPointRaw.trim()
+    : null;
+  const isUpstreamItselfRaw = row.isUpstreamItself ?? row.is_upstream_itself;
+  return {
+    steps: readStringArray(row.steps),
+    decisionPoint,
+    inputSources,
+    isUpstreamItself: isUpstreamItselfRaw === true,
+  };
 }
 
 function normalizeNullableBoolean(value: unknown): boolean | null | undefined {
@@ -328,6 +368,7 @@ export function compactEpisodeForPrompt(
     steps: episode.steps,
     styleHints: episode.styleHints ?? [],
     automationSignals: episode.automationSignals ?? null,
+    upstreamWork: episode.upstreamWork ?? null,
     userBehavior: episode.userBehavior ?? null,
     sealedAt: episode.sealedAt,
     approved: episode.approved,
@@ -366,6 +407,7 @@ export function normalizeEpisodeExtraction(value: unknown, validEventIds: Set<st
   const outputRow = readObject(row.output);
   const behaviorRow = readObject(row.userBehavior ?? row.user_behavior);
   const automationRow = readObject(row.automationSignals ?? row.automation_signals);
+  const upstreamWork = normalizeUpstreamWork(row.upstreamWork ?? row.upstream_work);
   const sourceRows = Array.isArray(row.sources) ? row.sources : [];
   const sourceDetails = sourceRows
     .map((source): NonNullable<EpisodeExtraction["sourceDetails"]>[number] | null => {
@@ -429,6 +471,7 @@ export function normalizeEpisodeExtraction(value: unknown, validEventIds: Set<st
       businessValue: normalizeConfidence(automationRow.businessValue ?? automationRow.business_value),
       automationReadiness: normalizeConfidence(automationRow.automationReadiness ?? automationRow.automation_readiness),
     },
+    upstreamWork,
     confidence: normalizeConfidence(row.confidence),
     approved,
     eventIds,
@@ -449,6 +492,7 @@ export function normalizeCandidateLoop(value: unknown, validEpisodeIds: Set<stri
   const row = value as Record<string, unknown>;
   const episodeIds = readStringArray(row.episodeIds ?? row.episode_ids).filter((id) => validEpisodeIds.has(id));
   if (episodeIds.length < 2) return null;
+  const loopLayerRaw = row.loopLayer ?? row.loop_layer;
   return {
     loopName: readString(row.loopName ?? row.loop_name, "Recurring workflow"),
     episodeIds,
@@ -456,6 +500,7 @@ export function normalizeCandidateLoop(value: unknown, validEpisodeIds: Set<stri
     sharedSources: readStringArray(row.sharedSources ?? row.shared_sources),
     sharedOutputType: readString(row.sharedOutputType ?? row.shared_output_type, "unknown"),
     reasoning: readString(row.reasoning, "Episodes repeat the same workflow pattern."),
+    loopLayer: isLoopLayer(loopLayerRaw) ? loopLayerRaw : undefined,
   };
 }
 
@@ -526,6 +571,9 @@ export function normalizeWorkflowDna(value: unknown, fallback: { loop: Candidate
   if (requiresApproval(dna)) {
     return { ...dna, approvalBehavior: "require_explicit_approval" };
   }
+  if (fallback.loop.loopLayer === "upstream_preparation" || fallback.loop.loopLayer === "mixed") {
+    return { ...dna, approvalBehavior: "require_explicit_approval" };
+  }
   return dna;
 }
 
@@ -546,7 +594,7 @@ export function workflowDnaPrompt(dna: WorkflowDNA): string {
 }
 
 export const LOOP_EPISODE_EXTRACTION_VERSION = "loop_episode_extraction_v2";
-export const LOOP_EPISODE_EMBEDDING_VERSION = "loop_episode_embedding_v2";
+export const LOOP_EPISODE_EMBEDDING_VERSION = "loop_episode_embedding_v3";
 
 function stableHash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -683,6 +731,85 @@ export function deriveCanonicalLoopFacet(episode: EpisodeRecord): CanonicalLoopF
     artifactClass,
     actionClass,
     sequenceSignal,
+  };
+}
+
+export function coarseMechanismClusterKey(facet: CanonicalLoopFacet): string {
+  const inputMatch = facet.mechanismSignature.match(/^input:([^|]+)/);
+  const inputClass = inputMatch?.[1] ?? "unknown";
+  return `domain:${facet.operationalDomain}|action:${facet.actionClass}|input:${inputClass}`;
+}
+
+export function normalizedStepClusterKey(episode: EpisodeRecord): string | null {
+  const steps = episode.steps.join(" ").toLowerCase().replace(/\s+/g, " ").trim();
+  if (steps.length < 16) return null;
+  return `steps:${steps}`;
+}
+
+export interface MinerEventEvidenceCapOptions {
+  maxEvidenceDays: number;
+  maxEventsPerRun: number;
+  nowMs?: number;
+}
+
+export interface MinerEventEvidenceCapResult {
+  events: MinerEvent[];
+  capped: boolean;
+  cutoffDate: string;
+  beforeCap: number;
+  afterCap: number;
+  droppedByDate: number;
+  droppedByCount: number;
+}
+
+export function capMinerEventsWhenOverloaded(
+  events: MinerEvent[],
+  options: MinerEventEvidenceCapOptions,
+): MinerEventEvidenceCapResult {
+  const beforeCap = events.length;
+  const maxEvidenceDays = Math.max(1, options.maxEvidenceDays);
+  const maxEventsPerRun = options.maxEventsPerRun;
+  const nowMs = options.nowMs ?? Date.now();
+  const cutoffMs = nowMs - maxEvidenceDays * 24 * 60 * 60 * 1000;
+  const cutoffDate = new Date(cutoffMs).toISOString();
+
+  if (maxEventsPerRun <= 0 || beforeCap <= maxEventsPerRun) {
+    return {
+      events,
+      capped: false,
+      cutoffDate,
+      beforeCap,
+      afterCap: beforeCap,
+      droppedByDate: 0,
+      droppedByCount: 0,
+    };
+  }
+
+  const withinDate = events.filter((event) => {
+    const createdAt = Date.parse(event.createdAt);
+    return Number.isFinite(createdAt) && createdAt >= cutoffMs;
+  });
+  const droppedByDate = beforeCap - withinDate.length;
+
+  let selected = withinDate;
+  let droppedByCount = 0;
+  if (selected.length > maxEventsPerRun) {
+    droppedByCount = selected.length - maxEventsPerRun;
+    selected = [...selected]
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .slice(0, maxEventsPerRun);
+  }
+
+  selected = [...selected].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+
+  return {
+    events: selected,
+    capped: true,
+    cutoffDate,
+    beforeCap,
+    afterCap: selected.length,
+    droppedByDate,
+    droppedByCount,
   };
 }
 
@@ -851,6 +978,8 @@ export function consolidateWorkspaceGroupedHits(groups: WorkspaceGroupedHit[]): 
 
 export function episodeEmbeddingText(episode: EpisodeRecord): string {
   const canonical = deriveCanonicalLoopFacet(episode);
+  const upstreamSteps = (episode.upstreamWork?.steps ?? []).join(" | ");
+  const upstreamDecision = episode.upstreamWork?.decisionPoint ?? "";
   return [
     `version=${LOOP_EPISODE_EMBEDDING_VERSION}`,
     `abstractedJtbd=${canonical.abstractedJtbd}`,
@@ -862,6 +991,9 @@ export function episodeEmbeddingText(episode: EpisodeRecord): string {
     `outputType=${episode.outputType}`,
     `sources=${episode.sources.join(", ")}`,
     `tools=${episode.toolNames.join(", ")}`,
+    `upstreamSteps=${upstreamSteps}`,
+    `upstreamDecision=${upstreamDecision}`,
+    `isUpstreamItself=${episode.upstreamWork?.isUpstreamItself === true}`,
   ].join("\n");
 }
 

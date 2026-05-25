@@ -224,15 +224,26 @@ function isBulkUploadFile(file: File): boolean {
   return isConversationJsonImportFile(file);
 }
 
-const CHATGPT_MEMORY_EXPORT_PROMPT = `Extract my memory-relevant facts from this chat and return ONLY a JSON array of objects.
+const CHATGPT_MEMORY_EXPORT_PROMPT = `Extract memory-relevant facts from this chat and return ONLY a JSON array of objects.
 
-Balance complete coverage with a loop/workflow bias.
+Goal: capture what the user actually does repeatedly — especially the underlying operational work that could be automated — not brainstorming sessions, future promises, or surface-level deliverables.
 
-Prioritize:
-1) Recurring workflows, repeated tasks, operating cadence, routines, checklists, and playbooks.
-2) Stable identity and preferences (communication style, tools, constraints, environment).
-3) Ongoing projects, decisions, commitments, deadlines, and notable events.
-4) Important lessons/failures and corrective actions.
+Prioritize recurring work the user performs (or clearly performs on a cadence):
+1) Upstream preparation before any output exists: research, structure audits, topic sourcing, competitor scans, outline validation, context gathering.
+2) Stable repeated action patterns: same job-to-be-done, same artifact type, same sources/tools — even when titles, week numbers, or wording change.
+3) Operating cadence and checklists: weekly reviews, pre-publish steps, pre-meeting prep, recurring validation gates.
+4) Domain scaffolding the user must establish before work can repeat: course structure (weeks/modules), newsletter format and product positioning, content pillars, approval flows.
+
+Deprioritize or skip:
+- Brainstorming, ideation, or planning sessions with no concrete repeated behavior.
+- One-off project milestones (e.g. "finished Week 3 slides") unless they reveal a reusable step pattern.
+- What the user said they might do next — only what they actually do or have done more than once.
+- Generic preferences and identity unless they directly constrain how recurring work runs.
+
+For each recurring domain, go one level deeper than the visible output:
+- Course/slide work → how many weeks/modules, course structure, topic research per module, slide template/style.
+- Newsletter → newsletter type, product/audience, how new topics are chosen, inspiration sources, pre-write research steps.
+- Reports → data sources, aggregation steps, review/approval before sending.
 
 Rules:
 - Keep each item atomic, explicit, and reusable.
@@ -240,16 +251,16 @@ Rules:
 - Put the best available date/time for when the memory became true, happened, or was discussed.
 - Use ISO 8601 datetime when possible. If only a date is known, use YYYY-MM-DD. If unknown, use null.
 - Include enough detail to be actionable; skip filler/chit-chat.
-- Keep both loop-oriented and non-loop memories.
+- Include both upstream-preparation memories and final-output memories when both are evident.
 - Output valid JSON only.
 
 Example output:
 [
-  {"memory":"Every Monday I prepare the weekly product metrics report.","datetime":"2026-05-20"},
-  {"memory":"Use concise, direct explanations.","datetime":null},
-  {"memory":"I live in San Francisco.","datetime":"2026-05-20"},
-  {"memory":"Decision: use TypeScript for all new services.","datetime":"2026-05-20T10:30:00Z"},
-  {"memory":"When loop-miner runs timeout, split by token budget before retrying.","datetime":"2026-05-20"}
+  {"memory":"Before building course slides, I check how many weeks/modules exist and map the course structure first.","datetime":"2026-05-20"},
+  {"memory":"For each course module I research topics and gather references before drafting slides.","datetime":"2026-05-20"},
+  {"memory":"My newsletter is a product-update format for SaaS founders; I pick topics from user feedback and competitor newsletters.","datetime":"2026-05-18"},
+  {"memory":"Every Monday I pull metrics from Stripe and PostHog, summarize trends, and draft a short internal update.","datetime":"2026-05-20"},
+  {"memory":"Use concise, direct explanations.","datetime":null}
 ]`;
 
 const PAGE_SIZE = 20;
@@ -1305,7 +1316,7 @@ export default function DashboardMemoriesPage() {
                   }}
                   className={styles.importTextarea}
                   rows={6}
-                  placeholder='Paste ChatGPT output, e.g. [{"memory":"Every Monday I prepare the metrics report.","datetime":"2026-05-20"}]'
+                  placeholder='Paste ChatGPT output, e.g. [{"memory":"Before building course slides, I map the course structure and research topics per module.","datetime":"2026-05-20"}]'
                 />
               </details>
             )}

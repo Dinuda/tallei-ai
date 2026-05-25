@@ -6,6 +6,7 @@ import { emptyCleanupAiUsage, mergeCleanupAiUsage, recordCleanupAiUsage } from "
 import { loopMinerModelForPhase } from "./model.js";
 import { LOOP_EVALUATOR_PROMPT } from "./prompts.js";
 import type { CandidateLoop, EpisodeRecord, LoopEvaluation, PhaseUsageMetrics } from "./types.js";
+import type { LoopMinerRunProgress } from "./run-progress.js";
 import {
   compactEpisodeForPrompt,
   estimatePromptTokensFromRequest,
@@ -52,6 +53,7 @@ export class LoopEvaluatorUseCase {
   async execute(input: {
     candidateLoops: CandidateLoop[];
     episodesByLoop: Map<string, EpisodeRecord[]>;
+    progress?: LoopMinerRunProgress;
   }): Promise<{
     evaluations: LoopEvaluation[];
     raw: unknown[];
@@ -110,6 +112,12 @@ export class LoopEvaluatorUseCase {
     let batchesSkipped = 0;
 
     for (const [batchIndex, batch] of packed.batches.entries()) {
+      const batchStartedAt = Date.now();
+      input.progress?.step("loop evaluator batch started", {
+        batchIndex: batchIndex + 1,
+        batchTotal: packed.batches.length,
+        loopCount: batch.length,
+      });
       const request: ChatCompletionRequest = {
         model: loopMinerModelForPhase("evaluator"),
         temperature: 0,
@@ -129,6 +137,11 @@ export class LoopEvaluatorUseCase {
         response = await this.chat(request);
       } catch (error) {
         batchesSkipped += 1;
+        input.progress?.step("loop evaluator batch failed", {
+          batchIndex: batchIndex + 1,
+          durationMs: Date.now() - batchStartedAt,
+          reason: errorMessage(error),
+        });
         warnings.push(`phase=loop_evaluator batch=${batchIndex + 1}/${packed.batches.length} items=${batch.length} estimatedPromptTokens=${estimatedPromptTokens} reason=${errorMessage(error)}`);
         rawResponses.push({
           skipped: "loop_evaluator_batch_failed",
@@ -144,6 +157,11 @@ export class LoopEvaluatorUseCase {
       recordCleanupAiUsage(callUsage, request, response);
       mergeCleanupAiUsage(usage, callUsage);
       aiCalls += 1;
+      input.progress?.step("loop evaluator batch completed", {
+        batchIndex: batchIndex + 1,
+        durationMs: Date.now() - batchStartedAt,
+        qualifiedSoFar: evaluations.length,
+      });
 
       const raw = readJsonObject(response.text);
       rawResponses.push(raw);

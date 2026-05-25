@@ -6,6 +6,7 @@ import { emptyCleanupAiUsage, mergeCleanupAiUsage, recordCleanupAiUsage } from "
 import { loopMinerModelForPhase } from "./model.js";
 import { DNA_GENERATOR_PROMPT } from "./prompts.js";
 import type { CandidateLoop, EpisodeRecord, LoopEvaluation, PhaseUsageMetrics, WorkflowDNA } from "./types.js";
+import type { LoopMinerRunProgress } from "./run-progress.js";
 import {
   compactEpisodeForPrompt,
   estimatePromptTokensFromRequest,
@@ -57,6 +58,7 @@ export class DnaGeneratorUseCase {
 
   async execute(input: {
     qualifiedLoops: Array<{ candidateLoop: CandidateLoop; evaluation: LoopEvaluation; episodes: EpisodeRecord[] }>;
+    progress?: LoopMinerRunProgress;
   }): Promise<{
     dna: Array<{ candidateLoop: CandidateLoop; evaluation: LoopEvaluation; episodes: EpisodeRecord[]; workflowDna: WorkflowDNA }>;
     raw: unknown[];
@@ -114,6 +116,12 @@ export class DnaGeneratorUseCase {
     let batchesSkipped = 0;
 
     for (const [batchIndex, batch] of packed.batches.entries()) {
+      const batchStartedAt = Date.now();
+      input.progress?.step("dna generator batch started", {
+        batchIndex: batchIndex + 1,
+        batchTotal: packed.batches.length,
+        loopCount: batch.length,
+      });
       const request: ChatCompletionRequest = {
         model: loopMinerModelForPhase("dna"),
         temperature: 0,
@@ -143,6 +151,11 @@ export class DnaGeneratorUseCase {
         response = await this.chat(request);
       } catch (error) {
         batchesSkipped += 1;
+        input.progress?.step("dna generator batch failed", {
+          batchIndex: batchIndex + 1,
+          durationMs: Date.now() - batchStartedAt,
+          reason: errorMessage(error),
+        });
         warnings.push(`phase=dna_generator batch=${batchIndex + 1}/${packed.batches.length} items=${batch.length} estimatedPromptTokens=${estimatedPromptTokens} reason=${errorMessage(error)}`);
         rawResponses.push({
           skipped: "dna_generator_batch_failed",
@@ -158,6 +171,11 @@ export class DnaGeneratorUseCase {
       recordCleanupAiUsage(callUsage, request, response);
       mergeCleanupAiUsage(usage, callUsage);
       aiCalls += 1;
+      input.progress?.step("dna generator batch completed", {
+        batchIndex: batchIndex + 1,
+        durationMs: Date.now() - batchStartedAt,
+        workflowsSoFar: dna.length,
+      });
 
       const raw = readJsonObject(response.text);
       rawResponses.push(raw);

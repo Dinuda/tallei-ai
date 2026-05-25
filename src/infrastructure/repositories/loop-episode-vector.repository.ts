@@ -171,6 +171,77 @@ export class LoopEpisodeVectorRepository {
     });
   }
 
+  async getEpisodeVector(input: {
+    auth: AuthContext;
+    episodeId: string;
+  }): Promise<number[] | null> {
+    await ensureCollection();
+    const client = getClient();
+    const pointId = deterministicPointUuid(`loop-episode:${input.auth.tenantId}:${input.auth.userId}:${input.episodeId}`);
+    const points = await client.retrieve(config.loopQdrantCollectionName, {
+      ids: [pointId],
+      with_payload: false,
+      with_vector: true,
+    });
+    const vector = points[0]?.vector;
+    if (Array.isArray(vector)) {
+      return vector.filter((value): value is number => typeof value === "number");
+    }
+    if (vector && typeof vector === "object") {
+      const values = Object.values(vector as Record<string, number[]>)[0];
+      if (Array.isArray(values)) {
+        return values.filter((value): value is number => typeof value === "number");
+      }
+    }
+    return null;
+  }
+
+  async getEpisodeVectors(input: {
+    auth: AuthContext;
+    episodeIds: string[];
+  }): Promise<Map<string, number[]>> {
+    await ensureCollection();
+    const client = getClient();
+    const uniqueEpisodeIds = [...new Set(input.episodeIds.filter((value) => value.trim().length > 0))];
+    if (uniqueEpisodeIds.length === 0) return new Map();
+
+    const episodeByPointId = new Map<string, string>();
+    const pointIds = uniqueEpisodeIds.map((episodeId) => {
+      const pointId = deterministicPointUuid(`loop-episode:${input.auth.tenantId}:${input.auth.userId}:${episodeId}`);
+      episodeByPointId.set(pointId, episodeId);
+      return pointId;
+    });
+
+    const points = await client.retrieve(config.loopQdrantCollectionName, {
+      ids: pointIds,
+      with_payload: ["episode_id"],
+      with_vector: true,
+    });
+
+    const vectors = new Map<string, number[]>();
+    for (const point of points) {
+      const payload = (point.payload ?? {}) as Record<string, unknown>;
+      const payloadEpisodeId = typeof payload.episode_id === "string" ? payload.episode_id : null;
+      const fallbackEpisodeId = point.id != null ? episodeByPointId.get(String(point.id)) ?? null : null;
+      const episodeId = payloadEpisodeId ?? fallbackEpisodeId;
+      if (!episodeId) continue;
+
+      const rawVector = point.vector;
+      if (Array.isArray(rawVector)) {
+        vectors.set(episodeId, rawVector.filter((value): value is number => typeof value === "number"));
+        continue;
+      }
+      if (rawVector && typeof rawVector === "object") {
+        const firstVector = Object.values(rawVector as Record<string, number[]>)[0];
+        if (Array.isArray(firstVector)) {
+          vectors.set(episodeId, firstVector.filter((value): value is number => typeof value === "number"));
+        }
+      }
+    }
+
+    return vectors;
+  }
+
   async searchSimilarEpisodes(input: {
     auth: AuthContext;
     vector: number[];

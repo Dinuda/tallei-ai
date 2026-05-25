@@ -28,6 +28,8 @@ export interface MinerEvent {
   metadata: unknown;
 }
 
+export type LoopLayer = "upstream_preparation" | "output_production" | "mixed";
+
 export interface EpisodeExtraction {
   title?: string;
   summary?: string;
@@ -65,6 +67,12 @@ export interface EpisodeExtraction {
     likelyCadence?: "daily" | "weekly" | "monthly" | "event_based" | "unknown";
     businessValue: number;
     automationReadiness: number;
+  };
+  upstreamWork?: {
+    steps: string[];
+    decisionPoint: string | null;
+    inputSources: Array<{ type: string; name: string; fetchRequired: boolean }>;
+    isUpstreamItself: boolean;
   };
   confidence?: number;
   approved: boolean;
@@ -153,6 +161,7 @@ export interface CandidateLoop {
   sharedSources: string[];
   sharedOutputType: string;
   reasoning: string;
+  loopLayer?: LoopLayer;
   patternConfidence?: number;
   patternStatus?: PatternJudgeStatus;
 }
@@ -297,6 +306,16 @@ export interface LoopMinerSummary {
       fallbackEventsReplaced: number;
       includedMemoryIdsSample: string[];
       memoryEventIdsSample: string[];
+      evidenceCap?: {
+        requestedLookbackDays: number;
+        maxEvidenceDays: number;
+        maxEventsPerRun: number;
+        beforeCap: number;
+        afterCap: number;
+        droppedByDate: number;
+        droppedByCount: number;
+        cutoffDate: string;
+      };
     };
     episodeBuilder?: {
       inputEvents: number;
@@ -333,6 +352,26 @@ export interface LoopMinerSummary {
           groupCount: number;
           runCount: number;
         };
+    phaseTimings?: Array<{
+      phase: string;
+      startedAt: string;
+      endedAt?: string;
+      durationMs?: number;
+      status: "running" | "completed" | "failed" | "skipped";
+      details?: Record<string, unknown>;
+    }>;
+    totalElapsedMs?: number;
+  };
+  liveProgress?: {
+    phaseTimings: Array<{
+      phase: string;
+      startedAt: string;
+      endedAt?: string;
+      durationMs?: number;
+      status: "running" | "completed" | "failed" | "skipped";
+      details?: Record<string, unknown>;
+    }>;
+    totalElapsedMs: number;
   };
   patternTrace?: PatternTrace;
   phaseUsage?: {
@@ -409,7 +448,7 @@ export interface LoopMinerMemoryDecision {
   cleanupSourceMemoryIds?: string[] | null;
   minerImportance: number;
   memoryImportance: number;
-  selectionRole?: "newest" | "interesting";
+  selectionRole?: "newest" | "interesting" | "process_all";
   selectionConsidered?: number;
   selectionCandidateLimit?: number;
   selectionTruncated?: boolean;
@@ -419,6 +458,8 @@ export interface LoopMinerMemorySelectionOptions {
   newestLimit?: number;
   interestingLimit?: number;
   candidateLimit?: number;
+  /** When true, include all eligible memories/events in the lookback window (no hybrid cap). */
+  processAll?: boolean;
 }
 
 export interface LoopMinerSuggestion {
@@ -462,6 +503,30 @@ export interface LoopMinerRunView {
   loopParents?: WorkspaceLoopParent[];
 }
 
+export interface LoopMinerEpisodeEmbeddingPoint {
+  episodeId: string;
+  intent: string;
+  outputType: string;
+  sealedAt: string;
+  turnCount: number;
+  sources: string[];
+  embeddingStatus?: "pending" | "ready" | "failed";
+  x: number;
+  y: number;
+}
+
+export interface LoopMinerEpisodeEmbeddingMapView {
+  runId: string;
+  points: LoopMinerEpisodeEmbeddingPoint[];
+  meta: {
+    totalEpisodes: number;
+    mappedEpisodes: number;
+    missingEpisodeIds: string[];
+    vectorStoreEnabled: boolean;
+    reason?: string;
+  };
+}
+
 export interface LoopMinerRepository {
   hasRunningDailyRun(auth: AuthContext): Promise<boolean>;
   hasCompletedDailyRunToday(auth: AuthContext): Promise<boolean>;
@@ -475,6 +540,7 @@ export interface LoopMinerRepository {
   }): Promise<void>;
   listRecentEvents(auth: AuthContext, days: number, options?: LoopMinerMemorySelectionOptions): Promise<MinerEvent[]>;
   listMemoryDecisionLog?(auth: AuthContext, days: number, options?: LoopMinerMemorySelectionOptions): Promise<LoopMinerMemoryDecision[]>;
+  patchRunLiveProgress?(auth: AuthContext, runId: string, liveProgress: LoopMinerSummary["liveProgress"]): Promise<void>;
   markStaleRunningRunsFailed?(auth: AuthContext, maxAgeMs: number): Promise<number>;
   getLatestCompletedIncrementalState?(auth: AuthContext, lookbackDays: number): Promise<{
     evidenceFingerprint: string;

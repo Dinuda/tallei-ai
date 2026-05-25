@@ -8,7 +8,7 @@ import { encryptMemoryContent } from "../../../src/infrastructure/crypto/memory-
 import { LoopMinerRepository } from "../../../src/infrastructure/repositories/loop-miner.repository.js";
 import { DnaGeneratorUseCase } from "../../../src/orchestration/loop-miner/dna-generator.usecase.js";
 import { EpisodeBuilderUseCase } from "../../../src/orchestration/loop-miner/episode-builder.usecase.js";
-import { LoopDetectorUseCase } from "../../../src/orchestration/loop-miner/loop-detector.usecase.js";
+import { LoopDetectorUseCase, buildDeterministicCandidateGroups } from "../../../src/orchestration/loop-miner/loop-detector.usecase.js";
 import { LoopEvaluatorUseCase } from "../../../src/orchestration/loop-miner/loop-evaluator.usecase.js";
 import { runLoopMinerForUser } from "../../../src/orchestration/loop-miner/loop-miner.js";
 import type {
@@ -26,6 +26,7 @@ import type {
 } from "../../../src/orchestration/loop-miner/types.js";
 import {
   chunkEventsByTimeGap,
+  capMinerEventsWhenOverloaded,
   compactMinerEvent,
   consolidateWorkspaceGroupedHits,
   deriveCanonicalLoopFacet,
@@ -364,6 +365,12 @@ test("loop miner normalizers validate ids, clamp confidence, and force approval 
     styleHints: ["short", "founder-like"],
     userBehavior: { accepted: true, edited: true, regenerated: false, ignored: false, approvalSignal: "approved" },
     automationSignals: { repeatable: true, likelyCadence: "weekly", businessValue: 0.8, automationReadiness: 0.7 },
+    upstreamWork: {
+      steps: ["identified topic angle", "checked prior issue list"],
+      decisionPoint: "which angle to lead with",
+      inputSources: [{ type: "memory", name: "newsletter archive", fetchRequired: false }],
+      isUpstreamItself: false,
+    },
     confidence: 0.9,
     eventIds: ["event-1"],
   }, new Set(["event-1"]));
@@ -374,6 +381,27 @@ test("loop miner normalizers validate ids, clamp confidence, and force approval 
   assert.deepEqual(extraction.sources, ["Tallei company memory"]);
   assert.equal(extraction.approved, true);
   assert.equal(extraction.automationSignals?.repeatable, true);
+  assert.deepEqual(extraction.upstreamWork, {
+    steps: ["identified topic angle", "checked prior issue list"],
+    decisionPoint: "which angle to lead with",
+    inputSources: [{ type: "memory", name: "newsletter archive", fetchRequired: false }],
+    isUpstreamItself: false,
+  });
+
+  const upstreamOnly = normalizeEpisodeExtraction({
+    title: "Newsletter topic research",
+    intent: { label: "research_newsletter_topics", goal: "Find next newsletter angle", confidence: 0.88 },
+    output: { type: "unknown", description: "No draft yet" },
+    upstreamWork: {
+      steps: ["review prior issues", "scan competitor newsletters"],
+      decisionPoint: "pick the lead topic",
+      inputSources: [{ type: "web", name: "competitor newsletters", fetchRequired: true }],
+      isUpstreamItself: true,
+    },
+    eventIds: ["event-2"],
+  }, new Set(["event-2"]));
+  assert.ok(upstreamOnly);
+  assert.equal(upstreamOnly?.upstreamWork?.isUpstreamItself, true);
 
   const memoryLike = normalizeEpisodeExtraction({
     intent: "User prefers no emoji",
@@ -389,9 +417,11 @@ test("loop miner normalizers validate ids, clamp confidence, and force approval 
     sharedSources: ["github"],
     sharedOutputType: "changelog",
     reasoning: "same task",
+    loopLayer: "upstream_preparation",
   }, new Set(["ep-1", "ep-2"]));
   assert.ok(candidate);
   assert.deepEqual(candidate.episodeIds, ["ep-1", "ep-2"]);
+  assert.equal(candidate.loopLayer, "upstream_preparation");
 
   const evaluation = normalizeLoopEvaluation({
     loopName: "Weekly changelog",
@@ -1372,6 +1402,85 @@ test("loop detector rejects imported memory entries that only share artifact/sou
   assert.equal(result.aiCalls, 0);
 });
 
+test("buildDeterministicCandidateGroups clusters repeated upstream work across episodes", () => {
+  const sharedSteps = ["Research comparable products", "Extract positioning patterns", "Draft topic brief"];
+  const makeEpisode = (id: string, intent: string): EpisodeRecord => ({
+    id,
+    title: intent,
+    summary: intent,
+    intent,
+    sources: ["Imported ChatGPT memory"],
+    outputType: "research_brief",
+    toolNames: ["chatgpt"],
+    steps: ["Write final newsletter draft"],
+    approved: true,
+    eventIds: [`memory-${id}`],
+    sealedAt: "2026-05-20T10:30:00.000Z",
+    turnCount: 1,
+    upstreamWork: {
+      steps: sharedSteps,
+      decisionPoint: "Pick the strongest topic angle",
+      inputSources: ["prior newsletters", "product notes"],
+      isUpstreamItself: true,
+    },
+    turns: [{
+      role: "user",
+      contentSummary: intent,
+      sourceEventType: "memory_record",
+      sourceEventId: `memory-${id}`,
+      createdAt: "2026-05-20T10:30:00.000Z",
+    }],
+  });
+  const groups = buildDeterministicCandidateGroups([
+    makeEpisode("episode-upstream-1", "Research newsletter topics for launch week"),
+    makeEpisode("episode-upstream-2", "Research newsletter topics for onboarding week"),
+  ]);
+  assert.ok(groups.some((group) => group.episodeIds.length === 2 && group.loopLayer === "upstream_preparation"));
+});
+
+test("loop detector finds deterministic loops without LLM when upstream work repeats", async () => {
+  const sharedSteps = ["Review analytics dashboard", "Identify three experiment ideas"];
+  const makeEpisode = (id: string, intent: string, createdAt: string): EpisodeRecord => ({
+    id,
+    title: intent,
+    summary: intent,
+    intent,
+    sources: ["Imported ChatGPT memory"],
+    outputType: "experiment_plan",
+    toolNames: ["chatgpt"],
+    steps: ["Capture experiment plan"],
+    approved: true,
+    eventIds: [`memory-${id}`],
+    sealedAt: createdAt,
+    turnCount: 1,
+    upstreamWork: {
+      steps: sharedSteps,
+      decisionPoint: "Choose the top three experiments",
+      inputSources: ["product analytics"],
+      isUpstreamItself: true,
+    },
+    turns: [{
+      role: "user",
+      contentSummary: intent,
+      sourceEventType: "memory_record",
+      sourceEventId: `memory-${id}`,
+      createdAt,
+    }],
+  });
+  const detector = new LoopDetectorUseCase(async () => ({
+    text: JSON.stringify({ groups: [] }),
+    model: "gpt-4.1-nano",
+    finishReason: "stop",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+  const result = await detector.execute([
+    makeEpisode("episode-upstream-a", "Friday analytics review for growth experiments", "2026-05-03T10:30:00.000Z"),
+    makeEpisode("episode-upstream-b", "Friday analytics review for retention experiments", "2026-05-17T10:30:00.000Z"),
+  ]);
+  assert.ok(result.patternTrace.candidateGroups.length >= 1);
+  assert.ok(result.loops.some((loop) => loop.loopLayer === "upstream_preparation"));
+});
+
 test("loop detector rejects same-topic groups when judge identifies topical similarity", async () => {
   const makeCourseEpisode = (id: string, intent: string, steps: string[]): EpisodeRecord => ({
     id,
@@ -1855,4 +1964,64 @@ test("loop detector keeps subset group when intent/output/source do not match", 
   ]);
 
   assert.equal(result.loops.length, 2);
+});
+
+test("capMinerEventsWhenOverloaded leaves small feeds unchanged", () => {
+  const nowMs = Date.parse("2026-05-25T12:00:00.000Z");
+  const events = [
+    { id: "e1", sourceEventType: "memory_record" as const, createdAt: "2026-05-20T10:00:00.000Z", platform: "chatgpt", contentSummary: "a", role: "user" as const, metadata: {} },
+    { id: "e2", sourceEventType: "memory_record" as const, createdAt: "2026-05-22T10:00:00.000Z", platform: "chatgpt", contentSummary: "b", role: "user" as const, metadata: {} },
+  ];
+  const result = capMinerEventsWhenOverloaded(events, {
+    maxEvidenceDays: 14,
+    maxEventsPerRun: 100,
+    nowMs,
+  });
+  assert.equal(result.capped, false);
+  assert.equal(result.afterCap, 2);
+  assert.deepEqual(result.events.map((event) => event.id), ["e1", "e2"]);
+});
+
+test("capMinerEventsWhenOverloaded keeps newest events within max evidence days", () => {
+  const nowMs = Date.parse("2026-05-25T12:00:00.000Z");
+  const events = Array.from({ length: 120 }, (_, index) => ({
+    id: `event-${index}`,
+    sourceEventType: "memory_record" as const,
+    createdAt: new Date(nowMs - index * 24 * 60 * 60 * 1000).toISOString(),
+    platform: "chatgpt",
+    contentSummary: `memory ${index}`,
+    role: "user" as const,
+    metadata: {},
+  }));
+  const result = capMinerEventsWhenOverloaded(events, {
+    maxEvidenceDays: 14,
+    maxEventsPerRun: 100,
+    nowMs,
+  });
+  assert.equal(result.capped, true);
+  assert.equal(result.afterCap, 15);
+  assert.equal(result.droppedByDate, 105);
+  assert.equal(result.droppedByCount, 0);
+  assert.equal(result.events[0]?.id, "event-14");
+  assert.equal(result.events.at(-1)?.id, "event-0");
+});
+
+test("capMinerEventsWhenOverloaded skips cap when maxEventsPerRun is zero", () => {
+  const nowMs = Date.parse("2026-05-25T12:00:00.000Z");
+  const events = Array.from({ length: 120 }, (_, index) => ({
+    id: `event-${index}`,
+    sourceEventType: "memory_record" as const,
+    createdAt: new Date(nowMs - index * 24 * 60 * 60 * 1000).toISOString(),
+    platform: "chatgpt",
+    contentSummary: `memory ${index}`,
+    role: "user" as const,
+    metadata: {},
+  }));
+  const result = capMinerEventsWhenOverloaded(events, {
+    maxEvidenceDays: 14,
+    maxEventsPerRun: 0,
+    nowMs,
+  });
+  assert.equal(result.capped, false);
+  assert.equal(result.afterCap, 120);
 });
