@@ -1,0 +1,17 @@
+sequenceDiagram
+  participant Caller
+  participant Docs as services/documents.ts
+  participant DB as PostgreSQL
+  participant Embed as embedding-cache + provider
+  participant Qdrant as Qdrant
+  participant Vertex as Discovery Engine
+
+  Caller->>Docs: stashDocument(content, auth, opts)
+  Docs->>DB: insert documents row
+  Docs->>Docs: maybeAutoCreateLot()
+  Docs->>Docs: runBackgroundIndexing() fire-and-forget
+  Docs->>Embed: embedText(summary input)
+  Docs->>Qdrant: upsertMemoryVector()
+  Docs->>DB: update documents row with summary_json and qdrant_point_id
+  Docs->>Vertex: indexDocument()
+  Docs->>DB: markVertexIndexState()

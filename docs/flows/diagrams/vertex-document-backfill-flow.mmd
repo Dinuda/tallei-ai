@@ -1,0 +1,11 @@
+flowchart TD
+  A["startVertexDocumentBackfillWorker()"] --> B{"worker enabled?"}
+  B -->|no| B1["log disabled and exit"]
+  B -->|yes| C{"Vertex flags enabled?"}
+  C -->|no| C1["log skipped and exit"]
+  C -->|yes| D["set interval + initial poll"]
+  D --> E["runVertexDocumentBackfillOnce()"]
+  E --> F["loadBackfillCandidates()"]
+  F --> G["decrypt document content"]
+  G --> H["indexDocument()"]
+  H --> I["updateVertexIndexMarker(ok=true/false)"]

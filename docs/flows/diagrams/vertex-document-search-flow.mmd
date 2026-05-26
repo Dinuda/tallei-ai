@@ -1,0 +1,11 @@
+flowchart TD
+  A["searchDocuments(query, auth, limit)"] --> B["check Vertex flags"]
+  B --> C{"serving config available?"}
+  C -->|no| C1["return empty result + timing status"]
+  C -->|yes| D["build tenant/user filter"]
+  D --> E["POST Discovery Engine search request"]
+  E --> F["collect results"]
+  F --> G["filter out mismatched tenant/user hits"]
+  G --> H["dedupe by ref"]
+  H --> I["sort by model score"]
+  I --> J["return top N hits"]

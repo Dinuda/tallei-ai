@@ -12,6 +12,10 @@ Start here to understand the system:
   - Contradiction detection
   - Entity relationship graphs
   - Database schema
+- **[Runtime Flows](./flows/README.md)** — End-to-end Mermaid docs for the hottest operational paths:
+  - Loop Miner
+  - Memory Cleanup
+  - Vertex document embeddings and search
 
 ## Memory Model Update (April 2026)
 

@@ -12,6 +12,7 @@
     "deps:rules": "depcruise --config .dependency-cruiser.cjs src",
     "size:check": "node scripts/check-file-size.mjs",
     "architecture:check": "npm run deps:rules && npm run size:check",
+    "docs:render": "node scripts/render-docs-mermaid.mjs",
     "test": "npm run test:unit && npm run test:contract && npm run test:integration",
     "test:unit": "tsx --test test/unit/**/*.test.ts",
     "test:contract": "tsx --test test/contract/*.test.ts",

@@ -13,6 +13,8 @@ The **Loop Miner** is a background intelligence pipeline that analyzes a user's 
 
 The pipeline runs either **daily** (`daily_intelligence`) or **manually**, producing `pending` workflow suggestions that users can activate.
 
+For the current end-to-end runtime path and Mermaid flow diagrams, see [Loop Miner End-to-End](./flows/loop-miner-end-to-end.md).
+
 ---
 
 ## High-Level Architecture

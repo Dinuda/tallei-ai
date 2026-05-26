@@ -1,0 +1,45 @@
+flowchart TD
+  A["Caller"] --> B{"Execution path"}
+  B -->|manual| C["runLoopMinerForUser(auth, options)"]
+  B -->|background| D["queueLoopMinerRunForUser(auth, options)"]
+  D --> E["create run record"]
+  E --> F["spawn async runLoopMinerForUser(...)"]
+  C --> G{"daily_intelligence run reason?"}
+  F --> G
+
+  G -->|yes| H{"running daily run exists?"}
+  H -->|yes| H1["return skipped: running_loop_miner_exists"]
+  H -->|no| I{"completed today exists?"}
+  I -->|yes| I1["return skipped: completed_loop_miner_exists_today"]
+  I -->|no| J["create run + context + progress tracker"]
+  G -->|no| J
+
+  J --> K["ingestMemoriesPhase"]
+  K --> L{"at least 2 memories?"}
+  L -->|no| L1["complete run as skipped"]
+  L -->|yes| M["detectLoopsFromMemoriesPhase"]
+
+  M --> N{"approved loop groups found?"}
+  N -->|no| N1["complete run: no loops found"]
+  N -->|yes| O["selectLoopMemories()"]
+
+  O --> P["buildEpisodesPhase"]
+  P --> Q{"episodes built?"}
+  Q -->|no| Q1["complete run: no episodes built"]
+  Q -->|yes| R["candidateLoopsFromMemoryGroups()"]
+
+  R --> S{"candidate loops remain?"}
+  S -->|no| S1["complete run: loops not episode-aligned"]
+  S -->|yes| T["evaluateCandidateLoopsPhase"]
+
+  T --> U{"qualified loops remain?"}
+  U -->|no| U1["complete run: no qualified loops"]
+  U -->|yes| V["implementability filter"]
+
+  V --> W{"implementable loops remain?"}
+  W -->|no| W1["complete run: no implementable loops"]
+  W -->|yes| X["generateWorkflowDnaPhase"]
+
+  X --> Y["persistSuggestionsPhase"]
+  Y --> Z["complete run"]
+  Z --> AA["send Slack completion notice"]

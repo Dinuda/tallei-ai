@@ -2,6 +2,8 @@
 
 Visual walkthroughs of how everything connects. Read these if you want to understand the flow without reading code.
 
+For the current end-to-end operational paths, see [Runtime Flows](./flows/README.md). The pages there use Mermaid and map directly to the live service entrypoints.
+
 ## The Full Picture
 
 ```
