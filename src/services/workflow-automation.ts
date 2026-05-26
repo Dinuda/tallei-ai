@@ -12,7 +12,7 @@ import {
   workflowRunWorkflowInputSchema,
   WORKFLOW_DEFINITIONS,
 } from "../orchestration/workflows/definitions.js";
-import { sendResendEmail } from "./resend-email.js";
+import { sendResendEmail } from "./notifications/resend-email.js";
 import { isWorkflowSdkEnabled } from "./workflow-sdk-runtime.js";
 import {
   cancelWorkflowSdkRun,
@@ -23,7 +23,7 @@ import {
 } from "./workflow-sdk-runtime.js";
 import { encryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { runMemoryCleanupForUser, sendMemoryCleanupAdminEmail } from "./memory-cleanup.js";
-import { runDailyIntelligencePipeline } from "./workflow-automation/daily-intelligence.js";
+import { runDailyIntelligencePipeline } from "./workflow-automation/daily-intelligence/pipeline.js";
 
 export type ConnectorSetupState =
   | "not_required"

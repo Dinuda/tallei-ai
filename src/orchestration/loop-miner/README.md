@@ -17,7 +17,6 @@ Loop miner detects repeated work patterns and proposes automations.
 - Detection logic: `loop-detector.usecase.ts`
 - Episode building: `episode-builder.usecase.ts`
 - Shared domain contracts and helpers: `core/loop-miner.types.ts`, `core/loop-miner-prompts.ts`, `core/loop-miner-helpers.ts`, `core/loop-miner-models.ts`
-- Public module entrypoint for consumers: `index.ts`
 
 ## Contributor rule
 

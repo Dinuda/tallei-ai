@@ -24,7 +24,7 @@ import type {
   LoopMinerSummary,
   MinerEvent,
   WorkflowDNA,
-} from "../../../src/orchestration/loop-miner/types.js";
+} from "../../../src/orchestration/loop-miner/core/loop-miner.types.js";
 import {
   chunkEventsByTimeGap,
   capMinerEventsWhenOverloaded,
@@ -44,7 +44,7 @@ import {
   packByEstimatedPromptBudget,
   prefilterEpisodesByOutputType,
   sourceFingerprintFromEvent,
-} from "../../../src/orchestration/loop-miner/utils.js";
+} from "../../../src/orchestration/loop-miner/core/loop-miner-helpers.js";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "../../../src/providers/ai/types.js";
 
 const auth: AuthContext = {

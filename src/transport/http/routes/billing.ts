@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import { createHmac, timingSafeEqual } from "crypto";
 import { pool } from "../../../infrastructure/db/index.js";
 import { config } from "../../../config/index.js";
-import { notifyPaymentSuccess } from "../../../services/payment-notifications.js";
+import { notifyPaymentSuccess } from "../../../services/notifications/payment-notifications.js";
 import { runAsyncSafe } from "../../../shared/async-safe.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.middleware.js";
 

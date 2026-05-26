@@ -3,7 +3,7 @@ import streamArray from "stream-json/streamers/stream-array.js";
 import unzipper from "unzipper";
 
 import { config } from "../../config/index.js";
-import { resolveStoragePath } from "../../services/chatgpt-import-storage.js";
+import { resolveStoragePath } from "../../services/chatgpt-import/storage.js";
 import type { BulkIngestDocument } from "./chatgpt-bulk-ingest.js";
 import {
   conversationRecordToBundle,

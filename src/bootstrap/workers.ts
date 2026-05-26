@@ -5,7 +5,7 @@ import {
 import {
   startChatGptImportWorker,
   stopChatGptImportWorker,
-} from "../services/chatgpt-import-jobs.js";
+} from "../services/chatgpt-import/jobs.service.js";
 import {
   startVertexDocumentBackfillWorker,
   stopVertexDocumentBackfillWorker,

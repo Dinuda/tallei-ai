@@ -4,7 +4,7 @@ import { recallMemories, saveMemory, savePreference } from "../../services/memor
 import {
   listRecentCollabTasks,
   getCollabTaskContentForContext,
-} from "../../services/collab.js";
+} from "../../services/collab/collab.service.js";
 import {
   stashDocument,
   stashDocumentNote,

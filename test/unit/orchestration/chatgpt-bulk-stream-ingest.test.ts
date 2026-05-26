@@ -18,7 +18,7 @@ import {
 import {
   buildStorageRef,
   resolveStoragePath,
-} from "../../../src/services/chatgpt-import-storage.js";
+} from "../../../src/services/chatgpt-import/storage.js";
 
 process.env.TALLEI_IMPORT__STORAGE_DIR ??= join(tmpdir(), "tallei-import-tests");
 process.env.TALLEI_IMPORT__MAX_AGE_DAYS ??= "365";

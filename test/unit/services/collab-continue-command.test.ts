@@ -13,7 +13,7 @@ import {
   finishTask,
   submitTurn,
   type CollabTask,
-} from "../../../src/services/collab.js";
+} from "../../../src/services/collab/collab.service.js";
 import { assertPro as assertDocumentPlan } from "../../../src/services/documents.js";
 import {
   approvePlan,

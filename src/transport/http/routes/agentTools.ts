@@ -11,7 +11,7 @@ import {
   getTask,
   submitTurn,
   type CollabModelActor,
-} from "../../../services/collab.js";
+} from "../../../services/collab/collab.service.js";
 
 const router = express.Router();
 

@@ -12,7 +12,7 @@ import {
   saveWorkflowFromBuilderSession,
   setWorkflowStatus,
   skipRunById,
-} from "../../../services/workflow-builder.js";
+} from "../../../services/workflow-automation/workflow-builder.service.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();

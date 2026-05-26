@@ -13,7 +13,7 @@ import {
   getTask,
   listTasks,
   submitTurn,
-} from "../../../services/collab.js";
+} from "../../../services/collab/collab.service.js";
 import { getTaskPreferences, setTaskPreferences } from "../../../services/task-preferences.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";

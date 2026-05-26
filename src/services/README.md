@@ -15,8 +15,6 @@ Use this folder for orchestration-facing application services only.
 - `collab/`: collaboration task orchestration service.
 - `workflow-automation/`: daily intelligence internals and workflow builder submodule.
 
-Top-level files like `chatgpt-import-jobs.ts`, `resend-email.ts`, `collab.ts`, and `workflow-builder.ts` are compatibility re-export shims.
-
 ## Editing rules
 
 - Keep exported service APIs stable unless route contracts explicitly change.
@@ -31,4 +29,3 @@ Top-level files like `chatgpt-import-jobs.ts`, `resend-email.ts`, `collab.ts`, a
   - `state.repository.ts`: DB-backed claim/skip/completion helpers
   - `cleanup-policy.ts`: first-run throttling policy
   - `types.ts`: dependency contracts
-  - `index.ts`: module entrypoint

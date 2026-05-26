@@ -19,7 +19,7 @@ import {
   inlineDocumentsFromTaskContext,
   listTasks,
   submitTurn,
-} from "../../../services/collab.js";
+} from "../../../services/collab/collab.service.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
 import { hasRequiredScopes } from "../../../infrastructure/auth/oauth-tokens.js";
 import {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { LoopImplementabilityFilterUseCase } from "../../../src/orchestration/loop-miner/implementability-filter.usecase.js";
-import type { CandidateLoop, EpisodeRecord, LoopEvaluation } from "../../../src/orchestration/loop-miner/types.js";
+import type { CandidateLoop, EpisodeRecord, LoopEvaluation } from "../../../src/orchestration/loop-miner/core/loop-miner.types.js";
 
 function episode(id: string, input: {
   intent: string;

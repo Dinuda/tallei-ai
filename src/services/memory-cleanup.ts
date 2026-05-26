@@ -17,11 +17,11 @@ import type {
   MemoryCleanupRunView,
   MemoryCleanupSummary,
 } from "../orchestration/memory-cleanup/types.js";
-import type { LoopMinerSummary } from "../orchestration/loop-miner/types.js";
+import type { LoopMinerSummary } from "../orchestration/loop-miner/core/loop-miner.types.js";
 import type { MemorySelectionStrategy } from "../orchestration/memory/hybrid-memory-selection.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage } from "../orchestration/memory-cleanup/usage.js";
 import { invalidateRecallCache } from "./memory.js";
-import { sendResendEmail } from "./resend-email.js";
+import { sendResendEmail } from "./notifications/resend-email.js";
 
 export interface RunMemoryCleanupOptions {
   maxMemories?: number;

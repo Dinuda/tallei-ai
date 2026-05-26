@@ -18,13 +18,13 @@ import {
   enqueueChatGptImportJob,
   getChatGptImportJobStatus,
   persistChatGptImportJob,
-} from "../../../services/chatgpt-import-jobs.js";
+} from "../../../services/chatgpt-import/jobs.service.js";
 import {
   buildStorageRef,
   ensureUserImportDir,
   resolveStoragePath,
   sanitizeImportFilename,
-} from "../../../services/chatgpt-import-storage.js";
+} from "../../../services/chatgpt-import/storage.js";
 import {
   getMemoryCleanupRun,
   listMemoryCleanupRuns,

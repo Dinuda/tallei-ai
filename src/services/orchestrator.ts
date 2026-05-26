@@ -7,7 +7,7 @@ import {
   getTask as getCollabTask,
   type CollabModelActor,
   type CollabTask,
-} from "./collab.js";
+} from "./collab/collab.service.js";
 import {
   runPlannerStep,
   suggestProviderRoles,

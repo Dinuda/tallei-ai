@@ -33,7 +33,7 @@ import {
   inlineDocumentsFromTaskContext,
   listTasks as listCollabTasks,
   submitTurn as submitCollabTurn,
-} from "../../../services/collab.js";
+} from "../../../services/collab/collab.service.js";
 import { PlatformSchema } from "../schemas.js";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
 import {

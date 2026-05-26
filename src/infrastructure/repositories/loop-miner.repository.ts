@@ -23,7 +23,7 @@ import type {
   WorkspaceLoopParent,
   MinerEvent,
   WorkflowDNA,
-} from "../../orchestration/loop-miner/types.js";
+} from "../../orchestration/loop-miner/core/loop-miner.types.js";
 import { interestingMemoryScore, selectNewestHybrid } from "../../orchestration/memory/hybrid-memory-selection.js";
 
 interface AiActivityRow {

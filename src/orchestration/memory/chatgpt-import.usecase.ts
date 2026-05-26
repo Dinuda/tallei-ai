@@ -34,7 +34,7 @@ import {
   streamStatsToIngestSummary,
   type StreamIngestSkipStats,
 } from "./chatgpt-bulk-stream-ingest.js";
-import { resolveStoragePath } from "../../services/chatgpt-import-storage.js";
+import { resolveStoragePath } from "../../services/chatgpt-import/storage.js";
 import { basename } from "node:path";
 import { extractProfileImportItems } from "./chatgpt-bulk-parser.js";
 

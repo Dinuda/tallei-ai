@@ -8,7 +8,7 @@ process.env.TALLEI_AUTH__JWT_SECRET ??= "test-jwt-secret";
 const {
   computeChatGptImportRetryDelayMs,
   isRetryableChatGptImportError,
-} = await import("../../../src/services/chatgpt-import-jobs.js");
+} = await import("../../../src/services/chatgpt-import/jobs.service.js");
 
 test("computeChatGptImportRetryDelayMs uses capped exponential backoff", () => {
   const originalRandom = Math.random;
