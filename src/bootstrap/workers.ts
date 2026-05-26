@@ -28,6 +28,7 @@ import {
   workflowRunWorkflowInputSchema,
   WORKFLOW_DEFINITIONS,
 } from "../orchestration/workflows/definitions.js";
+import { getPlanForTenant } from "../infrastructure/auth/tenancy.js";
 
 let workersRunning = false;
 
@@ -37,11 +38,12 @@ export function startWorkers(): void {
   registerWorkflowSdkRunProcessor(async (run) => {
     if (run.workflowName === WORKFLOW_DEFINITIONS.DAILY_INTELLIGENCE) {
       const parsed = dailyIntelligenceWorkflowInputSchema.parse(run.input);
+      const plan = await getPlanForTenant(parsed.tenantId);
       const result = await runDailyIntelligencePassForUserInternal({
         tenantId: parsed.tenantId,
         userId: parsed.userId,
         authMode: "internal",
-        plan: "pro",
+        plan,
       }, { skipSdkLifecycle: true });
       return { output: result };
     }
@@ -53,12 +55,13 @@ export function startWorkers(): void {
       if (typeof executionTenant !== "string" || typeof executionUser !== "string") {
         throw new Error("Missing execution context for workflow run");
       }
+      const plan = await getPlanForTenant(executionTenant);
       return executeWorkflowRunSdkHandler({
         auth: {
           tenantId: executionTenant,
           userId: executionUser,
           authMode: "internal",
-          plan: "pro",
+          plan,
         },
         runId: parsed.runId,
         workflowId: parsed.workflowId,

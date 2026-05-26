@@ -159,6 +159,10 @@ function parseLlmMemoryGroups(raw: Record<string, unknown>): LlmGroup[] {
     .filter((g): g is LlmGroup => g !== null);
 }
 
+function isSourceImportMemory(memory: MinerEvent): boolean {
+  return readObject(memory.metadata).sourceImport === true;
+}
+
 function compactMemoryForDetection(memory: MinerEvent): Record<string, unknown> {
   const compact = compactMinerEvent(memory, { contentSummaryCharCap: 320 });
   const summary = compact.contentSummary.length <= 200
@@ -209,6 +213,13 @@ function buildDeterministicMemoryGroups(memories: MinerEvent[]): LlmGroup[] {
   for (const [signature, clusterMemories] of clusters.entries()) {
     const unique = [...new Map(clusterMemories.map((memory) => [memory.id, memory])).values()];
     if (unique.length < 2) continue;
+
+    // Require at least one organic (non-imported) memory in the cluster.
+    // A group made entirely of imported ChatGPT memories represents a single bulk
+    // import event, not independently observed repetitions over time.
+    const hasOrganicMemory = unique.some((memory) => !isSourceImportMemory(memory));
+    if (!hasOrganicMemory) continue;
+
     const preview = unique[0].contentSummary.replace(/\s+/g, " ").trim().slice(0, 80);
     groups.push({
       episodeIds: unique.map((memory) => memory.id),
@@ -526,6 +537,10 @@ function applyDeterministicGuards(
 
 function hasRepeatedCopywritingMemoryContent(memories: MinerEvent[]): boolean {
   if (memories.length < 2) return false;
+  // All-import groups do not qualify: multiple ChatGPT import entries that each
+  // say "I repeatedly create slides/newsletters" are self-reports from a single
+  // bulk ingest, not independent observations of repeated real work.
+  if (memories.every(isSourceImportMemory)) return false;
   const copywritingMemories = memories.filter((memory) => {
     const signal = memory.contentSummary.toLowerCase();
     const hasArtifact = /\b(newsletter|email|copy|copywriting|positioning|product philosophy|technical explanations?|slides?|deck|presentation)\b/.test(signal);
@@ -536,6 +551,8 @@ function hasRepeatedCopywritingMemoryContent(memories: MinerEvent[]): boolean {
 }
 
 function hasConcreteRepeatedMemoryAction(memories: MinerEvent[]): boolean {
+  // All-import groups do not qualify as concrete repeated action evidence.
+  if (memories.every(isSourceImportMemory)) return false;
   const normalizedSummaries = memories
     .map((memory) => memory.contentSummary.toLowerCase().replace(/\s+/g, " ").trim())
     .filter((value) => value.length > 0);
@@ -568,6 +585,21 @@ function applyMemoryDeterministicGuards(
 
     if (group.status === "rejected_topical_similarity" || group.status === "rejected_insufficient_evidence") {
       return group;
+    }
+
+    // Reject groups composed entirely of source-imported memories.
+    // An imported ChatGPT bulk export is a single historical snapshot — multiple
+    // entries from the same import do NOT represent independent observations of
+    // repeated behavior over time. A real loop requires at least one organically
+    // recorded memory alongside the imported evidence.
+    const allImported = groupMemories.every(isSourceImportMemory);
+    if (allImported) {
+      return {
+        ...group,
+        status: "rejected_insufficient_evidence",
+        confidence: Math.min(group.confidence, 0.25),
+        reasoning: `${group.reasoning} Rejected: all memories are source imports from the same bulk ingest — multiple import entries are not independent observations of recurring behavior.`,
+      };
     }
 
     const lookupOnly = groupMemories.every((memory) =>

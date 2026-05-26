@@ -352,7 +352,128 @@ function extractMessagesFromNode(
   }];
 }
 
+function claudeMessageToRole(sender: unknown): "user" | "assistant" | null {
+  if (typeof sender !== "string") return null;
+  const normalized = sender.trim().toLowerCase();
+  if (normalized === "human" || normalized === "user") return "user";
+  if (normalized === "assistant" || normalized === "bot") return "assistant";
+  return null;
+}
+
+function claudeMessageToText(message: Record<string, unknown>): string {
+  const text = message["text"];
+  if (typeof text === "string" && text.trim().length > 0) return text;
+  const content = message["content"];
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const entry of content) {
+      if (typeof entry === "string") {
+        parts.push(entry);
+        continue;
+      }
+      const row = asRecord(entry);
+      if (!row) continue;
+      const blockText = row["text"];
+      if (typeof blockText === "string" && blockText.trim().length > 0) {
+        parts.push(blockText);
+      }
+    }
+    if (parts.length > 0) return parts.join("\n");
+  }
+  return "";
+}
+
+export function isClaudeConversationRecord(value: unknown): boolean {
+  const record = asRecord(value);
+  if (!record) return false;
+  const chatMessages = record["chat_messages"];
+  return Array.isArray(chatMessages) && chatMessages.length > 0;
+}
+
+function claudeRecordToBundle(
+  record: Record<string, unknown>,
+  sourceFile: string,
+  rootIndex: number
+): BulkConversationBundle | null {
+  const chatMessages = Array.isArray(record["chat_messages"]) ? record["chat_messages"] : null;
+  if (!chatMessages || chatMessages.length === 0) return null;
+
+  const convoDateTime = readSourceDateTime(record);
+  const messages: Array<{ role: "user" | "assistant"; text: string; sourceDateTime: string | null }> = [];
+
+  for (const item of chatMessages) {
+    const row = asRecord(item);
+    if (!row) continue;
+    const role = claudeMessageToRole(row["sender"]);
+    if (!role) continue;
+    const text = claudeMessageToText(row);
+    const sanitized = sanitizeLinesAllowShort(text);
+    if (sanitized.length === 0) continue;
+    messages.push({
+      role,
+      text: sanitized.join("\n"),
+      sourceDateTime: readSourceDateTime(row) ?? convoDateTime,
+    });
+  }
+
+  if (messages.length === 0) return null;
+
+  const title = typeof record["name"] === "string" && record["name"].trim().length > 0
+    ? record["name"].trim()
+    : typeof record["title"] === "string" && record["title"].trim().length > 0
+      ? record["title"].trim()
+      : null;
+
+  const id = typeof record["uuid"] === "string" && record["uuid"].trim().length > 0
+    ? record["uuid"].trim()
+    : typeof record["id"] === "string" && record["id"].trim().length > 0
+      ? record["id"].trim()
+      : `${sourceFile}:${rootIndex}`;
+
+  return {
+    id,
+    sourceFile,
+    sourceDateTime: convoDateTime,
+    title,
+    messages,
+  };
+}
+
+export function extractClaudeConversationBundles(
+  data: unknown,
+  sourceFile: string
+): BulkConversationBundle[] {
+  const bundles: BulkConversationBundle[] = [];
+  const roots = Array.isArray(data) ? data : [data];
+
+  for (let rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
+    const record = asRecord(roots[rootIndex]);
+    if (!record) continue;
+
+    if (isClaudeConversationRecord(record)) {
+      const bundle = claudeRecordToBundle(record, sourceFile, rootIndex);
+      if (bundle) bundles.push(bundle);
+      continue;
+    }
+
+    const nested = record["conversations"];
+    if (Array.isArray(nested)) {
+      for (let nestedIndex = 0; nestedIndex < nested.length; nestedIndex += 1) {
+        const nestedRecord = asRecord(nested[nestedIndex]);
+        if (!nestedRecord || !isClaudeConversationRecord(nestedRecord)) continue;
+        const bundle = claudeRecordToBundle(nestedRecord, sourceFile, rootIndex * 1000 + nestedIndex);
+        if (bundle) bundles.push(bundle);
+      }
+    }
+  }
+
+  return bundles;
+}
+
 function collectConversationBundlesFromPayload(data: unknown, sourceFile: string): BulkConversationBundle[] {
+  const claudeBundles = extractClaudeConversationBundles(data, sourceFile);
+  if (claudeBundles.length > 0) return claudeBundles;
+
   const bundles: BulkConversationBundle[] = [];
   const roots = Array.isArray(data) ? data : [data];
 
@@ -371,6 +492,11 @@ export function conversationRecordToBundle(
 ): BulkConversationBundle | null {
   const record = asRecord(root);
   if (!record) return null;
+
+  if (isClaudeConversationRecord(record)) {
+    return claudeRecordToBundle(record, sourceFile, rootIndex);
+  }
+
   const mapping = asRecord(record["mapping"]);
   if (!mapping) return null;
   const convoDateTime = readSourceDateTime(record);

@@ -582,6 +582,8 @@ export async function persistChatGptImportJob(
     preview: importResult.preview,
     batchId: importResult.batchId,
     mode: importResult.mode,
+    importSource: importResult.importSource
+      ?? (importResult.mode === "claude_export" ? "claude" : "chatgpt"),
     onProgress: async (progress) => {
       await pool.query(
         `UPDATE chatgpt_import_jobs

@@ -116,7 +116,9 @@ const bulkJsonRoleSchema = z.enum([
 const chatGptImportSchema = z.object({
   input: z.string().optional(),
   apply: z.boolean().optional(),
+  importSource: z.enum(["chatgpt", "claude"]).optional(),
   modeHint: z.enum(["json_export", "paste", "bulk_export"]).optional(),
+  importProfile: z.enum(["curated", "inclusive"]).optional(),
   bulkDocuments: z.array(z.object({
     path: z.string(),
     role: bulkJsonRoleSchema,
@@ -346,6 +348,7 @@ async function parseChatGptImportRequest(req: AuthRequest): Promise<ChatGptImpor
   let normalizedInput: string | null = null;
   let normalizedApply: boolean | undefined;
   let normalizedModeHint: "json_export" | "paste" | "bulk_export" | undefined;
+  let normalizedImportSource: "chatgpt" | "claude" | undefined;
   for (const candidate of wrappers) {
     if (!normalizedInput) {
       normalizedInput = findFirstString(candidate, ["input", "text", "content", "memory_dump", "memoryDump"]);
@@ -359,12 +362,20 @@ async function parseChatGptImportRequest(req: AuthRequest): Promise<ChatGptImpor
         normalizedModeHint = hint === "dat_export" ? "bulk_export" : hint;
       }
     }
+    if (!normalizedImportSource) {
+      const importSource = findFirstString(candidate, ["importSource", "import_source"]);
+      if (importSource === "chatgpt" || importSource === "claude") {
+        normalizedImportSource = importSource;
+      }
+    }
   }
 
   const body = chatGptImportSchema.parse({
     input: normalizedInput ?? rootRecord["input"],
     apply: normalizedApply ?? rootRecord["apply"],
     modeHint: normalizedModeHint ?? rootRecord["modeHint"],
+    importSource: normalizedImportSource ?? rootRecord["importSource"],
+    importProfile: rootRecord["importProfile"],
     bulkDocuments: rootRecord["bulkDocuments"],
     ingestSummary: rootRecord["ingestSummary"],
     ingestWarnings: rootRecord["ingestWarnings"],
@@ -397,6 +408,8 @@ async function parseChatGptImportRequest(req: AuthRequest): Promise<ChatGptImpor
     input,
     apply: body.apply ?? false,
     ...(body.modeHint ? { modeHint: body.modeHint } : {}),
+    ...(body.importProfile ? { importProfile: body.importProfile } : {}),
+    ...(body.importSource ? { importSource: body.importSource } : {}),
     ...(body.bulkDocuments
       ? { bulkDocuments: body.bulkDocuments as BulkIngestDocument[] }
       : {}),

@@ -41,10 +41,13 @@ type UIMemory = MemoryItem & {
   category: string;
   keywords: string[];
   importance: number;
+  sourceImport: boolean;
+  importSourceLabel: string | null;
 };
 
 type TimeFilter = "all" | "1d" | "7d" | "30d";
 type MessageKind = "success" | "error" | "info";
+type ImportSource = "chatgpt" | "claude";
 
 type ModalMessage = {
   kind: MessageKind;
@@ -150,7 +153,8 @@ type ChatGptIngestSummary = {
 
 type ChatGptImportResult = {
   batchId: string;
-  mode: "json_export" | "paste" | "bulk_export";
+  mode: "json_export" | "paste" | "bulk_export" | "claude_export";
+  importSource?: "chatgpt" | "claude";
   summary: {
     parsed: number;
     selected: number;
@@ -290,6 +294,20 @@ function normalizePlatform(raw: unknown): Platform {
   return "other";
 }
 
+function resolveMemoryPlatform(metadata: Record<string, unknown> | undefined): Platform {
+  if (!metadata) return "other";
+  if (metadata.source_import === true) {
+    const importMode = typeof metadata.source_import_mode === "string"
+      ? metadata.source_import_mode.trim().toLowerCase()
+      : "";
+    if (importMode === "claude_export") return "claude";
+    return normalizePlatform(
+      metadata.source_import_source ?? metadata.source_platform ?? metadata.platform
+    );
+  }
+  return normalizePlatform(metadata.platform);
+}
+
 function normalizeMemoryType(raw: unknown): MemoryType {
   if (typeof raw !== "string") return "unknown";
   const value = raw.trim().toLowerCase();
@@ -367,6 +385,40 @@ function normalizePreferenceKey(value: string): string | null {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "") || null;
+}
+
+function isClaudeConversationRecord(item: unknown): boolean {
+  if (!item || typeof item !== "object") return false;
+  const chatMessages = (item as Record<string, unknown>).chat_messages;
+  return Array.isArray(chatMessages) && chatMessages.length > 0;
+}
+
+function summarizeClaudeExportInput(input: string): { conversationCount: number } | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (Array.isArray(parsed)) {
+      const conversationCount = parsed.filter(isClaudeConversationRecord).length;
+      return conversationCount > 0 ? { conversationCount } : null;
+    }
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      if (isClaudeConversationRecord(record)) {
+        return { conversationCount: 1 };
+      }
+      const nested = record.conversations;
+      if (Array.isArray(nested)) {
+        const conversationCount = nested.filter(isClaudeConversationRecord).length;
+        return conversationCount > 0 ? { conversationCount } : null;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 function parsePastedImportItems(input: string): string[] {
@@ -578,8 +630,10 @@ export default function DashboardMemoriesPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const [isImportOpen, setImportOpen] = useState(false);
+  const [importSource, setImportSource] = useState<ImportSource>("chatgpt");
   const [importText, setImportText] = useState("");
   const [importFiles, setImportFiles] = useState<File[]>([]);
+  const [claudeImportFileNames, setClaudeImportFileNames] = useState<string[]>([]);
   const [quickPreference, setQuickPreference] = useState("");
   const [copyLabel, setCopyLabel] = useState("Copy prompt");
   const [importBusy, setImportBusy] = useState(false);
@@ -704,9 +758,13 @@ export default function DashboardMemoriesPage() {
   const enriched = useMemo<UIMemory[]>(() => {
     return memories
       .map((memory) => {
-        const platform = normalizePlatform(memory.metadata?.platform);
-        const memoryType = normalizeMemoryType(memory.metadata?.memory_type);
-        const directCategory = normalizeCategory(memory.metadata?.category);
+        const metadata = (memory.metadata && typeof memory.metadata === "object"
+          ? memory.metadata
+          : {}) as Record<string, unknown>;
+        const sourceImport = metadata.source_import === true;
+        const platform = resolveMemoryPlatform(metadata);
+        const memoryType = normalizeMemoryType(metadata.memory_type);
+        const directCategory = normalizeCategory(metadata.category);
         const category = directCategory || inferCategory(memory);
 
         return {
@@ -716,6 +774,7 @@ export default function DashboardMemoriesPage() {
           category,
           keywords: extractKeywords(memory.text || ""),
           importance: importanceScore(memory),
+          sourceImport
         };
       })
       .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
@@ -745,7 +804,12 @@ export default function DashboardMemoriesPage() {
   }, [enriched, timeFilter]);
 
   const parsedImportItems = useMemo(() => parsePastedImportItems(importText), [importText]);
-  const hasExportFiles = importFiles.length > 0;
+  const claudeExportSummary = useMemo(
+    () => (importSource === "claude" ? summarizeClaudeExportInput(importText) : null),
+    [importSource, importText]
+  );
+  const supportsExportFiles = importSource === "chatgpt";
+  const hasExportFiles = supportsExportFiles && importFiles.length > 0;
   const conversationFileCount = useMemo(
     () => importFiles.filter(isConversationStreamFile).length,
     [importFiles]
@@ -786,14 +850,18 @@ export default function DashboardMemoriesPage() {
     const bulkFiles = importFiles.filter(isBulkUploadFile);
 
     if (!pasted && bulkFiles.length === 0) {
-      throw new Error("Paste ChatGPT memory JSON or select conversation JSON files from your export.");
+      throw new Error(
+        importSource === "claude"
+          ? "Paste Claude export JSON to import memories."
+          : "Paste ChatGPT memory JSON or select conversation JSON files from your export."
+      );
     }
 
-    if (bulkFiles.length > MAX_CONVERSATION_JSON_FILES) {
+    if (supportsExportFiles && bulkFiles.length > MAX_CONVERSATION_JSON_FILES) {
       throw new Error(`Select at most ${MAX_CONVERSATION_JSON_FILES} conversation JSON files.`);
     }
 
-    if (bulkFiles.length > 0) {
+    if (supportsExportFiles && bulkFiles.length > 0) {
       const body = new FormData();
       if (pasted) body.append("input", pasted);
       body.append("apply", String(apply));
@@ -846,7 +914,12 @@ export default function DashboardMemoriesPage() {
     const response = await fetch("/api/memories/import/chatgpt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: pasted, apply }),
+      body: JSON.stringify({
+        input: pasted,
+        apply,
+        importSource,
+        ...(importSource === "claude" ? { importProfile: "inclusive" as const } : {}),
+      }),
     });
 
     const payload = (await response.json().catch(() => ({}))) as {
@@ -861,7 +934,7 @@ export default function DashboardMemoriesPage() {
       throw new Error("Invalid import queue response.");
     }
     return payload as { ref: string; status: ChatGptImportJobStatus };
-  }, [importFiles, importText]);
+  }, [importFiles, importSource, importText, supportsExportFiles]);
 
   const pollImportJob = useCallback(async (ref: string): Promise<ChatGptImportResult> => {
     const startedAt = Date.now();
@@ -916,7 +989,12 @@ export default function DashboardMemoriesPage() {
 
   const handlePreviewImport = useCallback(async () => {
     if (!hasImportInput) {
-      setModalMessage({ kind: "error", text: "Paste ChatGPT memory JSON or select conversation JSON files from your export." });
+      setModalMessage({
+        kind: "error",
+        text: importSource === "claude"
+          ? "Paste Claude export JSON to import memories."
+          : "Paste ChatGPT memory JSON or select conversation JSON files from your export.",
+      });
       return;
     }
     setImportBusy(true);
@@ -927,7 +1005,9 @@ export default function DashboardMemoriesPage() {
       const { accepted, selected, parsed, conflicts, duplicates, invalid } = report.summary;
       setModalMessage({
         kind: "info",
-        text: `Preview ready: ${accepted} accepted from ${selected}/${parsed} selected rows, ${conflicts} conflicts, ${duplicates} duplicates, ${invalid} invalid. Click Persist memories to save.`,
+        text: importSource === "claude"
+          ? `Preview ready: ${accepted} memory(ies) accepted from ${parsed} Claude conversation(s). Review below, then click Persist memories to save.`
+          : `Preview ready: ${accepted} accepted from ${selected}/${parsed} selected rows, ${conflicts} conflicts, ${duplicates} duplicates, ${invalid} invalid. Click Persist memories to save.`,
       });
     } catch (previewError) {
       const message = previewError instanceof Error ? previewError.message : "Preview failed.";
@@ -935,7 +1015,7 @@ export default function DashboardMemoriesPage() {
     } finally {
       setImportBusy(false);
     }
-  }, [hasImportInput, runImportRequest]);
+  }, [hasImportInput, importSource, runImportRequest]);
 
   const handlePersistImport = useCallback(async () => {
     const ref = importJob?.ref;
@@ -991,11 +1071,59 @@ export default function DashboardMemoriesPage() {
   }, [fetchMemories, importJob?.ref, importJob?.status, importReport?.summary.accepted]);
 
   const handleImportFileSelection = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    if (!supportsExportFiles) {
+      const picked = Array.from(event.target.files ?? []);
+      if (picked.length === 0) return;
+      setImportFiles([]);
+      setImportReport(null);
+      setImportJob(null);
+      void (async () => {
+        try {
+          const parsedRows: unknown[] = [];
+          const rawChunks: string[] = [];
+          for (const file of picked) {
+            const text = (await file.text()).trim();
+            if (!text) continue;
+            try {
+              const parsed = JSON.parse(text) as unknown;
+              if (Array.isArray(parsed)) parsedRows.push(...parsed);
+              else parsedRows.push(parsed);
+            } catch {
+              rawChunks.push(text);
+            }
+          }
+
+          if (parsedRows.length === 0 && rawChunks.length === 0) {
+            setImportText("");
+            setClaudeImportFileNames([]);
+            setModalMessage({ kind: "error", text: "Selected Claude file(s) were empty." });
+            return;
+          }
+
+          const chunks: string[] = [];
+          if (parsedRows.length > 0) chunks.push(JSON.stringify(parsedRows, null, 2));
+          if (rawChunks.length > 0) chunks.push(...rawChunks);
+          setImportText(chunks.join("\n\n"));
+          setClaudeImportFileNames(picked.map((file) => fileBasename(file.name)));
+          setModalMessage({
+            kind: "info",
+            text: `Loaded ${picked.length} Claude JSON file${picked.length === 1 ? "" : "s"} for import.`,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Failed to read Claude import files.";
+          setModalMessage({ kind: "error", text: message });
+        } finally {
+          if (importFileInputRef.current) importFileInputRef.current.value = "";
+        }
+      })();
+      return;
+    }
     const picked = Array.from(event.target.files ?? []);
     const accepted = picked.filter(isConversationJsonImportFile);
     const rejected = picked.filter((file) => !isConversationJsonImportFile(file));
     const capped = accepted.slice(0, MAX_CONVERSATION_JSON_FILES);
     setImportFiles(capped);
+    setClaudeImportFileNames([]);
     setImportReport(null);
     setImportJob(null);
 
@@ -1029,7 +1157,7 @@ export default function DashboardMemoriesPage() {
     }
 
     setModalMessage(null);
-  }, []);
+  }, [supportsExportFiles]);
 
   const handleQuickAdd = useCallback(async () => {
     const content = quickPreference.trim();
@@ -1062,11 +1190,19 @@ export default function DashboardMemoriesPage() {
     }
   }, []);
 
-  const openImportModal = useCallback(() => {
+  const openImportModal = useCallback((source: ImportSource) => {
+    setImportSource(source);
+    setImportText("");
+    setImportFiles([]);
+    setClaudeImportFileNames([]);
+    setQuickPreference("");
     setImportOpen(true);
     setModalMessage(null);
     setImportReport(null);
     setImportJob(null);
+    setImportUploadProgress(null);
+    setCopyLabel("Copy prompt");
+    if (importFileInputRef.current) importFileInputRef.current.value = "";
   }, []);
 
   const handleDeleteMemory = useCallback(async (id: string) => {
@@ -1121,10 +1257,18 @@ export default function DashboardMemoriesPage() {
           <button
             type="button"
             className={styles.actionBtn}
-            onClick={openImportModal}
+            onClick={() => openImportModal("chatgpt")}
             disabled={loading}
           >
             Import from ChatGPT
+          </button>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={() => openImportModal("claude")}
+            disabled={loading}
+          >
+            Import from Claude
           </button>
           <button
             type="button"
@@ -1220,7 +1364,9 @@ export default function DashboardMemoriesPage() {
           <div className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="import-dialog-title" ref={modalRef}>
             <div className={styles.modalHeader}>
               <h2 id="import-dialog-title" className={styles.modalTitle}>
-                {hasExportFiles ? "Import ChatGPT Export" : "Import ChatGPT Memories"}
+                {importSource === "chatgpt"
+                  ? (hasExportFiles ? "Import ChatGPT Export" : "Import ChatGPT Memories")
+                  : "Import Claude Memories"}
               </h2>
               <Button variant="ghost" size="icon" className={styles.modalClose}
                 onClick={() => setImportOpen(false)}
@@ -1231,9 +1377,13 @@ export default function DashboardMemoriesPage() {
             </div>
 
             <p className={styles.modalSubtitle}>
-              {hasExportFiles
-                ? `${conversationFileCount} conversation file${conversationFileCount === 1 ? "" : "s"} ready. Click Import to preview, then Persist memories to save. Profile files like user.json are handled separately.`
-                : "Export from ChatGPT, unzip locally, and select all files in the folder (Cmd/Ctrl+A). Or paste a memory JSON dump below."}
+              {importSource === "chatgpt"
+                ? (
+                  hasExportFiles
+                    ? `${conversationFileCount} conversation file${conversationFileCount === 1 ? "" : "s"} ready. Click Import to preview, then Persist memories to save. Profile files like user.json are handled separately.`
+                    : "Export from ChatGPT, unzip locally, and select all files in the folder (Cmd/Ctrl+A). Or paste a memory JSON dump below."
+                )
+                : "Upload or paste your Claude conversations.json export, click Preview to extract memories, then Persist to save. Nothing is written until you persist."}
             </p>
 
             {modalMessage && (
@@ -1242,90 +1392,154 @@ export default function DashboardMemoriesPage() {
               </div>
             )}
 
-            <section className={styles.importSection}>
-              <h3 className={styles.importSectionTitle}>Chat history export</h3>
-              <div className={styles.importFileRow}>
-                <input
-                  ref={importFileInputRef}
-                  type="file"
-                  accept={BULK_IMPORT_ACCEPT}
-                  multiple
-                  onChange={handleImportFileSelection}
-                  className={styles.importFileInput}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={importBusy || persistBusy}
-                  onClick={() => importFileInputRef.current?.click()}
-                >
-                  Select JSON files
-                </Button>
-                <span className={styles.importFileHint}>
-                  {hasExportFiles
-                    ? `${importFiles.length} selected (${conversationFileCount} conversation${conversationFileCount === 1 ? "" : "s"}): ${selectedImportFileNames}`
-                    : "Unzip your export, then Cmd/Ctrl+A in the folder — extra export JSON files are skipped automatically."}
-                </span>
-                {importUploadProgress !== null && (
-                  <div className={styles.importUploadProgress} aria-live="polite">
-                    <span>Uploading {importUploadProgress}%</span>
-                    <div className={styles.importUploadProgressBar}>
-                      <div className={styles.importUploadProgressFill} style={{ width: `${importUploadProgress}%` }} />
-                    </div>
-                  </div>
-                )}
-                {hasExportFiles && (
+            {importSource === "chatgpt" && (
+              <section className={styles.importSection}>
+                <h3 className={styles.importSectionTitle}>Chat history export</h3>
+                <div className={styles.importFileRow}>
+                  <input
+                    ref={importFileInputRef}
+                    type="file"
+                    accept={BULK_IMPORT_ACCEPT}
+                    multiple
+                    onChange={handleImportFileSelection}
+                    className={styles.importFileInput}
+                  />
                   <Button
-                    variant="ghost"
+                    variant="outline"
                     size="sm"
                     disabled={importBusy || persistBusy}
-                    onClick={() => {
-                      setImportFiles([]);
-                      setImportReport(null);
-                      setImportJob(null);
-                      setModalMessage(null);
-                      if (importFileInputRef.current) importFileInputRef.current.value = "";
-                    }}
+                    onClick={() => importFileInputRef.current?.click()}
                   >
-                    Clear files
+                    Select JSON files
                   </Button>
-                )}
-              </div>
-            </section>
+                  <span className={styles.importFileHint}>
+                    {hasExportFiles
+                      ? `${importFiles.length} selected (${conversationFileCount} conversation${conversationFileCount === 1 ? "" : "s"}): ${selectedImportFileNames}`
+                      : "Unzip your export, then Cmd/Ctrl+A in the folder — extra export JSON files are skipped automatically."}
+                  </span>
+                  {importUploadProgress !== null && (
+                    <div className={styles.importUploadProgress} aria-live="polite">
+                      <span>Uploading {importUploadProgress}%</span>
+                      <div className={styles.importUploadProgressBar}>
+                        <div className={styles.importUploadProgressFill} style={{ width: `${importUploadProgress}%` }} />
+                      </div>
+                    </div>
+                  )}
+                  {hasExportFiles && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={importBusy || persistBusy}
+                      onClick={() => {
+                        setImportFiles([]);
+                        setImportReport(null);
+                        setImportJob(null);
+                        setModalMessage(null);
+                        if (importFileInputRef.current) importFileInputRef.current.value = "";
+                      }}
+                    >
+                      Clear files
+                    </Button>
+                  )}
+                </div>
+              </section>
+            )}
+            {importSource === "claude" && (
+              <section className={styles.importSection}>
+                <h3 className={styles.importSectionTitle}>Claude export file</h3>
+                <div className={styles.importFileRow}>
+                  <input
+                    ref={importFileInputRef}
+                    type="file"
+                    accept={BULK_IMPORT_ACCEPT}
+                    multiple
+                    onChange={handleImportFileSelection}
+                    className={styles.importFileInput}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={importBusy || persistBusy}
+                    onClick={() => importFileInputRef.current?.click()}
+                  >
+                    Select Claude JSON
+                  </Button>
+                  <span className={styles.importFileHint}>
+                    {claudeImportFileNames.length > 0
+                      ? `${claudeImportFileNames.length} selected: ${claudeImportFileNames.slice(0, 4).join(", ")}${claudeImportFileNames.length > 4 ? `, +${claudeImportFileNames.length - 4} more` : ""}`
+                      : "Select one or more Claude JSON export files."}
+                  </span>
+                  {claudeImportFileNames.length > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={importBusy || persistBusy}
+                      onClick={() => {
+                        setClaudeImportFileNames([]);
+                        setImportText("");
+                        setImportReport(null);
+                        setImportJob(null);
+                        setModalMessage(null);
+                        if (importFileInputRef.current) importFileInputRef.current.value = "";
+                      }}
+                    >
+                      Clear files
+                    </Button>
+                  )}
+                </div>
+              </section>
+            )}
 
             {!hasExportFiles && (
               <details className={styles.importPasteSection} open={hasPasteInput}>
-                <summary className={styles.importSectionTitle}>Memory dump JSON (optional)</summary>
-                <div className={styles.modalTopActions}>
-                  <Button variant="outline" size="sm" onClick={() => void handleCopyPrompt()}>
-                    <Copy size={14} />
-                    {copyLabel}
-                  </Button>
-                  <details className={styles.promptDetails}>
-                    <summary>Show prompt text</summary>
-                    <pre>{CHATGPT_MEMORY_EXPORT_PROMPT}</pre>
-                  </details>
-                </div>
+                <summary className={styles.importSectionTitle}>
+                  {importSource === "claude" ? "Claude export JSON" : "Memory dump JSON (optional)"}
+                </summary>
+                {importSource === "chatgpt" && (
+                  <div className={styles.modalTopActions}>
+                    <Button variant="outline" size="sm" onClick={() => void handleCopyPrompt()}>
+                      <Copy size={14} />
+                      {copyLabel}
+                    </Button>
+                    <details className={styles.promptDetails}>
+                      <summary>Show prompt text</summary>
+                      <pre>{CHATGPT_MEMORY_EXPORT_PROMPT}</pre>
+                    </details>
+                  </div>
+                )}
 
                 <textarea
                   value={importText}
                   onChange={(event) => {
                     setImportText(event.target.value);
+                    if (importSource === "claude") setClaudeImportFileNames([]);
                     setImportReport(null);
                     setImportJob(null);
                   }}
                   className={styles.importTextarea}
                   rows={6}
-                  placeholder='Paste ChatGPT output, e.g. [{"memory":"Before building course slides, I map the course structure and research topics per module.","datetime":"2026-05-20"}]'
+                  placeholder={importSource === "chatgpt"
+                    ? 'Paste ChatGPT output, e.g. [{"memory":"Before building course slides, I map the course structure and research topics per module.","datetime":"2026-05-20"}]'
+                    : 'Paste Claude export JSON, e.g. [{"name":"Conversation","chat_messages":[{"sender":"human","text":"..."},{"sender":"assistant","text":"..."}]}]'}
                 />
               </details>
             )}
 
             <div className={styles.importFooter}>
               <span className={styles.parsedHint}>
-                {hasExportFiles
-                  ? `${conversationFileCount} conversation file${conversationFileCount === 1 ? "" : "s"} ready to import`
-                  : `Parsed ${parsedImportItems.length} pasted candidate memor${parsedImportItems.length === 1 ? "y" : "ies"}`}
+                {importReport
+                  ? (importSource === "claude"
+                    ? `Preview ready: ${importReport.summary.accepted} accepted memory(ies) extracted from ${importReport.summary.parsed} conversation(s).`
+                    : `Preview ready: ${importReport.summary.accepted} accepted from ${importReport.summary.selected}/${importReport.summary.parsed} selected rows.`)
+                  : hasExportFiles
+                    ? `${conversationFileCount} conversation file${conversationFileCount === 1 ? "" : "s"} ready — click Preview to extract memories.`
+                    : importSource === "claude"
+                      ? (claudeExportSummary
+                        ? `${claudeExportSummary.conversationCount} Claude conversation${claudeExportSummary.conversationCount === 1 ? "" : "s"} loaded — click Preview to extract memories.`
+                        : hasPasteInput
+                          ? "Claude export loaded — click Preview to extract memories."
+                          : "Paste or upload Claude export JSON to begin.")
+                      : `Parsed ${parsedImportItems.length} candidate memor${parsedImportItems.length === 1 ? "y" : "ies"}`}
               </span>
               <div className={styles.importActionsRow}>
                 <Button
@@ -1333,7 +1547,9 @@ export default function DashboardMemoriesPage() {
                   disabled={importBusy || persistBusy || !hasImportInput}
                   onClick={() => void handlePreviewImport()}
                 >
-                  {importBusy ? "Importing..." : "Import"}
+                  {importBusy
+                    ? (importSource === "claude" ? "Previewing..." : "Importing...")
+                    : (importSource === "claude" ? "Preview" : "Import")}
                 </Button>
                 <Button
                   disabled={
@@ -1390,7 +1606,7 @@ export default function DashboardMemoriesPage() {
                   <div className={styles.importSummaryCell}><span>Embedded</span><strong>{importReport.summary.embedded}</strong></div>
                 </div>
 
-                {importReport.ingestSummary && (
+                {importReport.ingestSummary && importSource === "chatgpt" && (
                   <div className={styles.ingestSummary}>
                     <strong>Ingest summary</strong>
                     <p>

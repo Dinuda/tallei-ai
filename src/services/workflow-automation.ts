@@ -6,6 +6,7 @@ import { generateText, stepCountIs } from "ai";
 
 import { config } from "../config/index.js";
 import type { AuthContext } from "../domain/auth/index.js";
+import { getPlanForTenant } from "../infrastructure/auth/tenancy.js";
 import { pool } from "../infrastructure/db/index.js";
 import {
   dailyIntelligenceWorkflowInputSchema,
@@ -23,7 +24,6 @@ import {
 } from "./workflow-sdk-runtime.js";
 import { encryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { runMemoryCleanupForUser, sendMemoryCleanupAdminEmail } from "./memory-cleanup.js";
-import { runLoopMinerForUser } from "../orchestration/loop-miner/loop-miner.js";
 
 export type ConnectorSetupState =
   | "not_required"
@@ -2474,13 +2474,63 @@ export async function runDailyIntelligencePassForUserInternal(
 ): Promise<{
   suggestionCount: number;
 }> {
-  const runId = randomUUID();
-  await pool.query(
-    `INSERT INTO daily_intelligence_runs
-     (id, tenant_id, user_id, status, metadata_json)
-     VALUES ($1, $2, $3, 'running', '{}'::jsonb)`,
-    [runId, auth.tenantId, auth.userId]
-  );
+  const resolvedPlan = await getPlanForTenant(auth.tenantId);
+  const resolvedAuth: AuthContext = {
+    ...auth,
+    plan: resolvedPlan,
+  };
+
+  const claim = await claimDailyIntelligenceRun(resolvedAuth);
+  if (!claim.claimed) {
+    return { suggestionCount: 0 };
+  }
+  const runId = claim.runId;
+
+  if (resolvedPlan === "free") {
+    await completeDailyIntelligenceRun({
+      auth: resolvedAuth,
+      runId,
+      status: "completed",
+      metadata: {
+        skipped: true,
+        skipReason: "unpaid_plan",
+        processed: false,
+      },
+    });
+    return { suggestionCount: 0 };
+  }
+
+  const hasActiveMemoryRecords = await userHasActiveMemoryRecords(resolvedAuth);
+  if (!hasActiveMemoryRecords) {
+    await completeDailyIntelligenceRun({
+      auth: resolvedAuth,
+      runId,
+      status: "completed",
+      metadata: {
+        skipped: true,
+        skipReason: "no_memory_records",
+        processed: false,
+      },
+    });
+    return { suggestionCount: 0 };
+  }
+
+  const firstProcessedRun = !await hasAnyProcessedDailyRun(resolvedAuth);
+  const cleanupOptions = firstProcessedRun
+    ? {
+        runReason: "daily_intelligence" as const,
+        dryRun: false,
+        processAll: false,
+        selectionStrategy: "newest_hybrid" as const,
+        maxMemories: 50,
+        newestLimit: 30,
+        interestingLimit: 20,
+      }
+    : {
+        runReason: "daily_intelligence" as const,
+        dryRun: false,
+        maxMemories: 200,
+      };
 
   let sdkRunId: string | null = null;
   if (isWorkflowSdkEnabled() && !options.skipSdkLifecycle) {
@@ -2488,12 +2538,12 @@ export async function runDailyIntelligencePassForUserInternal(
       sdkRunId = await createWorkflowSdkRun({
         workflowName: WORKFLOW_DEFINITIONS.DAILY_INTELLIGENCE,
         workflowInput: dailyIntelligenceWorkflowInputSchema.parse({
-          tenantId: auth.tenantId,
-          userId: auth.userId,
+          tenantId: resolvedAuth.tenantId,
+          userId: resolvedAuth.userId,
         }),
         executionContext: {
-          tenantId: auth.tenantId,
-          userId: auth.userId,
+          tenantId: resolvedAuth.tenantId,
+          userId: resolvedAuth.userId,
         },
       });
     } catch (error) {
@@ -2502,131 +2552,245 @@ export async function runDailyIntelligencePassForUserInternal(
     }
   }
 
-  const memoryCleanupRun = await runMemoryCleanupForUser(auth, {
-    runReason: "daily_intelligence",
-    dryRun: false,
-    maxMemories: 200,
-  });
-  const memoryCleanup = {
-    runId: memoryCleanupRun.id,
-    status: memoryCleanupRun.status,
-    ...memoryCleanupRun.summary,
-  };
+  try {
+    const memoryCleanupRun = await runMemoryCleanupForUser(resolvedAuth, cleanupOptions);
+    const memoryCleanup = {
+      runId: memoryCleanupRun.id,
+      status: memoryCleanupRun.status,
+      ...memoryCleanupRun.summary,
+    };
 
-  const loopMinerRun = await runLoopMinerForUser(auth, {
-    runReason: "daily_intelligence",
-    lookbackDays: 30,
-  });
-  const loopMiner = {
-    runId: loopMinerRun.id,
-    status: loopMinerRun.status,
-    ...loopMinerRun.summary,
-  };
+    if (memoryCleanupRun.status !== "completed" || memoryCleanupRun.summary.skipped) {
+      const skipReason = memoryCleanupRun.summary.skipReason
+        ? `cleanup_${memoryCleanupRun.summary.skipReason}`
+        : "cleanup_not_completed";
+      await completeDailyIntelligenceRun({
+        auth: resolvedAuth,
+        runId,
+        status: "completed",
+        metadata: {
+          skipped: true,
+          skipReason,
+          processed: false,
+          firstProcessedRun,
+          memoryCleanup,
+        },
+      });
+      return { suggestionCount: 0 };
+    }
 
-  const recentActivities = await pool.query<{ content_text: string }>(
-    `SELECT content_text
-     FROM ai_activity_events
-     WHERE tenant_id = $1
-       AND user_id = $2
-       AND created_at >= NOW() - interval '30 days'
-     ORDER BY created_at DESC
-     LIMIT 300`,
-    [auth.tenantId, auth.userId]
-  );
+    // TEMP: Keep daily worker focused on cleanup only for now.
+    // const loopMinerRun = await runLoopMinerForUser(resolvedAuth, {
+    //   runReason: "daily_intelligence",
+    //   lookbackDays: 30,
+    // });
+    // const loopMiner = {
+    //   runId: loopMinerRun.id,
+    //   status: loopMinerRun.status,
+    //   ...loopMinerRun.summary,
+    // };
 
-  const suggestions: WorkflowSuggestion[] = [...loopMinerRun.suggestions];
-  for (const row of recentActivities.rows) {
-    const found = await discoverInlineWorkflowSuggestions({
-      auth,
-      message: row.content_text,
-      source: "daily_intelligence",
-    });
-    suggestions.push(...found);
-  }
+    const recentActivities = await pool.query<{ content_text: string }>(
+      `SELECT content_text
+       FROM ai_activity_events
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND created_at >= NOW() - interval '30 days'
+       ORDER BY created_at DESC
+       LIMIT 300`,
+      [resolvedAuth.tenantId, resolvedAuth.userId]
+    );
 
-  if (suggestions.length > 0) {
-    const channels = await listEnabledNotificationChannels(auth);
-    const topSuggestion = suggestions[0];
-    const selectedChannel = channels[0];
-    if (topSuggestion && selectedChannel) {
-      try {
-        await sendWorkflowSuggestionNotification({
-          auth,
-          suggestion: topSuggestion,
-          to: selectedChannel.destination,
-          channel: selectedChannel.kind,
-        });
-      } catch (error) {
-        console.error("[workflow] failed to send daily suggestion notification:", error);
+    const suggestions: WorkflowSuggestion[] = [];
+    for (const row of recentActivities.rows) {
+      const found = await discoverInlineWorkflowSuggestions({
+        auth: resolvedAuth,
+        message: row.content_text,
+        source: "daily_intelligence",
+      });
+      suggestions.push(...found);
+    }
+
+    if (suggestions.length > 0) {
+      const channels = await listEnabledNotificationChannels(resolvedAuth);
+      const topSuggestion = suggestions[0];
+      const selectedChannel = channels[0];
+      if (topSuggestion && selectedChannel) {
+        try {
+          await sendWorkflowSuggestionNotification({
+            auth: resolvedAuth,
+            suggestion: topSuggestion,
+            to: selectedChannel.destination,
+            channel: selectedChannel.kind,
+          });
+        } catch (error) {
+          console.error("[workflow] failed to send daily suggestion notification:", error);
+        }
       }
     }
-  }
 
-  await pool.query(
-    `UPDATE daily_intelligence_runs
-     SET status = 'completed',
-         metadata_json = $4::jsonb,
-         completed_at = NOW(),
-         updated_at = NOW()
-     WHERE id = $1
-       AND tenant_id = $2
-       AND user_id = $3`,
-    [
+    await completeDailyIntelligenceRun({
+      auth: resolvedAuth,
       runId,
-      auth.tenantId,
-      auth.userId,
-      JSON.stringify({ suggestionCount: suggestions.length, memoryCleanup, loopMiner }),
-    ]
-  );
-
-  await sendMemoryCleanupAdminEmail({
-    auth,
-    run: memoryCleanupRun,
-    source: "daily_intelligence",
-    dailyRunId: runId,
-    suggestionCount: suggestions.length,
-    loopMiner: {
-      runId: loopMinerRun.id,
-      status: loopMinerRun.status,
-      summary: loopMinerRun.summary,
-    },
-  });
-
-  if (isWorkflowSdkEnabled()) {
-    await pool.query(
-      `UPDATE daily_intelligence_runs
-       SET metadata_json = metadata_json || $4::jsonb,
-           updated_at = NOW()
-       WHERE id = $1
-         AND tenant_id = $2
-         AND user_id = $3`,
-      [
-        runId,
-        auth.tenantId,
-        auth.userId,
-        JSON.stringify({
+      status: "completed",
+      metadata: {
+        skipped: false,
+        processed: true,
+        firstProcessedRun,
+        suggestionCount: suggestions.length,
+        memoryCleanup,
+        loopMinerDisabled: true,
+        ...(isWorkflowSdkEnabled() ? {
           workflow_sdk_handoff: {
             targetWorld: config.workflowTargetWorld,
             accepted: true,
             sdkRunId,
           },
-          memoryCleanup,
-          loopMiner,
-        }),
-      ]
-    );
-  }
-
-  if (sdkRunId && !options.skipSdkLifecycle) {
-    await completeWorkflowSdkRun(sdkRunId, {
-      tenantId: auth.tenantId,
-      userId: auth.userId,
-      suggestionCount: suggestions.length,
-      loopMinerSuggestionCount: loopMinerRun.suggestions.length,
+        } : {}),
+      },
     });
+
+    await sendMemoryCleanupAdminEmail({
+      auth: resolvedAuth,
+      run: memoryCleanupRun,
+      source: "daily_intelligence",
+      dailyRunId: runId,
+      suggestionCount: suggestions.length,
+    });
+
+    if (sdkRunId && !options.skipSdkLifecycle) {
+      await completeWorkflowSdkRun(sdkRunId, {
+        tenantId: resolvedAuth.tenantId,
+        userId: resolvedAuth.userId,
+        suggestionCount: suggestions.length,
+        loopMinerSuggestionCount: 0,
+      });
+    }
+
+    return { suggestionCount: suggestions.length };
+  } catch (error) {
+    await completeDailyIntelligenceRun({
+      auth: resolvedAuth,
+      runId,
+      status: "failed",
+      metadata: {
+        skipped: false,
+        processed: false,
+        failureStage: "daily_pipeline",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function claimDailyIntelligenceRun(auth: AuthContext): Promise<
+  | { claimed: true; runId: string }
+  | { claimed: false; reason: "already_processed_today"; existingRunId: string | null }
+> {
+  const runId = randomUUID();
+  const lockKey = `${auth.tenantId}:${auth.userId}:daily-intelligence:utc`;
+  const claim = await pool.query<{ inserted_id: string | null; existing_id: string | null }>(
+    `WITH lock_key AS (
+       SELECT pg_advisory_xact_lock(hashtext($4))
+     ),
+     existing AS (
+       SELECT id
+       FROM daily_intelligence_runs
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+       ORDER BY created_at DESC
+       LIMIT 1
+     ),
+     inserted AS (
+       INSERT INTO daily_intelligence_runs
+         (id, tenant_id, user_id, status, metadata_json)
+       SELECT
+         $3,
+         $1,
+         $2,
+         'running',
+         $5::jsonb
+       WHERE NOT EXISTS (SELECT 1 FROM existing)
+       RETURNING id
+     )
+     SELECT
+       (SELECT id FROM inserted LIMIT 1) AS inserted_id,
+       (SELECT id FROM existing LIMIT 1) AS existing_id`,
+    [
+      auth.tenantId,
+      auth.userId,
+      runId,
+      lockKey,
+      JSON.stringify({
+        guard: {
+          claimedAt: new Date().toISOString(),
+          policy: "one_daily_run_per_utc_day",
+        },
+      }),
+    ]
+  );
+
+  const row = claim.rows[0];
+  if (row?.inserted_id) {
+    return { claimed: true, runId: row.inserted_id };
   }
 
-  return { suggestionCount: suggestions.length };
+  return {
+    claimed: false,
+    reason: "already_processed_today",
+    existingRunId: row?.existing_id ?? null,
+  };
+}
+
+async function completeDailyIntelligenceRun(input: {
+  auth: AuthContext;
+  runId: string;
+  status: "completed" | "failed";
+  metadata: Record<string, unknown>;
+}): Promise<void> {
+  await pool.query(
+    `UPDATE daily_intelligence_runs
+     SET status = $4,
+         metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $5::jsonb,
+         completed_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3`,
+    [input.runId, input.auth.tenantId, input.auth.userId, input.status, JSON.stringify(input.metadata)]
+  );
+}
+
+async function userHasActiveMemoryRecords(auth: AuthContext): Promise<boolean> {
+  const result = await pool.query<{ active_memory_count: number }>(
+    `SELECT COUNT(*)::int AS active_memory_count
+     FROM memory_records
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND deleted_at IS NULL
+       AND superseded_by IS NULL`,
+    [auth.tenantId, auth.userId]
+  );
+  return (result.rows[0]?.active_memory_count ?? 0) > 0;
+}
+
+async function hasAnyProcessedDailyRun(auth: AuthContext): Promise<boolean> {
+  const result = await pool.query<{ id: string }>(
+    `SELECT id
+     FROM daily_intelligence_runs
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND status = 'completed'
+       AND (
+         metadata_json->>'processed' = 'true'
+         OR metadata_json ? 'memoryCleanup'
+       )
+     LIMIT 1`,
+    [auth.tenantId, auth.userId]
+  );
+  return result.rows.length > 0;
 }
 
 async function buildMemoryCleanupSummary(auth: AuthContext): Promise<{
@@ -2883,12 +3047,24 @@ export function stopDailyIntelligenceWorker(): void {
 }
 
 async function runDailyIntelligenceWorkerTick(): Promise<void> {
-  const users = await pool.query<{ tenant_id: string; user_id: string }>(
-    `SELECT tenant_id, user_id
-     FROM ai_activity_events
-     WHERE created_at >= NOW() - interval '7 days'
-     GROUP BY tenant_id, user_id
-     ORDER BY MAX(created_at) DESC
+  const users = await pool.query<{ tenant_id: string; user_id: string; plan: AuthContext["plan"] }>(
+    `SELECT e.tenant_id, e.user_id, s.plan
+     FROM ai_activity_events e
+     JOIN subscriptions s
+       ON s.tenant_id = e.tenant_id
+     WHERE e.created_at >= NOW() - interval '7 days'
+       AND s.status <> 'expired'
+       AND s.plan <> 'free'
+       AND EXISTS (
+         SELECT 1
+         FROM memory_records mr
+         WHERE mr.tenant_id = e.tenant_id
+           AND mr.user_id = e.user_id
+           AND mr.deleted_at IS NULL
+           AND mr.superseded_by IS NULL
+       )
+     GROUP BY e.tenant_id, e.user_id, s.plan
+     ORDER BY MAX(e.created_at) DESC
      LIMIT $1`,
     [config.dailyIntelligenceWorkerBatchSize]
   );
@@ -2898,7 +3074,7 @@ async function runDailyIntelligenceWorkerTick(): Promise<void> {
       tenantId: row.tenant_id,
       userId: row.user_id,
       authMode: "internal",
-      plan: "pro",
+      plan: row.plan,
     };
     try {
       await runDailyIntelligencePassForUser(auth);

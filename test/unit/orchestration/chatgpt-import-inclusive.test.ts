@@ -89,7 +89,7 @@ test("persistImportPreview persists preview without re-classifying", async () =>
 
   const result = await useCase.persistImportPreview(
     { tenantId: "t1", userId: "u1", authMode: "internal", plan: "free" },
-    { preview, batchId: "batch-1", mode: "bulk_export" }
+    { preview, batchId: "batch-1", mode: "bulk_export", importSource: "chatgpt" }
   );
 
   assert.equal(result.persisted, 1);

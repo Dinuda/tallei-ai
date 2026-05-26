@@ -97,6 +97,116 @@ test("use case dedupes and conflicts against existing values", async () => {
   assert.equal(result.summary.persisted, 0);
 });
 
+test("parser routes Claude conversation exports through bulk pipeline", () => {
+  const parsed = parseChatGptImportInput(JSON.stringify([
+    {
+      uuid: "conv-1",
+      name: "Preferences",
+      created_at: "2026-03-06T10:00:00.000Z",
+      chat_messages: [
+        { sender: "human", text: "I prefer concise answers for project updates.", created_at: "2026-03-06T10:00:01.000Z" },
+        { sender: "assistant", text: "Got it.", created_at: "2026-03-06T10:00:02.000Z" },
+      ],
+    },
+    {
+      uuid: "conv-2",
+      name: "Stack",
+      created_at: "2026-04-06T10:00:00.000Z",
+      chat_messages: [
+        { sender: "human", text: "Our stack is TypeScript, Postgres, and Qdrant.", created_at: "2026-04-06T10:00:01.000Z" },
+      ],
+    },
+  ]));
+
+  assert.equal(parsed.mode, "claude_export");
+  assert.equal(parsed.useBulkPipeline, true);
+  assert.equal(parsed.bundles.length, 2);
+  assert.equal(parsed.items.length, 0);
+  assert.equal(parsed.importProfileOverride, "inclusive");
+  assert.equal(parsed.invalid, 0);
+  assert.match(parsed.bundles[0]?.messages[0]?.text ?? "", /concise answers/);
+});
+
+test("Claude export preview uses bulk extraction instead of raw chat lines", async () => {
+  const useCase = new ChatGptMemoryImportUseCase({
+    listExistingMemories: async () => [],
+    persistMemory: async () => ({ memoryId: "mem-1" }),
+    extractHighSignalMemories: mockExtractor([
+      {
+        memory: "User prefers concise answers for project updates.",
+        type: "preference",
+        stability: 0.9,
+        reuseLikelihood: 0.9,
+        confidence: 0.9,
+        sourceReason: "Stable preference",
+        sourceConversationId: "conv-1",
+        sourceDateTime: "2026-03-06T10:00:00.000Z",
+        sourceFile: "pasted-claude-export.json",
+      },
+    ]),
+  });
+
+  const result = await useCase.execute(auth, {
+    input: JSON.stringify([{
+      uuid: "conv-1",
+      name: "Preferences",
+      created_at: "2026-03-06T10:00:00.000Z",
+      chat_messages: [
+        { sender: "human", text: "I prefer concise answers for project updates and weekly reports.", created_at: "2026-03-06T10:00:01.000Z" },
+      ],
+    }]),
+    apply: false,
+  });
+
+  assert.equal(result.mode, "claude_export");
+  assert.equal(result.summary.parsed, 1);
+  assert.equal(result.summary.extracted, 1);
+  assert.equal(result.preview.length, 1);
+  assert.match(result.preview[0]?.raw ?? "", /concise answers/);
+  assert.equal(result.preview[0]?.extractType, "preference");
+  assert.equal(result.importSource, "claude");
+  assert.equal(result.warnings.some((warning) => warning.includes("strict JSON")), false);
+});
+
+test("Claude import persists with claude platform label", async () => {
+  let persistedPlatform: string | null = null;
+  const useCase = new ChatGptMemoryImportUseCase({
+    listExistingMemories: async () => [],
+    persistMemory: async ({ sourceImportPlatform }) => {
+      persistedPlatform = sourceImportPlatform;
+      return { memoryId: "mem-claude-1" };
+    },
+    extractHighSignalMemories: mockExtractor([
+      {
+        memory: "User prefers concise answers.",
+        type: "preference",
+        stability: 0.9,
+        reuseLikelihood: 0.9,
+        confidence: 0.9,
+        sourceReason: "Stable preference",
+        sourceConversationId: "conv-1",
+        sourceDateTime: "2026-03-06T10:00:00.000Z",
+        sourceFile: "pasted-claude-export.json",
+      },
+    ]),
+  });
+
+  await useCase.execute(auth, {
+    input: JSON.stringify([{
+      uuid: "conv-1",
+      name: "Preferences",
+      created_at: "2026-03-06T10:00:00.000Z",
+      chat_messages: [
+        { sender: "human", text: "I prefer concise answers for project updates.", created_at: "2026-03-06T10:00:01.000Z" },
+      ],
+    }]),
+    importSource: "claude",
+    apply: true,
+  });
+
+  assert.equal(persistedPlatform, "claude");
+});
+
 test("bulk_export pipeline filters junk and persists extracted memories only", async () => {
   const persisted: string[] = [];
   const useCase = new ChatGptMemoryImportUseCase({

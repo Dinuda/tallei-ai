@@ -227,6 +227,20 @@
   flex-shrink: 0;
 }
 
+.importedBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--accent-light);
+  border: 1px solid var(--border-light);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .memoryPreviewText {
   color: var(--text);
   font-size: 0.88rem;

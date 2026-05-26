@@ -5,6 +5,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import type { BulkIngestDocument, BulkIngestSummary } from "./chatgpt-bulk-ingest.js";
 import {
   extractBulkConversationBundles,
+  extractClaudeConversationBundles,
   looksLikeBinaryText,
   type BulkConversationBundle,
 } from "./chatgpt-bulk-parser.js";
@@ -50,7 +51,7 @@ export type ChatGptImportReasonCode =
   | "invalid_input"
   | "deduped_on_persist";
 
-export type ChatGptImportMode = "json_export" | "paste" | "bulk_export";
+export type ChatGptImportMode = "json_export" | "paste" | "bulk_export" | "claude_export";
 
 export type ChatGptImportProgressStage =
   | "ingesting"
@@ -66,6 +67,7 @@ export interface ChatGptImportProgress {
 }
 
 export type ChatGptImportProfile = "curated" | "inclusive";
+export type MemoryImportSource = "chatgpt" | "claude";
 
 export interface ChatGptImportRequest {
   mode?: "bulk_file" | "conversation_json_files";
@@ -74,6 +76,7 @@ export interface ChatGptImportRequest {
   originalFilename?: string;
   originalFilenames?: string[];
   importProfile?: ChatGptImportProfile;
+  importSource?: MemoryImportSource;
   input?: string;
   apply?: boolean;
   modeHint?: ChatGptImportMode;
@@ -158,6 +161,7 @@ export interface ChatGptImportSummary {
 export interface ChatGptImportResult {
   batchId: string;
   mode: ChatGptImportMode;
+  importSource: MemoryImportSource;
   summary: ChatGptImportSummary;
   preview: ChatGptImportCandidate[];
   conflicts: ChatGptImportConflict[];
@@ -188,6 +192,7 @@ interface ParsedInputResult {
   useBulkPipeline: boolean;
   useBulkFilePipeline: boolean;
   useConversationJsonFilesPipeline: boolean;
+  importProfileOverride?: ChatGptImportProfile;
   invalid: number;
   warnings: string[];
 }
@@ -221,6 +226,7 @@ interface UseCaseDeps {
     preferenceKey: string | null;
     sourceImportBatchId: string;
     sourceImportMode: ChatGptImportMode;
+    sourceImportPlatform: MemoryImportSource;
     sourceDateTime: string | null;
     importDetectedCategory: string | null;
     importEntityKey: string | null;
@@ -410,6 +416,80 @@ function stripMarkdownCodeBlocks(input: string): string {
 
 function fixTrailingCommas(json: string): string {
   return json.replace(/,(\s*[}\]])/g, "$1");
+}
+
+function tryParseImportJson(input: string): unknown | null {
+  try {
+    return JSON.parse(input) as unknown;
+  } catch {
+    try {
+      return JSON.parse(fixTrailingCommas(input)) as unknown;
+    } catch {
+      const chunks = input
+        .split(/\n{2,}/)
+        .map((chunk) => chunk.trim())
+        .filter(Boolean);
+      if (chunks.length <= 1) return null;
+
+      const merged: unknown[] = [];
+      for (const chunk of chunks) {
+        const parsed = tryParseImportJson(chunk);
+        if (parsed == null) return null;
+        if (Array.isArray(parsed)) merged.push(...parsed);
+        else merged.push(parsed);
+      }
+      return merged.length > 0 ? merged : null;
+    }
+  }
+}
+
+function applyParsedConversationPayload(
+  parsed: unknown,
+  options: ParseImportOptions | undefined,
+  modeHint: ChatGptImportMode | undefined
+): Pick<ParsedInputResult, "mode" | "items" | "bundles" | "useBulkPipeline" | "importProfileOverride" | "invalid" | "warnings"> {
+  let mode: ChatGptImportMode = options?.modeHint ?? "json_export";
+  let invalid = 0;
+  const warnings: string[] = [];
+  let rawItems: RawImportCandidate[] = [];
+  let bundles: BulkConversationBundle[] = [];
+  let useBulkPipeline = false;
+  let importProfileOverride: ChatGptImportProfile | undefined;
+
+  const claudeBundles = extractClaudeConversationBundles(parsed, "pasted-claude-export.json");
+  if (claudeBundles.length > 0) {
+    mode = "claude_export";
+    bundles = claudeBundles;
+    useBulkPipeline = true;
+    importProfileOverride = "inclusive";
+    return { mode, items: [], bundles, useBulkPipeline, importProfileOverride, invalid, warnings };
+  }
+
+  if (modeHint === "bulk_export" || options?.modeHint === "bulk_export") {
+    mode = "bulk_export";
+    bundles = bundlesFromParsedJson(parsed, "pasted-export.json");
+    if (bundles.length > 0) {
+      useBulkPipeline = true;
+    } else {
+      const conversationRows = collectConversationCandidates(parsed);
+      if (conversationRows.length > 0) rawItems = conversationRows;
+    }
+  }
+
+  if (!useBulkPipeline) {
+    rawItems = collectStringCandidates(parsed);
+  }
+  if (!useBulkPipeline && rawItems.length === 0) {
+    invalid += 1;
+    warnings.push("No importable string candidates found in JSON payload.");
+  }
+  if (useBulkPipeline && bundles.length === 0) {
+    invalid += 1;
+    warnings.push("No importable conversations found in bulk export JSON.");
+  }
+
+  const items = normalizeParsedItems(rawItems);
+  return { mode, items, bundles, useBulkPipeline, importProfileOverride, invalid, warnings };
 }
 
 function parseJsonLikeQuotedValue(value: string): string {
@@ -611,6 +691,16 @@ function extractedToParsedItem(row: ExtractedImportMemory): ParsedImportItem {
   };
 }
 
+function resolveImportSource(
+  request: ChatGptImportRequest,
+  mode: ChatGptImportMode
+): MemoryImportSource {
+  if (request.importSource === "claude") return "claude";
+  if (request.importSource === "chatgpt") return "chatgpt";
+  if (mode === "claude_export") return "claude";
+  return "chatgpt";
+}
+
 function resolveClassification(candidate: ParsedImportItem): ReturnType<typeof classifyMemory> {
   const heuristic = classifyMemory(candidate.raw);
   if (!candidate.memoryTypeOverride) {
@@ -640,91 +730,69 @@ export function parseChatGptImportInput(input: string, options?: ParseImportOpti
     };
   }
 
+  const cleaned = stripMarkdownCodeBlocks(trimmed);
+  const parsed = tryParseImportJson(cleaned);
+  if (parsed != null) {
+    const applied = applyParsedConversationPayload(parsed, options, options?.modeHint);
+    let items = applied.items;
+    const warnings = [...applied.warnings];
+    let invalid = applied.invalid;
+
+    if (!applied.useBulkPipeline && applied.mode === "bulk_export" && items.length > LEGACY_BULK_MAX_CANDIDATES) {
+      warnings.push(`Capped bulk export candidates at ${LEGACY_BULK_MAX_CANDIDATES} from ${items.length} detected rows.`);
+      items = items.slice(0, LEGACY_BULK_MAX_CANDIDATES);
+    }
+    if (!applied.useBulkPipeline && items.length === 0 && invalid > 0) {
+      warnings.push("No importable memory candidates found in input.");
+    }
+    if (applied.useBulkPipeline && applied.bundles.length === 0 && invalid === 0) {
+      invalid = 1;
+      warnings.push("No importable conversations found in bulk export.");
+    }
+
+    return {
+      mode: applied.mode,
+      items,
+      bundles: applied.bundles,
+      useBulkPipeline: applied.useBulkPipeline,
+      useBulkFilePipeline: false,
+      useConversationJsonFilesPipeline: false,
+      ...(applied.importProfileOverride ? { importProfileOverride: applied.importProfileOverride } : {}),
+      invalid,
+      warnings,
+    };
+  }
+
   let mode: ChatGptImportMode = options?.modeHint ?? "paste";
   let invalid = 0;
   const warnings: string[] = [];
   let rawItems: RawImportCandidate[] = [];
-  let bundles: BulkConversationBundle[] = [];
-  let useBulkPipeline = false;
 
-  const cleaned = stripMarkdownCodeBlocks(trimmed);
-
-  try {
-    const parsed = JSON.parse(cleaned) as unknown;
+  const recovered = salvageJsonLikeObjects(cleaned);
+  if (recovered.length > 0) {
     mode = options?.modeHint ?? "json_export";
-    if (mode === "bulk_export") {
-      bundles = bundlesFromParsedJson(parsed, "pasted-export.json");
-      if (bundles.length > 0) {
-        useBulkPipeline = true;
-      } else {
-        const conversationRows = collectConversationCandidates(parsed);
-        if (conversationRows.length > 0) rawItems = conversationRows;
-      }
-    }
-    if (!useBulkPipeline) {
-      rawItems = collectStringCandidates(parsed);
-    }
-    if (!useBulkPipeline && rawItems.length === 0) {
-      invalid += 1;
-      warnings.push("No importable string candidates found in JSON payload.");
-    }
-    if (useBulkPipeline && bundles.length === 0) {
-      invalid += 1;
-      warnings.push("No importable conversations found in bulk export JSON.");
-    }
-  } catch {
-    try {
-      const fixed = fixTrailingCommas(cleaned);
-      const parsed = JSON.parse(fixed) as unknown;
-      mode = options?.modeHint ?? "json_export";
-      if (mode === "bulk_export") {
-        bundles = bundlesFromParsedJson(parsed, "pasted-export.json");
-        if (bundles.length > 0) {
-          useBulkPipeline = true;
-        } else {
-          const conversationRows = collectConversationCandidates(parsed);
-          if (conversationRows.length > 0) rawItems = conversationRows;
-        }
-      }
-      if (!useBulkPipeline) {
-        rawItems = collectStringCandidates(parsed);
-      }
-      if (!useBulkPipeline && rawItems.length === 0) {
-        invalid += 1;
-        warnings.push("No importable string candidates found in JSON payload.");
-      }
-    } catch {
-      const recovered = salvageJsonLikeObjects(cleaned);
-      if (recovered.length > 0) {
-        mode = options?.modeHint ?? "json_export";
-        rawItems = recovered;
-        warnings.push("Found JSON-like block but could not parse it as strict JSON. Recovered candidates from object lines.");
-      } else {
-        mode = options?.modeHint ?? "paste";
-        rawItems = cleaned
-          .split(/\r?\n/)
-          .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, "").trim())
-          .filter((line) => line.length > 0 && !isStructuralJsonLine(line))
-          .filter((line) => mode !== "bulk_export" || !looksLikeBinaryText(line))
-          .map((line) => ({ text: line, sourceDateTime: null }));
-      }
-    }
+    rawItems = recovered;
+    warnings.push("Found JSON-like block but could not parse it as strict JSON. Recovered candidates from object lines.");
+  } else {
+    mode = options?.modeHint ?? "paste";
+    rawItems = cleaned
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, "").trim())
+      .filter((line) => line.length > 0 && !isStructuralJsonLine(line))
+      .filter((line) => mode !== "bulk_export" || !looksLikeBinaryText(line))
+      .map((line) => ({ text: line, sourceDateTime: null }));
   }
 
   let items = normalizeParsedItems(rawItems);
-  if (!useBulkPipeline && mode === "bulk_export" && items.length > LEGACY_BULK_MAX_CANDIDATES) {
+  if (mode === "bulk_export" && items.length > LEGACY_BULK_MAX_CANDIDATES) {
     warnings.push(`Capped bulk export candidates at ${LEGACY_BULK_MAX_CANDIDATES} from ${items.length} detected rows.`);
     items = items.slice(0, LEGACY_BULK_MAX_CANDIDATES);
   }
-  if (!useBulkPipeline && items.length === 0 && invalid > 0) {
+  if (items.length === 0 && invalid > 0) {
     warnings.push("No importable memory candidates found in input.");
   }
-  if (useBulkPipeline && bundles.length === 0 && invalid === 0) {
-    invalid = 1;
-    warnings.push("No importable conversations found in bulk export.");
-  }
 
-  return { mode, items, bundles, useBulkPipeline, useBulkFilePipeline: false, useConversationJsonFilesPipeline: false, invalid, warnings };
+  return { mode, items, bundles: [], useBulkPipeline: false, useBulkFilePipeline: false, useConversationJsonFilesPipeline: false, invalid, warnings };
 }
 
 function parseBulkDocuments(
@@ -1176,6 +1244,7 @@ export class ChatGptMemoryImportUseCase {
       preview: ChatGptImportCandidate[];
       batchId: string;
       mode: ChatGptImportMode;
+      importSource: MemoryImportSource;
       onProgress?: (progress: ChatGptImportProgress) => void | Promise<void>;
     }
   ): Promise<{
@@ -1212,6 +1281,7 @@ export class ChatGptMemoryImportUseCase {
         preferenceKey: candidate.preferenceKey,
         sourceImportBatchId: input.batchId,
         sourceImportMode: input.mode,
+        sourceImportPlatform: input.importSource,
         sourceDateTime: candidate.sourceDateTime,
         importDetectedCategory: candidate.category,
         importEntityKey: entityKey,
@@ -1257,10 +1327,14 @@ export class ChatGptMemoryImportUseCase {
       return { items: [], stats, warnings };
     }
 
+    const importProfile = request.importProfile ?? "curated";
+    const isInclusive = importProfile === "inclusive";
+    const classifyOptions = this.resolveBulkClassifyOptions({ ...request, importProfile });
+
     await request.onProgress?.({ stage: "filtering", message: "Applying deterministic filters" });
 
     const conversations = bundlesToImportConversations(bundles);
-    const classified = classifyBulkImportCandidates(conversations);
+    const classified = classifyBulkImportCandidates(conversations, classifyOptions);
     const promoted = promoteWeakSignals(classified);
 
     stats.hardDropped = promoted.hardDropped;
@@ -1269,32 +1343,41 @@ export class ChatGptMemoryImportUseCase {
     stats.dropped = promoted.dropped.length;
     warnings.push(...promoted.warnings);
 
-    if (promoted.keepHigh.length === 0) {
-      warnings.push("No KEEP_HIGH conversations to send to memory extractor.");
+    const extractionPool = isInclusive
+      ? [...promoted.keepHigh, ...promoted.keepWeak]
+      : promoted.keepHigh;
+    if (extractionPool.length === 0) {
+      warnings.push(isInclusive
+        ? "No conversations matched inclusive filters for memory extraction."
+        : "No KEEP_HIGH conversations to send to memory extractor.");
       return { items: [], stats, warnings };
     }
 
-    const maxExtract = Math.max(1, config.importMaxExtractConversations);
-    const rankedHigh = [...promoted.keepHigh].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-    const toExtract = rankedHigh.slice(0, maxExtract);
-    if (toExtract.length < rankedHigh.length) {
+    const maxExtract = isInclusive
+      ? Math.max(1, config.importInclusiveMaxExtractConversations)
+      : Math.max(1, config.importMaxExtractConversations);
+    const ranked = [...extractionPool].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    const toExtract = ranked.slice(0, maxExtract);
+    if (toExtract.length < ranked.length) {
       warnings.push(
-        `Capped LLM extraction to top ${toExtract.length}/${rankedHigh.length} KEEP_HIGH conversation(s) by score.`
+        `Capped extraction to top ${toExtract.length}/${ranked.length} conversation(s) by score.`
       );
     }
 
+    const extractStage = config.importExtractMode === "llm" ? "extracting" : "promoting";
     await request.onProgress?.({
-      stage: "extracting",
+      stage: extractStage,
       message: config.importExtractMode === "llm"
-        ? `Extracting memories from ${toExtract.length} high-signal conversation(s) via LLM`
-        : `Promoting memories from ${toExtract.length} high-signal conversation(s) (no LLM)`,
+        ? `Extracting memories from ${toExtract.length} conversation(s) via LLM`
+        : `Promoting memories from ${toExtract.length} conversation(s) (no LLM)`,
     });
 
     const extractOptions: ExtractHighSignalMemoriesOptions = {
       concurrency: config.importExtractConcurrency,
+      importProfile,
       onProgress: async ({ completed, total }) => {
         await request.onProgress?.({
-          stage: "extracting",
+          stage: extractStage,
           message: config.importExtractMode === "llm"
             ? `Extracting memories ${completed}/${total}`
             : `Promoting memories ${completed}/${total}`,
@@ -1317,6 +1400,10 @@ export class ChatGptMemoryImportUseCase {
     const batchId = randomUUID();
     const apply = request.apply === true;
     const parsed = resolveParsedInput(request);
+    const effectiveRequest: ChatGptImportRequest = parsed.importProfileOverride
+      ? { ...request, importProfile: parsed.importProfileOverride }
+      : request;
+    const importSource = resolveImportSource(effectiveRequest, parsed.mode);
     const warnings = [...parsed.warnings];
 
     let activeItems = parsed.items;
@@ -1336,7 +1423,7 @@ export class ChatGptMemoryImportUseCase {
       ingestSummary = pipeline.ingestSummary;
       warnings.push(...pipeline.warnings);
     } else if (parsed.useBulkPipeline) {
-      const pipeline = await this.runBulkPipeline(parsed.bundles, request);
+      const pipeline = await this.runBulkPipeline(parsed.bundles, effectiveRequest);
       activeItems = pipeline.items;
       pipelineStats = pipeline.stats;
       warnings.push(...pipeline.warnings);
@@ -1532,6 +1619,7 @@ export class ChatGptMemoryImportUseCase {
           preferenceKey: classification.preferenceKey,
           sourceImportBatchId: batchId,
           sourceImportMode: parsed.mode,
+          sourceImportPlatform: importSource,
           sourceDateTime: candidate.sourceDateTime,
           importDetectedCategory: classification.category,
           importEntityKey: entityKey,
@@ -1586,6 +1674,7 @@ export class ChatGptMemoryImportUseCase {
     return {
       batchId,
       mode: parsed.mode,
+      importSource,
       summary,
       preview: apply ? [] : preview,
       conflicts: conflictRows,

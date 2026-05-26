@@ -342,6 +342,7 @@ const chatGptMemoryImportUseCase = new ChatGptMemoryImportUseCase({
     preferenceKey,
     sourceImportBatchId,
     sourceImportMode,
+    sourceImportPlatform,
     sourceDateTime,
     importDetectedCategory,
     importEntityKey,
@@ -352,10 +353,12 @@ const chatGptMemoryImportUseCase = new ChatGptMemoryImportUseCase({
         ? "fact"
         : memoryType;
 
+    const importPlatform = sourceImportPlatform === "claude" ? "claude" : "chatgpt";
+
     const result = await saveMemoryUseCase.execute({
       content,
       auth,
-      platform: "chatgpt",
+      platform: importPlatform,
       memoryType: persistedMemoryType,
       isPinned,
       preferenceKey,
@@ -365,10 +368,11 @@ const chatGptMemoryImportUseCase = new ChatGptMemoryImportUseCase({
       runVectorDedup: false,
       skipSummary,
       summaryMetadata: {
-        source_platform: "chatgpt",
+        source_platform: importPlatform,
         source_import: true,
         source_import_batch_id: sourceImportBatchId,
         source_import_mode: sourceImportMode,
+        source_import_source: sourceImportPlatform,
         source_datetime: sourceDateTime,
         import_detected_memory_type: memoryType,
         import_persisted_memory_type: persistedMemoryType,
@@ -517,6 +521,7 @@ export async function persistChatGptImportPreview(
     preview: ChatGptImportResult["preview"];
     batchId: string;
     mode: ChatGptImportResult["mode"];
+    importSource: ChatGptImportResult["importSource"];
     onProgress?: ChatGptImportRequest["onProgress"];
   }
 ): Promise<{

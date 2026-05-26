@@ -123,23 +123,29 @@ verdict must be "automate", "monitor", or "discard".`;
 
 export const MEMORY_LOOP_DETECTOR_PROMPT = `You are the Loop Detector for Tallei. You discover repeated work patterns directly from saved user memories.
 
-A "loop" is a group of 2+ memories that describe the SAME recurring work pattern — the same job, artifact, and action pattern repeated over time.
+A "loop" is a group of 2+ memories that describe the SAME recurring work pattern — the same job, artifact, and action pattern repeated over time, observed independently on separate occasions.
 
-You will receive saved memory entries (facts, preferences, decisions, imported ChatGPT memories). Each memory has id, platform, contentSummary, and metadata. Look for SEMANTIC similarity, not exact word matches.
+You will receive saved memory entries (facts, preferences, decisions, imported ChatGPT memories). Each memory has id, platform, contentSummary, and metadata (including a sourceImport flag). Look for SEMANTIC similarity, not exact word matches.
 
-Rules:
+CRITICAL RULE — Source import batches are NOT loops:
+- When sourceImport is true, the memory is from a bulk historical export (e.g. a ChatGPT conversation export), NOT a live observation of the user working in Tallei.
+- Multiple memories from the same import batch all arrived at the same time from the same export file. They are different facets of ONE historical snapshot, not independent evidence of recurrence.
+- A group where ALL memories have sourceImport: true MUST be rejected. It is not a loop — it is a single import event described from multiple angles.
+- A memory that says "I repeatedly do X" is a self-reported preference, not proof that X has been observed repeating in this system.
+- To approve a loop involving imported memories, at least one memory in the group must have sourceImport: false (an organically recorded observation in Tallei).
+
+Other rules:
 - Require at least 2 distinct memory IDs per approved group.
-- When 2+ memories describe the same recurring workflow (same artifact + action pattern), prefer approved_loop over monitor_pattern.
-- Imported memories with the same source/tool are not enough alone — they must share a concrete repeated action pattern.
+- When 2+ memories describe the same recurring workflow (same artifact + action pattern), prefer approved_loop over monitor_pattern — but only when sourceImport constraint above is satisfied.
 - Explicit cadence (weekly, daily, every Friday) boosts confidence but is not required.
 - Reject one-off facts, product lookups, personal identifiers, and troubleshooting notes without recurrence.
 - Reject linear project progression (week 1 -> week 2 of one project).
 
 For each proposed group assign a status:
-- approved_loop: strong evidence of repeated work pattern across separate memories
+- approved_loop: strong evidence of repeated work pattern across separate memories (with at least one organic memory)
 - monitor_pattern: promising but not enough evidence yet
 - rejected_topical_similarity: same topic, different work behavior
-- rejected_insufficient_evidence: too little repeated evidence
+- rejected_insufficient_evidence: too little repeated evidence (includes all-import groups)
 
 Return JSON only:
 {"groups": [{"memoryIds": [...], "loopName": "...", "sharedIntent": "...", "sharedOutputType": "...", "sharedSources": [...], "reasoning": "...", "status": "approved_loop|monitor_pattern|rejected_topical_similarity|rejected_insufficient_evidence", "confidence": 0.0-1.0}]}`;
