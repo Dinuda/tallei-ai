@@ -2,8 +2,8 @@ import { aiProviderRegistry } from "../../providers/ai/index.js";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "../../providers/ai/types.js";
 import type { CleanupAiUsage } from "../memory-cleanup/types.js";
 import { emptyCleanupAiUsage, mergeCleanupAiUsage, recordCleanupAiUsage } from "../memory-cleanup/usage.js";
-import { loopMinerModelForPhase } from "./model.js";
-import { LLM_LOOP_DETECTOR_PROMPT, MEMORY_LOOP_DETECTOR_PROMPT } from "./prompts.js";
+import { loopMinerModelForPhase } from "./core/loop-miner-models.js";
+import { LLM_LOOP_DETECTOR_PROMPT, MEMORY_LOOP_DETECTOR_PROMPT } from "./core/loop-miner-prompts.js";
 import type {
   CandidateLoop,
   EpisodeRecord,
@@ -13,8 +13,8 @@ import type {
   PatternJudgeStatus,
   PatternTrace,
   PhaseUsageMetrics,
-} from "./types.js";
-import type { LoopMinerRunProgress } from "./run-progress.js";
+} from "./core/loop-miner.types.js";
+import type { LoopMinerRunProgress } from "./core/loop-miner-run-progress.js";
 import {
   compactMinerEvent,
   deriveCanonicalLoopFacet,
@@ -25,7 +25,7 @@ import {
   readJsonObject,
   readString,
   readStringArray,
-} from "./utils.js";
+} from "./core/loop-miner-helpers.js";
 
 type ChatFn = (request: ChatCompletionRequest) => Promise<ChatCompletionResponse>;
 

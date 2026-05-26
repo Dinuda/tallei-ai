@@ -14,7 +14,7 @@ import { EpisodeBuilderUseCase } from "./episode-builder.usecase.js";
 import { LoopImplementabilityFilterUseCase } from "./implementability-filter.usecase.js";
 import { LoopDetectorUseCase } from "./loop-detector.usecase.js";
 import { LoopEvaluatorUseCase } from "./loop-evaluator.usecase.js";
-import { LoopMinerRunProgress } from "./run-progress.js";
+import { LoopMinerRunProgress } from "./core/loop-miner-run-progress.js";
 import type {
   CandidateLoop,
   EpisodeRecord,
@@ -30,11 +30,11 @@ import type {
   LoopMinerSummary,
   MinerEvent,
   WorkflowDNA,
-} from "./types.js";
+} from "./core/loop-miner.types.js";
 import {
   workflowDnaFingerprint,
   workflowDnaPrompt,
-} from "./utils.js";
+} from "./core/loop-miner-helpers.js";
 import { buildLoopMinerEpisodeEmbeddingMap, projectEpisodesLexically } from "./episode-embedding-map.js";
 
 export interface RunLoopMinerOptions {

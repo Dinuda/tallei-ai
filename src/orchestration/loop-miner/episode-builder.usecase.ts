@@ -5,10 +5,10 @@ import type { ChatCompletionRequest, ChatCompletionResponse } from "../../provid
 import { TimeoutError } from "../../resilience/timeout.js";
 import type { CleanupAiUsage } from "../memory-cleanup/types.js";
 import { emptyCleanupAiUsage, recordCleanupAiUsage } from "../memory-cleanup/usage.js";
-import { loopMinerModelForPhase } from "./model.js";
-import { EPISODE_BUILDER_PROMPT } from "./prompts.js";
-import type { EpisodeBuilderEfficiencyMetrics, EpisodeRecord, LoopMinerRepository, MinerEvent } from "./types.js";
-import type { LoopMinerRunProgress } from "./run-progress.js";
+import { loopMinerModelForPhase } from "./core/loop-miner-models.js";
+import { EPISODE_BUILDER_PROMPT } from "./core/loop-miner-prompts.js";
+import type { EpisodeBuilderEfficiencyMetrics, EpisodeRecord, LoopMinerRepository, MinerEvent } from "./core/loop-miner.types.js";
+import type { LoopMinerRunProgress } from "./core/loop-miner-run-progress.js";
 import {
   chunkEventsByTimeGap,
   compactMinerEvent,
@@ -22,7 +22,7 @@ import {
   packByEstimatedPromptBudget,
   readJsonObject,
   sourceFingerprintFromTurns,
-} from "./utils.js";
+} from "./core/loop-miner-helpers.js";
 
 type ChatFn = (request: ChatCompletionRequest) => Promise<ChatCompletionResponse>;
 

@@ -9,13 +9,13 @@ import type {
   LoopMinerEpisodeEmbeddingMapView,
   LoopMinerEpisodeEmbeddingPoint,
   LoopMinerRepository,
-} from "./types.js";
+} from "./core/loop-miner.types.js";
 import {
   deriveCanonicalLoopFacet,
   deriveWorkspaceTracePayload,
   episodeEmbeddingText,
   episodeEmbeddingTextHash,
-} from "./utils.js";
+} from "./core/loop-miner-helpers.js";
 
 const loopEpisodeVectorRepository = new LoopEpisodeVectorRepository();
 const LOOP_EPISODE_EMBED_MAX_ATTEMPTS = 4;

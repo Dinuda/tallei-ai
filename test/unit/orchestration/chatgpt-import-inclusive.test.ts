@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyBulkImportCandidates } from "../../../src/orchestration/memory/chatgpt-import-signal.usecase.js";
-import { bundlesToImportConversations } from "../../../src/orchestration/memory/chatgpt-import-signal.usecase.js";
+import {
+  bundlesToImportConversations,
+  classifyBulkImportCandidates,
+} from "../../../src/orchestration/memory/chatgpt-import-signal.usecase.js";
 import type { BulkConversationBundle } from "../../../src/orchestration/memory/chatgpt-bulk-parser.js";
 import { isConversationWithinImportWindow } from "../../../src/orchestration/memory/chatgpt-bulk-parser.js";
 import { ChatGptMemoryImportUseCase } from "../../../src/orchestration/memory/chatgpt-import.usecase.js";

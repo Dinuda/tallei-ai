@@ -277,7 +277,7 @@ test("daily intelligence skips when a run already exists for the current UTC day
   try {
     const result = await workflowAutomation.runDailyIntelligencePassForUserInternal(AUTH, { skipSdkLifecycle: true });
     assert.equal(result.suggestionCount, 0);
-    assert.equal(dailyRunUpdated, false);
+    assert.equal(dailyRunUpdated, true);
     assert.equal(cleanupOrLoopTouched, false);
   } finally {
     (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;

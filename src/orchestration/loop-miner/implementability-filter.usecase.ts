@@ -3,7 +3,7 @@ import type {
   EpisodeRecord,
   LoopEvaluation,
   LoopImplementabilityAssessment,
-} from "./types.js";
+} from "./core/loop-miner.types.js";
 
 export interface QualifiedLoopInput {
   candidateLoop: CandidateLoop;
