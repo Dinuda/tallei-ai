@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { useRouter } from "next/navigation";
 import {
   AlertCircle,
   ArrowRight,
@@ -474,6 +475,54 @@ function platformStyle(platform: Platform): {
 
 const ACCENT = "#4338ca";
 
+const HARDCODED_NEWSLETTER_TASK = "User is writing a newsletter for xyz product every week. Make that a loop.";
+
+function hardcodedNewsletterLoop(): LoopInsight {
+  const now = new Date();
+  const last = new Date(now);
+  last.setDate(now.getDate() - 7);
+  const previous = new Date(now);
+  previous.setDate(now.getDate() - 14);
+  const next = new Date(now);
+  next.setDate(now.getDate() + 7);
+
+  return {
+    id: "hardcoded-newsletter-loop-v1",
+    name: "Weekly Product Newsletter",
+    description: "CEO spawns Topic Researcher, Creative Writer, and Publicist. Publicist only prepares an approval draft.",
+    primarySourceFile: "internal loop creator",
+    frequency: "Weekly",
+    conversationCount: 3,
+    lastOccurred: last.toISOString(),
+    nextPredicted: next.toISOString(),
+    confidence: 99,
+    status: "detected",
+    conversations: [
+      {
+        id: "hardcoded-newsletter-research",
+        title: "Topic Researcher",
+        date: previous.toISOString(),
+        platform: "chatgpt",
+        snippet: "Researches product context, customer questions, release notes, and competitive references.",
+      },
+      {
+        id: "hardcoded-newsletter-writer",
+        title: "Creative Writer",
+        date: last.toISOString(),
+        platform: "chatgpt",
+        snippet: "Turns research into a weekly newsletter draft.",
+      },
+      {
+        id: "hardcoded-newsletter-publicist",
+        title: "Publicist",
+        date: now.toISOString(),
+        platform: "claude",
+        snippet: "Prepares the send or publish plan as an approval draft. No external action is committed.",
+      },
+    ],
+  };
+}
+
 /* ------------------------------------------------------------------ */
 //  Conversation Deck — always fanned
 /* ------------------------------------------------------------------ */
@@ -709,11 +758,15 @@ function LoopCard({
   index,
   onDismiss,
   onLoop,
+  running,
+  actionLabel = "Loop this",
 }: {
   loop: LoopInsight;
   index: number;
   onDismiss: (id: string) => void;
-  onLoop: (id: string) => void;
+  onLoop: (id: string) => Promise<void> | void;
+  running?: boolean;
+  actionLabel?: string;
 }) {
   const [looped, setLooped] = useState(loop.status === "looped");
   const [expanded, setExpanded] = useState(false);
@@ -827,15 +880,20 @@ function LoopCard({
 
             {!looped ? (
               <Button
-                onClick={() => {
-                  setLooped(true);
-                  onLoop(loop.id);
+                onClick={async () => {
+                  try {
+                    await onLoop(loop.id);
+                    setLooped(true);
+                  } catch {
+                    setLooped(false);
+                  }
                 }}
+                disabled={running}
                 className="h-8 gap-2 rounded-none px-4 text-sm text-white"
                 style={{ backgroundColor: ACCENT }}
               >
-                <RotateCcw size={14} />
-                Loop this
+                {running ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                {actionLabel}
               </Button>
             ) : (
               <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700">
@@ -957,11 +1015,14 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
 /* ------------------------------------------------------------------ */
 
 export default function LoopsPage() {
+  const router = useRouter();
   const [loops, setLoops] = useState<LoopInsight[]>([]);
   const [latestRun, setLatestRun] = useState<LoopMinerRun | null>(null);
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loopActionError, setLoopActionError] = useState<string | null>(null);
+  const [runningLoopId, setRunningLoopId] = useState<string | null>(null);
 
   const loadLoopMinerRuns = useCallback(async () => {
     setLoading(true);
@@ -973,11 +1034,16 @@ export default function LoopsPage() {
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
       const displayRun = pickRunForDisplay(runs);
       setLatestRun(displayRun);
-      setLoops(displayRun ? buildLoopInsightsFromRun(displayRun) : []);
+      const minedLoops = displayRun ? buildLoopInsightsFromRun(displayRun) : [];
+      const hardcoded = hardcodedNewsletterLoop();
+      setLoops([
+        hardcoded,
+        ...minedLoops.filter((loop) => loop.id !== hardcoded.id),
+      ]);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
       setLatestRun(null);
-      setLoops([]);
+      setLoops([hardcodedNewsletterLoop()]);
     } finally {
       setLoading(false);
     }
@@ -991,11 +1057,24 @@ export default function LoopsPage() {
     setLoops((prev) => prev.filter((l) => l.id !== id));
   }, []);
 
-  const activateLoop = useCallback((id: string) => {
-    setLoops((prev) =>
-      prev.map((l) => (l.id === id ? { ...l, status: "looped" as const } : l))
-    );
-  }, []);
+  const activateLoop = useCallback(async (id: string) => {
+    setLoopActionError(null);
+    setRunningLoopId(id);
+    try {
+      if (id === "hardcoded-newsletter-loop-v1") {
+        router.push("/dashboard/loops/newsletter");
+        return;
+      }
+      setLoops((prev) =>
+        prev.map((l) => (l.id === id ? { ...l, status: "looped" as const } : l))
+      );
+    } catch (activateError) {
+      setLoopActionError(activateError instanceof Error ? activateError.message : "Failed to run loop");
+      throw activateError;
+    } finally {
+      setRunningLoopId(null);
+    }
+  }, [router]);
 
   const filtered = useMemo(() => {
     if (filter === "high") return loops.filter((l) => l.confidence >= 80);
@@ -1056,6 +1135,14 @@ export default function LoopsPage() {
               </span>
             </div>
           ) : null}
+          {loopActionError ? (
+            <div className="mx-auto mb-4 max-w-5xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              <span className="inline-flex items-center gap-2">
+                <AlertCircle size={14} />
+                {loopActionError}
+              </span>
+            </div>
+          ) : null}
           <AnimatePresence mode="popLayout">
             {filtered.length === 0 ? (
               <motion.div
@@ -1098,6 +1185,8 @@ export default function LoopsPage() {
                       index={i}
                       onDismiss={dismissLoop}
                       onLoop={activateLoop}
+                      running={runningLoopId === loop.id}
+                      actionLabel={loop.id === "hardcoded-newsletter-loop-v1" ? "Open loop" : "Loop this"}
                     />
                   ))}
                 </div>

@@ -24,6 +24,10 @@ import {
   stopWorkflowSdkRuntime,
 } from "../services/workflow-sdk-runtime.js";
 import {
+  startLoopExecutorScheduler,
+  stopLoopExecutorScheduler,
+} from "../services/loop-executor/index.js";
+import {
   dailyIntelligenceWorkflowInputSchema,
   workflowRunWorkflowInputSchema,
   WORKFLOW_DEFINITIONS,
@@ -86,6 +90,7 @@ export function startWorkers(): void {
   startUploadedFileIngestWorker();
   startVertexDocumentBackfillWorker();
   startDailyIntelligenceWorker();
+  startLoopExecutorScheduler();
 }
 
 export function stopWorkers(): void {
@@ -95,6 +100,7 @@ export function stopWorkers(): void {
   stopUploadedFileIngestWorker();
   stopVertexDocumentBackfillWorker();
   stopDailyIntelligenceWorker();
+  stopLoopExecutorScheduler();
   void stopWorkflowSdkRuntime().catch((error) => {
     console.error("[workflow-sdk] failed to stop runtime:", error);
   });

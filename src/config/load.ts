@@ -163,6 +163,9 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_WORKFLOW__TARGET_WORLD", oldKey: "WORKFLOW_TARGET_WORLD" },
   { newKey: "TALLEI_WORKFLOW__POSTGRES_JOB_PREFIX", oldKey: "WORKFLOW_POSTGRES_JOB_PREFIX" },
   { newKey: "TALLEI_WORKFLOW__POSTGRES_QUEUE_CONCURRENCY", oldKey: "WORKFLOW_POSTGRES_WORKER_CONCURRENCY" },
+  { newKey: "TALLEI_LOOP_EXECUTOR__SCHEDULER", oldKey: "LOOP_EXECUTOR_SCHEDULER" },
+  { newKey: "TALLEI_LOOP_EXECUTOR__POLL_MS", oldKey: "LOOP_EXECUTOR_POLL_MS" },
+  { newKey: "TALLEI_LOOP_EXECUTOR__BATCH_SIZE", oldKey: "LOOP_EXECUTOR_BATCH_SIZE" },
   // Feature flags
   { newKey: "TALLEI_FEATURE__RERANK",           oldKey: "RERANK_ENABLED" },
   { newKey: "TALLEI_FEATURE__USE_NEW_SAVE",     oldKey: "USE_NEW_SAVE_USECASE" },
@@ -485,6 +488,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     workflowTargetWorld: readStringEnv(e, "TALLEI_WORKFLOW__TARGET_WORLD", ""),
     workflowPostgresJobPrefix: readStringEnv(e, "TALLEI_WORKFLOW__POSTGRES_JOB_PREFIX", "tallei"),
     workflowPostgresQueueConcurrency: readIntEnv(e, "TALLEI_WORKFLOW__POSTGRES_QUEUE_CONCURRENCY", 10),
+    loopExecutorScheduler: readStringEnv(e, "TALLEI_LOOP_EXECUTOR__SCHEDULER", "internal") === "cloudflare"
+      ? "cloudflare" as const
+      : "internal" as const,
+    loopExecutorPollMs: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__POLL_MS", 30_000),
+    loopExecutorSchedulerBatchSize: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__BATCH_SIZE", 4),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),
