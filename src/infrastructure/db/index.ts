@@ -352,6 +352,11 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       policy: "loop_run_events_tenant_user_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
     },
+    {
+      table: "loop_heartbeat_jobs",
+      policy: "loop_heartbeat_jobs_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
   ];
 
   for (const entry of policyStatements) {
@@ -1072,6 +1077,11 @@ export async function initDb() {
         ON loop_run_tasks(tenant_id, user_id, workflow_run_id, seq);
       CREATE INDEX IF NOT EXISTS idx_loop_run_tasks_run_status
         ON loop_run_tasks(tenant_id, user_id, workflow_run_id, status, updated_at DESC);
+
+      ALTER TABLE loop_run_tasks
+        ADD COLUMN IF NOT EXISTS agent_spec JSONB NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE loop_run_tasks
+        ADD COLUMN IF NOT EXISTS assigned_tools JSONB NOT NULL DEFAULT '[]'::jsonb;
     `);
 
     await client.query(`
@@ -1108,6 +1118,33 @@ export async function initDb() {
         ON loop_run_events(tenant_id, user_id, workflow_run_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_loop_run_events_type_created
         ON loop_run_events(tenant_id, user_id, event_type, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_heartbeat_jobs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        job_type TEXT NOT NULL
+          CHECK (job_type IN ('agent', 'ceo_finalize')),
+        task_id UUID REFERENCES loop_run_tasks(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+        idempotency_key TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        last_error TEXT,
+        next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (idempotency_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_heartbeat_jobs_dispatch
+        ON loop_heartbeat_jobs(status, next_attempt_at, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_loop_heartbeat_jobs_run
+        ON loop_heartbeat_jobs(tenant_id, user_id, workflow_run_id, created_at DESC);
     `);
 
     await client.query(`

@@ -1,6 +1,7 @@
 "use client";
 
-import { Send, X } from "lucide-react";
+import { useState } from "react";
+import { Loader2, Send, Sparkles, X } from "lucide-react";
 import { Streamdown } from "streamdown";
 
 import { Button } from "@/components/ui/button";
@@ -45,63 +46,79 @@ export function ChatDrawer({
   comments,
   message,
   setMessage,
+  onSend,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   comments: ChatComment[];
   message: string;
   setMessage: (v: string) => void;
+  onSend: (body: string) => Promise<void>;
 }) {
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  async function handleSend() {
+    const trimmed = message.trim();
+    if (!trimmed || sending) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      await onSend(trimmed);
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : "Failed to send");
+    } finally {
+      setSending(false);
+    }
+  }
   return (
-    <Drawer
-      open={open}
-      onOpenChange={onOpenChange}
-      direction="right"
-    >
-      <DrawerContent className="flex h-full flex-col rounded-l-xl border-l bg-background shadow-2xl sm:max-w-[420px]">
-        {/* Vaul handle — visible on bottom drawers, hide here */}
-        <div className="flex items-center justify-between border-b px-5 py-4">
-          <DrawerTitle className="text-sm font-semibold">Steer the run</DrawerTitle>
+    <Drawer open={open} onOpenChange={onOpenChange} direction="right">
+      <DrawerContent className="flex h-full flex-col rounded-l-2xl border-0  shadow-2xl sm:max-w-[420px]">
+        <div className="flex items-center justify-between bg-white px-5 py-4 shadow-sm">
+          <div className="flex items-center gap-2">
+            <span className="grid size-8 place-items-center rounded-lg bg-[#7eb71b] text-white">
+              <Sparkles className="size-4" />
+            </span>
+            <DrawerTitle className="text-sm font-semibold text-[#182506]">Steer the run</DrawerTitle>
+          </div>
           <DrawerClose asChild>
-            <Button variant="ghost" size="icon-sm" aria-label="Close">
+            <Button variant="ghost" size="icon-sm" aria-label="Close" className="text-[#7a9a4a]">
               <X className="size-4" />
             </Button>
           </DrawerClose>
         </div>
 
-        {/* Quick suggestions */}
-        <div className="flex flex-wrap gap-1.5 border-b px-4 py-3">
+        <div className="flex flex-wrap gap-1.5 bg-white px-4 py-3 shadow-sm">
           {SUGGESTIONS.map((s) => (
             <button
               key={s}
               type="button"
               onClick={() => setMessage(s)}
-              className="rounded-full border border-border bg-muted/60 px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:border-foreground/20 hover:bg-muted hover:text-foreground"
+              className="rounded-full bg-[#e6f5c8] px-2.5 py-1 text-[11px] font-medium text-[#3d5c18] transition-colors hover:bg-[#cde99a]"
             >
               {s}
             </button>
           ))}
         </div>
 
-        {/* Thread */}
         <ScrollArea className="min-h-0 flex-1">
           <div className="space-y-3 px-4 py-4">
             {comments.length > 0 ? (
               comments.map((c) => {
                 const isUser = c.author === "user";
                 return (
-                  <article key={c.id} className={`space-y-1 ${isUser ? "items-end" : ""} flex flex-col`}>
+                  <article key={c.id} className={`flex flex-col space-y-1 ${isUser ? "items-end" : ""}`}>
                     <div className="flex items-center gap-1.5">
-                      <span className="text-[11px] font-medium capitalize">
+                      <span className="text-[11px] font-semibold capitalize text-[#3d5c18]">
                         {c.author === "ceo" ? "CEO" : c.author.replace(/_/g, " ")}
                       </span>
-                      <span className="text-[10px] text-muted-foreground">{age(c.createdAt)}</span>
+                      <span className="text-[10px] text-[#7a9a4a]">{age(c.createdAt)}</span>
                     </div>
                     <div
-                      className={`max-w-[90%] rounded-2xl px-3.5 py-2.5 text-sm leading-5 ${
+                      className={`max-w-[90%] rounded-2xl px-3.5 py-2.5 text-sm leading-5 shadow-sm ${
                         isUser
-                          ? "rounded-tr-sm bg-primary text-primary-foreground"
-                          : "rounded-tl-sm bg-muted/60 text-foreground"
+                          ? "rounded-tr-sm bg-[#7eb71b] text-white"
+                          : "rounded-tl-sm bg-white text-[#182506]"
                       }`}
                     >
                       <Streamdown>{c.body}</Streamdown>
@@ -110,27 +127,42 @@ export function ChatDrawer({
                 );
               })
             ) : (
-              <div className="py-10 text-center">
-                <p className="text-sm font-medium text-muted-foreground">No messages yet</p>
-                <p className="mt-1 text-xs text-muted-foreground/70">Pick a suggestion or write your own below.</p>
+              <div className="rounded-xl bg-white py-10 text-center shadow-sm">
+                <p className="text-sm font-medium text-[#3d5c18]">No messages yet</p>
+                <p className="mt-1 text-xs text-[#7a9a4a]">Pick a suggestion or write your own below.</p>
               </div>
             )}
           </div>
         </ScrollArea>
 
-        {/* Input */}
-        <div className="border-t p-4">
-          <InputGroup className="h-auto flex-col items-stretch">
+        <div className="bg-white p-4 shadow-[0_-4px_20px_rgba(126,183,27,0.08)]">
+          {sendError ? (
+            <p className="mb-2 text-xs text-rose-600">{sendError}</p>
+          ) : null}
+          <InputGroup className="h-auto flex-col items-stretch overflow-hidden rounded-xl ring-1 /80">
             <InputGroupTextarea
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               placeholder="Ask the CEO to change direction…"
-              className="min-h-20 resize-none"
+              className="min-h-20 resize-none border-0 /50"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void handleSend();
+                }
+              }}
             />
-            <InputGroupAddon align="block-end" className="justify-between border-t">
-              <span className="text-xs text-muted-foreground">Preview only — send not yet wired</span>
-              <InputGroupButton disabled type="button" size="icon-sm" aria-label="Send">
-                <Send className="size-3.5" />
+            <InputGroupAddon align="block-end" className="justify-between bg-white px-3 py-2">
+              <span className="text-xs text-[#7a9a4a]">Steer this run</span>
+              <InputGroupButton
+                disabled={sending || !message.trim()}
+                type="button"
+                size="icon-sm"
+                aria-label="Send"
+                className="bg-[#7eb71b] text-white hover:bg-[#6aa015]"
+                onClick={() => void handleSend()}
+              >
+                {sending ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>

@@ -1,10 +1,31 @@
 import { randomUUID } from "crypto";
+import { z } from "zod";
 
 import type { AuthContext } from "../../domain/auth/index.js";
+import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
-import { runLoopTool } from "./integration-registry.js";
-import { LOOP_DEFINITION_VERSION, loopDefinitionSchema, type LoopDefinition, type LoopToolKey } from "./types.js";
+import { enqueueLoopHeartbeatJob, type LoopHeartbeatJobType } from "./heartbeat-jobs.js";
+import { runLoopAgent } from "./integration-registry.js";
+import {
+  getEffectiveLoopConstraints,
+  listAllowedLoopTools,
+  listLoopTools,
+  listToolValidationIssues,
+  validateAgentRoster,
+  type LoopToolValidationIssue,
+} from "./tool-catalog.js";
+import {
+  LOOP_DEFINITION_VERSION,
+  ceoStrategyOutputSchema,
+  loopDefinitionSchema,
+  loopExecutorRunMetaSchema,
+  loopRunAgentSchema,
+  loopToolAssignmentSchema,
+  type LoopDefinition,
+  type LoopRunAgent,
+  type LoopToolAssignment,
+} from "./types.js";
 
 interface WorkflowRecord {
   id: string;
@@ -34,6 +55,8 @@ interface LoopRunTaskRow {
   agent_id: string;
   agent_name: string;
   tool_key: string;
+  agent_spec: unknown;
+  assigned_tools: unknown;
   status: string;
   input_json: unknown;
   output_json: unknown;
@@ -54,6 +77,82 @@ function readObject(value: unknown): Record<string, unknown> {
 function readLoopDefinition(metadata: unknown): LoopDefinition {
   const row = readObject(metadata);
   return loopDefinitionSchema.parse(row.loopDefinition);
+}
+
+function authFromContext(context: Pick<RunContext, "tenantId" | "userId">): AuthContext {
+  return {
+    tenantId: context.tenantId,
+    userId: context.userId,
+    authMode: "internal",
+    plan: "pro",
+  };
+}
+
+function readLoopExecutorMeta(metadataJson: unknown) {
+  const root = readObject(metadataJson);
+  const loopExecutor = readObject(root.loop_executor);
+  return loopExecutorRunMetaSchema.parse({
+    proposedRoster: loopExecutor.proposedRoster,
+    approvedRoster: loopExecutor.approvedRoster,
+    strategyReadyAt: loopExecutor.strategyReadyAt,
+    rosterApprovedAt: loopExecutor.rosterApprovedAt,
+  });
+}
+
+function mergeLoopExecutorMeta(metadataJson: unknown, patch: Record<string, unknown>): Record<string, unknown> {
+  const root = readObject(metadataJson);
+  const loopExecutor = readObject(root.loop_executor);
+  return {
+    ...root,
+    loop_executor: {
+      ...loopExecutor,
+      ...patch,
+    },
+  };
+}
+
+function slugAgentId(name: string, index: number): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+  return slug ? `${slug}_${index + 1}` : `agent_${index + 1}`;
+}
+
+function readAgentSpec(task: LoopRunTaskRow, taskInput: Record<string, unknown>): LoopRunAgent {
+  const fromColumn = readObject(task.agent_spec);
+  if (typeof fromColumn.id === "string") {
+    return loopRunAgentSchema.parse(fromColumn);
+  }
+  const fromInput = readObject(taskInput.agent);
+  if (typeof fromInput.id === "string") {
+    return loopRunAgentSchema.parse(fromInput);
+  }
+  return loopRunAgentSchema.parse({
+    id: task.agent_id,
+    name: task.agent_name,
+    task: typeof fromInput.task === "string" ? fromInput.task : task.tool_key,
+    tools: [],
+  });
+}
+
+function readAssignedTools(task: LoopRunTaskRow, agentSpec: LoopRunAgent): LoopToolAssignment[] {
+  if (Array.isArray(task.assigned_tools) && task.assigned_tools.length > 0) {
+    return z.array(loopToolAssignmentSchema).parse(task.assigned_tools);
+  }
+  return agentSpec.tools;
+}
+
+function normalizeRosterAgents(agents: LoopRunAgent[]): LoopRunAgent[] {
+  const seen = new Set<string>();
+  return agents.map((agent, index) => {
+    const baseId = agent.id.trim() || slugAgentId(agent.name, index);
+    const id = seen.has(baseId) ? `${baseId}_${index + 1}` : baseId;
+    seen.add(id);
+    return loopRunAgentSchema.parse({
+      id,
+      name: agent.name.trim(),
+      task: agent.task.trim(),
+      tools: agent.tools.map((tool) => loopToolAssignmentSchema.parse(tool)),
+    });
+  });
 }
 
 async function loadWorkflow(auth: AuthContext, workflowId: string): Promise<WorkflowRecord> {
@@ -205,22 +304,86 @@ async function completeLoopText(input: {
   return text;
 }
 
-async function buildStrategy(context: RunContext): Promise<string> {
-  return completeLoopText({
-    system: "You are the CEO coordinator for a Paperclip-style multi-agent recurring loop. Produce a concise ordered execution strategy for the IC agents. Do not do their work.",
-    user: [
-      `Loop goal: ${context.definition.goal}`,
-      "",
-      `CEO policy: ${context.definition.ceo.policy}`,
-      "",
-      "Agents:",
-      ...context.definition.agents.map((agent, index) => (
-        `${index + 1}. ${agent.name} (${agent.id}) uses ${agent.toolPolicy.allowedTools[0]}: ${agent.task}`
-      )),
-      "",
-      "Return a short plan with task order, handoff expectations, and approval constraints.",
-    ].join("\n"),
+async function buildCeoStrategyOutput(context: RunContext): Promise<{
+  strategyText: string;
+  agents: LoopRunAgent[];
+}> {
+  const constraints = getEffectiveLoopConstraints(context.definition);
+  const allowedTools = listAllowedLoopTools(context.definition);
+  const catalogSummary = allowedTools
+    .map((tool) => `- ${tool.ref}: ${tool.description}${tool.requiresConnector ? " (requires connector)" : ""}`)
+    .join("\n");
+
+  const response = await aiProviderRegistry.chat({
+    model: aiProviderRegistry.chatModelName(),
+    responseFormat: "json_object",
+    temperature: 0.2,
+    maxTokens: 2200,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You are the CEO coordinator for a Paperclip-style multi-agent recurring loop.",
+          "Propose a fresh ordered roster of specialist agents for this run and a concise strategy narrative.",
+          "Return JSON only:",
+          '{"strategyText":"...","agents":[{"id":"snake_case","name":"Role Name","task":"specific task","tools":[{"ref":"internal.llm_only"}]}]}',
+          "Each agent may only use tools from this allowed catalog:",
+          catalogSummary,
+          `Allowed integrations: ${constraints.allowedIntegrations.join(", ")}`,
+          "Only assign tool refs listed above. Do not invent tool names.",
+          "Keep 2-4 agents unless the goal clearly needs more.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: [
+          `Loop goal: ${context.definition.goal}`,
+          `CEO policy: ${context.definition.ceo.policy}`,
+        ].join("\n"),
+      },
+    ],
   });
+
+  const parsed = ceoStrategyOutputSchema.parse(JSON.parse(response.text));
+  return {
+    strategyText: parsed.strategyText.trim(),
+    agents: normalizeRosterAgents(parsed.agents),
+  };
+}
+
+async function materializeTasksFromRoster(input: {
+  context: RunContext;
+  roster: LoopRunAgent[];
+  strategyOutput: string;
+}): Promise<void> {
+  for (const [seq, agent] of input.roster.entries()) {
+    await pool.query(
+      `INSERT INTO loop_run_tasks
+       (id, tenant_id, user_id, workflow_run_id, seq, agent_id, agent_name, tool_key, agent_spec, assigned_tools, status, input_json)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, 'todo', $11::jsonb)
+       ON CONFLICT (tenant_id, user_id, workflow_run_id, seq) DO UPDATE
+         SET agent_id = EXCLUDED.agent_id,
+             agent_name = EXCLUDED.agent_name,
+             tool_key = EXCLUDED.tool_key,
+             agent_spec = EXCLUDED.agent_spec,
+             assigned_tools = EXCLUDED.assigned_tools,
+             input_json = EXCLUDED.input_json,
+             updated_at = NOW()`,
+      [
+        randomUUID(),
+        input.context.tenantId,
+        input.context.userId,
+        input.context.runId,
+        seq,
+        agent.id,
+        agent.name,
+        agent.tools[0]?.ref ?? "internal.llm_only",
+        JSON.stringify(agent),
+        JSON.stringify(agent.tools),
+        JSON.stringify({ agent, strategyOutput: input.strategyOutput }),
+      ]
+    );
+  }
 }
 
 async function synthesizeFinalOutput(context: RunContext, comments: LoopRunComment[]): Promise<string> {
@@ -242,7 +405,7 @@ async function synthesizeFinalOutput(context: RunContext, comments: LoopRunComme
   });
 }
 
-async function markRunBlocked(runId: string, message: string, taskId?: string | null): Promise<void> {
+export async function markRunBlocked(runId: string, message: string, taskId?: string | null): Promise<void> {
   const context = await loadRunContext(runId);
   await insertComment({
     context,
@@ -274,62 +437,52 @@ async function markRunBlocked(runId: string, message: string, taskId?: string | 
   );
 }
 
-function fireAndForget(promise: Promise<unknown>, runId: string): void {
-  void promise.catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    void markRunBlocked(runId, message).catch((blockError) => {
-      console.error("[loop-executor] failed to mark run blocked:", blockError);
-    });
-  });
+async function scheduleHeartbeat(input: {
+  tenantId: string;
+  userId: string;
+  runId: string;
+  jobType: LoopHeartbeatJobType;
+  taskId?: string | null;
+}): Promise<void> {
+  await enqueueLoopHeartbeatJob(input);
+  const { dispatchLoopHeartbeatJobs } = await import("./heartbeat-dispatch.js");
+  await dispatchLoopHeartbeatJobs({ limit: 1, source: "immediate" });
 }
 
 export async function runCeoStrategyHeartbeat(runId: string): Promise<{
   runId: string;
   status: "waiting_for_strategy_approval";
   strategyOutput: string;
+  proposedRoster: LoopRunAgent[];
 }> {
   const context = await loadRunContext(runId);
-  const strategyOutput = await buildStrategy(context);
-
-  for (const [seq, agent] of context.definition.agents.entries()) {
-    const [toolKey] = agent.toolPolicy.allowedTools;
-    if (!toolKey) throw new Error(`Agent ${agent.name} must have exactly one tool`);
-    if (agent.integration !== "internal" && !context.definition.integrations.includes(agent.integration)) {
-      throw new Error(`Agent ${agent.name} requested unavailable integration ${agent.integration}`);
-    }
-    await pool.query(
-      `INSERT INTO loop_run_tasks
-       (id, tenant_id, user_id, workflow_run_id, seq, agent_id, agent_name, tool_key, status, input_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'todo', $9::jsonb)
-       ON CONFLICT (tenant_id, user_id, workflow_run_id, seq) DO UPDATE
-         SET agent_id = EXCLUDED.agent_id,
-             agent_name = EXCLUDED.agent_name,
-             tool_key = EXCLUDED.tool_key,
-             input_json = EXCLUDED.input_json,
-             updated_at = NOW()`,
-      [
-        randomUUID(),
-        context.tenantId,
-        context.userId,
-        context.runId,
-        seq,
-        agent.id,
-        agent.name,
-        toolKey,
-        JSON.stringify({ agent, strategyOutput }),
-      ]
-    );
+  const auth = authFromContext(context);
+  const ceoOutput = await buildCeoStrategyOutput(context);
+  const rosterValidation = await validateAgentRoster({
+    agents: ceoOutput.agents,
+    definition: getEffectiveLoopConstraints(context.definition),
+    auth,
+    strictConnectors: false,
+  });
+  if (!rosterValidation.ok) {
+    const message = rosterValidation.issues.map((issue) => issue.message).join("; ");
+    throw new Error(`CEO proposed invalid roster: ${message}`);
   }
 
   await insertComment({
     context,
     author: "ceo",
-    body: strategyOutput,
+    body: ceoOutput.strategyText,
   });
   await insertEvent({
     context,
     eventType: "ceo_strategy_ready",
-    payload: { agentCount: context.definition.agents.length },
+    payload: { agentCount: ceoOutput.agents.length },
+  });
+
+  const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
+    proposedRoster: ceoOutput.agents,
+    strategyReadyAt: new Date().toISOString(),
   });
 
   await pool.query(
@@ -346,12 +499,17 @@ export async function runCeoStrategyHeartbeat(runId: string): Promise<{
       context.runId,
       context.tenantId,
       context.userId,
-      strategyOutput,
-      JSON.stringify({ loop_executor: { strategyReadyAt: new Date().toISOString() } }),
+      ceoOutput.strategyText,
+      JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
     ]
   );
 
-  return { runId: context.runId, status: "waiting_for_strategy_approval", strategyOutput };
+  return {
+    runId: context.runId,
+    status: "waiting_for_strategy_approval",
+    strategyOutput: ceoOutput.strategyText,
+    proposedRoster: ceoOutput.agents,
+  };
 }
 
 async function checkoutTask(runId: string, taskId: string): Promise<LoopRunTaskRow | null> {
@@ -411,7 +569,20 @@ async function loadNextTask(context: RunContext, currentSeq: number): Promise<Lo
 export async function runAgentHeartbeat(runId: string, taskId: string): Promise<{ status: string; taskId: string }> {
   const context = await loadRunContext(runId);
   const task = await checkoutTask(runId, taskId);
-  if (!task) return { status: "skipped", taskId };
+  if (!task) {
+    throw new Error(`Agent task ${taskId} could not be checked out (run status: ${context.runStatus})`);
+  }
+
+  await pool.query(
+    `UPDATE workflow_runs
+     SET status = 'running',
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND status = 'strategy_approved'`,
+    [context.runId, context.tenantId, context.userId]
+  );
 
   try {
     await insertEvent({
@@ -423,12 +594,27 @@ export async function runAgentHeartbeat(runId: string, taskId: string): Promise<
 
     const comments = await loadRunComments(context);
     const taskInput = readObject(task.input_json);
-    const inputAgent = readObject(taskInput.agent);
-    const agentTask = typeof inputAgent.task === "string" ? inputAgent.task : task.tool_key;
-    const result = await runLoopTool(task.tool_key as LoopToolKey, {
+    const agentSpec = readAgentSpec(task, taskInput);
+    const assignedTools = readAssignedTools(task, agentSpec);
+
+    const auth = authFromContext(context);
+    const connectorValidation = await validateAgentRoster({
+      agents: [{ tools: assignedTools }],
+      definition: getEffectiveLoopConstraints(context.definition),
+      auth,
+      strictConnectors: true,
+    });
+    if (!connectorValidation.ok) {
+      const message = connectorValidation.issues.map((issue) => issue.message).join("; ");
+      throw new Error(message);
+    }
+
+    const result = await runLoopAgent({
+      auth,
       goal: context.definition.goal,
-      agentName: task.agent_name,
-      agentTask,
+      agent: agentSpec,
+      assignedTools,
+      draftPolicy: context.definition.draftPolicy,
       priorComments: comments.map((comment) => ({
         author: comment.author,
         body: comment.body,
@@ -468,9 +654,20 @@ export async function runAgentHeartbeat(runId: string, taskId: string): Promise<
 
     const nextTask = await loadNextTask(context, task.seq);
     if (nextTask) {
-      fireAndForget(runAgentHeartbeat(runId, nextTask.id), runId);
+      await scheduleHeartbeat({
+        tenantId: context.tenantId,
+        userId: context.userId,
+        runId,
+        jobType: "agent",
+        taskId: nextTask.id,
+      });
     } else {
-      fireAndForget(runCeoFinalizeHeartbeat(runId), runId);
+      await scheduleHeartbeat({
+        tenantId: context.tenantId,
+        userId: context.userId,
+        runId,
+        jobType: "ceo_finalize",
+      });
     }
     return { status: "done", taskId: task.id };
   } catch (error) {
@@ -561,12 +758,42 @@ export async function runCeoFinalizeHeartbeat(runId: string): Promise<{ runId: s
 export async function approveLoopStrategy(input: {
   auth: AuthContext;
   runId: string;
+  roster?: LoopRunAgent[];
 }): Promise<{ runId: string; status: "strategy_approved"; firstTaskId: string | null }> {
   await assertRunAccess(input.auth, input.runId);
   const context = await loadRunContext(input.runId);
   if (context.runStatus !== "waiting_for_strategy_approval") {
     throw new Error(`Run is ${context.runStatus}, not waiting_for_strategy_approval`);
   }
+
+  const runMeta = readLoopExecutorMeta(context.metadataJson);
+  const rosterSource = input.roster ?? runMeta.approvedRoster ?? runMeta.proposedRoster;
+  if (!rosterSource?.length) {
+    throw new Error("No agent roster is available to approve");
+  }
+  const roster = normalizeRosterAgents(rosterSource);
+  const constraints = getEffectiveLoopConstraints(context.definition);
+  const rosterValidation = await validateAgentRoster({
+    agents: roster,
+    definition: constraints,
+    auth: input.auth,
+  });
+  if (!rosterValidation.ok) {
+    const message = rosterValidation.issues.map((issue) => issue.message).join("; ");
+    throw new Error(message);
+  }
+
+  const strategyOutput = (await pool.query<{ strategy_output: string | null }>(
+    `SELECT strategy_output FROM workflow_runs WHERE id = $1 LIMIT 1`,
+    [context.runId]
+  )).rows[0]?.strategy_output ?? "";
+
+  await materializeTasksFromRoster({
+    context,
+    roster,
+    strategyOutput,
+  });
+
   const firstTask = await pool.query<{ id: string }>(
     `SELECT id
      FROM loop_run_tasks
@@ -579,15 +806,27 @@ export async function approveLoopStrategy(input: {
     [context.runId, context.tenantId, context.userId]
   );
   const firstTaskId = firstTask.rows[0]?.id ?? null;
+
+  const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
+    approvedRoster: roster,
+    rosterApprovedAt: new Date().toISOString(),
+  });
+
   await pool.query(
     `UPDATE workflow_runs
      SET status = 'strategy_approved',
          waiting_for_strategy_approval = FALSE,
+         metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb,
          updated_at = NOW()
      WHERE id = $1
        AND tenant_id = $2
        AND user_id = $3`,
-    [context.runId, context.tenantId, context.userId]
+    [
+      context.runId,
+      context.tenantId,
+      context.userId,
+      JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
+    ]
   );
   await insertComment({
     context,
@@ -597,16 +836,173 @@ export async function approveLoopStrategy(input: {
   await insertEvent({
     context,
     eventType: "strategy_approved",
-    payload: { firstTaskId },
+    payload: { firstTaskId, agentCount: roster.length },
   });
 
   if (firstTaskId) {
-    fireAndForget(runAgentHeartbeat(context.runId, firstTaskId), context.runId);
+    await scheduleHeartbeat({
+      tenantId: context.tenantId,
+      userId: context.userId,
+      runId: context.runId,
+      jobType: "agent",
+      taskId: firstTaskId,
+    });
   } else {
-    fireAndForget(runCeoFinalizeHeartbeat(context.runId), context.runId);
+    await scheduleHeartbeat({
+      tenantId: context.tenantId,
+      userId: context.userId,
+      runId: context.runId,
+      jobType: "ceo_finalize",
+    });
+  }
+
+  // Fallback: if the queue did not advance the first task, run it inline once.
+  if (firstTaskId) {
+    const pending = await pool.query<{ id: string }>(
+      `SELECT id
+       FROM loop_run_tasks
+       WHERE workflow_run_id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+         AND id = $4
+         AND status = 'todo'
+       LIMIT 1`,
+      [context.runId, context.tenantId, context.userId, firstTaskId]
+    );
+    if (pending.rows[0]) {
+      await runAgentHeartbeat(context.runId, firstTaskId);
+    }
   }
 
   return { runId: context.runId, status: "strategy_approved", firstTaskId };
+}
+
+export async function resumeLoopRunExecution(input: {
+  auth: AuthContext;
+  runId: string;
+}): Promise<{ runId: string; status: string; firstTaskId: string | null }> {
+  await assertRunAccess(input.auth, input.runId);
+  const context = await loadRunContext(input.runId);
+  if (context.runStatus !== "strategy_approved" && context.runStatus !== "running") {
+    throw new Error(`Run is ${context.runStatus}, cannot resume agent execution`);
+  }
+
+  const firstTask = await pool.query<{ id: string }>(
+    `SELECT id
+     FROM loop_run_tasks
+     WHERE workflow_run_id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND status = 'todo'
+     ORDER BY seq ASC
+     LIMIT 1`,
+    [context.runId, context.tenantId, context.userId]
+  );
+  const firstTaskId = firstTask.rows[0]?.id ?? null;
+
+  if (firstTaskId) {
+    await scheduleHeartbeat({
+      tenantId: context.tenantId,
+      userId: context.userId,
+      runId: context.runId,
+      jobType: "agent",
+      taskId: firstTaskId,
+    });
+    const stillPending = await pool.query<{ id: string }>(
+      `SELECT id FROM loop_run_tasks WHERE id = $1 AND status = 'todo' LIMIT 1`,
+      [firstTaskId]
+    );
+    if (stillPending.rows[0]) {
+      await runAgentHeartbeat(context.runId, firstTaskId);
+    }
+  } else {
+    await scheduleHeartbeat({
+      tenantId: context.tenantId,
+      userId: context.userId,
+      runId: context.runId,
+      jobType: "ceo_finalize",
+    });
+  }
+
+  return { runId: context.runId, status: context.runStatus, firstTaskId };
+}
+
+export async function getLoopRunRoster(auth: AuthContext, runId: string): Promise<{
+  proposedRoster: LoopRunAgent[];
+  approvedRoster: LoopRunAgent[] | null;
+  editable: boolean;
+  toolCatalog: ReturnType<typeof listLoopTools>;
+  validationIssues: LoopToolValidationIssue[];
+}> {
+  await assertRunAccess(auth, runId);
+  const context = await loadRunContext(runId);
+  const runMeta = readLoopExecutorMeta(context.metadataJson);
+  const proposedRoster = runMeta.proposedRoster ?? [];
+  const approvedRoster = runMeta.approvedRoster ?? null;
+  const editable = context.runStatus === "waiting_for_strategy_approval";
+  const activeRoster = approvedRoster ?? proposedRoster;
+  const constraints = getEffectiveLoopConstraints(context.definition);
+  const validationIssues = activeRoster.length
+    ? await listToolValidationIssues({ agents: activeRoster, definition: constraints, auth })
+    : [];
+  const toolCatalog = listAllowedLoopTools(context.definition);
+
+  return {
+    proposedRoster,
+    approvedRoster,
+    editable,
+    toolCatalog,
+    validationIssues,
+  };
+}
+
+export async function updateLoopRunRoster(auth: AuthContext, input: {
+  runId: string;
+  roster: LoopRunAgent[];
+}): Promise<{ roster: LoopRunAgent[]; validationIssues: LoopToolValidationIssue[] }> {
+  await assertRunAccess(auth, input.runId);
+  const context = await loadRunContext(input.runId);
+  if (context.runStatus !== "waiting_for_strategy_approval") {
+    throw new Error(`Run is ${context.runStatus}, roster is not editable`);
+  }
+
+  const roster = normalizeRosterAgents(input.roster);
+  const constraints = getEffectiveLoopConstraints(context.definition);
+  const blockingValidation = await validateAgentRoster({
+    agents: roster,
+    definition: constraints,
+    auth,
+    strictConnectors: false,
+  });
+  if (!blockingValidation.ok) {
+    return { roster, validationIssues: blockingValidation.issues };
+  }
+  const validationIssues = await listToolValidationIssues({
+    agents: roster,
+    definition: constraints,
+    auth,
+  });
+
+  const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
+    approvedRoster: roster,
+  });
+
+  await pool.query(
+    `UPDATE workflow_runs
+     SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb,
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3`,
+    [
+      context.runId,
+      context.tenantId,
+      context.userId,
+      JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
+    ]
+  );
+
+  return { roster, validationIssues };
 }
 
 export async function listLoopRunTasks(auth: AuthContext, runId: string): Promise<Array<{
@@ -615,6 +1011,8 @@ export async function listLoopRunTasks(auth: AuthContext, runId: string): Promis
   agentId: string;
   agentName: string;
   toolKey: string;
+  assignedTools: LoopToolAssignment[];
+  agentSpec: LoopRunAgent;
   status: string;
   inputJson: unknown;
   outputJson: unknown;
@@ -632,6 +1030,8 @@ export async function listLoopRunTasks(auth: AuthContext, runId: string): Promis
     agent_id: string;
     agent_name: string;
     tool_key: string;
+    agent_spec: unknown;
+    assigned_tools: unknown;
     status: string;
     input_json: unknown;
     output_json: unknown;
@@ -650,6 +1050,8 @@ export async function listLoopRunTasks(auth: AuthContext, runId: string): Promis
             t.agent_id,
             t.agent_name,
             t.tool_key,
+            t.agent_spec,
+            t.assigned_tools,
             t.status,
             t.input_json,
             t.output_json,
@@ -676,29 +1078,50 @@ export async function listLoopRunTasks(auth: AuthContext, runId: string): Promis
      ORDER BY t.seq ASC`,
     [runId, auth.tenantId, auth.userId]
   );
-  return result.rows.map((row) => ({
-    id: row.id,
-    seq: row.seq,
-    agentId: row.agent_id,
-    agentName: row.agent_name,
-    toolKey: row.tool_key,
-    status: row.status,
-    inputJson: row.input_json,
-    outputJson: row.output_json,
-    errorJson: row.error_json,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    latestComment: row.latest_comment_id && row.latest_comment_author && row.latest_comment_body && row.latest_comment_created_at
-      ? {
-        id: row.latest_comment_id,
-        author: row.latest_comment_author,
-        body: row.latest_comment_body,
-        createdAt: row.latest_comment_created_at,
-      }
-      : null,
-  }));
+  return result.rows.map((row) => {
+    const taskRow: LoopRunTaskRow = {
+      id: row.id,
+      tenant_id: auth.tenantId,
+      user_id: auth.userId,
+      workflow_run_id: runId,
+      seq: row.seq,
+      agent_id: row.agent_id,
+      agent_name: row.agent_name,
+      tool_key: row.tool_key,
+      agent_spec: row.agent_spec,
+      assigned_tools: row.assigned_tools,
+      status: row.status,
+      input_json: row.input_json,
+      output_json: row.output_json,
+    };
+    const agentSpec = readAgentSpec(taskRow, readObject(row.input_json));
+    const assignedTools = readAssignedTools(taskRow, agentSpec);
+    return {
+      id: row.id,
+      seq: row.seq,
+      agentId: row.agent_id,
+      agentName: row.agent_name,
+      toolKey: row.tool_key,
+      assignedTools,
+      agentSpec,
+      status: row.status,
+      inputJson: row.input_json,
+      outputJson: row.output_json,
+      errorJson: row.error_json,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      latestComment: row.latest_comment_id && row.latest_comment_author && row.latest_comment_body && row.latest_comment_created_at
+        ? {
+          id: row.latest_comment_id,
+          author: row.latest_comment_author,
+          body: row.latest_comment_body,
+          createdAt: row.latest_comment_created_at,
+        }
+        : null,
+    };
+  });
 }
 
 export async function getLoopRun(auth: AuthContext, runId: string): Promise<{
@@ -786,6 +1209,51 @@ export async function listLoopRunComments(auth: AuthContext, runId: string): Pro
     body: row.body,
     createdAt: row.created_at,
   }));
+}
+
+export async function addLoopRunComment(auth: AuthContext, input: {
+  runId: string;
+  body: string;
+  taskId?: string | null;
+}): Promise<{ id: string; taskId: string | null; author: string; body: string; createdAt: string }> {
+  await assertRunAccess(auth, input.runId);
+  const body = input.body.trim();
+  if (!body) throw new Error("Comment body is required");
+  if (body.length > 8000) throw new Error("Comment body is too long");
+
+  const context = await loadRunContext(input.runId);
+  const commentId = randomUUID();
+  await pool.query(
+    `INSERT INTO loop_run_comments
+     (id, tenant_id, user_id, workflow_run_id, task_id, author, body)
+     VALUES ($1, $2, $3, $4, $5, 'user', $6)`,
+    [
+      commentId,
+      auth.tenantId,
+      auth.userId,
+      input.runId,
+      input.taskId ?? null,
+      body,
+    ]
+  );
+  await insertEvent({
+    context,
+    taskId: input.taskId ?? null,
+    eventType: "user_comment",
+    payload: { commentId },
+  });
+
+  const result = await pool.query<{ created_at: string }>(
+    `SELECT created_at FROM loop_run_comments WHERE id = $1 LIMIT 1`,
+    [commentId]
+  );
+  return {
+    id: commentId,
+    taskId: input.taskId ?? null,
+    author: "user",
+    body,
+    createdAt: result.rows[0]?.created_at ?? new Date().toISOString(),
+  };
 }
 
 export async function executeLoopWorkflow(input: {

@@ -2,15 +2,14 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import {
   AlertCircle,
   Check,
-  ChevronRight,
   Copy,
-  Crown,
   FileText,
+  Info,
   Loader2,
   MessageSquare,
   MoreHorizontal,
@@ -22,8 +21,14 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { AgentRow, AgentPlaceholder, type AgentRowTask } from "./components/agent-rows";
+import { AgentRow, AgentPlaceholder, CeoRow, type AgentRowTask } from "./components/agent-rows";
 import { ChatDrawer, type ChatComment } from "./components/chat-drawer";
+import {
+  StrategyRosterEditor,
+  type CatalogTool,
+  type RosterAgent,
+  type ValidationIssue,
+} from "./components/strategy-roster-editor";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +42,13 @@ import {
 } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -45,7 +57,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import {
   Tooltip,
   TooltipContent,
@@ -53,8 +64,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-
-// ─── Types ───────────────────────────────────────────────────────────────────
 
 type LoopWorkflow = {
   id: string;
@@ -87,6 +96,7 @@ type LoopRunTask = {
   agentId: string;
   agentName: string;
   toolKey: string;
+  assignedTools?: Array<{ ref: string }>;
   status: string;
   inputJson: unknown;
   outputJson: unknown;
@@ -96,9 +106,24 @@ type LoopRunTask = {
   latestComment: { id: string; author: string; body: string; createdAt: string } | null;
 };
 
-type RunAction = "approve-strategy" | "approve" | "skip";
+type WorkflowListRun = {
+  id: string;
+  status: string;
+  draftOutput: string | null;
+  createdAt: string;
+};
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+type WorkflowListItem = {
+  id: string;
+  latestRun: WorkflowListRun | null;
+};
+
+type MemoryEntry = {
+  label: string;
+  source: "memory" | "context" | "credential";
+};
+
+type RunAction = "approve-strategy" | "approve" | "skip";
 
 const ACTIVE_STATUSES = new Set([
   "running",
@@ -106,6 +131,10 @@ const ACTIVE_STATUSES = new Set([
   "strategy_approved",
   "waiting_for_approval",
 ]);
+
+function readRecord(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
 
 function formatDayDate(v: string | null) {
   if (!v) return "Not scheduled";
@@ -154,80 +183,168 @@ function firstSentence(v: string | null | undefined, fallback: string) {
 }
 
 function statusBadgeClass(s: string) {
-  if (s === "completed" || s === "done") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (s === "running" || s === "strategy_approved") return "border-blue-200 bg-blue-50 text-blue-800";
-  if (s.includes("waiting")) return "border-amber-200 bg-amber-50 text-amber-800";
-  if (s === "blocked" || s === "failed") return "border-destructive/30 bg-destructive/10 text-destructive";
-  return "border-border bg-muted/50 text-muted-foreground";
+  if (s === "completed" || s === "done") return "bg-sky-100 text-sky-800";
+  if (s === "running" || s === "strategy_approved") return "bg-blue-100 text-blue-800";
+  if (s.includes("waiting")) return "bg-amber-100 text-amber-800";
+  if (s === "blocked" || s === "failed") return "bg-rose-100 text-rose-800";
+  return "bg-slate-100 text-slate-700";
 }
 
-// What content to show as the hero artifact
-function heroContent(run: LoopRun | null) {
-  const status = run?.status ?? "";
-  const hasDraft = Boolean(run?.draftOutput?.trim());
-  const hasStrategy = Boolean(run?.strategyOutput?.trim());
-
-  if (hasDraft || status === "waiting_for_approval" || status === "completed") {
-    return {
-      label: "DRAFT",
-      description: status === "waiting_for_approval"
-        ? "Ready for your approval — review before anything goes out."
-        : "Final output from this run.",
-      content: run?.draftOutput ?? null,
-      empty: "The draft isn't ready yet.",
-    };
+function getTaskOutput(task: {
+  outputJson: unknown;
+  latestComment?: { body: string } | null;
+}): string {
+  const out = readRecord(task.outputJson);
+  const candidates = [out.text, out.message, out.summary, out.draft, task.latestComment?.body];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
-  if (hasStrategy || status === "waiting_for_strategy_approval") {
-    return {
-      label: "STRATEGY",
-      description: "The CEO's execution plan — approve to start agents.",
-      content: run?.strategyOutput ?? null,
-      empty: "The CEO is still mapping out the strategy.",
-    };
-  }
-  return {
-    label: "OUTPUT",
-    description: "Live preview of this run's most recent artifact.",
-    content: null,
-    empty: "Nothing here yet — agents are getting started.",
-  };
+  return "";
 }
 
-// Single decisive action for the run
+function looksTechnicalContent(v: string): boolean {
+  const text = v.toLowerCase();
+  return (
+    text.includes("execution strategy") ||
+    text.includes("approval constraints") ||
+    text.includes("loop title") ||
+    text.includes("loop goal") ||
+    text.includes("topic researcher") ||
+    text.includes("creative writer") ||
+    text.includes("publicist (")
+  );
+}
+
+function looksNewsletterContent(v: string): boolean {
+  const text = v.toLowerCase();
+  return (
+    text.includes("subject:") ||
+    text.includes("dear ") ||
+    text.includes("hello ") ||
+    text.includes("newsletter") ||
+    text.includes("this week") ||
+    text.includes("thanks for reading")
+  );
+}
+
+function cleanNewsletterContent(v: string): string {
+  const lines = v.split("\n");
+  const blockedStarts = [
+    "final output",
+    "loop title",
+    "loop goal",
+    "execution strategy",
+    "approval constraints",
+    "this structured approach",
+  ];
+  const cutoffIndex = lines.findIndex((line) => line.trim().toLowerCase().startsWith("execution strategy"));
+  const source = cutoffIndex >= 0 ? lines.slice(0, cutoffIndex) : lines;
+  const cleaned = source.filter((line) => {
+    const normalized = line.trim().toLowerCase();
+    if (!normalized) return true;
+    if (blockedStarts.some((start) => normalized.startsWith(start))) return false;
+    if (/^\d+\.\s+(topic researcher|creative writer|publicist)/i.test(line.trim())) return false;
+    if (/^[-*]\s+(output|approval status):/i.test(line.trim())) return false;
+    return true;
+  }).join("\n");
+  return cleaned.trim();
+}
+
+function extractMemoryEntries(tasks: LoopRunTask[]): MemoryEntry[] {
+  const out: MemoryEntry[] = [];
+  const seen = new Set<string>();
+
+  function push(label: string, source: MemoryEntry["source"]) {
+    const clean = label.trim();
+    if (!clean) return;
+    const key = `${source}:${clean.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ label: clean, source });
+  }
+
+  function scan(value: unknown, parentKey = "") {
+    if (typeof value === "string") {
+      if (parentKey.includes("memory") || parentKey.includes("context") || parentKey.includes("credential")) {
+        push(value, parentKey.includes("credential") ? "credential" : parentKey.includes("memory") ? "memory" : "context");
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const row of value) scan(row, parentKey);
+      return;
+    }
+
+    if (!value || typeof value !== "object") return;
+
+    for (const [rawKey, rawVal] of Object.entries(value as Record<string, unknown>)) {
+      const key = rawKey.toLowerCase();
+      if (key.includes("memory") || key.includes("context") || key.includes("credential")) {
+        if (typeof rawVal === "string") {
+          push(rawVal, key.includes("credential") ? "credential" : key.includes("memory") ? "memory" : "context");
+        } else if (Array.isArray(rawVal)) {
+          for (const row of rawVal) {
+            if (typeof row === "string") {
+              push(row, key.includes("credential") ? "credential" : key.includes("memory") ? "memory" : "context");
+            } else {
+              const record = readRecord(row);
+              const name = [record.label, record.title, record.name, record.query, record.id].find((v) => typeof v === "string");
+              if (typeof name === "string") {
+                push(name, key.includes("credential") ? "credential" : key.includes("memory") ? "memory" : "context");
+              }
+            }
+          }
+        } else {
+          const record = readRecord(rawVal);
+          const name = [record.label, record.title, record.name, record.query, record.id].find((v) => typeof v === "string");
+          if (typeof name === "string") {
+            push(name, key.includes("credential") ? "credential" : key.includes("memory") ? "memory" : "context");
+          }
+        }
+      }
+      scan(rawVal, key);
+    }
+  }
+
+  for (const task of tasks) scan(task.inputJson);
+  return out.slice(0, 10);
+}
+
 function runAction(run: LoopRun | null): {
   show: boolean;
   headline: string;
   sub: string;
   cta: string;
   action: RunAction;
-  tone: "amber" | "emerald" | "rose";
+  tone: "amber" | "sky" | "rose";
 } | null {
-  const s = run?.status ?? "";
-  if (s === "waiting_for_strategy_approval") {
+  const status = run?.status ?? "";
+  if (status === "waiting_for_strategy_approval") {
     return {
       show: true,
-      headline: "Approve strategy to start agents",
-      sub: firstSentence(run?.strategyOutput, "The CEO has mapped out the execution plan."),
-      cta: "Approve strategy",
+      headline: "Ready to start this run",
+      sub: "Start the run when you're ready.",
+      cta: "Start run",
       action: "approve-strategy",
       tone: "amber",
     };
   }
-  if (s === "waiting_for_approval") {
+  if (status === "waiting_for_approval") {
     return {
       show: true,
-      headline: "Approve draft before anything is sent",
-      sub: firstSentence(run?.draftOutput, "The newsletter draft is ready for your review."),
-      cta: "Approve draft",
+      headline: "Newsletter is ready for approval",
+      sub: firstSentence(run?.draftOutput, "Review and approve this newsletter."),
+      cta: "Approve newsletter",
       action: "approve",
-      tone: "emerald",
+      tone: "sky",
     };
   }
-  if (s === "blocked") {
+  if (status === "blocked") {
     return {
       show: true,
-      headline: "Run is blocked — skip or steer to continue",
-      sub: "Something needs a human decision before agents can proceed.",
+      headline: "Run needs a decision",
+      sub: "Use steer or skip this run to continue.",
       cta: "Skip this run",
       action: "skip",
       tone: "rose",
@@ -236,17 +353,15 @@ function runAction(run: LoopRun | null): {
   return null;
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
 function RunBadge({ status }: { status: string }) {
   const isRunning = status === "running" || status === "strategy_approved";
   return (
-    <Badge variant="outline" className={cn("gap-1.5 capitalize", statusBadgeClass(status))}>
+    <Badge variant="secondary" className={cn("gap-1.5 border-0 capitalize shadow-none", statusBadgeClass(status))}>
       <span
         className={cn(
           "size-1.5 rounded-full",
           status.includes("waiting") ? "bg-amber-500" :
-          status === "completed" ? "bg-emerald-500" :
+          status === "completed" ? "bg-sky-500" :
           isRunning ? "bg-blue-500 animate-pulse" :
           "bg-muted-foreground/50"
         )}
@@ -256,8 +371,6 @@ function RunBadge({ status }: { status: string }) {
   );
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
-
 export default function LoopRunDetailPage() {
   const params = useParams<{ workflowId: string; runId: string }>();
   const { workflowId, runId } = params;
@@ -266,45 +379,98 @@ export default function LoopRunDetailPage() {
   const [run, setRun] = useState<LoopRun | null>(null);
   const [tasks, setTasks] = useState<LoopRunTask[]>([]);
   const [comments, setComments] = useState<ChatComment[]>([]);
+  const [linkedLatestRun, setLinkedLatestRun] = useState<WorkflowListRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessage, setChatMessage] = useState("");
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [roster, setRoster] = useState<RosterAgent[]>([]);
+  const [toolCatalog, setToolCatalog] = useState<CatalogTool[]>([]);
+  const [rosterIssues, setRosterIssues] = useState<ValidationIssue[]>([]);
+  const [rosterEditable, setRosterEditable] = useState(false);
+  const resumeAttemptedRef = useRef(false);
 
   const active = run ? ACTIVE_STATUSES.has(run.status) : false;
   const runStatus = run?.status ?? "loading";
   const wfStatus = workflow?.status ?? "active";
-  const hero = heroContent(run);
   const decision = runAction(run);
 
   const agentTasks = useMemo((): AgentRowTask[] => {
-    const research = tasks.find((t) => t.toolKey.includes("research"));
-    const writer = tasks.find((t) => t.toolKey.includes("write") || t.toolKey.includes("draft"));
-    const pub = tasks.find((t) => t.toolKey.includes("publication") || t.toolKey.includes("publish"));
-    const ordered = [research, writer, pub].filter((t): t is LoopRunTask => Boolean(t));
-    const rest = tasks.filter((t) => !ordered.some((o) => o.id === t.id));
-    return [...ordered, ...rest];
+    return [...tasks]
+      .sort((a, b) => a.seq - b.seq)
+      .map((task) => ({
+        id: task.id,
+        agentName: task.agentName,
+        toolKey: task.toolKey,
+        agentId: task.agentId,
+        status: task.status,
+        startedAt: task.startedAt,
+        completedAt: task.completedAt,
+        inputJson: task.inputJson,
+        outputJson: task.outputJson,
+        latestComment: task.latestComment,
+        assignedTools: task.assignedTools ?? [],
+      }));
   }, [tasks]);
+
+  const memoryEntries = useMemo(() => extractMemoryEntries(tasks), [tasks]);
+  const activeAgentTask = expandedTaskId ? agentTasks.find((task) => task.id === expandedTaskId) ?? null : null;
+  const writerTask = agentTasks.find((task) =>
+    task.assignedTools?.some((tool) => tool.ref.includes("llm_only")) ||
+    task.toolKey.includes("write") ||
+    task.toolKey.includes("draft")
+  ) ?? null;
+  const rawPrimaryNewsletter = (() => {
+    const runDraft = run?.draftOutput?.trim() ?? "";
+    const writerOutput = writerTask ? getTaskOutput(writerTask) : "";
+    if (runDraft && !looksTechnicalContent(runDraft)) return runDraft;
+    if (writerOutput && (looksNewsletterContent(writerOutput) || looksTechnicalContent(runDraft))) return writerOutput;
+    if (runDraft) return cleanNewsletterContent(runDraft);
+    if (linkedLatestRun?.id && linkedLatestRun.id !== run?.id && linkedLatestRun.draftOutput?.trim()) {
+      return cleanNewsletterContent(linkedLatestRun.draftOutput);
+    }
+    return "";
+  })();
+  const centerOutput = run?.status === "waiting_for_strategy_approval" && run.strategyOutput?.trim()
+    ? run.strategyOutput
+    : activeAgentTask
+      ? getTaskOutput(activeAgentTask)
+      : rawPrimaryNewsletter || null;
+  const centerUpdatedAt = activeAgentTask ? activeAgentTask.completedAt ?? activeAgentTask.startedAt : run?.updatedAt ?? linkedLatestRun?.createdAt ?? null;
+
+  useEffect(() => {
+    if (!expandedTaskId) return;
+    if (!agentTasks.some((task) => task.id === expandedTaskId)) {
+      setExpandedTaskId(null);
+    }
+  }, [agentTasks, expandedTaskId]);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [rRes, tRes, cRes, wRes] = await Promise.all([
+      const [rRes, tRes, cRes, wRes, allRes, rosterRes] = await Promise.all([
         fetch(`/api/workflows/runs/${runId}`, { cache: "no-store" }),
         fetch(`/api/workflows/runs/${runId}/tasks`, { cache: "no-store" }),
         fetch(`/api/workflows/runs/${runId}/comments`, { cache: "no-store" }),
         fetch(`/api/workflows/internal/loops/${workflowId}`, { cache: "no-store" }),
+        fetch("/api/workflows", { cache: "no-store" }),
+        fetch(`/api/workflows/runs/${runId}/roster`, { cache: "no-store" }),
       ]);
-      const [rP, tP, cP, wP] = await Promise.all([
+      const [rP, tP, cP, wP, allP, rosterP] = await Promise.all([
         rRes.json().catch(() => ({})),
         tRes.json().catch(() => ({})),
         cRes.json().catch(() => ({})),
         wRes.json().catch(() => ({})),
+        allRes.json().catch(() => ({})),
+        rosterRes.json().catch(() => ({})),
       ]);
+
       if (!rRes.ok) throw new Error((rP as { error?: string }).error ?? "Failed to load run");
       if (!tRes.ok) throw new Error((tP as { error?: string }).error ?? "Failed to load tasks");
       if (!cRes.ok) throw new Error((cP as { error?: string }).error ?? "Failed to load comments");
+
       if (wRes.ok) setWorkflow((wP as { loop: LoopWorkflow }).loop);
       setRun((rP as { run: LoopRun }).run);
       setTasks(Array.isArray((tP as { tasks?: LoopRunTask[] }).tasks) ? (tP as { tasks: LoopRunTask[] }).tasks : []);
@@ -313,6 +479,33 @@ export default function LoopRunDetailPage() {
           ? (cP as { comments: ChatComment[] }).comments
           : []
       );
+
+      if (rosterRes.ok) {
+        const payload = rosterP as {
+          roster?: {
+            proposedRoster?: RosterAgent[];
+            approvedRoster?: RosterAgent[] | null;
+            editable?: boolean;
+            toolCatalog?: CatalogTool[];
+            validationIssues?: ValidationIssue[];
+          };
+        };
+        const active = payload.roster?.approvedRoster?.length
+          ? payload.roster.approvedRoster
+          : payload.roster?.proposedRoster ?? [];
+        setRoster(active);
+        setToolCatalog(Array.isArray(payload.roster?.toolCatalog) ? payload.roster.toolCatalog : []);
+        setRosterIssues(Array.isArray(payload.roster?.validationIssues) ? payload.roster.validationIssues : []);
+        setRosterEditable(Boolean(payload.roster?.editable));
+      }
+
+      if (allRes.ok) {
+        const workflows = Array.isArray((allP as { workflows?: WorkflowListItem[] }).workflows)
+          ? (allP as { workflows: WorkflowListItem[] }).workflows
+          : [];
+        const linked = workflows.find((row) => row.id === workflowId);
+        setLinkedLatestRun(linked?.latestRun ?? null);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
@@ -323,18 +516,84 @@ export default function LoopRunDetailPage() {
   useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
+    if (resumeAttemptedRef.current || loading) return;
+    if (!run || tasks.length === 0) return;
+    if (run.status !== "strategy_approved" && run.status !== "running") return;
+
+    const hasTodo = tasks.some((task) => task.status === "todo");
+    const hasActive = tasks.some((task) => task.status === "in_progress" || task.status === "working");
+    if (!hasTodo || hasActive) return;
+
+    resumeAttemptedRef.current = true;
+    void fetch(`/api/workflows/runs/${runId}/resume`, { method: "POST" })
+      .then(async (res) => {
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error((payload as { error?: string }).error ?? "Failed to resume agents");
+        }
+        await load();
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : "Failed to resume agents");
+      });
+  }, [loading, run, tasks, runId, load]);
+
+  useEffect(() => {
     if (!active) return;
     const t = window.setInterval(() => void load(), 3000);
     return () => window.clearInterval(t);
   }, [active, load]);
 
+  async function sendSteerComment(body: string) {
+    const trimmed = body.trim();
+    if (!trimmed) return;
+    setError(null);
+    const res = await fetch(`/api/workflows/runs/${runId}/comments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: trimmed }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to send steer message");
+    setChatMessage("");
+    await load();
+  }
+
+  async function saveRoster(next: RosterAgent[]) {
+    setBusy("save-roster");
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/runs/${runId}/roster`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ roster: next }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to save roster");
+      setRoster(next);
+      setRosterIssues(Array.isArray((payload as { validationIssues?: ValidationIssue[] }).validationIssues)
+        ? (payload as { validationIssues: ValidationIssue[] }).validationIssues
+        : []);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save roster");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function doAction(action: RunAction) {
     setBusy(action);
     setError(null);
     try {
-      const res = await fetch(`/api/workflows/runs/${runId}/${action}`, { method: "POST" });
-      const p = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(p.error ?? "Action failed");
+      const init: RequestInit = { method: "POST" };
+      if (action === "approve-strategy" && roster.length > 0) {
+        init.headers = { "content-type": "application/json" };
+        init.body = JSON.stringify({ roster });
+      }
+      const res = await fetch(`/api/workflows/runs/${runId}/${action}`, init);
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload.error ?? "Action failed");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Action failed");
@@ -349,8 +608,8 @@ export default function LoopRunDetailPage() {
     setBusy(act);
     try {
       const res = await fetch(`/api/workflows/${workflow.id}/${act}`, { method: "POST" });
-      const p = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(p.error ?? "Failed");
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload.error ?? "Failed");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
@@ -359,24 +618,24 @@ export default function LoopRunDetailPage() {
     }
   }
 
-  const toneClass = {
-    amber: "bg-amber-50 border-amber-100 text-amber-900",
-    emerald: "bg-emerald-50 border-emerald-100 text-emerald-900",
-    rose: "bg-rose-50 border-rose-100 text-rose-900",
+  const toneCardClass = {
+    amber: "bg-gradient-to-r from-amber-50 to-orange-50",
+    sky: "bg-gradient-to-r from-sky-50 to-cyan-50",
+    rose: "bg-gradient-to-r from-rose-50 to-red-50",
   };
   const toneBtnClass = {
-    amber: "bg-amber-900 text-amber-50 hover:bg-amber-800",
-    emerald: "bg-emerald-700 text-white hover:bg-emerald-600",
-    rose: "bg-rose-700 text-white hover:bg-rose-600",
+    amber: "bg-amber-600 text-white shadow-sm hover:bg-amber-700",
+    sky: "bg-sky-700 text-white shadow-sm hover:bg-sky-800",
+    rose: "bg-rose-600 text-white shadow-sm hover:bg-rose-700",
   };
+
+  const doneCount = agentTasks.filter((t) => t.status === "done" || t.status === "completed").length;
+  const agentTotal = agentTasks.length > 0 ? agentTasks.length : roster.length;
 
   return (
     <TooltipProvider>
-      {/* Full-viewport app layout — no page scroll */}
-      <div className="flex h-[calc(100vh-56px)] flex-col overflow-hidden bg-background">
-
-        {/* ── Header ── */}
-        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b bg-background px-5 py-3">
+      <div className="relative flex h-[calc(100vh-56px)] flex-col overflow-hidden bg-slate-50/40">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 px-5 py-4">
           <div className="min-w-0 space-y-0.5">
             <Breadcrumb>
               <BreadcrumbList>
@@ -388,7 +647,7 @@ export default function LoopRunDetailPage() {
                 <BreadcrumbSeparator />
                 <BreadcrumbItem>
                   <BreadcrumbLink asChild>
-                    <Link href="/dashboard/loops/newsletter" className="text-xs">{workflow?.title ?? "Loop"}</Link>
+                    <Link href="/dashboard/loops/newsletter" className="text-xs">Newsletter</Link>
                   </BreadcrumbLink>
                 </BreadcrumbItem>
                 <BreadcrumbSeparator />
@@ -398,22 +657,44 @@ export default function LoopRunDetailPage() {
               </BreadcrumbList>
             </Breadcrumb>
             <div className="flex items-center gap-2">
-              <h1 className="text-base font-semibold tracking-tight">{workflow?.title ?? "Loop run"}</h1>
+              <h1 className="text-lg font-bold tracking-tight text-slate-900">Newsletter</h1>
               <RunBadge status={runStatus} />
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => setChatOpen(true)}
-              className="gap-1.5 text-muted-foreground hover:text-foreground"
-            >
-              <MessageSquare className="size-4" />
-              <span className="hidden sm:inline">Steer</span>
-            </Button>
+            <DropdownMenu>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Run info"
+                      className="text-slate-500 hover:bg-white hover:text-slate-900"
+                    >
+                      <Info className="size-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent>Run info</TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent align="end" className="w-60">
+                <DropdownMenuLabel>Run info</DropdownMenuLabel>
+                {[
+                  { label: "Next run", value: formatDayDate(workflow?.nextRunAt ?? null) },
+                  { label: "Updated", value: formatRelative(run?.updatedAt ?? null) || "—" },
+                  { label: "Mode", value: run?.runMode ?? "—" },
+                ].map(({ label, value }) => (
+                  <DropdownMenuItem key={label} disabled className="flex items-start justify-between gap-2">
+                    <span className="text-xs text-slate-500">{label}</span>
+                    <span className="text-right text-xs font-medium text-slate-900">{value}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -423,12 +704,14 @@ export default function LoopRunDetailPage() {
                   onClick={() => void load()}
                   disabled={loading}
                   aria-label="Refresh"
+                  className="text-slate-500 hover:bg-white hover:text-slate-900"
                 >
                   <RefreshCw className={cn("size-4", loading && "animate-spin")} />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>Refresh</TooltipContent>
             </Tooltip>
+
             <Button
               type="button"
               variant="ghost"
@@ -436,6 +719,7 @@ export default function LoopRunDetailPage() {
               onClick={() => void togglePause()}
               disabled={!workflow || busy === "pause" || busy === "resume"}
               aria-label={wfStatus === "paused" ? "Resume loop" : "Pause loop"}
+              className="text-slate-500 hover:bg-white hover:text-slate-900"
             >
               {busy === "pause" || busy === "resume"
                 ? <Loader2 className="size-4 animate-spin" />
@@ -443,9 +727,10 @@ export default function LoopRunDetailPage() {
                   ? <Play className="size-4" />
                   : <Pause className="size-4" />}
             </Button>
+
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button type="button" variant="ghost" size="icon-sm" aria-label="More options">
+                <Button type="button" variant="ghost" size="icon-sm" aria-label="More options" className="text-slate-500 hover:bg-white">
                   <MoreHorizontal className="size-4" />
                 </Button>
               </DropdownMenuTrigger>
@@ -473,225 +758,277 @@ export default function LoopRunDetailPage() {
           </div>
         </header>
 
-        {/* ── Body: two columns ── */}
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-
-          {/* ── Main: output / artifact ── */}
-          <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-
-            {/* Error */}
+        <div className="flex min-h-0 flex-1 gap-4 overflow-hidden px-4 pb-4 lg:px-5">
+          <main className="flex min-w-0 flex-1 flex-col gap-4 overflow-hidden">
             {error ? (
-              <Alert variant="destructive" className="m-4 flex-none">
+              <Alert variant="destructive" className="flex-none shadow-sm">
                 <AlertCircle className="size-4" />
                 <AlertTitle>Error</AlertTitle>
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
 
-            {/* Decision strip — thin, full width, only when action needed */}
             {decision ? (
-              <div className={cn("flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-3", toneClass[decision.tone])}>
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <ShieldCheck className="size-4 shrink-0 opacity-70" />
-                  <div className="min-w-0">
-                    <span className="text-sm font-semibold">{decision.headline}</span>
-                    <span className="ml-2 hidden text-sm opacity-70 sm:inline">{decision.sub}</span>
+              <Card className={cn("shrink-0 gap-0 py-0 ring-0 shadow-md", toneCardClass[decision.tone])}>
+                <CardContent className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-white/80 shadow-sm">
+                      <ShieldCheck className="size-5 text-slate-700" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900">{decision.headline}</p>
+                      <p className="mt-0.5 text-sm text-slate-600">{decision.sub}</p>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    className={toneBtnClass[decision.tone]}
-                    disabled={busy !== null}
-                    onClick={() => void doAction(decision.action)}
-                  >
-                    {busy === decision.action ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-                    {decision.cta}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="opacity-70 hover:opacity-100"
-                    onClick={() => setChatOpen(true)}
-                  >
-                    Request changes
-                  </Button>
-                </div>
-              </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={toneBtnClass[decision.tone]}
+                      disabled={busy !== null}
+                      onClick={() => void doAction(decision.action)}
+                    >
+                      {busy === decision.action ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+                      {decision.cta}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-slate-700 hover:bg-white/60"
+                      onClick={() => setChatOpen(true)}
+                    >
+                      Request changes
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
             ) : null}
 
-            {/* Artifact — this is what the user came to see */}
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              {/* Label row */}
-              <div className="sticky top-0 z-10 flex items-center gap-3 border-b bg-background/95 px-6 py-3 backdrop-blur">
-                <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                  {hero.label}
-                </span>
-                <span className="text-xs text-muted-foreground">{hero.description}</span>
-              </div>
+            {run?.status === "waiting_for_strategy_approval" && roster.length > 0 ? (
+              <StrategyRosterEditor
+                roster={roster}
+                toolCatalog={toolCatalog}
+                validationIssues={rosterIssues}
+                editable={rosterEditable}
+                busy={busy !== null}
+                onChange={setRoster}
+                onSave={saveRoster}
+              />
+            ) : null}
 
-              {/* Content */}
-              {hero.content?.trim() ? (
-                <div className="px-6 py-6 text-sm leading-7 text-foreground/90 [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:tracking-tight [&_h2]:mb-3 [&_h2]:mt-7 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mb-2 [&_h3]:mt-5 [&_h3]:text-base [&_h3]:font-semibold [&_h4]:mb-2 [&_h4]:mt-4 [&_h4]:font-semibold [&_li]:my-1 [&_ol]:ml-5 [&_ol]:list-decimal [&_p]:mb-3.5 [&_strong]:font-semibold [&_ul]:ml-5 [&_ul]:list-disc">
-                  <Streamdown>{hero.content}</Streamdown>
+            <Card className="min-h-0 flex-1 gap-0 overflow-hidden py-0 ring-0 shadow-md">
+              <CardHeader className="space-y-2 border-0 bg-gradient-to-r from-orange-50/70 via-white to-sky-50/70 px-5 py-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="rounded-full bg-slate-900 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
+                      Newsletter
+                    </span>
+                    <CardDescription className="text-slate-600">
+                      {run?.status === "waiting_for_strategy_approval"
+                        ? "CEO strategy proposal"
+                        : activeAgentTask
+                          ? `${activeAgentTask.agentName} output`
+                          : "Written content"}
+                    </CardDescription>
+                  </div>
+                  {activeAgentTask ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 border-slate-300 text-slate-700 hover:bg-slate-100"
+                      onClick={() => setExpandedTaskId(null)}
+                    >
+                      Show newsletter
+                    </Button>
+                  ) : null}
                 </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center py-24 text-center">
-                  {loading ? (
-                    <>
-                      <Loader2 className="size-6 animate-spin text-muted-foreground/50" />
-                      <p className="mt-3 text-sm text-muted-foreground">Loading…</p>
-                    </>
-                  ) : (
-                    <>
-                      <div className="grid size-12 place-items-center rounded-full bg-muted/50">
-                        <FileText className="size-5 text-muted-foreground/50" />
-                      </div>
-                      <p className="mt-4 text-sm font-medium text-muted-foreground">{hero.empty}</p>
-                      <p className="mt-1 text-xs text-muted-foreground/60">
-                        {active ? "This page updates automatically every few seconds." : "Start a new run to generate output."}
+              </CardHeader>
+
+              <CardContent className="min-h-0 flex-1 overflow-y-auto px-5 pb-6 pt-2">
+                {centerOutput?.trim() ? (
+                  <article className="rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                    {centerUpdatedAt ? (
+                      <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                        Updated {formatRelative(centerUpdatedAt)}
                       </p>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
+                    ) : null}
+                    <div className="text-sm leading-7 text-slate-800 [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:tracking-tight [&_h2]:mb-3 [&_h2]:mt-7 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mb-2 [&_h3]:mt-5 [&_h3]:text-base [&_h3]:font-semibold [&_li]:my-1 [&_ol]:ml-5 [&_ol]:list-decimal [&_p]:mb-3.5 [&_strong]:font-semibold [&_ul]:ml-5 [&_ul]:list-disc">
+                      <Streamdown>{centerOutput}</Streamdown>
+                    </div>
+                  </article>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-20 text-center">
+                    {loading ? (
+                      <>
+                        <Loader2 className="size-7 animate-spin text-slate-500" />
+                        <p className="mt-3 text-sm text-slate-500">Loading…</p>
+                      </>
+                    ) : (
+                      <>
+                        <div className="grid size-14 place-items-center rounded-2xl bg-slate-100">
+                          <FileText className="size-6 text-slate-500" />
+                        </div>
+                        <p className="mt-4 text-sm font-medium text-slate-800">No newsletter content available yet.</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {active ? "Open an agent row to inspect its output while the run progresses." : "Start a new run to generate output."}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </main>
 
-          {/* ── Sidebar: agents + meta ── */}
-          <aside className="hidden w-72 shrink-0 flex-col overflow-hidden border-l lg:flex">
-            <ScrollArea className="flex-1">
-              <div className="space-y-0.5 px-2 pt-4">
-                {/* CEO orchestrator */}
-                <div className="mb-1 flex items-center gap-2 px-2.5 pb-1">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                    Agents
-                  </span>
-                  <span className="text-[10px] text-muted-foreground/60">
-                    {agentTasks.filter((t) => t.status === "done" || t.status === "completed").length}/{agentTasks.length} done
-                  </span>
-                </div>
-
-                {/* CEO row */}
-                <div className="flex items-start gap-2.5 rounded-md px-2.5 py-2">
-                  <span
-                    className={cn(
-                      "mt-[5px] size-1.5 shrink-0 rounded-full",
-                      runStatus === "completed" ? "bg-emerald-500" :
-                      runStatus === "running" || runStatus === "strategy_approved" ? "bg-blue-500 animate-pulse" :
-                      "bg-muted-foreground/30"
+          <aside className="hidden w-[320px] shrink-0 flex-col gap-3 overflow-hidden lg:flex">
+            <ScrollArea className="flex-1 pr-1">
+              <div className="space-y-3">
+                <Card className="gap-3 py-4 ring-0 shadow-md">
+                  <CardHeader className="px-4 pb-0">
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="text-sm text-slate-900">Agents</CardTitle>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                        {doneCount}/{agentTotal} done
+                      </span>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-2 px-3">
+                    <CeoRow
+                      name={workflow?.definition?.ceo?.name ?? "CEO"}
+                      statusLabel={prettyStatus(runStatus)}
+                      runStatus={runStatus}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setExpandedTaskId(null)}
+                      className={cn(
+                        "flex w-full items-center gap-3 rounded-xl border bg-white px-3 py-2.5 text-left shadow-sm transition-colors",
+                        expandedTaskId === null
+                          ? "border-slate-900 text-slate-900"
+                          : "border-slate-200 text-slate-700 hover:border-slate-300"
+                      )}
+                    >
+                      <span className="grid size-8 place-items-center rounded-lg bg-slate-100">
+                        <FileText className="size-3.5" />
+                      </span>
+                      <span className="text-sm font-semibold">Newsletter</span>
+                    </button>
+                    {loading && agentTasks.length === 0 && roster.length === 0 ? (
+                      <AgentPlaceholder />
+                    ) : agentTasks.length > 0 ? (
+                      agentTasks.map((task) => (
+                        <AgentRow
+                          key={task.id}
+                          task={task}
+                          open={expandedTaskId === task.id}
+                          onToggle={() => {
+                            setExpandedTaskId((current) => current === task.id ? null : task.id);
+                          }}
+                        />
+                      ))
+                    ) : roster.length > 0 && run?.status === "waiting_for_strategy_approval" ? (
+                      roster.map((agent, index) => (
+                        <div key={`${agent.id}-${index}`} className="rounded-xl border border-dashed border-slate-200 bg-white px-3 py-2.5 text-left shadow-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-slate-900">{agent.name}</span>
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
+                              Pending
+                            </span>
+                          </div>
+                          <p className="mt-1 line-clamp-2 text-xs text-slate-500">{agent.task}</p>
+                          {agent.tools.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {agent.tools.map((tool) => (
+                                <span key={tool.ref} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
+                                  {tool.ref.replace(/^[^.]+\./, "")}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))
+                    ) : (
+                      <p className="py-4 text-center text-xs text-slate-500">
+                        Agent updates appear after the run starts.
+                      </p>
                     )}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="text-sm font-medium">
-                        <Crown className="mb-0.5 mr-1 inline size-3 text-muted-foreground" />
-                        {workflow?.definition?.ceo?.name ?? "CEO"}
-                      </span>
-                      <span className="shrink-0 text-[11px] text-muted-foreground capitalize">
-                        {prettyStatus(runStatus)}
-                      </span>
-                    </div>
-                    <p className="mt-0.5 line-clamp-1 text-[11px] text-muted-foreground">
-                      Orchestrates the run
-                    </p>
-                  </div>
-                </div>
+                  </CardContent>
+                </Card>
 
-                <div className="mx-2.5 my-1">
-                  <Separator />
-                </div>
-
-                {/* Agent tasks */}
-                {loading && agentTasks.length === 0 ? (
-                  <AgentPlaceholder />
-                ) : agentTasks.length > 0 ? (
-                  agentTasks.map((task) => (
-                    <AgentRow key={task.id} task={task} />
-                  ))
-                ) : (
-                  <p className="px-2.5 py-4 text-center text-xs text-muted-foreground">
-                    Agents appear after strategy approval.
-                  </p>
-                )}
-              </div>
-
-              {/* Run meta */}
-              <div className="mx-4 my-4">
-                <Separator />
-              </div>
-              <div className="space-y-3 px-4 pb-6">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                  Run info
-                </p>
-                {[
-                  { label: "Next run", value: formatDayDate(workflow?.nextRunAt ?? null) },
-                  { label: "Updated", value: formatRelative(run?.updatedAt ?? null) || "—" },
-                  { label: "Mode", value: run?.runMode ?? "—" },
-                  { label: "Timezone", value: workflow?.definition?.schedule?.timezone ?? "Local" },
-                ].map(({ label, value }) => (
-                  <div key={label} className="flex items-start justify-between gap-2">
-                    <span className="text-xs text-muted-foreground">{label}</span>
-                    <span className="text-right text-xs font-medium text-foreground">{value}</span>
-                  </div>
-                ))}
-
-                {workflow?.definition?.goal ? (
-                  <>
-                    <Separator />
-                    <div>
-                      <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Goal</p>
-                      <p className="text-xs leading-5 text-muted-foreground">{workflow.definition.goal}</p>
-                    </div>
-                  </>
-                ) : null}
+                <Card className="gap-3 py-4 ring-0 shadow-md">
+                  <CardHeader className="px-4 pb-0">
+                    <CardTitle className="text-sm text-slate-900">From memory</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2 px-4">
+                    {memoryEntries.length > 0 ? (
+                      memoryEntries.map((entry) => (
+                        <div key={`${entry.source}-${entry.label}`} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                          <span className="text-xs text-slate-700">{entry.label}</span>
+                          <span className={cn(
+                            "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                            entry.source === "credential"
+                              ? "bg-rose-100 text-rose-700"
+                              : entry.source === "memory"
+                                ? "bg-sky-100 text-sky-700"
+                                : "bg-amber-100 text-amber-800"
+                          )}>
+                            {entry.source}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-slate-500">No memory records were attached to this run yet.</p>
+                    )}
+                  </CardContent>
+                </Card>
               </div>
             </ScrollArea>
-
-            {/* Chat trigger at bottom of sidebar */}
-            <div className="border-t p-3">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="w-full gap-2 text-muted-foreground"
-                onClick={() => setChatOpen(true)}
-              >
-                <MessageSquare className="size-4" />
-                Chat with CEO
-                <ChevronRight className="ml-auto size-3" />
-              </Button>
-            </div>
           </aside>
         </div>
 
-        {/* ── Mobile: bottom chat trigger ── */}
-        <div className="flex shrink-0 items-center justify-between border-t px-4 py-2 lg:hidden">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span>{agentTasks.filter((t) => t.status === "done" || t.status === "completed").length}/{agentTasks.length} agents done</span>
-          </div>
+        <div className="flex shrink-0 items-center justify-between bg-white/90 px-4 py-3 shadow-[0_-4px_20px_rgba(15,23,42,0.06)] backdrop-blur lg:hidden">
+          <span className="text-xs font-medium text-slate-600">
+            {doneCount}/{agentTasks.length} agents done
+          </span>
           <Button
             type="button"
-            variant="outline"
             size="sm"
+            className="gap-1.5 bg-slate-900 text-white hover:bg-slate-800"
             onClick={() => setChatOpen(true)}
-            className="gap-1.5"
           >
             <MessageSquare className="size-4" />
             Steer
           </Button>
         </div>
 
-        {/* ── Chat drawer (vaul, direction right) ── */}
+        <button
+          type="button"
+          onClick={() => setChatOpen(true)}
+          className="fixed right-0 top-1/2 z-30 hidden -translate-y-1/2 flex-col items-center gap-2 border border-r-0 border-slate-300 bg-slate-100 px-2.5 py-4 text-slate-900 shadow-lg lg:flex"
+        >
+          <MessageSquare className="size-4 rotate-90" />
+          <span className="[writing-mode:vertical-rl] rotate-180 text-sm font-semibold tracking-[0.08em]">Steer</span>
+        </button>
+
         <ChatDrawer
           open={chatOpen}
           onOpenChange={setChatOpen}
           comments={comments}
           message={chatMessage}
           setMessage={setChatMessage}
+          onSend={sendSteerComment}
         />
+
+        {loading ? (
+          <div className="pointer-events-none fixed inset-0 z-40 grid place-items-center bg-white/60 backdrop-blur-[2px]">
+            <div className="flex items-center gap-2 rounded-2xl bg-white px-5 py-3 text-sm shadow-lg ring-1 ring-slate-200/50">
+              <Loader2 className="size-4 animate-spin text-slate-600" />
+              <span className="text-slate-700">Loading run…</span>
+            </div>
+          </div>
+        ) : null}
       </div>
     </TooltipProvider>
   );

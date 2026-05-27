@@ -1,10 +1,22 @@
+import type { AuthContext } from "../../domain/auth/index.js";
+import { recallMemories } from "../memory.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
-import type { LoopToolKey } from "./types.js";
+import {
+  actionableToolRefs,
+  buildAgentSystemPrompt,
+  buildAgentUserPrompt,
+  buildDraftFromToolResults,
+  getLoopTool,
+  hasOnlyLlmTools,
+} from "./tool-catalog.js";
+import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
-export interface LoopToolInput {
+export interface LoopAgentInput {
+  auth: AuthContext;
   goal: string;
-  agentName: string;
-  agentTask: string;
+  agent: LoopRunAgent;
+  assignedTools: LoopToolAssignment[];
+  draftPolicy: LoopDefinition["draftPolicy"];
   priorComments: Array<{ author: string; body: string; taskId: string | null; createdAt: string }>;
 }
 
@@ -16,20 +28,6 @@ export interface LoopToolResult {
     summary: string;
     payload: Record<string, unknown>;
   };
-}
-
-type LoopToolHandler = (input: LoopToolInput) => Promise<LoopToolResult>;
-
-function commentsAsContext(comments: LoopToolInput["priorComments"]): string {
-  if (comments.length === 0) return "No prior comments yet.";
-  return comments
-    .map((comment) => `[${comment.author}] ${comment.body}`)
-    .join("\n\n")
-    .slice(-12_000);
-}
-
-function firstCommentByAuthor(input: LoopToolInput, authorPattern: RegExp): string {
-  return input.priorComments.find((comment) => authorPattern.test(comment.author))?.body ?? "";
 }
 
 async function completeText(input: {
@@ -44,98 +42,104 @@ async function completeText(input: {
       { role: "user", content: input.user },
     ],
     temperature: 0.3,
-    maxTokens: input.maxTokens ?? 1200,
+    maxTokens: input.maxTokens ?? 1600,
   });
   const text = response.text.trim();
-  if (!text) throw new Error("Loop tool LLM returned an empty response");
+  if (!text) throw new Error("Loop agent LLM returned an empty response");
   return text;
 }
 
-const TOOL_REGISTRY: Record<LoopToolKey, LoopToolHandler> = {
-  async research_topic(input) {
-    const ceoStrategy = firstCommentByAuthor(input, /^ceo$/i);
-    const text = await completeText({
-      system: "You are a research specialist for a recurring content loop. Be specific, concise, and separate known facts from useful angles. Do not invent sources or claim live browsing.",
-      user: [
-        `Goal: ${input.goal}`,
-        "",
-        `CEO strategy:\n${ceoStrategy || "No CEO strategy comment was found."}`,
-        "",
-        `Your task:\n${input.agentTask}`,
-        "",
-        "Produce a research brief the next agent can safely use.",
-      ].join("\n"),
-    });
-    return {
-      text,
-      data: {
-        model: aiProviderRegistry.chatModelName(),
-        contextCommentCount: input.priorComments.length,
-      },
-    };
-  },
+async function runAssignedTools(input: LoopAgentInput): Promise<{
+  sections: string[];
+  draft?: LoopToolResult["draft"];
+  toolsUsed: string[];
+}> {
+  const sections: string[] = [];
+  const toolsUsed: string[] = [];
+  let draft: LoopToolResult["draft"];
 
-  async write_draft(input) {
-    const context = commentsAsContext(input.priorComments);
-    const text = await completeText({
-      system: "You are a careful creative writer for a recurring content loop. Use the prior comments as source context, preserve uncertainty, and write a polished draft without making external commitments.",
-      user: [
-        `Goal: ${input.goal}`,
-        "",
-        `Your task:\n${input.agentTask}`,
-        "",
-        `Prior comments:\n${context}`,
-        "",
-        "Write the requested draft. Include a short notes section if any claims need verification.",
-      ].join("\n"),
-      maxTokens: 1800,
-    });
-    return {
-      text,
-      data: {
-        model: aiProviderRegistry.chatModelName(),
-        format: "newsletter_draft",
-        contextCommentCount: input.priorComments.length,
-      },
-    };
-  },
+  for (const assignment of input.assignedTools) {
+    const entry = getLoopTool(assignment.ref);
+    if (!entry?.isActionable || entry.ref === "internal.llm_only") continue;
 
-  async prepare_publication_plan(input) {
-    const context = commentsAsContext(input.priorComments);
-    const text = await completeText({
-      system: "You are a publicist preparing an approval-only publication plan. Do not publish, send, schedule, or imply that an external action has happened.",
-      user: [
-        `Goal: ${input.goal}`,
-        "",
-        `Your task:\n${input.agentTask}`,
-        "",
-        `Prior comments:\n${context}`,
-        "",
-        "Prepare a concise publication plan for human approval. Include channel, audience, checklist, and the exact draft content or summary to approve.",
-      ].join("\n"),
-      maxTokens: 1600,
-    });
-    const payload = {
-      goal: input.goal,
-      approvalText: text,
+    if (entry.ref === "internal.memory_search") {
+      const query = input.agent.task.slice(0, 500);
+      const result = await recallMemories(query, input.auth, 5);
+      toolsUsed.push(entry.ref);
+      sections.push([
+        "Memory search results:",
+        ...result.memories.map((memory) => `- ${memory.text}`),
+      ].join("\n"));
+      continue;
+    }
+
+    if (entry.provider === "composio" && entry.requiresApproval) {
+      const prepared = await completeText({
+        system: `You prepare ${entry.label} content for human approval. Do not claim the external action happened.`,
+        user: [
+          `Goal: ${input.goal}`,
+          `Task: ${input.agent.task}`,
+          "Return JSON only with keys: subject, body, recipient_email (optional).",
+        ].join("\n"),
+        maxTokens: 1200,
+      });
+      let payload: Record<string, unknown> = { raw: prepared };
+      try {
+        payload = JSON.parse(prepared) as Record<string, unknown>;
+      } catch {
+        payload = { body: prepared };
+      }
+      toolsUsed.push(entry.ref);
+      draft = buildDraftFromToolResults({
+        goal: input.goal,
+        toolRef: entry.ref,
+        toolResult: payload,
+      });
+      sections.push(`Prepared ${entry.label} payload for approval:\n${JSON.stringify(payload, null, 2)}`);
+    }
+  }
+
+  return { sections, draft, toolsUsed };
+}
+
+export async function runLoopAgent(input: LoopAgentInput): Promise<LoopToolResult> {
+  const bindCtx = {
+    auth: input.auth,
+    goal: input.goal,
+    agentName: input.agent.name,
+    agentTask: input.agent.task,
+    priorComments: input.priorComments.map((comment) => ({
+      author: comment.author,
+      body: comment.body,
+    })),
+    draftPolicy: input.draftPolicy,
+  };
+
+  const system = buildAgentSystemPrompt(bindCtx);
+  let user = buildAgentUserPrompt(bindCtx);
+  let draft: LoopToolResult["draft"];
+  let toolsUsed: string[] = [];
+
+  if (!hasOnlyLlmTools(input.assignedTools)) {
+    const toolRun = await runAssignedTools(input);
+    toolsUsed = toolRun.toolsUsed;
+    draft = toolRun.draft;
+    if (toolRun.sections.length > 0) {
+      user = [user, "", ...toolRun.sections].join("\n");
+    }
+  }
+
+  const text = await completeText({ system, user, maxTokens: 1800 });
+  return {
+    text,
+    data: {
+      model: aiProviderRegistry.chatModelName(),
+      mode: hasOnlyLlmTools(input.assignedTools) ? "llm_only" : "tool_assisted",
+      toolRefs: input.assignedTools.map((tool) => tool.ref),
+      actionableToolRefs: actionableToolRefs(input.assignedTools),
+      toolsUsed,
       contextCommentCount: input.priorComments.length,
-    };
-    return {
-      text,
-      data: {
-        model: aiProviderRegistry.chatModelName(),
-        draftStatus: "pending_approval",
-        action: "prepare_publication_plan",
-      },
-      draft: {
-        kind: "publication_plan",
-        summary: `Approve publication plan for ${input.goal}`,
-        payload,
-      },
-    };
-  },
-};
-
-export async function runLoopTool(toolKey: LoopToolKey, input: LoopToolInput): Promise<LoopToolResult> {
-  return TOOL_REGISTRY[toolKey](input);
+    },
+    draft,
+  };
 }

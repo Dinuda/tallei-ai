@@ -4,14 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, Play, Plus, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type LoopAgent = {
-  id: string;
-  name: string;
-  task: string;
-  integration: string;
-  toolPolicy: { allowedTools: string[]; draftBeforeExternalAction: boolean };
-};
-
 type LoopWorkflow = {
   id: string;
   title: string;
@@ -22,9 +14,9 @@ type LoopWorkflow = {
     goal: string;
     schedule: { cron: string; timezone: string };
     schedulerTarget: "internal" | "cloudflare";
-    integrations: string[];
+    allowedIntegrations?: string[];
+    integrations?: string[];
     ceo: { name: string; task: string; policy: string };
-    agents: LoopAgent[];
     draftPolicy: { requireDraftBeforeExternalAction: boolean; approvalRequiredFor: string[] };
   };
 };
@@ -246,19 +238,15 @@ export default function InternalLoopsPage() {
                 </div>
 
                 <div className="mt-5">
-                  <h3 className="text-sm font-semibold text-slate-900">Auto-spawned agents</h3>
-                  <div className="mt-2 grid gap-3">
-                    {selected.definition.agents.map((agent, index) => (
-                      <div key={agent.id} className="border border-slate-200 p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium text-slate-900">{index + 1}. {agent.name}</p>
-                          <span className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600">
-                            {agent.integration}:{agent.toolPolicy.allowedTools[0]}
-                          </span>
-                        </div>
-                        <p className="mt-2 text-sm text-slate-600">{agent.task}</p>
-                      </div>
-                    ))}
+                  <h3 className="text-sm font-semibold text-slate-900">Execution model</h3>
+                  <div className="mt-2 border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                    <p className="font-medium text-slate-900">Agents are proposed per run by the CEO</p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      Allowed integrations: {(selected.definition.allowedIntegrations ?? selected.definition.integrations ?? ["internal"]).join(", ")}
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      Edit the roster on the run detail page while waiting for strategy approval.
+                    </p>
                   </div>
                 </div>
               </div>

@@ -10,8 +10,9 @@ process.env.JWT_SECRET ??= "test-jwt-secret";
 process.env.MEMORY_MASTER_KEY ??= "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 process.env.REDIS_URL = "";
 
-const [loopExecutor, db] = await Promise.all([
+const [loopExecutor, toolCatalog, db] = await Promise.all([
   import("../../../src/services/loop-executor/index.js"),
+  import("../../../src/services/loop-executor/tool-catalog.js"),
   import("../../../src/infrastructure/db/index.js"),
 ]);
 const { aiProviderRegistry } = await import("../../../src/providers/ai/index.js");
@@ -23,41 +24,100 @@ const auth = {
   plan: "pro" as const,
 };
 
-test("creator builds newsletter loop with CEO and auto-spawned specialists", () => {
+test("creator builds v2 loop definition without fixed agents", () => {
   const definition = loopExecutor.buildLoopDefinition({
     task: "User is writing a newsletter for xyz product every week. Make that a loop.",
     cron: "0 9 * * 1",
     timezone: "UTC",
+    integrations: ["internal", "composio"],
   });
 
-  assert.equal(definition.definitionVersion, "loop_executor_v1");
+  assert.equal(definition.definitionVersion, "loop_executor_v2");
   assert.equal(definition.ceo.name, "CEO");
-  assert.deepEqual(
-    definition.agents.map((agent) => agent.id),
-    ["topic_researcher", "creative_writer", "publicist"]
-  );
-  for (const agent of definition.agents) {
-    assert.equal(agent.toolPolicy.allowedTools.length, 1);
-    assert.equal(agent.toolPolicy.draftBeforeExternalAction, true);
+  assert.ok(Array.isArray(definition.allowedIntegrations));
+  assert.equal("agents" in definition, false);
+});
+
+test("tool catalog rejects unknown tool refs", async () => {
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+  try {
+    const result = await toolCatalog.validateToolAssignments({
+      tools: [{ ref: "unknown.tool" }],
+      definition: { allowedIntegrations: ["internal"], allowedToolRefs: undefined },
+      auth,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.issues[0]?.code, "unknown_tool");
+    }
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
   }
 });
 
-test("executor creates a strategy-gated run with ordered agent tasks", async () => {
+test("tool catalog allows connector warnings without blocking roster edits", async () => {
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+  try {
+    const result = await toolCatalog.validateToolAssignments({
+      tools: [{ ref: "composio.gmail.create_draft" }],
+      definition: { allowedIntegrations: ["internal", "composio"], allowedToolRefs: undefined },
+      auth,
+      strictConnectors: false,
+    });
+    assert.equal(result.ok, true);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
+test("executor creates a strategy-gated run with proposed roster only", async () => {
   const originalQuery = db.pool.query.bind(db.pool);
   const originalChat = aiProviderRegistry.chat.bind(aiProviderRegistry);
   const definition = loopExecutor.buildLoopDefinition({
     task: "User is writing a newsletter for xyz product every week. Make that a loop.",
     cron: "0 9 * * 1",
     timezone: "UTC",
+    integrations: ["internal", "composio"],
   });
 
   let insertedRunId: string | null = null;
-  const taskAgentIds: string[] = [];
+  let insertedTasks = 0;
   let finalStatus: string | null = null;
   let strategyOutput = "";
+  let proposedRoster: unknown = null;
 
   (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = (async () => ({
-    text: "CEO strategy: research, draft, then prepare approval plan.",
+    text: JSON.stringify({
+      strategyText: "CEO strategy: research with memory search, draft with LLM only, prepare Gmail draft.",
+      agents: [
+        {
+          id: "researcher",
+          name: "Researcher",
+          task: "Gather context",
+          tools: [{ ref: "internal.memory_search" }],
+        },
+        {
+          id: "writer",
+          name: "Writer",
+          task: "Write the draft",
+          tools: [{ ref: "internal.llm_only" }],
+        },
+        {
+          id: "publicist",
+          name: "Publicist",
+          task: "Prepare Gmail draft",
+          tools: [{ ref: "composio.gmail.create_draft" }],
+        },
+      ],
+    }),
     model: "gpt-4o-mini",
     finishReason: "stop",
   })) as typeof aiProviderRegistry.chat;
@@ -95,13 +155,18 @@ test("executor creates a strategy-gated run with ordered agent tasks", async () 
       } as unknown;
     }
     if (sql.includes("INSERT INTO loop_run_tasks")) {
-      taskAgentIds.push(String(params?.[5]));
+      insertedTasks += 1;
       return { rows: [], rowCount: 1 } as unknown;
     }
     if (sql.includes("UPDATE workflow_runs") && sql.includes("waiting_for_strategy_approval")) {
       finalStatus = "waiting_for_strategy_approval";
       strategyOutput = String(params?.[3] ?? "");
+      const metadata = JSON.parse(String(params?.[4] ?? "{}")) as { loop_executor?: { proposedRoster?: unknown } };
+      proposedRoster = metadata.loop_executor?.proposedRoster ?? null;
       return { rows: [], rowCount: 1 } as unknown;
+    }
+    if (sql.includes("FROM connector_accounts")) {
+      return { rows: [], rowCount: 0 } as unknown;
     }
     return { rows: [], rowCount: 1 } as unknown;
   }) as typeof db.pool.query;
@@ -118,7 +183,9 @@ test("executor creates a strategy-gated run with ordered agent tasks", async () 
     assert.equal(result.draftRequired, false);
     assert.equal(finalStatus, "waiting_for_strategy_approval");
     assert.match(strategyOutput, /CEO strategy/);
-    assert.deepEqual(taskAgentIds, ["topic_researcher", "creative_writer", "publicist"]);
+    assert.equal(insertedTasks, 0);
+    assert.ok(Array.isArray(proposedRoster));
+    assert.equal((proposedRoster as Array<{ id: string }>).length, 3);
   } finally {
     (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
     (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = originalChat;
@@ -133,13 +200,19 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
     task: "User is writing a newsletter for xyz product every week. Make that a loop.",
     cron: "0 9 * * 1",
     timezone: "UTC",
+    integrations: ["internal", "composio"],
   });
 
   let dueQueryCheckedActiveStatus = false;
   let nextRunWritten: string | null = null;
   let insertedRunId: string | null = null;
   (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = (async () => ({
-    text: "CEO strategy: ordered plan.",
+    text: JSON.stringify({
+      strategyText: "CEO strategy: ordered plan.",
+      agents: [
+        { id: "writer", name: "Writer", task: "Write", tools: [{ ref: "internal.llm_only" }] },
+      ],
+    }),
     model: "gpt-4o-mini",
     finishReason: "stop",
   })) as typeof aiProviderRegistry.chat;
@@ -203,6 +276,9 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
         }],
         rowCount: 1,
       } as unknown;
+    }
+    if (sql.includes("FROM connector_accounts")) {
+      return { rows: [], rowCount: 0 } as unknown;
     }
     return { rows: [], rowCount: 1 } as unknown;
   }) as typeof db.pool.query;

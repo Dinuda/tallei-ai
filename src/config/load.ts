@@ -166,6 +166,9 @@ const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
   { newKey: "TALLEI_LOOP_EXECUTOR__SCHEDULER", oldKey: "LOOP_EXECUTOR_SCHEDULER" },
   { newKey: "TALLEI_LOOP_EXECUTOR__POLL_MS", oldKey: "LOOP_EXECUTOR_POLL_MS" },
   { newKey: "TALLEI_LOOP_EXECUTOR__BATCH_SIZE", oldKey: "LOOP_EXECUTOR_BATCH_SIZE" },
+  { newKey: "TALLEI_LOOP_EXECUTOR__HEARTBEAT_DISPATCH", oldKey: "LOOP_EXECUTOR_HEARTBEAT_DISPATCH" },
+  { newKey: "TALLEI_LOOP_EXECUTOR__HEARTBEAT_POLL_MS", oldKey: "LOOP_EXECUTOR_HEARTBEAT_POLL_MS" },
+  { newKey: "TALLEI_LOOP_EXECUTOR__HEARTBEAT_BATCH_SIZE", oldKey: "LOOP_EXECUTOR_HEARTBEAT_BATCH_SIZE" },
   // Feature flags
   { newKey: "TALLEI_FEATURE__RERANK",           oldKey: "RERANK_ENABLED" },
   { newKey: "TALLEI_FEATURE__USE_NEW_SAVE",     oldKey: "USE_NEW_SAVE_USECASE" },
@@ -493,6 +496,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       : "internal" as const,
     loopExecutorPollMs: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__POLL_MS", 30_000),
     loopExecutorSchedulerBatchSize: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__BATCH_SIZE", 4),
+    loopExecutorHeartbeatDispatch: readStringEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_DISPATCH", "internal") === "cloudflare"
+      ? "cloudflare" as const
+      : "internal" as const,
+    loopExecutorHeartbeatPollMs: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_POLL_MS", 2_000),
+    loopExecutorHeartbeatBatchSize: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_BATCH_SIZE", 4),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),

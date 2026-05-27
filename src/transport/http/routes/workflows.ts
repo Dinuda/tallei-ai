@@ -14,18 +14,24 @@ import {
   skipRunById,
 } from "../../../services/workflow-automation/workflow-builder.service.js";
 import {
+  addLoopRunComment,
   approveLoopStrategy,
   assignLoopToWorkspace,
   createLoopWorkflow,
   createWorkspace,
   dispatchDueLoopWorkflows,
+  dispatchLoopHeartbeatJobs,
   executeLoopWorkflow,
   getLoopRun,
+  getLoopRunRoster,
   getLoopWorkflow,
   listLoopRunComments,
   listLoopRunTasks,
   listLoopWorkflows,
   listWorkspaces,
+  loopRunAgentSchema,
+  resumeLoopRunExecution,
+  updateLoopRunRoster,
 } from "../../../services/loop-executor/index.js";
 import { authMiddleware, internalSecretMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
@@ -79,6 +85,21 @@ router.post("/internal/loops/scheduler/wake", internalSecretMiddleware, async (r
     }
     console.error("Error dispatching due loop workflows:", error);
     res.status(500).json({ error: "Failed to dispatch due loop workflows" });
+  }
+});
+
+router.post("/internal/loops/heartbeat/dispatch", internalSecretMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const body = z.object({ limit: z.number().int().min(1).max(25).optional() }).parse(req.body ?? {});
+    const result = await dispatchLoopHeartbeatJobs({ limit: body.limit, source: "cloudflare" });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error dispatching loop heartbeat jobs:", error);
+    res.status(500).json({ error: "Failed to dispatch loop heartbeat jobs" });
   }
 });
 
@@ -364,9 +385,13 @@ router.post("/runs/:runId/approve", requireScopes(["memory:write"]), async (req:
 router.post("/runs/:runId/approve-strategy", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const body = z.object({
+      roster: z.array(loopRunAgentSchema).optional(),
+    }).parse(req.body ?? {});
     const run = await approveLoopStrategy({
       auth: req.authContext!,
       runId,
+      roster: body.roster,
     });
     res.status(202).json({ run });
   } catch (error) {
@@ -384,6 +409,77 @@ router.post("/runs/:runId/approve-strategy", requireScopes(["memory:write"]), as
     }
     console.error("Error approving loop strategy:", error);
     res.status(500).json({ error: "Failed to approve loop strategy" });
+  }
+});
+
+router.post("/runs/:runId/resume", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const result = await resumeLoopRunExecution({
+      auth: req.authContext!,
+      runId,
+    });
+    res.status(202).json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    if (error instanceof Error && /cannot resume/i.test(error.message)) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    console.error("Error resuming loop run:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to resume loop run" });
+  }
+});
+
+router.get("/runs/:runId/roster", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const roster = await getLoopRunRoster(req.authContext!, runId);
+    res.json({ roster });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error reading loop run roster:", error);
+    res.status(500).json({ error: "Failed to read loop run roster" });
+  }
+});
+
+router.put("/runs/:runId/roster", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const body = z.object({
+      roster: z.array(loopRunAgentSchema).min(1).max(6),
+    }).parse(req.body ?? {});
+    const result = await updateLoopRunRoster(req.authContext!, { runId, roster: body.roster });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    if (error instanceof Error && /not editable/i.test(error.message)) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    console.error("Error updating loop run roster:", error);
+    res.status(500).json({ error: "Failed to update loop run roster" });
   }
 });
 
@@ -441,6 +537,35 @@ router.get("/runs/:runId/comments", requireScopes(["memory:read"]), async (req: 
     }
     console.error("Error listing loop run comments:", error);
     res.status(500).json({ error: "Failed to list loop run comments" });
+  }
+});
+
+const runCommentSchema = z.object({
+  body: z.string().trim().min(1).max(8000),
+  taskId: z.string().uuid().nullable().optional(),
+});
+
+router.post("/runs/:runId/comments", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const body = runCommentSchema.parse(req.body ?? {});
+    const comment = await addLoopRunComment(req.authContext!, {
+      runId,
+      body: body.body,
+      taskId: body.taskId,
+    });
+    res.status(201).json({ comment });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error adding loop run comment:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to add loop run comment" });
   }
 });
 

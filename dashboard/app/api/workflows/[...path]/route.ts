@@ -50,7 +50,7 @@ async function resolveBackendUserId(req: NextRequest): Promise<string | null> {
   return backendId;
 }
 
-async function proxy(req: NextRequest, method: "GET" | "POST"): Promise<Response> {
+async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT"): Promise<Response> {
   const userId = await resolveBackendUserId(req);
   if (!userId) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -69,7 +69,7 @@ async function proxy(req: NextRequest, method: "GET" | "POST"): Promise<Response
         "X-Internal-Secret": SECRET,
         "X-User-Id": userId,
       },
-      body: method === "POST" ? JSON.stringify(await req.json().catch(() => ({}))) : undefined,
+      body: method === "GET" ? undefined : JSON.stringify(await req.json().catch(() => ({}))),
     });
     const data = await safeJson(res);
     return Response.json(data, { status: res.status });
@@ -85,4 +85,8 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   return proxy(req, "POST");
+}
+
+export async function PUT(req: NextRequest) {
+  return proxy(req, "PUT");
 }

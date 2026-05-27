@@ -21,15 +21,11 @@ import { Button } from "@/components/ui/button";
 const NEWSLETTER_TASK = "User is writing a newsletter for xyz product every week. Make that a loop.";
 const NEWSLETTER_CRON = "0 9 * * 1";
 
-type LoopAgent = {
+type LoopAgentPreview = {
   id: string;
   name: string;
   task: string;
-  integration: string;
-  toolPolicy: {
-    allowedTools: string[];
-    draftBeforeExternalAction: boolean;
-  };
+  tools: Array<{ ref: string }>;
 };
 
 type LoopWorkflow = {
@@ -42,9 +38,9 @@ type LoopWorkflow = {
     goal: string;
     schedule: { cron: string; timezone: string };
     schedulerTarget: "internal" | "cloudflare";
-    integrations: string[];
+    allowedIntegrations?: string[];
+    integrations?: string[];
     ceo: { name: string; task: string; policy: string };
-    agents: LoopAgent[];
     draftPolicy: { requireDraftBeforeExternalAction: boolean; approvalRequiredFor: string[] };
   };
 };
@@ -69,27 +65,24 @@ type WorkflowListItem = {
   latestRun: WorkflowListRun | null;
 };
 
-const FALLBACK_AGENTS: LoopAgent[] = [
+const EXAMPLE_RUN_AGENTS: LoopAgentPreview[] = [
   {
-    id: "topic_researcher",
-    name: "Topic Researcher",
+    id: "researcher",
+    name: "Researcher",
     task: `Research and source useful context for this loop: ${NEWSLETTER_TASK}`,
-    integration: "internal",
-    toolPolicy: { allowedTools: ["research_topic"], draftBeforeExternalAction: true },
+    tools: [{ ref: "internal.memory_search" }],
   },
   {
-    id: "creative_writer",
-    name: "Creative Writer",
-    task: `Write the newsletter draft using only the research output and the loop goal: ${NEWSLETTER_TASK}`,
-    integration: "internal",
-    toolPolicy: { allowedTools: ["write_draft"], draftBeforeExternalAction: true },
+    id: "writer",
+    name: "Writer",
+    task: `Write the newsletter draft using prior agent output: ${NEWSLETTER_TASK}`,
+    tools: [{ ref: "internal.llm_only" }],
   },
   {
     id: "publicist",
     name: "Publicist",
-    task: `Prepare a publication or send plan for approval. Do not publish or send directly: ${NEWSLETTER_TASK}`,
-    integration: "internal",
-    toolPolicy: { allowedTools: ["prepare_publication_plan"], draftBeforeExternalAction: true },
+    task: `Prepare a Gmail draft for approval: ${NEWSLETTER_TASK}`,
+    tools: [{ ref: "composio.gmail.create_draft" }],
   },
 ];
 
@@ -135,7 +128,7 @@ export default function NewsletterLoopPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const agents = workflow?.definition.agents ?? FALLBACK_AGENTS;
+  const agents = EXAMPLE_RUN_AGENTS;
   const initialized = Boolean(workflow);
   const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC", []);
 
@@ -254,7 +247,7 @@ export default function NewsletterLoopPage() {
             </Button>
             <div>
               <h1 className="text-xl font-semibold text-slate-950">Weekly Product Newsletter</h1>
-              <p className="mt-1 text-sm text-slate-500">CEO loop with three scoped execution agents.</p>
+              <p className="mt-1 text-sm text-slate-500">CEO proposes a fresh agent roster each run before execution starts.</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -349,8 +342,11 @@ export default function NewsletterLoopPage() {
                 </div>
                 <p className="mt-3 text-sm text-slate-600">{agent.task}</p>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <span className="border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600">{agent.integration}</span>
-                  <span className="border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600">{agent.toolPolicy.allowedTools[0]}</span>
+                  {agent.tools.map((tool) => (
+                    <span key={tool.ref} className="border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600">
+                      {tool.ref}
+                    </span>
+                  ))}
                 </div>
               </div>
             ))}

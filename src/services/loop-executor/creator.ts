@@ -6,7 +6,7 @@ import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
 import { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
-import { LOOP_DEFINITION_VERSION, loopAgentSchema, loopDefinitionSchema, type LoopAgentDefinition, type LoopDefinition, type LoopWorkflowView } from "./types.js";
+import { LOOP_DEFINITION_VERSION, loopDefinitionSchema, type LoopDefinition, type LoopWorkflowView } from "./types.js";
 
 function normalizeText(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -29,73 +29,19 @@ function normalizeIntegrationList(integrations: string[] | undefined): string[] 
   return [...values];
 }
 
-function fallbackAgents(goal: string): LoopAgentDefinition[] {
-  const newsletterLike = /newsletter|weekly update|product update|publicist|publish/i.test(goal);
-  const agents = newsletterLike
-    ? [
-      {
-        id: "topic_researcher",
-        name: "Topic Researcher",
-        task: `Research and source useful context for this loop: ${goal}`,
-        integration: "internal",
-        toolPolicy: { allowedTools: ["research_topic" as const], draftBeforeExternalAction: true },
-      },
-      {
-        id: "creative_writer",
-        name: "Creative Writer",
-        task: `Write the newsletter draft using only the research output and the loop goal: ${goal}`,
-        integration: "internal",
-        toolPolicy: { allowedTools: ["write_draft" as const], draftBeforeExternalAction: true },
-      },
-      {
-        id: "publicist",
-        name: "Publicist",
-        task: `Prepare a publication or send plan for approval. Do not publish or send directly: ${goal}`,
-        integration: "internal",
-        toolPolicy: { allowedTools: ["prepare_publication_plan" as const], draftBeforeExternalAction: true },
-      },
-    ]
-    : [
-      {
-        id: "researcher",
-        name: "Researcher",
-        task: `Gather source context for this recurring loop: ${goal}`,
-        integration: "internal",
-        toolPolicy: { allowedTools: ["research_topic" as const], draftBeforeExternalAction: true },
-      },
-      {
-        id: "producer",
-        name: "Producer",
-        task: `Produce the requested recurring output from the research: ${goal}`,
-        integration: "internal",
-        toolPolicy: { allowedTools: ["write_draft" as const], draftBeforeExternalAction: true },
-      },
-      {
-        id: "publisher",
-        name: "Publisher",
-        task: `Prepare the output for approval and external delivery. Do not commit external actions: ${goal}`,
-        integration: "internal",
-        toolPolicy: { allowedTools: ["prepare_publication_plan" as const], draftBeforeExternalAction: true },
-      },
-    ];
-  return agents.map((agent) => loopAgentSchema.parse(agent));
-}
-
-function slugId(value: string, fallback: string): string {
-  const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
-  return slug || fallback;
+function inferIntegrationsFromGoal(goal: string, integrations: string[] | undefined): string[] {
+  const values = normalizeIntegrationList(integrations);
+  if (/newsletter|weekly update|product update|publish|publicist|email|gmail|send|deliver/i.test(goal)) {
+    values.push("composio");
+  }
+  return [...new Set(values)];
 }
 
 const parsedLoopIntentSchema = z.object({
-  agents: z.array(z.object({
-    id: z.string().trim().min(1).max(80).optional(),
-    name: z.string().trim().min(1).max(120),
-    task: z.string().trim().min(1).max(1000),
-    toolKey: z.enum(["research_topic", "write_draft", "prepare_publication_plan"]),
-  })).min(1).max(6),
+  allowedIntegrations: z.array(z.string().trim().min(1)).optional(),
 });
 
-export async function parseLoopIntent(task: string): Promise<{ agents: LoopAgentDefinition[] }> {
+export async function parseLoopIntent(task: string): Promise<{ allowedIntegrations: string[] }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
@@ -103,39 +49,24 @@ export async function parseLoopIntent(task: string): Promise<{ agents: LoopAgent
       model: aiProviderRegistry.chatModelName(),
       responseFormat: "json_object",
       temperature: 0.1,
-      maxTokens: 1200,
+      maxTokens: 600,
       signal: controller.signal,
       messages: [
         {
           role: "system",
           content: [
-            "Parse a natural-language recurring loop request into an ordered roster of internal execution agents.",
-            "Return JSON only: {\"agents\":[{\"id\":\"snake_case\",\"name\":\"Role Name\",\"task\":\"specific task\",\"toolKey\":\"research_topic|write_draft|prepare_publication_plan\"}]}",
-            "Use research_topic for source gathering, write_draft for producing the main artifact, and prepare_publication_plan for approval-only delivery planning.",
-            "Do not include external integrations. Keep 2-4 agents unless the request clearly needs more.",
+            "Parse a natural-language recurring loop request into allowed integration providers.",
+            'Return JSON only: {"allowedIntegrations":["internal","composio"]}',
+            "Include composio when external delivery (email, calendar, Slack, etc.) is implied.",
           ].join("\n"),
         },
         { role: "user", content: task },
       ],
     });
     const parsed = parsedLoopIntentSchema.parse(JSON.parse(response.text));
-    const seen = new Set<string>();
-    const agents = parsed.agents.map((agent, index) => {
-      const baseId = slugId(agent.id ?? agent.name, `agent_${index + 1}`);
-      const id = seen.has(baseId) ? `${baseId}_${index + 1}` : baseId;
-      seen.add(id);
-      return loopAgentSchema.parse({
-        id,
-        name: agent.name,
-        task: agent.task,
-        integration: "internal",
-        toolPolicy: {
-          allowedTools: [agent.toolKey],
-          draftBeforeExternalAction: true,
-        },
-      });
-    });
-    return { agents };
+    return {
+      allowedIntegrations: inferIntegrationsFromGoal(task, parsed.allowedIntegrations),
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -161,26 +92,25 @@ export function buildLoopDefinition(input: {
   cron: string;
   timezone: string;
   integrations?: string[];
+  allowedToolRefs?: string[];
   schedulerTarget?: "internal" | "cloudflare";
-  agents?: LoopAgentDefinition[];
 }): LoopDefinition {
   const goal = normalizeText(input.task);
   const cron = validateFiveFieldCron(input.cron);
-  const integrations = normalizeIntegrationList(input.integrations);
-  const agents = input.agents?.length ? input.agents : fallbackAgents(goal);
+  const allowedIntegrations = inferIntegrationsFromGoal(goal, input.integrations);
 
   return loopDefinitionSchema.parse({
     definitionVersion: LOOP_DEFINITION_VERSION,
     goal,
     schedule: { cron, timezone: input.timezone.trim() || "UTC" },
     schedulerTarget: input.schedulerTarget ?? config.loopExecutorScheduler,
-    integrations,
+    allowedIntegrations,
+    allowedToolRefs: input.allowedToolRefs?.length ? input.allowedToolRefs : undefined,
     ceo: {
       name: "CEO",
-      task: `Orchestrate this recurring loop, spawn each specialist once, pass structured output forward, and produce the final result: ${goal}`,
-      policy: "Decide and coordinate only. Do not call specialist tools directly. All external actions must become approval drafts.",
+      task: `Orchestrate this recurring loop, propose a fresh specialist roster each run, pass structured output forward, and produce the final result: ${goal}`,
+      policy: "Decide and coordinate only. Propose agents with explicit tool assignments from the catalog. Do not call specialist tools directly. All external actions must become approval drafts.",
     },
-    agents,
     draftPolicy: {
       requireDraftBeforeExternalAction: true,
       approvalRequiredFor: ["publish", "send", "external_action"],
@@ -229,13 +159,15 @@ export async function createLoopWorkflow(input: {
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
   const cron = input.cron ?? "0 9 * * 1";
+  const intent = await parseLoopIntent(input.task).catch(() => ({
+    allowedIntegrations: inferIntegrationsFromGoal(input.task, input.integrations),
+  }));
   const definition = buildLoopDefinition({
     task: input.task,
     cron,
     timezone: input.timezone ?? "UTC",
-    integrations: input.integrations,
+    integrations: intent.allowedIntegrations ?? input.integrations,
     schedulerTarget: input.schedulerTarget,
-    agents: await parseLoopIntent(input.task).then((intent) => intent.agents).catch(() => undefined),
   });
 
   const workflowId = randomUUID();
@@ -260,7 +192,7 @@ export async function createLoopWorkflow(input: {
       definition.goal,
       definition.schedule.cron,
       JSON.stringify({
-        source: "internal_loop_creator_v1",
+        source: "internal_loop_creator_v2",
         loopDefinition: definition,
       }),
       LOOP_DEFINITION_VERSION,
