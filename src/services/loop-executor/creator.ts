@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "crypto";
+import { z } from "zod";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import { aiProviderRegistry } from "../../providers/ai/index.js";
 import { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
-import { LOOP_DEFINITION_VERSION, loopDefinitionSchema, type LoopDefinition, type LoopWorkflowView } from "./types.js";
+import { LOOP_DEFINITION_VERSION, loopAgentSchema, loopDefinitionSchema, type LoopAgentDefinition, type LoopDefinition, type LoopWorkflowView } from "./types.js";
 
 function normalizeText(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -27,33 +29,8 @@ function normalizeIntegrationList(integrations: string[] | undefined): string[] 
   return [...values];
 }
 
-export async function requireLoopAdmin(auth: AuthContext): Promise<void> {
-  if (auth.authMode === "internal") return;
-  if (config.nodeEnv !== "production" && !config.adminEmail) return;
-  if (!config.adminEmail) throw new Error("Loop creator admin email is not configured");
-
-  const result = await pool.query<{ email: string }>(
-    `SELECT email FROM users WHERE id = $1 LIMIT 1`,
-    [auth.userId]
-  );
-  const email = result.rows[0]?.email?.trim().toLowerCase();
-  if (!email || email !== config.adminEmail.trim().toLowerCase()) {
-    throw new Error("Loop creator is admin-only");
-  }
-}
-
-export function buildLoopDefinition(input: {
-  task: string;
-  cron: string;
-  timezone: string;
-  integrations?: string[];
-  schedulerTarget?: "internal" | "cloudflare";
-}): LoopDefinition {
-  const goal = normalizeText(input.task);
-  const cron = validateFiveFieldCron(input.cron);
-  const integrations = normalizeIntegrationList(input.integrations);
+function fallbackAgents(goal: string): LoopAgentDefinition[] {
   const newsletterLike = /newsletter|weekly update|product update|publicist|publish/i.test(goal);
-
   const agents = newsletterLike
     ? [
       {
@@ -101,6 +78,96 @@ export function buildLoopDefinition(input: {
         toolPolicy: { allowedTools: ["prepare_publication_plan" as const], draftBeforeExternalAction: true },
       },
     ];
+  return agents.map((agent) => loopAgentSchema.parse(agent));
+}
+
+function slugId(value: string, fallback: string): string {
+  const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+  return slug || fallback;
+}
+
+const parsedLoopIntentSchema = z.object({
+  agents: z.array(z.object({
+    id: z.string().trim().min(1).max(80).optional(),
+    name: z.string().trim().min(1).max(120),
+    task: z.string().trim().min(1).max(1000),
+    toolKey: z.enum(["research_topic", "write_draft", "prepare_publication_plan"]),
+  })).min(1).max(6),
+});
+
+export async function parseLoopIntent(task: string): Promise<{ agents: LoopAgentDefinition[] }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await aiProviderRegistry.chat({
+      model: aiProviderRegistry.chatModelName(),
+      responseFormat: "json_object",
+      temperature: 0.1,
+      maxTokens: 1200,
+      signal: controller.signal,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "Parse a natural-language recurring loop request into an ordered roster of internal execution agents.",
+            "Return JSON only: {\"agents\":[{\"id\":\"snake_case\",\"name\":\"Role Name\",\"task\":\"specific task\",\"toolKey\":\"research_topic|write_draft|prepare_publication_plan\"}]}",
+            "Use research_topic for source gathering, write_draft for producing the main artifact, and prepare_publication_plan for approval-only delivery planning.",
+            "Do not include external integrations. Keep 2-4 agents unless the request clearly needs more.",
+          ].join("\n"),
+        },
+        { role: "user", content: task },
+      ],
+    });
+    const parsed = parsedLoopIntentSchema.parse(JSON.parse(response.text));
+    const seen = new Set<string>();
+    const agents = parsed.agents.map((agent, index) => {
+      const baseId = slugId(agent.id ?? agent.name, `agent_${index + 1}`);
+      const id = seen.has(baseId) ? `${baseId}_${index + 1}` : baseId;
+      seen.add(id);
+      return loopAgentSchema.parse({
+        id,
+        name: agent.name,
+        task: agent.task,
+        integration: "internal",
+        toolPolicy: {
+          allowedTools: [agent.toolKey],
+          draftBeforeExternalAction: true,
+        },
+      });
+    });
+    return { agents };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function requireLoopAdmin(auth: AuthContext): Promise<void> {
+  if (auth.authMode === "internal") return;
+  if (config.nodeEnv !== "production" && !config.adminEmail) return;
+  if (!config.adminEmail) throw new Error("Loop creator admin email is not configured");
+
+  const result = await pool.query<{ email: string }>(
+    `SELECT email FROM users WHERE id = $1 LIMIT 1`,
+    [auth.userId]
+  );
+  const email = result.rows[0]?.email?.trim().toLowerCase();
+  if (!email || email !== config.adminEmail.trim().toLowerCase()) {
+    throw new Error("Loop creator is admin-only");
+  }
+}
+
+export function buildLoopDefinition(input: {
+  task: string;
+  cron: string;
+  timezone: string;
+  integrations?: string[];
+  schedulerTarget?: "internal" | "cloudflare";
+  agents?: LoopAgentDefinition[];
+}): LoopDefinition {
+  const goal = normalizeText(input.task);
+  const cron = validateFiveFieldCron(input.cron);
+  const integrations = normalizeIntegrationList(input.integrations);
+  const agents = input.agents?.length ? input.agents : fallbackAgents(goal);
 
   return loopDefinitionSchema.parse({
     definitionVersion: LOOP_DEFINITION_VERSION,
@@ -123,6 +190,7 @@ export function buildLoopDefinition(input: {
 
 function mapLoopWorkflowRow(row: {
   id: string;
+  workspace_id: string | null;
   title: string;
   status: string;
   schedule_rrule: string;
@@ -138,6 +206,7 @@ function mapLoopWorkflowRow(row: {
   const definition = loopDefinitionSchema.parse(metadata.loopDefinition);
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     title: row.title,
     status: row.status,
     scheduleRrule: row.schedule_rrule,
@@ -156,6 +225,7 @@ export async function createLoopWorkflow(input: {
   timezone?: string;
   integrations?: string[];
   schedulerTarget?: "internal" | "cloudflare";
+  workspaceId?: string | null;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
   const cron = input.cron ?? "0 9 * * 1";
@@ -165,6 +235,7 @@ export async function createLoopWorkflow(input: {
     timezone: input.timezone ?? "UTC",
     integrations: input.integrations,
     schedulerTarget: input.schedulerTarget,
+    agents: await parseLoopIntent(input.task).then((intent) => intent.agents).catch(() => undefined),
   });
 
   const workflowId = randomUUID();
@@ -177,12 +248,13 @@ export async function createLoopWorkflow(input: {
 
   await pool.query(
     `INSERT INTO workflows
-     (id, tenant_id, user_id, title, fingerprint, instruction, schedule_rrule, status, requires_connector, connector_provider, connector_scope_keys, metadata_json, definition_version, next_run_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', FALSE, NULL, '[]'::jsonb, $8::jsonb, $9, $10::timestamptz)`,
+     (id, tenant_id, user_id, workspace_id, title, fingerprint, instruction, schedule_rrule, status, requires_connector, connector_provider, connector_scope_keys, metadata_json, definition_version, next_run_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', FALSE, NULL, '[]'::jsonb, $9::jsonb, $10, $11::timestamptz)`,
     [
       workflowId,
       input.auth.tenantId,
       input.auth.userId,
+      input.workspaceId ?? null,
       title,
       fingerprint,
       definition.goal,
@@ -206,6 +278,7 @@ export async function getLoopWorkflow(auth: AuthContext, workflowId: string): Pr
   const result = await pool.query<{
     id: string;
     title: string;
+    workspace_id: string | null;
     status: string;
     schedule_rrule: string;
     next_run_at: string | null;
@@ -214,7 +287,7 @@ export async function getLoopWorkflow(auth: AuthContext, workflowId: string): Pr
     created_at: string;
     updated_at: string;
   }>(
-    `SELECT id, title, status, schedule_rrule, next_run_at, last_scheduled_at, metadata_json, created_at, updated_at
+    `SELECT id, workspace_id, title, status, schedule_rrule, next_run_at, last_scheduled_at, metadata_json, created_at, updated_at
      FROM workflows
      WHERE id = $1
        AND tenant_id = $2
@@ -232,6 +305,7 @@ export async function listLoopWorkflows(auth: AuthContext): Promise<LoopWorkflow
   const result = await pool.query<{
     id: string;
     title: string;
+    workspace_id: string | null;
     status: string;
     schedule_rrule: string;
     next_run_at: string | null;
@@ -240,7 +314,7 @@ export async function listLoopWorkflows(auth: AuthContext): Promise<LoopWorkflow
     created_at: string;
     updated_at: string;
   }>(
-    `SELECT id, title, status, schedule_rrule, next_run_at, last_scheduled_at, metadata_json, created_at, updated_at
+    `SELECT id, workspace_id, title, status, schedule_rrule, next_run_at, last_scheduled_at, metadata_json, created_at, updated_at
      FROM workflows
      WHERE tenant_id = $1
        AND user_id = $2

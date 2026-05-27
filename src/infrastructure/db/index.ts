@@ -332,6 +332,26 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       policy: "orchestration_sessions_tenant_user_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
     },
+    {
+      table: "loop_workspaces",
+      policy: "loop_workspaces_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "loop_run_tasks",
+      policy: "loop_run_tasks_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "loop_run_comments",
+      policy: "loop_run_comments_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
+    {
+      table: "loop_run_events",
+      policy: "loop_run_events_tenant_user_policy",
+      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
+    },
   ];
 
   for (const entry of policyStatements) {
@@ -915,10 +935,26 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_workspaces (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_workspaces_scope_created
+        ON loop_workspaces(tenant_id, user_id, created_at DESC);
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS workflows (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE SET NULL,
         source_suggestion_id UUID NULL REFERENCES workflow_suggestions(id) ON DELETE SET NULL,
         title TEXT NOT NULL,
         fingerprint TEXT NOT NULL,
@@ -939,6 +975,11 @@ export async function initDb() {
         ON workflows(tenant_id, user_id, status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_workflows_fingerprint
         ON workflows(tenant_id, user_id, fingerprint);
+
+      ALTER TABLE workflows
+        ADD COLUMN IF NOT EXISTS workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS idx_workflows_workspace
+        ON workflows(tenant_id, user_id, workspace_id, updated_at DESC);
 
       ALTER TABLE workflows
         ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ;
@@ -976,8 +1017,10 @@ export async function initDb() {
         run_mode TEXT NOT NULL DEFAULT 'scheduled'
           CHECK (run_mode IN ('scheduled', 'manual')),
         status TEXT NOT NULL DEFAULT 'scheduled'
-          CHECK (status IN ('scheduled', 'running', 'waiting_for_approval', 'completed', 'failed', 'skipped', 'cancelled')),
+          CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_approval', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
         scheduled_for TIMESTAMPTZ,
+        strategy_output TEXT,
+        waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE,
         draft_output TEXT,
         connector_action_status TEXT,
         metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -991,10 +1034,80 @@ export async function initDb() {
         ON workflow_runs(workflow_id, created_at DESC);
 
       ALTER TABLE workflow_runs
+        ADD COLUMN IF NOT EXISTS strategy_output TEXT;
+      ALTER TABLE workflow_runs
+        ADD COLUMN IF NOT EXISTS waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE workflow_runs
         DROP CONSTRAINT IF EXISTS workflow_runs_status_check;
       ALTER TABLE workflow_runs
         ADD CONSTRAINT workflow_runs_status_check
-        CHECK (status IN ('scheduled', 'running', 'waiting_for_approval', 'paused_for_approval', 'completed', 'failed', 'skipped', 'cancelled'));
+        CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_approval', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled'));
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_run_tasks (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        agent_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        tool_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'todo'
+          CHECK (status IN ('todo', 'in_progress', 'done', 'blocked', 'skipped')),
+        checkout_locked_at TIMESTAMPTZ,
+        input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, user_id, workflow_run_id, seq),
+        UNIQUE (tenant_id, user_id, workflow_run_id, agent_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_run_tasks_run_seq
+        ON loop_run_tasks(tenant_id, user_id, workflow_run_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_loop_run_tasks_run_status
+        ON loop_run_tasks(tenant_id, user_id, workflow_run_id, status, updated_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_run_comments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        task_id UUID REFERENCES loop_run_tasks(id) ON DELETE SET NULL,
+        author TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_run_comments_run_created
+        ON loop_run_comments(tenant_id, user_id, workflow_run_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_loop_run_comments_task_created
+        ON loop_run_comments(task_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_run_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        task_id UUID REFERENCES loop_run_tasks(id) ON DELETE SET NULL,
+        event_type TEXT NOT NULL,
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_run_events_run_created
+        ON loop_run_events(tenant_id, user_id, workflow_run_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_loop_run_events_type_created
+        ON loop_run_events(tenant_id, user_id, event_type, created_at DESC);
     `);
 
     await client.query(`

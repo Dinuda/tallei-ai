@@ -14,6 +14,7 @@ const [loopExecutor, db] = await Promise.all([
   import("../../../src/services/loop-executor/index.js"),
   import("../../../src/infrastructure/db/index.js"),
 ]);
+const { aiProviderRegistry } = await import("../../../src/providers/ai/index.js");
 
 const auth = {
   tenantId: "11111111-1111-4111-8111-111111111111",
@@ -41,17 +42,25 @@ test("creator builds newsletter loop with CEO and auto-spawned specialists", () 
   }
 });
 
-test("executor runs child agents in order and leaves external action as approval draft", async () => {
+test("executor creates a strategy-gated run with ordered agent tasks", async () => {
   const originalQuery = db.pool.query.bind(db.pool);
+  const originalChat = aiProviderRegistry.chat.bind(aiProviderRegistry);
   const definition = loopExecutor.buildLoopDefinition({
     task: "User is writing a newsletter for xyz product every week. Make that a loop.",
     cron: "0 9 * * 1",
     timezone: "UTC",
   });
 
-  const stepNames: string[] = [];
+  let insertedRunId: string | null = null;
+  const taskAgentIds: string[] = [];
   let finalStatus: string | null = null;
-  let finalDraft = "";
+  let strategyOutput = "";
+
+  (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = (async () => ({
+    text: "CEO strategy: research, draft, then prepare approval plan.",
+    model: "gpt-4o-mini",
+    finishReason: "stop",
+  })) as typeof aiProviderRegistry.chat;
 
   (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string, params?: unknown[]) => {
     if (sql.includes("SELECT id, title, status, metadata_json") && sql.includes("FROM workflows")) {
@@ -65,15 +74,33 @@ test("executor runs child agents in order and leaves external action as approval
         rowCount: 1,
       } as unknown;
     }
-    if (sql.includes("INSERT INTO workflow_run_steps")) {
-      if (typeof params?.[4] === "string" && typeof params?.[6] === "string") {
-        stepNames.push(`${params[4]}:${params[6]}`);
-      }
+    if (sql.includes("INSERT INTO workflow_runs")) {
+      insertedRunId = String(params?.[0]);
       return { rows: [], rowCount: 1 } as unknown;
     }
-    if (sql.includes("UPDATE workflow_runs") && sql.includes("draft_output")) {
-      finalStatus = String(params?.[4]);
-      finalDraft = String(params?.[5] ?? "");
+    if (sql.includes("FROM workflow_runs r") && sql.includes("JOIN workflows w")) {
+      return {
+        rows: [{
+          id: insertedRunId,
+          tenant_id: auth.tenantId,
+          user_id: auth.userId,
+          workflow_id: "33333333-3333-4333-8333-333333333333",
+          status: "running",
+          draft_output: null,
+          metadata_json: {},
+          workflow_title: "Newsletter Loop",
+          workflow_metadata_json: { loopDefinition: definition },
+        }],
+        rowCount: 1,
+      } as unknown;
+    }
+    if (sql.includes("INSERT INTO loop_run_tasks")) {
+      taskAgentIds.push(String(params?.[5]));
+      return { rows: [], rowCount: 1 } as unknown;
+    }
+    if (sql.includes("UPDATE workflow_runs") && sql.includes("waiting_for_strategy_approval")) {
+      finalStatus = "waiting_for_strategy_approval";
+      strategyOutput = String(params?.[3] ?? "");
       return { rows: [], rowCount: 1 } as unknown;
     }
     return { rows: [], rowCount: 1 } as unknown;
@@ -87,25 +114,21 @@ test("executor runs child agents in order and leaves external action as approval
       scheduledFor: null,
     });
 
-    assert.equal(result.status, "waiting_for_approval");
-    assert.equal(result.draftRequired, true);
-    assert.equal(finalStatus, "waiting_for_approval");
-    assert.match(finalDraft, /Draft approval required/);
-    assert.deepEqual(stepNames.filter((name) => name.endsWith(":completed")), [
-      "ceo_dispatch:completed",
-      "agent:topic_researcher:completed",
-      "agent:creative_writer:completed",
-      "agent:publicist:completed",
-      "ceo_finalize:completed",
-    ]);
+    assert.equal(result.status, "waiting_for_strategy_approval");
+    assert.equal(result.draftRequired, false);
+    assert.equal(finalStatus, "waiting_for_strategy_approval");
+    assert.match(strategyOutput, /CEO strategy/);
+    assert.deepEqual(taskAgentIds, ["topic_researcher", "creative_writer", "publicist"]);
   } finally {
     (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+    (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = originalChat;
   }
 });
 
 test("scheduler claims active due loops, recomputes next run, and dispatches through executor", async () => {
   const originalQuery = db.pool.query.bind(db.pool);
   const originalConnect = db.pool.connect.bind(db.pool);
+  const originalChat = aiProviderRegistry.chat.bind(aiProviderRegistry);
   const definition = loopExecutor.buildLoopDefinition({
     task: "User is writing a newsletter for xyz product every week. Make that a loop.",
     cron: "0 9 * * 1",
@@ -114,6 +137,12 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
 
   let dueQueryCheckedActiveStatus = false;
   let nextRunWritten: string | null = null;
+  let insertedRunId: string | null = null;
+  (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = (async () => ({
+    text: "CEO strategy: ordered plan.",
+    model: "gpt-4o-mini",
+    finishReason: "stop",
+  })) as typeof aiProviderRegistry.chat;
   const fakeClient = {
     async query(sql: string, params?: unknown[]) {
       if (sql.includes("FROM workflows") && sql.includes("FOR UPDATE SKIP LOCKED")) {
@@ -140,7 +169,7 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
   };
 
   (db.pool as unknown as { connect: typeof db.pool.connect }).connect = (async () => fakeClient) as typeof db.pool.connect;
-  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string, params?: unknown[]) => {
     if (sql.includes("SELECT plan, status FROM subscriptions")) {
       return { rows: [{ plan: "pro", status: "active" }], rowCount: 1 } as unknown;
     }
@@ -151,6 +180,26 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
           title: "Newsletter Loop",
           status: "active",
           metadata_json: { loopDefinition: definition },
+        }],
+        rowCount: 1,
+      } as unknown;
+    }
+    if (sql.includes("INSERT INTO workflow_runs")) {
+      insertedRunId = String(params?.[0]);
+      return { rows: [], rowCount: 1 } as unknown;
+    }
+    if (sql.includes("FROM workflow_runs r") && sql.includes("JOIN workflows w")) {
+      return {
+        rows: [{
+          id: insertedRunId,
+          tenant_id: auth.tenantId,
+          user_id: auth.userId,
+          workflow_id: "44444444-4444-4444-8444-444444444444",
+          status: "running",
+          draft_output: null,
+          metadata_json: {},
+          workflow_title: "Newsletter Loop",
+          workflow_metadata_json: { loopDefinition: definition },
         }],
         rowCount: 1,
       } as unknown;
@@ -168,5 +217,6 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
   } finally {
     (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
     (db.pool as unknown as { connect: typeof db.pool.connect }).connect = originalConnect;
+    (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = originalChat;
   }
 });

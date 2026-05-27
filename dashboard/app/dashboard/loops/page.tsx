@@ -48,6 +48,7 @@ type LoopInsight = {
   id: string;
   name: string;
   description: string;
+  workspaceId?: string | null;
   primarySourceFile: string;
   frequency: string;
   conversationCount: number;
@@ -162,6 +163,21 @@ type LoopMinerRun = {
 type LoopMinerRunsPayload = {
   runs?: LoopMinerRun[];
   error?: string;
+};
+
+type LoopWorkspace = {
+  id: string;
+  name: string;
+  description: string | null;
+};
+
+type LoopWorkflow = {
+  id: string;
+  title: string;
+  workspaceId: string | null;
+  definition?: {
+    goal?: string;
+  };
 };
 
 /* ------------------------------------------------------------------ */
@@ -1017,7 +1033,8 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
 export default function LoopsPage() {
   const router = useRouter();
   const [loops, setLoops] = useState<LoopInsight[]>([]);
-  const [latestRun, setLatestRun] = useState<LoopMinerRun | null>(null);
+  const [workspaces, setWorkspaces] = useState<LoopWorkspace[]>([]);
+  const [workspaceFilter, setWorkspaceFilter] = useState<"all" | "unassigned" | string>("all");
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1028,21 +1045,33 @@ export default function LoopsPage() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/memories/cleanup/loop-miner/runs", { cache: "no-store" });
+      const [response, workspacesResponse, loopsResponse] = await Promise.all([
+        fetch("/api/memories/cleanup/loop-miner/runs", { cache: "no-store" }),
+        fetch("/api/workflows/workspaces", { cache: "no-store" }),
+        fetch("/api/workflows/internal/loops", { cache: "no-store" }),
+      ]);
       const payload = (await response.json().catch(() => ({}))) as LoopMinerRunsPayload;
+      const workspacesPayload = await workspacesResponse.json().catch(() => ({}));
+      const loopsPayload = await loopsResponse.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
+      if (workspacesResponse.ok) {
+        setWorkspaces(Array.isArray(workspacesPayload.workspaces) ? workspacesPayload.workspaces as LoopWorkspace[] : []);
+      }
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      const internalLoops = loopsResponse.ok && Array.isArray(loopsPayload.loops) ? loopsPayload.loops as LoopWorkflow[] : [];
+      const newsletterWorkflow = internalLoops.find((loop) =>
+        loop.definition?.goal === HARDCODED_NEWSLETTER_TASK
+        || loop.title === "Newsletter Loop"
+      );
       const displayRun = pickRunForDisplay(runs);
-      setLatestRun(displayRun);
       const minedLoops = displayRun ? buildLoopInsightsFromRun(displayRun) : [];
-      const hardcoded = hardcodedNewsletterLoop();
+      const hardcoded = { ...hardcodedNewsletterLoop(), workspaceId: newsletterWorkflow?.workspaceId ?? null };
       setLoops([
         hardcoded,
         ...minedLoops.filter((loop) => loop.id !== hardcoded.id),
       ]);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
-      setLatestRun(null);
       setLoops([hardcodedNewsletterLoop()]);
     } finally {
       setLoading(false);
@@ -1077,10 +1106,15 @@ export default function LoopsPage() {
   }, [router]);
 
   const filtered = useMemo(() => {
-    if (filter === "high") return loops.filter((l) => l.confidence >= 80);
-    if (filter === "medium") return loops.filter((l) => l.confidence >= 60 && l.confidence < 80);
-    return loops;
-  }, [loops, filter]);
+    const byConfidence = filter === "high"
+      ? loops.filter((l) => l.confidence >= 80)
+      : filter === "medium"
+        ? loops.filter((l) => l.confidence >= 60 && l.confidence < 80)
+        : loops;
+    if (workspaceFilter === "all") return byConfidence;
+    if (workspaceFilter === "unassigned") return byConfidence.filter((loop) => !loop.workspaceId);
+    return byConfidence.filter((loop) => loop.workspaceId === workspaceFilter);
+  }, [loops, filter, workspaceFilter]);
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -1143,6 +1177,26 @@ export default function LoopsPage() {
               </span>
             </div>
           ) : null}
+          <div className="mx-auto mb-4 flex max-w-5xl flex-wrap items-center gap-2">
+            {[
+              { id: "all", name: "All workspaces" },
+              { id: "unassigned", name: "Unassigned" },
+              ...workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name })),
+            ].map((workspace) => (
+              <button
+                key={workspace.id}
+                type="button"
+                onClick={() => setWorkspaceFilter(workspace.id)}
+                className={`border px-3 py-1.5 text-xs font-medium transition ${
+                  workspaceFilter === workspace.id
+                    ? "border-[var(--text)] bg-[var(--surface)] text-[var(--text)]"
+                    : "border-[var(--border-light)] bg-white text-[var(--text-2)] hover:text-[var(--text)]"
+                }`}
+              >
+                {workspace.name}
+              </button>
+            ))}
+          </div>
           <AnimatePresence mode="popLayout">
             {filtered.length === 0 ? (
               <motion.div

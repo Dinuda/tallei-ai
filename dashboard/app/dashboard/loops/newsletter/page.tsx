@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -124,6 +125,7 @@ function mapWorkflowRun(run: WorkflowListRun): LoopRunResult {
 }
 
 export default function NewsletterLoopPage() {
+  const router = useRouter();
   const [workflow, setWorkflow] = useState<LoopWorkflow | null>(null);
   const [run, setRun] = useState<LoopRunResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -204,12 +206,9 @@ export default function NewsletterLoopPage() {
       const response = await fetch(`/api/workflows/internal/loops/${activeWorkflow.id}/run`, { method: "POST" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "Failed to run newsletter loop");
-      setRun(payload.run as LoopRunResult);
-      const runStatus = (payload.run as LoopRunResult | undefined)?.status;
-      setNotice(runStatus === "waiting_for_approval"
-        ? "Newsletter loop run completed and is waiting for approval."
-        : "Newsletter loop run completed.");
-      await loadWorkflow();
+      const nextRun = payload.run as LoopRunResult;
+      setRun(nextRun);
+      router.push(`/dashboard/loops/${activeWorkflow.id}/runs/${nextRun.runId}`);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Failed to run newsletter loop");
     } finally {

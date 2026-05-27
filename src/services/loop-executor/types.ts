@@ -48,6 +48,7 @@ export type LoopDefinition = z.infer<typeof loopDefinitionSchema>;
 
 export interface LoopWorkflowView {
   id: string;
+  workspaceId: string | null;
   title: string;
   status: string;
   scheduleRrule: string;
