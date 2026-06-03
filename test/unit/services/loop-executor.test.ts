@@ -33,7 +33,7 @@ test("creator builds v2 loop definition without fixed agents", () => {
   });
 
   assert.equal(definition.definitionVersion, "loop_executor_v2");
-  assert.equal(definition.ceo.name, "CEO");
+  assert.equal(definition.ceo.name, "Parent Agent");
   assert.ok(Array.isArray(definition.allowedIntegrations));
   assert.equal("agents" in definition, false);
 });
@@ -299,7 +299,7 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
 });
 
 test("parseContactListCsv accepts email and optional name columns", async () => {
-  const { parseContactListCsv } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const { parseContactListCsv } = await import("../../../src/services/loop-executor/presets/newsletter.js");
   const contacts = parseContactListCsv("email,name\na@example.com,Ada\nb@example.com,Bob\n");
   assert.equal(contacts.length, 2);
   assert.equal(contacts[0]?.email, "a@example.com");
@@ -307,7 +307,7 @@ test("parseContactListCsv accepts email and optional name columns", async () => 
 });
 
 test("newsletter formatter strips internal approval instructions", async () => {
-  const { formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const { formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/presets/newsletter.js");
   const raw = [
     "### Newsletter Draft",
     "",
@@ -359,7 +359,7 @@ test("newsletter formatter strips internal approval instructions", async () => {
 });
 
 test("newsletter formatter strips leaked draft scaffolding from subscriber copy", async () => {
-  const { formatNewsletterForBroadcast, formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const { formatNewsletterForBroadcast, formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/presets/newsletter.js");
   const raw = [
     "**Subject:** Weekly Insights for Product Builders: Navigating the Evolving Landscape of AI and Algorithms",
     "",
@@ -385,16 +385,16 @@ test("newsletter formatter strips leaked draft scaffolding from subscriber copy"
 
   const sanitized = sanitizeSubscriberNewsletterBody(raw);
   assert.match(sanitized, /Hello Product Builders/);
-  assert.match(sanitized, /Best,\nLenny/);
   assert.doesNotMatch(sanitized, /draft for the weekly product newsletter/i);
   assert.doesNotMatch(sanitized, /Lenny's voice/i);
+  assert.doesNotMatch(sanitized, /Best,\nLenny/);
   assert.doesNotMatch(sanitized, /Would you like/i);
   assert.doesNotMatch(sanitized, /next step/i);
   assert.doesNotMatch(sanitized, /Read more here/i);
   assert.doesNotMatch(sanitized, /Explore the details/i);
 
   const formatted = formatNewsletterForEmail(raw);
-  const broadcast = formatNewsletterForBroadcast(formatted);
+  const broadcast = await formatNewsletterForBroadcast(formatted);
   assert.equal(formatted.subject, "Weekly Insights for Product Builders: Navigating the Evolving Landscape of AI and Algorithms");
   assert.doesNotMatch(formatted.text, /draft for the weekly product newsletter/i);
   assert.doesNotMatch(formatted.html, /Weekly Newsletter/);
@@ -402,14 +402,124 @@ test("newsletter formatter strips leaked draft scaffolding from subscriber copy"
   assert.doesNotMatch(broadcast.text, /Would you like/i);
 });
 
+test("newsletter formatter strips publicist handoff and third-party draft labels", async () => {
+  const { formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const raw = [
+    "### Draft Newsletter for Lenny's Weekly Product Newsletter",
+    "",
+    "**Subject:** Embracing the Future: How AI Agents are Transforming Product Management",
+    "",
+    "Hey Builders,",
+    "",
+    "This week, we're looking at how AI agents are changing product workflows.",
+    "",
+    "Best,",
+    "Lenny",
+    "",
+    "### Next Steps:",
+    "",
+    "- **Publicist:** Please review this draft and prepare it for distribution. Once approved, we can upload the contact list and send it out via Resend.",
+  ].join("\n");
+
+  const sanitized = sanitizeSubscriberNewsletterBody(raw);
+  assert.match(sanitized, /Hey Builders/);
+  assert.doesNotMatch(sanitized, /Draft Newsletter for Lenny/i);
+  assert.doesNotMatch(sanitized, /Next Steps/i);
+  assert.doesNotMatch(sanitized, /Publicist/i);
+  assert.doesNotMatch(sanitized, /Best,\nLenny/i);
+  assert.doesNotMatch(sanitized, /upload the contact list/i);
+
+  const formatted = formatNewsletterForEmail(raw);
+  assert.equal(formatted.subject, "Embracing the Future: How AI Agents are Transforming Product Management");
+  assert.doesNotMatch(formatted.text, /Next Steps/i);
+  assert.doesNotMatch(formatted.html, /Publicist/i);
+});
+
 test("broadcast formatter includes Resend contact properties and unsubscribe URL", async () => {
-  const { formatNewsletterForEmail, formatNewsletterForBroadcast } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const { formatNewsletterForEmail, formatNewsletterForBroadcast } = await import("../../../src/services/loop-executor/presets/newsletter.js");
   const formatted = formatNewsletterForEmail("**Subject:** Hello\n\nBody copy.");
-  const broadcast = formatNewsletterForBroadcast(formatted);
+  const broadcast = await formatNewsletterForBroadcast(formatted);
   assert.match(broadcast.html, /\{\{\{contact\.first_name\|there\}\}\}/);
   assert.match(broadcast.html, /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/);
-  assert.match(broadcast.html, /You’re receiving this because you subscribed to updates from Tallei\./);
+  assert.match(broadcast.html, /subscribed to updates[\s\S]*from Tallei/i);
   assert.match(broadcast.text, /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/);
+});
+
+test("broadcast formatter uses React Email by default for newsletter delivery", async () => {
+  const { formatNewsletterForEmail, formatNewsletterForBroadcast } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const formatted = formatNewsletterForEmail("**Subject:** Hello\n\nBody copy.");
+  const legacy = await formatNewsletterForBroadcast(formatted, { templateId: "editorial", useReactEmail: false });
+  const templated = await formatNewsletterForBroadcast(formatted, { templateId: "editorial" });
+
+  assert.doesNotMatch(legacy.html, /vercel-logo\.png/);
+  assert.match(templated.html, /vercel-logo\.png/);
+  assert.match(templated.html, /\{\{\{contact\.first_name\|there\}\}\}/);
+});
+
+test("delivery formatter falls back to newsletter formatting from markdown body", async () => {
+  const { looksLikeNewsletterContent, resolveDeliveryFormatter } = await import("../../../src/services/loop-executor/delivery-format.js");
+  const { newsletterDeliveryFormatter } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const body = "**Streamlining Your Schedule**\n\n### 1. Introduction\n\nHey Product Builders,";
+  assert.equal(looksLikeNewsletterContent(body), true);
+  const definition = {
+    definitionVersion: "loop_executor_v2" as const,
+    goal: "Weekly product update",
+    schedule: { cron: "0 9 * * 1", timezone: "UTC" },
+    schedulerTarget: "internal" as const,
+    allowedIntegrations: ["internal"],
+    ceo: { name: "CEO", task: "Own the loop", policy: "Coordinate" },
+    draftPolicy: { requireDraftBeforeExternalAction: true, approvalRequiredFor: ["send"] },
+  };
+  assert.equal(resolveDeliveryFormatter(definition, body), newsletterDeliveryFormatter);
+  const formatted = newsletterDeliveryFormatter.formatForDelivery(body);
+  assert.equal(formatted.subject, "Streamlining Your Schedule");
+});
+
+test("newsletter delivery formatter resolves for resend broadcast loops without presetId", async () => {
+  const { isNewsletterLoopDefinition, resolveDeliveryFormatter } = await import("../../../src/services/loop-executor/delivery-format.js");
+  const { newsletterDeliveryFormatter } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const definition = {
+    definitionVersion: "loop_executor_v2" as const,
+    goal: "Weekly newsletter",
+    schedule: { cron: "0 9 * * 1", timezone: "UTC" },
+    schedulerTarget: "internal" as const,
+    allowedIntegrations: ["internal", "react_email"],
+    allowedToolRefs: ["internal.resend_broadcast"],
+    ceo: { name: "CEO", task: "Own the loop", policy: "Coordinate" },
+    draftPolicy: { requireDraftBeforeExternalAction: true, approvalRequiredFor: ["send"] },
+  };
+  assert.equal(isNewsletterLoopDefinition(definition), true);
+  assert.equal(resolveDeliveryFormatter(definition), newsletterDeliveryFormatter);
+});
+
+test("newsletter formatter uses bold headline as subject and removes it from body", async () => {
+  const { formatNewsletterForEmail } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const raw = [
+    "**Lenny's Weekly Product Newsletter**",
+    "",
+    "**1. Introduction**",
+    "",
+    "Hey Product Builders,",
+  ].join("\n");
+  const formatted = formatNewsletterForEmail(raw);
+  assert.equal(formatted.subject, "Lenny's Weekly Product Newsletter");
+  assert.doesNotMatch(formatted.text, /Lenny's Weekly Product Newsletter/);
+  assert.match(formatted.text, /Hey Product Builders/);
+});
+
+test("React Email approval template renders markdown before sending", async () => {
+  const { renderNewsletterApprovalEmail } = await import("../../../src/services/loop-executor/presets/newsletter-react-email.js");
+  const rendered = await renderNewsletterApprovalEmail({
+    subject: "Newsletter Loop",
+    markdown: "**Lenny's Weekly Product Newsletter**\n\n**1. User Experience Trends**\nA recent analysis underscores the need for clearer product UX.",
+    approvalUrl: "https://example.com/approve",
+    runUrl: "https://example.com/run",
+  });
+
+  assert.doesNotMatch(rendered.html, /\*\*/);
+  assert.doesNotMatch(rendered.text, /\*\*/);
+  assert.match(rendered.html, /Approve draft/);
+  assert.match(rendered.html, /<strong[\s\S]*>1\. User Experience Trends<\/strong/);
 });
 
 test("tool catalog includes email approval request tool", () => {

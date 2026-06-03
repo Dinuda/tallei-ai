@@ -4,7 +4,9 @@ import {
   completeLoopHeartbeatJob,
   failLoopHeartbeatJob,
 } from "./heartbeat-jobs.js";
-import { markRunBlocked, runAgentHeartbeat, runCeoFinalizeHeartbeat, runDistributionHeartbeat } from "./executor.js";
+import { runAgentHeartbeat, runCeoFinalizeHeartbeat } from "./executor.js";
+import { runDistributionHeartbeat } from "./distribution.js";
+import { markRunBlocked } from "./run-status.js";
 
 async function executeLoopHeartbeatJob(job: {
   id: string;

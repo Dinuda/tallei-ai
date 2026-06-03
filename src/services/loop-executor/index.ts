@@ -1,10 +1,15 @@
-// Loop creation (design-time): definitions, workflows, workspaces
+/**
+ * loop-executor — Public barrel exports.
+ *
+ * Core execution is domain-agnostic; opt-in presets (e.g. newsletter) live under ./presets/.
+ */
+
+// Design-time
 export {
   buildLoopDefinition,
   createLoopWorkflow,
   getLoopWorkflow,
   listLoopWorkflows,
-  parseLoopIntent,
   requireLoopAdmin,
 } from "./creator.js";
 export {
@@ -14,41 +19,67 @@ export {
 } from "./plan.js";
 export { assignLoopToWorkspace, createWorkspace, listWorkspaces } from "./workspace.js";
 export { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
-export { listLoopTools } from "./tool-catalog.js";
+export {
+  getEffectiveLoopConstraints,
+  listAllowedLoopTools,
+  listLoopTools,
+  validateAgentRoster,
+  validateToolAssignments,
+} from "./tool-catalog.js";
 
-// Loop execution (runtime): runs, heartbeats, gates, approvals
+// Execution — run lifecycle
 export {
   addLoopRunComment,
-  approveLoopRunApprovalToken,
-  approveLoopRunFromUi,
-  approveLoopRunGate,
-  approveLoopRunGateApprovalToken,
-  approveLoopStrategy,
   executeLoopWorkflow,
   getLoopRun,
   getLoopRunRoster,
   listLoopRunArtifacts,
   listLoopRunComments,
-  listLoopRunGates,
   listLoopRunTasks,
   markRunBlocked,
-  rejectLoopRunGate,
   rerunLoopRunTask,
-  resumeLoopRunExecution,
   runAgentHeartbeat,
   runCeoFinalizeHeartbeat,
   runCeoStrategyHeartbeat,
-  runDistributionHeartbeat,
-  submitLoopRunGateInput,
-  submitLoopRunInput,
-  uploadLoopRunContacts,
+  updateLoopRunNewsletterDraft,
   updateLoopRunRoster,
 } from "./executor.js";
 export { buildCeoStrategyOutput, materializeTasksFromPlan, materializeTasksFromRoster } from "./run-strategy.js";
+
+// Execution — approvals
+export {
+  applyEmailApprovalResult,
+  approveLoopRunApprovalToken,
+  approveLoopRunFromUi,
+  approveLoopStrategy,
+  resumeLoopRunExecution,
+  submitLoopRunInput,
+  uploadDeliveryRecipients,
+  uploadLoopRunContacts,
+} from "./approval.js";
+
+// Execution — gates
+export {
+  approveLoopRunGate,
+  approveLoopRunGateApprovalToken,
+  listLoopRunGates,
+  rejectLoopRunGate,
+  submitLoopRunGateInput,
+} from "./gates.js";
+
+// Execution — delivery
+export { runDistributionHeartbeat } from "./distribution.js";
+
+// Scheduling
 export { dispatchLoopHeartbeatJobs } from "./heartbeat-dispatch.js";
 export { dispatchDueLoopWorkflows, startLoopExecutorScheduler, stopLoopExecutorScheduler } from "./scheduler.js";
 export { startLoopHeartbeatWorker, stopLoopHeartbeatWorker } from "./heartbeat-worker.js";
 
+// Presets (opt-in)
+export { newsletterPreset } from "./presets/newsletter.js";
+export { getLoopPreset } from "./presets/registry.js";
+
+// Types
 export {
   LOOP_DEFINITION_VERSION,
   loopAgentGraphSchema,
@@ -57,5 +88,4 @@ export {
   loopRunAgentSchema,
   loopStageSchema,
   loopToolAssignmentSchema,
-  loopToolKeySchema,
 } from "./types.js";

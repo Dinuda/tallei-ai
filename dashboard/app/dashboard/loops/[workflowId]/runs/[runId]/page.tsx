@@ -16,6 +16,7 @@ import {
   Pause,
   Play,
   RefreshCw,
+  Save,
   Settings,
   ShieldCheck,
   Upload,
@@ -73,10 +74,17 @@ type LoopWorkflow = {
   nextRunAt: string | null;
   definition?: {
     goal: string;
+    allowedIntegrations?: string[];
+    allowedToolRefs?: string[];
     schedule?: { timezone?: string };
     ceo: { name: string; task: string; policy: string };
   };
 };
+
+const NEWSLETTER_TEMPLATES = [
+  { id: "clean", label: "Clean", description: "Focused white-card layout." },
+  { id: "editorial", label: "Editorial", description: "Publication-style layout." },
+];
 
 type LoopRun = {
   id: string;
@@ -417,6 +425,12 @@ export default function LoopRunDetailPage() {
   const [toolCatalog, setToolCatalog] = useState<CatalogTool[]>([]);
   const [rosterIssues, setRosterIssues] = useState<ValidationIssue[]>([]);
   const [rosterEditable, setRosterEditable] = useState(false);
+  const [draftEditor, setDraftEditor] = useState("");
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("clean");
+  const [previewHtml, setPreviewHtml] = useState("");
+  const [previewSubject, setPreviewSubject] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
   const resumeAttemptedRef = useRef(false);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -425,6 +439,10 @@ export default function LoopRunDetailPage() {
   const wfStatus = workflow?.status ?? "active";
   const decision = runAction(run);
   const showCsvUpload = runStatus === "waiting_for_contact_list" || runStatus === "waiting_for_input";
+  const definitionReactEmailEnabled = Boolean(
+    workflow?.definition?.allowedIntegrations?.some((integration) => integration.trim().toLowerCase() === "react_email") ||
+    workflow?.definition?.allowedToolRefs?.some((ref) => ref === "internal.react_email_template")
+  );
 
   const agentTasks = useMemo((): AgentRowTask[] => {
     return [...tasks]
@@ -462,12 +480,52 @@ export default function LoopRunDetailPage() {
     }
     return "";
   })();
+  const showTemplateOptions = showCsvUpload && Boolean(rawPrimaryNewsletter);
   const centerOutput = run?.status === "waiting_for_strategy_approval" && run.strategyOutput?.trim()
     ? run.strategyOutput
     : activeAgentTask
       ? getTaskOutput(activeAgentTask)
       : rawPrimaryNewsletter || null;
   const centerUpdatedAt = activeAgentTask ? activeAgentTask.completedAt ?? activeAgentTask.startedAt : run?.updatedAt ?? linkedLatestRun?.createdAt ?? null;
+
+  useEffect(() => {
+    if (draftDirty) return;
+    setDraftEditor(rawPrimaryNewsletter || "");
+  }, [draftDirty, rawPrimaryNewsletter]);
+
+  useEffect(() => {
+    if (!showTemplateOptions || !draftEditor.trim()) {
+      setPreviewHtml("");
+      setPreviewSubject(null);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setPreviewBusy(true);
+      void fetch(`/api/workflows/runs/${runId}/newsletter/preview`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ body: draftEditor, templateId: selectedTemplateId }),
+      })
+        .then(async (res) => {
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(payload.error ?? "Failed to render preview");
+          setPreviewHtml(typeof payload.html === "string" ? payload.html : "");
+          setPreviewSubject(typeof payload.subject === "string" ? payload.subject : null);
+        })
+        .catch((e) => {
+          if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Failed to render preview");
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setPreviewBusy(false);
+        });
+    }, 350);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [draftEditor, runId, selectedTemplateId, showTemplateOptions]);
 
   useEffect(() => {
     if (!expandedTaskId) return;
@@ -671,11 +729,17 @@ export default function LoopRunDetailPage() {
     setBusy("upload-contacts");
     setError(null);
     try {
+      if (draftDirty && draftEditor.trim()) {
+        await saveNewsletterDraft({ keepBusy: true });
+      }
       const csv = await file.text();
       const res = await fetch(`/api/workflows/runs/${runId}/contacts`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ csv }),
+        body: JSON.stringify({
+          csv,
+          ...(showTemplateOptions ? { templateId: selectedTemplateId } : {}),
+        }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload.error ?? "Failed to upload contacts");
@@ -685,6 +749,31 @@ export default function LoopRunDetailPage() {
       setError(e instanceof Error ? e.message : "Failed to upload contacts");
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function saveNewsletterDraft(options?: { keepBusy?: boolean }) {
+    if (!draftEditor.trim()) {
+      setError("Newsletter body is required");
+      throw new Error("Newsletter body is required");
+    }
+    if (!options?.keepBusy) setBusy("save-newsletter");
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/runs/${runId}/newsletter`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: draftEditor }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload.error ?? "Failed to save newsletter");
+      setRun((current) => current ? { ...current, draftOutput: draftEditor, updatedAt: new Date().toISOString() } : current);
+      setDraftDirty(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save newsletter");
+      throw e;
+    } finally {
+      if (!options?.keepBusy) setBusy(null);
     }
   }
 
@@ -891,6 +980,89 @@ export default function LoopRunDetailPage() {
               </Card>
             ) : null}
 
+            {showCsvUpload && rawPrimaryNewsletter ? (
+              <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
+                <CardHeader className="px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <CardTitle className="text-base">Newsletter editor</CardTitle>
+                      <CardDescription>Edit the approved copy before uploading recipients.</CardDescription>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={draftDirty ? "default" : "outline"}
+                      className={draftDirty ? "bg-slate-900 text-white hover:bg-slate-800" : ""}
+                      disabled={busy !== null || !draftDirty}
+                      onClick={() => void saveNewsletterDraft()}
+                    >
+                      {busy === "save-newsletter" ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+                      Save
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4 px-5 pb-5">
+                  <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="min-w-44">
+                      <p className="text-sm font-semibold text-slate-900">Email template</p>
+                      <p className="text-xs text-slate-500">
+                        {definitionReactEmailEnabled ? "Enabled on this loop." : "Optional for this send."}
+                      </p>
+                    </div>
+                    <select
+                      value={selectedTemplateId}
+                      onChange={(event) => setSelectedTemplateId(event.target.value)}
+                      className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400"
+                    >
+                      {NEWSLETTER_TEMPLATES.map((template) => (
+                        <option key={template.id} value={template.id}>{template.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-slate-500">
+                      {NEWSLETTER_TEMPLATES.find((template) => template.id === selectedTemplateId)?.description}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(360px,1.05fr)]">
+                    <div className="min-w-0">
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Markdown</p>
+                      <textarea
+                        value={draftEditor}
+                        onChange={(event) => {
+                          setDraftEditor(event.target.value);
+                          setDraftDirty(true);
+                        }}
+                        className="min-h-96 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-3 font-mono text-sm leading-6 text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+                        spellCheck
+                      />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Rendered preview</p>
+                        <span className="truncate text-xs text-slate-500">
+                          {previewBusy ? "Rendering..." : previewSubject ? `Subject: ${previewSubject}` : "Subject not set"}
+                        </span>
+                      </div>
+                      <div className="h-96 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                        {previewHtml ? (
+                          <iframe
+                            title="Newsletter email preview"
+                            srcDoc={previewHtml}
+                            className="h-full w-full bg-white"
+                            sandbox=""
+                          />
+                        ) : (
+                          <div className="grid h-full place-items-center px-4 text-center text-sm text-slate-500">
+                            Preview renders after newsletter content is available.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
+
             {showCsvUpload ? (
               <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
                 <CardContent className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
@@ -901,7 +1073,7 @@ export default function LoopRunDetailPage() {
                     <div className="min-w-0">
                       <p className="font-semibold text-slate-900">Upload recipients CSV</p>
                       <p className="mt-0.5 text-sm text-slate-600">
-                        Use columns <code className="rounded bg-slate-100 px-1">email</code> and optional <code className="rounded bg-slate-100 px-1">name</code>. Uploading starts the Resend broadcast.
+                        Use columns <code className="rounded bg-slate-100 px-1">email</code> and optional <code className="rounded bg-slate-100 px-1">name</code>. Uploading starts the Resend broadcast{showTemplateOptions ? " with the selected template" : ""}.
                       </p>
                       {run?.stats?.contacts ? (
                         <p className="mt-1 text-xs text-slate-500">

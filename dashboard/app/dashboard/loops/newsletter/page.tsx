@@ -264,7 +264,16 @@ export default function NewsletterLoopPage() {
           task: NEWSLETTER_TASK,
           cron: NEWSLETTER_CRON,
           timezone,
-          integrations: ["internal"],
+          preset_id: "newsletter",
+          integrations: ["internal", "react_email"],
+          allowed_tool_refs: [
+            "internal.memory_search",
+            "internal.web_search",
+            "internal.llm_only",
+            "internal.email_approval_request",
+            "internal.resend_broadcast",
+            "internal.react_email_template",
+          ],
         }),
       });
       const payload = await response.json().catch(() => ({}));

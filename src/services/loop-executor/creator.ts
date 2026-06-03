@@ -4,7 +4,6 @@ import { z } from "zod";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
 import { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
 import { buildPlanFromAgentGraph } from "./plan.js";
 import {
@@ -34,41 +33,6 @@ function normalizeIntegrationList(integrations: string[] | undefined): string[] 
     if (value) values.add(value);
   }
   return [...values];
-}
-
-const parsedLoopIntentSchema = z.object({
-  allowedIntegrations: z.array(z.string().trim().min(1)).optional(),
-});
-
-export async function parseLoopIntent(task: string): Promise<{ allowedIntegrations: string[] }> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8_000);
-  try {
-    const response = await aiProviderRegistry.chat({
-      model: aiProviderRegistry.chatModelName(),
-      responseFormat: "json_object",
-      temperature: 0.1,
-      maxTokens: 600,
-      signal: controller.signal,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "Parse a natural-language recurring loop request into allowed integration providers.",
-            'Return JSON only: {"allowedIntegrations":["internal","composio"]}',
-            "Only return provider keys. Do not return child agents, tools, stages, gates, or execution status.",
-          ].join("\n"),
-        },
-        { role: "user", content: task },
-      ],
-    });
-    const parsed = parsedLoopIntentSchema.parse(JSON.parse(response.text));
-    return {
-      allowedIntegrations: normalizeIntegrationList(parsed.allowedIntegrations),
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 export async function requireLoopAdmin(auth: AuthContext): Promise<void> {
@@ -129,6 +93,7 @@ export function buildLoopDefinition(input: {
   agentGraph?: LoopAgentGraph;
   plan?: LoopPlan;
   schedulerTarget?: "internal" | "cloudflare";
+  presetId?: string;
 }): LoopDefinition {
   const goal = normalizeText(input.task);
   const cron = validateFiveFieldCron(input.cron);
@@ -147,6 +112,9 @@ export function buildLoopDefinition(input: {
         ...(plan?.allowedToolRefs ?? []),
         ...agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
       ]);
+  const resolvedPresetId = input.presetId?.trim()
+    || (/\bnewsletter\b/i.test(goal) ? "newsletter" : undefined)
+    || (resolvedAllowedToolRefs.includes("internal.resend_broadcast") ? "newsletter" : undefined);
 
   return loopDefinitionSchema.parse({
     definitionVersion: LOOP_DEFINITION_VERSION,
@@ -166,6 +134,7 @@ export function buildLoopDefinition(input: {
     },
     agentGraph,
     ...(plan ? { plan } : {}),
+    ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
   });
 }
 
@@ -210,6 +179,7 @@ export async function createLoopWorkflow(input: {
   plan?: LoopPlan;
   schedulerTarget?: "internal" | "cloudflare";
   workspaceId?: string | null;
+  presetId?: string;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
   const cron = input.cron ?? "0 9 * * 1";
@@ -222,6 +192,7 @@ export async function createLoopWorkflow(input: {
     agentGraph: input.agentGraph,
     plan: input.plan,
     schedulerTarget: input.schedulerTarget,
+    presetId: input.presetId,
   });
 
   const workflowId = randomUUID();

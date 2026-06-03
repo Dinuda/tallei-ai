@@ -76,6 +76,10 @@ export interface ApprovalPromptInput {
   reason: string;
   suggestedPrompt: string;
   draftOutput?: string | null;
+  renderedEmail?: {
+    html: string;
+    text: string;
+  } | null;
 }
 
 export interface StatusNotificationInput {
@@ -95,6 +99,11 @@ export interface WorkflowRunApprovalPromptInput {
   approvalUrl: string;
   approvalToken: string;
   artifactKind?: string | null;
+  emailSubject?: string | null;
+  renderedEmail?: {
+    html: string;
+    text: string;
+  } | null;
 }
 
 export interface WorkflowRunApprovalPromptResult {
@@ -673,6 +682,7 @@ async function sendEmailMessage(input: {
   channel: NotificationChannelConfig;
   subject: string;
   text: string;
+  html?: string | null;
   replyAddress?: string | null;
 }): Promise<DeliveryResult> {
   const result = await sendResendEmail({
@@ -680,7 +690,7 @@ async function sendEmailMessage(input: {
     to: input.channel.destination,
     subject: input.subject,
     text: input.text,
-    html: `<pre style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;">${input.text
+    html: input.html ?? `<pre style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif;">${input.text
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")}</pre>`,
@@ -705,6 +715,7 @@ async function deliverToChannel(input: {
   channel: NotificationChannelConfig;
   subject: string;
   text: string;
+  html?: string | null;
   metadata?: Record<string, unknown>;
   approvalMessageId?: string;
   approvalUrl?: string;
@@ -726,6 +737,7 @@ async function deliverToChannel(input: {
     channel: input.channel,
     subject: input.subject,
     text: input.text,
+    html: input.html,
     replyAddress: input.replyAddress,
   });
 }
@@ -1064,7 +1076,7 @@ export async function sendChannelTest(auth: AuthContext, channelId: string): Pro
 }
 
 export async function deliverApprovalPrompt(input: ApprovalPromptInput): Promise<DeliveryResult> {
-  const text = channelMessageText({
+  const fallbackText = channelMessageText({
     title: input.title,
     reason: input.reason,
     approvalUrl: input.approvalUrl,
@@ -1072,6 +1084,7 @@ export async function deliverApprovalPrompt(input: ApprovalPromptInput): Promise
     suggestedPrompt: input.suggestedPrompt,
     footer: "Reply APPROVE to approve or SKIP to skip.",
   });
+  const text = input.renderedEmail?.text ?? fallbackText;
   const replyAddress = buildReplyAddress(input.channel.id);
   await recordNotificationDeliveryAttempt({
     auth: input.auth,
@@ -1102,6 +1115,7 @@ export async function deliverApprovalPrompt(input: ApprovalPromptInput): Promise
     channel: input.channel,
     subject: input.title,
     text,
+    html: input.renderedEmail?.html ?? null,
     approvalMessageId: input.channel.kind === "telegram" ? messageId : undefined,
     approvalUrl: input.approvalUrl,
     replyAddress,
@@ -1175,7 +1189,7 @@ export async function sendWorkflowRunApprovalPrompt(input: WorkflowRunApprovalPr
   const to = await resolvePrimaryEmailDestination(input.auth);
   const runUrl = `${config.frontendUrl.replace(/\/$/, "")}/dashboard/loops/${input.workflowId}/runs/${input.runId}`;
   const artifactKind = input.artifactKind?.trim() || "draft";
-  const subject = `Approval required: ${input.workflowTitle}`;
+  const subject = input.emailSubject?.trim() || `Approval required: ${input.workflowTitle}`;
   const preview = input.artifactBody.trim().slice(0, 4000);
   const reason = `Your ${artifactKind} is ready for review.`;
 
@@ -1206,7 +1220,7 @@ export async function sendWorkflowRunApprovalPrompt(input: WorkflowRunApprovalPr
     throw new Error("No enabled email notification channel found. Add an email destination in notification settings.");
   }
 
-  const text = [
+  const text = input.renderedEmail?.text ?? [
     reason,
     "",
     preview,
@@ -1215,7 +1229,7 @@ export async function sendWorkflowRunApprovalPrompt(input: WorkflowRunApprovalPr
     "",
     `Or open the run in Tallei: ${runUrl}`,
   ].join("\n");
-  const html = [
+  const html = input.renderedEmail?.html ?? [
     `<p>${escapeHtml(reason)}</p>`,
     `<pre style="white-space:pre-wrap;font-family:inherit;line-height:1.5;">${escapeHtml(preview)}</pre>`,
     `<p><a href="${input.approvalUrl}">Approve this draft</a></p>`,

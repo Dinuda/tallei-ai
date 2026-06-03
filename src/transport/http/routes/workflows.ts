@@ -7,6 +7,8 @@ import {
   consumeWorkflowApprovalToken,
   resolveWorkflowApprovalToken,
 } from "../../../services/approval-tokens.js";
+import { formatNewsletterForEmail, normalizeNewsletterTemplateId } from "../../../services/loop-executor/presets/newsletter.js";
+import { renderNewsletterReactEmail } from "../../../services/loop-executor/presets/newsletter-react-email.js";
 import {
   addLoopRunComment,
   approveLoopStrategy,
@@ -33,6 +35,7 @@ import {
   rerunLoopRunTask,
   resumeLoopRunExecution,
   uploadLoopRunContacts,
+  updateLoopRunNewsletterDraft,
   updateLoopRunRoster,
 } from "../../../services/loop-executor/index.js";
 import { authMiddleware, internalSecretMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
@@ -61,6 +64,7 @@ const createLoopSchema = z.object({
   plan: loopPlanSchema.optional(),
   schedulerTarget: z.enum(["internal", "cloudflare"]).optional(),
   workspaceId: z.string().uuid().nullable().optional(),
+  preset_id: z.string().trim().min(1).max(80).optional(),
 });
 
 const createWorkspaceSchema = z.object({
@@ -79,6 +83,16 @@ const approvalTokenSchema = z.object({
 
 const contactCsvSchema = z.object({
   csv: z.string().trim().min(1).max(1_000_000),
+  templateId: z.string().trim().min(1).max(80).optional(),
+});
+
+const newsletterDraftSchema = z.object({
+  body: z.string().trim().min(1).max(200_000),
+});
+
+const newsletterPreviewSchema = z.object({
+  body: z.string().trim().min(1).max(200_000),
+  templateId: z.string().trim().min(1).max(80).optional(),
 });
 
 async function applyWorkflowApprovalTokenDecision(token: string, decision: "approve" | "skip") {
@@ -293,6 +307,7 @@ router.post("/internal/loops", requireScopes(["memory:write"]), async (req: Auth
       plan: body.plan,
       schedulerTarget: body.schedulerTarget,
       workspaceId: body.workspaceId,
+      presetId: body.preset_id,
     });
     res.status(201).json({ loop });
   } catch (error) {
@@ -483,6 +498,7 @@ router.post("/runs/:runId/contacts", requireScopes(["memory:write"]), async (req
       auth: req.authContext!,
       runId,
       csv: body.csv,
+      templateId: body.templateId,
     });
     res.status(202).json(result);
   } catch (error) {
@@ -496,6 +512,49 @@ router.post("/runs/:runId/contacts", requireScopes(["memory:write"]), async (req
     }
     console.error("Error uploading loop contacts:", error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to upload contacts" });
+  }
+});
+
+router.patch("/runs/:runId/newsletter", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const body = newsletterDraftSchema.parse(req.body ?? {});
+    const run = await updateLoopRunNewsletterDraft(req.authContext!, { runId, body: body.body });
+    res.json({ run });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /executing|body is required/i.test(error.message)) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    console.error("Error updating newsletter draft:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to update newsletter draft" });
+  }
+});
+
+router.post("/runs/:runId/newsletter/preview", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    await getLoopRun(req.authContext!, runId);
+    const body = newsletterPreviewSchema.parse(req.body ?? {});
+    const formatted = formatNewsletterForEmail(body.body);
+    const templateId = normalizeNewsletterTemplateId(body.templateId);
+    const html = await renderNewsletterReactEmail({
+      templateId,
+      subject: formatted.subject,
+      markdown: formatted.text,
+    });
+    res.json({ html, subject: formatted.subject, body: formatted.text, templateId });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error rendering newsletter preview:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to render newsletter preview" });
   }
 });
 

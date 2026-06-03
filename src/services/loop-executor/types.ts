@@ -1,16 +1,16 @@
+/**
+ * types.ts — Zod schemas and TypeScript types for loop executor v2.
+ *
+ * A **loop definition** is the persisted blueprint (goal, schedule, plan, tools).
+ * **Run metadata** (`loopExecutorRunMetaSchema`) holds per-run state (roster, approvals, delivery).
+ */
+
 import { z } from "zod";
 
+/** Current loop definition schema version stored on `workflows.definition_version`. */
 export const LOOP_DEFINITION_VERSION = "loop_executor_v2";
 
-/** @deprecated v1 semantic tool keys — kept for reading legacy task rows */
-export const loopToolKeySchema = z.enum([
-  "research_topic",
-  "write_draft",
-  "prepare_publication_plan",
-]);
-
-export type LoopToolKey = z.infer<typeof loopToolKeySchema>;
-
+/** Tool binding on an agent: catalog ref plus optional JSON config. */
 export const loopToolAssignmentSchema = z.object({
   ref: z.string().min(1),
   config: z.record(z.unknown()).optional(),
@@ -18,6 +18,7 @@ export const loopToolAssignmentSchema = z.object({
 
 export type LoopToolAssignment = z.infer<typeof loopToolAssignmentSchema>;
 
+/** One specialist agent in a run roster or task row. */
 export const loopRunAgentSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -27,6 +28,7 @@ export const loopRunAgentSchema = z.object({
 
 export type LoopRunAgent = z.infer<typeof loopRunAgentSchema>;
 
+/** CEO strategy heartbeat output (before human approval). */
 export const ceoStrategyOutputSchema = z.object({
   strategyText: z.string().min(1),
   agents: z.array(loopRunAgentSchema).min(1).max(6),
@@ -34,6 +36,7 @@ export const ceoStrategyOutputSchema = z.object({
 
 export type CeoStrategyOutput = z.infer<typeof ceoStrategyOutputSchema>;
 
+/** Declared artifact in a dynamic plan. */
 export const loopArtifactDefinitionSchema = z.object({
   id: z.string().min(1),
   kind: z.string().min(1),
@@ -42,6 +45,7 @@ export const loopArtifactDefinitionSchema = z.object({
 
 export type LoopArtifactDefinition = z.infer<typeof loopArtifactDefinitionSchema>;
 
+/** Plan stage: run one agent. */
 export const loopAgentStageSchema = z.object({
   kind: z.literal("agent"),
   id: z.string().min(1),
@@ -51,6 +55,7 @@ export const loopAgentStageSchema = z.object({
   outputArtifactId: z.string().min(1).optional(),
 });
 
+/** Plan stage: pause for human approval on an artifact. */
 export const loopApprovalGateStageSchema = z.object({
   kind: z.literal("approval_gate"),
   id: z.string().min(1),
@@ -59,6 +64,7 @@ export const loopApprovalGateStageSchema = z.object({
   required: z.literal(true),
 });
 
+/** Plan stage: pause for structured operator input. */
 export const loopInputGateStageSchema = z.object({
   kind: z.literal("input_gate"),
   id: z.string().min(1),
@@ -67,6 +73,7 @@ export const loopInputGateStageSchema = z.object({
   outputArtifactId: z.string().min(1),
 });
 
+/** Plan stage: execute a catalog external-action tool (e.g. broadcast). */
 export const loopExternalActionStageSchema = z.object({
   kind: z.literal("external_action"),
   id: z.string().min(1),
@@ -84,6 +91,7 @@ export const loopStageSchema = z.discriminatedUnion("kind", [
 
 export type LoopStage = z.infer<typeof loopStageSchema>;
 
+/** Ordered stages and artifacts for plan-driven runs. */
 export const loopPlanSchema = z.object({
   goal: z.string().min(1),
   stages: z.array(loopStageSchema).min(1).max(24),
@@ -94,19 +102,19 @@ export const loopPlanSchema = z.object({
 
 export type LoopPlan = z.infer<typeof loopPlanSchema>;
 
+/** Child agent in the design-time agent graph (optional at create time). */
 export const loopAgentGraphChildSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   task: z.string().min(1),
   tools: z.array(loopToolAssignmentSchema).default([]),
-  connectorProvider: z.string().min(1).nullable().default(null),
-  requestedToolkits: z.array(z.string().min(1)).default([]),
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
 });
 
 export type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;
 
+/** Parent coordinator plus optional pre-defined children. */
 export const loopAgentGraphSchema = z.object({
   parent: z.object({
     id: z.string().min(1),
@@ -124,6 +132,10 @@ export const loopAgentGraphSchema = z.object({
 
 export type LoopAgentGraph = z.infer<typeof loopAgentGraphSchema>;
 
+/**
+ * Persisted loop definition (`workflows.metadata_json.loopDefinition`).
+ * Use `presetId` to select a built-in CEO roster strategy (see presets/registry).
+ */
 export const loopDefinitionSchema = z.object({
   definitionVersion: z.literal(LOOP_DEFINITION_VERSION),
   goal: z.string().min(1),
@@ -145,14 +157,13 @@ export const loopDefinitionSchema = z.object({
   }),
   agentGraph: loopAgentGraphSchema.optional(),
   plan: loopPlanSchema.optional(),
-  template: z.object({
-    id: z.string().min(1),
-    label: z.string().min(1),
-  }).optional(),
+  /** Built-in preset key (e.g. `newsletter`). Resolved at runtime via presets/registry. */
+  presetId: z.string().min(1).optional(),
 });
 
 export type LoopDefinition = z.infer<typeof loopDefinitionSchema>;
 
+/** Email + optional name for bulk delivery recipient lists. */
 export const loopContactRowSchema = z.object({
   email: z.string().email(),
   name: z.string().optional(),
@@ -160,6 +171,9 @@ export const loopContactRowSchema = z.object({
 
 export type LoopContactRow = z.infer<typeof loopContactRowSchema>;
 
+/**
+ * Per-run executor state under `workflow_runs.metadata_json.loop_executor`.
+ */
 export const loopExecutorRunMetaSchema = z.object({
   proposedRoster: z.array(loopRunAgentSchema).optional(),
   approvedRoster: z.array(loopRunAgentSchema).optional(),
@@ -188,51 +202,60 @@ export const loopExecutorRunMetaSchema = z.object({
     schema: z.record(z.unknown()).optional(),
   }).optional(),
   artifactBody: z.string().optional(),
-  publicistApproval: z.object({
-    to: z.string(),
-    approvalUrl: z.string(),
-    token: z.string(),
-    sentAt: z.string(),
-  }).optional(),
-  emailApprovedAt: z.string().optional(),
-  uiApprovedAt: z.string().optional(),
-  approvalChannel: z.string().optional(),
-  newsletterBody: z.string().optional(),
-  contactList: z.object({
+  deliveryContentBody: z.string().optional(),
+  deliveryContentArtifactId: z.string().optional(),
+  deliveryResultArtifactId: z.string().optional(),
+  deliveryRecipients: z.object({
     uploadedAt: z.string(),
     contacts: z.array(loopContactRowSchema),
     recipientCount: z.number().int().nonnegative(),
   }).optional(),
-  distribution: z.object({
+  deliveryTemplateId: z.string().optional(),
+  deliveryBatch: z.object({
     startedAt: z.string().optional(),
     retryStartedAt: z.string().optional(),
-    sentAt: z.string(),
-    successCount: z.number().int().nonnegative(),
-    failureCount: z.number().int().nonnegative(),
+    sentAt: z.string().optional(),
+    successCount: z.number().int().nonnegative().optional(),
+    failureCount: z.number().int().nonnegative().optional(),
     recipientCount: z.number().int().nonnegative().optional(),
     nextIndex: z.number().int().nonnegative().optional(),
     batchSize: z.number().int().positive().optional(),
+    segmentId: z.string().optional(),
+    broadcastId: z.string().optional(),
+    broadcastError: z.string().optional(),
+    provider: z.string().optional(),
     recipients: z.array(z.object({
       email: z.string().email(),
       ok: z.boolean(),
       status: z.number().int().optional(),
+      contactId: z.string().optional(),
       providerMessageId: z.string().optional(),
       error: z.string().optional(),
     })).optional(),
   }).optional(),
   deliveryAction: z.object({
     kind: z.string(),
-    status: z.enum(["pending", "in_progress", "completed", "partial_failure"]).default("pending"),
+    status: z.enum(["pending", "in_progress", "completed", "partial_failure", "syncing_contacts", "failed"]).default("pending"),
     startedAt: z.string().optional(),
     completedAt: z.string().optional(),
     successCount: z.number().int().nonnegative().optional(),
     failureCount: z.number().int().nonnegative().optional(),
     recipientCount: z.number().int().nonnegative().optional(),
+    broadcastId: z.string().optional(),
   }).optional(),
+  activeGateId: z.string().optional(),
+  activeGateStageId: z.string().optional(),
+  gateCompletedAt: z.string().optional(),
+  blockedAt: z.string().optional(),
+  error: z.object({ message: z.string() }).optional(),
+  resumedAt: z.string().optional(),
+  rerunTaskId: z.string().optional(),
+  rerunTaskSeq: z.number().optional(),
 });
 
 export type LoopExecutorRunMeta = z.infer<typeof loopExecutorRunMetaSchema>;
 
+/** API view of a saved loop workflow. */
 export interface LoopWorkflowView {
   id: string;
   workspaceId: string | null;
@@ -244,4 +267,21 @@ export interface LoopWorkflowView {
   definition: LoopDefinition;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Runtime preset: optional fixed CEO roster for a domain workflow. */
+export interface LoopPreset {
+  id: string;
+  label: string;
+  buildRoster: (goal: string) => Promise<CeoStrategyOutput>;
+}
+
+/** Formats raw delivery body for a provider (e.g. email broadcast). */
+export interface DeliveryContentFormatter {
+  sanitizeBody(raw: string): string;
+  formatForDelivery(raw: string): { subject: string | null; text: string; html: string };
+  formatForBroadcast(
+    formatted: { subject: string | null; text: string; html: string },
+    options?: { templateId?: string | null; useReactEmail?: boolean }
+  ): { text: string; html: string } | Promise<{ text: string; html: string }>;
 }

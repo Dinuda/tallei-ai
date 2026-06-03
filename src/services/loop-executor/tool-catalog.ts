@@ -1,5 +1,10 @@
-// @ts-nocheck
+/**
+ * tool-catalog.ts — Loop tool registry, validation, and agent prompt builders.
+ */
+
+import type { AuthContext } from "../../domain/auth/index.js";
 import { listConnectorAccounts } from "../connectors/composio.js";
+import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 const CATALOG = [
     {
         ref: "internal.llm_only",
@@ -14,7 +19,6 @@ const CATALOG = [
         requiredArtifactKinds: [],
         producesArtifactKind: "text",
         riskLevel: "none",
-        requiresApprovalBeforeExecution: false,
         integrationKey: "internal",
         isActionable: false,
     },
@@ -31,7 +35,6 @@ const CATALOG = [
         requiredArtifactKinds: [],
         producesArtifactKind: "research_notes",
         riskLevel: "none",
-        requiresApprovalBeforeExecution: false,
         integrationKey: "internal",
         isActionable: true,
     },
@@ -48,7 +51,6 @@ const CATALOG = [
         requiredArtifactKinds: [],
         producesArtifactKind: "research_notes",
         riskLevel: "none",
-        requiresApprovalBeforeExecution: false,
         integrationKey: "internal",
         isActionable: true,
     },
@@ -65,7 +67,6 @@ const CATALOG = [
         requiredArtifactKinds: ["draft", "message", "outbound_payload", "content"],
         producesArtifactKind: "approval_request",
         riskLevel: "review",
-        requiresApprovalBeforeExecution: false,
         integrationKey: "internal",
         isActionable: true,
     },
@@ -82,9 +83,24 @@ const CATALOG = [
         requiredArtifactKinds: ["content", "draft", "message", "contact_list"],
         producesArtifactKind: "delivery_result",
         riskLevel: "external_action",
-        requiresApprovalBeforeExecution: true,
         integrationKey: "internal",
         isActionable: true,
+    },
+    {
+        ref: "internal.react_email_template",
+        label: "React Email template",
+        description: "Render newsletter broadcast HTML with an optional React Email template before Resend sends it.",
+        provider: "internal",
+        toolkit: null,
+        requiresConnector: false,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { templateId: { type: "string" } } },
+        outputSchema: { type: "object", properties: { html: { type: "string" }, text: { type: "string" } } },
+        requiredArtifactKinds: ["content", "draft", "message"],
+        producesArtifactKind: "email_template",
+        riskLevel: "none",
+        integrationKey: "react_email",
+        isActionable: false,
     },
     {
         ref: "composio.gmail.create_draft",
@@ -99,7 +115,6 @@ const CATALOG = [
         requiredArtifactKinds: ["message", "draft", "content"],
         producesArtifactKind: "draft",
         riskLevel: "review",
-        requiresApprovalBeforeExecution: false,
         integrationKey: "composio",
         composioAction: "GMAIL_CREATE_EMAIL_DRAFT",
         isActionable: true,
@@ -117,7 +132,6 @@ const CATALOG = [
         requiredArtifactKinds: ["message", "draft"],
         producesArtifactKind: "delivery_result",
         riskLevel: "external_action",
-        requiresApprovalBeforeExecution: true,
         integrationKey: "composio",
         composioAction: "GMAIL_SEND_EMAIL",
         isActionable: true,
@@ -137,10 +151,12 @@ export function getEffectiveLoopConstraints(definition) {
     if (goalImpliesExternalDelivery(definition.goal)) {
         allowedIntegrations.add("composio");
     }
+    const allowedToolRefs = definition.allowedToolRefs?.length
+        ? definition.allowedToolRefs
+        : undefined;
     return {
         allowedIntegrations: [...allowedIntegrations],
-        // Tool ref caps are optional; only honor explicit non-empty user caps, not stale NL-parse lists.
-        allowedToolRefs: undefined,
+        allowedToolRefs,
     };
 }
 export function listAllowedLoopTools(definition) {
@@ -241,55 +257,6 @@ export async function validateAgentRoster(input) {
     }
     return issues.length > 0 ? { ok: false, issues } : { ok: true };
 }
-export async function listToolValidationIssues(input) {
-    const allowedIntegrations = normalizeIntegrations(input.definition);
-    const allowedToolRefs = input.definition.allowedToolRefs
-        ? new Set(input.definition.allowedToolRefs)
-        : null;
-    const connectors = await listConnectorAccounts(input.auth);
-    const toolkits = connectedToolkits(connectors);
-    const issues = [];
-    for (const agent of input.agents) {
-        for (const assignment of agent.tools) {
-            const entry = getLoopTool(assignment.ref);
-            if (!entry) {
-                issues.push({
-                    ref: assignment.ref,
-                    code: "unknown_tool",
-                    message: `Unknown tool ref: ${assignment.ref}`,
-                });
-                continue;
-            }
-            if (allowedToolRefs && !allowedToolRefs.has(entry.ref)) {
-                issues.push({
-                    ref: entry.ref,
-                    code: "tool_not_allowed",
-                    message: `Tool ${entry.ref} is not allowed for this loop`,
-                });
-            }
-            if (!allowedIntegrations.has(entry.integrationKey)) {
-                issues.push({
-                    ref: entry.ref,
-                    code: "tool_not_allowed",
-                    message: `Integration ${entry.integrationKey} is not enabled for this loop`,
-                });
-            }
-            if (entry.requiresConnector && entry.toolkit && !toolkits.has(entry.toolkit)) {
-                issues.push({
-                    ref: entry.ref,
-                    code: "connector_missing",
-                    message: `Connect ${entry.toolkit} to use ${entry.label}`,
-                });
-            }
-        }
-    }
-    return issues;
-}
-export function summarizeCatalogForCeo() {
-    return listLoopTools()
-        .map((tool) => `- ${tool.ref}: ${tool.description}${tool.requiresConnector ? " (requires connector)" : ""}`)
-        .join("\n");
-}
 function commentsAsContext(comments) {
     if (comments.length === 0)
         return "No prior comments yet.";
@@ -306,6 +273,8 @@ export function buildAgentSystemPrompt(ctx) {
         `You are ${ctx.agentName}, a specialist agent in a recurring multi-agent loop.`,
         "Complete your assigned task using prior comments as context.",
         "Do not claim external actions occurred unless a tool explicitly confirms it.",
+        "If producing subscriber-facing or customer-facing copy, return only that copy; omit workflow scaffolding, draft labels, approval instructions, next steps, and handoff notes.",
+        "Do not impersonate a real person, newsletter, publication, or third-party brand unless the loop goal explicitly says that is the authorized sender.",
         "If you lack information, say so clearly.",
     ].join(" ");
 }

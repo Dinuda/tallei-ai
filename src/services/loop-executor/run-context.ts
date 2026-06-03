@@ -1,18 +1,17 @@
+/**
+ * run-context.ts — Load workflow/run rows and parse executor metadata.
+ */
+
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { readLoopDefinition } from "./plan.js";
+import { readObject } from "./run-store.js";
 import {
   LOOP_DEFINITION_VERSION,
   loopExecutorRunMetaSchema,
   type LoopDefinition,
   type LoopExecutorRunMeta,
 } from "./types.js";
-
-function readObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
 
 export type LoopRunContext = {
   runId: string;
@@ -35,26 +34,25 @@ export function authFromContext(context: Pick<LoopRunContext, "tenantId" | "user
   };
 }
 
+/** Parses run metadata, mapping legacy newsletter field names when present. */
 export function readLoopExecutorMeta(metadataJson: unknown): LoopExecutorRunMeta {
   const root = readObject(metadataJson);
   const loopExecutor = readObject(root.loop_executor);
+  const legacyApproval = readObject(loopExecutor.publicistApproval);
+  const approvalRequest = Object.keys(readObject(loopExecutor.approvalRequest)).length > 0
+    ? loopExecutor.approvalRequest
+    : Object.keys(legacyApproval).length > 0 ? legacyApproval : undefined;
+  const artifactBody = typeof loopExecutor.artifactBody === "string"
+    ? loopExecutor.artifactBody
+    : typeof loopExecutor.newsletterBody === "string" ? loopExecutor.newsletterBody : undefined;
+  const deliveryRecipients = loopExecutor.deliveryRecipients ?? loopExecutor.contactList;
+  const deliveryBatch = loopExecutor.deliveryBatch ?? loopExecutor.distribution;
   return loopExecutorRunMetaSchema.parse({
-    proposedRoster: loopExecutor.proposedRoster,
-    approvedRoster: loopExecutor.approvedRoster,
-    strategyReadyAt: loopExecutor.strategyReadyAt,
-    rosterApprovedAt: loopExecutor.rosterApprovedAt,
-    approvalRequest: loopExecutor.approvalRequest,
-    approvalDecision: loopExecutor.approvalDecision,
-    pendingInput: loopExecutor.pendingInput,
-    artifactBody: loopExecutor.artifactBody,
-    publicistApproval: loopExecutor.publicistApproval,
-    emailApprovedAt: loopExecutor.emailApprovedAt,
-    uiApprovedAt: loopExecutor.uiApprovedAt,
-    approvalChannel: loopExecutor.approvalChannel,
-    newsletterBody: loopExecutor.newsletterBody,
-    contactList: loopExecutor.contactList,
-    distribution: loopExecutor.distribution,
-    deliveryAction: loopExecutor.deliveryAction,
+    ...loopExecutor,
+    approvalRequest,
+    artifactBody,
+    deliveryRecipients,
+    deliveryBatch,
   });
 }
 
@@ -132,12 +130,7 @@ export async function loadRunContext(runId: string): Promise<LoopRunContext> {
 
 export async function assertRunAccess(auth: AuthContext, runId: string): Promise<void> {
   const result = await pool.query(
-    `SELECT id
-     FROM workflow_runs
-     WHERE id = $1
-       AND tenant_id = $2
-       AND user_id = $3
-     LIMIT 1`,
+    `SELECT id FROM workflow_runs WHERE id = $1 AND tenant_id = $2 AND user_id = $3 LIMIT 1`,
     [runId, auth.tenantId, auth.userId]
   );
   if (!result.rows[0]) throw new Error("Loop run not found");
