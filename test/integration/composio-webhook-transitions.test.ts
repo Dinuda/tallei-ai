@@ -10,8 +10,8 @@ process.env.JWT_SECRET ??= "integration-jwt-secret";
 process.env.MEMORY_MASTER_KEY ??= "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 process.env.REDIS_URL = "";
 
-const [workflowAutomation, db] = await Promise.all([
-  import("../../src/services/workflow-automation.js"),
+const [composioConnectors, db] = await Promise.all([
+  import("../../src/services/connectors/composio.js"),
   import("../../src/infrastructure/db/index.js"),
 ]);
 
@@ -46,7 +46,7 @@ test("composio webhook marks auth session connected and upserts connected accoun
   }) as typeof db.pool.query;
 
   try {
-    const result = await workflowAutomation.handleComposioWebhook({
+    const result = await composioConnectors.handleComposioWebhook({
       type: "connected_account.connected",
       data: {
         connectedAccountId: "conn_123",
@@ -98,7 +98,7 @@ test("composio webhook marks auth session/account revoked", async () => {
   }) as typeof db.pool.query;
 
   try {
-    const result = await workflowAutomation.handleComposioWebhook({
+    const result = await composioConnectors.handleComposioWebhook({
       type: "connected_account.revoked",
       data: {
         id: "conn_revoked_1",

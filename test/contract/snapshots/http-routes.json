@@ -65,6 +65,46 @@
     "source": "src/routes/billing.ts"
   },
   {
+    "method": "GET",
+    "path": "/api/channels",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/channels/:id",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/channels/:id/primary",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/channels/:id/test",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/channels/setup/:id/complete",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/channels/setup/start",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/channels/webhooks/resend",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/channels/webhooks/telegram",
+    "source": "src/routes/channels.ts"
+  },
+  {
     "method": "POST",
     "path": "/api/chatgpt/actions/collab_continue",
     "source": "src/routes/chatgpt.ts"
@@ -102,61 +142,6 @@
   {
     "method": "POST",
     "path": "/api/chatgpt/actions/search_documents",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_approve_workflow_run",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_approve_workflow_suggestion",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_continue_connector_auth",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_create_workflow",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_dismiss_workflow_suggestion",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_get_workflow_run",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_list_connectors",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_list_workflow_suggestions",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_skip_workflow_run",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_start_connector_auth",
-    "source": "src/routes/chatgpt.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/chatgpt/actions/tallei_update_workflow_suggestion",
     "source": "src/routes/chatgpt.ts"
   },
   {
@@ -205,6 +190,11 @@
     "source": "src/routes/connectors.ts"
   },
   {
+    "method": "DELETE",
+    "path": "/api/connectors/:id",
+    "source": "src/routes/connectors.ts"
+  },
+  {
     "method": "POST",
     "path": "/api/connectors/:provider/auth-sessions",
     "source": "src/routes/connectors.ts"
@@ -220,8 +210,33 @@
     "source": "src/routes/connectors.ts"
   },
   {
+    "method": "GET",
+    "path": "/api/connectors/composio/toolkits",
+    "source": "src/routes/connectors.ts"
+  },
+  {
     "method": "POST",
     "path": "/api/connectors/composio/webhook",
+    "source": "src/routes/connectors.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/connectors/resend",
+    "source": "src/routes/connectors.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connectors/resend",
+    "source": "src/routes/connectors.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/connectors/resend",
+    "source": "src/routes/connectors.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/connectors/resend/:id",
     "source": "src/routes/connectors.ts"
   },
   {
@@ -322,6 +337,66 @@
   {
     "method": "DELETE",
     "path": "/api/memories/:id",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/memories/cleanup/loop-miner/run",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/cleanup/loop-miner/runs",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/cleanup/loop-miner/runs/:id/embedding-map",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/cleanup/loop-miner/runs/:id/status",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/cleanup/loop-miner/runs/:id/status/stream",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/memories/cleanup/reset",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/memories/cleanup/run",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/cleanup/runs",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/cleanup/runs/:id",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/memories/import/chatgpt",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memories/import/chatgpt/:ref",
+    "source": "src/routes/memories.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/memories/import/chatgpt/:ref/persist",
     "source": "src/routes/memories.ts"
   },
   {
@@ -431,82 +506,147 @@
   },
   {
     "method": "GET",
-    "path": "/api/workflow-approvals/:token",
-    "source": "src/routes/workflowApprovals.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflow-approvals/:token/approve",
-    "source": "src/routes/workflowApprovals.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflow-approvals/:token/ignore",
-    "source": "src/routes/workflowApprovals.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
     "path": "/api/workflows",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "GET",
-    "path": "/api/workflows/:id/runs",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/:id/runs",
+    "path": "/api/workflows/approvals/:token",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "GET",
-    "path": "/api/workflows/:id/runs/:runId",
+    "path": "/api/workflows/approvals/:token/approve",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "POST",
-    "path": "/api/workflows/:id/runs/:runId/approve",
+    "path": "/api/workflows/approvals/:token/approve",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/approvals/:token/skip",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "GET",
-    "path": "/api/workflows/:id/runs/:runId/health",
+    "path": "/api/workflows/internal/loops",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "POST",
-    "path": "/api/workflows/:id/runs/:runId/skip",
+    "path": "/api/workflows/internal/loops",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "GET",
-    "path": "/api/workflows/:id/runs/:runId/steps",
+    "path": "/api/workflows/internal/loops/:workflowId",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/internal/loops/:workflowId/run",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "GET",
-    "path": "/api/workflows/active",
+    "path": "/api/workflows/internal/loops/:workflowId/runs",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "POST",
-    "path": "/api/workflows/suggestions/:id/approve",
+    "path": "/api/workflows/internal/loops/heartbeat/dispatch",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "POST",
-    "path": "/api/workflows/suggestions/:id/dismiss",
+    "path": "/api/workflows/internal/loops/scheduler/wake",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/loops/approvals/:token",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/loops/approvals/:token/approve",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "POST",
-    "path": "/api/workflows/suggestions/:id/update",
+    "path": "/api/workflows/loops/approvals/:token/approve",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/runs/:runId",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/approve",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/approve-strategy",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/runs/:runId/comments",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/comments",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/contacts",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/resume",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/runs/:runId/roster",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/workflows/runs/:runId/roster",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/runs/:runId/tasks",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/tasks/:taskId/rerun",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/workspaces",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/workspaces",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/workspaces/assign-loop",
     "source": "src/routes/workflows.ts"
   },
   {

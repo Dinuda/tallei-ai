@@ -1,7 +1,10 @@
 // @ts-nocheck
 import { recallMemories } from "../memory.js";
+import { config } from "../../config/index.js";
+import { sendWorkflowRunApprovalPrompt, getPrimaryNotificationChannel } from "../channels.js";
+import { createWorkflowApprovalRequest } from "../approval-tokens.js";
 import { actionableToolRefs, buildAgentSystemPrompt, buildAgentUserPrompt, buildDraftFromToolResults, getLoopTool, hasOnlyLlmTools, } from "./tool-catalog.js";
-import { extractNewsletterBodyFromComments, sendRunApprovalEmail, } from "./publicist-email.js";
+import { extractNewsletterBodyFromComments } from "./publicist-email.js";
 import { loopExecutorOpenAiChat, loopExecutorOpenAiModel } from "./openai-chat.js";
 function readLoopAgentTimeoutMs() {
     const raw = process.env.TALLEI_LOOP_EXECUTOR__AGENT_TIMEOUT_MS;
@@ -198,17 +201,34 @@ async function runAssignedTools(input) {
             if (!artifactBody.trim()) {
                 throw new Error("Writer output is required before sending the approval email");
             }
-            const sent = await sendRunApprovalEmail({
+            const primaryChannel = await getPrimaryNotificationChannel(input.auth);
+            const approval = await createWorkflowApprovalRequest({
+                auth: input.auth,
+                targetType: "workflow_run",
+                targetId: input.runId,
+                channel: primaryChannel?.kind === "telegram" || primaryChannel?.kind === "gmail"
+                    ? primaryChannel.kind
+                    : "email",
+            });
+            const approvalUrl = `${config.publicBaseUrl.replace(/\/$/, "")}/api/workflows/loops/approvals/${approval.token}/approve`;
+            const sentPrompt = await sendWorkflowRunApprovalPrompt({
                 auth: input.auth,
                 runId: input.runId,
                 workflowId: input.workflowId,
                 workflowTitle: input.workflowTitle ?? "Newsletter",
                 artifactBody,
+                approvalUrl,
+                approvalToken: approval.token,
                 artifactKind: "draft",
             });
+            const sent = {
+                ...sentPrompt,
+                approvalUrl,
+                token: approval.token,
+            };
             toolsUsed.push(entry.ref);
             sections.push([
-                "Email approval request sent via Resend notification adapter.",
+                `Approval request sent via ${sent.channel ?? "email"} notification channel.`,
                 `Recipient: ${sent.to}`,
                 `Approval link issued at ${sent.sentAt}.`,
             ].join("\n"));

@@ -72,50 +72,6 @@
     "inputSchema": "{\n        content: z.string().min(1).describe(\"Full document markdown/text to store verbatim.\"),\n        filename: z.string().optional().describe(\"Optional source filename.\"),\n        title: z.string().optional().describe(\"Optional display title.\"),\n      }"
   },
   {
-    "name": "tallei_approve_workflow_run",
-    "inputSchema": "{\n        workflow_id: z.string().uuid(),\n        run_id: z.string().uuid(),\n      }"
-  },
-  {
-    "name": "tallei_approve_workflow_suggestion",
-    "inputSchema": "{\n        suggestion_id: z.string().uuid(),\n        schedule_rrule: z.string().optional(),\n        requires_connector: z.boolean().optional().default(false),\n        connector_provider: z.string().optional(),\n        connector_scope_keys: z.array(z.string()).optional().default([]),\n      }"
-  },
-  {
-    "name": "tallei_continue_connector_auth",
-    "inputSchema": "{\n        auth_session_id: z.string().uuid(),\n        external_account_id: z.string().optional(),\n        scopes: z.array(z.string()).optional(),\n      }"
-  },
-  {
-    "name": "tallei_create_workflow",
-    "inputSchema": "{\n        title: z.string().min(1),\n        instruction: z.string().min(1),\n        schedule_rrule: z.string().min(1),\n        requires_connector: z.boolean().optional().default(false),\n        connector_provider: z.string().optional(),\n        connector_scope_keys: z.array(z.string()).optional().default([]),\n      }"
-  },
-  {
-    "name": "tallei_dismiss_workflow_suggestion",
-    "inputSchema": "{\n        suggestion_id: z.string().uuid(),\n        reason: z.string().optional(),\n      }"
-  },
-  {
-    "name": "tallei_get_workflow_run",
-    "inputSchema": "{\n        workflow_id: z.string().uuid(),\n        run_id: z.string().uuid(),\n        include_sdk: z.boolean().optional().default(false),\n      }"
-  },
-  {
-    "name": "tallei_list_connectors",
-    "inputSchema": "{}"
-  },
-  {
-    "name": "tallei_list_workflow_suggestions",
-    "inputSchema": "{}"
-  },
-  {
-    "name": "tallei_skip_workflow_run",
-    "inputSchema": "{\n        workflow_id: z.string().uuid(),\n        run_id: z.string().uuid(),\n      }"
-  },
-  {
-    "name": "tallei_start_connector_auth",
-    "inputSchema": "{\n        provider: z.string(),\n        app_key: z.string().optional(),\n        required_scopes: z.array(z.string()).optional().default([]),\n        redirect_uri: z.string().optional(),\n      }"
-  },
-  {
-    "name": "tallei_update_workflow_suggestion",
-    "inputSchema": "{\n        suggestion_id: z.string().uuid(),\n        title: z.string().optional(),\n        suggested_prompt: z.string().optional(),\n      }"
-  },
-  {
     "name": "undo_save",
     "inputSchema": "{\n        ref: z.string().min(1).describe(\"The @doc ref to delete, e.g. @doc:catalogue-a3f2\"),\n      }"
   },

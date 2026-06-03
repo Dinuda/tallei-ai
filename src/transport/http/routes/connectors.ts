@@ -13,7 +13,7 @@ import {
   startConnectorAuth,
   upsertResendConnector,
   verifyComposioWebhookSignature,
-} from "../../../services/workflow-automation.js";
+} from "../../../services/connectors/composio.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();

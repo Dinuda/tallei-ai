@@ -1121,6 +1121,33 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_run_gates (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        stage_id TEXT NOT NULL,
+        kind TEXT NOT NULL
+          CHECK (kind IN ('approval', 'input')),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'approved', 'rejected', 'submitted')),
+        title TEXT NOT NULL,
+        artifact_id TEXT,
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        decision_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        UNIQUE (tenant_id, user_id, workflow_run_id, stage_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_run_gates_run_created
+        ON loop_run_gates(tenant_id, user_id, workflow_run_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_loop_run_gates_run_status
+        ON loop_run_gates(tenant_id, user_id, workflow_run_id, status, updated_at DESC);
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS loop_heartbeat_jobs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1184,15 +1211,27 @@ export async function initDb() {
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         target_type TEXT NOT NULL
-          CHECK (target_type IN ('workflow_suggestion', 'workflow_run')),
+          CHECK (target_type IN ('workflow_suggestion', 'workflow_run', 'workflow_gate')),
         target_id UUID NOT NULL,
         channel TEXT NOT NULL
-          CHECK (channel IN ('chat', 'email', 'whatsapp', 'portal')),
+          CHECK (channel IN ('chat', 'email', 'gmail', 'whatsapp', 'telegram', 'portal')),
         decision TEXT NOT NULL
           CHECK (decision IN ('approved', 'dismissed', 'skipped', 'ignored')),
         metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      ALTER TABLE approvals
+        DROP CONSTRAINT IF EXISTS approvals_target_type_check;
+      ALTER TABLE approvals
+        ADD CONSTRAINT approvals_target_type_check
+        CHECK (target_type IN ('workflow_suggestion', 'workflow_run', 'workflow_gate'));
+
+      ALTER TABLE approvals
+        DROP CONSTRAINT IF EXISTS approvals_channel_check;
+      ALTER TABLE approvals
+        ADD CONSTRAINT approvals_channel_check
+        CHECK (channel IN ('chat', 'email', 'gmail', 'whatsapp', 'telegram', 'portal'));
     `);
 
     await client.query(`
@@ -1201,14 +1240,50 @@ export async function initDb() {
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         kind TEXT NOT NULL
-          CHECK (kind IN ('email', 'whatsapp', 'slack', 'discord')),
+          CHECK (kind IN ('email', 'gmail', 'whatsapp', 'telegram', 'slack', 'discord')),
         destination TEXT NOT NULL,
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+        status TEXT NOT NULL DEFAULT 'connected'
+          CHECK (status IN ('pending', 'connected', 'verified', 'failed', 'revoked')),
+        label TEXT,
+        verified_at TIMESTAMPTZ,
+        last_error TEXT,
+        last_error_at TIMESTAMPTZ,
         config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (tenant_id, user_id, kind, destination)
       );
+
+      ALTER TABLE notification_channels
+        ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE notification_channels
+        ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'connected';
+      ALTER TABLE notification_channels
+        ADD COLUMN IF NOT EXISTS label TEXT;
+      ALTER TABLE notification_channels
+        ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+      ALTER TABLE notification_channels
+        ADD COLUMN IF NOT EXISTS last_error TEXT;
+      ALTER TABLE notification_channels
+        ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMPTZ;
+
+      ALTER TABLE notification_channels
+        DROP CONSTRAINT IF EXISTS notification_channels_kind_check;
+      ALTER TABLE notification_channels
+        ADD CONSTRAINT notification_channels_kind_check
+        CHECK (kind IN ('email', 'gmail', 'whatsapp', 'telegram', 'slack', 'discord'));
+
+      ALTER TABLE notification_channels
+        DROP CONSTRAINT IF EXISTS notification_channels_status_check;
+      ALTER TABLE notification_channels
+        ADD CONSTRAINT notification_channels_status_check
+        CHECK (status IN ('pending', 'connected', 'verified', 'failed', 'revoked'));
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_channels_primary
+        ON notification_channels(tenant_id, user_id)
+        WHERE enabled = TRUE AND is_primary = TRUE;
     `);
 
     await client.query(`
@@ -1217,7 +1292,7 @@ export async function initDb() {
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         channel TEXT NOT NULL
-          CHECK (channel IN ('email', 'whatsapp', 'slack', 'discord')),
+          CHECK (channel IN ('email', 'gmail', 'whatsapp', 'telegram', 'slack', 'discord')),
         target_type TEXT NOT NULL,
         target_id UUID NOT NULL,
         status TEXT NOT NULL
@@ -1226,6 +1301,63 @@ export async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      ALTER TABLE notification_deliveries
+        DROP CONSTRAINT IF EXISTS notification_deliveries_channel_check;
+      ALTER TABLE notification_deliveries
+        ADD CONSTRAINT notification_deliveries_channel_check
+        CHECK (channel IN ('email', 'gmail', 'whatsapp', 'telegram', 'slack', 'discord'));
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS channel_setup_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL
+          CHECK (kind IN ('email', 'gmail', 'whatsapp', 'telegram')),
+        mode TEXT NOT NULL
+          CHECK (mode IN ('default', 'botfather', 'shared', 'session')),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'connected', 'expired', 'failed')),
+        nonce TEXT,
+        pairing_code TEXT,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        expires_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_setup_sessions_nonce
+        ON channel_setup_sessions(nonce)
+        WHERE nonce IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_setup_sessions_pairing_code
+        ON channel_setup_sessions(pairing_code)
+        WHERE pairing_code IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_channel_setup_sessions_scope
+        ON channel_setup_sessions(tenant_id, user_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS channel_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        channel_id UUID NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL
+          CHECK (kind IN ('email', 'gmail', 'whatsapp', 'telegram')),
+        direction TEXT NOT NULL
+          CHECK (direction IN ('inbound', 'outbound')),
+        body TEXT NOT NULL,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_channel_messages_scope_created
+        ON channel_messages(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_created
+        ON channel_messages(channel_id, created_at DESC);
     `);
 
     await client.query(`
@@ -1312,14 +1444,26 @@ export async function initDb() {
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         target_type TEXT NOT NULL
-          CHECK (target_type IN ('workflow_suggestion', 'workflow_run')),
+          CHECK (target_type IN ('workflow_suggestion', 'workflow_run', 'workflow_gate')),
         target_id UUID NOT NULL,
         channel TEXT NOT NULL
-          CHECK (channel IN ('email', 'whatsapp')),
+          CHECK (channel IN ('email', 'gmail', 'whatsapp', 'telegram')),
         expires_at TIMESTAMPTZ NOT NULL,
         consumed_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      ALTER TABLE workflow_approval_tokens
+        DROP CONSTRAINT IF EXISTS workflow_approval_tokens_target_type_check;
+      ALTER TABLE workflow_approval_tokens
+        ADD CONSTRAINT workflow_approval_tokens_target_type_check
+        CHECK (target_type IN ('workflow_suggestion', 'workflow_run', 'workflow_gate'));
+
+      ALTER TABLE workflow_approval_tokens
+        DROP CONSTRAINT IF EXISTS workflow_approval_tokens_channel_check;
+      ALTER TABLE workflow_approval_tokens
+        ADD CONSTRAINT workflow_approval_tokens_channel_check
+        CHECK (channel IN ('email', 'gmail', 'whatsapp', 'telegram'));
     `);
 
     await client.query(`

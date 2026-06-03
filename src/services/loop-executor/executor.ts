@@ -2,13 +2,35 @@
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { pool } from "../../infrastructure/db/index.js";
-import { consumeWorkflowApprovalToken, resolveWorkflowApprovalToken, } from "../workflow-automation.js";
+import { deliverApprovalPrompt, deliverStatusNotification, getPrimaryNotificationChannel } from "../channels.js";
+import { consumeWorkflowApprovalToken, createWorkflowApprovalRequest, resolveWorkflowApprovalToken, } from "../approval-tokens.js";
 import { enqueueLoopHeartbeatJob, findLoopHeartbeatJob, completeLoopHeartbeatJob, failLoopHeartbeatJob } from "./heartbeat-jobs.js";
 import { runLoopAgent } from "./integration-registry.js";
 import { loopExecutorOpenAiChat } from "./openai-chat.js";
-import { extractNewsletterBodyFromComments, formatNewsletterForBroadcast, formatNewsletterForEmail, ensureDraftApprovedForContactUpload, parseContactListCsv, sanitizeSubscriberNewsletterBody, } from "./publicist-email.js";
+import {
+  artifactDefinition,
+  isDynamicPlanDefinition,
+  normalizeRosterAgents,
+  readLoopDefinition,
+  stageSeq,
+} from "./plan.js";
+import { extractNewsletterBodyFromComments, formatNewsletterForBroadcast, formatNewsletterForEmail, parseContactListCsv, sanitizeSubscriberNewsletterBody, } from "./publicist-email.js";
+import {
+  assertRunAccess,
+  authFromContext,
+  loadRunContext,
+  loadWorkflow,
+  mergeLoopExecutorMeta,
+  readLoopExecutorMeta,
+} from "./run-context.js";
+import {
+  buildCeoStrategyOutput,
+  materializeTasksFromPlan,
+  materializeTasksFromRoster,
+} from "./run-strategy.js";
 import { getEffectiveLoopConstraints, listAllowedLoopTools, listToolValidationIssues, validateAgentRoster, } from "./tool-catalog.js";
-import { LOOP_DEFINITION_VERSION, ceoStrategyOutputSchema, loopDefinitionSchema, loopExecutorRunMetaSchema, loopRunAgentSchema, loopToolAssignmentSchema, } from "./types.js";
+import { loopRunAgentSchema, loopToolAssignmentSchema, } from "./types.js";
+
 function readObject(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -22,55 +44,6 @@ function scheduleDelayedHeartbeatDispatch(delaySeconds) {
             .catch((error) => console.error("[loop-executor] delayed heartbeat dispatch failed:", error));
     }, Math.max(0, delaySeconds) * 1000 + 250);
     timer.unref?.();
-}
-function readLoopDefinition(metadata) {
-    const row = readObject(metadata);
-    return loopDefinitionSchema.parse(row.loopDefinition);
-}
-function authFromContext(context) {
-    return {
-        tenantId: context.tenantId,
-        userId: context.userId,
-        authMode: "internal",
-        plan: "pro",
-    };
-}
-function readLoopExecutorMeta(metadataJson) {
-    const root = readObject(metadataJson);
-    const loopExecutor = readObject(root.loop_executor);
-    return loopExecutorRunMetaSchema.parse({
-        proposedRoster: loopExecutor.proposedRoster,
-        approvedRoster: loopExecutor.approvedRoster,
-        strategyReadyAt: loopExecutor.strategyReadyAt,
-        rosterApprovedAt: loopExecutor.rosterApprovedAt,
-        approvalRequest: loopExecutor.approvalRequest,
-        approvalDecision: loopExecutor.approvalDecision,
-        pendingInput: loopExecutor.pendingInput,
-        artifactBody: loopExecutor.artifactBody,
-        publicistApproval: loopExecutor.publicistApproval,
-        emailApprovedAt: loopExecutor.emailApprovedAt,
-        uiApprovedAt: loopExecutor.uiApprovedAt,
-        approvalChannel: loopExecutor.approvalChannel,
-        newsletterBody: loopExecutor.newsletterBody,
-        contactList: loopExecutor.contactList,
-        distribution: loopExecutor.distribution,
-        deliveryAction: loopExecutor.deliveryAction,
-    });
-}
-function mergeLoopExecutorMeta(metadataJson, patch) {
-    const root = readObject(metadataJson);
-    const loopExecutor = readObject(root.loop_executor);
-    return {
-        ...root,
-        loop_executor: {
-            ...loopExecutor,
-            ...patch,
-        },
-    };
-}
-function slugAgentId(name, index) {
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
-    return slug ? `${slug}_${index + 1}` : `agent_${index + 1}`;
 }
 function readAgentSpec(task, taskInput) {
     const fromColumn = readObject(task.agent_spec);
@@ -93,102 +66,6 @@ function readAssignedTools(task, agentSpec) {
         return z.array(loopToolAssignmentSchema).parse(task.assigned_tools);
     }
     return agentSpec.tools;
-}
-function normalizeRosterAgents(agents) {
-    const seen = new Set();
-    return agents.map((agent, index) => {
-        const baseId = agent.id.trim() || slugAgentId(agent.name, index);
-        const id = seen.has(baseId) ? `${baseId}_${index + 1}` : baseId;
-        seen.add(id);
-        return loopRunAgentSchema.parse({
-            id,
-            name: agent.name.trim(),
-            task: agent.task.trim(),
-            tools: agent.tools.map((tool) => loopToolAssignmentSchema.parse(tool)),
-        });
-    });
-}
-function isDynamicPlanDefinition(definition) {
-    return Boolean(definition.plan?.stages?.length);
-}
-function stageSeq(plan, stageId) {
-    return plan.stages.findIndex((stage) => stage.id === stageId);
-}
-function executableStageToAgent(stage) {
-    if (stage.kind === "external_action") {
-        return loopRunAgentSchema.parse({
-            id: stage.id,
-            name: stage.label,
-            task: `Execute external action: ${stage.label}`,
-            tools: [{ ref: stage.toolRef }],
-        });
-    }
-    return loopRunAgentSchema.parse({
-        id: stage.id,
-        name: stage.name,
-        task: stage.task,
-        tools: stage.toolRef ? [{ ref: stage.toolRef }] : [],
-    });
-}
-function planStrategyText(plan) {
-    const lines = plan.stages.map((stage, index) => {
-        if (stage.kind === "agent") {
-            return `${index + 1}. Agent: ${stage.name} (${stage.toolRef ?? "LLM only"}) -> ${stage.outputArtifactId ?? "comment"}`;
-        }
-        if (stage.kind === "approval_gate") {
-            return `${index + 1}. Approval gate: ${stage.label} for ${stage.artifactId}`;
-        }
-        if (stage.kind === "input_gate") {
-            return `${index + 1}. Input gate: ${stage.label} -> ${stage.outputArtifactId}`;
-        }
-        return `${index + 1}. External action: ${stage.label} via ${stage.toolRef}`;
-    });
-    return [
-        "IntentAnalyzerAgent generated a dynamic one-thing stage plan.",
-        `Goal: ${plan.goal}`,
-        "",
-        ...lines,
-    ].join("\n");
-}
-function dynamicPlanRoster(plan) {
-    return normalizeRosterAgents(plan.stages
-        .filter((stage) => stage.kind === "agent")
-        .map((stage) => executableStageToAgent(stage)));
-}
-function artifactDefinition(plan, artifactId) {
-    if (!artifactId)
-        return null;
-    return plan.artifacts.find((artifact) => artifact.id === artifactId) ?? null;
-}
-async function materializeTasksFromPlan(input) {
-    for (const [seq, stage] of input.plan.stages.entries()) {
-        if (stage.kind !== "agent" && stage.kind !== "external_action")
-            continue;
-        const agent = executableStageToAgent(stage);
-        await pool.query(`INSERT INTO loop_run_tasks
-       (id, tenant_id, user_id, workflow_run_id, seq, agent_id, agent_name, tool_key, agent_spec, assigned_tools, status, input_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, 'todo', $11::jsonb)
-       ON CONFLICT (tenant_id, user_id, workflow_run_id, seq) DO UPDATE
-         SET agent_id = EXCLUDED.agent_id,
-             agent_name = EXCLUDED.agent_name,
-             tool_key = EXCLUDED.tool_key,
-             agent_spec = EXCLUDED.agent_spec,
-             assigned_tools = EXCLUDED.assigned_tools,
-             input_json = EXCLUDED.input_json,
-             updated_at = NOW()`, [
-            randomUUID(),
-            input.context.tenantId,
-            input.context.userId,
-            input.context.runId,
-            seq,
-            agent.id,
-            agent.name,
-            agent.tools[0]?.ref ?? "internal.llm_only",
-            JSON.stringify(agent),
-            JSON.stringify(agent.tools),
-            JSON.stringify({ agent, stage, strategyOutput: input.strategyOutput }),
-        ]);
-    }
 }
 async function insertOrUpdateArtifact(input) {
     if (!isDynamicPlanDefinition(input.context.definition))
@@ -340,6 +217,47 @@ async function pauseForDynamicGate(input) {
         input.context.userId,
         JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
     ]);
+    const notificationAuth = authFromContext(input.context);
+    const gateMetadata = {
+        workflowId: input.context.workflowId,
+        runId: input.context.runId,
+        gateId: resolvedGateId,
+        stageId: input.stage.id,
+        status: "waiting_for_gate",
+        gateKind: kind,
+    };
+    if (kind === "approval") {
+        void (async () => {
+            const channel = await getPrimaryNotificationChannel(notificationAuth);
+            if (!channel) return;
+            const approval = await createWorkflowApprovalRequest({
+                auth: notificationAuth,
+                targetType: "workflow_gate",
+                targetId: resolvedGateId,
+                channel: channel.kind,
+            });
+            await deliverApprovalPrompt({
+                auth: notificationAuth,
+                channel,
+                targetType: "workflow_gate",
+                targetId: resolvedGateId,
+                approvalUrl: approval.url,
+                approvalToken: approval.token,
+                title: `${input.context.workflowTitle} is waiting for approval`,
+                reason: input.stage.label,
+                suggestedPrompt: "Reply APPROVE to approve or SKIP to skip.",
+                draftOutput: payload.artifact?.body ?? null,
+            });
+        })().catch(() => undefined);
+    }
+    else {
+        await deliverStatusNotification({
+            auth: notificationAuth,
+            title: `${input.context.workflowTitle} needs input`,
+            body: `${input.stage.label}. Reply with the requested input or continue in Tallei.`,
+            metadata: gateMetadata,
+        }).catch(() => undefined);
+    }
     await insertEvent({
         context: input.context,
         eventType: "gate_waiting",
@@ -362,61 +280,6 @@ async function advanceDynamicRunAfterSeq(context, currentSeq) {
     }
     const next = await scheduleNextDynamicExecutable({ context, afterSeq: currentSeq });
     return { status: next.status, ...(next.taskId ? { taskId: next.taskId } : {}) };
-}
-async function loadWorkflow(auth, workflowId) {
-    const result = await pool.query(`SELECT id, title, status, metadata_json
-     FROM workflows
-     WHERE id = $1
-       AND tenant_id = $2
-       AND user_id = $3
-       AND definition_version = $4
-     LIMIT 1`, [workflowId, auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION]);
-    const workflow = result.rows[0];
-    if (!workflow)
-        throw new Error("Loop workflow not found");
-    if (workflow.status !== "active")
-        throw new Error(`Loop workflow is ${workflow.status}`);
-    return workflow;
-}
-async function loadRunContext(runId) {
-    const result = await pool.query(`SELECT r.id,
-            r.tenant_id,
-            r.user_id,
-            r.workflow_id,
-            r.status,
-            r.draft_output,
-            r.metadata_json,
-            w.title AS workflow_title,
-            w.metadata_json AS workflow_metadata_json
-     FROM workflow_runs r
-     JOIN workflows w ON w.id = r.workflow_id
-     WHERE r.id = $1
-       AND w.definition_version = $2
-     LIMIT 1`, [runId, LOOP_DEFINITION_VERSION]);
-    const row = result.rows[0];
-    if (!row)
-        throw new Error("Loop run not found");
-    return {
-        runId: row.id,
-        tenantId: row.tenant_id,
-        userId: row.user_id,
-        workflowId: row.workflow_id,
-        workflowTitle: row.workflow_title,
-        runStatus: row.status,
-        draftOutput: row.draft_output,
-        metadataJson: row.metadata_json,
-        definition: readLoopDefinition(row.workflow_metadata_json),
-    };
-}
-async function assertRunAccess(auth, runId) {
-    const result = await pool.query(`SELECT id
-     FROM workflow_runs
-     WHERE id = $1
-       AND tenant_id = $2
-       AND user_id = $3
-     LIMIT 1`, [runId, auth.tenantId, auth.userId]);
-    if (!result.rows[0])
-        throw new Error("Loop run not found");
 }
 async function insertEvent(input) {
     await pool.query(`INSERT INTO loop_run_events
@@ -467,163 +330,6 @@ async function completeLoopText(input) {
         throw new Error("Loop executor LLM returned an empty response");
     return text;
 }
-const NEWSLETTER_MEMORY_RECORDS = [
-    {
-        id: "newsletter-memory-2026-05-26",
-        title: "Essential books for product builders",
-        summary: "Timeless reading recommendations across writing, execution, strategy, leadership, product craft, and distribution.",
-    },
-    {
-        id: "newsletter-memory-2026-05-25",
-        title: "How I AI weekly roundup",
-        summary: "Felix Rieseberg's Claude workflows and Google I/O 2026 launch analysis with practical implications for builders.",
-    },
-];
-function buildLegacyNewsletterPresetRoster(goal) {
-    const memoryContext = NEWSLETTER_MEMORY_RECORDS
-        .map((record, index) => `${index + 1}. ${record.title}: ${record.summary}`)
-        .join("\n");
-    return {
-        strategyText: [
-            "CEO strategy: run a fixed weekly newsletter pipeline for Lenny.",
-            "Order: Search Agent -> Web Search Agent -> Research Agent -> Writer -> Publicist.",
-            "Pinned memory records to ground this run:",
-            memoryContext,
-            "Outcome requirement: final output must include a publish-ready draft, an operator approval email, contact list upload, and a Resend broadcast to subscribers.",
-        ].join("\n"),
-        agents: normalizeRosterAgents([
-            {
-                id: "search_agent",
-                name: "Search Agent",
-                task: [
-                    "Find timely themes for this week's newsletter and surface high-signal internal source material.",
-                    "Start from pinned memory records, then identify angles worth expanding this week.",
-                    "Output: ranked topic candidates with source notes and why each matters now.",
-                    `Goal: ${goal}`,
-                ].join(" "),
-                tools: [{ ref: "internal.memory_search" }],
-            },
-            {
-                id: "web_search_agent",
-                name: "Web Search Agent",
-                task: [
-                    "Run live web search for this week's priority themes and gather source-grounded evidence.",
-                    "Focus on recent, credible, high-signal updates that strengthen the newsletter's arguments.",
-                    "Output: concise findings with URLs and recommended narrative angles for research and writing.",
-                    `Goal: ${goal}`,
-                ].join(" "),
-                tools: [{ ref: "internal.web_search", config: { searchContextSize: "high", country: "US" } }],
-            },
-            {
-                id: "research_agent",
-                name: "Research Agent",
-                task: [
-                    "Take Search Agent and Web Search Agent outputs and produce concise research notes for the top topics.",
-                    "Highlight insights, risks, contrarian takes, and references worth citing in the newsletter.",
-                    `Goal: ${goal}`,
-                ].join(" "),
-                tools: [{ ref: "internal.llm_only" }],
-            },
-            {
-                id: "writer",
-                name: "Writer",
-                task: [
-                    "Write the full newsletter draft in Lenny's practical voice using search and research outputs.",
-                    "Keep structure scannable, specific, and useful for product builders.",
-                    `Goal: ${goal}`,
-                ].join(" "),
-                tools: [{ ref: "internal.llm_only" }],
-            },
-            {
-                id: "publicist",
-                name: "Publicist",
-                task: [
-                    "Send the final newsletter draft to the operator via the email adapter for approval.",
-                    "After approval, the operator uploads a contact list and the distribution runner sends a Resend broadcast to that segment.",
-                    "Do not send to the list until the broadcast is created.",
-                    `Goal: ${goal}`,
-                ].join(" "),
-                tools: [{ ref: "internal.email_approval_request" }],
-            },
-        ]),
-    };
-}
-async function buildCeoStrategyOutput(context) {
-    if (isDynamicPlanDefinition(context.definition)) {
-        return {
-            strategyText: planStrategyText(context.definition.plan),
-            agents: dynamicPlanRoster(context.definition.plan),
-        };
-    }
-    if (context.definition.template?.id === "newsletter_v1") {
-        return buildLegacyNewsletterPresetRoster(context.definition.goal);
-    }
-    const constraints = getEffectiveLoopConstraints(context.definition);
-    const allowedTools = listAllowedLoopTools(context.definition);
-    const catalogSummary = allowedTools
-        .map((tool) => `- ${tool.ref}: ${tool.description}${tool.requiresConnector ? " (requires connector)" : ""}`)
-        .join("\n");
-    const response = await loopExecutorOpenAiChat({
-        responseFormat: "json_object",
-        temperature: 0.2,
-        maxTokens: 2200,
-        messages: [
-            {
-                role: "system",
-                content: [
-                    "You are the CEO coordinator for a Paperclip-style multi-agent recurring loop.",
-                    "Propose a fresh ordered roster of specialist agents for this run and a concise strategy narrative.",
-                    "Return JSON only:",
-                    '{"strategyText":"...","agents":[{"id":"snake_case","name":"Role Name","task":"specific task","tools":[{"ref":"internal.llm_only"}]}]}',
-                    "Each agent may only use tools from this allowed catalog:",
-                    catalogSummary,
-                    `Allowed integrations: ${constraints.allowedIntegrations.join(", ")}`,
-                    "Only assign tool refs listed above. Do not invent tool names.",
-                    "Keep 2-4 agents unless the goal clearly needs more.",
-                ].join("\n"),
-            },
-            {
-                role: "user",
-                content: [
-                    `Loop goal: ${context.definition.goal}`,
-                    `CEO policy: ${context.definition.ceo.policy}`,
-                ].join("\n"),
-            },
-        ],
-    });
-    const parsed = ceoStrategyOutputSchema.parse(JSON.parse(response.text));
-    return {
-        strategyText: parsed.strategyText.trim(),
-        agents: normalizeRosterAgents(parsed.agents),
-    };
-}
-async function materializeTasksFromRoster(input) {
-    for (const [seq, agent] of input.roster.entries()) {
-        await pool.query(`INSERT INTO loop_run_tasks
-       (id, tenant_id, user_id, workflow_run_id, seq, agent_id, agent_name, tool_key, agent_spec, assigned_tools, status, input_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, 'todo', $11::jsonb)
-       ON CONFLICT (tenant_id, user_id, workflow_run_id, seq) DO UPDATE
-         SET agent_id = EXCLUDED.agent_id,
-             agent_name = EXCLUDED.agent_name,
-             tool_key = EXCLUDED.tool_key,
-             agent_spec = EXCLUDED.agent_spec,
-             assigned_tools = EXCLUDED.assigned_tools,
-             input_json = EXCLUDED.input_json,
-             updated_at = NOW()`, [
-            randomUUID(),
-            input.context.tenantId,
-            input.context.userId,
-            input.context.runId,
-            seq,
-            agent.id,
-            agent.name,
-            agent.tools[0]?.ref ?? "internal.llm_only",
-            JSON.stringify(agent),
-            JSON.stringify(agent.tools),
-            JSON.stringify({ agent, strategyOutput: input.strategyOutput }),
-        ]);
-    }
-}
 async function synthesizeFinalOutput(context, comments) {
     const commentThread = comments
         .map((comment) => `[${comment.author}] ${comment.body}`)
@@ -673,6 +379,12 @@ export async function markRunBlocked(runId, message, taskId) {
         context.userId,
         JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
     ]);
+    await deliverStatusNotification({
+        auth: authFromContext(context),
+        title: `${context.workflowTitle} is blocked`,
+        body: message,
+        metadata: { workflowId: context.workflowId, runId: context.runId, status: "blocked" },
+    }).catch(() => undefined);
 }
 async function scheduleHeartbeat(input) {
     await enqueueLoopHeartbeatJob(input);
@@ -754,6 +466,12 @@ export async function runCeoStrategyHeartbeat(runId) {
         ceoOutput.strategyText,
         JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
     ]);
+    await deliverStatusNotification({
+        auth: auth,
+        title: `${context.workflowTitle} strategy is ready`,
+        body: "Review the proposed roster and approve the strategy to continue this loop.",
+        metadata: { workflowId: context.workflowId, runId: context.runId, status: "waiting_for_strategy_approval" },
+    }).catch(() => undefined);
     return {
         runId: context.runId,
         status: "waiting_for_strategy_approval",
@@ -1162,7 +880,148 @@ export async function runCeoFinalizeHeartbeat(runId) {
             },
         }),
     ]);
+    await deliverStatusNotification({
+        auth: authFromContext(context),
+        title: draftRequired ? `${context.workflowTitle} draft is ready` : `${context.workflowTitle} completed`,
+        body: draftRequired
+            ? "A draft is ready for final approval."
+            : "This loop completed successfully.",
+        metadata: { workflowId: context.workflowId, runId: context.runId, status },
+    }).catch(() => undefined);
     return { runId: context.runId, status, finalOutput };
+}
+async function approveLoopRunForContactUpload(input) {
+    const runResult = await pool.query(`SELECT id, workflow_id, status, metadata_json
+     FROM workflow_runs
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+     LIMIT 1`, [input.runId, input.tenantId, input.userId]);
+    const run = runResult.rows[0];
+    if (!run)
+        throw new Error("Workflow run not found");
+    const meta = readObject(run.metadata_json);
+    const loopExecutor = readObject(meta.loop_executor);
+    const approvalRequest = Object.keys(readObject(loopExecutor.approvalRequest)).length > 0
+        ? readObject(loopExecutor.approvalRequest)
+        : readObject(loopExecutor.publicistApproval);
+    const hasApprovalContext = typeof approvalRequest.token === "string"
+        || typeof approvalRequest.approvalUrl === "string"
+        || typeof approvalRequest.sentAt === "string";
+    if (!hasApprovalContext && input.approvedBy !== "email") {
+        throw new Error("Run has no loop approval context to continue");
+    }
+    const canApproveFromStatus = run.status === "waiting_for_approval" || run.status === "waiting_for_email_approval" || run.status === "blocked";
+    if (!canApproveFromStatus) {
+        if (run.status === "waiting_for_contact_list" || run.status === "waiting_for_input" || run.status === "executing_action" || run.status === "distributing" || run.status === "completed") {
+            return {
+                runId: run.id,
+                workflowId: run.workflow_id,
+                status: run.status,
+            };
+        }
+        throw new Error(`Run is ${run.status}, not waiting for approval`);
+    }
+    const approvedAt = new Date().toISOString();
+    await pool.query(`UPDATE workflow_runs
+     SET status = 'waiting_for_contact_list',
+         metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb,
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3`, [
+        run.id,
+        input.tenantId,
+        input.userId,
+        JSON.stringify({
+            loop_executor: {
+                ...loopExecutor,
+                emailApprovedAt: approvedAt,
+                approvalChannel: input.approvedBy,
+                approvalDecision: {
+                    approvedAt,
+                    channel: input.approvedBy,
+                },
+                pendingInput: {
+                    id: "recipient_list_csv",
+                    kind: "csv",
+                    label: "Recipient list CSV",
+                    status: "pending",
+                    requestedAt: approvedAt,
+                    instructions: "Upload a CSV with `email` and optional `name` columns. The newsletter sends immediately when you upload - no further approval.",
+                    schema: {
+                        requiredColumns: ["email"],
+                        optionalColumns: ["name"],
+                        maxRows: 5000,
+                    },
+                },
+                ...(input.approvedBy === "ui" ? { uiApprovedAt: approvedAt } : {}),
+            },
+        }),
+    ]);
+    return {
+        runId: run.id,
+        workflowId: run.workflow_id,
+        status: "waiting_for_contact_list",
+    };
+}
+/** Apply draft approval metadata when upload arrives before a separate approve click. */
+export async function ensureDraftApprovedForContactUpload(input) {
+    const runResult = await pool.query(`SELECT status
+     FROM workflow_runs
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+     LIMIT 1`, [input.runId, input.tenantId, input.userId]);
+    const run = runResult.rows[0];
+    if (!run)
+        throw new Error("Workflow run not found");
+    if (run.status !== "waiting_for_approval" && run.status !== "waiting_for_email_approval") {
+        return false;
+    }
+    await approveLoopRunForContactUpload({
+        tenantId: input.tenantId,
+        userId: input.userId,
+        runId: input.runId,
+        approvedBy: "csv_upload",
+    });
+    return true;
+}
+export async function approveLoopRunFromUi(input) {
+    const approved = await approveLoopRunForContactUpload({
+        tenantId: input.auth.tenantId,
+        userId: input.auth.userId,
+        runId: input.runId,
+        approvedBy: "ui",
+    });
+    return {
+        runId: approved.runId,
+        workflowId: approved.workflowId,
+        status: approved.status,
+    };
+}
+export async function approveLoopRunApprovalToken(token) {
+    const resolved = await resolveWorkflowApprovalToken(token);
+    if (!resolved)
+        throw new Error("Approval token not found");
+    if (resolved.expired)
+        throw new Error("Approval token expired");
+    if (resolved.consumedAt)
+        throw new Error("Approval token already used");
+    if (resolved.targetType !== "workflow_run")
+        throw new Error("Invalid approval target");
+    const approved = await approveLoopRunForContactUpload({
+        tenantId: resolved.tenantId,
+        userId: resolved.userId,
+        runId: resolved.targetId,
+        approvedBy: "email",
+    });
+    await consumeWorkflowApprovalToken(token);
+    return {
+        runId: approved.runId,
+        workflowId: approved.workflowId,
+        status: approved.status,
+    };
 }
 export async function uploadLoopRunContacts(input) {
     await assertRunAccess(input.auth, input.runId);
@@ -1832,6 +1691,12 @@ async function finalizeDistributionRun(input) {
         finalStatus === "completed" ? "completed" : "partial_failure",
         JSON.stringify({ loop_executor: loopExecutorPatchWithAction.loop_executor }),
     ]);
+    await deliverStatusNotification({
+        auth,
+        title: finalStatus === "completed" ? `${context.workflowTitle} broadcast completed` : `${context.workflowTitle} broadcast needs review`,
+        body: `Delivered to ${successCount} recipients. ${failureCount > 0 ? `${failureCount} failed.` : "No delivery failures were reported."}`,
+        metadata: { workflowId: context.workflowId, runId: context.runId, status: finalStatus },
+    }).catch(() => undefined);
     await insertEvent({
         context,
         eventType: "broadcast_sent",
@@ -2543,6 +2408,14 @@ export async function executeLoopWorkflow(input) {
             scheduler_target: definition.schedulerTarget,
         }),
     ]);
+    await deliverStatusNotification({
+        auth: input.auth,
+        title: `${workflow.title} started`,
+        body: input.runMode === "scheduled"
+            ? "A scheduled loop run has started."
+            : "A manual loop run has started.",
+        metadata: { workflowId: workflow.id, runId, status: "running", runMode: input.runMode },
+    }).catch(() => undefined);
     try {
         const strategy = await runCeoStrategyHeartbeat(runId);
         return {

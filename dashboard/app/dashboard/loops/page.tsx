@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useRouter } from "next/navigation";
+import { FaTelegramPlane } from "react-icons/fa";
+import { MdMarkEmailRead } from "react-icons/md";
 import {
   AlertCircle,
-  ArrowRight,
-  Bot,
   Calendar,
   Check,
   Clock,
@@ -15,7 +15,6 @@ import {
   RotateCcw,
   Sparkles,
   X,
-  Zap,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -186,6 +185,15 @@ type LoopWorkflow = {
   definition?: {
     goal?: string;
   };
+};
+
+type ActiveChannel = {
+  id: string;
+  kind: "telegram" | "gmail" | "email";
+  destination: string;
+  isPrimary: boolean;
+  enabled: boolean;
+  label: string | null;
 };
 
 /* ------------------------------------------------------------------ */
@@ -1073,6 +1081,7 @@ export default function LoopsPage() {
   const router = useRouter();
   const [loops, setLoops] = useState<LoopInsight[]>([]);
   const [workspaces, setWorkspaces] = useState<LoopWorkspace[]>([]);
+  const [activeChannel, setActiveChannel] = useState<ActiveChannel | null>(null);
   const [workspaceFilter, setWorkspaceFilter] = useState<"all" | "unassigned" | string>("all");
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
   const [loading, setLoading] = useState(true);
@@ -1084,17 +1093,25 @@ export default function LoopsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [response, workspacesResponse, loopsResponse] = await Promise.all([
+      const [response, workspacesResponse, loopsResponse, channelsResponse] = await Promise.all([
         fetch("/api/memories/cleanup/loop-miner/runs", { cache: "no-store" }),
         fetch("/api/workflows/workspaces", { cache: "no-store" }),
         fetch("/api/workflows/internal/loops", { cache: "no-store" }),
+        fetch("/api/channels", { cache: "no-store" }),
       ]);
       const payload = (await response.json().catch(() => ({}))) as LoopMinerRunsPayload;
       const workspacesPayload = await workspacesResponse.json().catch(() => ({}));
       const loopsPayload = await loopsResponse.json().catch(() => ({}));
+      const channelsPayload = await channelsResponse.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
       if (workspacesResponse.ok) {
         setWorkspaces(Array.isArray(workspacesPayload.workspaces) ? workspacesPayload.workspaces as LoopWorkspace[] : []);
+      }
+      if (channelsResponse.ok) {
+        const channels = Array.isArray(channelsPayload.channels) ? channelsPayload.channels as ActiveChannel[] : [];
+        const primaryChannel = channels.find((channel) => channel.enabled && channel.isPrimary)
+          ?? channels.find((channel) => channel.enabled && (channel.kind === "gmail" || channel.kind === "email"));
+        setActiveChannel(primaryChannel ?? null);
       }
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
       const internalLoops = loopsResponse.ok && Array.isArray(loopsPayload.loops) ? loopsPayload.loops as LoopWorkflow[] : [];
@@ -1112,6 +1129,7 @@ export default function LoopsPage() {
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
       setLoops([hardcodedNewsletterLoop()]);
+      setActiveChannel(null);
     } finally {
       setLoading(false);
     }
@@ -1188,13 +1206,6 @@ export default function LoopsPage() {
               Refresh
             </Button>
 
-            <Button asChild className="gap-1.5 h-9 bg-orange-500 text-white hover:bg-orange-600 rounded-none">
-              <Link href="/dashboard/workflows">
-                <Bot size={14} />
-                Builder
-                <ArrowRight size={12} />
-              </Link>
-            </Button>
           </div>
         </header>
 
@@ -1235,6 +1246,41 @@ export default function LoopsPage() {
                 {workspace.name}
               </button>
             ))}
+            <div
+              className={`ml-auto inline-flex items-center gap-2 border px-3 py-1.5 text-xs font-medium shadow-sm ${
+                activeChannel
+                  ? activeChannel.kind === "telegram"
+                    ? "border-sky-200 bg-sky-50 text-sky-700"
+                    : "border-indigo-200 bg-indigo-50 text-indigo-700"
+                  : "border-[var(--border-light)] bg-white text-[var(--text-2)]"
+              }`}
+            >
+              <span
+                className={`grid h-6 w-6 place-items-center rounded-full border ${
+                  activeChannel
+                    ? activeChannel.kind === "telegram"
+                      ? "border-sky-200 bg-white text-sky-500"
+                      : "border-indigo-200 bg-white text-indigo-600"
+                    : "border-slate-200 bg-slate-50 text-slate-400"
+                }`}
+              >
+                {activeChannel ? (
+                  activeChannel.kind === "telegram" ? (
+                    <FaTelegramPlane size={12} />
+                  ) : (
+                    <MdMarkEmailRead size={13} />
+                  )
+                ) : (
+                  <span className="h-2 w-2 rounded-full bg-slate-300" />
+                )}
+              </span>
+              <span>Active channel</span>
+              <span className="max-w-[12rem] truncate text-[var(--text)]">
+                {activeChannel
+                  ? `${activeChannel.kind === "telegram" ? "Telegram" : "Inbox"}`
+                  : "None"}
+              </span>
+            </div>
           </div>
           <AnimatePresence mode="popLayout">
             {filtered.length === 0 ? (
@@ -1256,16 +1302,6 @@ export default function LoopsPage() {
                     recurring dream.
                   </p>
                 </div>
-                <Button
-                  asChild
-                  className="gap-2 rounded-full text-white"
-                  style={{ backgroundColor: ACCENT }}
-                >
-                  <Link href="/dashboard/workflows">
-                    <Zap size={14} />
-                    Open workflow builder
-                  </Link>
-                </Button>
               </motion.div>
             ) : (
               <div className="mx-auto max-w-5xl">

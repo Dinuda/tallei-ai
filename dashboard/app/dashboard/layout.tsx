@@ -10,6 +10,7 @@ import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Toaster } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
 
@@ -81,6 +82,11 @@ const ICONS = {
       <path d="M5.5 7.5h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
+  channels: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M2.25 4.5A2.25 2.25 0 0 1 4.5 2.25h6A2.25 2.25 0 0 1 12.75 4.5v3A2.25 2.25 0 0 1 10.5 9.75H7.2L4.5 12v-2.25A2.25 2.25 0 0 1 2.25 7.5v-3Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  ),
   activity: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M1.8 7.7H4.7L6.1 4.2L8.2 10.3L10 7.1H13.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
@@ -114,7 +120,7 @@ const NAV: NavSection[] = [
       { id: "collab", label: "Collab", href: "/dashboard/tasks", icon: ICONS.collab },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
       { id: "loops", label: "Loops", href: "/dashboard/loops", icon: ICONS.loops },
-      { id: "workflows", label: "Workflows", href: "/dashboard/workflows", icon: ICONS.workflows },
+      { id: "channels", label: "Channels", href: "/dashboard/channels", icon: ICONS.channels },
       { id: "connectors", label: "AI Assistants", href: "/dashboard/setup", icon: ICONS.aiAssistants },
       { id: "connected-apps", label: "Connected Apps", href: "/dashboard/integrations", icon: ICONS.connectedApps },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
@@ -350,6 +356,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           {children}
         </div>
       </main>
+      <Toaster position="top-right" />
     </div>
   );
 }

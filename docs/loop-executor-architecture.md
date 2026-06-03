@@ -300,8 +300,7 @@ The run detail page is intentionally opinionated:
 
 See:
 
-- [dashboard/app/dashboard/workflows/internal-loops/page.tsx](/Users/dinudayaggahavita/Documents/work/tallei-ai/dashboard/app/dashboard/workflows/internal-loops/page.tsx)
-- [dashboard/app/dashboard/loops/newsletter/page.tsx](/Users/dinudayaggahavita/Documents/work/tallei-ai/dashboard/app/dashboard/loops/newsletter/page.tsx)
+- [dashboard/app/dashboard/loops/page.tsx](/Users/dinudayaggahavita/Documents/work/tallei-ai/dashboard/app/dashboard/loops/page.tsx)
 - [dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/page.tsx](/Users/dinudayaggahavita/Documents/work/tallei-ai/dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/page.tsx)
 
 ## What Is Implemented
@@ -360,4 +359,3 @@ This keeps the system auditable and makes it safe to expose through the dashboar
 - [workspace.ts](/Users/dinudayaggahavita/Documents/work/tallei-ai/src/services/loop-executor/workspace.ts)
 - [routes/workflows.ts](/Users/dinudayaggahavita/Documents/work/tallei-ai/src/transport/http/routes/workflows.ts)
 - [db/index.ts](/Users/dinudayaggahavita/Documents/work/tallei-ai/src/infrastructure/db/index.ts)
-

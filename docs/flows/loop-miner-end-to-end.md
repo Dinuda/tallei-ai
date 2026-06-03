@@ -1,8 +1,8 @@
 # Loop Miner End-to-End
 
-This document traces the complete loop-miner path from a run request to persisted workflow suggestions.
+This document traces the complete loop-miner path from a run request to persisted loop suggestions.
 
-It covers the live execution path, the run-status/embedding-map views, and the daily-intelligence interaction point.
+It covers the live execution path and the run-status/embedding-map views.
 
 Standalone Mermaid sources:
 
@@ -33,8 +33,8 @@ It turns:
   - persistence and evidence selection
 - `src/bootstrap/workers.ts`
   - worker bootstrap and scheduled background execution
-- `src/services/workflow-automation.ts`
-  - workflow-oriented orchestration that can call loop-miner paths
+- `src/services/loop-executor/creator.ts`
+  - consumes approved loop ideas when an internal loop is created
 
 ## End-To-End Flow
 
@@ -213,7 +213,7 @@ That means:
 - `src/orchestration/loop-miner/implementability-filter.usecase.ts`
 - `src/orchestration/loop-miner/episode-embedding-map.ts`
 - `src/infrastructure/repositories/loop-miner.repository.ts`
-- `src/services/workflow-automation.ts`
+- `src/services/loop-executor/creator.ts`
 - `src/bootstrap/workers.ts`
 
 ## When To Edit What

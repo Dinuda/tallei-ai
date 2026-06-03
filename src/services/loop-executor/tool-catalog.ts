@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { listConnectorAccounts } from "../workflow-automation.js";
+import { listConnectorAccounts } from "../connectors/composio.js";
 const CATALOG = [
     {
         ref: "internal.llm_only",

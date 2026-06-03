@@ -30,8 +30,8 @@ The cleanup flow is intentionally conservative. It prefers to keep a memory unch
   - `resetMemoryCleanupForUser()`
 - `src/orchestration/memory-cleanup/`
   - snapshot, consolidator, adversary, debate, judge, and apply use cases
-- `src/services/workflow-automation/daily-intelligence/pipeline.ts`
-  - daily caller that chooses cleanup options and keeps loop miner disabled in the daily path
+- `src/services/memory-cleanup.ts`
+  - direct service entry point for cleanup runs after legacy daily automation removal
 
 ## End-To-End Flow
 
@@ -184,7 +184,7 @@ If the admin email fails, the run itself still completes. Email is operational r
 - `src/orchestration/memory-cleanup/apply.usecase.ts`
 - `src/orchestration/memory-cleanup/types.ts`
 - `src/orchestration/memory-cleanup/usage.ts`
-- `src/services/workflow-automation/daily-intelligence/pipeline.ts`
+- `src/services/memory-cleanup.ts`
 
 ## When To Edit What
 
@@ -194,4 +194,4 @@ If the admin email fails, the run itself still completes. Email is operational r
 - change dispute resolution in `debate.usecase.ts`
 - change final approval policy in `judge.usecase.ts`
 - change side effects on approved proposals in `apply.usecase.ts`
-- change daily throttling in `src/services/workflow-automation/daily-intelligence/cleanup-policy.ts`
+- change cleanup throttling or run eligibility near the memory-cleanup service/orchestration boundary

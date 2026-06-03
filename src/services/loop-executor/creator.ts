@@ -6,7 +6,17 @@ import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { aiProviderRegistry } from "../../providers/ai/index.js";
 import { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
-import { LOOP_DEFINITION_VERSION, loopDefinitionSchema, type LoopDefinition, type LoopWorkflowView } from "./types.js";
+import { buildPlanFromAgentGraph } from "./plan.js";
+import {
+  LOOP_DEFINITION_VERSION,
+  loopAgentGraphSchema,
+  loopDefinitionSchema,
+  loopPlanSchema,
+  type LoopAgentGraph,
+  type LoopDefinition,
+  type LoopPlan,
+  type LoopWorkflowView,
+} from "./types.js";
 
 function normalizeText(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -14,9 +24,6 @@ function normalizeText(value: string): string {
 
 function titleFromTask(task: string): string {
   const normalized = normalizeText(task);
-  if (/newsletter/i.test(normalized)) return "Newsletter Loop";
-  if (/calendar/i.test(normalized)) return "Calendar Loop";
-  if (/brief|summary|digest/i.test(normalized)) return "Recurring Brief Loop";
   return normalized.length > 70 ? `${normalized.slice(0, 67)}...` : normalized || "Loop Workflow";
 }
 
@@ -27,14 +34,6 @@ function normalizeIntegrationList(integrations: string[] | undefined): string[] 
     if (value) values.add(value);
   }
   return [...values];
-}
-
-function inferIntegrationsFromGoal(goal: string, integrations: string[] | undefined): string[] {
-  const values = normalizeIntegrationList(integrations);
-  if (/newsletter|weekly update|product update|publish|publicist|email|gmail|send|deliver/i.test(goal)) {
-    values.push("composio");
-  }
-  return [...new Set(values)];
 }
 
 const parsedLoopIntentSchema = z.object({
@@ -57,7 +56,7 @@ export async function parseLoopIntent(task: string): Promise<{ allowedIntegratio
           content: [
             "Parse a natural-language recurring loop request into allowed integration providers.",
             'Return JSON only: {"allowedIntegrations":["internal","composio"]}',
-            "Include composio when external delivery (email, calendar, Slack, etc.) is implied.",
+            "Only return provider keys. Do not return child agents, tools, stages, gates, or execution status.",
           ].join("\n"),
         },
         { role: "user", content: task },
@@ -65,7 +64,7 @@ export async function parseLoopIntent(task: string): Promise<{ allowedIntegratio
     });
     const parsed = parsedLoopIntentSchema.parse(JSON.parse(response.text));
     return {
-      allowedIntegrations: inferIntegrationsFromGoal(task, parsed.allowedIntegrations),
+      allowedIntegrations: normalizeIntegrationList(parsed.allowedIntegrations),
     };
   } finally {
     clearTimeout(timeout);
@@ -87,17 +86,67 @@ export async function requireLoopAdmin(auth: AuthContext): Promise<void> {
   }
 }
 
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
+function parentAgentForGoal(goal: string): LoopAgentGraph["parent"] {
+  return {
+    id: "parent_agent",
+    name: "Parent Agent",
+    task: [
+      "Own the recurring loop.",
+      "Pick child agents from this loop definition, pass context between them, and make sure every external action is gated by approval.",
+      `Goal: ${goal}`,
+    ].join(" "),
+    policy: [
+      "Coordinate only.",
+      "Do not execute child tools directly.",
+      "Route specialist work to child agents.",
+      "Use Composio as the connector hub for external app/tool access.",
+    ].join(" "),
+    connectorHub: {
+      provider: "composio",
+      label: "Composio",
+      description: "Connector hub for external app integrations and future tool expansion.",
+    },
+  };
+}
+
+function buildParentAgentGraph(goal: string): LoopAgentGraph {
+  return {
+    parent: parentAgentForGoal(goal),
+    children: [],
+  };
+}
+
 export function buildLoopDefinition(input: {
   task: string;
   cron: string;
   timezone: string;
   integrations?: string[];
   allowedToolRefs?: string[];
+  agentGraph?: LoopAgentGraph;
+  plan?: LoopPlan;
   schedulerTarget?: "internal" | "cloudflare";
 }): LoopDefinition {
   const goal = normalizeText(input.task);
   const cron = validateFiveFieldCron(input.cron);
-  const allowedIntegrations = inferIntegrationsFromGoal(goal, input.integrations);
+  const explicitPlan = input.plan ? loopPlanSchema.parse(input.plan) : undefined;
+  const allowedIntegrations = normalizeIntegrationList(input.integrations ?? explicitPlan?.allowedIntegrations);
+  const agentGraph = input.agentGraph
+    ? loopAgentGraphSchema.parse(input.agentGraph)
+    : buildParentAgentGraph(goal);
+  const derivedPlan = !explicitPlan && agentGraph.children.length > 0
+    ? buildPlanFromAgentGraph(goal, agentGraph, allowedIntegrations)
+    : undefined;
+  const plan = explicitPlan ?? derivedPlan;
+  const resolvedAllowedToolRefs = input.allowedToolRefs?.length
+    ? input.allowedToolRefs
+    : uniqueStrings([
+        ...(plan?.allowedToolRefs ?? []),
+        ...agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
+      ]);
 
   return loopDefinitionSchema.parse({
     definitionVersion: LOOP_DEFINITION_VERSION,
@@ -105,16 +154,18 @@ export function buildLoopDefinition(input: {
     schedule: { cron, timezone: input.timezone.trim() || "UTC" },
     schedulerTarget: input.schedulerTarget ?? config.loopExecutorScheduler,
     allowedIntegrations,
-    allowedToolRefs: input.allowedToolRefs?.length ? input.allowedToolRefs : undefined,
+    ...(resolvedAllowedToolRefs.length > 0 ? { allowedToolRefs: resolvedAllowedToolRefs } : {}),
     ceo: {
-      name: "CEO",
-      task: `Orchestrate this recurring loop, propose a fresh specialist roster each run, pass structured output forward, and produce the final result: ${goal}`,
-      policy: "Decide and coordinate only. Propose agents with explicit tool assignments from the catalog. Do not call specialist tools directly. All external actions must become approval drafts.",
+      name: agentGraph.parent.name,
+      task: agentGraph.parent.task,
+      policy: agentGraph.parent.policy,
     },
     draftPolicy: {
       requireDraftBeforeExternalAction: true,
       approvalRequiredFor: ["publish", "send", "external_action"],
     },
+    agentGraph,
+    ...(plan ? { plan } : {}),
   });
 }
 
@@ -154,19 +205,22 @@ export async function createLoopWorkflow(input: {
   cron?: string;
   timezone?: string;
   integrations?: string[];
+  allowedToolRefs?: string[];
+  agentGraph?: LoopAgentGraph;
+  plan?: LoopPlan;
   schedulerTarget?: "internal" | "cloudflare";
   workspaceId?: string | null;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
   const cron = input.cron ?? "0 9 * * 1";
-  const intent = await parseLoopIntent(input.task).catch(() => ({
-    allowedIntegrations: inferIntegrationsFromGoal(input.task, input.integrations),
-  }));
   const definition = buildLoopDefinition({
     task: input.task,
     cron,
     timezone: input.timezone ?? "UTC",
-    integrations: intent.allowedIntegrations ?? input.integrations,
+    integrations: input.integrations,
+    allowedToolRefs: input.allowedToolRefs,
+    agentGraph: input.agentGraph,
+    plan: input.plan,
     schedulerTarget: input.schedulerTarget,
   });
 

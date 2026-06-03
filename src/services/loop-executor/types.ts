@@ -94,6 +94,36 @@ export const loopPlanSchema = z.object({
 
 export type LoopPlan = z.infer<typeof loopPlanSchema>;
 
+export const loopAgentGraphChildSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  task: z.string().min(1),
+  tools: z.array(loopToolAssignmentSchema).default([]),
+  connectorProvider: z.string().min(1).nullable().default(null),
+  requestedToolkits: z.array(z.string().min(1)).default([]),
+  outputArtifactId: z.string().min(1).optional(),
+  outputArtifactKind: z.string().min(1).optional(),
+});
+
+export type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;
+
+export const loopAgentGraphSchema = z.object({
+  parent: z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    task: z.string().min(1),
+    policy: z.string().min(1),
+    connectorHub: z.object({
+      provider: z.literal("composio"),
+      label: z.string().min(1),
+      description: z.string().min(1),
+    }).optional(),
+  }),
+  children: z.array(loopAgentGraphChildSchema).max(12).default([]),
+});
+
+export type LoopAgentGraph = z.infer<typeof loopAgentGraphSchema>;
+
 export const loopDefinitionSchema = z.object({
   definitionVersion: z.literal(LOOP_DEFINITION_VERSION),
   goal: z.string().min(1),
@@ -113,6 +143,7 @@ export const loopDefinitionSchema = z.object({
     requireDraftBeforeExternalAction: z.boolean().default(true),
     approvalRequiredFor: z.array(z.string()).default(["publish", "send", "external_action"]),
   }),
+  agentGraph: loopAgentGraphSchema.optional(),
   plan: loopPlanSchema.optional(),
   template: z.object({
     id: z.string().min(1),

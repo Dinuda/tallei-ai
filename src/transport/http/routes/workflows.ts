@@ -2,19 +2,11 @@ import { Router, type Response } from "express";
 import { z } from "zod";
 
 import { config } from "../../../config/index.js";
+import { pool } from "../../../infrastructure/db/index.js";
 import {
-  appendWorkflowBuilderMessage,
-  approveRunById,
-  createWorkflowBuilderSession,
-  getWorkflowBuilderSession,
-  listWorkflowBuilderSessions,
-  listWorkflowsWithRuns,
-  runWorkflowNow,
-  saveWorkflowFromBuilderSession,
-  setWorkflowStatus,
-  skipRunById,
-} from "../../../services/workflow-automation/workflow-builder.service.js";
-import { listWorkflowRuns } from "../../../services/workflow-automation.js";
+  consumeWorkflowApprovalToken,
+  resolveWorkflowApprovalToken,
+} from "../../../services/approval-tokens.js";
 import {
   addLoopRunComment,
   approveLoopStrategy,
@@ -34,7 +26,10 @@ import {
   listLoopRunTasks,
   listLoopWorkflows,
   listWorkspaces,
+  loopAgentGraphSchema,
+  loopPlanSchema,
   loopRunAgentSchema,
+  rejectLoopRunGate,
   rerunLoopRunTask,
   resumeLoopRunExecution,
   uploadLoopRunContacts,
@@ -43,15 +38,6 @@ import {
 import { authMiddleware, internalSecretMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
-
-const createSessionSchema = z.object({
-  title: z.string().trim().min(1).max(180).optional(),
-  goal: z.string().trim().min(1).max(1000),
-});
-
-const messageSchema = z.object({
-  message: z.string().trim().min(1).max(4000),
-});
 
 const workflowIdSchema = z.object({
   workflowId: z.string().uuid(),
@@ -70,6 +56,9 @@ const createLoopSchema = z.object({
   cron: z.string().trim().min(1).max(120).optional(),
   timezone: z.string().trim().min(1).max(80).optional(),
   integrations: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
+  allowed_tool_refs: z.array(z.string().trim().min(1).max(160)).max(100).optional(),
+  agent_graph: loopAgentGraphSchema.optional(),
+  plan: loopPlanSchema.optional(),
   schedulerTarget: z.enum(["internal", "cloudflare"]).optional(),
   workspaceId: z.string().uuid().nullable().optional(),
 });
@@ -91,6 +80,64 @@ const approvalTokenSchema = z.object({
 const contactCsvSchema = z.object({
   csv: z.string().trim().min(1).max(1_000_000),
 });
+
+async function applyWorkflowApprovalTokenDecision(token: string, decision: "approve" | "skip") {
+  const resolved = await resolveWorkflowApprovalToken(token);
+  if (!resolved) {
+    throw new Error("Approval token not found");
+  }
+  if (resolved.expired) {
+    throw new Error("Approval token expired");
+  }
+  if (resolved.consumedAt) {
+    throw new Error("Approval token already used");
+  }
+
+  const auth = {
+    tenantId: resolved.tenantId,
+    userId: resolved.userId,
+    authMode: "internal" as const,
+    plan: "pro" as const,
+  };
+
+  if (resolved.targetType === "workflow_gate") {
+    if (decision === "approve") {
+      return approveLoopRunGateApprovalToken(token);
+    }
+    const gate = await pool.query<{ workflow_run_id: string; workflow_id: string }>(
+      `SELECT g.workflow_run_id, r.workflow_id
+       FROM loop_run_gates g
+       JOIN workflow_runs r ON r.id = g.workflow_run_id
+       WHERE g.id = $1
+         AND g.tenant_id = $2
+         AND g.user_id = $3
+       LIMIT 1`,
+      [resolved.targetId, resolved.tenantId, resolved.userId]
+    );
+    const row = gate.rows[0];
+    if (!row) {
+      throw new Error("Loop gate not found");
+    }
+    await rejectLoopRunGate({
+      auth,
+      runId: row.workflow_run_id,
+      gateId: resolved.targetId,
+      reason: "approval_token_skip",
+    });
+    await consumeWorkflowApprovalToken(token);
+    return { runId: row.workflow_run_id, workflowId: row.workflow_id, status: "blocked", gateId: resolved.targetId };
+  }
+
+  if (resolved.targetType === "workflow_run") {
+    if (decision === "approve") {
+      const result = await approveLoopRunApprovalToken(token);
+      return { kind: "workflow_run" as const, ...result };
+    }
+    throw new Error("Loop run approval tokens can only be approved");
+  }
+
+  throw new Error("Unsupported approval target");
+}
 
 router.post("/internal/loops/scheduler/wake", internalSecretMiddleware, async (req: AuthRequest, res: Response) => {
   try {
@@ -119,6 +166,48 @@ router.post("/internal/loops/heartbeat/dispatch", internalSecretMiddleware, asyn
     }
     console.error("Error dispatching loop heartbeat jobs:", error);
     res.status(500).json({ error: "Failed to dispatch loop heartbeat jobs" });
+  }
+});
+
+router.get("/approvals/:token", async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = approvalTokenSchema.parse({ token: req.params.token });
+    res.redirect(302, `${config.publicBaseUrl.replace(/\/$/, "")}/api/workflows/approvals/${token}/approve`);
+  } catch {
+    res.status(400).json({ error: "Invalid approval token" });
+  }
+});
+
+router.get("/approvals/:token/approve", async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = approvalTokenSchema.parse({ token: req.params.token });
+    const result = await applyWorkflowApprovalTokenDecision(token, "approve");
+    res.redirect(302, `${config.frontendUrl.replace(/\/$/, "")}/dashboard/loops/${result.workflowId}/runs/${result.runId}?approved=1`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Approval failed";
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post("/approvals/:token/approve", async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = approvalTokenSchema.parse({ token: req.params.token });
+    const result = await applyWorkflowApprovalTokenDecision(token, "approve");
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Approval failed";
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post("/approvals/:token/skip", async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = approvalTokenSchema.parse({ token: req.params.token });
+    const result = await applyWorkflowApprovalTokenDecision(token, "skip");
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Skip failed";
+    res.status(400).json({ error: message });
   }
 });
 
@@ -168,11 +257,8 @@ router.use(authMiddleware);
 
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const [workflows, sessions] = await Promise.all([
-      listWorkflowsWithRuns(req.authContext!),
-      listWorkflowBuilderSessions(req.authContext!),
-    ]);
-    res.json({ workflows, builderSessions: sessions });
+    const workflows = await listLoopWorkflows(req.authContext!);
+    res.json({ workflows, builderSessions: [] });
   } catch (error) {
     console.error("Error listing workflows:", error);
     res.status(500).json({ error: "Failed to list workflows" });
@@ -202,6 +288,9 @@ router.post("/internal/loops", requireScopes(["memory:write"]), async (req: Auth
       cron: body.cron,
       timezone: body.timezone,
       integrations: body.integrations,
+      allowedToolRefs: body.allowed_tool_refs,
+      agentGraph: body.agent_graph,
+      plan: body.plan,
       schedulerTarget: body.schedulerTarget,
       workspaceId: body.workspaceId,
     });
@@ -247,7 +336,25 @@ router.get("/internal/loops/:workflowId/runs", requireScopes(["memory:read"]), a
   try {
     const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
     await getLoopWorkflow(req.authContext!, workflowId);
-    const runs = await listWorkflowRuns(req.authContext!, workflowId);
+    const result = await pool.query(
+      `SELECT id, workflow_id, status, run_mode, scheduled_for, created_at, updated_at
+       FROM workflow_runs
+       WHERE workflow_id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [workflowId, req.authContext!.tenantId, req.authContext!.userId]
+    );
+    const runs = result.rows.map((row) => ({
+      id: row.id,
+      workflowId: row.workflow_id,
+      status: row.status,
+      runMode: row.run_mode,
+      scheduledFor: row.scheduled_for,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
     res.json({ runs });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -350,115 +457,12 @@ router.post("/workspaces/assign-loop", requireScopes(["memory:write"]), async (r
   }
 });
 
-router.post("/builder/sessions", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = createSessionSchema.parse(req.body ?? {});
-    const session = await createWorkflowBuilderSession({
-      auth: req.authContext!,
-      title: body.title,
-      goal: body.goal,
-    });
-    res.status(201).json({ session });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error creating workflow builder session:", error);
-    res.status(500).json({ error: "Failed to create workflow builder session" });
-  }
-});
-
-router.get("/builder/sessions/:id", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const session = await getWorkflowBuilderSession(req.authContext!, String(req.params.id));
-    if (!session) {
-      res.status(404).json({ error: "Workflow builder session not found" });
-      return;
-    }
-    res.json({ session });
-  } catch (error) {
-    console.error("Error reading workflow builder session:", error);
-    res.status(500).json({ error: "Failed to read workflow builder session" });
-  }
-});
-
-router.post("/builder/sessions/:id/messages", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = messageSchema.parse(req.body ?? {});
-    const session = await appendWorkflowBuilderMessage({
-      auth: req.authContext!,
-      sessionId: String(req.params.id),
-      message: body.message,
-    });
-    const lastAssistant = [...session.transcript].reverse().find((entry) => entry.actor === "assistant");
-    res.json({
-      session,
-      message: lastAssistant?.content ?? "Draft updated.",
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof Error && /not found|archived/i.test(error.message)) {
-      res.status(404).json({ error: error.message });
-      return;
-    }
-    console.error("Error appending workflow builder message:", error);
-    res.status(500).json({ error: "Failed to append workflow builder message" });
-  }
-});
-
-router.post("/builder/sessions/:id/save", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const result = await saveWorkflowFromBuilderSession({
-      auth: req.authContext!,
-      sessionId: String(req.params.id),
-    });
-    res.json(result);
-  } catch (error) {
-    if (error instanceof Error && /not found/i.test(error.message)) {
-      res.status(404).json({ error: error.message });
-      return;
-    }
-    console.error("Error saving workflow builder session:", error);
-    res.status(500).json({ error: "Failed to save workflow builder session" });
-  }
-});
-
-router.post("/:workflowId/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
-    const run = await runWorkflowNow({
-      auth: req.authContext!,
-      workflowId,
-    });
-    res.status(201).json({ run });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error starting workflow run:", error);
-    res.status(500).json({ error: "Failed to start workflow run" });
-  }
-});
-
 router.post("/runs/:runId/approve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse({ runId: req.params.runId });
     const run = await approveLoopRunFromUi({
       auth: req.authContext!,
       runId,
-    }).catch(async (error) => {
-      if (error instanceof Error && /no loop approval context|not waiting for approval/i.test(error.message)) {
-        return approveRunById({
-          auth: req.authContext!,
-          runId,
-        });
-      }
-      throw error;
     });
     res.json({ run });
   } catch (error) {
@@ -707,81 +711,6 @@ router.post("/runs/:runId/comments", requireScopes(["memory:write"]), async (req
     }
     console.error("Error adding loop run comment:", error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to add loop run comment" });
-  }
-});
-
-router.post("/runs/:runId/skip", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse({ runId: req.params.runId });
-    const run = await skipRunById({
-      auth: req.authContext!,
-      runId,
-    });
-    res.json({ run });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error skipping workflow run:", error);
-    res.status(500).json({ error: "Failed to skip workflow run" });
-  }
-});
-
-router.post("/:workflowId/pause", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
-    await setWorkflowStatus({
-      auth: req.authContext!,
-      workflowId,
-      status: "paused",
-    });
-    res.json({ success: true });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error pausing workflow:", error);
-    res.status(500).json({ error: "Failed to pause workflow" });
-  }
-});
-
-router.post("/:workflowId/resume", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
-    await setWorkflowStatus({
-      auth: req.authContext!,
-      workflowId,
-      status: "active",
-    });
-    res.json({ success: true });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error resuming workflow:", error);
-    res.status(500).json({ error: "Failed to resume workflow" });
-  }
-});
-
-router.post("/:workflowId/archive", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
-    await setWorkflowStatus({
-      auth: req.authContext!,
-      workflowId,
-      status: "archived",
-    });
-    res.json({ success: true });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error archiving workflow:", error);
-    res.status(500).json({ error: "Failed to archive workflow" });
   }
 });
 
