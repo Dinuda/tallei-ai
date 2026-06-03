@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Menu, Sparkles, X } from "lucide-react";
+import { Code2, Menu, Sparkles, X } from "lucide-react";
 import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -124,6 +124,7 @@ const NAV: NavSection[] = [
     label: "DEVELOPER",
     items: [
       { id: "cleanup", label: "Memory Cleanup", href: "/dashboard/memory-cleanup", icon: ICONS.cleanup },
+      { id: "live-loops", label: "Live Loops", href: "/dashboard/loops/developer", icon: <Code2 size={15} aria-hidden /> },
       { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
     ],
   },
@@ -131,6 +132,7 @@ const NAV: NavSection[] = [
 
 function isActive(pathname: string, item: NavItem) {
   if (item.href === "/dashboard") return pathname === "/dashboard";
+  if (item.href === "/dashboard/loops" && pathname.startsWith("/dashboard/loops/developer")) return false;
   return pathname.startsWith(item.href);
 }
 

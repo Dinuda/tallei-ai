@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { ChevronLeft, FileText, Megaphone, Search } from "lucide-react";
+import { ChevronLeft, FileText, Loader2, Megaphone, RefreshCw, Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -76,7 +76,10 @@ function stripMarkdown(v: string) {
 
 function getOutput(task: AgentRowTask): string {
   const out = readRecord(task.outputJson);
-  const candidates = [out.text, out.message, out.summary, out.draft, task.latestComment?.body];
+  const candidates = [out.text, out.message, out.summary, out.draft];
+  if (task.status !== "todo" || candidates.some((value) => typeof value === "string" && value.trim())) {
+    candidates.push(task.latestComment?.body);
+  }
   for (const c of candidates) {
     if (typeof c === "string" && c.trim()) return c.trim();
   }
@@ -100,6 +103,12 @@ function duration(task: AgentRowTask): string {
   return `${Math.floor(s / 60)}m`;
 }
 
+function isEmailApprovalTask(task: AgentRowTask): boolean {
+  const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
+  const text = `${task.agentId} ${task.toolKey} ${getOutput(task)}`.toLowerCase();
+  return refs.includes("email_approval_request") || text.includes("email approval request sent");
+}
+
 function statusPill(status: string) {
   if (status === "done" || status === "completed") return "bg-sky-100 text-sky-700";
   if (status === "in_progress") return "bg-blue-100 text-blue-700";
@@ -107,9 +116,16 @@ function statusPill(status: string) {
   return "bg-slate-100 text-slate-600";
 }
 
-function statusLabel(status: string) {
+function taskStatusPill(task: AgentRowTask): string {
+  if (task.status === "blocked" && isEmailApprovalTask(task)) return "bg-amber-100 text-amber-700";
+  return statusPill(task.status);
+}
+
+function statusLabel(task: AgentRowTask) {
+  const status = task.status;
   if (status === "done" || status === "completed") return "Done";
   if (status === "in_progress") return "Working";
+  if (status === "blocked" && isEmailApprovalTask(task)) return "Awaiting approval";
   if (status === "blocked") return "Blocked";
   if (status === "failed") return "Failed";
   if (status === "skipped") return "Skipped";
@@ -120,10 +136,16 @@ export function AgentRow({
   task,
   open,
   onToggle,
+  onRerun,
+  rerunning = false,
+  canRerun = false,
 }: {
   task: AgentRowTask;
   open: boolean;
   onToggle: () => void;
+  onRerun?: () => void;
+  rerunning?: boolean;
+  canRerun?: boolean;
 }) {
   const active = task.status === "in_progress";
   const theme = agentTheme(task);
@@ -131,39 +153,57 @@ export function AgentRow({
 
   return (
     <div className="space-y-1.5">
-      <button
-        type="button"
-        onClick={onToggle}
+      <div
         className={cn(
-          "flex w-full items-start gap-3 rounded-xl bg-white p-3 text-left shadow-sm transition-all",
-          "hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/40",
+          "rounded-xl bg-white p-3 shadow-sm transition-all",
           active && theme.active,
           open && "ring-2 ring-slate-300"
         )}
       >
-        <ChevronLeft className="mt-1 size-4 shrink-0 text-slate-500" />
-        <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", theme.chip)}>
-          <Icon className="size-3.5" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-sm font-semibold text-slate-900">{task.agentName}</span>
-            <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", statusPill(task.status))}>
-              {task.status === "done" || task.status === "completed" ? duration(task) : statusLabel(task.status)}
-            </span>
-          </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">{brief(task)}</p>
-          {toolBadges(task).length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {toolBadges(task).map((label) => (
-                <span key={label} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
-                  {label}
+        <div className="flex items-start gap-3">
+          <ChevronLeft className="mt-1 size-4 shrink-0 text-slate-500" />
+          <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", theme.chip)}>
+            <Icon className="size-3.5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={onToggle}
+                className="min-w-0 text-left"
+              >
+                <span className="block truncate text-sm font-semibold text-slate-900">{task.agentName}</span>
+              </button>
+              <div className="flex items-center gap-1.5">
+                {canRerun && onRerun ? (
+                  <button
+                    type="button"
+                    onClick={onRerun}
+                    disabled={rerunning}
+                    className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {rerunning ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                    Rerun
+                  </button>
+                ) : null}
+                <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", taskStatusPill(task))}>
+                  {task.status === "done" || task.status === "completed" ? duration(task) : statusLabel(task)}
                 </span>
-              ))}
+              </div>
             </div>
-          ) : null}
+            <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">{brief(task)}</p>
+            {toolBadges(task).length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {toolBadges(task).map((label) => (
+                  <span key={label} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
+                    {label}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
-      </button>
+      </div>
     </div>
   );
 }

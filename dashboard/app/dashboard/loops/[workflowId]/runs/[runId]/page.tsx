@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Settings,
   ShieldCheck,
+  Upload,
   XCircle,
 } from "lucide-react";
 
@@ -86,6 +87,24 @@ type LoopRun = {
   strategyOutput: string | null;
   waitingForStrategyApproval: boolean;
   draftOutput: string | null;
+  pendingInput?: {
+    id: string;
+    kind: string;
+    label: string;
+    status: "pending" | "submitted";
+    instructions: string | null;
+  } | null;
+  deliveryAction?: {
+    kind: string;
+    status: string;
+    recipientCount: number;
+    successCount: number;
+    failureCount: number;
+  } | null;
+  stats?: {
+    contacts: { uploadedAt: string | null; recipientCount: number } | null;
+    delivery: { sentAt: string | null; successCount: number; failureCount: number } | null;
+  };
   createdAt: string;
   updatedAt: string;
 };
@@ -129,6 +148,7 @@ const ACTIVE_STATUSES = new Set([
   "running",
   "waiting_for_strategy_approval",
   "strategy_approved",
+  "waiting_for_email_approval",
   "waiting_for_approval",
 ]);
 
@@ -161,6 +181,9 @@ function formatRelative(v: string | null) {
 }
 
 function prettyStatus(s: string) {
+  if (s === "waiting_for_email_approval") return "awaiting approval";
+  if (s === "waiting_for_contact_list") return "awaiting contacts";
+  if (s === "waiting_for_input") return "awaiting input";
   return s.replace(/_/g, " ");
 }
 
@@ -191,11 +214,15 @@ function statusBadgeClass(s: string) {
 }
 
 function getTaskOutput(task: {
+  status: string;
   outputJson: unknown;
   latestComment?: { body: string } | null;
 }): string {
   const out = readRecord(task.outputJson);
-  const candidates = [out.text, out.message, out.summary, out.draft, task.latestComment?.body];
+  const candidates = [out.text, out.message, out.summary, out.draft];
+  if (task.status !== "todo" || candidates.some((value) => typeof value === "string" && value.trim())) {
+    candidates.push(task.latestComment?.body);
+  }
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
@@ -330,7 +357,7 @@ function runAction(run: LoopRun | null): {
       tone: "amber",
     };
   }
-  if (status === "waiting_for_approval") {
+  if (status === "waiting_for_approval" || status === "waiting_for_email_approval") {
     return {
       show: true,
       headline: "Newsletter is ready for approval",
@@ -391,11 +418,13 @@ export default function LoopRunDetailPage() {
   const [rosterIssues, setRosterIssues] = useState<ValidationIssue[]>([]);
   const [rosterEditable, setRosterEditable] = useState(false);
   const resumeAttemptedRef = useRef(false);
+  const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   const active = run ? ACTIVE_STATUSES.has(run.status) : false;
   const runStatus = run?.status ?? "loading";
   const wfStatus = workflow?.status ?? "active";
   const decision = runAction(run);
+  const showCsvUpload = runStatus === "waiting_for_contact_list" || runStatus === "waiting_for_input";
 
   const agentTasks = useMemo((): AgentRowTask[] => {
     return [...tasks]
@@ -517,7 +546,25 @@ export default function LoopRunDetailPage() {
 
   useEffect(() => {
     if (resumeAttemptedRef.current || loading) return;
-    if (!run || tasks.length === 0) return;
+    if (!run) return;
+
+    if (run.status === "executing_action" || run.status === "distributing") {
+      resumeAttemptedRef.current = true;
+      void fetch(`/api/workflows/runs/${runId}/resume`, { method: "POST" })
+        .then(async (res) => {
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error((payload as { error?: string }).error ?? "Failed to resume delivery");
+          }
+          await load();
+        })
+        .catch((e) => {
+          setError(e instanceof Error ? e.message : "Failed to resume delivery");
+        });
+      return;
+    }
+
+    if (tasks.length === 0) return;
     if (run.status !== "strategy_approved" && run.status !== "running") return;
 
     const hasTodo = tasks.some((task) => task.status === "todo");
@@ -597,6 +644,45 @@ export default function LoopRunDetailPage() {
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Action failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function rerunTask(taskId: string) {
+    setBusy(`rerun:${taskId}`);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/runs/${runId}/tasks/${taskId}/rerun`, {
+        method: "POST",
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload.error ?? "Failed to rerun stage");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to rerun stage");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function uploadCsvFile(file: File | null | undefined) {
+    if (!file) return;
+    setBusy("upload-contacts");
+    setError(null);
+    try {
+      const csv = await file.text();
+      const res = await fetch(`/api/workflows/runs/${runId}/contacts`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ csv }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload.error ?? "Failed to upload contacts");
+      if (csvInputRef.current) csvInputRef.current.value = "";
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to upload contacts");
     } finally {
       setBusy(null);
     }
@@ -805,6 +891,74 @@ export default function LoopRunDetailPage() {
               </Card>
             ) : null}
 
+            {showCsvUpload ? (
+              <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
+                <CardContent className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-sky-100 shadow-sm">
+                      <Upload className="size-5 text-sky-700" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900">Upload recipients CSV</p>
+                      <p className="mt-0.5 text-sm text-slate-600">
+                        Use columns <code className="rounded bg-slate-100 px-1">email</code> and optional <code className="rounded bg-slate-100 px-1">name</code>. Uploading starts the Resend broadcast.
+                      </p>
+                      {run?.stats?.contacts ? (
+                        <p className="mt-1 text-xs text-slate-500">
+                          {run.stats.contacts.recipientCount} recipients uploaded.
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={csvInputRef}
+                      type="file"
+                      accept=".csv,text/csv"
+                      className="hidden"
+                      onChange={(event) => void uploadCsvFile(event.target.files?.[0])}
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="bg-slate-900 text-white shadow-sm hover:bg-slate-800"
+                      disabled={busy !== null}
+                      onClick={() => csvInputRef.current?.click()}
+                    >
+                      {busy === "upload-contacts" ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
+                      Upload CSV
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {run?.deliveryAction || run?.stats?.delivery ? (
+              <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">Broadcast delivery</p>
+                    <p className="text-xs text-slate-500">
+                      {run.deliveryAction?.status === "completed" || run.stats?.delivery?.sentAt
+                        ? "Resend broadcast sent."
+                        : "Contacts are syncing to Resend before the broadcast sends."}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">
+                      {run.deliveryAction?.recipientCount ?? run.stats?.contacts?.recipientCount ?? 0} recipients
+                    </span>
+                    <span className="rounded-full bg-sky-100 px-2.5 py-1 text-sky-700">
+                      {run.stats?.delivery?.successCount ?? run.deliveryAction?.successCount ?? 0} sent
+                    </span>
+                    <span className="rounded-full bg-rose-100 px-2.5 py-1 text-rose-700">
+                      {run.stats?.delivery?.failureCount ?? run.deliveryAction?.failureCount ?? 0} failed
+                    </span>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
+
             {run?.status === "waiting_for_strategy_approval" && roster.length > 0 ? (
               <StrategyRosterEditor
                 roster={roster}
@@ -919,10 +1073,13 @@ export default function LoopRunDetailPage() {
                       <AgentPlaceholder />
                     ) : agentTasks.length > 0 ? (
                       agentTasks.map((task) => (
-                        <AgentRow
+                          <AgentRow
                           key={task.id}
                           task={task}
                           open={expandedTaskId === task.id}
+                          canRerun={runStatus !== "executing_action" && runStatus !== "distributing" && task.status !== "in_progress" && task.status !== "todo"}
+                          rerunning={busy === `rerun:${task.id}`}
+                          onRerun={() => void rerunTask(task.id)}
                           onToggle={() => {
                             setExpandedTaskId((current) => current === task.id ? null : task.id);
                           }}

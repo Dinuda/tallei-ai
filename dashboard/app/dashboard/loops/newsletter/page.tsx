@@ -26,6 +26,7 @@ type LoopAgentPreview = {
   name: string;
   task: string;
   tools: Array<{ ref: string }>;
+  status?: string;
 };
 
 type LoopWorkflow = {
@@ -55,9 +56,13 @@ type LoopRunResult = {
 
 type WorkflowListRun = {
   id: string;
+  workflowId?: string;
   status: string;
+  runMode?: string;
+  scheduledFor?: string | null;
   draftOutput: string | null;
   createdAt: string;
+  updatedAt?: string;
 };
 
 type WorkflowListItem = {
@@ -65,26 +70,23 @@ type WorkflowListItem = {
   latestRun: WorkflowListRun | null;
 };
 
-const EXAMPLE_RUN_AGENTS: LoopAgentPreview[] = [
-  {
-    id: "researcher",
-    name: "Researcher",
-    task: `Research and source useful context for this loop: ${NEWSLETTER_TASK}`,
-    tools: [{ ref: "internal.memory_search" }],
-  },
-  {
-    id: "writer",
-    name: "Writer",
-    task: `Write the newsletter draft using prior agent output: ${NEWSLETTER_TASK}`,
-    tools: [{ ref: "internal.llm_only" }],
-  },
-  {
-    id: "publicist",
-    name: "Publicist",
-    task: `Prepare a Gmail draft for approval: ${NEWSLETTER_TASK}`,
-    tools: [{ ref: "composio.gmail.create_draft" }],
-  },
-];
+type LoopRunTask = {
+  id: string;
+  seq: number;
+  agentId: string;
+  agentName: string;
+  toolKey: string;
+  assignedTools?: Array<{ ref: string }>;
+  status: string;
+  inputJson: unknown;
+};
+
+type RosterAgent = {
+  id: string;
+  name: string;
+  task: string;
+  tools: Array<{ ref: string }>;
+};
 
 function formatDate(value: string | null): string {
   if (!value) return "Not scheduled";
@@ -93,10 +95,49 @@ function formatDate(value: string | null): string {
   return date.toLocaleString();
 }
 
-function iconForAgent(agentId: string) {
-  if (agentId.includes("research")) return <Search className="h-4 w-4" />;
-  if (agentId.includes("writer")) return <FileText className="h-4 w-4" />;
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function iconForAgent(agent: LoopAgentPreview) {
+  const key = `${agent.id} ${agent.name} ${agent.tools.map((tool) => tool.ref).join(" ")}`.toLowerCase();
+  if (key.includes("search") || key.includes("research")) return <Search className="h-4 w-4" />;
+  if (key.includes("writer") || key.includes("draft") || key.includes("llm")) return <FileText className="h-4 w-4" />;
   return <Megaphone className="h-4 w-4" />;
+}
+
+function agentStatusClass(status?: string) {
+  if (status === "done" || status === "completed") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (status === "in_progress") return "border-blue-200 bg-blue-50 text-blue-700";
+  if (status === "blocked" || status === "failed") return "border-rose-200 bg-rose-50 text-rose-700";
+  return "border-slate-200 bg-slate-50 text-slate-500";
+}
+
+function prettyAgentStatus(status?: string) {
+  if (!status) return "Queued";
+  if (status === "done" || status === "completed") return "Done";
+  if (status === "in_progress") return "Running";
+  return status.replace(/_/g, " ");
+}
+
+function taskToAgent(task: LoopRunTask): LoopAgentPreview {
+  const input = readRecord(task.inputJson);
+  const agentInput = readRecord(input.agent);
+  const taskText = typeof agentInput.task === "string" && agentInput.task.trim()
+    ? agentInput.task.trim()
+    : task.toolKey.replace(/_/g, " ");
+  const tools = task.assignedTools?.length
+    ? task.assignedTools
+    : task.toolKey
+      ? [{ ref: task.toolKey }]
+      : [];
+  return {
+    id: task.agentId || task.id,
+    name: task.agentName,
+    task: taskText,
+    tools,
+    status: task.status,
+  };
 }
 
 function findNewsletterLoop(loops: LoopWorkflow[]): LoopWorkflow | null {
@@ -127,8 +168,10 @@ export default function NewsletterLoopPage() {
   const [approving, setApproving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [agents, setAgents] = useState<LoopAgentPreview[]>([]);
+  const [runHistory, setRunHistory] = useState<WorkflowListRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
-  const agents = EXAMPLE_RUN_AGENTS;
   const initialized = Boolean(workflow);
   const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC", []);
 
@@ -150,15 +193,60 @@ export default function NewsletterLoopPage() {
 
       const workflows = Array.isArray(workflowPayload.workflows) ? workflowPayload.workflows as WorkflowListItem[] : [];
       const linked = nextWorkflow ? workflows.find((item) => item.id === nextWorkflow.id) : null;
-      if (linked?.latestRun?.id) {
-        setRun(mapWorkflowRun(linked.latestRun));
+      const runsResponse = nextWorkflow
+        ? await fetch(`/api/workflows/internal/loops/${nextWorkflow.id}/runs`, { cache: "no-store" })
+        : null;
+      const runsPayload = runsResponse ? await runsResponse.json().catch(() => ({})) : {};
+      const runs = runsResponse?.ok && Array.isArray((runsPayload as { runs?: WorkflowListRun[] }).runs)
+        ? (runsPayload as { runs: WorkflowListRun[] }).runs
+        : linked?.latestRun?.id
+          ? [linked.latestRun]
+          : [];
+      setRunHistory(runs);
+      const activeRun = runs.find((item) => item.id === selectedRunId) ?? runs[0] ?? null;
+      if (activeRun?.id) {
+        setSelectedRunId(activeRun.id);
+        setRun(mapWorkflowRun(activeRun));
+        const [tasksResponse, rosterResponse] = await Promise.all([
+          fetch(`/api/workflows/runs/${activeRun.id}/tasks`, { cache: "no-store" }),
+          fetch(`/api/workflows/runs/${activeRun.id}/roster`, { cache: "no-store" }),
+        ]);
+        const [tasksPayload, rosterPayload] = await Promise.all([
+          tasksResponse.json().catch(() => ({})),
+          rosterResponse.json().catch(() => ({})),
+        ]);
+        const tasks = tasksResponse.ok && Array.isArray((tasksPayload as { tasks?: LoopRunTask[] }).tasks)
+          ? (tasksPayload as { tasks: LoopRunTask[] }).tasks
+          : [];
+        if (tasks.length > 0) {
+          setAgents([...tasks].sort((a, b) => a.seq - b.seq).map(taskToAgent));
+        } else {
+          const roster = (rosterPayload as {
+            roster?: {
+              approvedRoster?: RosterAgent[] | null;
+              proposedRoster?: RosterAgent[];
+            };
+          }).roster;
+          const activeRoster = roster?.approvedRoster?.length ? roster.approvedRoster : roster?.proposedRoster ?? [];
+          setAgents(activeRoster.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            task: agent.task,
+            tools: agent.tools,
+            status: "queued",
+          })));
+        }
+      } else {
+        setRun(null);
+        setAgents([]);
+        setSelectedRunId(null);
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedRunId]);
 
   useEffect(() => {
     void loadWorkflow();
@@ -305,6 +393,50 @@ export default function NewsletterLoopPage() {
             <p className="mt-2 text-sm text-slate-600">{run ? `${run.runId} · ${run.status}` : "No run in this view yet."}</p>
             {run?.createdAt ? <p className="mt-1 text-xs text-slate-500">{formatDate(run.createdAt)}</p> : null}
           </div>
+
+          <div className="border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                <Clock className="h-4 w-4 text-slate-500" />
+                Previous runs
+              </div>
+              <span className="text-xs text-slate-400">{runHistory.length}</span>
+            </div>
+            {runHistory.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {runHistory.map((item) => {
+                  const selected = item.id === selectedRunId;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        if (!workflow?.id) return;
+                        router.push(`/dashboard/loops/${workflow.id}/runs/${item.id}`);
+                      }}
+                      className={`w-full border px-3 py-2 text-left transition-colors ${
+                        selected
+                          ? "border-slate-900 bg-slate-50"
+                          : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-xs font-medium text-slate-900">
+                          Run {item.id.slice(0, 6)}
+                        </span>
+                        <span className={`shrink-0 border px-1.5 py-0.5 text-[10px] font-medium capitalize ${agentStatusClass(item.status)}`}>
+                          {prettyAgentStatus(item.status)}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">{formatDate(item.createdAt)}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-slate-500">No previous runs yet.</p>
+            )}
+          </div>
         </section>
 
         <section className="space-y-5">
@@ -328,28 +460,47 @@ export default function NewsletterLoopPage() {
             </p>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-3">
-            {agents.map((agent, index) => (
-              <div key={agent.id} className="border border-slate-200 bg-white p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                    <span className="grid h-7 w-7 place-items-center border border-slate-200 bg-slate-50 text-slate-600">
-                      {iconForAgent(agent.id)}
-                    </span>
-                    {agent.name}
+          <div>
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold text-slate-900">Agents triggered for this run</h2>
+              <span className="text-xs text-slate-500">{agents.length} agents</span>
+            </div>
+            {agents.length > 0 ? (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {agents.map((agent, index) => (
+                  <div key={`${agent.id}-${index}`} className="border border-slate-200 bg-white p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-slate-900">
+                        <span className="grid h-7 w-7 shrink-0 place-items-center border border-slate-200 bg-slate-50 text-slate-600">
+                          {iconForAgent(agent)}
+                        </span>
+                        <span className="truncate">{agent.name}</span>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <span className={`border px-2 py-0.5 text-[11px] font-medium capitalize ${agentStatusClass(agent.status)}`}>
+                          {prettyAgentStatus(agent.status)}
+                        </span>
+                        <span className="text-xs text-slate-400">{String(index + 1).padStart(2, "0")}</span>
+                      </div>
+                    </div>
+                    <p className="mt-3 text-sm text-slate-600">{agent.task}</p>
+                    {agent.tools.length > 0 ? (
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {agent.tools.map((tool) => (
+                          <span key={tool.ref} className="border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600">
+                            {tool.ref}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
-                  <span className="text-xs text-slate-400">0{index + 1}</span>
-                </div>
-                <p className="mt-3 text-sm text-slate-600">{agent.task}</p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {agent.tools.map((tool) => (
-                    <span key={tool.ref} className="border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600">
-                      {tool.ref}
-                    </span>
-                  ))}
-                </div>
+                ))}
               </div>
-            ))}
+            ) : (
+              <div className="border border-dashed border-slate-200 bg-white px-4 py-5 text-sm text-slate-500">
+                Run the loop to see the exact agent roster selected for that run.
+              </div>
+            )}
           </div>
 
           <div className="border border-slate-200 bg-white p-5">

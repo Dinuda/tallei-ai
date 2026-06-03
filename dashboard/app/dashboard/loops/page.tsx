@@ -16,7 +16,6 @@ import {
   Sparkles,
   X,
   Zap,
-  MessageCircle,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -44,6 +43,14 @@ type Conversation = {
   snippet: string;
 };
 
+type LoopMemory = {
+  id: string;
+  text: string;
+  date: string;
+  platform: Platform;
+  reason?: string;
+};
+
 type LoopInsight = {
   id: string;
   name: string;
@@ -57,6 +64,7 @@ type LoopInsight = {
   confidence: number;
   status: "detected" | "looped" | "dismissed";
   conversations: Conversation[];
+  memories?: LoopMemory[];
 };
 
 type LoopMinerEpisode = {
@@ -254,6 +262,33 @@ function episodeToConversation(episode: LoopMinerEpisode): Conversation {
   };
 }
 
+function memoryDecisionToLoopMemory(decision: LoopMinerMemoryDecision): LoopMemory {
+  return {
+    id: decision.memoryId,
+    text: decision.contentPreview || "Memory used to detect this loop.",
+    date: decision.sourceDateTime ?? decision.selectedAt ?? new Date().toISOString(),
+    platform: decision.sourceImport ? "chatgpt" : "claude",
+    reason: decision.reason,
+  };
+}
+
+function memoriesForIds(run: LoopMinerRun, memoryIds: string[]): LoopMemory[] {
+  const memoryIdSet = new Set(memoryIds);
+  const decisions = run.summary?.memoryDecisionLog ?? [];
+  const matched = decisions
+    .filter((decision) => decision.status === "included" && memoryIdSet.has(decision.memoryId))
+    .map(memoryDecisionToLoopMemory);
+
+  if (matched.length > 0) return matched;
+
+  return memoryIds.map((memoryId) => ({
+    id: memoryId,
+    text: "Memory used to detect this loop.",
+    date: run.completedAt ?? run.createdAt,
+    platform: "chatgpt" as Platform,
+  }));
+}
+
 function approvedLoopCount(run: LoopMinerRun): number {
   return run.summary?.loopsDetected
     ?? run.summary?.patternTrace?.approvedGroups.length
@@ -313,6 +348,7 @@ function buildLoopInsightsFromPatternTrace(run: LoopMinerRun): LoopInsight[] {
       const decision = patternTrace.judgeDecisions?.find((item) => item.candidateGroupId === group.id);
       const memoryIds = group.episodeIds;
       const matchedEpisodes = episodesForMemoryIds(episodes, memoryIds);
+      const memories = memoriesForIds(run, memoryIds);
       const conversations = (matchedEpisodes.length > 0
         ? matchedEpisodes
         : memoryIds.map((memoryId) => ({
@@ -348,6 +384,7 @@ function buildLoopInsightsFromPatternTrace(run: LoopMinerRun): LoopInsight[] {
         confidence,
         status: "detected" as const,
         conversations,
+        memories,
       };
     })
     .sort((a, b) => b.confidence - a.confidence || b.lastOccurred.localeCompare(a.lastOccurred));
@@ -376,6 +413,7 @@ function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
           .slice(0, Math.max(1, suggestion.triggerCount))
           .map(episodeToConversation);
       }
+      const memories = memoriesForIds(run, episodeIds);
 
       const lastOccurred = conversations
         .map((conversation) => conversation.date)
@@ -394,6 +432,7 @@ function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
         confidence: Math.max(1, Math.min(99, Math.round((suggestion.confidence ?? 0.5) * 100))),
         status: "detected",
         conversations,
+        memories,
       };
     });
   }
@@ -410,6 +449,13 @@ function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
         platform: inferPlatform([run.provenance.platform]),
         snippet: run.text || "Historical run",
       }));
+      const memories = parent.historicalRuns.map((historicalRun) => ({
+        id: historicalRun.id,
+        text: historicalRun.text || historicalRun.metadata.subject_anchor,
+        date: historicalRun.provenance.written_at,
+        platform: inferPlatform([historicalRun.provenance.platform]),
+        reason: historicalRun.metadata.category ?? undefined,
+      }));
       const lastOccurred = conversations
         .map((conversation) => conversation.date)
         .sort((a, b) => b.localeCompare(a))[0] ?? run.completedAt ?? run.createdAt;
@@ -425,6 +471,7 @@ function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
         confidence: Math.max(1, Math.min(99, Math.round(parent.confidenceScore * 100))),
         status: "detected",
         conversations,
+        memories,
       };
     });
   }
@@ -455,6 +502,12 @@ function buildLoopInsightsFromRun(run: LoopMinerRun): LoopInsight[] {
         confidence: 65,
         status: "detected" as const,
         conversations,
+        memories: conversations.map((conversation) => ({
+          id: conversation.id,
+          text: conversation.snippet,
+          date: conversation.date,
+          platform: conversation.platform,
+        })),
       };
     })
     .sort((a, b) => b.lastOccurred.localeCompare(a.lastOccurred));
@@ -536,15 +589,38 @@ function hardcodedNewsletterLoop(): LoopInsight {
         snippet: "Prepares the send or publish plan as an approval draft. No external action is committed.",
       },
     ],
+    memories: [
+      {
+        id: "hardcoded-newsletter-memory-product",
+        text: "User is writing a newsletter for xyz product every week.",
+        date: previous.toISOString(),
+        platform: "chatgpt",
+        reason: "This identifies the recurring weekly product newsletter task.",
+      },
+      {
+        id: "hardcoded-newsletter-memory-loop",
+        text: "Make the weekly xyz product newsletter a loop.",
+        date: last.toISOString(),
+        platform: "chatgpt",
+        reason: "This confirms the recurring workflow should be automated.",
+      },
+      {
+        id: "hardcoded-newsletter-memory-approval",
+        text: "Publicist only prepares an approval draft. No external action is committed.",
+        date: now.toISOString(),
+        platform: "claude",
+        reason: "This sets the publishing boundary for the loop.",
+      },
+    ],
   };
 }
 
 /* ------------------------------------------------------------------ */
-//  Conversation Deck — always fanned
+//  Memory Deck — always fanned
 /* ------------------------------------------------------------------ */
 
-function ConversationDeck({ conversations }: { conversations: Conversation[] }) {
-  const total = conversations.length;
+function MemoryDeck({ memories }: { memories: LoopMemory[] }) {
+  const total = memories.length;
   const [hovered, setHovered] = useState(false);
   const [hoveredCardId, setHoveredCardId] = useState<string | null>(null);
 
@@ -557,20 +633,20 @@ function ConversationDeck({ conversations }: { conversations: Conversation[] }) 
         setHoveredCardId(null);
       }}
     >
-      {conversations.map((conv, index) => {
+      {memories.map((memory, index) => {
         const offset = index - (total - 1) / 2;
         const restRotation =
-          (seededRandom(conv.id + "-rot") > 0.5 ? 1 : -1) * (Math.abs(offset) * 0.6 + 0.3);
+          (seededRandom(memory.id + "-rot") > 0.5 ? 1 : -1) * (Math.abs(offset) * 0.6 + 0.3);
         const fanRotation = offset * 7;
         const restX = offset * 34;
         const fanX = offset * 58;
         const restY = -index * 3;
         const fanY = Math.abs(offset) * 4;
-        const ps = platformStyle(conv.platform);
-        const isCardHovered = hoveredCardId === conv.id;
+        const ps = platformStyle(memory.platform);
+        const isCardHovered = hoveredCardId === memory.id;
 
         return (
-          <TooltipProvider key={conv.id} delayDuration={200}>
+          <TooltipProvider key={memory.id} delayDuration={200}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <motion.div
@@ -582,9 +658,9 @@ function ConversationDeck({ conversations }: { conversations: Conversation[] }) 
                     rotate: hovered ? fanRotation : restRotation,
                   }}
                   whileHover={{ scale: 1.04 }}
-                  onMouseEnter={() => setHoveredCardId(conv.id)}
+                  onMouseEnter={() => setHoveredCardId(memory.id)}
                   onMouseLeave={() =>
-                    setHoveredCardId((current) => (current === conv.id ? null : current))
+                    setHoveredCardId((current) => (current === memory.id ? null : current))
                   }
                   transition={{
                     type: "spring",
@@ -611,18 +687,18 @@ function ConversationDeck({ conversations }: { conversations: Conversation[] }) 
                         {ps.label}
                       </span>
                       <span className="text-[10px] text-[var(--text-muted)]">
-                        {formatDate(conv.date)}
+                        {formatDate(memory.date)}
                       </span>
                     </div>
-                    <p className="truncate text-xs font-medium text-[var(--text)]">
-                      {conv.title}
+                    <p className="line-clamp-3 text-xs font-medium leading-5 text-[var(--text)]">
+                      {memory.text}
                     </p>
                   </Card>
                 </motion.div>
               </TooltipTrigger>
               <TooltipContent side="top" className="max-w-[200px]">
-                <p className="text-xs font-medium">{conv.title}</p>
-                <p className="mt-0.5 text-[11px] text-white/70">{conv.snippet}</p>
+                <p className="text-xs font-medium">{memory.text}</p>
+                {memory.reason ? <p className="mt-0.5 text-[11px] text-white/70">{memory.reason}</p> : null}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -785,8 +861,13 @@ function LoopCard({
   actionLabel?: string;
 }) {
   const [looped, setLooped] = useState(loop.status === "looped");
-  const [expanded, setExpanded] = useState(false);
   const days = daysUntil(loop.nextPredicted);
+  const memories = loop.memories?.length ? loop.memories : loop.conversations.map((conversation) => ({
+    id: conversation.id,
+    text: conversation.snippet,
+    date: conversation.date,
+    platform: conversation.platform,
+  }));
 
   return (
     <motion.div
@@ -823,17 +904,10 @@ function LoopCard({
           {/* Title + meta */}
           <div className="mb-1">
             <h3 className="text-base font-bold text-[var(--text)]">{loop.name}</h3>
-            <div className="mt-2 grid grid-cols-3 gap-2 text-[10px] text-[var(--text-muted)]">
-              <div className="rounded bg-slate-50 px-2 py-1">Confidence {loop.confidence}%</div>
-              <div className="rounded bg-slate-50 px-2 py-1 truncate" title={loop.primarySourceFile}>
-                Source {loop.primarySourceFile}
-              </div>
-              <div className="rounded bg-slate-50 px-2 py-1">{loop.conversationCount} runs</div>
-            </div>
           </div>
 
           <div className="mb-1 mt-4">
-            <ConversationDeck conversations={loop.conversations} />
+            <MemoryDeck memories={memories} />
           </div>
 
           <div className="mb-2 mt-3 flex justify-center">
@@ -843,41 +917,6 @@ function LoopCard({
               loopId={loop.id}
             />
           </div>
-
-          <button
-            type="button"
-            onClick={() => setExpanded((value) => !value)}
-            className="mt-3 inline-flex items-center gap-2 text-xs font-medium text-[var(--text-2)] hover:text-[var(--text)]"
-          >
-            <MessageCircle size={12} />
-            {expanded ? "Hide historical runs" : "Show historical runs"}
-          </button>
-          <AnimatePresence initial={false}>
-            {expanded ? (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className="overflow-hidden"
-              >
-                <div className="mt-3 max-h-44 overflow-y-auto border border-[var(--border-light)] bg-white">
-                  {loop.conversations
-                    .slice()
-                    .sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
-                    .map((conversation) => (
-                      <div key={conversation.id} className="border-b border-[var(--border-light)] px-3 py-2 text-xs last:border-b-0">
-                        <div className="flex items-center justify-between text-[var(--text-muted)]">
-                          <span>{formatDate(conversation.date)}</span>
-                          <span>{conversation.platform}</span>
-                        </div>
-                        <div className="mt-1 font-medium text-[var(--text)]">{conversation.title}</div>
-                        <div className="mt-0.5 text-[var(--text-2)]">{conversation.snippet}</div>
-                      </div>
-                    ))}
-                </div>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
 
           {/* Footer */}
           <div className="flex items-center justify-between gap-3 border-t border-[var(--border-light)] pt-4">

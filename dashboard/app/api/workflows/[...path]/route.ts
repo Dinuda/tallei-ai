@@ -50,14 +50,48 @@ async function resolveBackendUserId(req: NextRequest): Promise<string | null> {
   return backendId;
 }
 
+async function proxyLoopApproval(req: NextRequest): Promise<Response> {
+  const backend = resolveBackendUrl(req);
+  const path = req.nextUrl.pathname.replace(/^\/api\/workflows\/?/, "").replace(/^\/+/, "");
+  const target = new URL(`${backend}/api/workflows/${path}`);
+  req.nextUrl.searchParams.forEach((value, key) => target.searchParams.set(key, value));
+
+  try {
+    const res = await fetchWithTimeout(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+    });
+    const location = res.headers.get("location");
+    if (location && res.status >= 300 && res.status < 400) {
+      return Response.redirect(location, res.status);
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const data = await safeJson(res);
+      return Response.json(data, { status: res.status });
+    }
+    return new Response(await res.text(), {
+      status: res.status,
+      headers: { "content-type": contentType || "text/plain" },
+    });
+  } catch (error) {
+    const isAbort = error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
+    return Response.json({ error: isAbort ? "Timed out contacting backend workflows API" : "Failed to reach backend workflows API" }, { status: isAbort ? 504 : 502 });
+  }
+}
+
 async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT"): Promise<Response> {
+  const path = req.nextUrl.pathname.replace(/^\/api\/workflows\/?/, "").replace(/^\/+/, "");
+  if (method === "GET" && path.startsWith("loops/approvals/")) {
+    return proxyLoopApproval(req);
+  }
+
   const userId = await resolveBackendUserId(req);
   if (!userId) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const backend = resolveBackendUrl(req);
-  const path = req.nextUrl.pathname.replace(/^\/api\/workflows\/?/, "").replace(/^\/+/, "");
   const target = new URL(`${backend}/api/workflows${path ? `/${path}` : ""}`);
   req.nextUrl.searchParams.forEach((value, key) => target.searchParams.set(key, value));
 

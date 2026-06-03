@@ -1022,7 +1022,7 @@ export async function initDb() {
         run_mode TEXT NOT NULL DEFAULT 'scheduled'
           CHECK (run_mode IN ('scheduled', 'manual')),
         status TEXT NOT NULL DEFAULT 'scheduled'
-          CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_approval', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
+          CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
         scheduled_for TIMESTAMPTZ,
         strategy_output TEXT,
         waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1046,7 +1046,7 @@ export async function initDb() {
         DROP CONSTRAINT IF EXISTS workflow_runs_status_check;
       ALTER TABLE workflow_runs
         ADD CONSTRAINT workflow_runs_status_check
-        CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_approval', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled'));
+        CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled'));
     `);
 
     await client.query(`
@@ -1127,7 +1127,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         job_type TEXT NOT NULL
-          CHECK (job_type IN ('agent', 'ceo_finalize')),
+          CHECK (job_type IN ('agent', 'ceo_finalize', 'distribution')),
         task_id UUID REFERENCES loop_run_tasks(id) ON DELETE CASCADE,
         status TEXT NOT NULL DEFAULT 'pending'
           CHECK (status IN ('pending', 'processing', 'done', 'failed')),
@@ -1145,6 +1145,12 @@ export async function initDb() {
         ON loop_heartbeat_jobs(status, next_attempt_at, created_at ASC);
       CREATE INDEX IF NOT EXISTS idx_loop_heartbeat_jobs_run
         ON loop_heartbeat_jobs(tenant_id, user_id, workflow_run_id, created_at DESC);
+
+      ALTER TABLE loop_heartbeat_jobs
+        DROP CONSTRAINT IF EXISTS loop_heartbeat_jobs_job_type_check;
+      ALTER TABLE loop_heartbeat_jobs
+        ADD CONSTRAINT loop_heartbeat_jobs_job_type_check
+        CHECK (job_type IN ('agent', 'ceo_finalize', 'distribution'));
     `);
 
     await client.query(`

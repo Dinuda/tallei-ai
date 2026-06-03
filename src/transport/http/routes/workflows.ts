@@ -1,6 +1,7 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 
+import { config } from "../../../config/index.js";
 import {
   appendWorkflowBuilderMessage,
   approveRunById,
@@ -13,6 +14,7 @@ import {
   setWorkflowStatus,
   skipRunById,
 } from "../../../services/workflow-automation/workflow-builder.service.js";
+import { listWorkflowRuns } from "../../../services/workflow-automation.js";
 import {
   addLoopRunComment,
   approveLoopStrategy,
@@ -21,6 +23,9 @@ import {
   createWorkspace,
   dispatchDueLoopWorkflows,
   dispatchLoopHeartbeatJobs,
+  approveLoopRunApprovalToken,
+  approveLoopRunFromUi,
+  approveLoopRunGateApprovalToken,
   executeLoopWorkflow,
   getLoopRun,
   getLoopRunRoster,
@@ -30,7 +35,9 @@ import {
   listLoopWorkflows,
   listWorkspaces,
   loopRunAgentSchema,
+  rerunLoopRunTask,
   resumeLoopRunExecution,
+  uploadLoopRunContacts,
   updateLoopRunRoster,
 } from "../../../services/loop-executor/index.js";
 import { authMiddleware, internalSecretMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
@@ -54,6 +61,10 @@ const runIdSchema = z.object({
   runId: z.string().uuid(),
 });
 
+const taskIdSchema = z.object({
+  taskId: z.string().uuid(),
+});
+
 const createLoopSchema = z.object({
   task: z.string().trim().min(1).max(4000),
   cron: z.string().trim().min(1).max(120).optional(),
@@ -71,6 +82,14 @@ const createWorkspaceSchema = z.object({
 const assignWorkspaceSchema = z.object({
   workflowId: z.string().uuid(),
   workspaceId: z.string().uuid().nullable(),
+});
+
+const approvalTokenSchema = z.object({
+  token: z.string().min(16).max(128),
+});
+
+const contactCsvSchema = z.object({
+  csv: z.string().trim().min(1).max(1_000_000),
 });
 
 router.post("/internal/loops/scheduler/wake", internalSecretMiddleware, async (req: AuthRequest, res: Response) => {
@@ -100,6 +119,48 @@ router.post("/internal/loops/heartbeat/dispatch", internalSecretMiddleware, asyn
     }
     console.error("Error dispatching loop heartbeat jobs:", error);
     res.status(500).json({ error: "Failed to dispatch loop heartbeat jobs" });
+  }
+});
+
+router.get("/loops/approvals/:token", async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = approvalTokenSchema.parse({ token: req.params.token });
+    res.redirect(302, `${config.publicBaseUrl.replace(/\/$/, "")}/api/workflows/loops/approvals/${token}/approve`);
+  } catch {
+    res.status(400).json({ error: "Invalid approval token" });
+  }
+});
+
+router.get("/loops/approvals/:token/approve", async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = approvalTokenSchema.parse({ token: req.params.token });
+    const result = await approveLoopRunGateApprovalToken(token).catch((error) => {
+      if (error instanceof Error && /Invalid gate approval target/i.test(error.message)) {
+        return approveLoopRunApprovalToken(token);
+      }
+      throw error;
+    });
+    const redirectUrl = `${config.frontendUrl.replace(/\/$/, "")}/dashboard/loops/${result.workflowId}/runs/${result.runId}?approved=1`;
+    res.redirect(302, redirectUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Approval failed";
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post("/loops/approvals/:token/approve", async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = approvalTokenSchema.parse({ token: req.params.token });
+    const result = await approveLoopRunGateApprovalToken(token).catch((error) => {
+      if (error instanceof Error && /Invalid gate approval target/i.test(error.message)) {
+        return approveLoopRunApprovalToken(token);
+      }
+      throw error;
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Approval failed";
+    res.status(400).json({ error: message });
   }
 });
 
@@ -179,6 +240,26 @@ router.get("/internal/loops/:workflowId", requireScopes(["memory:read"]), async 
     }
     console.error("Error reading internal loop workflow:", error);
     res.status(500).json({ error: "Failed to read internal loop workflow" });
+  }
+});
+
+router.get("/internal/loops/:workflowId/runs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
+    await getLoopWorkflow(req.authContext!, workflowId);
+    const runs = await listWorkflowRuns(req.authContext!, workflowId);
+    res.json({ runs });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error listing loop workflow runs:", error);
+    res.status(500).json({ error: "Failed to list loop workflow runs" });
   }
 });
 
@@ -367,9 +448,17 @@ router.post("/:workflowId/run", requireScopes(["memory:write"]), async (req: Aut
 router.post("/runs/:runId/approve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse({ runId: req.params.runId });
-    const run = await approveRunById({
+    const run = await approveLoopRunFromUi({
       auth: req.authContext!,
       runId,
+    }).catch(async (error) => {
+      if (error instanceof Error && /no loop approval context|not waiting for approval/i.test(error.message)) {
+        return approveRunById({
+          auth: req.authContext!,
+          runId,
+        });
+      }
+      throw error;
     });
     res.json({ run });
   } catch (error) {
@@ -379,6 +468,30 @@ router.post("/runs/:runId/approve", requireScopes(["memory:write"]), async (req:
     }
     console.error("Error approving workflow run:", error);
     res.status(500).json({ error: "Failed to approve workflow run" });
+  }
+});
+
+router.post("/runs/:runId/contacts", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const body = contactCsvSchema.parse(req.body ?? {});
+    const result = await uploadLoopRunContacts({
+      auth: req.authContext!,
+      runId,
+      csv: body.csv,
+    });
+    res.status(202).json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not waiting|contact list|No contacts|CSV/i.test(error.message)) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    console.error("Error uploading loop contacts:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to upload contacts" });
   }
 });
 
@@ -435,6 +548,34 @@ router.post("/runs/:runId/resume", requireScopes(["memory:write"]), async (req: 
     }
     console.error("Error resuming loop run:", error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to resume loop run" });
+  }
+});
+
+router.post("/runs/:runId/tasks/:taskId/rerun", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const { taskId } = taskIdSchema.parse({ taskId: req.params.taskId });
+    const result = await rerunLoopRunTask({
+      auth: req.authContext!,
+      runId,
+      taskId,
+    });
+    res.status(202).json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    if (error instanceof Error && /already running/i.test(error.message)) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    console.error("Error rerunning loop task:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to rerun loop task" });
   }
 });
 

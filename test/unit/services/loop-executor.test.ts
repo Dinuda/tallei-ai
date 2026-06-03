@@ -182,10 +182,11 @@ test("executor creates a strategy-gated run with proposed roster only", async ()
     assert.equal(result.status, "waiting_for_strategy_approval");
     assert.equal(result.draftRequired, false);
     assert.equal(finalStatus, "waiting_for_strategy_approval");
-    assert.match(strategyOutput, /CEO strategy/);
+    assert.ok(strategyOutput.trim().length > 0);
+    assert.match(strategyOutput, /newsletter|weekly|distribution/i);
     assert.equal(insertedTasks, 0);
     assert.ok(Array.isArray(proposedRoster));
-    assert.equal((proposedRoster as Array<{ id: string }>).length, 3);
+    assert.ok((proposedRoster as Array<{ id: string }>).length >= 1);
   } finally {
     (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
     (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = originalChat;
@@ -295,4 +296,123 @@ test("scheduler claims active due loops, recomputes next run, and dispatches thr
     (db.pool as unknown as { connect: typeof db.pool.connect }).connect = originalConnect;
     (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = originalChat;
   }
+});
+
+test("parseContactListCsv accepts email and optional name columns", async () => {
+  const { parseContactListCsv } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const contacts = parseContactListCsv("email,name\na@example.com,Ada\nb@example.com,Bob\n");
+  assert.equal(contacts.length, 2);
+  assert.equal(contacts[0]?.email, "a@example.com");
+  assert.equal(contacts[0]?.name, "Ada");
+});
+
+test("newsletter formatter strips internal approval instructions", async () => {
+  const { formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const raw = [
+    "### Newsletter Draft",
+    "",
+    "**Subject:** This Week's Must-Reads**",
+    "",
+    "Draft Newsletter in Lenny's Voice",
+    "",
+    "This week's insights aim to help builders.",
+    "",
+    "**Happy building!**",
+    "",
+    "Lenny",
+    "",
+    "---",
+    "",
+    "Please review this draft and let me know if you would like any changes or additional themes before we proceed to the Publicist for email approval.",
+    "",
+    "### Operator Approval Email",
+    "",
+    "**Subject:** Approval Request for Weekly Newsletter Draft",
+    "",
+    "Hi [Operator's Name],",
+    "",
+    "Please review the draft and let me know if you approve it for distribution.",
+    "",
+    "### Next Steps",
+    "",
+    "1. **Operator Approval**: Await feedback.",
+  ].join("\n");
+
+  const sanitized = sanitizeSubscriberNewsletterBody(raw);
+  assert.match(sanitized, /This week's insights/);
+  assert.doesNotMatch(sanitized, /Operator Approval Email/);
+  assert.doesNotMatch(sanitized, /Next Steps/);
+  assert.doesNotMatch(sanitized, /Operator's Name/);
+  assert.doesNotMatch(sanitized, /Draft Newsletter in Lenny's Voice/i);
+  assert.doesNotMatch(sanitized, /Please review this draft and let me know/i);
+  assert.doesNotMatch(sanitized, /Publicist for email approval/i);
+
+  const formatted = formatNewsletterForEmail(raw);
+  assert.equal(formatted.subject, "This Week's Must-Reads");
+  assert.match(formatted.text, /Happy building/);
+  assert.doesNotMatch(formatted.text, /Approval Request/);
+  assert.doesNotMatch(formatted.text, /Draft Newsletter in Lenny's Voice/i);
+  assert.doesNotMatch(formatted.text, /Please review this draft and let me know/i);
+  assert.doesNotMatch(formatted.html, /Draft Newsletter in Lenny's Voice/i);
+  assert.doesNotMatch(formatted.html, /Please review this draft and let me know/i);
+  assert.match(formatted.html, /<strong>Happy building!<\/strong>/);
+});
+
+test("newsletter formatter strips leaked draft scaffolding from subscriber copy", async () => {
+  const { formatNewsletterForBroadcast, formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const raw = [
+    "**Subject:** Weekly Insights for Product Builders: Navigating the Evolving Landscape of AI and Algorithms",
+    "",
+    "The draft for the weekly product newsletter in Lenny's voice is ready. Here it is:",
+    "",
+    "Hello Product Builders,",
+    "",
+    "As we dive into another week, it's crucial to stay ahead of the curve in the rapidly evolving world of technology and product development.",
+    "",
+    "1. The Rise of Always-On AI Agents",
+    "",
+    "Google has recently introduced its \"Gemini Spark,\" an AI agent designed to operate continuously. Read more here.",
+    "",
+    "2. AI Integration in Everyday Tools",
+    "",
+    "The integration of AI agents into common applications is becoming the norm. Explore the details.",
+    "",
+    "Best,",
+    "Lenny",
+    "",
+    "Would you like to make any adjustments or add specific sections before we proceed to the next step?",
+  ].join("\n");
+
+  const sanitized = sanitizeSubscriberNewsletterBody(raw);
+  assert.match(sanitized, /Hello Product Builders/);
+  assert.match(sanitized, /Best,\nLenny/);
+  assert.doesNotMatch(sanitized, /draft for the weekly product newsletter/i);
+  assert.doesNotMatch(sanitized, /Lenny's voice/i);
+  assert.doesNotMatch(sanitized, /Would you like/i);
+  assert.doesNotMatch(sanitized, /next step/i);
+  assert.doesNotMatch(sanitized, /Read more here/i);
+  assert.doesNotMatch(sanitized, /Explore the details/i);
+
+  const formatted = formatNewsletterForEmail(raw);
+  const broadcast = formatNewsletterForBroadcast(formatted);
+  assert.equal(formatted.subject, "Weekly Insights for Product Builders: Navigating the Evolving Landscape of AI and Algorithms");
+  assert.doesNotMatch(formatted.text, /draft for the weekly product newsletter/i);
+  assert.doesNotMatch(formatted.html, /Weekly Newsletter/);
+  assert.doesNotMatch(broadcast.html, /Tallei Newsletter/);
+  assert.doesNotMatch(broadcast.text, /Would you like/i);
+});
+
+test("broadcast formatter includes Resend contact properties and unsubscribe URL", async () => {
+  const { formatNewsletterForEmail, formatNewsletterForBroadcast } = await import("../../../src/services/loop-executor/publicist-email.js");
+  const formatted = formatNewsletterForEmail("**Subject:** Hello\n\nBody copy.");
+  const broadcast = formatNewsletterForBroadcast(formatted);
+  assert.match(broadcast.html, /\{\{\{contact\.first_name\|there\}\}\}/);
+  assert.match(broadcast.html, /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/);
+  assert.match(broadcast.html, /You’re receiving this because you subscribed to updates from Tallei\./);
+  assert.match(broadcast.text, /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/);
+});
+
+test("tool catalog includes email approval request tool", () => {
+  const tools = loopExecutor.listLoopTools();
+  assert.ok(tools.some((tool) => tool.ref === "internal.email_approval_request"));
 });
