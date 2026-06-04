@@ -209,6 +209,8 @@ export const loopExecutorRunMetaSchema = z.object({
     uploadedAt: z.string(),
     contacts: z.array(loopContactRowSchema),
     recipientCount: z.number().int().nonnegative(),
+    documentRef: z.string().optional(),
+    lotRef: z.string().optional(),
   }).optional(),
   deliveryTemplateId: z.string().optional(),
   deliveryEmailHtml: z.string().optional(),

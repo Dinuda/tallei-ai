@@ -5,6 +5,7 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { consumeWorkflowApprovalToken, resolveWorkflowApprovalToken } from "../approval-tokens.js";
+import { stashDocument } from "../documents.js";
 import { normalizeRosterAgents, isDynamicPlanDefinition } from "./plan.js";
 import {
   assertRunAccess,
@@ -21,6 +22,36 @@ import { normalizeNewsletterTemplateId, parseContactListCsv } from "./presets/ne
 import { resolveLoopPreset } from "./presets/registry.js";
 
 const DELIVERY_RECIPIENTS_INPUT_ID = "delivery_recipients";
+
+function markdownTableCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+}
+
+function renderContactsDocument(input: {
+  runId: string;
+  workflowId: string;
+  uploadedAt: string;
+  contacts: Array<{ email: string; name?: string }>;
+}): string {
+  const rows = input.contacts.map((contact, index) => {
+    const name = contact.name ? markdownTableCell(contact.name) : "";
+    return `| ${index + 1} | ${markdownTableCell(contact.email)} | ${name} |`;
+  });
+
+  return [
+    `# Newsletter broadcast contacts`,
+    "",
+    `Workflow run: ${input.runId}`,
+    `Workflow: ${input.workflowId}`,
+    `Uploaded at: ${input.uploadedAt}`,
+    `Recipient count: ${input.contacts.length}`,
+    "",
+    "| # | Email | Name |",
+    "| - | - | - |",
+    ...rows,
+    "",
+  ].join("\n");
+}
 
 async function transitionRunToDelivery(input: {
   tenantId: string;
@@ -134,6 +165,21 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
   }
 
   const contacts = parseContactListCsv(input.csv);
+  const uploadedAt = new Date().toISOString();
+  const contactsDocument = await stashDocument(
+    renderContactsDocument({
+      runId: context.runId,
+      workflowId: context.workflowId,
+      uploadedAt,
+      contacts,
+    }),
+    input.auth,
+    {
+      title: `Newsletter contacts for run ${context.runId.slice(0, 8)}`,
+      filename: `newsletter-contacts-${context.runId.slice(0, 8)}.md`,
+      mimeType: "text/markdown",
+    }
+  );
   const integrations = new Set(context.definition.allowedIntegrations.map((integration) => integration.trim().toLowerCase()));
   const toolRefs = new Set((context.definition.allowedToolRefs ?? []).map((ref) => ref.trim()));
   const reactEmailEnabled = isNewsletterLoopDefinition(context.definition)
@@ -147,21 +193,23 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
       kind: "csv",
       label: "Delivery recipients",
       status: "submitted",
-      requestedAt: new Date().toISOString(),
-      submittedAt: new Date().toISOString(),
+      requestedAt: uploadedAt,
+      submittedAt: uploadedAt,
       instructions: "Recipient list submitted.",
       schema: { requiredColumns: ["email"], optionalColumns: ["name"], maxRows: 5000 },
     },
     deliveryRecipients: {
-      uploadedAt: new Date().toISOString(),
+      uploadedAt,
       contacts,
       recipientCount: contacts.length,
+      documentRef: contactsDocument.refHandle,
+      ...(contactsDocument.lotRef ? { lotRef: contactsDocument.lotRef } : {}),
     },
     ...(deliveryTemplateId ? { deliveryTemplateId } : {}),
     deliveryAction: {
       kind: "send_broadcast",
       status: "in_progress",
-      startedAt: new Date().toISOString(),
+      startedAt: uploadedAt,
       recipientCount: contacts.length,
       successCount: 0,
       failureCount: 0,
@@ -182,7 +230,11 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
   await insertEvent({
     context,
     eventType: "delivery_recipients_uploaded",
-    payload: { recipientCount: contacts.length, ...(deliveryTemplateId ? { templateId: deliveryTemplateId } : {}) },
+    payload: {
+      recipientCount: contacts.length,
+      documentRef: contactsDocument.refHandle,
+      ...(deliveryTemplateId ? { templateId: deliveryTemplateId } : {}),
+    },
   });
   await scheduleHeartbeat({
     tenantId: context.tenantId,
@@ -199,6 +251,7 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
     runId: context.runId,
     status: after.runStatus,
     recipientCount: contacts.length,
+    contactDocumentRef: contactsDocument.refHandle,
     ...(deliveryTemplateId ? { templateId: deliveryTemplateId } : {}),
     ...(broadcastId ? { broadcastId } : {}),
   };

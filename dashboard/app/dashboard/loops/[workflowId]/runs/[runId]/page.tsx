@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import {
   AlertCircle,
@@ -67,7 +67,23 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   Tooltip,
   TooltipContent,
@@ -118,7 +134,13 @@ type LoopRun = {
     broadcastId?: string | null;
   } | null;
   stats?: {
-    contacts: { uploadedAt: string | null; recipientCount: number } | null;
+    contacts: {
+      uploadedAt: string | null;
+      recipientCount: number;
+      documentRef?: string | null;
+      lotRef?: string | null;
+      contacts?: Array<{ email: string; name: string | null }>;
+    } | null;
     delivery: {
       sentAt: string | null;
       successCount: number;
@@ -617,16 +639,68 @@ export default function LoopRunDetailPage() {
   const recipientCount = run?.deliveryAction?.recipientCount ?? run?.stats?.contacts?.recipientCount ?? sentCount + failureCount;
   const openCount = deliveryStats?.openCount ?? 0;
   const clickCount = deliveryStats?.clickCount ?? 0;
-  const deliveredCount = deliveryStats?.deliveredCount ?? 0;
   const totalClickCount = deliveryStats?.totalClickCount ?? clickCount;
   const unsubscribeCount = deliveryStats?.unsubscribeCount ?? 0;
   const openRate = deliveryStats?.openRate ?? (sentCount > 0 ? openCount / sentCount : 0);
   const clickRate = deliveryStats?.clickRate ?? (sentCount > 0 ? clickCount / sentCount : 0);
   const deliveryRate = recipientCount > 0 ? sentCount / recipientCount : 0;
-  const trackingDiagnostics = deliveryStats?.trackingDiagnostics ?? null;
   const metricsWebhook = deliveryStats?.metricsWebhook ?? null;
-  const htmlBytes = trackingDiagnostics?.htmlBytes ?? 0;
-  const htmlKb = htmlBytes > 0 ? Math.round(htmlBytes / 1024) : 0;
+  const uploadedContacts = run?.stats?.contacts?.contacts ?? [];
+  const contactDocumentRef = run?.stats?.contacts?.documentRef ?? null;
+  const openTrackingHelpText =
+    "Open tracking is best effort because Resend records an open only when the recipient loads the HTML tracking pixel.";
+  const openTrackingSignalText = "Clicks are the stronger engagement signal.";
+  const openTrackingWebhookText =
+    metricsWebhook?.endpoint ?? "https://k17m9n29-3000.asse.devtunnels.ms/api/channels/webhooks/resend-events";
+  const openTrackingWebhookNote =
+    "No engagement webhooks have arrived yet. Confirm this run used a public HTTPS webhook URL and that Resend has email.opened and email.clicked selected.";
+  const renderContactsDialog = (trigger: ReactNode) => (
+    <Dialog>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogContent className="max-h-[82vh] gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="border-b px-5 py-4">
+          <DialogTitle>Uploaded contacts</DialogTitle>
+          <DialogDescription>
+            {recipientCount} recipients uploaded{contactDocumentRef ? ` and saved as ${contactDocumentRef}` : ""}.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="border-b bg-slate-50 px-5 py-3">
+          <p className="text-xs font-medium text-slate-500">Document ref</p>
+          <p className="mt-1 break-all text-sm font-semibold text-slate-900">
+            {contactDocumentRef ?? "Not available"}
+          </p>
+        </div>
+        <ScrollArea className="max-h-[54vh]">
+          <Table>
+            <TableHeader className="sticky top-0 z-10 bg-white">
+              <TableRow>
+                <TableHead className="w-12">#</TableHead>
+                <TableHead>Email</TableHead>
+                <TableHead>Name</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {uploadedContacts.length > 0 ? (
+                uploadedContacts.map((contact, index) => (
+                  <TableRow key={`${contact.email}-${index}`}>
+                    <TableCell className="text-slate-500">{index + 1}</TableCell>
+                    <TableCell className="font-medium text-slate-900">{contact.email}</TableCell>
+                    <TableCell className="text-slate-600">{contact.name || "-"}</TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={3} className="h-24 text-center text-slate-500">
+                    No uploaded contacts are available on this run.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  );
 
   useEffect(() => {
     if (draftDirty) return;
@@ -1170,9 +1244,20 @@ export default function LoopRunDetailPage() {
                         Use columns <code className="rounded bg-slate-100 px-1">email</code> and optional <code className="rounded bg-slate-100 px-1">name</code>. Uploading starts the Resend broadcast.
                       </p>
                       {run?.stats?.contacts ? (
-                        <p className="mt-1 text-xs text-slate-500">
-                          {run.stats.contacts.recipientCount} recipients uploaded.
-                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                          <span>{run.stats.contacts.recipientCount} recipients uploaded.</span>
+                          {renderContactsDialog(
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 border-slate-300 px-2 text-xs text-slate-700 hover:bg-slate-100"
+                            >
+                              <Users className="size-3.5" />
+                              View contacts
+                            </Button>
+                          )}
+                        </div>
                       ) : null}
                     </div>
                   </div>
@@ -1317,9 +1402,58 @@ export default function LoopRunDetailPage() {
                         <div key={stat.label} className="flex flex-col justify-center gap-0.5 bg-white px-4 py-3">
                           <div className="flex items-center gap-1.5">
                             <stat.icon className={cn("size-3.5", stat.color)} />
-                            <span className="text-[11px] font-medium text-slate-500">{stat.label}</span>
+                            <span className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                              {stat.label}
+                              {stat.label === "Open rate" ? (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      aria-label="Open rate tracking details"
+                                      className="inline-flex size-4 items-center justify-center rounded-full text-slate-400 transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
+                                    >
+                                      <Info className="size-3.5" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent
+                                    side="top"
+                                    sideOffset={8}
+                                    className="max-w-[340px] px-4 py-3 text-left leading-5"
+                                  >
+                                    <div className="space-y-3 text-[13px] leading-5">
+                                      <p>{openTrackingHelpText}</p>
+                                      <p>{openTrackingSignalText}</p>
+                                      <div className="space-y-1.5">
+                                        <p className="text-[11px] font-semibold uppercase tracking-wide text-white/60">
+                                          Metrics webhook
+                                        </p>
+                                        <code className="block break-all rounded-md bg-white/10 px-2 py-1.5 font-mono text-[11px] leading-4 text-white">
+                                          {openTrackingWebhookText}
+                                        </code>
+                                      </div>
+                                      <p className="text-[11px] leading-4 text-white/75">
+                                        {openTrackingWebhookNote}
+                                      </p>
+                                    </div>
+                                  </TooltipContent>
+                                </Tooltip>
+                              ) : null}
+                            </span>
                           </div>
-                          <span className="text-lg font-semibold tabular-nums text-slate-900">{stat.value}</span>
+                          <span className="flex items-center gap-2 text-lg font-semibold tabular-nums text-slate-900">
+                            {stat.value}
+                            {stat.label === "Recipients" && run?.stats?.contacts ? (
+                              renderContactsDialog(
+                                <button
+                                  type="button"
+                                  className="inline-flex size-7 items-center justify-center rounded-md border border-slate-200 text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
+                                  aria-label="View uploaded contacts"
+                                >
+                                  <Users className="size-3.5" />
+                                </button>
+                              )
+                            ) : null}
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -1338,7 +1472,43 @@ export default function LoopRunDetailPage() {
                           ].map((bar) => (
                             <div key={bar.label}>
                               <div className="flex items-center justify-between text-xs mb-1">
-                                <span className="text-slate-600">{bar.label}</span>
+                                <span className="flex items-center gap-1 text-slate-600">
+                                  {bar.label}
+                                  {bar.label === "Open rate" ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <button
+                                          type="button"
+                                          aria-label="Open rate tracking details"
+                                          className="inline-flex size-4 items-center justify-center rounded-full text-slate-400 transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
+                                        >
+                                          <Info className="size-3.5" />
+                                        </button>
+                                      </TooltipTrigger>
+                                      <TooltipContent
+                                        side="top"
+                                        sideOffset={8}
+                                        className="max-w-[340px] px-4 py-3 text-left leading-5"
+                                      >
+                                        <div className="space-y-3 text-[13px] leading-5">
+                                          <p>{openTrackingHelpText}</p>
+                                          <p>{openTrackingSignalText}</p>
+                                          <div className="space-y-1.5">
+                                            <p className="text-[11px] font-semibold uppercase tracking-wide text-white/60">
+                                              Metrics webhook
+                                            </p>
+                                            <code className="block break-all rounded-md bg-white/10 px-2 py-1.5 font-mono text-[11px] leading-4 text-white">
+                                              {openTrackingWebhookText}
+                                            </code>
+                                          </div>
+                                          <p className="text-[11px] leading-4 text-white/75">
+                                            {openTrackingWebhookNote}
+                                          </p>
+                                        </div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  ) : null}
+                                </span>
                                 <span className="font-semibold text-slate-900">{formatPercent(bar.pct)}</span>
                               </div>
                               <div className="h-2 rounded-full bg-slate-100">
@@ -1350,30 +1520,6 @@ export default function LoopRunDetailPage() {
                         <p className="mt-3 text-xs text-slate-500">
                           {openCount} tracked opens, {clickCount} unique clicks, {totalClickCount} total clicks, {failureCount} failed deliveries.
                         </p>
-                        <div className="mt-3 space-y-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                          <p>
-                            Open tracking is best effort because Resend records an open only when the recipient loads the HTML tracking pixel. Clicks are the stronger engagement signal.
-                          </p>
-                          {trackingDiagnostics?.gmailClippingRisk ? (
-                            <p>
-                              This email is about {htmlKb} KB of HTML, so Gmail may clip it and hide the open pixel. Trim the builder HTML or move heavy content behind links.
-                            </p>
-                          ) : null}
-                          {metricsWebhook?.endpoint ? (
-                            <p className="break-all">
-                              Metrics webhook: {metricsWebhook.endpoint}
-                            </p>
-                          ) : null}
-                          {deliveredCount > 0 && openCount === 0 ? (
-                            <p>
-                              Delivery events are arriving from Resend, so zero opens usually means the pixel was blocked, cached, clipped, or not loaded by the inbox.
-                            </p>
-                          ) : sentCount > 0 && openCount === 0 && clickCount === 0 ? (
-                            <p>
-                              No engagement webhooks have arrived yet. Confirm this run used a public HTTPS webhook URL and that Resend has email.opened and email.clicked selected.
-                            </p>
-                          ) : null}
-                        </div>
                       </div>
                     ) : null}
 

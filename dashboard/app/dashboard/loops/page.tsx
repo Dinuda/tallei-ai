@@ -188,11 +188,6 @@ type LoopWorkflow = {
   };
 };
 
-type WorkflowRunResponse = {
-  id?: string;
-  runId?: string;
-};
-
 type ActiveChannel = {
   id: string;
   kind: "telegram" | "gmail" | "email";
@@ -593,9 +588,13 @@ function findLennyNewsletterWorkflow(loops: LoopWorkflow[]): LoopWorkflow | null
     ?? null;
 }
 
-function runIdFromResponse(run: WorkflowRunResponse | null | undefined): string | null {
-  if (typeof run?.runId === "string" && run.runId.trim()) return run.runId;
-  if (typeof run?.id === "string" && run.id.trim()) return run.id;
+function runIdFromResponse(value: unknown): string | null {
+  const record = readRecord(value);
+  if (typeof record.runId === "string" && record.runId.trim()) return record.runId;
+  if (typeof record.id === "string" && record.id.trim()) return record.id;
+  const nested = readRecord(record.run);
+  if (typeof nested.runId === "string" && nested.runId.trim()) return nested.runId;
+  if (typeof nested.id === "string" && nested.id.trim()) return nested.id;
   return null;
 }
 
@@ -1218,7 +1217,19 @@ export default function LoopsPage() {
           setNewsletterWorkflowId(activeNewsletterWorkflowId);
         }
 
-        router.push(`/dashboard/loops/newsletter`);
+        const runResponse = await fetch(`/api/workflows/internal/loops/${activeNewsletterWorkflowId}/run`, {
+          method: "POST",
+        });
+        const runPayload = await runResponse.json().catch(() => ({}));
+        if (!runResponse.ok) {
+          throw new Error(runPayload.error ?? "Failed to run newsletter loop");
+        }
+        const runId = runIdFromResponse(runPayload);
+        if (!runId) {
+          throw new Error("Newsletter loop started without a run id");
+        }
+
+        router.push(`/dashboard/loops/${activeNewsletterWorkflowId}/runs/${runId}`);
         return;
       }
       setLoops((prev) =>

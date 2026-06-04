@@ -856,6 +856,15 @@ export async function getLoopRun(auth, runId) {
         : Array.isArray(contactList.contacts)
             ? contactList.contacts.length
             : 0;
+    const contactRows = Array.isArray(contactList.contacts)
+        ? contactList.contacts
+            .map((contact) => readObject(contact))
+            .map((contact) => ({
+                email: typeof contact.email === "string" ? contact.email : "",
+                name: typeof contact.name === "string" ? contact.name : null,
+            }))
+            .filter((contact) => contact.email.length > 0)
+        : [];
     const pendingInput = typeof pendingInputRaw.id === "string" && typeof pendingInputRaw.kind === "string"
         ? {
             id: pendingInputRaw.id,
@@ -909,6 +918,9 @@ export async function getLoopRun(auth, runId) {
                 ? {
                     uploadedAt: typeof contactList.uploadedAt === "string" ? contactList.uploadedAt : null,
                     recipientCount,
+                    documentRef: typeof contactList.documentRef === "string" ? contactList.documentRef : null,
+                    lotRef: typeof contactList.lotRef === "string" ? contactList.lotRef : null,
+                    contacts: contactRows,
                 }
                 : null,
             delivery: distribution.sentAt || typeof distribution.successCount === "number" || typeof distribution.failureCount === "number"
