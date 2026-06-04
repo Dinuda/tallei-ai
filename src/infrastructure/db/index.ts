@@ -1154,7 +1154,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         job_type TEXT NOT NULL
-          CHECK (job_type IN ('agent', 'ceo_finalize', 'distribution')),
+          CHECK (job_type IN ('agent', 'ceo_strategy', 'ceo_finalize', 'distribution')),
         task_id UUID REFERENCES loop_run_tasks(id) ON DELETE CASCADE,
         status TEXT NOT NULL DEFAULT 'pending'
           CHECK (status IN ('pending', 'processing', 'done', 'failed')),
@@ -1177,7 +1177,7 @@ export async function initDb() {
         DROP CONSTRAINT IF EXISTS loop_heartbeat_jobs_job_type_check;
       ALTER TABLE loop_heartbeat_jobs
         ADD CONSTRAINT loop_heartbeat_jobs_job_type_check
-        CHECK (job_type IN ('agent', 'ceo_finalize', 'distribution'));
+        CHECK (job_type IN ('agent', 'ceo_strategy', 'ceo_finalize', 'distribution'));
     `);
 
     await client.query(`
@@ -1436,6 +1436,32 @@ export async function initDb() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (tenant_id, user_id, idempotency_key)
       );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS resend_broadcast_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_run_id UUID REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        broadcast_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        email_id TEXT,
+        recipient TEXT,
+        link_url TEXT,
+        svix_id TEXT,
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        event_created_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_resend_broadcast_events_svix
+        ON resend_broadcast_events(svix_id)
+        WHERE svix_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_resend_broadcast_events_broadcast
+        ON resend_broadcast_events(tenant_id, user_id, broadcast_id, event_type);
+      CREATE INDEX IF NOT EXISTS idx_resend_broadcast_events_run
+        ON resend_broadcast_events(workflow_run_id, created_at DESC);
     `);
 
     await client.query(`

@@ -14,12 +14,47 @@ import { synthesizeFinalOutput } from "./run-llm.js";
 import { insertComment, insertEvent, insertOrUpdateArtifact, loadRunComments, readObject } from "./run-store.js";
 import type { LoopRunContext } from "./run-context.js";
 
+const GMAIL_CLIPPING_WARNING_BYTES = 95_000;
+
 function readDeliveryMeta(loopExecutor: Record<string, unknown>) {
   return readObject(loopExecutor.deliveryBatch ?? loopExecutor.distribution);
 }
 
 function readRecipients(loopExecutor: Record<string, unknown>) {
   return readObject(loopExecutor.deliveryRecipients ?? loopExecutor.contactList);
+}
+
+function readCustomEmailHtml(loopExecutor: Record<string, unknown>): string | null {
+    if (typeof loopExecutor.deliveryEmailHtml === "string" && loopExecutor.deliveryEmailHtml.trim()) {
+        return loopExecutor.deliveryEmailHtml;
+    }
+    const emailTemplate = readObject(loopExecutor.emailTemplate);
+    if (typeof emailTemplate.html === "string" && emailTemplate.html.trim()) {
+        return emailTemplate.html;
+    }
+    return null;
+}
+
+function isDryRunBroadcastId(value: string | null | undefined): boolean {
+    return typeof value === "string" && value.startsWith("dry_broadcast_");
+}
+
+function buildTrackingDiagnostics(input: {
+    html: string;
+    text: string;
+    webhook?: Record<string, unknown> | null;
+}) {
+    const htmlBytes = Buffer.byteLength(input.html ?? "", "utf8");
+    const textBytes = Buffer.byteLength(input.text ?? "", "utf8");
+    return {
+        htmlBytes,
+        textBytes,
+        gmailClippingRisk: htmlBytes >= GMAIL_CLIPPING_WARNING_BYTES,
+        gmailClippingWarningBytes: GMAIL_CLIPPING_WARNING_BYTES,
+        openTracking: "best_effort_pixel",
+        note: "Resend email.opened depends on the recipient loading the HTML tracking pixel. Image blocking, privacy proxies, security scanners, and Gmail clipping can hide or distort opens; clicks are more reliable engagement events.",
+        webhookEndpoint: typeof input.webhook?.endpoint === "string" ? input.webhook.endpoint : null,
+    };
 }
 
 export async function runDistributionHeartbeat(runId: string) {
@@ -62,9 +97,7 @@ export async function runDistributionHeartbeat(runId: string) {
         || integrations.has("react_email")
         || toolRefs.has("internal.react_email_template");
     const generatedContent = await formatter.formatForBroadcast(formattedNewsletter, { templateId, useReactEmail });
-    const customEmailHtml = typeof loopExecutor.deliveryEmailHtml === "string" && loopExecutor.deliveryEmailHtml.trim()
-        ? loopExecutor.deliveryEmailHtml
-        : null;
+    const customEmailHtml = readCustomEmailHtml(loopExecutor);
     const broadcastContent = customEmailHtml
         ? { ...generatedContent, html: customEmailHtml }
         : generatedContent;
@@ -74,17 +107,19 @@ export async function runDistributionHeartbeat(runId: string) {
         ? existingDistribution.broadcastId
         : null;
     if (existingBroadcastId) {
+        const dryRun = isDryRunBroadcastId(existingBroadcastId) || existingDistribution.dryRun === true;
         const recipientResults = contacts.map((contact) => ({
             email: contact.email,
-            ok: true,
+            ok: !dryRun,
             providerMessageId: existingBroadcastId,
+            ...(dryRun ? { error: "Outbound email dry-run; no email was sent" } : {}),
         }));
         const distributionMeta = {
             ...existingDistribution,
             startedAt: typeof existingDistribution.startedAt === "string" ? existingDistribution.startedAt : new Date().toISOString(),
             sentAt: new Date().toISOString(),
-            successCount: contacts.length,
-            failureCount: 0,
+            successCount: dryRun ? 0 : contacts.length,
+            failureCount: dryRun ? contacts.length : 0,
             openCount: typeof existingDistribution.openCount === "number" ? existingDistribution.openCount : 0,
             clickCount: typeof existingDistribution.clickCount === "number" ? existingDistribution.clickCount : 0,
             unsubscribeCount: typeof existingDistribution.unsubscribeCount === "number" ? existingDistribution.unsubscribeCount : 0,
@@ -95,6 +130,7 @@ export async function runDistributionHeartbeat(runId: string) {
             provider: "resend_broadcast",
             emailSource: customEmailHtml ? "builder" : "react_email",
             broadcastId: existingBroadcastId,
+            ...(dryRun ? { dryRun: true, broadcastError: "Outbound email is disabled; Resend was not called." } : {}),
             recipients: recipientResults,
         };
         return finalizeDistributionRun({
@@ -104,14 +140,30 @@ export async function runDistributionHeartbeat(runId: string) {
             contacts,
             distributionMeta,
             recipientResults,
-            finalStatus: "completed",
+            finalStatus: dryRun ? "blocked" : "completed",
         });
     }
-    const { createAndSendResendBroadcast, createResendSegment, resolveResendMarketingCredentials, upsertResendContactInSegment, } = await import("../notifications/resend-broadcast.js");
+    const { createAndSendResendBroadcast, createResendSegment, ensureResendMetricsWebhook, resolveResendMarketingCredentials, upsertResendContactInSegment, } = await import("../notifications/resend-broadcast.js");
     const creds = await resolveResendMarketingCredentials(auth);
     if (!creds) {
         throw new Error("Resend is not configured for marketing broadcasts. Connect Resend in workflow connector settings or set signup Resend environment variables.");
     }
+    const webhook = await ensureResendMetricsWebhook({ auth, creds });
+    if (!webhook.ok) {
+        throw new Error(webhook.error ?? "Failed to configure Resend metrics webhook before sending broadcast");
+    }
+    const metricsWebhook = {
+        id: typeof webhook.webhookId === "string" ? webhook.webhookId : null,
+        endpoint: typeof webhook.endpoint === "string" ? webhook.endpoint : null,
+        created: webhook.created === true,
+        updated: webhook.updated === true,
+        events: Array.isArray(webhook.events) ? webhook.events : [],
+    };
+    const trackingDiagnostics = buildTrackingDiagnostics({
+        html: broadcastContent.html,
+        text: broadcastContent.text,
+        webhook: metricsWebhook,
+    });
     let segmentId = typeof existingDistribution.segmentId === "string"
         ? existingDistribution.segmentId
         : null;
@@ -174,6 +226,8 @@ export async function runDistributionHeartbeat(runId: string) {
         segmentId,
         provider: "resend_broadcast",
         emailSource: customEmailHtml ? "builder" : "react_email",
+        metricsWebhook,
+        trackingDiagnostics,
         recipients: recipientResults,
     };
     if (processedCount < contacts.length) {
@@ -236,11 +290,20 @@ export async function runDistributionHeartbeat(runId: string) {
         name: `${context.workflowTitle} — ${context.runId.slice(0, 8)}`,
     });
     if (!broadcast.ok || !broadcast.broadcastId) {
+        const broadcastError = broadcast.error ?? "Failed to send Resend broadcast";
+        const failedRecipients = contacts.map((contact) => ({
+            email: contact.email,
+            ok: false,
+            error: broadcastError,
+        }));
         const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
             distribution: {
                 ...inProgressMeta,
                 nextIndex: contacts.length,
-                broadcastError: broadcast.error ?? "Failed to send Resend broadcast",
+                successCount: 0,
+                failureCount: contacts.length,
+                broadcastError,
+                recipients: failedRecipients,
             },
             deliveryAction: {
                 kind: "send_broadcast",
@@ -248,8 +311,8 @@ export async function runDistributionHeartbeat(runId: string) {
                 startedAt: typeof existingDistribution.startedAt === "string" ? existingDistribution.startedAt : new Date().toISOString(),
                 completedAt: new Date().toISOString(),
                 recipientCount: contacts.length,
-                successCount,
-                failureCount,
+                successCount: 0,
+                failureCount: contacts.length,
             },
         });
         await pool.query(`UPDATE workflow_runs
@@ -265,15 +328,17 @@ export async function runDistributionHeartbeat(runId: string) {
             context.userId,
             JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
         ]);
-        throw new Error(broadcast.error ?? "Failed to send Resend broadcast");
+        throw new Error(broadcastError);
     }
+    const dryRun = broadcast.dryRun === true || isDryRunBroadcastId(broadcast.broadcastId);
     const broadcastRecipients = contacts.map((contact) => {
         const synced = recipientResults.find((recipient) => recipient.email === contact.email);
         return {
             email: contact.email,
-            ok: synced?.ok ?? false,
+            ok: dryRun ? false : synced?.ok ?? false,
             providerMessageId: broadcast.broadcastId,
             ...(synced?.error ? { error: synced.error } : {}),
+            ...(dryRun ? { error: "Outbound email dry-run; no email was sent" } : {}),
         };
     });
     const broadcastSuccessCount = broadcastRecipients.filter((recipient) => recipient.ok).length;
@@ -286,6 +351,14 @@ export async function runDistributionHeartbeat(runId: string) {
         nextIndex: contacts.length,
         segmentId,
         broadcastId: broadcast.broadcastId,
+        metricsWebhook,
+        trackingDiagnostics: {
+            ...trackingDiagnostics,
+            htmlBytes: typeof broadcast.htmlBytes === "number" ? broadcast.htmlBytes : trackingDiagnostics.htmlBytes,
+            textBytes: typeof broadcast.textBytes === "number" ? broadcast.textBytes : trackingDiagnostics.textBytes,
+            gmailClippingRisk: broadcast.gmailClippingRisk === true || trackingDiagnostics.gmailClippingRisk,
+        },
+        ...(dryRun ? { dryRun: true, broadcastError: "Outbound email is disabled; Resend was not called." } : {}),
         recipients: broadcastRecipients,
     };
     const finalStatus = broadcastFailureCount > 0 ? "blocked" : "completed";
@@ -312,6 +385,7 @@ async function finalizeDistributionRun(input: {
     const auth = authFromContext(context);
     const successCount = recipientResults.filter((recipient) => recipient.ok).length;
     const failureCount = recipientResults.filter((recipient) => !recipient.ok).length;
+    const dryRun = distributionMeta.dryRun === true || isDryRunBroadcastId(typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : null);
     const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, { deliveryBatch: distributionMeta });
     const loopExecutorPatchWithAction = mergeLoopExecutorMeta({ loop_executor: loopExecutorPatch.loop_executor }, {
         deliveryAction: {
@@ -337,9 +411,11 @@ async function finalizeDistributionRun(input: {
         body: [
             finalOutput,
             "",
-            `Distribution ${finalStatus === "completed" ? "complete" : "needs review"}: Resend broadcast ${broadcastId ?? "pending"} to ${successCount} contact(s) in segment, ${failureCount} contact sync failure(s).`,
-            failedRecipients.length > 0 ? `Contact sync failed: ${failedRecipients.join(", ")}` : null,
-            "Broadcast sends use Resend marketing delivery (not transactional email). Delivery and bounces are tracked in Resend.",
+            dryRun
+                ? `Distribution needs review: outbound email is disabled, so no email was sent to ${contacts.length} contact(s).`
+                : `Distribution ${finalStatus === "completed" ? "complete" : "needs review"}: Resend broadcast ${broadcastId ?? "pending"} submitted for ${successCount} contact(s), ${failureCount} failure(s).`,
+            failedRecipients.length > 0 ? `Failed recipients: ${failedRecipients.join(", ")}` : null,
+            dryRun ? null : "Broadcast sends use Resend marketing delivery (not transactional email). Delivery and bounces are tracked in Resend.",
         ].filter(Boolean).join("\n"),
     });
     await insertEvent({
@@ -412,7 +488,9 @@ async function finalizeDistributionRun(input: {
     await deliverStatusNotification({
         auth,
         title: finalStatus === "completed" ? `${context.workflowTitle} broadcast completed` : `${context.workflowTitle} broadcast needs review`,
-        body: `Delivered to ${successCount} recipients. ${failureCount > 0 ? `${failureCount} failed.` : "No delivery failures were reported."}`,
+        body: dryRun
+            ? `Outbound email is disabled, so no email was sent to ${contacts.length} recipients.`
+            : `Submitted to ${successCount} recipients. ${failureCount > 0 ? `${failureCount} failed.` : "No delivery failures were reported."}`,
         metadata: { workflowId: context.workflowId, runId: context.runId, status: finalStatus },
     }).catch(() => undefined);
     await insertEvent({

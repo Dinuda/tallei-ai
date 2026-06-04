@@ -18,6 +18,7 @@ import { materializeTasksFromPlan, materializeTasksFromRoster } from "./run-stra
 import { getEffectiveLoopConstraints, validateAgentRoster } from "./tool-catalog.js";
 import { isNewsletterLoopDefinition } from "./delivery-format.js";
 import { normalizeNewsletterTemplateId, parseContactListCsv } from "./presets/newsletter.js";
+import { resolveLoopPreset } from "./presets/registry.js";
 
 const DELIVERY_RECIPIENTS_INPUT_ID = "delivery_recipients";
 
@@ -227,7 +228,11 @@ export async function approveLoopStrategy(input: {
   }
 
   const runMeta = readLoopExecutorMeta(context.metadataJson);
-  const rosterSource = input.roster ?? runMeta.approvedRoster ?? runMeta.proposedRoster;
+  const preset = resolveLoopPreset(context.definition);
+  const rosterSource = preset?.buildRoster(context.definition.goal).agents
+    ?? input.roster
+    ?? runMeta.approvedRoster
+    ?? runMeta.proposedRoster;
   if (!rosterSource?.length) throw new Error("No agent roster is available to approve");
 
   const roster = normalizeRosterAgents(rosterSource);
@@ -242,7 +247,7 @@ export async function approveLoopStrategy(input: {
     [context.runId]
   )).rows[0]?.strategy_output ?? "";
 
-  if (isDynamicPlanDefinition(context.definition)) {
+  if (isDynamicPlanDefinition(context.definition) && !preset) {
     await materializeTasksFromPlan({ context, plan: context.definition.plan!, strategyOutput });
   } else {
     await materializeTasksFromRoster({ context, roster, strategyOutput });

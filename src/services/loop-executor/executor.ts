@@ -14,6 +14,7 @@ import { applyEmailApprovalResult } from "./approval.js";
 import { advanceDynamicRunAfterSeq } from "./gates.js";
 import { isDynamicPlanDefinition, normalizeRosterAgents, readLoopDefinition } from "./plan.js";
 import { extractPrimaryContentFromComments, sanitizeSubscriberBody } from "./presets/newsletter.js";
+import { resolveLoopPreset } from "./presets/registry.js";
 import {
   assertRunAccess,
   authFromContext,
@@ -25,7 +26,7 @@ import {
 import { scheduleHeartbeat } from "./run-heartbeat.js";
 import { synthesizeFinalOutput } from "./run-llm.js";
 import { insertComment, insertEvent, insertOrUpdateArtifact, loadRunArtifacts, loadRunComments, readObject } from "./run-store.js";
-import { buildCeoStrategyOutput } from "./run-strategy.js";
+import { buildCeoStrategyOutput, materializeTasksFromRoster } from "./run-strategy.js";
 import { getEffectiveLoopConstraints, listAllowedLoopTools, validateAgentRoster } from "./tool-catalog.js";
 import { loopRunAgentSchema, loopToolAssignmentSchema } from "./types.js";
 
@@ -61,6 +62,7 @@ export async function runCeoStrategyHeartbeat(runId: string) {
     const context = await loadRunContext(runId);
     const auth = authFromContext(context);
     const ceoOutput = await buildCeoStrategyOutput(context);
+    const preset = resolveLoopPreset(context.definition);
     const rosterValidation = await validateAgentRoster({
         agents: ceoOutput.agents,
         definition: getEffectiveLoopConstraints(context.definition),
@@ -70,6 +72,62 @@ export async function runCeoStrategyHeartbeat(runId: string) {
     if (!rosterValidation.ok) {
         const message = (rosterValidation.issues ?? []).map((issue) => issue.message).join("; ");
         throw new Error(`CEO proposed invalid roster: ${message}`);
+    }
+    if (preset) {
+        await materializeTasksFromRoster({ context, roster: ceoOutput.agents, strategyOutput: ceoOutput.strategyText });
+        const firstTask = await pool.query<{ id: string }>(
+            `SELECT id FROM loop_run_tasks WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+             AND status = 'todo' ORDER BY seq ASC LIMIT 1`,
+            [context.runId, context.tenantId, context.userId]
+        );
+        const firstTaskId = firstTask.rows[0]?.id ?? null;
+        const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
+            approvedRoster: ceoOutput.agents,
+            rosterApprovedAt: new Date().toISOString(),
+            strategyReadyAt: new Date().toISOString(),
+        });
+        await pool.query(`UPDATE workflow_runs
+         SET status = 'strategy_approved',
+             strategy_output = $4,
+             waiting_for_strategy_approval = FALSE,
+             metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $5::jsonb,
+             updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3`, [
+            context.runId,
+            context.tenantId,
+            context.userId,
+            ceoOutput.strategyText,
+            JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
+        ]);
+        await insertEvent({
+            context,
+            eventType: "preset_roster_started",
+            payload: { presetId: preset.id, firstTaskId, agentCount: ceoOutput.agents.length },
+        });
+        if (firstTaskId) {
+            await scheduleHeartbeat({
+                tenantId: context.tenantId,
+                userId: context.userId,
+                runId: context.runId,
+                jobType: "agent",
+                taskId: firstTaskId,
+            });
+        } else {
+            await scheduleHeartbeat({
+                tenantId: context.tenantId,
+                userId: context.userId,
+                runId: context.runId,
+                jobType: "ceo_finalize",
+            });
+        }
+        return {
+            runId: context.runId,
+            status: "strategy_approved",
+            strategyOutput: ceoOutput.strategyText,
+            approvedRoster: ceoOutput.agents,
+        };
     }
     await insertComment({
         context,
@@ -600,9 +658,12 @@ export async function getLoopRunRoster(auth, runId) {
     await assertRunAccess(auth, runId);
     const context = await loadRunContext(runId);
     const runMeta = readLoopExecutorMeta(context.metadataJson);
-    const proposedRoster = runMeta.proposedRoster ?? [];
     const approvedRoster = runMeta.approvedRoster ?? null;
     const editable = context.runStatus === "waiting_for_strategy_approval";
+    const preset = resolveLoopPreset(context.definition);
+    const proposedRoster = editable && !approvedRoster && preset
+        ? preset.buildRoster(context.definition.goal).agents
+        : runMeta.proposedRoster ?? [];
     const activeRoster = approvedRoster ?? proposedRoster;
     const constraints = getEffectiveLoopConstraints(context.definition);
     const rosterValidation = activeRoster.length
@@ -758,13 +819,24 @@ export async function getLoopRun(auth, runId) {
     const approvalDecisionMeta = readObject(meta.approvalDecision);
     const contactList = readObject(meta.deliveryRecipients ?? meta.contactList);
     const distribution = readObject(meta.deliveryBatch ?? meta.distribution);
+    const emailTemplateMeta = readObject(meta.emailTemplate);
     const deliveryEmailHtml = typeof meta.deliveryEmailHtml === "string" && meta.deliveryEmailHtml.trim()
         ? meta.deliveryEmailHtml
-        : null;
-    const deliveryEmailUpdatedAt = typeof meta.deliveryEmailUpdatedAt === "string" ? meta.deliveryEmailUpdatedAt : null;
+        : typeof emailTemplateMeta.html === "string" && emailTemplateMeta.html.trim()
+            ? emailTemplateMeta.html
+            : null;
+    const deliveryEmailDesign = meta.deliveryEmailDesign ?? emailTemplateMeta.design ?? null;
+    const deliveryEmailUpdatedAt = typeof meta.deliveryEmailUpdatedAt === "string"
+        ? meta.deliveryEmailUpdatedAt
+        : typeof emailTemplateMeta.updatedAt === "string"
+            ? emailTemplateMeta.updatedAt
+            : null;
     const pendingInputRaw = readObject(meta.pendingInput);
     const deliveryActionRaw = readObject(meta.deliveryAction);
     const recipientsRaw = Array.isArray(distribution.recipients) ? distribution.recipients : [];
+    const dryRunDelivery = distribution.dryRun === true
+        || (typeof distribution.broadcastId === "string" && distribution.broadcastId.startsWith("dry_broadcast_"))
+        || (typeof deliveryActionRaw.broadcastId === "string" && deliveryActionRaw.broadcastId.startsWith("dry_broadcast_"));
     const requestedTo = typeof approvalRequest.to === "string" ? approvalRequest.to : null;
     const requestedAt = typeof approvalRequest.sentAt === "string" ? approvalRequest.sentAt : null;
     const approvedAt = typeof approvalDecisionMeta.approvedAt === "string"
@@ -801,26 +873,32 @@ export async function getLoopRun(auth, runId) {
     const deliveryAction = typeof deliveryActionRaw.kind === "string"
         ? {
             kind: deliveryActionRaw.kind,
-            status: deliveryActionRaw.status === "completed" || deliveryActionRaw.status === "partial_failure" || deliveryActionRaw.status === "in_progress"
+            status: dryRunDelivery
+                ? "failed"
+                : deliveryActionRaw.status === "completed" || deliveryActionRaw.status === "partial_failure" || deliveryActionRaw.status === "in_progress" || deliveryActionRaw.status === "failed" || deliveryActionRaw.status === "syncing_contacts"
                 ? deliveryActionRaw.status
                 : "pending",
             startedAt: typeof deliveryActionRaw.startedAt === "string" ? deliveryActionRaw.startedAt : null,
             completedAt: typeof deliveryActionRaw.completedAt === "string" ? deliveryActionRaw.completedAt : null,
             recipientCount: typeof deliveryActionRaw.recipientCount === "number" ? deliveryActionRaw.recipientCount : 0,
-            successCount: typeof deliveryActionRaw.successCount === "number" ? deliveryActionRaw.successCount : 0,
-            failureCount: typeof deliveryActionRaw.failureCount === "number" ? deliveryActionRaw.failureCount : 0,
+            successCount: dryRunDelivery ? 0 : typeof deliveryActionRaw.successCount === "number" ? deliveryActionRaw.successCount : 0,
+            failureCount: dryRunDelivery
+                ? (typeof deliveryActionRaw.recipientCount === "number" ? deliveryActionRaw.recipientCount : recipientCount)
+                : typeof deliveryActionRaw.failureCount === "number" ? deliveryActionRaw.failureCount : 0,
+            broadcastId: typeof deliveryActionRaw.broadcastId === "string" ? deliveryActionRaw.broadcastId : null,
         }
         : null;
+    const normalizedRunStatus = dryRunDelivery && row.status === "completed" ? "blocked" : row.status;
     return {
         id: row.id,
         workflowId: row.workflow_id,
-        status: row.status,
+        status: normalizedRunStatus,
         runMode: row.run_mode,
         scheduledFor: row.scheduled_for,
         strategyOutput: row.strategy_output,
         waitingForStrategyApproval: row.waiting_for_strategy_approval,
         draftOutput: row.draft_output,
-        connectorActionStatus: row.connector_action_status,
+        connectorActionStatus: dryRunDelivery && row.connector_action_status === "completed" ? "partial_failure" : row.connector_action_status,
         pendingInput,
         deliveryAction,
         stats: {
@@ -836,13 +914,28 @@ export async function getLoopRun(auth, runId) {
             delivery: distribution.sentAt || typeof distribution.successCount === "number" || typeof distribution.failureCount === "number"
                 ? {
                     sentAt: typeof distribution.sentAt === "string" ? distribution.sentAt : null,
-                    successCount: typeof distribution.successCount === "number" ? distribution.successCount : 0,
-                    failureCount: typeof distribution.failureCount === "number" ? distribution.failureCount : 0,
+                    successCount: dryRunDelivery ? 0 : typeof distribution.successCount === "number" ? distribution.successCount : 0,
+                    failureCount: dryRunDelivery
+                        ? (typeof distribution.recipientCount === "number" ? distribution.recipientCount : recipientCount)
+                        : typeof distribution.failureCount === "number" ? distribution.failureCount : 0,
+                    dryRun: dryRunDelivery,
+                    error: typeof distribution.broadcastError === "string"
+                        ? distribution.broadcastError
+                        : dryRunDelivery
+                            ? "Outbound email is disabled; Resend was not called."
+                            : null,
                     openCount: typeof distribution.openCount === "number" ? distribution.openCount : 0,
                     clickCount: typeof distribution.clickCount === "number" ? distribution.clickCount : 0,
                     unsubscribeCount: typeof distribution.unsubscribeCount === "number" ? distribution.unsubscribeCount : 0,
                     openRate: typeof distribution.openRate === "number" ? distribution.openRate : 0,
                     clickRate: typeof distribution.clickRate === "number" ? distribution.clickRate : 0,
+                    deliveredCount: typeof distribution.deliveredCount === "number" ? distribution.deliveredCount : 0,
+                    totalClickCount: typeof distribution.totalClickCount === "number" ? distribution.totalClickCount : 0,
+                    bounceCount: typeof distribution.bounceCount === "number" ? distribution.bounceCount : 0,
+                    failedEventCount: typeof distribution.failedEventCount === "number" ? distribution.failedEventCount : 0,
+                    complaintCount: typeof distribution.complaintCount === "number" ? distribution.complaintCount : 0,
+                    metricsWebhook: readObject(distribution.metricsWebhook),
+                    trackingDiagnostics: readObject(distribution.trackingDiagnostics),
                     recipients: recipientsRaw.map((recipient) => readObject(recipient)).map((recipient) => ({
                         email: typeof recipient.email === "string" ? recipient.email : "",
                         ok: recipient.ok === true,
@@ -856,7 +949,7 @@ export async function getLoopRun(auth, runId) {
         emailTemplate: deliveryEmailHtml
             ? {
                 html: deliveryEmailHtml,
-                design: meta.deliveryEmailDesign ?? null,
+                design: deliveryEmailDesign,
                 updatedAt: deliveryEmailUpdatedAt,
             }
             : null,
@@ -878,14 +971,21 @@ export async function updateLoopRunNewsletterDraft(auth, input) {
     const emailHtml = typeof input.emailHtml === "string" && input.emailHtml.trim()
         ? input.emailHtml
         : undefined;
+    const emailUpdatedAt = new Date().toISOString();
     const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
         deliveryContentBody: body,
-        editorUpdatedAt: new Date().toISOString(),
+        editorUpdatedAt: emailUpdatedAt,
         ...(emailHtml
             ? {
                 deliveryEmailHtml: emailHtml,
                 deliveryEmailDesign: input.emailDesign ?? null,
-                deliveryEmailUpdatedAt: new Date().toISOString(),
+                deliveryEmailUpdatedAt: emailUpdatedAt,
+                deliveryEmailSource: "builder",
+                emailTemplate: {
+                    html: emailHtml,
+                    design: input.emailDesign ?? null,
+                    updatedAt: emailUpdatedAt,
+                },
             }
             : {}),
     });
@@ -988,32 +1088,18 @@ export async function executeLoopWorkflow(input) {
             : "A manual loop run has started.",
         metadata: { workflowId: workflow.id, runId, status: "running", runMode: input.runMode },
     }).catch(() => undefined);
-    try {
-        const strategy = await runCeoStrategyHeartbeat(runId);
-        return {
-            runId,
-            status: strategy.status,
-            draftRequired: false,
-            finalOutput: strategy.strategyOutput,
-            strategyOutput: strategy.strategyOutput,
-        };
-    }
-    catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await pool.query(`UPDATE workflow_runs
-       SET status = 'failed',
-           waiting_for_strategy_approval = FALSE,
-           metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb,
-           updated_at = NOW()
-       WHERE id = $1
-         AND tenant_id = $2
-         AND user_id = $3`, [
-            runId,
-            input.auth.tenantId,
-            input.auth.userId,
-            JSON.stringify({ loop_executor: { failedAt: new Date().toISOString(), error: { message } } }),
-        ]);
-        throw error;
-    }
+    await scheduleHeartbeat({
+        tenantId: input.auth.tenantId,
+        userId: input.auth.userId,
+        runId,
+        jobType: "ceo_strategy",
+    });
+    return {
+        runId,
+        status: "running",
+        draftRequired: false,
+        finalOutput: "",
+        strategyOutput: "",
+    };
 }
 //# sourceMappingURL=executor.js.map

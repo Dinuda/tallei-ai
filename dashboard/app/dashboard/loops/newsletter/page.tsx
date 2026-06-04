@@ -17,15 +17,63 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { isLennyNewsletterGoal, isNewsletterLoopDefinition, LENNY_NEWSLETTER_LOOP_GOAL } from "@/lib/lenny-newsletter";
 
-const NEWSLETTER_TASK = "User is writing a newsletter for xyz product every week. Make that a loop.";
+const NEWSLETTER_TASK = LENNY_NEWSLETTER_LOOP_GOAL;
 const NEWSLETTER_CRON = "0 9 * * 1";
+const NEWSLETTER_CEO_TASK =
+  "Run the fixed Lenny newsletter pipeline for product builders. Keep the roster in this order: Search Agent -> Web Search Agent -> Research Agent -> Writer -> Approval Handoff. Ground the run in recent Lenny themes, weekly AI and product-builder sources, and produce one subscriber-ready newsletter draft for approval.";
+const NEWSLETTER_CEO_POLICY =
+  "Use only the fixed newsletter preset roster. Search Agent surfaces memory-backed topics and voice cues. Web Search Agent gathers current weekly sources. Research Agent recommends one lead topic with rationale. Writer drafts the final newsletter. Approval Handoff sends the draft for operator approval before contacts upload and delivery.";
+
+const NEWSLETTER_PRESET_AGENTS: Array<Omit<LoopAgentPreview, "status">> = [
+  {
+    id: "search_agent",
+    name: "Search Agent",
+    task: "Search every relevant memory about Lenny's Newsletter, including prior issue examples, writing style, voice, formatting, recurring sections, sign-offs, and editorial preferences. Output three ranked topic candidates plus Lenny voice and theme guidance.",
+    tools: [{
+      ref: "internal.memory_search",
+      config: {
+        limit: 20,
+        query: "Lenny's Newsletter previous issues writing style voice formatting examples editorial preferences recurring sections tone sign-off product builders",
+      },
+    }],
+  },
+  {
+    id: "web_search_agent",
+    name: "Web Search Agent",
+    task: "Gather evidence from this week's AI and product-builder sources. In development, use the seeded weekly links; in production, use live web search across the approved source domains.",
+    tools: [{ ref: "internal.web_search" }],
+  },
+  {
+    id: "research_agent",
+    name: "Research Agent",
+    task: "Synthesize the candidate topics, choose one recommended lead topic, explain why it fits Lenny's recent direction, and hand the writer a concise briefing.",
+    tools: [{ ref: "internal.llm_only" }],
+  },
+  {
+    id: "writer",
+    name: "Writer",
+    task: "Draft the subscriber-facing newsletter from the selected topic and briefing. Output only the final newsletter body with subject metadata, not workflow notes.",
+    tools: [{ ref: "internal.llm_only" }],
+  },
+  {
+    id: "approval_handoff",
+    name: "Approval Handoff",
+    task: "Send the final draft to the operator for approval before delivery.",
+    tools: [
+      { ref: "internal.email_approval_request" },
+      { ref: "internal.email_builder_compose" },
+      { ref: "internal.email_builder_render" },
+    ],
+  },
+];
 
 type LoopAgentPreview = {
   id: string;
   name: string;
   task: string;
-  tools: Array<{ ref: string }>;
+  tools: Array<{ ref: string; config?: Record<string, unknown> }>;
   status?: string;
 };
 
@@ -43,6 +91,7 @@ type LoopWorkflow = {
     integrations?: string[];
     ceo: { name: string; task: string; policy: string };
     draftPolicy: { requireDraftBeforeExternalAction: boolean; approvalRequiredFor: string[] };
+    presetId?: string;
   };
 };
 
@@ -50,8 +99,12 @@ type LoopRunResult = {
   runId: string;
   status: string;
   draftRequired: boolean;
-  finalOutput: string;
   createdAt?: string | null;
+};
+
+type RunResponse = Partial<LoopRunResult> & {
+  id?: string;
+  draftOutput?: string | null;
 };
 
 type WorkflowListRun = {
@@ -70,33 +123,11 @@ type WorkflowListItem = {
   latestRun: WorkflowListRun | null;
 };
 
-type LoopRunTask = {
-  id: string;
-  seq: number;
-  agentId: string;
-  agentName: string;
-  toolKey: string;
-  assignedTools?: Array<{ ref: string }>;
-  status: string;
-  inputJson: unknown;
-};
-
-type RosterAgent = {
-  id: string;
-  name: string;
-  task: string;
-  tools: Array<{ ref: string }>;
-};
-
 function formatDate(value: string | null): string {
   if (!value) return "Not scheduled";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
-}
-
-function readRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function iconForAgent(agent: LoopAgentPreview) {
@@ -120,32 +151,51 @@ function prettyAgentStatus(status?: string) {
   return status.replace(/_/g, " ");
 }
 
-function taskToAgent(task: LoopRunTask): LoopAgentPreview {
-  const input = readRecord(task.inputJson);
-  const agentInput = readRecord(input.agent);
-  const taskText = typeof agentInput.task === "string" && agentInput.task.trim()
-    ? agentInput.task.trim()
-    : task.toolKey.replace(/_/g, " ");
-  const tools = task.assignedTools?.length
-    ? task.assignedTools
-    : task.toolKey
-      ? [{ ref: task.toolKey }]
-      : [];
-  return {
-    id: task.agentId || task.id,
-    name: task.agentName,
-    task: taskText,
-    tools,
-    status: task.status,
-  };
+function ToolConfigDetails({ tools, compact = false }: { tools: LoopAgentPreview["tools"]; compact?: boolean }) {
+  const configuredTools = tools.filter((tool) => tool.config);
+  if (configuredTools.length === 0) return null;
+  return (
+    <div className={compact ? "mt-2 space-y-2" : "mt-3 space-y-2"}>
+      {configuredTools.map((tool) => (
+        <div key={`${tool.ref}-config`} className="border border-slate-200 bg-white px-2 py-2 text-xs text-slate-600">
+          <div className="font-medium text-slate-700">{tool.ref} config</div>
+          {typeof tool.config?.limit === "number" ? (
+            <div className="mt-1">limit: {tool.config.limit}</div>
+          ) : null}
+          {typeof tool.config?.query === "string" ? (
+            <div className="mt-1 break-words">query: {tool.config.query}</div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function newsletterPresetAgents(status?: string): LoopAgentPreview[] {
+  const agentStatus = status === "running" ? "in_progress" : "queued";
+  return NEWSLETTER_PRESET_AGENTS.map((agent) => ({ ...agent, status: agentStatus }));
+}
+
+function isExplicitLennyNewsletterLoop(loop: LoopWorkflow): boolean {
+  return loop.definition?.presetId === "newsletter" && isLennyNewsletterGoal(loop.definition?.goal);
+}
+
+function isAnyLennyNewsletterLoop(loop: LoopWorkflow): boolean {
+  return isLennyNewsletterGoal(loop.definition?.goal) || /lenny/i.test(loop.title);
 }
 
 function findNewsletterLoop(loops: LoopWorkflow[]): LoopWorkflow | null {
-  return loops.find((loop) =>
-    loop.definition?.goal === NEWSLETTER_TASK
-    || loop.title === "Newsletter Loop"
-    || loop.id === "hardcoded-newsletter-loop-v1"
-  ) ?? null;
+  return loops.find(isExplicitLennyNewsletterLoop)
+    ?? loops.find(isAnyLennyNewsletterLoop)
+    ?? loops.find((loop) =>
+      isNewsletterLoopDefinition({
+        goal: loop.definition?.goal,
+        presetId: loop.definition?.presetId,
+        title: loop.title,
+      })
+      && !/\bxyz\b/i.test(`${loop.title} ${loop.definition?.goal ?? ""}`)
+    )
+    ?? null;
 }
 
 function mapWorkflowRun(run: WorkflowListRun): LoopRunResult {
@@ -153,8 +203,23 @@ function mapWorkflowRun(run: WorkflowListRun): LoopRunResult {
     runId: run.id,
     status: run.status,
     draftRequired: run.status === "waiting_for_approval",
-    finalOutput: run.draftOutput ?? "",
     createdAt: run.createdAt,
+  };
+}
+
+function normalizeRunResponse(run: RunResponse): LoopRunResult | null {
+  const runId = typeof run.runId === "string" && run.runId.trim()
+    ? run.runId
+    : typeof run.id === "string" && run.id.trim()
+      ? run.id
+      : null;
+  if (!runId) return null;
+  const status = typeof run.status === "string" && run.status.trim() ? run.status : "running";
+  return {
+    runId,
+    status,
+    draftRequired: run.draftRequired === true || status === "waiting_for_approval",
+    createdAt: typeof run.createdAt === "string" ? run.createdAt : null,
   };
 }
 
@@ -207,38 +272,10 @@ export default function NewsletterLoopPage() {
       if (activeRun?.id) {
         setSelectedRunId(activeRun.id);
         setRun(mapWorkflowRun(activeRun));
-        const [tasksResponse, rosterResponse] = await Promise.all([
-          fetch(`/api/workflows/runs/${activeRun.id}/tasks`, { cache: "no-store" }),
-          fetch(`/api/workflows/runs/${activeRun.id}/roster`, { cache: "no-store" }),
-        ]);
-        const [tasksPayload, rosterPayload] = await Promise.all([
-          tasksResponse.json().catch(() => ({})),
-          rosterResponse.json().catch(() => ({})),
-        ]);
-        const tasks = tasksResponse.ok && Array.isArray((tasksPayload as { tasks?: LoopRunTask[] }).tasks)
-          ? (tasksPayload as { tasks: LoopRunTask[] }).tasks
-          : [];
-        if (tasks.length > 0) {
-          setAgents([...tasks].sort((a, b) => a.seq - b.seq).map(taskToAgent));
-        } else {
-          const roster = (rosterPayload as {
-            roster?: {
-              approvedRoster?: RosterAgent[] | null;
-              proposedRoster?: RosterAgent[];
-            };
-          }).roster;
-          const activeRoster = roster?.approvedRoster?.length ? roster.approvedRoster : roster?.proposedRoster ?? [];
-          setAgents(activeRoster.map((agent) => ({
-            id: agent.id,
-            name: agent.name,
-            task: agent.task,
-            tools: agent.tools,
-            status: "queued",
-          })));
-        }
+        setAgents(newsletterPresetAgents());
       } else {
         setRun(null);
-        setAgents([]);
+        setAgents(newsletterPresetAgents());
         setSelectedRunId(null);
       }
     } catch (loadError) {
@@ -271,6 +308,8 @@ export default function NewsletterLoopPage() {
             "internal.web_search",
             "internal.llm_only",
             "internal.email_approval_request",
+            "internal.email_builder_compose",
+            "internal.email_builder_render",
             "internal.resend_broadcast",
             "internal.react_email_template",
           ],
@@ -296,9 +335,12 @@ export default function NewsletterLoopPage() {
       const response = await fetch(`/api/workflows/internal/loops/${activeWorkflow.id}/run`, { method: "POST" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "Failed to run newsletter loop");
-      const nextRun = payload.run as LoopRunResult;
-      setRun(nextRun);
-      router.push(`/dashboard/loops/${activeWorkflow.id}/runs/${nextRun.runId}`);
+      const nextRun = normalizeRunResponse(payload.run as RunResponse);
+      if (nextRun?.runId) {
+        router.push(`/dashboard/loops/${activeWorkflow.id}/runs/${nextRun.runId}`);
+        return;
+      }
+      throw new Error("Run started but backend did not return a run id");
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Failed to run newsletter loop");
     } finally {
@@ -320,7 +362,6 @@ export default function NewsletterLoopPage() {
         runId: approved.id,
         status: approved.status,
         draftRequired: approved.status === "waiting_for_approval",
-        finalOutput: approved.draftOutput ?? run.finalOutput,
         createdAt: approved.createdAt,
       });
       setNotice("Draft approved. Run completed.");
@@ -343,8 +384,8 @@ export default function NewsletterLoopPage() {
               </Link>
             </Button>
             <div>
-              <h1 className="text-xl font-semibold text-slate-950">Weekly Product Newsletter</h1>
-              <p className="mt-1 text-sm text-slate-500">CEO proposes a fresh agent roster each run before execution starts.</p>
+              <h1 className="text-xl font-semibold text-slate-950">Lenny&apos;s Weekly Newsletter</h1>
+              <p className="mt-1 text-sm text-slate-500">Fixed Search → Research → Writer → Approval pipeline from the newsletter preset.</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -462,10 +503,10 @@ export default function NewsletterLoopPage() {
               CEO
             </div>
             <p className="mt-3 text-sm text-slate-700">
-              {workflow?.definition.ceo.task ?? `Orchestrate this recurring loop, spawn each specialist once, pass structured output forward, and produce the final result: ${NEWSLETTER_TASK}`}
+              {NEWSLETTER_CEO_TASK}
             </p>
             <p className="mt-3 border-l-2 border-indigo-200 pl-3 text-xs text-slate-500">
-              {workflow?.definition.ceo.policy ?? "Decide and coordinate only. Do not call specialist tools directly. All external actions must become approval drafts."}
+              {NEWSLETTER_CEO_POLICY}
             </p>
           </div>
 
@@ -502,6 +543,7 @@ export default function NewsletterLoopPage() {
                         ))}
                       </div>
                     ) : null}
+                    <ToolConfigDetails tools={agent.tools} />
                   </div>
                 ))}
               </div>
@@ -515,14 +557,30 @@ export default function NewsletterLoopPage() {
           <div className="border border-slate-200 bg-white p-5">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
               <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-              Latest output
+              Run agents
             </div>
-            {run?.finalOutput ? (
-              <pre className="mt-3 max-h-[420px] overflow-auto whitespace-pre-wrap bg-slate-950 p-4 text-xs leading-5 text-slate-100">
-                {run.finalOutput}
-              </pre>
+            {agents.length > 0 ? (
+              <div className="mt-4 space-y-3">
+                {agents.map((agent, index) => (
+                  <div key={`summary-${agent.id}-${index}`} className="flex items-start justify-between gap-3 border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="grid h-7 w-7 shrink-0 place-items-center border border-slate-200 bg-white text-slate-600">
+                          {iconForAgent(agent)}
+                        </span>
+                        <p className="text-sm font-medium text-slate-900">{agent.name}</p>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-600">{agent.task}</p>
+                      <ToolConfigDetails tools={agent.tools} compact />
+                    </div>
+                    <span className={`shrink-0 border px-2 py-0.5 text-[11px] font-medium capitalize ${agentStatusClass(agent.status)}`}>
+                      {prettyAgentStatus(agent.status)}
+                    </span>
+                  </div>
+                ))}
+              </div>
             ) : (
-              <p className="mt-3 text-sm text-slate-500">Run the loop to see the researcher, writer, publicist, and final approval draft output here.</p>
+              <p className="mt-3 text-sm text-slate-500">Run the loop to see the exact agents selected for this run here.</p>
             )}
           </div>
         </section>

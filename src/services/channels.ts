@@ -1,9 +1,9 @@
-import { createHash, randomUUID } from "crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "crypto";
 
 import { config } from "../config/index.js";
 import type { AuthContext } from "../domain/auth/index.js";
 import { getUserById } from "../infrastructure/auth/auth.js";
-import { encryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
+import { decryptMemoryContent, encryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../infrastructure/db/index.js";
 import { sendResendEmail } from "./notifications/resend-email.js";
 
@@ -129,6 +129,14 @@ export interface InboundChannelAction {
   gateId?: string;
   value?: string;
   body?: string;
+}
+
+export interface ResendMetricsWebhookResult {
+  ok: true;
+  processed: boolean;
+  eventType?: string;
+  broadcastId?: string;
+  reason?: string;
 }
 
 interface ChannelRow {
@@ -1603,4 +1611,253 @@ export async function processResendInboundWebhook(input: { body: unknown }): Pro
     channel: kind,
     body: text,
   };
+}
+
+function verifySvixSignature(input: {
+  rawBody: Buffer;
+  svixId: string;
+  svixTimestamp: string;
+  svixSignature: string;
+  signingSecret: string;
+}): boolean {
+  const secret = input.signingSecret.startsWith("whsec_")
+    ? input.signingSecret.slice("whsec_".length)
+    : input.signingSecret;
+  let key: Buffer;
+  try {
+    key = Buffer.from(secret, "base64");
+  } catch {
+    return false;
+  }
+  const signedContent = `${input.svixId}.${input.svixTimestamp}.${input.rawBody.toString("utf8")}`;
+  const expected = createHmac("sha256", key).update(signedContent).digest("base64");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  const candidates = input.svixSignature
+    .split(" ")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith("v1,"))
+    .map((part) => part.slice(3));
+  return candidates.some((candidate) => {
+    const providedBuffer = Buffer.from(candidate, "utf8");
+    return providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
+  });
+}
+
+function firstString(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    const first = value.find((entry) => typeof entry === "string" && entry.trim());
+    return typeof first === "string" ? first.trim() : null;
+  }
+  return null;
+}
+
+function firstEmailLike(value: unknown): string | null {
+  const direct = firstString(value);
+  if (direct) return direct;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = firstEmailLike(entry);
+      if (found) return found;
+    }
+    return null;
+  }
+  const record = readObject(value);
+  return firstString(record.email)
+    ?? firstString(record.address)
+    ?? firstString(record.value)
+    ?? firstString(record.recipient);
+}
+
+function extractResendBroadcastId(payload: Record<string, unknown>, data: Record<string, unknown>): string {
+  const broadcast = readObject(data.broadcast);
+  return firstString(data.broadcast_id)
+    ?? firstString(broadcast.id)
+    ?? firstString(payload.broadcast_id)
+    ?? "";
+}
+
+function extractResendEmailId(data: Record<string, unknown>): string | null {
+  const email = readObject(data.email);
+  return firstString(data.email_id) ?? firstString(email.id) ?? firstString(data.id);
+}
+
+function extractClickUrl(data: Record<string, unknown>): string | null {
+  const click = readObject(data.click);
+  const link = readObject(data.link);
+  return firstString(data.url) ?? firstString(click.url) ?? firstString(link.url) ?? firstString(data.link);
+}
+
+async function refreshResendBroadcastAggregates(input: {
+  tenantId: string;
+  userId: string;
+  runId: string;
+  broadcastId: string;
+  successCount: number;
+}): Promise<void> {
+  const result = await pool.query<{
+    open_count: string;
+    click_count: string;
+    total_click_count: string;
+    delivered_count: string;
+    bounce_count: string;
+    failed_count: string;
+    complaint_count: string;
+  }>(
+    `SELECT
+       COUNT(DISTINCT COALESCE(email_id, recipient, svix_id)) FILTER (WHERE event_type = 'email.opened') AS open_count,
+       COUNT(DISTINCT COALESCE(email_id, recipient, svix_id)) FILTER (WHERE event_type = 'email.clicked') AS click_count,
+       COUNT(*) FILTER (WHERE event_type = 'email.clicked') AS total_click_count,
+       COUNT(DISTINCT COALESCE(email_id, recipient, svix_id)) FILTER (WHERE event_type = 'email.delivered') AS delivered_count,
+       COUNT(DISTINCT COALESCE(email_id, recipient, svix_id)) FILTER (WHERE event_type = 'email.bounced') AS bounce_count,
+       COUNT(DISTINCT COALESCE(email_id, recipient, svix_id)) FILTER (WHERE event_type = 'email.failed') AS failed_count,
+       COUNT(DISTINCT COALESCE(email_id, recipient, svix_id)) FILTER (WHERE event_type = 'email.complained') AS complaint_count
+     FROM resend_broadcast_events
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND broadcast_id = $3`,
+    [input.tenantId, input.userId, input.broadcastId]
+  );
+  const row = result.rows[0] ?? {};
+  const openCount = Number(row.open_count ?? 0);
+  const clickCount = Number(row.click_count ?? 0);
+  const totalClickCount = Number(row.total_click_count ?? 0);
+  const deliveredCount = Number(row.delivered_count ?? 0);
+  const bounceCount = Number(row.bounce_count ?? 0);
+  const failedCount = Number(row.failed_count ?? 0);
+  const complaintCount = Number(row.complaint_count ?? 0);
+  const denominator = input.successCount > 0 ? input.successCount : deliveredCount;
+  const openRate = denominator > 0 ? openCount / denominator : 0;
+  const clickRate = denominator > 0 ? clickCount / denominator : 0;
+  const metricsPatch = {
+    openCount,
+    clickCount,
+    totalClickCount,
+    deliveredCount,
+    bounceCount,
+    failedEventCount: failedCount,
+    complaintCount,
+    openRate,
+    clickRate,
+    metricsUpdatedAt: new Date().toISOString(),
+  };
+  await pool.query(
+    `UPDATE workflow_runs
+     SET metadata_json = jsonb_set(
+           jsonb_set(
+             COALESCE(metadata_json, '{}'::jsonb),
+             '{loop_executor,deliveryBatch}',
+             COALESCE(metadata_json #> '{loop_executor,deliveryBatch}', '{}'::jsonb) || $4::jsonb,
+             true
+           ),
+           '{loop_executor,distribution}',
+           COALESCE(metadata_json #> '{loop_executor,distribution}', '{}'::jsonb) || $4::jsonb,
+           true
+         ),
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3`,
+    [input.runId, input.tenantId, input.userId, JSON.stringify(metricsPatch)]
+  );
+}
+
+export async function processResendMetricsWebhook(input: {
+  body: unknown;
+  rawBody?: Buffer;
+  headers?: Record<string, string | string[] | undefined>;
+}): Promise<ResendMetricsWebhookResult> {
+  const payload = readObject(input.body);
+  const eventType = typeof payload.type === "string" ? payload.type : "";
+  if (!eventType.startsWith("email.")) return { ok: true, processed: false, reason: "unsupported_event_type" };
+  const data = readObject(payload.data);
+  const broadcastId = extractResendBroadcastId(payload, data);
+  if (!broadcastId) return { ok: true, processed: false, eventType, reason: "missing_broadcast_id" };
+  const runResult = await pool.query<{
+    id: string;
+    tenant_id: string;
+    user_id: string;
+    metadata_json: unknown;
+    connector_metadata_json: unknown;
+  }>(
+    `SELECT r.id,
+            r.tenant_id,
+            r.user_id,
+            r.metadata_json,
+            ca.metadata_json AS connector_metadata_json
+     FROM workflow_runs r
+     LEFT JOIN LATERAL (
+       SELECT metadata_json
+       FROM connector_accounts
+       WHERE tenant_id = r.tenant_id
+         AND user_id = r.user_id
+         AND provider = 'resend'
+         AND status = 'connected'
+       ORDER BY updated_at DESC
+       LIMIT 1
+     ) ca ON TRUE
+     WHERE r.metadata_json #>> '{loop_executor,deliveryBatch,broadcastId}' = $1
+        OR r.metadata_json #>> '{loop_executor,distribution,broadcastId}' = $1
+     ORDER BY r.updated_at DESC
+     LIMIT 1`,
+    [broadcastId]
+  );
+  const run = runResult.rows[0];
+  if (!run) return { ok: true, processed: false, eventType, broadcastId, reason: "broadcast_not_found" };
+  const connectorMetadata = readObject(run.connector_metadata_json);
+  const webhookMetadata = readObject(connectorMetadata.resendMetricsWebhook);
+  const signingSecretCiphertext = typeof webhookMetadata.signingSecretCiphertext === "string"
+    ? webhookMetadata.signingSecretCiphertext
+    : null;
+  if (signingSecretCiphertext && input.rawBody) {
+    const svixId = firstString(input.headers?.["svix-id"]) ?? "";
+    const svixTimestamp = firstString(input.headers?.["svix-timestamp"]) ?? "";
+    const svixSignature = firstString(input.headers?.["svix-signature"]) ?? "";
+    const signingSecret = decryptMemoryContent(signingSecretCiphertext);
+    if (!svixId || !svixTimestamp || !svixSignature || !verifySvixSignature({
+      rawBody: input.rawBody,
+      svixId,
+      svixTimestamp,
+      svixSignature,
+      signingSecret,
+    })) {
+      throw new Error("Invalid Resend webhook signature");
+    }
+  }
+  const emailId = extractResendEmailId(data);
+  const recipient = firstEmailLike(data.to) ?? firstEmailLike(data.recipient);
+  const svixId = firstString(input.headers?.["svix-id"]);
+  const eventCreatedAt = firstString(data.created_at) ?? (typeof payload.created_at === "string" ? payload.created_at : null);
+  const inserted = await pool.query(
+    `INSERT INTO resend_broadcast_events
+     (tenant_id, user_id, workflow_run_id, broadcast_id, event_type, email_id, recipient, link_url, svix_id, payload_json, event_created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::timestamptz)
+     ON CONFLICT (svix_id) WHERE svix_id IS NOT NULL DO NOTHING`,
+    [
+      run.tenant_id,
+      run.user_id,
+      run.id,
+      broadcastId,
+      eventType,
+      emailId,
+      recipient,
+      extractClickUrl(data),
+      svixId,
+      JSON.stringify(payload),
+      eventCreatedAt,
+    ]
+  );
+  if ((inserted.rowCount ?? 0) === 0) return { ok: true, processed: false, eventType, broadcastId, reason: "duplicate_svix_id" };
+  const root = readObject(run.metadata_json);
+  const loopExecutor = readObject(root.loop_executor);
+  const deliveryBatch = readObject(loopExecutor.deliveryBatch ?? loopExecutor.distribution);
+  const successCount = typeof deliveryBatch.successCount === "number" ? deliveryBatch.successCount : 0;
+  await refreshResendBroadcastAggregates({
+    tenantId: run.tenant_id,
+    userId: run.user_id,
+    runId: run.id,
+    broadcastId,
+    successCount,
+  });
+  return { ok: true, processed: true, eventType, broadcastId };
 }

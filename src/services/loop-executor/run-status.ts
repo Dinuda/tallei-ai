@@ -8,6 +8,35 @@ import { authFromContext, loadRunContext, mergeLoopExecutorMeta } from "./run-co
 import { insertComment, insertEvent } from "./run-store.js";
 
 /** Marks a run blocked and notifies the operator. */
+export async function markRunFailed(input: {
+  runId: string;
+  tenantId: string;
+  userId: string;
+  message: string;
+}): Promise<void> {
+  await pool.query(
+    `UPDATE workflow_runs
+     SET status = 'failed',
+         waiting_for_strategy_approval = FALSE,
+         metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb,
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3`,
+    [
+      input.runId,
+      input.tenantId,
+      input.userId,
+      JSON.stringify({
+        loop_executor: {
+          failedAt: new Date().toISOString(),
+          error: { message: input.message.slice(0, 2000) },
+        },
+      }),
+    ]
+  );
+}
+
 export async function markRunBlocked(runId: string, message: string, taskId?: string | null): Promise<void> {
   const context = await loadRunContext(runId);
   const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {

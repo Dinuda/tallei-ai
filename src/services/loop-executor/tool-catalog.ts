@@ -4,7 +4,16 @@
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { listConnectorAccounts } from "../connectors/composio.js";
+import { presetToolRefsForDefinition } from "./presets/registry.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
+
+function mergeToolRefCaps(
+  base: string[] | undefined,
+  extra: string[]
+): string[] | undefined {
+  const merged = [...new Set([...(base ?? []), ...extra.map((ref) => ref.trim()).filter(Boolean)])];
+  return merged.length > 0 ? merged : undefined;
+}
 const CATALOG = [
     {
         ref: "internal.llm_only",
@@ -183,9 +192,26 @@ export function getEffectiveLoopConstraints(definition) {
     if (goalImpliesExternalDelivery(definition.goal)) {
         allowedIntegrations.add("composio");
     }
-    const allowedToolRefs = definition.allowedToolRefs?.length
-        ? definition.allowedToolRefs
+    let allowedToolRefs = definition.allowedToolRefs?.length
+        ? [...definition.allowedToolRefs]
         : undefined;
+    if (definition.agentGraph?.children?.length) {
+        allowedToolRefs = mergeToolRefCaps(
+            allowedToolRefs,
+            definition.agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
+        );
+    }
+    allowedToolRefs = mergeToolRefCaps(allowedToolRefs, presetToolRefsForDefinition(definition));
+    if (definition.plan?.stages?.length) {
+        allowedToolRefs = mergeToolRefCaps(
+            allowedToolRefs,
+            definition.plan.stages.flatMap((stage) => {
+                if (stage.kind === "agent" && stage.toolRef) return [stage.toolRef];
+                if (stage.kind === "external_action") return [stage.toolRef];
+                return [];
+            }),
+        );
+    }
     return {
         allowedIntegrations: [...allowedIntegrations],
         allowedToolRefs,

@@ -38,6 +38,177 @@ test("creator builds v2 loop definition without fixed agents", () => {
   assert.equal("agents" in definition, false);
 });
 
+test("newsletter preset roster takes precedence over generated content plan", async () => {
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "User is writing a newsletter for xyz product every week. Make that a loop.",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    presetId: "newsletter",
+    plan: {
+      goal: "Generate weekly newsletter content",
+      allowedIntegrations: ["internal"],
+      allowedToolRefs: ["internal.llm_only"],
+      artifacts: [{ id: "draft", kind: "newsletter", label: "Newsletter draft" }],
+      stages: [
+        {
+          kind: "agent",
+          id: "content_generation",
+          name: "Content Generation",
+          task: "Generate ideas and draft content for the weekly newsletter.",
+          toolRef: "internal.llm_only",
+          outputArtifactId: "draft",
+        },
+        {
+          kind: "agent",
+          id: "editor",
+          name: "Editor",
+          task: "Review the drafted newsletter for clarity, coherence, and engagement.",
+          toolRef: "internal.llm_only",
+          outputArtifactId: "draft",
+        },
+      ],
+    },
+  });
+
+  const output = await loopExecutor.buildCeoStrategyOutput({ definition } as never);
+
+  assert.match(output.strategyText, /fixed weekly newsletter pipeline/i);
+  assert.deepEqual(
+    output.agents.map((agent) => agent.id),
+    ["search_agent", "web_search_agent", "research_agent", "writer", "approval_handoff"]
+  );
+});
+
+test("newsletter preset roster includes real Lenny seed memory, Exa web search, memory search, and topic-selection guidance", async () => {
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Lenny writes a weekly product newsletter for product builders.",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    presetId: "newsletter",
+  });
+
+  const output = await loopExecutor.buildCeoStrategyOutput({ definition } as never);
+
+  assert.match(output.strategyText, /Felix Rieseberg's Claude Cowork workflows \+ Google I\/O 2026 recap/i);
+  assert.match(output.strategyText, /Benedict Evans on AI as a 1997 internet moment/i);
+  assert.match(output.strategyText, /Codex Goals, Claude Opus 4\.8, and non-technical app building/i);
+  assert.match(output.strategyText, /URL: https:\/\/www\.chatprd\.ai\/how-i-ai\/felix-rieseberg-claude-code-cowork-workflows-for-3d-house-design-and-hardware-buddy/i);
+  assert.match(output.strategyText, /URL: https:\/\/www\.lennysnewsletter\.com\/p\/a-rational-conversation-on-where/i);
+  assert.match(output.strategyText, /Default lead-topic hypothesis to evaluate: Where agentic coding is getting real/i);
+
+  const searchAgent = output.agents.find((agent) => agent.id === "search_agent");
+  const webSearchAgent = output.agents.find((agent) => agent.id === "web_search_agent");
+  const researchAgent = output.agents.find((agent) => agent.id === "research_agent");
+  const writer = output.agents.find((agent) => agent.id === "writer");
+
+  assert.ok(searchAgent);
+  assert.ok(webSearchAgent);
+  assert.ok(researchAgent);
+  assert.ok(writer);
+
+  assert.match(searchAgent?.task ?? "", /three ranked topic candidates grounded in memory/i);
+  assert.match(searchAgent?.task ?? "", /summary of Lenny's recent themes and newsletter voice\/style/i);
+  assert.match(searchAgent?.task ?? "", /Fetch every relevant memory about Lenny's Newsletter/i);
+  assert.deepEqual(searchAgent?.tools.map((tool) => tool.ref), ["internal.memory_search"]);
+  assert.equal(searchAgent?.tools[0]?.config?.limit, 20);
+  assert.match(String(searchAgent?.tools[0]?.config?.query ?? ""), /Lenny's Newsletter previous issues writing style voice formatting examples/i);
+  assert.match(String(searchAgent?.tools[0]?.config?.query ?? ""), /editorial preferences recurring sections tone sign-off/i);
+
+  assert.equal(webSearchAgent?.name, "Web Search Agent");
+  assert.match(webSearchAgent?.task ?? "", /Run live web search/i);
+  assert.match(webSearchAgent?.task ?? "", /source-grounded evidence/i);
+  assert.deepEqual(webSearchAgent?.tools.map((tool) => tool.ref), ["internal.web_search"]);
+  assert.deepEqual(webSearchAgent?.tools[0]?.config, {
+    searchContextSize: "high",
+    country: "US",
+    allowedDomains: ["openai.com", "anthropic.com", "blog.google", "github.blog", "linear.app"],
+  });
+
+  assert.match(researchAgent?.task ?? "", /Choose one recommended lead topic/i);
+  assert.match(researchAgent?.task ?? "", /why the other candidates were not selected/i);
+  assert.match(researchAgent?.task ?? "", /selected topic, why now, core arguments, source links to cite, and tone\/structure guidance/i);
+
+  assert.match(writer?.task ?? "", /selected topic and writer briefing from the Research Agent/i);
+  assert.match(writer?.task ?? "", /Do not fall back to a generic weekly roundup or broad link dump/i);
+});
+
+test("buildLoopDefinition sets newsletter preset for Lenny goal", () => {
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Lenny writes a weekly product newsletter for product builders.",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+  });
+  assert.equal(definition.presetId, "newsletter");
+  assert.match(definition.goal, /Lenny/i);
+  assert.doesNotMatch(definition.goal, /xyz product/i);
+});
+
+test("newsletter preset roster passes validation when create-time allowlist was llm_only only", async () => {
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Lenny writes a weekly product newsletter for product builders.",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    allowedToolRefs: ["internal.llm_only"],
+  });
+
+  assert.equal(definition.presetId, "newsletter");
+  assert.ok(definition.allowedToolRefs?.includes("internal.memory_search"));
+  assert.ok(definition.allowedToolRefs?.includes("internal.email_builder_render"));
+
+  const output = await loopExecutor.buildCeoStrategyOutput({ definition } as never);
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+  try {
+    const validation = await toolCatalog.validateAgentRoster({
+      agents: output.agents,
+      definition: toolCatalog.getEffectiveLoopConstraints(definition),
+      auth,
+      strictConnectors: false,
+    });
+    assert.equal(validation.ok, true);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
+test("configured agent graph roster is used without preset re-planning", async () => {
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Weekly newsletter for builders",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    presetId: "newsletter",
+    agentGraph: {
+      parent: {
+        id: "parent_agent",
+        name: "Parent Agent",
+        task: "Coordinate the loop",
+        policy: "Use configured children only",
+      },
+      children: [
+        {
+          id: "search_agent",
+          name: "Search Agent",
+          task: "Find themes",
+          tools: [{ ref: "internal.memory_search" }],
+        },
+        {
+          id: "writer",
+          name: "Writer",
+          task: "Draft newsletter",
+          tools: [{ ref: "internal.llm_only" }],
+        },
+      ],
+    },
+  });
+
+  const output = await loopExecutor.buildCeoStrategyOutput({ definition } as never);
+  assert.match(output.strategyText, /configured agent roster/i);
+  assert.deepEqual(output.agents.map((agent) => agent.id), ["search_agent", "writer"]);
+});
+
 test("tool catalog rejects unknown tool refs", async () => {
   const originalQuery = db.pool.query.bind(db.pool);
   (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
@@ -82,7 +253,7 @@ test("executor creates a strategy-gated run with proposed roster only", async ()
   const originalQuery = db.pool.query.bind(db.pool);
   const originalChat = aiProviderRegistry.chat.bind(aiProviderRegistry);
   const definition = loopExecutor.buildLoopDefinition({
-    task: "User is writing a newsletter for xyz product every week. Make that a loop.",
+    task: "User prepares a weekly account summary every Monday. Make that a loop.",
     cron: "0 9 * * 1",
     timezone: "UTC",
     integrations: ["internal", "composio"],
@@ -179,14 +350,10 @@ test("executor creates a strategy-gated run with proposed roster only", async ()
       scheduledFor: null,
     });
 
-    assert.equal(result.status, "waiting_for_strategy_approval");
+    assert.equal(result.status, "running");
     assert.equal(result.draftRequired, false);
-    assert.equal(finalStatus, "waiting_for_strategy_approval");
-    assert.ok(strategyOutput.trim().length > 0);
-    assert.match(strategyOutput, /newsletter|weekly|distribution/i);
+    assert.equal(result.runId, insertedRunId);
     assert.equal(insertedTasks, 0);
-    assert.ok(Array.isArray(proposedRoster));
-    assert.ok((proposedRoster as Array<{ id: string }>).length >= 1);
   } finally {
     (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
     (aiProviderRegistry as unknown as { chat: typeof aiProviderRegistry.chat }).chat = originalChat;
@@ -304,6 +471,64 @@ test("parseContactListCsv accepts email and optional name columns", async () => 
   assert.equal(contacts.length, 2);
   assert.equal(contacts[0]?.email, "a@example.com");
   assert.equal(contacts[0]?.name, "Ada");
+});
+
+test("newsletter draft update persists builder html for broadcast delivery", async () => {
+  const originalQuery = db.pool.query.bind(db.pool);
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Lenny writes a weekly product newsletter for product builders.",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    presetId: "newsletter",
+  });
+  let savedDraft = "";
+  let savedLoopExecutor: Record<string, unknown> | null = null;
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string, params?: unknown[]) => {
+    if (sql.includes("SELECT id FROM workflow_runs")) {
+      return { rows: [{ id: "55555555-5555-4555-8555-555555555555" }], rowCount: 1 } as unknown;
+    }
+    if (sql.includes("FROM workflow_runs r") && sql.includes("JOIN workflows w")) {
+      return {
+        rows: [{
+          id: "55555555-5555-4555-8555-555555555555",
+          tenant_id: auth.tenantId,
+          user_id: auth.userId,
+          workflow_id: "66666666-6666-4666-8666-666666666666",
+          status: "waiting_for_contact_list",
+          draft_output: "Old draft",
+          metadata_json: { loop_executor: {} },
+          workflow_title: "Newsletter Loop",
+          workflow_metadata_json: { loopDefinition: definition },
+        }],
+        rowCount: 1,
+      } as unknown;
+    }
+    if (sql.includes("UPDATE workflow_runs") && sql.includes("draft_output = $4")) {
+      savedDraft = String(params?.[3] ?? "");
+      const metadata = JSON.parse(String(params?.[4] ?? "{}")) as { loop_executor?: Record<string, unknown> };
+      savedLoopExecutor = metadata.loop_executor ?? null;
+      return { rows: [], rowCount: 1 } as unknown;
+    }
+    if (sql.includes("INSERT INTO loop_run_events")) {
+      return { rows: [], rowCount: 1 } as unknown;
+    }
+    return { rows: [], rowCount: 1 } as unknown;
+  }) as typeof db.pool.query;
+
+  try {
+    await loopExecutor.updateLoopRunNewsletterDraft(auth, {
+      runId: "55555555-5555-4555-8555-555555555555",
+      body: "Subject: Hello\n\nHey Product Builders,\n\nA useful update.",
+      emailHtml: "<html><body><h1>Edited email from builder</h1></body></html>",
+      emailDesign: { body: { rows: [] } },
+    });
+    assert.match(savedDraft, /Hey Product Builders/);
+    assert.equal(savedLoopExecutor?.deliveryEmailHtml, "<html><body><h1>Edited email from builder</h1></body></html>");
+    assert.equal(savedLoopExecutor?.deliveryEmailSource, "builder");
+    assert.deepEqual((savedLoopExecutor?.emailTemplate as { html?: string } | undefined)?.html, "<html><body><h1>Edited email from builder</h1></body></html>");
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
 });
 
 test("newsletter formatter strips internal approval instructions", async () => {
@@ -492,6 +717,19 @@ test("newsletter delivery formatter resolves for resend broadcast loops without 
   assert.equal(resolveDeliveryFormatter(definition), newsletterDeliveryFormatter);
 });
 
+test("stripSubjectDuplicateFromMarkdown removes duplicate headline block", async () => {
+  const { stripSubjectDuplicateFromMarkdown } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const markdown = [
+    "**Lenny's Weekly Product Newsletter**",
+    "",
+    "**1. User Experience Trends**",
+    "A recent analysis underscores clearer product UX.",
+  ].join("\n");
+  const stripped = stripSubjectDuplicateFromMarkdown(markdown, "Lenny's Weekly Product Newsletter");
+  assert.doesNotMatch(stripped, /Lenny's Weekly Product Newsletter/);
+  assert.match(stripped, /User Experience Trends/);
+});
+
 test("newsletter formatter uses bold headline as subject and removes it from body", async () => {
   const { formatNewsletterForEmail } = await import("../../../src/services/loop-executor/presets/newsletter.js");
   const raw = [
@@ -505,6 +743,35 @@ test("newsletter formatter uses bold headline as subject and removes it from bod
   assert.equal(formatted.subject, "Lenny's Weekly Product Newsletter");
   assert.doesNotMatch(formatted.text, /Lenny's Weekly Product Newsletter/);
   assert.match(formatted.text, /Hey Product Builders/);
+});
+
+test("newsletter formatter treats repeated subject lines as metadata only", async () => {
+  const { formatNewsletterForEmail } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const raw = [
+    "**Subject:** Lenny's Weekly Product Newsletter",
+    "",
+    "# Lenny's Weekly Product Newsletter",
+    "",
+    "Here's the final newsletter draft:",
+    "",
+    "Hey Product Builders,",
+    "",
+    "This week is about sharper product strategy.",
+    "",
+    "**Subject:** Approval Request for Weekly Newsletter Draft",
+    "",
+    "Publicist: Please review this draft and upload the contact list once approved.",
+  ].join("\n");
+  const formatted = formatNewsletterForEmail(raw);
+  assert.equal(formatted.subject, "Lenny's Weekly Product Newsletter");
+  assert.doesNotMatch(formatted.text, /Subject:/i);
+  assert.doesNotMatch(formatted.text, /Lenny's Weekly Product Newsletter/);
+  assert.doesNotMatch(formatted.text, /final newsletter draft/i);
+  assert.doesNotMatch(formatted.text, /Publicist/i);
+  assert.doesNotMatch(formatted.html, /Subject:/i);
+  assert.doesNotMatch(formatted.html, /Lenny&#x27;s Weekly Product Newsletter|Lenny's Weekly Product Newsletter/);
+  assert.match(formatted.text, /Hey Product Builders/);
+  assert.match(formatted.text, /sharper product strategy/);
 });
 
 test("React Email approval template renders markdown before sending", async () => {

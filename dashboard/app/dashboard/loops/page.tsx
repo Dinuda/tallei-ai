@@ -16,7 +16,6 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import Link from "next/link";
 
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,6 +26,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import Image from "next/image";
+import { isLennyNewsletterGoal, isNewsletterLoopDefinition, LENNY_NEWSLETTER_LOOP_GOAL } from "@/lib/lenny-newsletter";
 
 /* ------------------------------------------------------------------ */
 //  Types
@@ -184,7 +184,13 @@ type LoopWorkflow = {
   workspaceId: string | null;
   definition?: {
     goal?: string;
+    presetId?: string;
   };
+};
+
+type WorkflowRunResponse = {
+  id?: string;
+  runId?: string;
 };
 
 type ActiveChannel = {
@@ -552,7 +558,46 @@ function platformStyle(platform: Platform): {
 
 const ACCENT = "#4338ca";
 
-const HARDCODED_NEWSLETTER_TASK = "User is writing a newsletter for xyz product every week. Make that a loop.";
+const HARDCODED_NEWSLETTER_TASK = LENNY_NEWSLETTER_LOOP_GOAL;
+const HARDCODED_NEWSLETTER_CRON = "0 9 * * 1";
+const NEWSLETTER_ALLOWED_TOOL_REFS = [
+  "internal.memory_search",
+  "internal.web_search",
+  "internal.llm_only",
+  "internal.email_approval_request",
+  "internal.email_builder_compose",
+  "internal.email_builder_render",
+  "internal.resend_broadcast",
+  "internal.react_email_template",
+] as const;
+
+function isExplicitLennyNewsletterLoop(loop: LoopWorkflow): boolean {
+  return loop.definition?.presetId === "newsletter" && isLennyNewsletterGoal(loop.definition?.goal);
+}
+
+function isAnyLennyNewsletterLoop(loop: LoopWorkflow): boolean {
+  return isLennyNewsletterGoal(loop.definition?.goal) || /lenny/i.test(loop.title);
+}
+
+function findLennyNewsletterWorkflow(loops: LoopWorkflow[]): LoopWorkflow | null {
+  return loops.find(isExplicitLennyNewsletterLoop)
+    ?? loops.find(isAnyLennyNewsletterLoop)
+    ?? loops.find((loop) =>
+      isNewsletterLoopDefinition({
+        goal: loop.definition?.goal,
+        presetId: loop.definition?.presetId,
+        title: loop.title,
+      })
+      && !/\bxyz\b/i.test(`${loop.title} ${loop.definition?.goal ?? ""}`)
+    )
+    ?? null;
+}
+
+function runIdFromResponse(run: WorkflowRunResponse | null | undefined): string | null {
+  if (typeof run?.runId === "string" && run.runId.trim()) return run.runId;
+  if (typeof run?.id === "string" && run.id.trim()) return run.id;
+  return null;
+}
 
 function hardcodedNewsletterLoop(): LoopInsight {
   const now = new Date();
@@ -565,8 +610,8 @@ function hardcodedNewsletterLoop(): LoopInsight {
 
   return {
     id: "hardcoded-newsletter-loop-v1",
-    name: "Weekly Product Newsletter",
-    description: "CEO spawns Topic Researcher, Creative Writer, and Publicist. Publicist only prepares an approval draft.",
+    name: "Lenny's Weekly Newsletter",
+    description: "Search Agent, Web Search Agent, Research Agent, Writer, and Publicist. Approval before Resend broadcast.",
     primarySourceFile: "internal loop creator",
     frequency: "Weekly",
     conversationCount: 3,
@@ -577,21 +622,21 @@ function hardcodedNewsletterLoop(): LoopInsight {
     conversations: [
       {
         id: "hardcoded-newsletter-research",
-        title: "Topic Researcher",
+        title: "Search Agent",
         date: previous.toISOString(),
         platform: "chatgpt",
-        snippet: "Researches product context, customer questions, release notes, and competitive references.",
+        snippet: "Finds timely themes and surfaces high-signal internal source material.",
       },
       {
         id: "hardcoded-newsletter-writer",
-        title: "Creative Writer",
+        title: "Writer",
         date: last.toISOString(),
         platform: "chatgpt",
-        snippet: "Turns research into a weekly newsletter draft.",
+        snippet: "Writes the subscriber-facing newsletter draft from research outputs.",
       },
       {
         id: "hardcoded-newsletter-publicist",
-        title: "Publicist",
+        title: "Approval Handoff",
         date: now.toISOString(),
         platform: "claude",
         snippet: "Prepares the send or publish plan as an approval draft. No external action is committed.",
@@ -600,14 +645,14 @@ function hardcodedNewsletterLoop(): LoopInsight {
     memories: [
       {
         id: "hardcoded-newsletter-memory-product",
-        text: "User is writing a newsletter for xyz product every week.",
+        text: "Lenny writes a weekly product newsletter for product builders.",
         date: previous.toISOString(),
         platform: "chatgpt",
-        reason: "This identifies the recurring weekly product newsletter task.",
+        reason: "This identifies the recurring weekly newsletter task.",
       },
       {
         id: "hardcoded-newsletter-memory-loop",
-        text: "Make the weekly xyz product newsletter a loop.",
+        text: "Automate Search, Research, Writer, and Publicist with Resend delivery after approval.",
         date: last.toISOString(),
         platform: "chatgpt",
         reason: "This confirms the recurring workflow should be automated.",
@@ -1088,6 +1133,7 @@ export default function LoopsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loopActionError, setLoopActionError] = useState<string | null>(null);
   const [runningLoopId, setRunningLoopId] = useState<string | null>(null);
+  const [newsletterWorkflowId, setNewsletterWorkflowId] = useState<string | null>(null);
 
   const loadLoopMinerRuns = useCallback(async () => {
     setLoading(true);
@@ -1115,10 +1161,8 @@ export default function LoopsPage() {
       }
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
       const internalLoops = loopsResponse.ok && Array.isArray(loopsPayload.loops) ? loopsPayload.loops as LoopWorkflow[] : [];
-      const newsletterWorkflow = internalLoops.find((loop) =>
-        loop.definition?.goal === HARDCODED_NEWSLETTER_TASK
-        || loop.title === "Newsletter Loop"
-      );
+      const newsletterWorkflow = findLennyNewsletterWorkflow(internalLoops);
+      setNewsletterWorkflowId(newsletterWorkflow?.id ?? null);
       const displayRun = pickRunForDisplay(runs);
       const minedLoops = displayRun ? buildLoopInsightsFromRun(displayRun) : [];
       const hardcoded = { ...hardcodedNewsletterLoop(), workspaceId: newsletterWorkflow?.workspaceId ?? null };
@@ -1148,7 +1192,33 @@ export default function LoopsPage() {
     setRunningLoopId(id);
     try {
       if (id === "hardcoded-newsletter-loop-v1") {
-        router.push("/dashboard/loops/newsletter");
+        let activeNewsletterWorkflowId = newsletterWorkflowId;
+        if (!activeNewsletterWorkflowId) {
+          const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+          const createResponse = await fetch("/api/workflows/internal/loops", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              task: HARDCODED_NEWSLETTER_TASK,
+              cron: HARDCODED_NEWSLETTER_CRON,
+              timezone,
+              preset_id: "newsletter",
+              integrations: ["internal", "react_email"],
+              allowed_tool_refs: NEWSLETTER_ALLOWED_TOOL_REFS,
+            }),
+          });
+          const createPayload = await createResponse.json().catch(() => ({}));
+          if (!createResponse.ok) {
+            throw new Error(createPayload.error ?? "Failed to initialize newsletter loop");
+          }
+          activeNewsletterWorkflowId = typeof createPayload.loop?.id === "string" ? createPayload.loop.id : null;
+          if (!activeNewsletterWorkflowId) {
+            throw new Error("Newsletter loop was created without a workflow id");
+          }
+          setNewsletterWorkflowId(activeNewsletterWorkflowId);
+        }
+
+        router.push(`/dashboard/loops/newsletter`);
         return;
       }
       setLoops((prev) =>
@@ -1160,7 +1230,7 @@ export default function LoopsPage() {
     } finally {
       setRunningLoopId(null);
     }
-  }, [router]);
+  }, [router, newsletterWorkflowId]);
 
   const filtered = useMemo(() => {
     const byConfidence = filter === "high"
@@ -1315,7 +1385,7 @@ export default function LoopsPage() {
                       onDismiss={dismissLoop}
                       onLoop={activateLoop}
                       running={runningLoopId === loop.id}
-                      actionLabel={loop.id === "hardcoded-newsletter-loop-v1" ? "Open loop" : "Loop this"}
+                      actionLabel={loop.id === "hardcoded-newsletter-loop-v1" ? "Run loop" : "Loop this"}
                     />
                   ))}
                 </div>

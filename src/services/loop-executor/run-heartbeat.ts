@@ -25,7 +25,7 @@ export type ScheduleHeartbeatInput = {
   tenantId: string;
   userId: string;
   runId: string;
-  jobType: "agent" | "ceo_finalize" | "distribution";
+  jobType: "agent" | "ceo_strategy" | "ceo_finalize" | "distribution";
   taskId?: string;
   delaySeconds?: number;
   resetAttempts?: boolean;
@@ -51,6 +51,21 @@ export async function scheduleHeartbeat(input: ScheduleHeartbeatInput): Promise<
       if (!input.taskId) throw new Error("Agent heartbeat job requires taskId");
       const { runAgentHeartbeat } = await import("./executor.js");
       await runAgentHeartbeat(input.runId, input.taskId);
+    } else if (input.jobType === "ceo_strategy") {
+      const { runCeoStrategyHeartbeat } = await import("./executor.js");
+      const { markRunFailed } = await import("./run-status.js");
+      try {
+        await runCeoStrategyHeartbeat(input.runId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await markRunFailed({
+          runId: input.runId,
+          tenantId: input.tenantId,
+          userId: input.userId,
+          message,
+        });
+        throw error;
+      }
     } else if (input.jobType === "distribution") {
       const { runDistributionHeartbeat } = await import("./distribution.js");
       await runDistributionHeartbeat(input.runId);

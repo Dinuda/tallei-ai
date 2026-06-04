@@ -1,8 +1,9 @@
 "use client";
 
-import { forwardRef, useEffect, useRef, useState, type ComponentType } from "react";
-import { X, Eye, Save } from "lucide-react";
+import { forwardRef, useCallback, useEffect, useRef, useState, type ComponentType } from "react";
+import { X, Eye, Save, PanelLeftClose, PanelLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { getLoadableUnlayerDesign, parseMarkdown } from "@/lib/unlayer-newsletter-template";
 
 type EmailEditorHandle = {
   editor: {
@@ -11,32 +12,6 @@ type EmailEditorHandle = {
   } | null;
 };
 
-type EmailDesign = {
-  counters: Record<string, number>;
-  body: {
-    rows: BuilderRow[];
-    values: Record<string, unknown>;
-  };
-};
-
-type BuilderContent = {
-  id: string;
-  type: "heading" | "text" | "divider";
-  values: Record<string, unknown>;
-};
-
-type BuilderRow = {
-  id: string;
-  cells: number[];
-  columns: Array<{
-    id: string;
-    contents: BuilderContent[];
-    values: Record<string, unknown>;
-  }>;
-  values: Record<string, unknown>;
-};
-
-const BUILDER_SEED_VERSION = 3;
 const UNLAYER_PROJECT_ID = Number.parseInt(process.env.NEXT_PUBLIC_UNLAYER_PROJECT_ID ?? "", 10);
 
 export function EmailBuilderDialog({
@@ -46,50 +21,92 @@ export function EmailBuilderDialog({
   initialDesign,
   initialHtml,
   initialMarkdown,
+  initialSubject,
+  initialGreeting,
 }: {
   open: boolean;
   onClose: () => void;
-  onSave: (html: string, designJson: unknown) => void;
+  onSave: (html: string, designJson: unknown) => void | Promise<void>;
   initialDesign?: unknown;
   initialHtml?: string;
   initialMarkdown?: string;
+  initialSubject?: string;
+  initialGreeting?: string;
 }) {
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [dialogHeight, setDialogHeight] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [editorHeight, setEditorHeight] = useState(600);
   const editorRef = useRef<EmailEditorHandle>({ editor: null });
-  const headerRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
 
+  // Parse initial values from markdown if not provided explicitly
+  const parsed = initialMarkdown ? parseMarkdown(initialMarkdown) : [];
+  const parsedSubject = parsed.find((p: { type: string; text?: string }) => p.type === "subject")?.text ?? "";
+  const parsedGreeting = parsed.find((p: { type: string; text?: string }) => p.type === "intro")?.text ?? "";
+
+  const [subject, setSubject] = useState(initialSubject ?? parsedSubject ?? "");
+  const [headline, setHeadline] = useState(initialSubject ?? parsedSubject ?? "");
+  const [greeting, setGreeting] = useState(initialGreeting ?? parsedGreeting ?? "");
+  const [applied, setApplied] = useState(false);
+
+  // Measure available height for the editor
   useEffect(() => {
     if (!open) return;
-
     const updateHeight = () => {
-      const viewportHeight = window.innerHeight;
-      const outerPadding = 32;
-      const headerHeight = headerRef.current?.offsetHeight ?? 80;
-      setDialogHeight(Math.max(520, viewportHeight - outerPadding - headerHeight));
+      const headerHeight = headerRef.current?.offsetHeight ?? 72;
+      setEditorHeight(Math.max(520, window.innerHeight - 32 - headerHeight));
     };
-
     updateHeight();
     window.addEventListener("resize", updateHeight);
     return () => window.removeEventListener("resize", updateHeight);
   }, [open]);
 
-  if (!open) return null;
+  // Reset fields when dialog opens
+  useEffect(() => {
+    if (!open) return;
+    const s = initialSubject ?? parsedSubject ?? "";
+    const g = initialGreeting ?? parsedGreeting ?? "";
+    setSubject(s);
+    setHeadline(s);
+    setGreeting(g);
+    setApplied(false);
+  }, [open, initialSubject, initialGreeting, parsedSubject, parsedGreeting]);
+
+  const handleApply = useCallback(() => {
+    if (!editorRef.current?.editor?.loadDesign) return;
+    const design = getLoadableUnlayerDesign(initialDesign, initialMarkdown, initialHtml, {
+      subject: headline || subject,
+      greeting,
+    });
+    if (design) {
+      editorRef.current.editor.loadDesign(design);
+      setApplied(true);
+      window.setTimeout(() => setApplied(false), 1500);
+    }
+  }, [initialDesign, initialHtml, initialMarkdown, headline, subject, greeting]);
 
   const handleExport = () => {
     if (!editorRef.current?.editor) return;
     setSaving(true);
     editorRef.current.editor.exportHtml((data) => {
-      onSave(data.html, data.design);
-      setSaving(false);
-      onClose();
+      void Promise.resolve(onSave(data.html, data.design))
+        .then(() => {
+          onClose();
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          setSaving(false);
+        });
     });
   };
+
+  if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+        {/* Top header */}
         <div ref={headerRef} className="flex shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold text-slate-900">Email Builder</h2>
@@ -98,6 +115,15 @@ export function EmailBuilderDialog({
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setSidebarOpen((v) => !v)}
+            >
+              {sidebarOpen ? <PanelLeftClose className="size-3.5" /> : <PanelLeft className="size-3.5" />}
+              {sidebarOpen ? "Hide panel" : "Show panel"}
+            </Button>
             <Button type="button" size="sm" disabled={!ready || saving} onClick={handleExport}>
               {saving ? (
                 <>
@@ -117,15 +143,97 @@ export function EmailBuilderDialog({
           </div>
         </div>
 
+        {/* Main content: sidebar + editor */}
         <div className="min-h-0 flex-1 overflow-hidden bg-slate-50">
-          <EmailEditorClient
-            ref={editorRef}
-            height={dialogHeight}
-            initialDesign={initialDesign}
-            initialHtml={initialHtml}
-            initialMarkdown={initialMarkdown}
-            onReady={() => setReady(true)}
-          />
+          <div className="flex h-full">
+            {/* Left sidebar with meta fields */}
+            {sidebarOpen && (
+              <div className="h-full w-72 shrink-0 overflow-y-auto border-r border-slate-200 bg-white p-5">
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">Newsletter metadata</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Edit these fields then click Apply to update the template.
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <label htmlFor="eb-subject" className="mb-1 block text-xs font-medium text-slate-700">
+                        Email subject
+                      </label>
+                      <input
+                        id="eb-subject"
+                        type="text"
+                        value={subject}
+                        onChange={(e) => setSubject(e.target.value)}
+                        placeholder="e.g. What I Read This Week"
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="eb-headline" className="mb-1 block text-xs font-medium text-slate-700">
+                        Headline (visible in email)
+                      </label>
+                      <input
+                        id="eb-headline"
+                        type="text"
+                        value={headline}
+                        onChange={(e) => setHeadline(e.target.value)}
+                        placeholder="Defaults to subject"
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="eb-greeting" className="mb-1 block text-xs font-medium text-slate-700">
+                        Greeting / intro
+                      </label>
+                      <textarea
+                        id="eb-greeting"
+                        value={greeting}
+                        onChange={(e) => setGreeting(e.target.value)}
+                        placeholder="e.g. What I Read This Week: a summary..."
+                        rows={3}
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 resize-none"
+                      />
+                    </div>
+                  </div>
+
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    className="w-full"
+                    onClick={handleApply}
+                    disabled={!ready}
+                  >
+                    {applied ? "Applied!" : "Apply to template"}
+                  </Button>
+
+                  <div className="rounded-lg bg-slate-50 p-3">
+                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                      You can also edit text directly in the canvas. Bold headings, story items, and the closing sign-off will auto-populate from the Writer&apos;s markdown.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Editor */}
+            <div className="min-h-0 flex-1">
+              <EmailEditorClient
+                ref={editorRef}
+                editorHeight={editorHeight}
+                initialDesign={initialDesign}
+                initialHtml={initialHtml}
+                initialMarkdown={initialMarkdown}
+                options={{ subject: headline || subject, greeting }}
+                onReady={() => setReady(true)}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -133,16 +241,18 @@ export function EmailBuilderDialog({
 }
 
 const EmailEditorClient = forwardRef<EmailEditorHandle, {
-  height: number;
+  editorHeight: number;
   initialDesign?: unknown;
   initialHtml?: string;
   initialMarkdown?: string;
+  options?: { subject?: string; greeting?: string };
   onReady: () => void;
 }>(function EmailEditorClient({
-  height,
+  editorHeight,
   initialDesign,
   initialHtml,
   initialMarkdown,
+  options,
   onReady,
 }, ref) {
   type EmailEditorComponent = ComponentType<{
@@ -169,10 +279,10 @@ const EmailEditorClient = forwardRef<EmailEditorHandle, {
   }
 
   return (
-    <div className="h-full w-full overflow-hidden" style={{ height: height > 0 ? `${height}px` : "100%" }}>
+    <div className="relative h-full w-full overflow-hidden">
       <ReactEmailEditor
         ref={ref}
-        minHeight={height > 0 ? height : 520}
+        minHeight={editorHeight}
         options={{
           displayMode: "email",
           ...(Number.isFinite(UNLAYER_PROJECT_ID) ? { projectId: UNLAYER_PROJECT_ID } : {}),
@@ -188,9 +298,9 @@ const EmailEditorClient = forwardRef<EmailEditorHandle, {
             social: { enabled: true },
           },
         }}
-        style={{ height: height > 0 ? `${height}px` : "100%", minHeight: height > 0 ? `${height}px` : "520px", width: "100%" }}
+        style={{ position: "absolute", top: "0", left: "0", width: "100%", height: `${editorHeight}px`, minHeight: `${editorHeight}px` }}
         onReady={(editor) => {
-          const design = getLoadableDesign(initialDesign, initialMarkdown, initialHtml);
+          const design = getLoadableUnlayerDesign(initialDesign, initialMarkdown, initialHtml, options);
           if (design && editor?.loadDesign) {
             editor.loadDesign(design);
           }
@@ -200,343 +310,3 @@ const EmailEditorClient = forwardRef<EmailEditorHandle, {
     </div>
   );
 });
-
-function getLoadableDesign(initialDesign: unknown, initialMarkdown?: string, initialHtml?: string): EmailDesign | unknown | null {
-  if (initialDesign && !shouldRegenerateDesign(initialDesign)) return initialDesign;
-  return markdownToUnlayerDesign(initialMarkdown) ?? textToUnlayerDesign(extractReadableText(initialHtml));
-}
-
-function shouldRegenerateDesign(design: unknown): boolean {
-  if (!isRecord(design)) return false;
-  const body = isRecord(design.body) ? design.body : null;
-  const rows = Array.isArray(body?.rows) ? body.rows : [];
-  const bodyValues = isRecord(body?.values) ? body.values : {};
-  if (bodyValues.talleiBuilderSeedVersion === BUILDER_SEED_VERSION) return false;
-  if (rows.length === 0) return false;
-  return rows.every((rowItem) => {
-    if (!isRecord(rowItem) || typeof rowItem.id !== "string" || !rowItem.id.startsWith("newsletter-row")) return false;
-    const columns = Array.isArray(rowItem.columns) ? rowItem.columns : [];
-    return columns.every((column) => {
-      if (!isRecord(column)) return false;
-      const contents = Array.isArray(column.contents) ? column.contents : [];
-      return contents.every((content) => isRecord(content) && typeof content.id === "string" && content.id.startsWith("newsletter-"));
-    });
-  });
-}
-
-function markdownToUnlayerDesign(markdown?: string): EmailDesign | null {
-  const blocks = parseMarkdownBlocks(markdown);
-  if (blocks.length === 0) return null;
-  return blocksToUnlayerDesign(blocks);
-}
-
-function textToUnlayerDesign(text?: string): EmailDesign | null {
-  const blocks = parseMarkdownBlocks(text);
-  if (blocks.length === 0) return null;
-  return blocksToUnlayerDesign(blocks);
-}
-
-function blocksToUnlayerDesign(blocks: ContentBlock[]): EmailDesign {
-  const rows = blocks.map((block, index) => {
-    const contentIndex = index + 1;
-    const content = block.kind === "divider"
-      ? dividerContent(contentIndex)
-      : block.kind === "heading"
-        ? headingContent(contentIndex, block.text, block.level)
-        : textContent(contentIndex, block.html);
-    return row(contentIndex, [content]);
-  });
-  const headingCount = blocks.filter((block) => block.kind === "heading").length;
-  const textCount = blocks.filter((block) => block.kind === "text").length;
-  const dividerCount = blocks.filter((block) => block.kind === "divider").length;
-
-  return {
-    counters: {
-      u_row: rows.length,
-      u_column: rows.length,
-      u_content_heading: headingCount,
-      u_content_text: textCount,
-      u_content_divider: dividerCount,
-    },
-    body: {
-      rows,
-      values: {
-        backgroundColor: "#eef2f7",
-        contentWidth: "680px",
-        talleiBuilderSeedVersion: BUILDER_SEED_VERSION,
-        fontFamily: {
-          label: "Arial",
-          value: "arial,helvetica,sans-serif",
-        },
-      },
-    },
-  };
-}
-
-function row(index: number, contents: BuilderContent[]): BuilderRow {
-  return {
-    id: `newsletter-row-${index}`,
-    cells: [1],
-    columns: [
-      {
-        id: `newsletter-column-${index}`,
-        contents,
-        values: {
-          ...editableMeta("column", index),
-          backgroundColor: "#ffffff",
-          border: {},
-          padding: index === 1 ? "30px 32px 8px" : "0px 32px",
-          _override: {
-            mobile: {
-              padding: index === 1 ? "24px 18px 6px" : "0px 18px",
-            },
-          },
-        },
-      },
-    ],
-    values: {
-      ...editableMeta("row", index),
-      backgroundColor: "#ffffff",
-      padding: "0px",
-      columnsBackgroundColor: "#ffffff",
-      _override: {
-        mobile: {
-          padding: "0px",
-        },
-      },
-    },
-  };
-}
-
-type ContentBlock =
-  | { kind: "heading"; level: 1 | 2 | 3; text: string }
-  | { kind: "text"; html: string }
-  | { kind: "divider" };
-
-function parseMarkdownBlocks(markdown?: string): ContentBlock[] {
-  const lines = markdown?.split(/\r?\n/) ?? [];
-  const blocks: ContentBlock[] = [];
-  let paragraph: string[] = [];
-  let listItems: string[] = [];
-  let titleSeen = false;
-
-  const flushParagraph = () => {
-    if (paragraph.length === 0) return;
-    blocks.push({ kind: "text", html: `<p>${inlineMarkdownToHtml(paragraph.join(" "))}</p>` });
-    paragraph = [];
-  };
-
-  const flushList = () => {
-    if (listItems.length === 0) return;
-    blocks.push({
-      kind: "text",
-      html: `<ul>${listItems.map((item) => `<li>${inlineMarkdownToHtml(item)}</li>`).join("")}</ul>`,
-    });
-    listItems = [];
-  };
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) {
-      flushParagraph();
-      flushList();
-      continue;
-    }
-
-    const subject = line.match(/^subject:\s*(.+)$/i);
-    if (subject) {
-      flushParagraph();
-      flushList();
-      if (!titleSeen) {
-        blocks.push({ kind: "heading", level: 1, text: subject[1].trim() });
-        titleSeen = true;
-      }
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) {
-      flushParagraph();
-      flushList();
-      blocks.push({
-        kind: "heading",
-        level: Math.min(heading[1].length, 3) as 1 | 2 | 3,
-        text: stripInlineMarkdown(heading[2]),
-      });
-      titleSeen = true;
-      continue;
-    }
-
-    if (/^(-{3,}|\*{3,})$/.test(line)) {
-      flushParagraph();
-      flushList();
-      blocks.push({ kind: "divider" });
-      continue;
-    }
-
-    const bullet = line.match(/^[-*]\s+(.+)$/);
-    if (bullet) {
-      flushParagraph();
-      listItems.push(bullet[1]);
-      continue;
-    }
-
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  flushList();
-
-  return blocks.length > 0 ? blocks : [];
-}
-
-function headingContent(index: number, text: string, level: 1 | 2 | 3): BuilderContent {
-  const fontSize = level === 1 ? "30px" : level === 2 ? "22px" : "18px";
-  return {
-    id: `newsletter-heading-${index}`,
-    type: "heading",
-    values: {
-      containerPadding: level === 1 ? "10px 10px 18px" : "18px 10px 8px",
-      headingType: `h${level}`,
-      text: escapeHtml(text),
-      fontSize,
-      lineHeight: "130%",
-      textAlign: "left",
-      color: "#0f172a",
-      linkStyle: defaultLinkStyle(),
-      ...editableMeta("heading", index),
-      _override: {
-        mobile: {
-          fontSize: level === 1 ? "24px" : level === 2 ? "20px" : "17px",
-          containerPadding: level === 1 ? "8px 0px 14px" : "14px 0px 6px",
-        },
-      },
-    },
-  };
-}
-
-function textContent(index: number, html: string): BuilderContent {
-  return {
-    id: `newsletter-text-${index}`,
-    type: "text",
-    values: {
-      containerPadding: "8px 10px",
-      text: html,
-      fontSize: "16px",
-      lineHeight: "165%",
-      textAlign: "left",
-      color: "#334155",
-      linkStyle: defaultLinkStyle(),
-      ...editableMeta("text", index),
-      _override: {
-        mobile: {
-          fontSize: "15px",
-          lineHeight: "155%",
-          containerPadding: "7px 0px",
-        },
-      },
-    },
-  };
-}
-
-function dividerContent(index: number): BuilderContent {
-  return {
-    id: `newsletter-divider-${index}`,
-    type: "divider",
-    values: {
-      containerPadding: "18px 10px",
-      width: "100%",
-      border: {
-        borderTopWidth: "1px",
-        borderTopStyle: "solid",
-        borderTopColor: "#e2e8f0",
-      },
-      ...editableMeta("divider", index),
-      _override: {
-        mobile: {
-          containerPadding: "14px 0px",
-        },
-      },
-    },
-  };
-}
-
-function editableMeta(kind: "row" | "column" | "heading" | "text" | "divider", index: number) {
-  const htmlClassNames = kind === "row" ? "u_row" : kind === "column" ? "u_column" : `u_content_${kind}`;
-  return {
-    anchor: "",
-    hideDesktop: false,
-    displayCondition: null,
-    _meta: {
-      htmlID: `${htmlClassNames}_${index}`,
-      htmlClassNames,
-    },
-    selectable: true,
-    draggable: true,
-    duplicatable: true,
-    deletable: true,
-    hideable: true,
-  };
-}
-
-function defaultLinkStyle() {
-  return {
-    inherit: false,
-    linkColor: "#2563eb",
-    linkHoverColor: "#1d4ed8",
-    linkUnderline: true,
-    linkHoverUnderline: true,
-  };
-}
-
-function inlineMarkdownToHtml(value: string): string {
-  return escapeHtml(value)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-}
-
-function stripInlineMarkdown(value: string): string {
-  return value
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .trim();
-}
-
-function extractReadableText(html?: string): string {
-  if (!html?.trim()) return "";
-  const body = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
-  return body
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<\/(h1|h2|h3|p|li|div|tr)>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "- ")
-    .replace(/<h1[^>]*>/gi, "# ")
-    .replace(/<h2[^>]*>/gi, "## ")
-    .replace(/<h3[^>]*>/gi, "### ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}

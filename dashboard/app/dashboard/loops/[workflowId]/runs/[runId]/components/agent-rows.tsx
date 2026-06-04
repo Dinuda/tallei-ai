@@ -42,11 +42,21 @@ const AGENT_THEME = {
   },
 } as const;
 
+function isWriterThemed(task: AgentRowTask): boolean {
+  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
+  return (
+    key.includes("writer") ||
+    key.includes("creative writer") ||
+    (key.includes("write") && !key.includes("research") && !key.includes("search")) ||
+    key.includes("draft")
+  );
+}
+
 function agentTheme(task: AgentRowTask) {
   const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ");
   const key = `${task.agentId} ${task.toolKey} ${refs}`.toLowerCase();
-  if (key.includes("memory_search") || key.includes("research")) return AGENT_THEME.research;
-  if (key.includes("llm_only") || key.includes("write") || key.includes("draft")) return AGENT_THEME.writer;
+  if (key.includes("memory_search") || key.includes("web_search") || key.includes("research")) return AGENT_THEME.research;
+  if (isWriterThemed(task)) return AGENT_THEME.writer;
   if (key.includes("gmail") || key.includes("public") || key.includes("publish")) return AGENT_THEME.publicist;
   return AGENT_THEME.default;
 }

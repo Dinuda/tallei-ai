@@ -9,7 +9,7 @@
  */
 
 import * as React from "react";
-import { Body, Button, Container, Head, Heading, Hr, Html, Img, Link, Preview, Section, Text, render } from "react-email";
+import { Body, Button, Container, Head, Heading, Hr, Html, Link, Preview, Section, Text, render } from "react-email";
 import { formatInlineMarkdown } from "./newsletter.js";
 import type { NewsletterTemplateId } from "./newsletter.js";
 
@@ -41,155 +41,8 @@ type TemplateTheme = {
   footer: string;
 };
 
-function themeForTemplate(templateId: NewsletterTemplateId): TemplateTheme {
-  if (templateId === "02-matte-feature-announcement") {
-    return {
-      accent: "#4f46e5",
-      background: "#f4f4f5",
-      containerBackground: "#ffffff",
-      text: "#27272a",
-      muted: "#71717a",
-      border: "#d4d4d8",
-      radius: "18px",
-      maxWidth: "560px",
-      bodyPadding: "32px 14px",
-      containerPadding: "36px",
-      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
-      buttonBackground: "#18181b",
-      buttonColor: "#ffffff",
-      headingWeight: "700",
-      eyebrow: "Feature announcement",
-      intro: "Here is what changed this week.",
-      footer: "You’re receiving this product announcement because you subscribed to updates from Tallei.",
-    };
-  }
-  if (templateId === "03-protocol-feature-announcement") {
-    return {
-      accent: "#059669",
-      background: "#0b1220",
-      containerBackground: "#101827",
-      text: "#f8fafc",
-      muted: "#a7b0c0",
-      border: "#263244",
-      radius: "8px",
-      maxWidth: "600px",
-      bodyPadding: "28px 12px",
-      containerPadding: "32px",
-      fontFamily: '"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace',
-      buttonBackground: "#34d399",
-      buttonColor: "#052e1b",
-      headingWeight: "700",
-      eyebrow: "Protocol update",
-      intro: "Release notes and implementation details follow.",
-      footer: "You’re receiving this protocol-style update because you subscribed to Tallei.",
-    };
-  }
-  if (templateId === "02-matte-product-update") {
-    return {
-      accent: "#2563eb",
-      background: "#eef2f7",
-      containerBackground: "#ffffff",
-      text: "#111827",
-      muted: "#64748b",
-      border: "#cbd5e1",
-      radius: "20px",
-      maxWidth: "600px",
-      bodyPadding: "34px 14px",
-      containerPadding: "34px",
-      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
-      buttonBackground: "#2563eb",
-      buttonColor: "#ffffff",
-      headingWeight: "700",
-      eyebrow: "Product update",
-      intro: "A concise product update for your team and customers.",
-      footer: "You're receiving this product update because you subscribed to Tallei.",
-    };
-  }
-  if (templateId === "04-tech-newsletter") {
-    return {
-      accent: "#1a1a1a",
-      background: "#f5f5f5",
-      containerBackground: "#e8e8e8",
-      text: "#1a1a1a",
-      muted: "#666666",
-      border: "#d4d4d4",
-      radius: "10px",
-      maxWidth: "640px",
-      bodyPadding: "0",
-      containerPadding: "0",
-      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
-      buttonBackground: "#ffffff",
-      buttonColor: "#1a1a1a",
-      headingWeight: "700",
-      eyebrow: "Newsletter",
-      intro: "The latest updates and insights.",
-      footer: "You're receiving this newsletter because you subscribed to updates from Tallei.",
-    };
-  }
-  if (templateId === "05-skin-newsletter") {
-    return {
-      accent: "#2d2d2d",
-      background: "#ffffff",
-      containerBackground: "#ffffff",
-      text: "#2d2d2d",
-      muted: "#767676",
-      border: "#e5e5e5",
-      radius: "0",
-      maxWidth: "640px",
-      bodyPadding: "0",
-      containerPadding: "0",
-      fontFamily: 'Georgia,"Times New Roman",Times,serif',
-      buttonBackground: "#2d2d2d",
-      buttonColor: "#ffffff",
-      headingWeight: "400",
-      eyebrow: "Newsletter",
-      intro: "Hi there,",
-      footer: "You're receiving this newsletter because you subscribed to updates from Tallei.",
-    };
-  }
-  if (templateId === "06-codepen-challenge") {
-    return {
-      accent: "#f0d361",
-      background: "#191919",
-      containerBackground: "#505050",
-      text: "#191919",
-      muted: "#505050",
-      border: "#f0d361",
-      radius: "0",
-      maxWidth: "648px",
-      bodyPadding: "0",
-      containerPadding: "0",
-      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
-      buttonBackground: "#2138c6",
-      buttonColor: "#ffffff",
-      headingWeight: "700",
-      eyebrow: "#CodePenChallenge",
-      intro: "This week's challenge:",
-      footer: "You can adjust your email preferences any time, or instantly opt out of emails of this kind.",
-    };
-  }
-  if (templateId === "07-stackoverflow-tips") {
-    return {
-      accent: "#0095ff",
-      background: "#f3f3f5",
-      containerBackground: "#ffffff",
-      text: "#0c0d0e",
-      muted: "#3c3f44",
-      border: "#d6d8db",
-      radius: "4px",
-      maxWidth: "680px",
-      bodyPadding: "0",
-      containerPadding: "0",
-      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
-      buttonBackground: "#0095ff",
-      buttonColor: "#ffffff",
-      headingWeight: "700",
-      eyebrow: "Tips",
-      intro: "Tips and tricks for searching on Stack Overflow",
-      footer: "You're receiving this email because your Stack Overflow activity triggered this tip or reminder.",
-    };
-  }
-  return {
+function themeForTemplate(templateId: NewsletterTemplateId): TemplateTheme { 
+   return {
     accent: "#111827",
     background: "#ffffff",
     containerBackground: "#ffffff",
@@ -236,9 +89,6 @@ function markdownHtml(markdown: string, theme: TemplateTheme): string {
     .join("\n")
     .replace(/style="color:#2563eb;text-decoration:underline;"/g, `style="color:${theme.accent};text-decoration:underline;"`);
 }
-
-const baseUrl = "https://demo.react.email";
-const logoUrl = `${baseUrl}/static/vercel-logo.png`;
 
 function techNewsletterElement(input: {
   subject: string | null;
@@ -533,13 +383,6 @@ function newsletterEmailElement(input: {
             borderRadius: theme.radius,
           },
         },
-        React.createElement(Img, {
-          src: logoUrl,
-          width: "32",
-          height: "32",
-          alt: "Tallei",
-          style: { margin: "0 0 28px" },
-        }),
         React.createElement(Text, {
           style: {
             margin: "0 0 10px",

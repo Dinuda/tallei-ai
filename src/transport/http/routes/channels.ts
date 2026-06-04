@@ -7,6 +7,7 @@ import {
   disconnectChannel,
   listChannelsOverview,
   processResendInboundWebhook,
+  processResendMetricsWebhook,
   processTelegramWebhook,
   sendChannelTest,
   setPrimaryChannel,
@@ -121,6 +122,21 @@ router.post("/webhooks/resend", async (req, res: Response) => {
     res.json({ ok: true, action: action.type });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Resend inbound webhook failed";
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post("/webhooks/resend-events", async (req, res: Response) => {
+  try {
+    const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody;
+    const result = await processResendMetricsWebhook({
+      body: req.body,
+      rawBody,
+      headers: req.headers,
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Resend metrics webhook failed";
     res.status(400).json({ error: message });
   }
 });

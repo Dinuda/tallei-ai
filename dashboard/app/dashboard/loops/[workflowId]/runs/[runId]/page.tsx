@@ -83,6 +83,7 @@ type LoopWorkflow = {
   nextRunAt: string | null;
   definition?: {
     goal: string;
+    presetId?: string;
     allowedIntegrations?: string[];
     allowedToolRefs?: string[];
     schedule?: { timezone?: string };
@@ -122,11 +123,34 @@ type LoopRun = {
       sentAt: string | null;
       successCount: number;
       failureCount: number;
+      dryRun?: boolean;
+      error?: string | null;
       openCount?: number;
       clickCount?: number;
       unsubscribeCount?: number;
       openRate?: number;
       clickRate?: number;
+      deliveredCount?: number;
+      totalClickCount?: number;
+      bounceCount?: number;
+      failedEventCount?: number;
+      complaintCount?: number;
+      metricsWebhook?: {
+        id?: string | null;
+        endpoint?: string | null;
+        created?: boolean;
+        updated?: boolean;
+        events?: string[];
+      };
+      trackingDiagnostics?: {
+        htmlBytes?: number;
+        textBytes?: number;
+        gmailClippingRisk?: boolean;
+        gmailClippingWarningBytes?: number;
+        openTracking?: string;
+        note?: string;
+        webhookEndpoint?: string | null;
+      };
     } | null;
   };
   emailTemplate?: {
@@ -274,14 +298,18 @@ function isPublicistTask(task: AgentRowTask): boolean {
 }
 
 function isWriterTask(task: AgentRowTask): boolean {
-  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
-  const key = `${task.agentId} ${task.agentName} ${task.toolKey} ${refs}`.toLowerCase();
+  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
   return (
     key.includes("writer") ||
-    key.includes("write") ||
-    key.includes("draft") ||
-    refs.includes("llm_only")
+    key.includes("creative writer") ||
+    (key.includes("write") && !key.includes("research") && !key.includes("search")) ||
+    key.includes("draft")
   );
+}
+
+function isAgentRowOpen(task: AgentRowTask, expandedTaskId: string | null): boolean {
+  if (isWriterTask(task)) return expandedTaskId === null;
+  return expandedTaskId === task.id;
 }
 
 function getPublicistMeta(task: AgentRowTask) {
@@ -319,6 +347,29 @@ function looksNewsletterContent(v: string): boolean {
     text.includes("this week") ||
     text.includes("thanks for reading")
   );
+}
+
+function parseNewsletterSubjectAndGreeting(v: string): { subject: string; greeting: string } {
+  const lines = v.split("\n");
+  let subject = "";
+  let greeting = "";
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const subjectMatch = trimmed.match(/^Subject:\s*(.+)$/i);
+    if (subjectMatch) {
+      subject = subjectMatch[1].trim();
+      continue;
+    }
+    if (!greeting && /^\*.+\*$/.test(trimmed)) {
+      greeting = trimmed.replace(/^\*|\*$/g, "").trim();
+      continue;
+    }
+    if (subject && greeting) break;
+  }
+
+  return { subject, greeting };
 }
 
 function cleanNewsletterContent(v: string): string {
@@ -447,6 +498,14 @@ function runAction(run: LoopRun | null): {
   return null;
 }
 
+function isNewsletterPresetWorkflow(workflow: LoopWorkflow | null): boolean {
+  const definition = workflow?.definition;
+  if (!definition) return false;
+  return definition.presetId === "newsletter"
+    || /\bnewsletter\b/i.test(definition.goal)
+    || Boolean(definition.allowedToolRefs?.includes("internal.resend_broadcast"));
+}
+
 function RunBadge({ status }: { status: string }) {
   const isRunning = status === "running" || status === "strategy_approved";
   return (
@@ -498,6 +557,7 @@ export default function LoopRunDetailPage() {
   const runStatus = run?.status ?? "loading";
   const wfStatus = workflow?.status ?? "active";
   const decision = runAction(run);
+  const predefinedNewsletterRun = isNewsletterPresetWorkflow(workflow);
   const showCsvUpload = runStatus === "waiting_for_contact_list" || runStatus === "waiting_for_input";
 
   const agentTasks = useMemo((): AgentRowTask[] => {
@@ -532,7 +592,7 @@ export default function LoopRunDetailPage() {
     }
     return "";
   })();
-  const centerOutput = run?.status === "waiting_for_strategy_approval" && run.strategyOutput?.trim()
+  const centerOutput = run?.status === "waiting_for_strategy_approval" && !predefinedNewsletterRun && run.strategyOutput?.trim()
     ? run.strategyOutput
     : activeAgentTask
       ? getTaskOutput(activeAgentTask)
@@ -545,13 +605,28 @@ export default function LoopRunDetailPage() {
   const deliveryStats = run?.stats?.delivery ?? null;
   const sentCount = deliveryStats?.successCount ?? run?.deliveryAction?.successCount ?? 0;
   const failureCount = deliveryStats?.failureCount ?? run?.deliveryAction?.failureCount ?? 0;
+  const deliveryDryRun = deliveryStats?.dryRun === true;
+  const deliveryFailed = deliveryDryRun || run?.deliveryAction?.status === "failed" || (failureCount > 0 && sentCount === 0);
+  const deliveryStatusMessage = deliveryDryRun
+    ? "Dry run only. Outbound email is disabled, so no email was sent."
+    : deliveryFailed
+      ? (deliveryStats?.error ?? "Resend broadcast failed or needs review.")
+      : run?.deliveryAction?.status === "completed" || run?.stats?.delivery?.sentAt
+        ? "Resend broadcast submitted."
+        : "Contacts are syncing to Resend before the broadcast sends.";
   const recipientCount = run?.deliveryAction?.recipientCount ?? run?.stats?.contacts?.recipientCount ?? sentCount + failureCount;
   const openCount = deliveryStats?.openCount ?? 0;
   const clickCount = deliveryStats?.clickCount ?? 0;
+  const deliveredCount = deliveryStats?.deliveredCount ?? 0;
+  const totalClickCount = deliveryStats?.totalClickCount ?? clickCount;
   const unsubscribeCount = deliveryStats?.unsubscribeCount ?? 0;
   const openRate = deliveryStats?.openRate ?? (sentCount > 0 ? openCount / sentCount : 0);
   const clickRate = deliveryStats?.clickRate ?? (sentCount > 0 ? clickCount / sentCount : 0);
   const deliveryRate = recipientCount > 0 ? sentCount / recipientCount : 0;
+  const trackingDiagnostics = deliveryStats?.trackingDiagnostics ?? null;
+  const metricsWebhook = deliveryStats?.metricsWebhook ?? null;
+  const htmlBytes = trackingDiagnostics?.htmlBytes ?? 0;
+  const htmlKb = htmlBytes > 0 ? Math.round(htmlBytes / 1024) : 0;
 
   useEffect(() => {
     if (draftDirty) return;
@@ -800,7 +875,7 @@ export default function LoopRunDetailPage() {
     setBusy("upload-contacts");
     setError(null);
     try {
-      if (draftDirty && draftEditor.trim()) {
+      if ((draftDirty && draftEditor.trim()) || (emailSource === "builder" && emailHtml.trim())) {
         await saveNewsletterDraft({ keepBusy: true });
       }
       const csv = await file.text();
@@ -842,7 +917,27 @@ export default function LoopRunDetailPage() {
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload.error ?? "Failed to save newsletter");
-      setRun((current) => current ? { ...current, draftOutput: draftEditor, updatedAt: new Date().toISOString() } : current);
+      const updatedAt = new Date().toISOString();
+      const savedEmailHtml = options?.emailHtmlOverride ?? (emailSource === "builder" && emailHtml ? emailHtml : "");
+      const savedEmailDesign = options?.emailHtmlOverride
+        ? options.emailDesignOverride ?? null
+        : emailSource === "builder" && emailHtml
+          ? emailDesign
+          : null;
+      setRun((current) => current ? {
+        ...current,
+        draftOutput: draftEditor,
+        updatedAt,
+        ...(savedEmailHtml
+          ? {
+            emailTemplate: {
+              html: savedEmailHtml,
+              design: savedEmailDesign,
+              updatedAt,
+            },
+          }
+          : {}),
+      } : current);
       setDraftDirty(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save newsletter");
@@ -1110,9 +1205,7 @@ export default function LoopRunDetailPage() {
                   <div>
                     <p className="text-sm font-semibold text-slate-900">Broadcast delivery</p>
                     <p className="text-xs text-slate-500">
-                      {run.deliveryAction?.status === "completed" || run.stats?.delivery?.sentAt
-                        ? "Resend broadcast sent."
-                        : "Contacts are syncing to Resend before the broadcast sends."}
+                      {deliveryStatusMessage}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2 text-xs">
@@ -1120,7 +1213,7 @@ export default function LoopRunDetailPage() {
                       {run.deliveryAction?.recipientCount ?? run.stats?.contacts?.recipientCount ?? 0} recipients
                     </span>
                     <span className="rounded-full bg-sky-100 px-2.5 py-1 text-sky-700">
-                      {run.stats?.delivery?.successCount ?? run.deliveryAction?.successCount ?? 0} sent
+                      {run.stats?.delivery?.successCount ?? run.deliveryAction?.successCount ?? 0} submitted
                     </span>
                     <span className="rounded-full bg-rose-100 px-2.5 py-1 text-rose-700">
                       {run.stats?.delivery?.failureCount ?? run.deliveryAction?.failureCount ?? 0} failed
@@ -1136,7 +1229,7 @@ export default function LoopRunDetailPage() {
               </Card>
             ) : null}
 
-            {run?.status === "waiting_for_strategy_approval" && roster.length > 0 ? (
+            {run?.status === "waiting_for_strategy_approval" && !predefinedNewsletterRun && roster.length > 0 ? (
               <StrategyRosterEditor
                 roster={roster}
                 toolCatalog={toolCatalog}
@@ -1156,7 +1249,7 @@ export default function LoopRunDetailPage() {
                       Newsletter
                     </span>
                     <CardDescription className="text-slate-600">
-                      {run?.status === "waiting_for_strategy_approval"
+                      {run?.status === "waiting_for_strategy_approval" && !predefinedNewsletterRun
                         ? "CEO strategy proposal"
                         : activeAgentTask
                           ? `${activeAgentTask.agentName} output`
@@ -1177,7 +1270,12 @@ export default function LoopRunDetailPage() {
                 </div>
               </CardHeader>
 
-              <CardContent className="min-h-0 flex-1 overflow-y-auto px-5 pb-6 pt-2">
+              <CardContent
+                className={cn(
+                  "min-h-0 flex flex-1 flex-col px-5 pb-6 pt-2",
+                  showNewsletterEditor ? "overflow-hidden" : "overflow-y-auto"
+                )}
+              >
                 {isPublicistView ? (
                   <div className="space-y-4">
                     {publicistMeta ? (
@@ -1208,23 +1306,20 @@ export default function LoopRunDetailPage() {
                       </div>
                     ) : null}
 
-                    <div className="grid grid-cols-4 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-px rounded-xl bg-slate-200/50 shadow-sm overflow-hidden">
                       {[
-                        { label: "Sent", value: sentCount, icon: Mail, color: "text-sky-700", bg: "bg-sky-50" },
-                        { label: "Open rate", value: formatPercent(openRate), icon: Eye, color: "text-amber-700", bg: "bg-amber-50" },
-                        { label: "Click rate", value: formatPercent(clickRate), icon: MousePointerClick, color: "text-emerald-700", bg: "bg-emerald-50" },
-                        { label: "Unsub", value: unsubscribeCount, icon: Users, color: "text-slate-600", bg: "bg-slate-50" },
+                        { label: "Recipients", value: recipientCount, icon: Users, color: "text-slate-500" },
+                        { label: deliveryDryRun ? "Not sent" : "Submitted", value: deliveryDryRun ? failureCount : sentCount, icon: Mail, color: deliveryDryRun ? "text-rose-600" : "text-sky-600" },
+                        { label: "Open rate", value: formatPercent(openRate), icon: Eye, color: "text-amber-600" },
+                        { label: "Click rate", value: formatPercent(clickRate), icon: MousePointerClick, color: "text-emerald-600" },
+                        { label: "Unsubscribed", value: unsubscribeCount, icon: Users, color: "text-slate-500" },
                       ].map((stat) => (
-                        <div key={stat.label} className="rounded-xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
-                          <div className="flex items-center gap-2">
-                            <span className={`grid size-7 place-items-center rounded-lg ${stat.bg}`}>
-                              <stat.icon className={`size-3.5 ${stat.color}`} />
-                            </span>
-                            <div>
-                              <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{stat.label}</p>
-                              <p className="text-lg font-bold text-slate-900">{stat.value}</p>
-                            </div>
+                        <div key={stat.label} className="flex flex-col justify-center gap-0.5 bg-white px-4 py-3">
+                          <div className="flex items-center gap-1.5">
+                            <stat.icon className={cn("size-3.5", stat.color)} />
+                            <span className="text-[11px] font-medium text-slate-500">{stat.label}</span>
                           </div>
+                          <span className="text-lg font-semibold tabular-nums text-slate-900">{stat.value}</span>
                         </div>
                       ))}
                     </div>
@@ -1253,20 +1348,44 @@ export default function LoopRunDetailPage() {
                           ))}
                         </div>
                         <p className="mt-3 text-xs text-slate-500">
-                          {openCount} opens, {clickCount} clicks, {failureCount} failed deliveries.
+                          {openCount} tracked opens, {clickCount} unique clicks, {totalClickCount} total clicks, {failureCount} failed deliveries.
                         </p>
+                        <div className="mt-3 space-y-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                          <p>
+                            Open tracking is best effort because Resend records an open only when the recipient loads the HTML tracking pixel. Clicks are the stronger engagement signal.
+                          </p>
+                          {trackingDiagnostics?.gmailClippingRisk ? (
+                            <p>
+                              This email is about {htmlKb} KB of HTML, so Gmail may clip it and hide the open pixel. Trim the builder HTML or move heavy content behind links.
+                            </p>
+                          ) : null}
+                          {metricsWebhook?.endpoint ? (
+                            <p className="break-all">
+                              Metrics webhook: {metricsWebhook.endpoint}
+                            </p>
+                          ) : null}
+                          {deliveredCount > 0 && openCount === 0 ? (
+                            <p>
+                              Delivery events are arriving from Resend, so zero opens usually means the pixel was blocked, cached, clipped, or not loaded by the inbox.
+                            </p>
+                          ) : sentCount > 0 && openCount === 0 && clickCount === 0 ? (
+                            <p>
+                              No engagement webhooks have arrived yet. Confirm this run used a public HTTPS webhook URL and that Resend has email.opened and email.clicked selected.
+                            </p>
+                          ) : null}
+                        </div>
                       </div>
                     ) : null}
 
                     {emailHtml ? (
-                      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm h-full">
                         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
-                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Email sent</p>
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{deliveryDryRun ? "Email dry run" : "Email submitted"}</p>
                         </div>
                         <iframe
                           title="Publicist email preview"
                           srcDoc={emailHtml}
-                          className="h-[520px] w-full bg-white"
+                          className="h-full w-full bg-white"
                           sandbox=""
                         />
                       </div>
@@ -1291,8 +1410,8 @@ export default function LoopRunDetailPage() {
                     ) : null}
                   </div>
                 ) : showNewsletterEditor ? (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                  <div className="flex min-h-0 flex-1 flex-col gap-3">
+                    <div className="flex shrink-0 items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
                       <div>
                         <p className="text-sm font-semibold text-slate-900">Newsletter editor</p>
                         <p className="text-xs text-slate-500">
@@ -1327,39 +1446,29 @@ export default function LoopRunDetailPage() {
                       </div>
                     </div>
 
-                    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-                        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
-                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Email preview</p>
-                          <span className="text-[10px] font-medium text-slate-500">
-                            {emailPreviewBusy ? "Rendering..." : emailSource === "builder" ? "Builder HTML" : "Generated HTML"}
-                          </span>
-                        </div>
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                      <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-2.5">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Email preview</p>
+                        <span className="text-[10px] font-medium text-slate-500">
+                          {emailPreviewBusy ? "Rendering..." : emailSource === "builder" ? "Builder HTML" : "Generated HTML"}
+                        </span>
+                      </div>
+                      <div className="relative min-h-0 flex-1">
                         {emailHtml ? (
                           <iframe
                             title="Writer email preview"
                             srcDoc={emailHtml}
-                            className="h-[520px] w-full bg-white"
+                            className="absolute inset-0 h-full w-full bg-white"
                             sandbox=""
                           />
                         ) : (
-                          <div className="grid h-[360px] place-items-center px-4 text-center text-sm text-slate-500">
+                          <div className="grid h-full place-items-center px-4 text-center text-sm text-slate-500">
                             {emailPreviewBusy ? "Building email preview..." : "Newsletter content will render here."}
                           </div>
                         )}
                       </div>
-
-                    <div className="min-w-0">
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Markdown</p>
-                      <textarea
-                        value={draftEditor}
-                        onChange={(event) => {
-                          setDraftEditor(event.target.value);
-                          setDraftDirty(true);
-                        }}
-                        className="min-h-64 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-3 font-mono text-sm leading-6 text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
-                        spellCheck
-                      />
                     </div>
+
                   </div>
                 ) : centerOutput?.trim() ? (
                   <article className="rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
@@ -1445,7 +1554,7 @@ export default function LoopRunDetailPage() {
                           <AgentRow
                           key={task.id}
                           task={task}
-                          open={expandedTaskId === task.id}
+                          open={isAgentRowOpen(task, expandedTaskId)}
                           canRerun={runStatus !== "executing_action" && runStatus !== "distributing" && task.status !== "in_progress" && task.status !== "todo"}
                           rerunning={busy === `rerun:${task.id}`}
                           onRerun={() => void rerunTask(task.id)}
@@ -1454,7 +1563,7 @@ export default function LoopRunDetailPage() {
                               setExpandedTaskId(null);
                               return;
                             }
-                            setExpandedTaskId((current) => current === task.id ? null : task.id);
+                            setExpandedTaskId((current) => (current === task.id ? null : task.id));
                           }}
                         />
                       ))
@@ -1557,9 +1666,9 @@ export default function LoopRunDetailPage() {
           initialDesign={emailDesign ?? undefined}
           initialHtml={emailHtml || undefined}
           initialMarkdown={draftEditor || undefined}
-          onSave={(html, design) => {
-            void saveBuilderEmail(html, design);
-          }}
+          initialSubject={parseNewsletterSubjectAndGreeting(draftEditor).subject}
+          initialGreeting={parseNewsletterSubjectAndGreeting(draftEditor).greeting}
+          onSave={saveBuilderEmail}
         />
 
         {loading ? (

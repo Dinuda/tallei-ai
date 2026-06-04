@@ -10,6 +10,9 @@ function idempotencyKey(input) {
     if (input.jobType === "distribution") {
         return `${input.runId}:distribution:${input.idempotencySuffix ?? "batch-0"}`;
     }
+    if (input.jobType === "ceo_strategy") {
+        return `${input.runId}:ceo_strategy`;
+    }
     return `${input.runId}:ceo_finalize`;
 }
 export async function findLoopHeartbeatJob(input) {

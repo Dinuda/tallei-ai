@@ -5,7 +5,7 @@
 import { randomUUID } from "crypto";
 import { pool } from "../../infrastructure/db/index.js";
 import { loopExecutorOpenAiChat } from "./openai-chat.js";
-import { getLoopPreset } from "./presets/registry.js";
+import { resolveLoopPreset } from "./presets/registry.js";
 import {
   dynamicPlanRoster,
   isDynamicPlanDefinition,
@@ -14,23 +14,46 @@ import {
 } from "./plan.js";
 import type { LoopRunContext } from "./run-context.js";
 import { getEffectiveLoopConstraints, listAllowedLoopTools } from "./tool-catalog.js";
-import { ceoStrategyOutputSchema, type LoopPlan, type LoopRunAgent } from "./types.js";
+import { ceoStrategyOutputSchema, type LoopDefinition, type LoopPlan, type LoopRunAgent } from "./types.js";
+
+function rosterFromAgentGraph(definition: LoopDefinition): { strategyText: string; agents: LoopRunAgent[] } {
+  const agents = normalizeRosterAgents(
+    (definition.agentGraph?.children ?? []).map((child) => ({
+      id: child.id,
+      name: child.name,
+      task: child.task,
+      tools: child.tools,
+    }))
+  );
+  return {
+    strategyText: [
+      "Using the loop's configured agent roster (no re-planning).",
+      `Goal: ${definition.goal}`,
+      ...agents.map((agent, index) => `${index + 1}. ${agent.name} — ${agent.task}`),
+    ].join("\n"),
+    agents,
+  };
+}
 
 /**
  * Builds CEO strategy text and proposed agent roster for a run.
- * Uses plan stages, preset, or dynamic LLM roster generation.
+ * Prefers stored agent graph, then preset, then plan stages, then LLM.
  */
 export async function buildCeoStrategyOutput(context: LoopRunContext) {
+  if (context.definition.agentGraph?.children?.length) {
+    return rosterFromAgentGraph(context.definition);
+  }
+
+  const preset = resolveLoopPreset(context.definition);
+  if (preset) {
+    return preset.buildRoster(context.definition.goal);
+  }
+
   if (isDynamicPlanDefinition(context.definition)) {
     return {
       strategyText: planStrategyText(context.definition.plan!),
       agents: dynamicPlanRoster(context.definition.plan!),
     };
-  }
-
-  const preset = getLoopPreset(context.definition.presetId);
-  if (preset) {
-    return preset.buildRoster(context.definition.goal);
   }
 
   const constraints = getEffectiveLoopConstraints(context.definition);

@@ -57,6 +57,23 @@ function readGatewaySearchConfig(raw: unknown) {
   };
 }
 
+function readMemorySearchConfig(raw: unknown, fallbackTask: string) {
+  const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const rawLimit = typeof record.limit === "number"
+    ? record.limit
+    : typeof record.limit === "string"
+      ? Number.parseInt(record.limit, 10)
+      : Number.NaN;
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(20, Math.max(1, Math.floor(rawLimit)))
+    : 5;
+  const configuredQuery = typeof record.query === "string" && record.query.trim()
+    ? record.query.trim()
+    : "";
+  const query = configuredQuery || fallbackTask.slice(0, 500);
+  return { query, limit };
+}
+
 async function runExaWebSearch(input: { goal: string; task: string; config?: Record<string, unknown> }) {
   const searchConfig = readGatewaySearchConfig(input.config);
   const exaApiKey = process.env.EXA_API_KEY?.trim() || "";
@@ -176,7 +193,8 @@ async function runAssignedTools(input: RunLoopAgentInput) {
     if (!entry?.isActionable || entry.ref === "internal.llm_only") continue;
 
     if (entry.ref === "internal.memory_search") {
-      const result = await recallMemories(input.agent.task.slice(0, 500), input.auth, 5);
+      const memoryConfig = readMemorySearchConfig(assignment.config, input.agent.task);
+      const result = await recallMemories(memoryConfig.query, input.auth, memoryConfig.limit);
       toolsUsed.push(entry.ref);
       sections.push(["Memory search results:", ...result.memories.map((m) => `- ${m.text}`)].join("\n"));
       continue;
@@ -291,7 +309,18 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     priorComments: input.priorComments.map((c) => ({ author: c.author, body: c.body })),
     draftPolicy: input.draftPolicy,
   };
-  const system = buildAgentSystemPrompt(bindCtx);
+  const isNewsletterWriter = input.agent.id === "writer"
+    && Boolean(input.definition && isNewsletterLoopDefinition(input.definition));
+  const system = [
+    buildAgentSystemPrompt(bindCtx),
+    ...(isNewsletterWriter
+      ? [
+        "Writer output contract: line 1 must be `Subject: <title>` only.",
+        "The body must not repeat that subject as a headline, H1, or opening sentence.",
+        "Deliver polished subscriber copy only — no draft labels, handoffs, or workflow notes.",
+      ]
+      : []),
+  ].join("\n");
   let user = buildAgentUserPrompt(bindCtx);
   let draft: unknown;
   let toolsUsed: string[] = [];

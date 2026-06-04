@@ -80,26 +80,48 @@ export function normalizeNewsletterTemplateId(value: unknown): NewsletterTemplat
 const NEWSLETTER_MEMORY_RECORDS = [
   {
     id: "newsletter-memory-2026-05-26",
-    title: "Essential books for product builders",
-    summary: "Timeless reading recommendations across writing, execution, strategy, leadership, product craft, and distribution.",
+    date: "2026-05-25",
+    title: "How I AI: Felix Rieseberg's Claude Cowork workflows + Google I/O 2026 recap",
+    url: "https://www.chatprd.ai/how-i-ai/felix-rieseberg-claude-code-cowork-workflows-for-3d-house-design-and-hardware-buddy",
+    summary: "Recent Lenny-adjacent coverage focused on practical AI workflows for builders: Claude Cowork usage patterns, personal automation, live dashboards, and Google's latest AI launches with product implications.",
   },
   {
-    id: "newsletter-memory-2026-05-25",
-    title: "How I AI weekly roundup",
-    summary: "Felix Rieseberg's Claude workflows and Google I/O 2026 launch analysis with practical implications for builders.",
+    id: "newsletter-memory-2026-05-31",
+    date: "2026-05-31",
+    title: "Benedict Evans on AI as a 1997 internet moment",
+    url: "https://www.lennysnewsletter.com/p/a-rational-conversation-on-where",
+    summary: "Lenny's recent podcast framing centered on where value accrues in AI, why distribution becomes the moat as software gets easier to build, and how to think about tasks versus jobs.",
+  },
+  {
+    id: "newsletter-memory-2026-06-01",
+    date: "2026-06-01",
+    title: "How I AI: Codex Goals, Claude Opus 4.8, and non-technical app building",
+    url: "https://www.chatprd.ai/how-i-ai/codex-goals-claude-opus-4-8-and-non-technical-app-building",
+    summary: "Recent coverage emphasized agentic coding workflows, clearer delegation to AI systems, frontier model upgrades, and the widening set of builder tools available to non-technical operators.",
   },
 ];
 
 const NEWSLETTER_DEV_SOURCE_LINKS = [
-  "https://news.ycombinator.com/",
-  "https://www.producthunt.com/",
-  "https://openai.com/news/",
-  "https://www.anthropic.com/news",
-  "https://linear.app/changelog",
-  "https://vercel.com/changelog",
-  "https://github.blog/changelog/",
-  "https://stripe.com/blog",
+  "https://openai.com/index/codex-for-every-role-tool-workflow/",
+  "https://openai.com/business/guides-and-resources/how-openai-uses-codex/",
+  "https://www.anthropic.com/news/claude-opus-4-8",
+  "https://blog.google/innovation-and-ai/technology/ai/google-io-2026-all-our-announcements/",
+  "https://blog.google/innovation-and-ai/technology/ai/io-2026-google-ai/",
+  "https://github.blog/changelog/2026-06-02-expanded-technical-preview-availability-for-the-github-copilot-app/",
+  "https://linear.app/changelog/2026-05-27-linear-diffs",
+  "https://linear.app/changelog/2026-05-14-code-intelligence",
 ] as const;
+
+const NEWSLETTER_LIVE_SEARCH_ALLOWED_DOMAINS = [
+  "openai.com",
+  "anthropic.com",
+  "blog.google",
+  "github.blog",
+  "linear.app",
+] as const;
+
+const NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS =
+  "Where agentic coding is getting real: what Codex, Claude Opus 4.8, Google's I/O launches, GitHub Copilot app, and Linear's code-aware agent features say about where value is accruing.";
 
 function buildNewsletterSourceAgent(goal: string) {
   if (config.loopExecutorNewsletterLiveWebSearchEnabled) {
@@ -107,10 +129,19 @@ function buildNewsletterSourceAgent(goal: string) {
       id: "web_search_agent",
       name: "Web Search Agent",
       task: [
-        "Run live web search for priority themes and gather source-grounded evidence.",
+        "Run live web search for the top topic candidates and gather source-grounded evidence from this week's builder/AI news.",
+        "Prioritize exact source equivalents to the seeded weekly links and stay focused on recent developments relevant to product builders.",
+        `Default topic hypothesis to evaluate: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
         `Goal: ${goal}`,
       ].join(" "),
-      tools: [{ ref: "internal.web_search", config: { searchContextSize: "high", country: "US" } }],
+      tools: [{
+        ref: "internal.web_search",
+        config: {
+          searchContextSize: "high",
+          country: "US",
+          allowedDomains: [...NEWSLETTER_LIVE_SEARCH_ALLOWED_DOMAINS],
+        },
+      }],
     };
   }
   return {
@@ -118,7 +149,9 @@ function buildNewsletterSourceAgent(goal: string) {
     name: "Seeded Source Agent",
     task: [
       "Development mode: do not call live web search.",
-      "Use these seeded source links as source candidates and produce concise source notes with titles, URLs, likely angles, and what to verify before publishing:",
+      "Use these exact seeded source links from this week as source candidates.",
+      "Produce concise source notes with titles, URLs, likely angles, and what to verify before publishing.",
+      `Default topic hypothesis to evaluate: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
       NEWSLETTER_DEV_SOURCE_LINKS.map((url) => `- ${url}`).join(" "),
       `Goal: ${goal}`,
     ].join(" "),
@@ -128,14 +161,16 @@ function buildNewsletterSourceAgent(goal: string) {
 
 function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
   const memoryContext = NEWSLETTER_MEMORY_RECORDS
-    .map((record, index) => `${index + 1}. ${record.title}: ${record.summary}`)
+    .map((record, index) => `${index + 1}. [${record.date}] ${record.title}\n   URL: ${record.url}\n   Summary: ${record.summary}`)
     .join("\n");
   return {
     strategyText: [
       "CEO strategy: run a fixed weekly newsletter pipeline.",
       "Order: Search Agent -> Web Search Agent -> Research Agent -> Writer -> Approval handoff.",
+      "CRITICAL: The Writer MUST check memory for previous newsletters and adopt the same voice, tone, and formatting style.",
       "Pinned memory records to ground this run:",
       memoryContext,
+      `Default lead-topic hypothesis to evaluate: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
       "Outcome: publish-ready draft, operator approval, recipient list upload, then broadcast delivery.",
     ].join("\n"),
     agents: normalizeRosterAgents([
@@ -143,11 +178,23 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
         id: "search_agent",
         name: "Search Agent",
         task: [
-          "Find timely themes and surface high-signal internal source material.",
-          "Output: ranked topic candidates with source notes.",
+          "Search memory for previous newsletters, weekly updates, and product-builder content relevant to Lenny's recent writing.",
+          "Fetch every relevant memory about Lenny's Newsletter, including prior issue examples, writing style, voice, formatting, recurring sections, sign-offs, and editorial preferences.",
+          "Output: 1) three ranked topic candidates grounded in memory with source notes, 2) a summary of Lenny's recent themes and newsletter voice/style found in memory (tone, formatting, section structure).",
+          `Evaluate this hypothesis but do not blindly select it: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
           `Goal: ${goal}`,
         ].join(" "),
-        tools: [{ ref: "internal.memory_search" }],
+        tools: [{
+          ref: "internal.memory_search",
+          config: {
+            limit: 20,
+            query: [
+              "Lenny's Newsletter previous issues writing style voice formatting examples",
+              "Lenny newsletter memory editorial preferences recurring sections tone sign-off",
+              "How I AI Lenny product newsletter product builders style",
+            ].join(" "),
+          },
+        }],
       },
       buildNewsletterSourceAgent(goal),
       {
@@ -155,6 +202,10 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
         name: "Research Agent",
         task: [
           "Synthesize search outputs into concise research notes for the top topics.",
+          "Choose one recommended lead topic, explain why it best matches Lenny's recent direction, and explicitly say why the other candidates were not selected.",
+          "Preserve the voice/style summary found by the Search Agent and pass it to the Writer.",
+          "Output a concise writer briefing with: selected topic, why now, core arguments, source links to cite, and tone/structure guidance.",
+          `Default topic hypothesis to evaluate: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
           `Goal: ${goal}`,
         ].join(" "),
         tools: [{ ref: "internal.llm_only" }],
@@ -163,10 +214,14 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
         id: "writer",
         name: "Writer",
         task: [
-          "Write only the subscriber-facing newsletter draft using search and research outputs.",
-          "Return an optional Subject line followed by the newsletter body.",
-          "Do not include workflow headings, draft labels, next steps, approval instructions, publicist handoff notes, or contact-list/upload instructions.",
-          "Do not impersonate or sign as a third-party newsletter/person unless the operator explicitly provided that sender identity.",
+          "Write the subscriber-facing newsletter draft using the selected topic and writer briefing from the Research Agent.",
+          "FIRST: Review the voice/style summary from the Search Agent. Adopt that exact tone, formatting, and section structure.",
+          "If previous newsletters exist in memory, match their voice (casual vs formal, first vs third person, section types, heading style, use of bullet points, etc).",
+          "Line 1 must be exactly: Subject: <email subject> (metadata only — never repeat this title in the body).",
+          "From line 2 onward: final subscriber-ready sections only.",
+          "Do not fall back to a generic weekly roundup or broad link dump; build the piece around the Research Agent's selected lead topic.",
+          "Use markdown links for cited sources, keep paragraphs short, and make the final draft read like a finished newsletter from the writer.",
+          "Do not include draft labels, approval instructions, publicist handoff notes, or contact-list upload notes.",
           `Goal: ${goal}`,
         ].join(" "),
         tools: [{ ref: "internal.llm_only" }],
@@ -245,6 +300,13 @@ function removeUnsupportedCtaPhrases(value: string): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
+function readSubjectMetadataLine(line: string): string | null {
+  const trimmed = line.trim();
+  const match = trimmed.match(/^(?:\*\*|__)?\s*subject\s*:\s*(?:\*\*|__)?\s*(.+?)\s*(?:\*\*|__)?$/i);
+  if (!match?.[1]?.trim()) return null;
+  return cleanDisplayMarkdown(match[1].replace(/^["']|["']$/g, "").trim()).slice(0, 160);
+}
+
 export function sanitizeSubscriberBody(raw: string): string {
   const normalized = raw.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!normalized) return "";
@@ -290,6 +352,7 @@ export function sanitizeSubscriberBody(raw: string): string {
     if (/^\*{0,2}(next steps?|handoff|operator approval|approval request)\*{0,2}\s*:/i.test(trimmed)) continue;
     if (/^would you like\b/i.test(trimmed) && /adjustments?|proceed|next step/i.test(trimmed)) continue;
     if (/^the draft for the weekly product newsletter\b/i.test(trimmed)) continue;
+    if (/^here(?:'s| is) (?:the )?(?:final )?(?:newsletter|email|draft)\b/i.test(trimmed)) continue;
     if (/^draft newsletter in lenny'?s voice\b/i.test(trimmed)) continue;
     if (/^draft newsletter for\b/i.test(trimmed)) continue;
     if (/^#{1,6}\s*(draft newsletter|newsletter draft|draft email)\b/i.test(trimmed)) continue;
@@ -304,6 +367,43 @@ export function sanitizeSubscriberBody(raw: string): string {
   return removeUnsupportedCtaPhrases(cleaned.join("\n").replace(/\n\s*---\s*$/g, "").replace(/\n{3,}/g, "\n\n").trim());
 }
 
+function normalizeSubjectKey(value: string): string {
+  return cleanDisplayMarkdown(value)
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\*\*([^*]+)\*\*$/, "$1")
+    .trim()
+    .toLowerCase();
+}
+
+/** Remove leading markdown blocks that duplicate the email subject (hero H1 renders subject separately). */
+export function stripSubjectDuplicateFromMarkdown(markdown: string, subject: string | null | undefined): string {
+  const subjectKey = subject?.trim() ? normalizeSubjectKey(subject) : "";
+  if (!subjectKey) return markdown.trim();
+
+  const lines = markdown.split("\n");
+  let index = 0;
+  while (index < lines.length && !lines[index]?.trim()) index += 1;
+  if (index >= lines.length) return markdown.trim();
+
+  const firstBlockEnd = (() => {
+    for (let i = index + 1; i < lines.length; i += 1) {
+      if (!lines[i]?.trim()) return i;
+    }
+    return lines.length;
+  })();
+  const firstBlock = lines.slice(index, firstBlockEnd).join("\n").trim();
+  const firstLine = lines[index]?.trim() ?? "";
+  const firstBlockKey = normalizeSubjectKey(firstBlock.split("\n")[0] ?? firstBlock);
+  const firstLineKey = normalizeSubjectKey(firstLine);
+
+  if (firstBlockKey === subjectKey || firstLineKey === subjectKey) {
+    let next = firstBlockEnd;
+    while (next < lines.length && !lines[next]?.trim()) next += 1;
+    return lines.slice(next).join("\n").trim();
+  }
+  return markdown.trim();
+}
+
 export function formatNewsletterForEmail(raw: string) {
   const sanitized = sanitizeSubscriberBody(raw);
   const lines = sanitized.split("\n");
@@ -311,9 +411,9 @@ export function formatNewsletterForEmail(raw: string) {
   const bodyLines: string[] = [];
   for (const line of lines) {
     const trimmed = line.trim();
-    const subjectMatch = trimmed.match(/^(?:\*\*)?subject:?(?:\*\*)?\s*(.+)$/i);
-    if (!subject && subjectMatch?.[1]) {
-      subject = cleanDisplayMarkdown(subjectMatch[1].replace(/^["']|["']$/g, "").trim());
+    const subjectLine = readSubjectMetadataLine(trimmed);
+    if (subjectLine) {
+      subject = subject ?? subjectLine;
       continue;
     }
     const boldTitleMatch = trimmed.match(/^\*\*([^*]+)\*\*$/);
@@ -340,44 +440,151 @@ export function formatNewsletterForEmail(raw: string) {
       bodyLines.splice(titleLineIndex, 1);
     }
   } else {
-    const duplicateTitleIndex = bodyLines.findIndex((line) => {
+    for (let index = bodyLines.length - 1; index >= 0; index -= 1) {
+      const line = bodyLines[index] ?? "";
       const trimmed = line.trim();
-      if (!trimmed || /^[-*_]{3,}$/.test(trimmed.replace(/\s/g, ""))) return false;
+      if (!trimmed || /^[-*_]{3,}$/.test(trimmed.replace(/\s/g, ""))) continue;
+      if (readSubjectMetadataLine(trimmed)) {
+        bodyLines.splice(index, 1);
+        continue;
+      }
       const normalized = cleanDisplayMarkdown(trimmed
         .replace(/^#{1,6}\s+/, "")
         .replace(/^\*\*([^*]+)\*\*$/, "$1")
         .trim());
-      return normalized.toLowerCase() === subject?.trim().toLowerCase();
-    });
-    if (duplicateTitleIndex >= 0) bodyLines.splice(duplicateTitleIndex, 1);
-  }
-  const text = bodyLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  const blocks = text.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
-  const htmlBlocks = blocks.map((block) => {
-    if (/^[-*_]{3,}$/.test(block.replace(/\s/g, ""))) {
-      return '<hr style="border:none;border-top:1px solid #e5e7eb;margin:32px 0 28px;">';
+      if (normalized.toLowerCase() === subject.trim().toLowerCase()) {
+        bodyLines.splice(index, 1);
+      }
     }
+  }
+  let text = bodyLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  text = stripSubjectDuplicateFromMarkdown(text, subject);
+
+  // Build Substack-style HTML
+  const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
+  const blocks = text.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+  let inList = false;
+  let listBuffer: string[] = [];
+  const bodyHtmlParts: string[] = [];
+
+  function flushList() {
+    if (listBuffer.length === 0) return;
+    const items = listBuffer.map((item) => {
+      const html = formatInlineMarkdown(item.replace(/^[-*]\s+/, ""));
+      return `<li style="margin:0 0 10px;font-size:16px;line-height:1.75;color:#374151;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${html}</li>`;
+    }).join("");
+    bodyHtmlParts.push(`<ul style="margin:0 0 20px;padding-left:20px;">${items}</ul>`);
+    listBuffer = [];
+    inList = false;
+  }
+
+  for (const block of blocks) {
+    // Detect italic intro pattern (wrapped in asterisks)
+    if (/^\*(?!\*)(.+?)(?<!\*)\*$/.test(block) && !block.includes("\n")) {
+      flushList();
+      const introText = formatInlineMarkdown(block.replace(/^\*|\*$/g, ""));
+      bodyHtmlParts.push(`<p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#4b5563;font-style:italic;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${introText}</p>`);
+      continue;
+    }
+
+    // Detect closing sign-off
+    if (/^that's all for this week/i.test(block) || /^thanks for reading/i.test(block) || /^see you next/i.test(block)) {
+      flushList();
+      bodyHtmlParts.push(`<p style="margin:32px 0 0;font-size:16px;line-height:1.75;color:#374151;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${formatInlineMarkdown(block)}</p>`);
+      continue;
+    }
+
+    // Detect horizontal rule
+    if (/^[-*_]{3,}$/.test(block.replace(/\s/g, ""))) {
+      flushList();
+      bodyHtmlParts.push('<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0;" />');
+      continue;
+    }
+
+    // Detect headings
     if (/^#{1,6}\s+/.test(block)) {
+      flushList();
       const markdownLevel = block.match(/^#+/)?.[0].length ?? 2;
       const level = Math.min(3, Math.max(1, markdownLevel));
       const headingText = formatInlineMarkdown(block.replace(/^#{1,6}\s+/, ""));
       if (level === 1) {
-        return `<h1 style="margin:0 0 20px;font-size:34px;line-height:1.16;color:#111827;font-weight:800;">${headingText}</h1>`;
+        bodyHtmlParts.push(`<h2 style="margin:32px 0 16px;font-size:28px;line-height:1.3;color:#111827;font-weight:700;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${headingText}</h2>`);
+      } else if (level === 2) {
+        bodyHtmlParts.push(`<h3 style="margin:28px 0 12px;font-size:22px;line-height:1.35;color:#111827;font-weight:700;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${headingText}</h3>`);
+      } else {
+        bodyHtmlParts.push(`<h4 style="margin:20px 0 8px;font-size:17px;line-height:1.4;color:#111827;font-weight:700;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${headingText}</h4>`);
       }
-      if (level === 2) {
-        return `<h2 style="margin:28px 0 14px;font-size:24px;line-height:1.26;color:#111827;font-weight:700;">${headingText}</h2>`;
-      }
-      return `<h3 style="margin:24px 0 12px;font-size:19px;line-height:1.35;color:#111827;font-weight:700;">${headingText}</h3>`;
+      continue;
     }
-    return `<p style="margin:0 0 18px;font-size:20px;line-height:1.68;color:#1f2937;">${formatInlineMarkdown(block).replace(/\n/g, "<br>")}</p>`;
-  });
+
+    // Detect numbered items like "1) Title" or "1. Title"
+    const numberedMatch = block.match(/^(\d+[).])\s*(.+)$/);
+    if (numberedMatch) {
+      flushList();
+      const num = numberedMatch[1];
+      const rest = numberedMatch[2];
+      // Check if there's a bold title within
+      const boldTitle = rest.match(/^\*\*([^*]+)\*\*\s*(.*)$/);
+      if (boldTitle) {
+        bodyHtmlParts.push(`<h4 style="margin:20px 0 8px;font-size:17px;line-height:1.4;color:#111827;font-weight:700;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${num} ${formatInlineMarkdown(boldTitle[1])}</h4>`);
+        if (boldTitle[2].trim()) {
+          bodyHtmlParts.push(`<p style="margin:0 0 16px;font-size:16px;line-height:1.75;color:#374151;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${formatInlineMarkdown(boldTitle[2])}</p>`);
+        }
+      } else {
+        bodyHtmlParts.push(`<h4 style="margin:20px 0 8px;font-size:17px;line-height:1.4;color:#111827;font-weight:700;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${num} ${formatInlineMarkdown(rest)}</h4>`);
+      }
+      continue;
+    }
+
+    // Detect bullet list items
+    const bulletItems = block.split("\n").filter((line) => /^[-*]\s+/.test(line.trim()));
+    if (bulletItems.length > 0 && bulletItems.length === block.split("\n").filter(Boolean).length) {
+      flushList();
+      bulletItems.forEach((item) => listBuffer.push(item));
+      inList = true;
+      continue;
+    }
+
+    // Regular paragraph
+    if (inList) {
+      listBuffer.push(block);
+    } else {
+      bodyHtmlParts.push(`<p style="margin:0 0 16px;font-size:16px;line-height:1.75;color:#374151;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">${formatInlineMarkdown(block).replace(/\n/g, "<br />")}</p>`);
+    }
+  }
+  flushList();
+
   const html = [
-    '<div style="margin:0;padding:28px 0 20px;background:#f8fafc;">',
-    '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Inter,Arial,sans-serif;max-width:760px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:24px;overflow:hidden;">',
-    '<div style="padding:32px 34px 34px;">',
-    htmlBlocks.join("\n"),
-    "</div></div></div>",
+    '<!DOCTYPE html>',
+    '<html>',
+    '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>',
+    '<body style="margin:0;padding:0;background:#ffffff;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif;">',
+    '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background:#ffffff;">',
+    '<tr><td style="padding:24px 20px;">',
+    '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;margin:0 auto;">',
+    '<tr><td>',
+    // Subscribe forwarding
+    '<p style="margin:0 0 4px;font-size:13px;color:#6b7280;text-align:center;line-height:1.4;">Forwarded this email? <a href="{{subscribe_url}}" style="color:#6b7280;text-decoration:underline;">Subscribe here</a> for more</p>',
+    // Date
+    `<p style="margin:0 0 16px;font-size:12px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px;line-height:1.4;">${today.toUpperCase()}</p>`,
+    // Divider
+    '<hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0 24px;" />',
+    // Body
+    bodyHtmlParts.join("\n"),
+    // Footer divider
+    '<hr style="border:none;border-top:1px solid #e5e7eb;margin:32px 0 16px;" />',
+    // Footer
+    '<p style="margin:0;font-size:12px;color:#9ca3af;text-align:center;line-height:1.6;">You\'re receiving this because you subscribed to updates.</p>',
+    '<p style="margin:4px 0 0;font-size:12px;color:#9ca3af;text-align:center;line-height:1.6;"><a href="{{unsubscribe_url}}" style="color:#6b7280;text-decoration:underline;">Unsubscribe</a> \u00b7 <a href="{{preferences_url}}" style="color:#6b7280;text-decoration:underline;">Manage preferences</a></p>',
+    '</td></tr>',
+    '</table>',
+    '</td></tr>',
+    '</table>',
+    '</body>',
+    '</html>',
   ].join("\n");
+
   return { subject, text, html };
 }
 
@@ -388,10 +595,11 @@ export async function formatNewsletterForBroadcast(
   const templateId = normalizeNewsletterTemplateId(options?.templateId);
   if (options?.useReactEmail !== false) {
     const module = await import("./newsletter-react-email.js");
+    const bodyMarkdown = stripSubjectDuplicateFromMarkdown(formatted.text, formatted.subject ?? null);
     const renderInput = {
       templateId,
       subject: formatted.subject ?? null,
-      markdown: formatted.text,
+      markdown: bodyMarkdown,
     };
     const html = await module.renderNewsletterReactEmail(renderInput);
     const text = await module.renderNewsletterReactEmailText(renderInput);
@@ -456,6 +664,16 @@ export const newsletterDeliveryFormatter: DeliveryContentFormatter = {
   formatForDelivery: (raw) => formatNewsletterForEmail(raw),
   formatForBroadcast: (formatted, options) => formatNewsletterForBroadcast(formatted, options),
 };
+
+/** Tool refs used by the fixed newsletter roster (for loop allowlists and validation). */
+export const NEWSLETTER_PRESET_TOOL_REFS = [
+  "internal.memory_search",
+  "internal.web_search",
+  "internal.llm_only",
+  "internal.email_approval_request",
+  "internal.email_builder_compose",
+  "internal.email_builder_render",
+] as const;
 
 export const newsletterPreset: LoopPreset = {
   id: "newsletter",

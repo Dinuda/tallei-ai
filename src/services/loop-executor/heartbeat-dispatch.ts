@@ -4,7 +4,7 @@ import {
   completeLoopHeartbeatJob,
   failLoopHeartbeatJob,
 } from "./heartbeat-jobs.js";
-import { runAgentHeartbeat, runCeoFinalizeHeartbeat } from "./executor.js";
+import { runAgentHeartbeat, runCeoFinalizeHeartbeat, runCeoStrategyHeartbeat } from "./executor.js";
 import { runDistributionHeartbeat } from "./distribution.js";
 import { markRunBlocked } from "./run-status.js";
 
@@ -19,6 +19,10 @@ async function executeLoopHeartbeatJob(job: {
   if (job.job_type === "agent") {
     if (!job.task_id) throw new Error("Agent heartbeat job missing task_id");
     await runAgentHeartbeat(job.workflow_run_id, job.task_id);
+    return;
+  }
+  if (job.job_type === "ceo_strategy") {
+    await runCeoStrategyHeartbeat(job.workflow_run_id);
     return;
   }
   if (job.job_type === "ceo_finalize") {

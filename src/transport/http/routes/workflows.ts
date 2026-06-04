@@ -8,7 +8,7 @@ import {
   resolveWorkflowApprovalToken,
 } from "../../../services/approval-tokens.js";
 import { formatNewsletterForEmail, normalizeNewsletterTemplateId } from "../../../services/loop-executor/presets/newsletter.js";
-import { renderNewsletterReactEmail } from "../../../services/loop-executor/presets/newsletter-react-email.js";
+// NOTE: renderUnlayerNewsletterEmail is deprecated; formatNewsletterForEmail now returns full Substack-style HTML
 import {
   addLoopRunComment,
   approveLoopStrategy,
@@ -542,19 +542,13 @@ router.patch("/runs/:runId/newsletter", requireScopes(["memory:write"]), async (
   }
 });
 
-router.post("/runs/:runId/newsletter/preview", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  router.post("/runs/:runId/newsletter/preview", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse({ runId: req.params.runId });
     await getLoopRun(req.authContext!, runId);
     const body = newsletterPreviewSchema.parse(req.body ?? {});
     const formatted = formatNewsletterForEmail(body.body);
-    const templateId = normalizeNewsletterTemplateId(body.templateId);
-    const html = await renderNewsletterReactEmail({
-      templateId,
-      subject: formatted.subject,
-      markdown: formatted.text,
-    });
-    res.json({ html, subject: formatted.subject, body: formatted.text, templateId });
+    res.json({ html: formatted.html, subject: formatted.subject, body: formatted.text, templateId: "substack-editorial" });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });

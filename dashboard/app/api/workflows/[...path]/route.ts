@@ -80,7 +80,7 @@ async function proxyLoopApproval(req: NextRequest): Promise<Response> {
   }
 }
 
-async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT"): Promise<Response> {
+async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"): Promise<Response> {
   const path = req.nextUrl.pathname.replace(/^\/api\/workflows\/?/, "").replace(/^\/+/, "");
   if (method === "GET" && path.startsWith("loops/approvals/")) {
     return proxyLoopApproval(req);
@@ -123,4 +123,12 @@ export async function POST(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   return proxy(req, "PUT");
+}
+
+export async function PATCH(req: NextRequest) {
+  return proxy(req, "PATCH");
+}
+
+export async function DELETE(req: NextRequest) {
+  return proxy(req, "DELETE");
 }

@@ -2,29 +2,11 @@
 import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { decryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
+
 const RESEND_URL = "https://api.resend.com/emails";
 const REQUEST_TIMEOUT_MS = 8_000;
 function dryRunId(prefix) {
     return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
-}
-function dryRunResendData(path, method) {
-    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-    if (method === "GET" && normalizedPath === "/segments") {
-        return { data: [] };
-    }
-    if (normalizedPath === "/segments") {
-        return { id: dryRunId("dry_segment") };
-    }
-    if (normalizedPath === "/contacts") {
-        return { id: dryRunId("dry_contact") };
-    }
-    if (/^\/contacts\/[^/]+\/segments\/[^/]+$/.test(normalizedPath)) {
-        return { id: dryRunId("dry_contact_segment") };
-    }
-    if (normalizedPath === "/broadcasts") {
-        return { id: dryRunId("dry_broadcast") };
-    }
-    return { id: dryRunId("dry_resend") };
 }
 async function resolveConnectorResendCredentials(auth) {
     const result = await pool.query(`SELECT metadata_json
@@ -67,14 +49,6 @@ async function resolveConnectorResendCredentials(auth) {
     return { apiKey, fromEmail, fromName, replyTo };
 }
 export async function resolveResendCredentials(auth) {
-    if (!config.notificationsOutboundEmailEnabled) {
-        return {
-            apiKey: "dry-run-resend-api-key",
-            fromEmail: config.signupEmailFromEmail || "dev@localhost.test",
-            fromName: config.signupEmailFromName || "Tallei",
-            replyTo: config.signupEmailReplyTo || undefined,
-        };
-    }
     if (auth) {
         const connectorCreds = await resolveConnectorResendCredentials(auth);
         if (connectorCreds)
@@ -109,13 +83,6 @@ export function formatResendFromAddress(creds) {
 export async function resendApiRequest(input) {
     const method = input.method ?? "POST";
     const url = `https://api.resend.com${input.path.startsWith("/") ? input.path : `/${input.path}`}`;
-    if (!config.notificationsOutboundEmailEnabled) {
-        return {
-            ok: true,
-            status: 202,
-            data: dryRunResendData(input.path, method),
-        };
-    }
     try {
         const result = await postJson(url, input.body ?? {}, { Authorization: `Bearer ${input.creds.apiKey}` }, method);
         let data;

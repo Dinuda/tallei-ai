@@ -622,9 +622,9 @@ export async function getResendConnectorSetup(auth: AuthContext): Promise<Resend
     apiKeysUrl: config.resendApiKeysUrl,
     docsUrl: config.resendDocsUrl,
     steps: [
-      "Open your Resend dashboard and create an API key with sending access.",
+      "Open your Resend dashboard and create an API key with full access.",
       "Copy the key now. Resend only shows it once.",
-      "Paste the key here to connect your account securely.",
+      "Paste the key here to connect your account securely. Tallei uses it to send broadcasts and configure analytics webhooks.",
     ],
     ...(row ? {
       connection: {
@@ -664,7 +664,7 @@ export async function upsertResendConnector(input: {
       input.auth.tenantId,
       input.auth.userId,
       `resend:${last4}`,
-      JSON.stringify(["resend.send_email"]),
+      JSON.stringify(["resend.send_email", "resend.webhooks.manage"]),
       JSON.stringify({
         appKey: "resend",
         authMode: "api_key",

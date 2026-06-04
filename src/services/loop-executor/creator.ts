@@ -6,6 +6,8 @@ import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
 import { buildPlanFromAgentGraph } from "./plan.js";
+import { isLennyNewsletterGoal } from "./presets/lenny-newsletter-goal.js";
+import { presetToolRefsForDefinition } from "./presets/registry.js";
 import {
   LOOP_DEFINITION_VERSION,
   loopAgentGraphSchema,
@@ -113,8 +115,32 @@ export function buildLoopDefinition(input: {
         ...agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
       ]);
   const resolvedPresetId = input.presetId?.trim()
-    || (/\bnewsletter\b/i.test(goal) ? "newsletter" : undefined)
+    || (isLennyNewsletterGoal(goal) || /\bnewsletter\b/i.test(goal) ? "newsletter" : undefined)
     || (resolvedAllowedToolRefs.includes("internal.resend_broadcast") ? "newsletter" : undefined);
+  const definitionDraft = {
+    definitionVersion: LOOP_DEFINITION_VERSION,
+    goal,
+    schedule: { cron, timezone: input.timezone.trim() || "UTC" },
+    schedulerTarget: input.schedulerTarget ?? config.loopExecutorScheduler,
+    allowedIntegrations,
+    ...(resolvedAllowedToolRefs.length > 0 ? { allowedToolRefs: resolvedAllowedToolRefs } : {}),
+    ceo: {
+      name: agentGraph.parent.name,
+      task: agentGraph.parent.task,
+      policy: agentGraph.parent.policy,
+    },
+    draftPolicy: {
+      requireDraftBeforeExternalAction: true,
+      approvalRequiredFor: ["publish", "send", "external_action"],
+    },
+    agentGraph,
+    ...(plan ? { plan } : {}),
+    ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
+  } satisfies Partial<LoopDefinition>;
+  const presetToolRefs = presetToolRefsForDefinition(definitionDraft as LoopDefinition);
+  const finalAllowedToolRefs = presetToolRefs.length > 0
+    ? [...new Set([...resolvedAllowedToolRefs, ...presetToolRefs])]
+    : resolvedAllowedToolRefs;
 
   return loopDefinitionSchema.parse({
     definitionVersion: LOOP_DEFINITION_VERSION,
@@ -122,7 +148,7 @@ export function buildLoopDefinition(input: {
     schedule: { cron, timezone: input.timezone.trim() || "UTC" },
     schedulerTarget: input.schedulerTarget ?? config.loopExecutorScheduler,
     allowedIntegrations,
-    ...(resolvedAllowedToolRefs.length > 0 ? { allowedToolRefs: resolvedAllowedToolRefs } : {}),
+    ...(finalAllowedToolRefs.length > 0 ? { allowedToolRefs: finalAllowedToolRefs } : {}),
     ceo: {
       name: agentGraph.parent.name,
       task: agentGraph.parent.task,
