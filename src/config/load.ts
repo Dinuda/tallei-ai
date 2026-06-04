@@ -480,6 +480,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     dailyIntelligenceWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__DAILY_INTELLIGENCE_POLL_MS", 24 * 60 * 60 * 1000),
     dailyIntelligenceWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__DAILY_INTELLIGENCE_BATCH_SIZE", 100),
     notificationsEmailAdapter: readStringEnv(e, "TALLEI_NOTIFICATIONS__EMAIL_ADAPTER", "resend"),
+    notificationsOutboundEmailEnabled: readBooleanEnv(e, "TALLEI_NOTIFICATIONS__OUTBOUND_EMAIL_ENABLED", nodeEnv === "production"),
     notificationsWhatsAppAdapter: readStringEnv(e, "TALLEI_NOTIFICATIONS__WHATSAPP_ADAPTER", "disabled"),
     notificationsWhatsAppWebhookUrl: readStringEnv(e, "TALLEI_NOTIFICATIONS__WHATSAPP_WEBHOOK_URL"),
     notificationsWhatsAppWebhookToken: readStringEnv(e, "TALLEI_NOTIFICATIONS__WHATSAPP_WEBHOOK_TOKEN"),
@@ -517,6 +518,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       : "internal" as const,
     loopExecutorHeartbeatPollMs: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_POLL_MS", 2_000),
     loopExecutorHeartbeatBatchSize: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_BATCH_SIZE", 4),
+    loopExecutorNewsletterLiveWebSearchEnabled: readBooleanEnv(e, "TALLEI_LOOP_EXECUTOR__NEWSLETTER_LIVE_WEB_SEARCH_ENABLED", nodeEnv === "production"),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),

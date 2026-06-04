@@ -61,7 +61,13 @@ export async function runDistributionHeartbeat(runId: string) {
         || Boolean(templateId)
         || integrations.has("react_email")
         || toolRefs.has("internal.react_email_template");
-    const broadcastContent = await formatter.formatForBroadcast(formattedNewsletter, { templateId, useReactEmail });
+    const generatedContent = await formatter.formatForBroadcast(formattedNewsletter, { templateId, useReactEmail });
+    const customEmailHtml = typeof loopExecutor.deliveryEmailHtml === "string" && loopExecutor.deliveryEmailHtml.trim()
+        ? loopExecutor.deliveryEmailHtml
+        : null;
+    const broadcastContent = customEmailHtml
+        ? { ...generatedContent, html: customEmailHtml }
+        : generatedContent;
     const subject = formattedNewsletter.subject ?? context.workflowTitle;
     const existingDistribution = readDeliveryMeta(loopExecutor);
     const existingBroadcastId = typeof existingDistribution.broadcastId === "string"
@@ -79,9 +85,15 @@ export async function runDistributionHeartbeat(runId: string) {
             sentAt: new Date().toISOString(),
             successCount: contacts.length,
             failureCount: 0,
+            openCount: typeof existingDistribution.openCount === "number" ? existingDistribution.openCount : 0,
+            clickCount: typeof existingDistribution.clickCount === "number" ? existingDistribution.clickCount : 0,
+            unsubscribeCount: typeof existingDistribution.unsubscribeCount === "number" ? existingDistribution.unsubscribeCount : 0,
+            openRate: typeof existingDistribution.openRate === "number" ? existingDistribution.openRate : 0,
+            clickRate: typeof existingDistribution.clickRate === "number" ? existingDistribution.clickRate : 0,
             recipientCount: contacts.length,
             nextIndex: contacts.length,
             provider: "resend_broadcast",
+            emailSource: customEmailHtml ? "builder" : "react_email",
             broadcastId: existingBroadcastId,
             recipients: recipientResults,
         };
@@ -151,11 +163,17 @@ export async function runDistributionHeartbeat(runId: string) {
         sentAt: new Date().toISOString(),
         successCount,
         failureCount,
+        openCount: typeof existingDistribution.openCount === "number" ? existingDistribution.openCount : 0,
+        clickCount: typeof existingDistribution.clickCount === "number" ? existingDistribution.clickCount : 0,
+        unsubscribeCount: typeof existingDistribution.unsubscribeCount === "number" ? existingDistribution.unsubscribeCount : 0,
+        openRate: typeof existingDistribution.openRate === "number" ? existingDistribution.openRate : 0,
+        clickRate: typeof existingDistribution.clickRate === "number" ? existingDistribution.clickRate : 0,
         recipientCount: contacts.length,
         nextIndex: processedCount,
         contactBatchSize,
         segmentId,
         provider: "resend_broadcast",
+        emailSource: customEmailHtml ? "builder" : "react_email",
         recipients: recipientResults,
     };
     if (processedCount < contacts.length) {

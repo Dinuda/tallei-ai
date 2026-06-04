@@ -6,20 +6,59 @@
  */
 
 import type { CeoStrategyOutput, DeliveryContentFormatter, LoopPreset } from "../types.js";
+import { config } from "../../../config/index.js";
 import { normalizeRosterAgents } from "../plan.js";
 
-export const NEWSLETTER_DEFAULT_TEMPLATE_ID = "clean";
+export const NEWSLETTER_DEFAULT_TEMPLATE_ID = "01-barebone-feature-announcement";
 
 export const NEWSLETTER_TEMPLATES = [
   {
     id: NEWSLETTER_DEFAULT_TEMPLATE_ID,
-    label: "Clean",
-    description: "A focused white-card layout for standard product updates.",
+    label: "Barebone / Feature announcement",
+    description: "Minimal single-column feature announcement based on React Email Barebone.",
+    previewUrl: "https://demo.react.email/preview/01-Barebone/feature-announcement",
   },
   {
-    id: "editorial",
-    label: "Editorial",
-    description: "A warmer publication-style layout with a stronger headline treatment.",
+    id: "02-matte-feature-announcement",
+    label: "Matte / Feature announcement",
+    description: "Soft bordered feature announcement based on React Email Matte.",
+    previewUrl: "https://demo.react.email/preview/02-Matte/feature-announcement",
+  },
+  {
+    id: "03-protocol-feature-announcement",
+    label: "Protocol / Feature announcement",
+    description: "Structured, protocol-style feature announcement based on React Email Protocol.",
+    previewUrl: "https://demo.react.email/preview/03-Protocol/feature-announcement",
+  },
+  {
+    id: "02-matte-product-update",
+    label: "Matte / Product update",
+    description: "Soft product-update layout based on React Email Matte.",
+    previewUrl: "https://demo.react.email/preview/02-Matte/product-update",
+  },
+  {
+    id: "04-tech-newsletter",
+    label: "Tech / Newsletter",
+    description: "Light card layout with spotlight, tips grid, and community CTA.",
+    previewUrl: "https://demo.react.email/preview/04-Tech/newsletter",
+  },
+  {
+    id: "05-skin-newsletter",
+    label: "Skin / Editorial",
+    description: "Editorial serif style with tips, quote, and community section.",
+    previewUrl: "https://demo.react.email/preview/05-Skin/newsletter",
+  },
+  {
+    id: "06-codepen-challenge",
+    label: "CodePen / Challenge",
+    description: "Bold colored challenge format with ideas and resources columns.",
+    previewUrl: "https://demo.react.email/preview/06-CodePen/challenge",
+  },
+  {
+    id: "07-stackoverflow-tips",
+    label: "Stack Overflow / Tips",
+    description: "Professional structured tips format with search guidance.",
+    previewUrl: "https://demo.react.email/preview/07-StackOverflow/tips",
   },
 ] as const;
 
@@ -31,6 +70,8 @@ export function listNewsletterTemplates() {
 
 export function normalizeNewsletterTemplateId(value: unknown): NewsletterTemplateId {
   const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (raw === "clean") return "01-barebone-feature-announcement";
+  if (raw === "editorial") return "02-matte-feature-announcement";
   return NEWSLETTER_TEMPLATES.some((template) => template.id === raw)
     ? raw as NewsletterTemplateId
     : NEWSLETTER_DEFAULT_TEMPLATE_ID;
@@ -48,6 +89,42 @@ const NEWSLETTER_MEMORY_RECORDS = [
     summary: "Felix Rieseberg's Claude workflows and Google I/O 2026 launch analysis with practical implications for builders.",
   },
 ];
+
+const NEWSLETTER_DEV_SOURCE_LINKS = [
+  "https://news.ycombinator.com/",
+  "https://www.producthunt.com/",
+  "https://openai.com/news/",
+  "https://www.anthropic.com/news",
+  "https://linear.app/changelog",
+  "https://vercel.com/changelog",
+  "https://github.blog/changelog/",
+  "https://stripe.com/blog",
+] as const;
+
+function buildNewsletterSourceAgent(goal: string) {
+  if (config.loopExecutorNewsletterLiveWebSearchEnabled) {
+    return {
+      id: "web_search_agent",
+      name: "Web Search Agent",
+      task: [
+        "Run live web search for priority themes and gather source-grounded evidence.",
+        `Goal: ${goal}`,
+      ].join(" "),
+      tools: [{ ref: "internal.web_search", config: { searchContextSize: "high", country: "US" } }],
+    };
+  }
+  return {
+    id: "web_search_agent",
+    name: "Seeded Source Agent",
+    task: [
+      "Development mode: do not call live web search.",
+      "Use these seeded source links as source candidates and produce concise source notes with titles, URLs, likely angles, and what to verify before publishing:",
+      NEWSLETTER_DEV_SOURCE_LINKS.map((url) => `- ${url}`).join(" "),
+      `Goal: ${goal}`,
+    ].join(" "),
+    tools: [{ ref: "internal.llm_only" }],
+  };
+}
 
 function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
   const memoryContext = NEWSLETTER_MEMORY_RECORDS
@@ -72,15 +149,7 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
         ].join(" "),
         tools: [{ ref: "internal.memory_search" }],
       },
-      {
-        id: "web_search_agent",
-        name: "Web Search Agent",
-        task: [
-          "Run live web search for priority themes and gather source-grounded evidence.",
-          `Goal: ${goal}`,
-        ].join(" "),
-        tools: [{ ref: "internal.web_search", config: { searchContextSize: "high", country: "US" } }],
-      },
+      buildNewsletterSourceAgent(goal),
       {
         id: "research_agent",
         name: "Research Agent",
@@ -110,7 +179,11 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
           "After approval, the operator uploads recipients and the distribution runner sends the broadcast.",
           `Goal: ${goal}`,
         ].join(" "),
-        tools: [{ ref: "internal.email_approval_request" }],
+        tools: [
+          { ref: "internal.email_approval_request" },
+          { ref: "internal.email_builder_compose" },
+          { ref: "internal.email_builder_render" },
+        ],
       },
     ]),
   };

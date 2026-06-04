@@ -246,6 +246,24 @@ async function runAssignedTools(input: RunLoopAgentInput) {
       };
     }
 
+    if (entry.ref === "internal.email_builder_render") {
+      const document = assignment.config?.document;
+      if (!document || typeof document !== "object") {
+        throw new Error("Email builder render requires a document config");
+      }
+      const module = await import("./presets/newsletter-waypoint.js");
+      const html = module.renderWaypointEmail(document as import("./presets/newsletter-waypoint.js").WaypointDocument);
+      toolsUsed.push(entry.ref);
+      sections.push(`Rendered email HTML (${html.length} bytes):\n${html.slice(0, 500)}${html.length > 500 ? "..." : ""}`);
+      continue;
+    }
+
+    if (entry.ref === "internal.email_builder_compose") {
+      toolsUsed.push(entry.ref);
+      sections.push("Email builder compose tool is available. Use the UI to edit the email template.");
+      continue;
+    }
+
     if (entry.provider === "composio" && entry.requiresApproval) {
       const prepared = await completeText({
         system: `You prepare ${entry.label} content for human approval. Do not claim the external action happened.`,

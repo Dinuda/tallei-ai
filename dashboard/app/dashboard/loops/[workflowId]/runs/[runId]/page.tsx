@@ -6,13 +6,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import {
   AlertCircle,
+  BarChart3,
   Check,
+  ChevronLeft,
+  Code,
   Copy,
+  Eye,
   FileText,
   Info,
   Loader2,
+  Mail,
+  Megaphone,
   MessageSquare,
   MoreHorizontal,
+  MousePointerClick,
   Pause,
   Play,
   RefreshCw,
@@ -20,11 +27,13 @@ import {
   Settings,
   ShieldCheck,
   Upload,
+  Users,
   XCircle,
 } from "lucide-react";
 
 import { AgentRow, AgentPlaceholder, CeoRow, type AgentRowTask } from "./components/agent-rows";
 import { ChatDrawer, type ChatComment } from "./components/chat-drawer";
+import { EmailBuilderDialog } from "./components/email-builder-dialog";
 import {
   StrategyRosterEditor,
   type CatalogTool,
@@ -81,11 +90,6 @@ type LoopWorkflow = {
   };
 };
 
-const NEWSLETTER_TEMPLATES = [
-  { id: "clean", label: "Clean", description: "Focused white-card layout." },
-  { id: "editorial", label: "Editorial", description: "Publication-style layout." },
-];
-
 type LoopRun = {
   id: string;
   workflowId: string;
@@ -108,11 +112,28 @@ type LoopRun = {
     recipientCount: number;
     successCount: number;
     failureCount: number;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    broadcastId?: string | null;
   } | null;
   stats?: {
     contacts: { uploadedAt: string | null; recipientCount: number } | null;
-    delivery: { sentAt: string | null; successCount: number; failureCount: number } | null;
+    delivery: {
+      sentAt: string | null;
+      successCount: number;
+      failureCount: number;
+      openCount?: number;
+      clickCount?: number;
+      unsubscribeCount?: number;
+      openRate?: number;
+      clickRate?: number;
+    } | null;
   };
+  emailTemplate?: {
+    html: string;
+    design: unknown;
+    updatedAt: string | null;
+  } | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -213,6 +234,11 @@ function firstSentence(v: string | null | undefined, fallback: string) {
   return s.trim() ? `${s.trim()}${s.endsWith(".") ? "" : "…"}` : fallback;
 }
 
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0%";
+  return `${Math.round(value * 100)}%`;
+}
+
 function statusBadgeClass(s: string) {
   if (s === "completed" || s === "done") return "bg-sky-100 text-sky-800";
   if (s === "running" || s === "strategy_approved") return "bg-blue-100 text-blue-800";
@@ -227,7 +253,7 @@ function getTaskOutput(task: {
   latestComment?: { body: string } | null;
 }): string {
   const out = readRecord(task.outputJson);
-  const candidates = [out.text, out.message, out.summary, out.draft];
+  const candidates = [out.text, out.message, out.summary, out.draft, out.artifactBody];
   if (task.status !== "todo" || candidates.some((value) => typeof value === "string" && value.trim())) {
     candidates.push(task.latestComment?.body);
   }
@@ -235,6 +261,39 @@ function getTaskOutput(task: {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
   return "";
+}
+
+function isPublicistTask(task: AgentRowTask): boolean {
+  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
+  return (
+    refs.includes("email_approval_request") ||
+    task.agentId.toLowerCase().includes("approval") ||
+    task.agentId.toLowerCase().includes("publicist") ||
+    task.toolKey.toLowerCase().includes("email_approval")
+  );
+}
+
+function isWriterTask(task: AgentRowTask): boolean {
+  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
+  const key = `${task.agentId} ${task.agentName} ${task.toolKey} ${refs}`.toLowerCase();
+  return (
+    key.includes("writer") ||
+    key.includes("write") ||
+    key.includes("draft") ||
+    refs.includes("llm_only")
+  );
+}
+
+function getPublicistMeta(task: AgentRowTask) {
+  const out = readRecord(task.outputJson);
+  const req = readRecord(out.approvalRequest);
+  return {
+    to: typeof req.to === "string" ? req.to : null,
+    channel: typeof req.channel === "string" ? req.channel : null,
+    sentAt: typeof req.sentAt === "string" ? req.sentAt : null,
+    artifactBody: typeof out.artifactBody === "string" ? out.artifactBody : null,
+    emailApprovalSent: out.emailApprovalSent === true,
+  };
 }
 
 function looksTechnicalContent(v: string): boolean {
@@ -427,10 +486,11 @@ export default function LoopRunDetailPage() {
   const [rosterEditable, setRosterEditable] = useState(false);
   const [draftEditor, setDraftEditor] = useState("");
   const [draftDirty, setDraftDirty] = useState(false);
-  const [selectedTemplateId, setSelectedTemplateId] = useState("clean");
-  const [previewHtml, setPreviewHtml] = useState("");
-  const [previewSubject, setPreviewSubject] = useState<string | null>(null);
-  const [previewBusy, setPreviewBusy] = useState(false);
+  const [emailHtml, setEmailHtml] = useState("");
+  const [emailDesign, setEmailDesign] = useState<unknown>(null);
+  const [emailSource, setEmailSource] = useState<"auto" | "builder" | null>(null);
+  const [emailPreviewBusy, setEmailPreviewBusy] = useState(false);
+  const [emailBuilderOpen, setEmailBuilderOpen] = useState(false);
   const resumeAttemptedRef = useRef(false);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -439,10 +499,6 @@ export default function LoopRunDetailPage() {
   const wfStatus = workflow?.status ?? "active";
   const decision = runAction(run);
   const showCsvUpload = runStatus === "waiting_for_contact_list" || runStatus === "waiting_for_input";
-  const definitionReactEmailEnabled = Boolean(
-    workflow?.definition?.allowedIntegrations?.some((integration) => integration.trim().toLowerCase() === "react_email") ||
-    workflow?.definition?.allowedToolRefs?.some((ref) => ref === "internal.react_email_template")
-  );
 
   const agentTasks = useMemo((): AgentRowTask[] => {
     return [...tasks]
@@ -464,11 +520,7 @@ export default function LoopRunDetailPage() {
 
   const memoryEntries = useMemo(() => extractMemoryEntries(tasks), [tasks]);
   const activeAgentTask = expandedTaskId ? agentTasks.find((task) => task.id === expandedTaskId) ?? null : null;
-  const writerTask = agentTasks.find((task) =>
-    task.assignedTools?.some((tool) => tool.ref.includes("llm_only")) ||
-    task.toolKey.includes("write") ||
-    task.toolKey.includes("draft")
-  ) ?? null;
+  const writerTask = agentTasks.find(isWriterTask) ?? null;
   const rawPrimaryNewsletter = (() => {
     const runDraft = run?.draftOutput?.trim() ?? "";
     const writerOutput = writerTask ? getTaskOutput(writerTask) : "";
@@ -480,13 +532,26 @@ export default function LoopRunDetailPage() {
     }
     return "";
   })();
-  const showTemplateOptions = showCsvUpload && Boolean(rawPrimaryNewsletter);
   const centerOutput = run?.status === "waiting_for_strategy_approval" && run.strategyOutput?.trim()
     ? run.strategyOutput
     : activeAgentTask
       ? getTaskOutput(activeAgentTask)
       : rawPrimaryNewsletter || null;
   const centerUpdatedAt = activeAgentTask ? activeAgentTask.completedAt ?? activeAgentTask.startedAt : run?.updatedAt ?? linkedLatestRun?.createdAt ?? null;
+  const isPublicistView = Boolean(activeAgentTask && isPublicistTask(activeAgentTask));
+  const publicistMeta = activeAgentTask && isPublicistTask(activeAgentTask) ? getPublicistMeta(activeAgentTask) : null;
+  const isNewsletterArtifactView = !activeAgentTask;
+  const showNewsletterEditor = Boolean(rawPrimaryNewsletter) && isNewsletterArtifactView;
+  const deliveryStats = run?.stats?.delivery ?? null;
+  const sentCount = deliveryStats?.successCount ?? run?.deliveryAction?.successCount ?? 0;
+  const failureCount = deliveryStats?.failureCount ?? run?.deliveryAction?.failureCount ?? 0;
+  const recipientCount = run?.deliveryAction?.recipientCount ?? run?.stats?.contacts?.recipientCount ?? sentCount + failureCount;
+  const openCount = deliveryStats?.openCount ?? 0;
+  const clickCount = deliveryStats?.clickCount ?? 0;
+  const unsubscribeCount = deliveryStats?.unsubscribeCount ?? 0;
+  const openRate = deliveryStats?.openRate ?? (sentCount > 0 ? openCount / sentCount : 0);
+  const clickRate = deliveryStats?.clickRate ?? (sentCount > 0 ? clickCount / sentCount : 0);
+  const deliveryRate = recipientCount > 0 ? sentCount / recipientCount : 0;
 
   useEffect(() => {
     if (draftDirty) return;
@@ -494,38 +559,44 @@ export default function LoopRunDetailPage() {
   }, [draftDirty, rawPrimaryNewsletter]);
 
   useEffect(() => {
-    if (!showTemplateOptions || !draftEditor.trim()) {
-      setPreviewHtml("");
-      setPreviewSubject(null);
-      return;
-    }
+    if (!run?.emailTemplate?.html || emailSource === "builder") return;
+    setEmailHtml(run.emailTemplate.html);
+    setEmailDesign(run.emailTemplate.design ?? null);
+    setEmailSource("builder");
+  }, [emailSource, run?.emailTemplate?.design, run?.emailTemplate?.html]);
+
+  useEffect(() => {
+    if (!showNewsletterEditor || !draftEditor.trim() || emailSource === "builder") return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      setPreviewBusy(true);
+      setEmailPreviewBusy(true);
       void fetch(`/api/workflows/runs/${runId}/newsletter/preview`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: controller.signal,
-        body: JSON.stringify({ body: draftEditor, templateId: selectedTemplateId }),
+        body: JSON.stringify({ body: draftEditor }),
       })
         .then(async (res) => {
           const payload = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(payload.error ?? "Failed to render preview");
-          setPreviewHtml(typeof payload.html === "string" ? payload.html : "");
-          setPreviewSubject(typeof payload.subject === "string" ? payload.subject : null);
+          if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to render email preview");
+          const html = typeof (payload as { html?: unknown }).html === "string" ? (payload as { html: string }).html : "";
+          if (html) {
+            setEmailHtml(html);
+            setEmailSource("auto");
+          }
         })
         .catch((e) => {
-          if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Failed to render preview");
+          if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Failed to render email preview");
         })
         .finally(() => {
-          if (!controller.signal.aborted) setPreviewBusy(false);
+          if (!controller.signal.aborted) setEmailPreviewBusy(false);
         });
     }, 350);
     return () => {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [draftEditor, runId, selectedTemplateId, showTemplateOptions]);
+  }, [draftEditor, emailSource, runId, showNewsletterEditor]);
 
   useEffect(() => {
     if (!expandedTaskId) return;
@@ -736,10 +807,7 @@ export default function LoopRunDetailPage() {
       const res = await fetch(`/api/workflows/runs/${runId}/contacts`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          csv,
-          ...(showTemplateOptions ? { templateId: selectedTemplateId } : {}),
-        }),
+        body: JSON.stringify({ csv }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload.error ?? "Failed to upload contacts");
@@ -752,7 +820,7 @@ export default function LoopRunDetailPage() {
     }
   }
 
-  async function saveNewsletterDraft(options?: { keepBusy?: boolean }) {
+  async function saveNewsletterDraft(options?: { keepBusy?: boolean; emailHtmlOverride?: string; emailDesignOverride?: unknown }) {
     if (!draftEditor.trim()) {
       setError("Newsletter body is required");
       throw new Error("Newsletter body is required");
@@ -763,7 +831,14 @@ export default function LoopRunDetailPage() {
       const res = await fetch(`/api/workflows/runs/${runId}/newsletter`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ body: draftEditor }),
+        body: JSON.stringify({
+          body: draftEditor,
+          ...(options?.emailHtmlOverride
+            ? { emailHtml: options.emailHtmlOverride, emailDesign: options.emailDesignOverride ?? null }
+            : emailSource === "builder" && emailHtml
+              ? { emailHtml, emailDesign }
+              : {}),
+        }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload.error ?? "Failed to save newsletter");
@@ -775,6 +850,13 @@ export default function LoopRunDetailPage() {
     } finally {
       if (!options?.keepBusy) setBusy(null);
     }
+  }
+
+  async function saveBuilderEmail(html: string, design: unknown) {
+    setEmailHtml(html);
+    setEmailDesign(design);
+    setEmailSource("builder");
+    await saveNewsletterDraft({ emailHtmlOverride: html, emailDesignOverride: design });
   }
 
   async function togglePause() {
@@ -980,89 +1062,6 @@ export default function LoopRunDetailPage() {
               </Card>
             ) : null}
 
-            {showCsvUpload && rawPrimaryNewsletter ? (
-              <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
-                <CardHeader className="px-5 py-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <CardTitle className="text-base">Newsletter editor</CardTitle>
-                      <CardDescription>Edit the approved copy before uploading recipients.</CardDescription>
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant={draftDirty ? "default" : "outline"}
-                      className={draftDirty ? "bg-slate-900 text-white hover:bg-slate-800" : ""}
-                      disabled={busy !== null || !draftDirty}
-                      onClick={() => void saveNewsletterDraft()}
-                    >
-                      {busy === "save-newsletter" ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
-                      Save
-                    </Button>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-4 px-5 pb-5">
-                  <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                    <div className="min-w-44">
-                      <p className="text-sm font-semibold text-slate-900">Email template</p>
-                      <p className="text-xs text-slate-500">
-                        {definitionReactEmailEnabled ? "Enabled on this loop." : "Optional for this send."}
-                      </p>
-                    </div>
-                    <select
-                      value={selectedTemplateId}
-                      onChange={(event) => setSelectedTemplateId(event.target.value)}
-                      className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400"
-                    >
-                      {NEWSLETTER_TEMPLATES.map((template) => (
-                        <option key={template.id} value={template.id}>{template.label}</option>
-                      ))}
-                    </select>
-                    <p className="text-xs text-slate-500">
-                      {NEWSLETTER_TEMPLATES.find((template) => template.id === selectedTemplateId)?.description}
-                    </p>
-                  </div>
-
-                  <div className="grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(360px,1.05fr)]">
-                    <div className="min-w-0">
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Markdown</p>
-                      <textarea
-                        value={draftEditor}
-                        onChange={(event) => {
-                          setDraftEditor(event.target.value);
-                          setDraftDirty(true);
-                        }}
-                        className="min-h-96 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-3 font-mono text-sm leading-6 text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
-                        spellCheck
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Rendered preview</p>
-                        <span className="truncate text-xs text-slate-500">
-                          {previewBusy ? "Rendering..." : previewSubject ? `Subject: ${previewSubject}` : "Subject not set"}
-                        </span>
-                      </div>
-                      <div className="h-96 overflow-hidden rounded-lg border border-slate-200 bg-white">
-                        {previewHtml ? (
-                          <iframe
-                            title="Newsletter email preview"
-                            srcDoc={previewHtml}
-                            className="h-full w-full bg-white"
-                            sandbox=""
-                          />
-                        ) : (
-                          <div className="grid h-full place-items-center px-4 text-center text-sm text-slate-500">
-                            Preview renders after newsletter content is available.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : null}
-
             {showCsvUpload ? (
               <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
                 <CardContent className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
@@ -1073,7 +1072,7 @@ export default function LoopRunDetailPage() {
                     <div className="min-w-0">
                       <p className="font-semibold text-slate-900">Upload recipients CSV</p>
                       <p className="mt-0.5 text-sm text-slate-600">
-                        Use columns <code className="rounded bg-slate-100 px-1">email</code> and optional <code className="rounded bg-slate-100 px-1">name</code>. Uploading starts the Resend broadcast{showTemplateOptions ? " with the selected template" : ""}.
+                        Use columns <code className="rounded bg-slate-100 px-1">email</code> and optional <code className="rounded bg-slate-100 px-1">name</code>. Uploading starts the Resend broadcast.
                       </p>
                       {run?.stats?.contacts ? (
                         <p className="mt-1 text-xs text-slate-500">
@@ -1126,6 +1125,12 @@ export default function LoopRunDetailPage() {
                     <span className="rounded-full bg-rose-100 px-2.5 py-1 text-rose-700">
                       {run.stats?.delivery?.failureCount ?? run.deliveryAction?.failureCount ?? 0} failed
                     </span>
+                    <span className="rounded-full bg-amber-100 px-2.5 py-1 text-amber-700">
+                      {formatPercent(openRate)} open rate
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-emerald-700">
+                      {formatPercent(clickRate)} click rate
+                    </span>
                   </div>
                 </CardContent>
               </Card>
@@ -1173,7 +1178,190 @@ export default function LoopRunDetailPage() {
               </CardHeader>
 
               <CardContent className="min-h-0 flex-1 overflow-y-auto px-5 pb-6 pt-2">
-                {centerOutput?.trim() ? (
+                {isPublicistView ? (
+                  <div className="space-y-4">
+                    {publicistMeta ? (
+                      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                        <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-orange-100">
+                          <Megaphone className="size-4 text-orange-700" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-slate-900">
+                            {publicistMeta.emailApprovalSent ? "Approval email sent" : "Draft ready for approval"}
+                          </p>
+                          <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                            {publicistMeta.to ? (
+                              <span className="inline-flex items-center gap-1">
+                                <Mail className="size-3" />
+                                {publicistMeta.to}
+                              </span>
+                            ) : null}
+                            {publicistMeta.channel ? <span>Via {publicistMeta.channel}</span> : null}
+                            {publicistMeta.sentAt ? <span>Sent {formatRelative(publicistMeta.sentAt)}</span> : null}
+                          </div>
+                        </div>
+                        {publicistMeta.emailApprovalSent ? (
+                          <span className="shrink-0 rounded-full bg-sky-100 px-2.5 py-0.5 text-[10px] font-semibold text-sky-700">
+                            Awaiting response
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    <div className="grid grid-cols-4 gap-3">
+                      {[
+                        { label: "Sent", value: sentCount, icon: Mail, color: "text-sky-700", bg: "bg-sky-50" },
+                        { label: "Open rate", value: formatPercent(openRate), icon: Eye, color: "text-amber-700", bg: "bg-amber-50" },
+                        { label: "Click rate", value: formatPercent(clickRate), icon: MousePointerClick, color: "text-emerald-700", bg: "bg-emerald-50" },
+                        { label: "Unsub", value: unsubscribeCount, icon: Users, color: "text-slate-600", bg: "bg-slate-50" },
+                      ].map((stat) => (
+                        <div key={stat.label} className="rounded-xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
+                          <div className="flex items-center gap-2">
+                            <span className={`grid size-7 place-items-center rounded-lg ${stat.bg}`}>
+                              <stat.icon className={`size-3.5 ${stat.color}`} />
+                            </span>
+                            <div>
+                              <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{stat.label}</p>
+                              <p className="text-lg font-bold text-slate-900">{stat.value}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {run?.deliveryAction || run?.stats?.delivery ? (
+                      <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                        <div className="flex items-center gap-2 mb-3">
+                          <BarChart3 className="size-4 text-slate-600" />
+                          <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Engagement</p>
+                        </div>
+                        <div className="space-y-2.5">
+                          {[
+                            { label: "Delivery rate", pct: deliveryRate, color: "bg-sky-400" },
+                            { label: "Open rate", pct: openRate, color: "bg-amber-400" },
+                            { label: "Click rate", pct: clickRate, color: "bg-emerald-400" },
+                          ].map((bar) => (
+                            <div key={bar.label}>
+                              <div className="flex items-center justify-between text-xs mb-1">
+                                <span className="text-slate-600">{bar.label}</span>
+                                <span className="font-semibold text-slate-900">{formatPercent(bar.pct)}</span>
+                              </div>
+                              <div className="h-2 rounded-full bg-slate-100">
+                                <div className={`h-2 rounded-full ${bar.color}`} style={{ width: formatPercent(bar.pct) }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="mt-3 text-xs text-slate-500">
+                          {openCount} opens, {clickCount} clicks, {failureCount} failed deliveries.
+                        </p>
+                      </div>
+                    ) : null}
+
+                    {emailHtml ? (
+                      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Email sent</p>
+                        </div>
+                        <iframe
+                          title="Publicist email preview"
+                          srcDoc={emailHtml}
+                          className="h-[520px] w-full bg-white"
+                          sandbox=""
+                        />
+                      </div>
+                    ) : null}
+
+                    {centerOutput?.trim() ? (
+                      <details className="group">
+                        <summary className="cursor-pointer select-none text-xs font-medium text-slate-500 hover:text-slate-700">
+                          Show raw markdown
+                        </summary>
+                        <article className="mt-3 rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                          {centerUpdatedAt ? (
+                            <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                              Updated {formatRelative(centerUpdatedAt)}
+                            </p>
+                          ) : null}
+                          <div className="text-sm leading-7 text-slate-800 [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:tracking-tight [&_h2]:mb-3 [&_h2]:mt-7 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mb-2 [&_h3]:mt-5 [&_h3]:text-base [&_h3]:font-semibold [&_li]:my-1 [&_ol]:ml-5 [&_ol]:list-decimal [&_p]:mb-3.5 [&_strong]:font-semibold [&_ul]:ml-5 [&_ul]:list-disc">
+                            <Streamdown>{centerOutput}</Streamdown>
+                          </div>
+                        </article>
+                      </details>
+                    ) : null}
+                  </div>
+                ) : showNewsletterEditor ? (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900">Newsletter editor</p>
+                        <p className="text-xs text-slate-500">
+                          {emailSource === "builder"
+                            ? "Custom visual email saved for this send."
+                            : emailHtml
+                              ? "Email preview generated from the newsletter draft."
+                              : "Write the newsletter and build the visual email."}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={draftDirty ? "default" : "outline"}
+                          className={draftDirty ? "bg-slate-900 text-white hover:bg-slate-800" : ""}
+                          disabled={busy !== null || !draftDirty}
+                          onClick={() => void saveNewsletterDraft()}
+                        >
+                          {busy === "save-newsletter" ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+                          Save
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setEmailBuilderOpen(true)}
+                        >
+                          <Code className="size-3.5" />
+                          {emailSource === "builder" ? "Edit email" : "Open Builder"}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Email preview</p>
+                          <span className="text-[10px] font-medium text-slate-500">
+                            {emailPreviewBusy ? "Rendering..." : emailSource === "builder" ? "Builder HTML" : "Generated HTML"}
+                          </span>
+                        </div>
+                        {emailHtml ? (
+                          <iframe
+                            title="Writer email preview"
+                            srcDoc={emailHtml}
+                            className="h-[520px] w-full bg-white"
+                            sandbox=""
+                          />
+                        ) : (
+                          <div className="grid h-[360px] place-items-center px-4 text-center text-sm text-slate-500">
+                            {emailPreviewBusy ? "Building email preview..." : "Newsletter content will render here."}
+                          </div>
+                        )}
+                      </div>
+
+                    <div className="min-w-0">
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Markdown</p>
+                      <textarea
+                        value={draftEditor}
+                        onChange={(event) => {
+                          setDraftEditor(event.target.value);
+                          setDraftDirty(true);
+                        }}
+                        className="min-h-64 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-3 font-mono text-sm leading-6 text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+                        spellCheck
+                      />
+                    </div>
+                  </div>
+                ) : centerOutput?.trim() ? (
                   <article className="rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
                     {centerUpdatedAt ? (
                       <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-slate-500">
@@ -1198,7 +1386,7 @@ export default function LoopRunDetailPage() {
                         </div>
                         <p className="mt-4 text-sm font-medium text-slate-800">No newsletter content available yet.</p>
                         <p className="mt-1 text-xs text-slate-500">
-                          {active ? "Open an agent row to inspect its output while the run progresses." : "Start a new run to generate output."}
+                          {active ? "Click an agent row to view its output here." : "Start a new run to generate output."}
                         </p>
                       </>
                     )}
@@ -1208,9 +1396,33 @@ export default function LoopRunDetailPage() {
             </Card>
           </main>
 
-          <aside className="hidden w-[320px] shrink-0 flex-col gap-3 overflow-hidden lg:flex">
-            <ScrollArea className="flex-1 pr-1">
+          <aside className="hidden w-[380px] shrink-0 flex-col gap-3 overflow-hidden lg:flex">
+            <ScrollArea className="h-full pr-1">
               <div className="space-y-3">
+                <Card className="gap-3 py-4 ring-0 shadow-md">
+                  <CardHeader className="px-4 pb-0">
+                    <CardTitle className="text-sm text-slate-900">Artifacts</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2 px-3">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedTaskId(null)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-xl border bg-white px-3 py-2.5 text-left shadow-sm transition-colors",
+                        expandedTaskId === null
+                          ? "border-slate-900 text-slate-900"
+                          : "border-slate-200 text-slate-700 hover:border-slate-300"
+                      )}
+                    >
+                      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-slate-100">
+                        <FileText className="size-3.5" />
+                      </span>
+                      <span className="flex-1 text-sm font-semibold">Newsletter</span>
+                      <ChevronLeft className={cn("size-4 shrink-0", expandedTaskId === null ? "text-slate-900" : "text-slate-400")} />
+                    </button>
+                  </CardContent>
+                </Card>
+
                 <Card className="gap-3 py-4 ring-0 shadow-md">
                   <CardHeader className="px-4 pb-0">
                     <div className="flex items-center justify-between">
@@ -1226,21 +1438,6 @@ export default function LoopRunDetailPage() {
                       statusLabel={prettyStatus(runStatus)}
                       runStatus={runStatus}
                     />
-                    <button
-                      type="button"
-                      onClick={() => setExpandedTaskId(null)}
-                      className={cn(
-                        "flex w-full items-center gap-3 rounded-xl border bg-white px-3 py-2.5 text-left shadow-sm transition-colors",
-                        expandedTaskId === null
-                          ? "border-slate-900 text-slate-900"
-                          : "border-slate-200 text-slate-700 hover:border-slate-300"
-                      )}
-                    >
-                      <span className="grid size-8 place-items-center rounded-lg bg-slate-100">
-                        <FileText className="size-3.5" />
-                      </span>
-                      <span className="text-sm font-semibold">Newsletter</span>
-                    </button>
                     {loading && agentTasks.length === 0 && roster.length === 0 ? (
                       <AgentPlaceholder />
                     ) : agentTasks.length > 0 ? (
@@ -1253,6 +1450,10 @@ export default function LoopRunDetailPage() {
                           rerunning={busy === `rerun:${task.id}`}
                           onRerun={() => void rerunTask(task.id)}
                           onToggle={() => {
+                            if (isWriterTask(task)) {
+                              setExpandedTaskId(null);
+                              return;
+                            }
                             setExpandedTaskId((current) => current === task.id ? null : task.id);
                           }}
                         />
@@ -1348,6 +1549,17 @@ export default function LoopRunDetailPage() {
           message={chatMessage}
           setMessage={setChatMessage}
           onSend={sendSteerComment}
+        />
+
+        <EmailBuilderDialog
+          open={emailBuilderOpen}
+          onClose={() => setEmailBuilderOpen(false)}
+          initialDesign={emailDesign ?? undefined}
+          initialHtml={emailHtml || undefined}
+          initialMarkdown={draftEditor || undefined}
+          onSave={(html, design) => {
+            void saveBuilderEmail(html, design);
+          }}
         />
 
         {loading ? (

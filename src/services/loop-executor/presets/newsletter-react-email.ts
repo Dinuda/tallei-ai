@@ -1,8 +1,11 @@
 /**
- * React Email templates for newsletter broadcasts (Vercel invite–style layout).
+ * React Email templates for newsletter broadcasts.
  *
  * @see https://react.email/docs/utilities/render
- * @see https://demo.react.email/preview/Community/notifications/vercel-invite-user
+ * @see https://demo.react.email/preview/01-Barebone/feature-announcement
+ * @see https://demo.react.email/preview/02-Matte/feature-announcement
+ * @see https://demo.react.email/preview/03-Protocol/feature-announcement
+ * @see https://demo.react.email/preview/02-Matte/product-update
  */
 
 import * as React from "react";
@@ -18,9 +21,197 @@ function firstPreviewLine(text: string): string {
     ?.slice(0, 140) ?? "Update from Tallei";
 }
 
-function markdownHtml(markdown: string, templateId: NewsletterTemplateId): string {
-  const accent = templateId === "editorial" ? "#be123c" : "#2563eb";
-  const paragraphStyle = "margin:0 0 16px;font-size:14px;line-height:24px;color:#404040;";
+type TemplateTheme = {
+  accent: string;
+  background: string;
+  containerBackground: string;
+  text: string;
+  muted: string;
+  border: string;
+  radius: string;
+  maxWidth: string;
+  bodyPadding: string;
+  containerPadding: string;
+  fontFamily: string;
+  buttonBackground: string;
+  buttonColor: string;
+  headingWeight: string;
+  eyebrow: string;
+  intro: string;
+  footer: string;
+};
+
+function themeForTemplate(templateId: NewsletterTemplateId): TemplateTheme {
+  if (templateId === "02-matte-feature-announcement") {
+    return {
+      accent: "#4f46e5",
+      background: "#f4f4f5",
+      containerBackground: "#ffffff",
+      text: "#27272a",
+      muted: "#71717a",
+      border: "#d4d4d8",
+      radius: "18px",
+      maxWidth: "560px",
+      bodyPadding: "32px 14px",
+      containerPadding: "36px",
+      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+      buttonBackground: "#18181b",
+      buttonColor: "#ffffff",
+      headingWeight: "700",
+      eyebrow: "Feature announcement",
+      intro: "Here is what changed this week.",
+      footer: "You’re receiving this product announcement because you subscribed to updates from Tallei.",
+    };
+  }
+  if (templateId === "03-protocol-feature-announcement") {
+    return {
+      accent: "#059669",
+      background: "#0b1220",
+      containerBackground: "#101827",
+      text: "#f8fafc",
+      muted: "#a7b0c0",
+      border: "#263244",
+      radius: "8px",
+      maxWidth: "600px",
+      bodyPadding: "28px 12px",
+      containerPadding: "32px",
+      fontFamily: '"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace',
+      buttonBackground: "#34d399",
+      buttonColor: "#052e1b",
+      headingWeight: "700",
+      eyebrow: "Protocol update",
+      intro: "Release notes and implementation details follow.",
+      footer: "You’re receiving this protocol-style update because you subscribed to Tallei.",
+    };
+  }
+  if (templateId === "02-matte-product-update") {
+    return {
+      accent: "#2563eb",
+      background: "#eef2f7",
+      containerBackground: "#ffffff",
+      text: "#111827",
+      muted: "#64748b",
+      border: "#cbd5e1",
+      radius: "20px",
+      maxWidth: "600px",
+      bodyPadding: "34px 14px",
+      containerPadding: "34px",
+      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+      buttonBackground: "#2563eb",
+      buttonColor: "#ffffff",
+      headingWeight: "700",
+      eyebrow: "Product update",
+      intro: "A concise product update for your team and customers.",
+      footer: "You're receiving this product update because you subscribed to Tallei.",
+    };
+  }
+  if (templateId === "04-tech-newsletter") {
+    return {
+      accent: "#1a1a1a",
+      background: "#f5f5f5",
+      containerBackground: "#e8e8e8",
+      text: "#1a1a1a",
+      muted: "#666666",
+      border: "#d4d4d4",
+      radius: "10px",
+      maxWidth: "640px",
+      bodyPadding: "0",
+      containerPadding: "0",
+      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+      buttonBackground: "#ffffff",
+      buttonColor: "#1a1a1a",
+      headingWeight: "700",
+      eyebrow: "Newsletter",
+      intro: "The latest updates and insights.",
+      footer: "You're receiving this newsletter because you subscribed to updates from Tallei.",
+    };
+  }
+  if (templateId === "05-skin-newsletter") {
+    return {
+      accent: "#2d2d2d",
+      background: "#ffffff",
+      containerBackground: "#ffffff",
+      text: "#2d2d2d",
+      muted: "#767676",
+      border: "#e5e5e5",
+      radius: "0",
+      maxWidth: "640px",
+      bodyPadding: "0",
+      containerPadding: "0",
+      fontFamily: 'Georgia,"Times New Roman",Times,serif',
+      buttonBackground: "#2d2d2d",
+      buttonColor: "#ffffff",
+      headingWeight: "400",
+      eyebrow: "Newsletter",
+      intro: "Hi there,",
+      footer: "You're receiving this newsletter because you subscribed to updates from Tallei.",
+    };
+  }
+  if (templateId === "06-codepen-challenge") {
+    return {
+      accent: "#f0d361",
+      background: "#191919",
+      containerBackground: "#505050",
+      text: "#191919",
+      muted: "#505050",
+      border: "#f0d361",
+      radius: "0",
+      maxWidth: "648px",
+      bodyPadding: "0",
+      containerPadding: "0",
+      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+      buttonBackground: "#2138c6",
+      buttonColor: "#ffffff",
+      headingWeight: "700",
+      eyebrow: "#CodePenChallenge",
+      intro: "This week's challenge:",
+      footer: "You can adjust your email preferences any time, or instantly opt out of emails of this kind.",
+    };
+  }
+  if (templateId === "07-stackoverflow-tips") {
+    return {
+      accent: "#0095ff",
+      background: "#f3f3f5",
+      containerBackground: "#ffffff",
+      text: "#0c0d0e",
+      muted: "#3c3f44",
+      border: "#d6d8db",
+      radius: "4px",
+      maxWidth: "680px",
+      bodyPadding: "0",
+      containerPadding: "0",
+      fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+      buttonBackground: "#0095ff",
+      buttonColor: "#ffffff",
+      headingWeight: "700",
+      eyebrow: "Tips",
+      intro: "Tips and tricks for searching on Stack Overflow",
+      footer: "You're receiving this email because your Stack Overflow activity triggered this tip or reminder.",
+    };
+  }
+  return {
+    accent: "#111827",
+    background: "#ffffff",
+    containerBackground: "#ffffff",
+    text: "#111827",
+    muted: "#525252",
+    border: "#e5e7eb",
+    radius: "0",
+    maxWidth: "520px",
+    bodyPadding: "24px 12px",
+    containerPadding: "20px 0 44px",
+    fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+    buttonBackground: "#111827",
+    buttonColor: "#ffffff",
+    headingWeight: "650",
+    eyebrow: "Feature announcement",
+    intro: "A quick announcement from Tallei.",
+    footer: "You’re receiving this because you subscribed to updates from Tallei.",
+  };
+}
+
+function markdownHtml(markdown: string, theme: TemplateTheme): string {
+  const paragraphStyle = `margin:0 0 16px;font-size:14px;line-height:24px;color:${theme.text};`;
   return markdown
     .split(/\n{2,}/)
     .map((block) => block.trim())
@@ -34,35 +225,76 @@ function markdownHtml(markdown: string, templateId: NewsletterTemplateId): strin
         const text = formatInlineMarkdown(block.replace(/^#{1,6}\s+/, ""));
         const size = level === 1 ? "20px" : level === 2 ? "18px" : "16px";
         const margin = level === 1 ? "0 0 16px" : "24px 0 12px";
-        return `<h${level} style="margin:${margin};font-size:${size};line-height:1.3;color:#111827;font-weight:600;">${text}</h${level}>`;
+        return `<h${level} style="margin:${margin};font-size:${size};line-height:1.3;color:${theme.text};font-weight:${theme.headingWeight};">${text}</h${level}>`;
       }
       const listItems = block.split("\n").filter((line) => /^[-*]\s+/.test(line.trim()));
       if (listItems.length > 0 && listItems.length === block.split("\n").filter(Boolean).length) {
-        return `<ul style="margin:0 0 16px;padding-left:20px;">${listItems.map((line) => `<li style="margin:0 0 8px;font-size:14px;line-height:24px;color:#404040;">${formatInlineMarkdown(line.trim().replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`;
+        return `<ul style="margin:0 0 16px;padding-left:20px;">${listItems.map((line) => `<li style="margin:0 0 8px;font-size:14px;line-height:24px;color:${theme.text};">${formatInlineMarkdown(line.trim().replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`;
       }
       return `<p style="${paragraphStyle}">${formatInlineMarkdown(block).replace(/\n/g, "<br>")}</p>`;
     })
     .join("\n")
-    .replace(/style="color:#2563eb;text-decoration:underline;"/g, `style="color:${accent};text-decoration:underline;"`);
+    .replace(/style="color:#2563eb;text-decoration:underline;"/g, `style="color:${theme.accent};text-decoration:underline;"`);
 }
 
 const baseUrl = "https://demo.react.email";
 const logoUrl = `${baseUrl}/static/vercel-logo.png`;
 
-function newsletterEmailElement(input: {
-  templateId: NewsletterTemplateId;
+function techNewsletterElement(input: {
   subject: string | null;
   markdown: string;
-  eyebrow?: string;
-  ctaLabel?: string;
-  ctaUrl?: string;
-  secondaryUrl?: string;
-  footer?: string;
 }) {
-  const isEditorial = input.templateId === "editorial";
-  const accent = isEditorial ? "#be123c" : "#2563eb";
   const preview = firstPreviewLine(input.markdown);
-  const title = input.subject || "Update from Tallei";
+  const title = input.subject || "Newsletter";
+  const theme = themeForTemplate("04-tech-newsletter");
+
+  return React.createElement(
+    Html,
+    { lang: "en" },
+    React.createElement(Head, null),
+    React.createElement(Preview, null, preview),
+    React.createElement(
+      Body,
+      {
+        style: {
+          margin: "0",
+          padding: "0",
+          backgroundColor: "#f5f5f5",
+          fontFamily: theme.fontFamily,
+        },
+      },
+      React.createElement(
+        Container,
+        {
+          style: {
+            margin: "0 auto",
+            maxWidth: "640px",
+            backgroundColor: "#e8e8e8",
+            borderRadius: "10px",
+          },
+        },
+        React.createElement("div", {
+          style: { padding: "40px 24px" },
+          dangerouslySetInnerHTML: { __html: markdownHtml(input.markdown, theme) },
+        }),
+        React.createElement("div", {
+          style: { padding: "20px 24px 32px", textAlign: "center" },
+        },
+          React.createElement(Text, {
+            style: { margin: "0", color: "#767676", fontSize: "12px", lineHeight: "18px" },
+          }, "Tallei is the AI ring on your finger—easy shopping, clear shipping, and real support when you need it.")
+        )
+      )
+    )
+  );
+}
+
+function skinNewsletterElement(input: {
+  subject: string | null;
+  markdown: string;
+}) {
+  const preview = firstPreviewLine(input.markdown);
+  const theme = themeForTemplate("05-skin-newsletter");
 
   return React.createElement(
     Html,
@@ -76,6 +308,60 @@ function newsletterEmailElement(input: {
           margin: "0",
           padding: "0",
           backgroundColor: "#ffffff",
+          fontFamily: theme.fontFamily,
+        },
+      },
+      React.createElement(
+        Container,
+        {
+          style: {
+            margin: "0 auto",
+            maxWidth: "640px",
+            backgroundColor: "#ffffff",
+          },
+        },
+        React.createElement("div", {
+          style: { padding: "40px" },
+        },
+          React.createElement(Heading, {
+            as: "h1",
+            style: {
+              margin: "0 0 32px",
+              fontSize: "72px",
+              lineHeight: "1",
+              color: "#2d2d2d",
+              fontWeight: "400",
+              textTransform: "capitalize",
+            },
+          }, "Newsletter"),
+          React.createElement("div", {
+            dangerouslySetInnerHTML: { __html: markdownHtml(input.markdown, theme) },
+          })
+        )
+      )
+    )
+  );
+}
+
+function codepenChallengeElement(input: {
+  subject: string | null;
+  markdown: string;
+}) {
+  const preview = firstPreviewLine(input.markdown);
+  const title = input.subject || "CodePen Challenge";
+
+  return React.createElement(
+    Html,
+    { lang: "en" },
+    React.createElement(Head, null),
+    React.createElement(Preview, null, preview),
+    React.createElement(
+      Body,
+      {
+        style: {
+          margin: "0",
+          padding: "0",
+          backgroundColor: "#505050",
           fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
         },
       },
@@ -84,56 +370,228 @@ function newsletterEmailElement(input: {
         {
           style: {
             margin: "0 auto",
-            padding: "20px 0 48px",
-            maxWidth: "465px",
+            width: "648px",
+            maxWidth: "100%",
+          },
+        },
+        React.createElement("div", {
+          style: {
+            backgroundColor: "#f0d361",
+            padding: "30px",
+            color: "#191919",
+          },
+        },
+          React.createElement(Text, {
+            style: { margin: "0", fontSize: "16px" },
+          },
+            React.createElement("strong", null, "This week:"),
+            " #CodePenChallenge: ",
+            React.createElement("span", { style: { fontSize: "32px", marginTop: "4px", marginBottom: "0" } }, title)
+          )
+        ),
+        React.createElement("div", {
+          style: {
+            margin: "0",
+            backgroundColor: "#ffffff",
+            padding: "24px",
+          },
+        },
+          React.createElement("div", {
+            dangerouslySetInnerHTML: { __html: markdownHtml(input.markdown, themeForTemplate("06-codepen-challenge")) },
+          })
+        )
+      )
+    )
+  );
+}
+
+function stackOverflowTipsElement(input: {
+  subject: string | null;
+  markdown: string;
+}) {
+  const preview = firstPreviewLine(input.markdown);
+  const title = input.subject || "Tips";
+
+  return React.createElement(
+    Html,
+    { lang: "en" },
+    React.createElement(Head, null),
+    React.createElement(Preview, null, preview),
+    React.createElement(
+      Body,
+      {
+        style: {
+          margin: "0",
+          padding: "0",
+          backgroundColor: "#f3f3f5",
+          fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+        },
+      },
+      React.createElement(
+        Container,
+        {
+          style: {
+            width: "680px",
+            maxWidth: "100%",
+            margin: "0 auto",
+            backgroundColor: "#ffffff",
+            borderRadius: "4px",
+          },
+        },
+        React.createElement("div", {
+          style: {
+            backgroundColor: "#2b2d6e",
+            padding: "20px 30px",
+          },
+        },
+          React.createElement(Heading, {
+            as: "h1",
+            style: {
+              margin: "0",
+              color: "#ffffff",
+              fontSize: "27px",
+              lineHeight: "27px",
+              fontWeight: "700",
+            },
+          }, "Find what you want, faster"),
+          React.createElement(Text, {
+            style: {
+              margin: "8px 0 0",
+              color: "#ffffff",
+              fontSize: "17px",
+              lineHeight: "24px",
+            },
+          }, title)
+        ),
+        React.createElement("div", {
+          style: {
+            padding: "30px",
+          },
+        },
+          React.createElement("div", {
+            dangerouslySetInnerHTML: { __html: markdownHtml(input.markdown, themeForTemplate("07-stackoverflow-tips")) },
+          })
+        )
+      )
+    )
+  );
+}
+
+function newsletterEmailElement(input: {
+  templateId: NewsletterTemplateId;
+  subject: string | null;
+  markdown: string;
+  eyebrow?: string;
+  ctaLabel?: string;
+  ctaUrl?: string;
+  secondaryUrl?: string;
+  footer?: string;
+}) {
+  if (input.templateId === "04-tech-newsletter") {
+    return techNewsletterElement(input);
+  }
+  if (input.templateId === "05-skin-newsletter") {
+    return skinNewsletterElement(input);
+  }
+  if (input.templateId === "06-codepen-challenge") {
+    return codepenChallengeElement(input);
+  }
+  if (input.templateId === "07-stackoverflow-tips") {
+    return stackOverflowTipsElement(input);
+  }
+
+  const theme = themeForTemplate(input.templateId);
+  const preview = firstPreviewLine(input.markdown);
+  const title = input.subject || "Update from Tallei";
+  const isBarebone = input.templateId === "01-barebone-feature-announcement";
+  const isProductUpdate = input.templateId === "02-matte-product-update";
+
+  return React.createElement(
+    Html,
+    { lang: "en" },
+    React.createElement(Head, null),
+    React.createElement(Preview, null, preview),
+    React.createElement(
+      Body,
+      {
+        style: {
+          margin: "0",
+          padding: theme.bodyPadding,
+          backgroundColor: theme.background,
+          fontFamily: theme.fontFamily,
+        },
+      },
+      React.createElement(
+        Container,
+        {
+          style: {
+            margin: "0 auto",
+            padding: theme.containerPadding,
+            maxWidth: theme.maxWidth,
+            backgroundColor: theme.containerBackground,
+            border: isBarebone ? "none" : `1px solid ${theme.border}`,
+            borderRadius: theme.radius,
           },
         },
         React.createElement(Img, {
           src: logoUrl,
-          width: "40",
-          height: "37",
+          width: "32",
+          height: "32",
           alt: "Tallei",
-          style: { margin: "0 0 40px" },
+          style: { margin: "0 0 28px" },
         }),
+        React.createElement(Text, {
+          style: {
+            margin: "0 0 10px",
+            color: theme.accent,
+            fontSize: "12px",
+            fontWeight: "700",
+            letterSpacing: input.templateId === "03-protocol-feature-announcement" ? "0" : "0.05em",
+            textTransform: "uppercase",
+          },
+        }, input.eyebrow ?? theme.eyebrow),
         React.createElement(Heading, {
           as: "h1",
           style: {
             margin: "0 0 12px",
-            color: "#111827",
+            color: theme.text,
             fontSize: "24px",
             lineHeight: "1.25",
-            fontWeight: "600",
+            fontWeight: theme.headingWeight,
           },
         }, title),
-        input.eyebrow
-          ? React.createElement(Text, {
-            style: {
-              margin: "0 0 24px",
-              color: accent,
-              fontSize: "12px",
-              fontWeight: "600",
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-            },
-          }, input.eyebrow)
-          : null,
         React.createElement(Text, {
           style: {
             margin: "0 0 16px",
-            color: "#404040",
+            color: theme.muted,
             fontSize: "14px",
             lineHeight: "24px",
           },
-        }, "Hi {{{contact.first_name|there}}},"),
-        React.createElement("div", { dangerouslySetInnerHTML: { __html: markdownHtml(input.markdown, input.templateId) } }),
+        }, `Hi {{{contact.first_name|there}}}, ${theme.intro}`),
+        isProductUpdate
+          ? React.createElement(Section, {
+            style: {
+              margin: "22px 0",
+              padding: "16px",
+              border: `1px solid ${theme.border}`,
+              borderRadius: "14px",
+              backgroundColor: "#f8fafc",
+            },
+          },
+          React.createElement(Text, {
+            style: { margin: "0", color: theme.muted, fontSize: "13px", lineHeight: "21px" },
+          }, "Highlights, fixes, and launch notes are grouped below for a quick read.")
+          )
+          : null,
+        React.createElement("div", { dangerouslySetInnerHTML: { __html: markdownHtml(input.markdown, theme) } }),
         input.ctaLabel && input.ctaUrl
           ? React.createElement(Section, { style: { margin: "32px 0 24px", textAlign: "center" } },
             React.createElement(Button, {
               href: input.ctaUrl,
               style: {
-                backgroundColor: "#000000",
-                borderRadius: "5px",
-                color: "#ffffff",
+                backgroundColor: theme.buttonBackground,
+                borderRadius: input.templateId === "03-protocol-feature-announcement" ? "4px" : "8px",
+                color: theme.buttonColor,
                 fontSize: "12px",
                 fontWeight: "600",
                 lineHeight: "100%",
@@ -147,23 +605,23 @@ function newsletterEmailElement(input: {
           : null,
         input.secondaryUrl
           ? React.createElement(Text, {
-            style: { margin: "0 0 16px", color: "#666666", fontSize: "14px", lineHeight: "24px" },
+            style: { margin: "0 0 16px", color: theme.muted, fontSize: "14px", lineHeight: "24px" },
           },
             "or copy and paste this URL into your browser:",
             " ",
-            React.createElement(Link, { href: input.secondaryUrl, style: { color: accent, textDecoration: "underline" } }, input.secondaryUrl)
+            React.createElement(Link, { href: input.secondaryUrl, style: { color: theme.accent, textDecoration: "underline" } }, input.secondaryUrl)
           )
           : null,
-        React.createElement(Hr, { style: { border: "none", borderTop: "1px solid #eaeaea", margin: "26px 0" } }),
+        React.createElement(Hr, { style: { border: "none", borderTop: `1px solid ${theme.border}`, margin: "26px 0" } }),
         React.createElement(Text, {
-          style: { margin: "0 0 8px", color: "#666666", fontSize: "12px", lineHeight: "22px" },
-        }, input.footer ?? "You’re receiving this because you subscribed to updates from Tallei."),
+          style: { margin: "0 0 8px", color: theme.muted, fontSize: "12px", lineHeight: "22px" },
+        }, input.footer ?? theme.footer),
         input.footer
           ? null
           : React.createElement(Text, {
-            style: { margin: "0", color: "#666666", fontSize: "12px", lineHeight: "22px" },
+            style: { margin: "0", color: theme.muted, fontSize: "12px", lineHeight: "22px" },
           },
-          React.createElement(Link, { href: "{{{RESEND_UNSUBSCRIBE_URL}}}", style: { color: accent, textDecoration: "underline" } }, "Unsubscribe")
+          React.createElement(Link, { href: "{{{RESEND_UNSUBSCRIBE_URL}}}", style: { color: theme.accent, textDecoration: "underline" } }, "Unsubscribe")
           )
       )
     )
@@ -193,7 +651,7 @@ export async function renderNewsletterApprovalEmail(input: {
   runUrl: string;
 }) {
   const element = newsletterEmailElement({
-    templateId: "clean",
+    templateId: "01-barebone-feature-announcement",
     subject: `Approval required: ${input.subject}`,
     markdown: input.markdown,
     eyebrow: "Review before send",

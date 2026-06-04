@@ -153,38 +153,34 @@ export function AgentRow({
 
   return (
     <div className="space-y-1.5">
-      <div
+      <button
+        type="button"
+        onClick={onToggle}
         className={cn(
-          "rounded-xl bg-white p-3 shadow-sm transition-all",
+          "w-full rounded-xl bg-white p-3 text-left shadow-sm transition-all",
           active && theme.active,
           open && "ring-2 ring-slate-300"
         )}
       >
-        <div className="flex items-start gap-3">
-          <ChevronLeft className="mt-1 size-4 shrink-0 text-slate-500" />
-          <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg", theme.chip)}>
+        <div className="flex items-start gap-2">
+          <span className={cn("mt-1 grid size-8 shrink-0 place-items-center rounded-lg", theme.chip)}>
             <Icon className="size-3.5" />
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-2">
-              <button
-                type="button"
-                onClick={onToggle}
-                className="min-w-0 text-left"
-              >
-                <span className="block truncate text-sm font-semibold text-slate-900">{task.agentName}</span>
-              </button>
-              <div className="flex items-center gap-1.5">
+              <span className="block truncate text-sm font-semibold text-slate-900">{task.agentName}</span>
+              <div className="flex shrink-0 items-center gap-1.5">
                 {canRerun && onRerun ? (
-                  <button
-                    type="button"
-                    onClick={onRerun}
-                    disabled={rerunning}
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => { e.stopPropagation(); onRerun(); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onRerun(); } }}
                     className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {rerunning ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
                     Rerun
-                  </button>
+                  </span>
                 ) : null}
                 <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", taskStatusPill(task))}>
                   {task.status === "done" || task.status === "completed" ? duration(task) : statusLabel(task)}
@@ -202,8 +198,9 @@ export function AgentRow({
               </div>
             ) : null}
           </div>
+          <ChevronLeft className={cn("mt-1 size-4 shrink-0 transition-transform", open ? "text-slate-900" : "text-slate-400")} />
         </div>
-      </div>
+      </button>
     </div>
   );
 }

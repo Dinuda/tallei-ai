@@ -39,7 +39,7 @@ function readAgentSpec(task: { agent_spec: unknown; agent_id: string; agent_name
         return loopRunAgentSchema.parse(fromColumn);
     }
     const fromInput = readObject(taskInput.agent);
-    if (typeof fromInput.id === "string") {
+    if (typeof fromInput.id === "string") { 
         return loopRunAgentSchema.parse(fromInput);
     }
     return loopRunAgentSchema.parse({
@@ -758,6 +758,10 @@ export async function getLoopRun(auth, runId) {
     const approvalDecisionMeta = readObject(meta.approvalDecision);
     const contactList = readObject(meta.deliveryRecipients ?? meta.contactList);
     const distribution = readObject(meta.deliveryBatch ?? meta.distribution);
+    const deliveryEmailHtml = typeof meta.deliveryEmailHtml === "string" && meta.deliveryEmailHtml.trim()
+        ? meta.deliveryEmailHtml
+        : null;
+    const deliveryEmailUpdatedAt = typeof meta.deliveryEmailUpdatedAt === "string" ? meta.deliveryEmailUpdatedAt : null;
     const pendingInputRaw = readObject(meta.pendingInput);
     const deliveryActionRaw = readObject(meta.deliveryAction);
     const recipientsRaw = Array.isArray(distribution.recipients) ? distribution.recipients : [];
@@ -834,6 +838,11 @@ export async function getLoopRun(auth, runId) {
                     sentAt: typeof distribution.sentAt === "string" ? distribution.sentAt : null,
                     successCount: typeof distribution.successCount === "number" ? distribution.successCount : 0,
                     failureCount: typeof distribution.failureCount === "number" ? distribution.failureCount : 0,
+                    openCount: typeof distribution.openCount === "number" ? distribution.openCount : 0,
+                    clickCount: typeof distribution.clickCount === "number" ? distribution.clickCount : 0,
+                    unsubscribeCount: typeof distribution.unsubscribeCount === "number" ? distribution.unsubscribeCount : 0,
+                    openRate: typeof distribution.openRate === "number" ? distribution.openRate : 0,
+                    clickRate: typeof distribution.clickRate === "number" ? distribution.clickRate : 0,
                     recipients: recipientsRaw.map((recipient) => readObject(recipient)).map((recipient) => ({
                         email: typeof recipient.email === "string" ? recipient.email : "",
                         ok: recipient.ok === true,
@@ -844,6 +853,13 @@ export async function getLoopRun(auth, runId) {
                 }
                 : null,
         },
+        emailTemplate: deliveryEmailHtml
+            ? {
+                html: deliveryEmailHtml,
+                design: meta.deliveryEmailDesign ?? null,
+                updatedAt: deliveryEmailUpdatedAt,
+            }
+            : null,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     };
@@ -859,9 +875,19 @@ export async function updateLoopRunNewsletterDraft(auth, input) {
     if (!body.trim()) {
         throw new Error("Newsletter body is required");
     }
+    const emailHtml = typeof input.emailHtml === "string" && input.emailHtml.trim()
+        ? input.emailHtml
+        : undefined;
     const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
         deliveryContentBody: body,
         editorUpdatedAt: new Date().toISOString(),
+        ...(emailHtml
+            ? {
+                deliveryEmailHtml: emailHtml,
+                deliveryEmailDesign: input.emailDesign ?? null,
+                deliveryEmailUpdatedAt: new Date().toISOString(),
+            }
+            : {}),
     });
     await pool.query(`UPDATE workflow_runs
      SET draft_output = $4,

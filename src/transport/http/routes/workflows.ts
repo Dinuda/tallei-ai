@@ -88,6 +88,8 @@ const contactCsvSchema = z.object({
 
 const newsletterDraftSchema = z.object({
   body: z.string().trim().min(1).max(200_000),
+  emailHtml: z.string().max(500_000).optional(),
+  emailDesign: z.unknown().optional(),
 });
 
 const newsletterPreviewSchema = z.object({
@@ -519,7 +521,12 @@ router.patch("/runs/:runId/newsletter", requireScopes(["memory:write"]), async (
   try {
     const { runId } = runIdSchema.parse({ runId: req.params.runId });
     const body = newsletterDraftSchema.parse(req.body ?? {});
-    const run = await updateLoopRunNewsletterDraft(req.authContext!, { runId, body: body.body });
+    const run = await updateLoopRunNewsletterDraft(req.authContext!, {
+      runId,
+      body: body.body,
+      emailHtml: body.emailHtml,
+      emailDesign: body.emailDesign,
+    });
     res.json({ run });
   } catch (error) {
     if (error instanceof z.ZodError) {
