@@ -57,9 +57,6 @@ function themeForTemplate(templateId: NewsletterTemplateId): TemplateTheme {
     buttonBackground: "#111827",
     buttonColor: "#ffffff",
     headingWeight: "650",
-    eyebrow: "Feature announcement",
-    intro: "A quick announcement from Tallei.",
-    footer: "You’re receiving this because you subscribed to updates from Tallei.",
   };
 }
 
