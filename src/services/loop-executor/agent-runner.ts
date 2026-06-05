@@ -6,6 +6,7 @@
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import {
+  actionableToolRefs,
   buildAgentSystemPrompt,
   buildAgentUserPrompt,
   getLoopTool,
@@ -13,8 +14,7 @@ import {
 } from "./tool-catalog.js";
 import { getToolHandler, type ToolHandlerContext } from "./tool-handlers.js";
 import { loopExecutorOpenAiChat, loopExecutorOpenAiModel } from "./openai-chat.js";
-import {
-} from "./agent-runner-internals.js";
+import { completeText } from "./agent-runner-internals.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
 import "./tool-handler-registrations.js";

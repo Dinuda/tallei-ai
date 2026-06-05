@@ -5,7 +5,6 @@
  * The newsletter formatter is registered at module load.
  */
 
-import { getLoopPreset } from "./presets/registry.js";
 import type { DeliveryContentFormatter, LoopDefinition } from "./types.js";
 
 const formatters = new Map<string, DeliveryContentFormatter>();
@@ -20,9 +19,7 @@ export function getDeliveryFormatter(key: string): DeliveryContentFormatter | un
 
 /** Newsletter loops use subscriber formatting + React Email for delivery. */
 export function isNewsletterLoopDefinition(definition: LoopDefinition): boolean {
-  const preset = getLoopPreset(definition.presetId);
-  if (preset?.id === "newsletter") return true;
-  return false;
+  return definition.presetId === "newsletter" || definition.presetId === "newsletter_v1";
 }
 
 const plainDeliveryFormatter: DeliveryContentFormatter = {

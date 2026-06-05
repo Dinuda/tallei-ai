@@ -77,10 +77,24 @@ async function transitionRunToDelivery(input: {
     || typeof approvalRequest.approvalUrl === "string"
     || typeof approvalRequest.sentAt === "string";
   if (!hasApprovalContext && input.approvedBy !== "email") {
-    throw new Error("Run has no approval context to continue");
+    const pendingGate = await pool.query<{ id: string }>(
+      `SELECT id
+       FROM loop_run_gates
+       WHERE workflow_run_id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+         AND kind = 'approval'
+         AND status = 'pending'
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [input.runId, input.tenantId, input.userId],
+    );
+    if (!pendingGate.rows[0]) {
+      throw new Error("Run has no approval context to continue");
+    }
   }
 
-  const canApproveFromStatus = run.status === "waiting_for_approval" || run.status === "waiting_for_email_approval" || run.status === "blocked";
+  const canApproveFromStatus = run.status === "waiting_for_approval" || run.status === "waiting_for_email_approval" || run.status === "waiting_for_gate" || run.status === "blocked";
   if (!canApproveFromStatus) {
     if (["waiting_for_contact_list", "executing_action", "completed"].includes(run.status)) {
       return { runId: run.id, workflowId: run.workflow_id, status: run.status };
@@ -398,7 +412,8 @@ export async function approveLoopStrategy(input: {
 
   const runMeta = readLoopExecutorMeta(context.metadataJson);
   const preset = resolveLoopPreset(context.definition);
-  const rosterSource = preset?.buildRoster(context.definition.goal).agents
+  const presetRoster = preset ? (await preset.buildRoster(context.definition.goal)).agents : null;
+  const rosterSource = presetRoster
     ?? input.roster
     ?? runMeta.approvedRoster
     ?? runMeta.proposedRoster;
@@ -469,9 +484,69 @@ export async function approveLoopStrategy(input: {
 export async function resumeLoopRunExecution(input: { auth: AuthContext; runId: string }) {
   await assertRunAccess(input.auth, input.runId);
   const context = await loadRunContext(input.runId);
-  const resumableStatuses = new Set(["strategy_approved", "running", "blocked", "executing_action"]);
+  const resumableStatuses = new Set(["strategy_approved", "running", "blocked", "waiting_for_gate", "executing_action"]);
   if (!resumableStatuses.has(context.runStatus)) {
     throw new Error(`Run is ${context.runStatus}, cannot resume agent execution`);
+  }
+
+  if (context.runStatus === "waiting_for_gate") {
+    const pendingGate = await pool.query<{ id: string }>(
+      `SELECT id FROM loop_run_gates
+       WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+         AND kind = 'approval' AND status = 'pending'
+       ORDER BY created_at ASC LIMIT 1`,
+      [context.runId, context.tenantId, context.userId],
+    );
+    if (pendingGate.rows[0]) {
+      throw new Error("Run is waiting for gate approval");
+    }
+    if (isDynamicPlanDefinition(context.definition) && !resolveLoopPreset(context.definition)) {
+      const seqResult = await pool.query<{ seq: number }>(
+        `SELECT seq FROM loop_run_tasks
+         WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+           AND status = 'done'
+         ORDER BY seq DESC LIMIT 1`,
+        [context.runId, context.tenantId, context.userId],
+      );
+      const currentSeq = typeof seqResult.rows[0]?.seq === "number" ? seqResult.rows[0].seq : -1;
+      await pool.query(
+        `UPDATE workflow_runs SET status = 'running',
+             metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+        [
+          context.runId,
+          context.tenantId,
+          context.userId,
+          JSON.stringify({
+            loop_executor: mergeLoopExecutorMeta(context.metadataJson, {
+              activeGateId: null,
+              activeGateStageId: null,
+              resumedAt: new Date().toISOString(),
+            }).loop_executor,
+          }),
+        ],
+      );
+      const freshContext = await loadRunContext(context.runId);
+      const advanced = await advanceDynamicRunAfterSeq(freshContext, currentSeq);
+      return { runId: context.runId, status: advanced.status, firstTaskId: advanced.taskId ?? null };
+    }
+    await pool.query(
+      `UPDATE workflow_runs SET status = 'running',
+           metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+       WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+      [
+        context.runId,
+        context.tenantId,
+        context.userId,
+        JSON.stringify({
+          loop_executor: mergeLoopExecutorMeta(context.metadataJson, {
+            activeGateId: null,
+            activeGateStageId: null,
+            resumedAt: new Date().toISOString(),
+          }).loop_executor,
+        }),
+      ],
+    );
   }
 
   if (context.runStatus === "executing_action") {
@@ -533,7 +608,7 @@ export async function resumeLoopRunExecution(input: { auth: AuthContext; runId: 
       runId: context.runId,
       jobType: "agent",
       taskId: firstTaskId,
-      resetAttempts: context.runStatus === "blocked",
+      resetAttempts: true,
     });
   } else {
     await scheduleHeartbeat({

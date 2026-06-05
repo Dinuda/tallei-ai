@@ -31,7 +31,7 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { AgentRow, AgentPlaceholder, CeoRow, type AgentRowTask } from "./components/agent-rows";
+import { AgentRow, AgentPlaceholder, ApprovalGateRow, CeoRow, type AgentRowTask, type ApprovalGateInfo } from "./components/agent-rows";
 import { ChatDrawer, type ChatComment } from "./components/chat-drawer";
 import { EmailBuilderDialog } from "./components/email-builder-dialog";
 import {
@@ -116,6 +116,8 @@ type LoopRun = {
   strategyOutput: string | null;
   waitingForStrategyApproval: boolean;
   draftOutput: string | null;
+  activeGateId?: string | null;
+  activeGateStageId?: string | null;
   pendingInput?: {
     id: string;
     kind: string;
@@ -212,12 +214,24 @@ type WorkflowListItem = {
   latestRun: WorkflowListRun | null;
 };
 
+type LoopRunGate = {
+  id: string;
+  stageId: string;
+  kind: string;
+  status: string;
+  title: string;
+  artifactId: string | null;
+  payload: unknown;
+  createdAt: string;
+  completedAt: string | null;
+};
+
 type MemoryEntry = {
   label: string;
   source: "memory" | "context" | "credential";
 };
 
-type RunAction = "approve-strategy" | "approve" | "skip";
+type RunAction = "approve-strategy" | "approve" | "approve-gate" | "skip" | "resume";
 
 const ACTIVE_STATUSES = new Set([
   "running",
@@ -225,7 +239,35 @@ const ACTIVE_STATUSES = new Set([
   "strategy_approved",
   "waiting_for_email_approval",
   "waiting_for_approval",
+  "waiting_for_gate",
 ]);
+
+const CHANNEL_LABELS: Record<string, string> = {
+  primary: "Primary channel",
+  email: "Email",
+  gmail: "Gmail",
+  telegram: "Telegram",
+  whatsapp: "WhatsApp",
+};
+
+function pendingApprovalGate(gates: LoopRunGate[]): LoopRunGate | null {
+  return gates.find((gate) => gate.kind === "approval" && gate.status === "pending") ?? null;
+}
+
+function gateApprovalChannels(gate: LoopRunGate | null): string[] {
+  if (!gate?.payload || typeof gate.payload !== "object" || Array.isArray(gate.payload)) return ["primary"];
+  const stage = (gate.payload as { stage?: { approvalPolicy?: { channels?: string[] } } }).stage;
+  const channels = stage?.approvalPolicy?.channels;
+  return Array.isArray(channels) && channels.length > 0 ? channels : ["primary"];
+}
+
+function isAwaitingApprovalStatus(status: string, gates: LoopRunGate[]): boolean {
+  if (status === "waiting_for_approval" || status === "waiting_for_email_approval") {
+    return true;
+  }
+  if (pendingApprovalGate(gates)) return true;
+  return false;
+}
 
 function readRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -255,8 +297,9 @@ function formatRelative(v: string | null) {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-function prettyStatus(s: string) {
-  if (s === "waiting_for_email_approval") return "awaiting approval";
+function prettyStatus(s: string, gates: LoopRunGate[] = []) {
+  if (pendingApprovalGate(gates)) return "awaiting approval";
+  if (s === "waiting_for_email_approval" || s === "waiting_for_approval") return "awaiting approval";
   if (s === "waiting_for_contact_list") return "awaiting contacts";
   if (s === "waiting_for_input") return "awaiting input";
   return s.replace(/_/g, " ");
@@ -285,10 +328,10 @@ function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
-function statusBadgeClass(s: string) {
+function statusBadgeClass(s: string, gates: LoopRunGate[] = []) {
   if (s === "completed" || s === "done") return "bg-sky-100 text-sky-800";
   if (s === "running" || s === "strategy_approved") return "bg-blue-100 text-blue-800";
-  if (s.includes("waiting")) return "bg-amber-100 text-amber-800";
+  if (s.includes("waiting") || isAwaitingApprovalStatus(s, gates)) return "bg-amber-100 text-amber-800";
   if (s === "blocked" || s === "failed") return "bg-rose-100 text-rose-800";
   return "bg-slate-100 text-slate-700";
 }
@@ -478,15 +521,40 @@ function extractMemoryEntries(tasks: LoopRunTask[]): MemoryEntry[] {
   return out.slice(0, 10);
 }
 
-function runAction(run: LoopRun | null): {
+function needsApprovalHandoffContinue(
+  run: LoopRun | null,
+  tasks: LoopRunTask[],
+  gates: LoopRunGate[],
+): boolean {
+  if (!run || run.status !== "running") return false;
+  if (pendingApprovalGate(gates)) return false;
+  const handoffTodo = tasks.some(
+    (t) => /approval_handoff|publicist/i.test(t.agentId) && t.status === "todo",
+  );
+  const writerDone = tasks.some(
+    (t) => /writer/i.test(t.agentId) && (t.status === "done" || t.status === "completed"),
+  );
+  const hasActive = tasks.some((t) => t.status === "in_progress" || t.status === "working");
+  return handoffTodo && writerDone && !hasActive;
+}
+
+function runAction(
+  run: LoopRun | null,
+  gates: LoopRunGate[],
+  tasks: LoopRunTask[],
+): {
   show: boolean;
   headline: string;
   sub: string;
   cta: string;
   action: RunAction;
   tone: "amber" | "sky" | "rose";
+  channels?: string[];
 } | null {
   const status = run?.status ?? "";
+  const pendingGate = pendingApprovalGate(gates);
+  const gateChannels = gateApprovalChannels(pendingGate);
+
   if (status === "waiting_for_strategy_approval") {
     return {
       show: true,
@@ -495,6 +563,18 @@ function runAction(run: LoopRun | null): {
       cta: "Start run",
       action: "approve-strategy",
       tone: "amber",
+    };
+  }
+  if (pendingGate) {
+    const channelText = gateChannels.map((c) => CHANNEL_LABELS[c] ?? c).join(", ");
+    return {
+      show: true,
+      headline: pendingGate.title,
+      sub: `Approval required via ${channelText}. Review the draft, then approve to continue.`,
+      cta: "Approve",
+      action: "approve-gate",
+      tone: "sky",
+      channels: gateChannels,
     };
   }
   if (status === "waiting_for_approval" || status === "waiting_for_email_approval") {
@@ -517,6 +597,16 @@ function runAction(run: LoopRun | null): {
       tone: "rose",
     };
   }
+  if (needsApprovalHandoffContinue(run, tasks, gates)) {
+    return {
+      show: true,
+      headline: "Draft ready — continue to approval",
+      sub: "The writer finished. Continue to send the draft for operator approval.",
+      cta: "Continue",
+      action: "resume",
+      tone: "sky",
+    };
+  }
   return null;
 }
 
@@ -528,20 +618,21 @@ function isNewsletterPresetWorkflow(workflow: LoopWorkflow | null): boolean {
     || Boolean(definition.allowedToolRefs?.includes("internal.resend_broadcast"));
 }
 
-function RunBadge({ status }: { status: string }) {
+function RunBadge({ status, gates = [] }: { status: string; gates?: LoopRunGate[] }) {
   const isRunning = status === "running" || status === "strategy_approved";
+  const awaiting = isAwaitingApprovalStatus(status, gates);
   return (
-    <Badge variant="secondary" className={cn("gap-1.5 border-0 capitalize shadow-none", statusBadgeClass(status))}>
+    <Badge variant="secondary" className={cn("gap-1.5 border-0 capitalize shadow-none", statusBadgeClass(status, gates))}>
       <span
         className={cn(
           "size-1.5 rounded-full",
-          status.includes("waiting") ? "bg-amber-500" :
+          awaiting ? "bg-amber-500" :
           status === "completed" ? "bg-sky-500" :
           isRunning ? "bg-blue-500 animate-pulse" :
           "bg-muted-foreground/50"
         )}
       />
-      {prettyStatus(status)}
+      {prettyStatus(status, gates)}
     </Badge>
   );
 }
@@ -555,6 +646,7 @@ export default function LoopRunDetailPage() {
   const [tasks, setTasks] = useState<LoopRunTask[]>([]);
   const [comments, setComments] = useState<ChatComment[]>([]);
   const [linkedLatestRun, setLinkedLatestRun] = useState<WorkflowListRun | null>(null);
+  const [gates, setGates] = useState<LoopRunGate[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -572,13 +664,23 @@ export default function LoopRunDetailPage() {
   const [emailSource, setEmailSource] = useState<"auto" | "builder" | null>(null);
   const [emailPreviewBusy, setEmailPreviewBusy] = useState(false);
   const [emailBuilderOpen, setEmailBuilderOpen] = useState(false);
-  const resumeAttemptedRef = useRef(false);
+  const resumeAttemptedRef = useRef<string | null>(null);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   const active = run ? ACTIVE_STATUSES.has(run.status) : false;
   const runStatus = run?.status ?? "loading";
   const wfStatus = workflow?.status ?? "active";
-  const decision = runAction(run);
+  const decision = runAction(run, gates, tasks);
+  const pendingGate = pendingApprovalGate(gates);
+  const approvalGateInfo: ApprovalGateInfo | null = pendingGate
+    ? {
+        id: pendingGate.id,
+        title: pendingGate.title,
+        artifactId: pendingGate.artifactId,
+        channels: gateApprovalChannels(pendingGate),
+        status: pendingGate.status,
+      }
+    : null;
   const predefinedNewsletterRun = isNewsletterPresetWorkflow(workflow);
   const showCsvUpload = runStatus === "waiting_for_contact_list" || runStatus === "waiting_for_input";
 
@@ -757,21 +859,23 @@ export default function LoopRunDetailPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [rRes, tRes, cRes, wRes, allRes, rosterRes] = await Promise.all([
+      const [rRes, tRes, cRes, wRes, allRes, rosterRes, gatesRes] = await Promise.all([
         fetch(`/api/workflows/runs/${runId}`, { cache: "no-store" }),
         fetch(`/api/workflows/runs/${runId}/tasks`, { cache: "no-store" }),
         fetch(`/api/workflows/runs/${runId}/comments`, { cache: "no-store" }),
         fetch(`/api/workflows/internal/loops/${workflowId}`, { cache: "no-store" }),
         fetch("/api/workflows", { cache: "no-store" }),
         fetch(`/api/workflows/runs/${runId}/roster`, { cache: "no-store" }),
+        fetch(`/api/workflows/runs/${runId}/gates`, { cache: "no-store" }),
       ]);
-      const [rP, tP, cP, wP, allP, rosterP] = await Promise.all([
+      const [rP, tP, cP, wP, allP, rosterP, gatesP] = await Promise.all([
         rRes.json().catch(() => ({})),
         tRes.json().catch(() => ({})),
         cRes.json().catch(() => ({})),
         wRes.json().catch(() => ({})),
         allRes.json().catch(() => ({})),
         rosterRes.json().catch(() => ({})),
+        gatesRes.json().catch(() => ({})),
       ]);
 
       if (!rRes.ok) throw new Error((rP as { error?: string }).error ?? "Failed to load run");
@@ -784,6 +888,11 @@ export default function LoopRunDetailPage() {
       setComments(
         Array.isArray((cP as { comments?: ChatComment[] }).comments)
           ? (cP as { comments: ChatComment[] }).comments
+          : []
+      );
+      setGates(
+        gatesRes.ok && Array.isArray((gatesP as { gates?: LoopRunGate[] }).gates)
+          ? (gatesP as { gates: LoopRunGate[] }).gates
           : []
       );
 
@@ -823,22 +932,39 @@ export default function LoopRunDetailPage() {
   useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
-    if (resumeAttemptedRef.current || loading) return;
+    if (loading) return;
     if (!run) return;
 
-    if (run.status === "executing_action" || run.status === "distributing") {
-      resumeAttemptedRef.current = true;
+    const resumeFingerprint = [
+      run.status,
+      tasks.map((t) => `${t.id}:${t.status}`).join("|"),
+      gates.map((g) => `${g.id}:${g.status}`).join("|"),
+    ].join(";");
+
+    const attemptResume = () => {
+      if (resumeAttemptedRef.current === resumeFingerprint) return;
+      resumeAttemptedRef.current = resumeFingerprint;
       void fetch(`/api/workflows/runs/${runId}/resume`, { method: "POST" })
         .then(async (res) => {
           const payload = await res.json().catch(() => ({}));
           if (!res.ok) {
-            throw new Error((payload as { error?: string }).error ?? "Failed to resume delivery");
+            resumeAttemptedRef.current = null;
+            throw new Error((payload as { error?: string }).error ?? "Failed to resume run");
           }
           await load();
         })
         .catch((e) => {
-          setError(e instanceof Error ? e.message : "Failed to resume delivery");
+          setError(e instanceof Error ? e.message : "Failed to resume run");
         });
+    };
+
+    if (run.status === "executing_action" || run.status === "distributing") {
+      attemptResume();
+      return;
+    }
+
+    if (run.status === "waiting_for_gate" && !pendingApprovalGate(gates)) {
+      attemptResume();
       return;
     }
 
@@ -849,19 +975,8 @@ export default function LoopRunDetailPage() {
     const hasActive = tasks.some((task) => task.status === "in_progress" || task.status === "working");
     if (!hasTodo || hasActive) return;
 
-    resumeAttemptedRef.current = true;
-    void fetch(`/api/workflows/runs/${runId}/resume`, { method: "POST" })
-      .then(async (res) => {
-        const payload = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw new Error((payload as { error?: string }).error ?? "Failed to resume agents");
-        }
-        await load();
-      })
-      .catch((e) => {
-        setError(e instanceof Error ? e.message : "Failed to resume agents");
-      });
-  }, [loading, run, tasks, runId, load]);
+    attemptResume();
+  }, [loading, run, tasks, gates, runId, load]);
 
   useEffect(() => {
     if (!active) return;
@@ -907,10 +1022,44 @@ export default function LoopRunDetailPage() {
     }
   }
 
+  async function resolvePendingGateId(): Promise<string | null> {
+    if (pendingGate?.id) return pendingGate.id;
+    const res = await fetch(`/api/workflows/runs/${runId}/gates`, { cache: "no-store" });
+    const payload = await res.json().catch(() => ({}));
+    const fetched = Array.isArray((payload as { gates?: LoopRunGate[] }).gates)
+      ? (payload as { gates: LoopRunGate[] }).gates
+      : [];
+    return pendingApprovalGate(fetched)?.id ?? null;
+  }
+
   async function doAction(action: RunAction) {
     setBusy(action);
     setError(null);
     try {
+      if (action === "resume") {
+        const res = await fetch(`/api/workflows/runs/${runId}/resume`, { method: "POST" });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to resume run");
+        await load();
+        return;
+      }
+
+      if (action === "approve-gate") {
+        const gateId = await resolvePendingGateId();
+        if (gateId) {
+          const res = await fetch(`/api/workflows/runs/${runId}/gates/${gateId}/approve`, { method: "POST" });
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to approve gate");
+          await load();
+          return;
+        }
+        const res = await fetch(`/api/workflows/runs/${runId}/approve`, { method: "POST" });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to approve run");
+        await load();
+        return;
+      }
+
       const init: RequestInit = { method: "POST" };
       if (action === "approve-strategy" && roster.length > 0) {
         init.headers = { "content-type": "application/json" };
@@ -918,7 +1067,7 @@ export default function LoopRunDetailPage() {
       }
       const res = await fetch(`/api/workflows/runs/${runId}/${action}`, init);
       const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(payload.error ?? "Action failed");
+      if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Action failed");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Action failed");
@@ -1056,7 +1205,9 @@ export default function LoopRunDetailPage() {
   };
 
   const doneCount = agentTasks.filter((t) => t.status === "done" || t.status === "completed").length;
-  const agentTotal = agentTasks.length > 0 ? agentTasks.length : roster.length;
+  const agentTotal = agentTasks.length > 0
+    ? agentTasks.length + (approvalGateInfo ? 1 : 0)
+    : roster.length;
 
   return (
     <TooltipProvider>
@@ -1084,7 +1235,7 @@ export default function LoopRunDetailPage() {
             </Breadcrumb>
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-bold tracking-tight text-slate-900">Newsletter</h1>
-              <RunBadge status={runStatus} />
+              <RunBadge status={runStatus} gates={gates} />
             </div>
           </div>
 
@@ -1204,6 +1355,15 @@ export default function LoopRunDetailPage() {
                     <div className="min-w-0">
                       <p className="font-semibold text-slate-900">{decision.headline}</p>
                       <p className="mt-0.5 text-sm text-slate-600">{decision.sub}</p>
+                      {decision.channels?.length ? (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {decision.channels.map((channel) => (
+                            <span key={channel} className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-slate-600 ring-1 ring-slate-200">
+                              {CHANNEL_LABELS[channel] ?? channel}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1690,9 +1850,10 @@ export default function LoopRunDetailPage() {
                   <CardContent className="space-y-2 px-3">
                     <CeoRow
                       name={workflow?.definition?.ceo?.name ?? "CEO"}
-                      statusLabel={prettyStatus(runStatus)}
+                      statusLabel={prettyStatus(runStatus, gates)}
                       runStatus={runStatus}
                     />
+                    {approvalGateInfo ? <ApprovalGateRow gate={approvalGateInfo} /> : null}
                     {loading && agentTasks.length === 0 && roster.length === 0 ? (
                       <AgentPlaceholder />
                     ) : agentTasks.length > 0 ? (

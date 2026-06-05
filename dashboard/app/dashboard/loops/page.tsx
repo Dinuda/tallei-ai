@@ -7,9 +7,11 @@ import { FaTelegramPlane } from "react-icons/fa";
 import { MdMarkEmailRead } from "react-icons/md";
 import {
   AlertCircle,
+  ArrowRight,
   Calendar,
   Check,
   Clock,
+  Bot,
   Loader2,
   RefreshCw,
   RotateCcw,
@@ -26,7 +28,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import Image from "next/image";
-import { isLennyNewsletterGoal, isNewsletterLoopDefinition, LENNY_NEWSLETTER_LOOP_GOAL } from "@/lib/lenny-newsletter";
+import { isLennyNewsletterGoal, isNewsletterLoopDefinition } from "@/lib/lenny-newsletter";
 
 /* ------------------------------------------------------------------ */
 //  Types
@@ -553,19 +555,6 @@ function platformStyle(platform: Platform): {
 
 const ACCENT = "#4338ca";
 
-const HARDCODED_NEWSLETTER_TASK = LENNY_NEWSLETTER_LOOP_GOAL;
-const HARDCODED_NEWSLETTER_CRON = "0 9 * * 1";
-const NEWSLETTER_ALLOWED_TOOL_REFS = [
-  "internal.memory_search",
-  "internal.web_search",
-  "internal.llm_only",
-  "internal.email_approval_request",
-  "internal.email_builder_compose",
-  "internal.email_builder_render",
-  "internal.resend_broadcast",
-  "internal.react_email_template",
-] as const;
-
 function isExplicitLennyNewsletterLoop(loop: LoopWorkflow): boolean {
   return loop.definition?.presetId === "newsletter" && isLennyNewsletterGoal(loop.definition?.goal);
 }
@@ -586,16 +575,6 @@ function findLennyNewsletterWorkflow(loops: LoopWorkflow[]): LoopWorkflow | null
       && !/\bxyz\b/i.test(`${loop.title} ${loop.definition?.goal ?? ""}`)
     )
     ?? null;
-}
-
-function runIdFromResponse(value: unknown): string | null {
-  const record = readRecord(value);
-  if (typeof record.runId === "string" && record.runId.trim()) return record.runId;
-  if (typeof record.id === "string" && record.id.trim()) return record.id;
-  const nested = readRecord(record.run);
-  if (typeof nested.runId === "string" && nested.runId.trim()) return nested.runId;
-  if (typeof nested.id === "string" && nested.id.trim()) return nested.id;
-  return null;
 }
 
 function hardcodedNewsletterLoop(): LoopInsight {
@@ -1132,8 +1111,6 @@ export default function LoopsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loopActionError, setLoopActionError] = useState<string | null>(null);
   const [runningLoopId, setRunningLoopId] = useState<string | null>(null);
-  const [newsletterWorkflowId, setNewsletterWorkflowId] = useState<string | null>(null);
-
   const loadLoopMinerRuns = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -1161,7 +1138,6 @@ export default function LoopsPage() {
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
       const internalLoops = loopsResponse.ok && Array.isArray(loopsPayload.loops) ? loopsPayload.loops as LoopWorkflow[] : [];
       const newsletterWorkflow = findLennyNewsletterWorkflow(internalLoops);
-      setNewsletterWorkflowId(newsletterWorkflow?.id ?? null);
       const displayRun = pickRunForDisplay(runs);
       const minedLoops = displayRun ? buildLoopInsightsFromRun(displayRun) : [];
       const hardcoded = { ...hardcodedNewsletterLoop(), workspaceId: newsletterWorkflow?.workspaceId ?? null };
@@ -1186,50 +1162,12 @@ export default function LoopsPage() {
     setLoops((prev) => prev.filter((l) => l.id !== id));
   }, []);
 
-  const activateLoop = useCallback(async (id: string) => {
+  const openLoop = useCallback(async (id: string) => {
     setLoopActionError(null);
     setRunningLoopId(id);
     try {
       if (id === "hardcoded-newsletter-loop-v1") {
-        let activeNewsletterWorkflowId = newsletterWorkflowId;
-        if (!activeNewsletterWorkflowId) {
-          const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-          const createResponse = await fetch("/api/workflows/internal/loops", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              task: HARDCODED_NEWSLETTER_TASK,
-              cron: HARDCODED_NEWSLETTER_CRON,
-              timezone,
-              preset_id: "newsletter",
-              integrations: ["internal", "react_email"],
-              allowed_tool_refs: NEWSLETTER_ALLOWED_TOOL_REFS,
-            }),
-          });
-          const createPayload = await createResponse.json().catch(() => ({}));
-          if (!createResponse.ok) {
-            throw new Error(createPayload.error ?? "Failed to initialize newsletter loop");
-          }
-          activeNewsletterWorkflowId = typeof createPayload.loop?.id === "string" ? createPayload.loop.id : null;
-          if (!activeNewsletterWorkflowId) {
-            throw new Error("Newsletter loop was created without a workflow id");
-          }
-          setNewsletterWorkflowId(activeNewsletterWorkflowId);
-        }
-
-        const runResponse = await fetch(`/api/workflows/internal/loops/${activeNewsletterWorkflowId}/run`, {
-          method: "POST",
-        });
-        const runPayload = await runResponse.json().catch(() => ({}));
-        if (!runResponse.ok) {
-          throw new Error(runPayload.error ?? "Failed to run newsletter loop");
-        }
-        const runId = runIdFromResponse(runPayload);
-        if (!runId) {
-          throw new Error("Newsletter loop started without a run id");
-        }
-
-        router.push(`/dashboard/loops/${activeNewsletterWorkflowId}/runs/${runId}`);
+        router.push("/dashboard/loops/newsletter");
         return;
       }
       setLoops((prev) =>
@@ -1241,7 +1179,7 @@ export default function LoopsPage() {
     } finally {
       setRunningLoopId(null);
     }
-  }, [router, newsletterWorkflowId]);
+  }, [router]);
 
   const filtered = useMemo(() => {
     const byConfidence = filter === "high"
@@ -1282,6 +1220,15 @@ export default function LoopsPage() {
                 </button>
               ))}
             </div>
+            <Button
+              type="button"
+              className="h-9 gap-1.5 rounded-none bg-orange-500 text-white hover:bg-orange-600"
+              onClick={() => router.push("/dashboard/loops/new")}
+            >
+              <Bot size={14} />
+              Build loop
+              <ArrowRight size={14} />
+            </Button>
             <Button type="button" variant="outline" className="h-9 gap-1.5" onClick={loadLoopMinerRuns} disabled={loading}>
               {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
               Refresh
@@ -1394,9 +1341,9 @@ export default function LoopsPage() {
                       loop={loop}
                       index={i}
                       onDismiss={dismissLoop}
-                      onLoop={activateLoop}
+                      onLoop={openLoop}
                       running={runningLoopId === loop.id}
-                      actionLabel={loop.id === "hardcoded-newsletter-loop-v1" ? "Run loop" : "Loop this"}
+                      actionLabel={loop.id === "hardcoded-newsletter-loop-v1" ? "Open loop" : "Loop this"}
                     />
                   ))}
                 </div>

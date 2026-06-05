@@ -12,9 +12,11 @@ import { scheduleHeartbeat } from "./run-heartbeat.js";
 import { insertEvent, loadArtifact, readObject } from "./run-store.js";
 import type { LoopStage } from "./types.js";
 
+type GateStage = Extract<LoopStage, { kind: "approval_gate" | "input_gate" }>;
+
 async function resolvePreferredApprovalChannel(input: {
   context: LoopRunContext;
-  stage: LoopStage;
+  stage: GateStage;
 }) {
   const preferred = input.stage.approvalPolicy?.channels ?? ["primary"];
   const auth = authFromContext(input.context);
@@ -61,7 +63,7 @@ export async function scheduleNextDynamicExecutable(input: {
 
 export async function pauseForDynamicGate(input: {
   context: LoopRunContext;
-  stage: LoopStage;
+  stage: GateStage;
   seq: number;
 }): Promise<{ status: string; gateId: string }> {
   const payload: Record<string, unknown> = { seq: input.seq, stage: input.stage };

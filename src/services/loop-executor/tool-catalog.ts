@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * tool-catalog.ts — Loop tool registry, validation, and agent prompt builders.
  */

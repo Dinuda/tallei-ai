@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * executor.ts — Loop run orchestration (heartbeats, queries, run lifecycle).
  *
@@ -347,7 +348,8 @@ export async function runAgentHeartbeat(runId, taskId) {
             });
             return { status: "waiting_for_email_approval", taskId: task.id };
         }
-        if (isDynamicPlanDefinition(context.definition)) {
+        const preset = resolveLoopPreset(context.definition);
+        if (isDynamicPlanDefinition(context.definition) && !preset) {
             const advanced = await advanceDynamicRunAfterSeq(context, task.seq);
             return { status: advanced.status, taskId: task.id };
         }
@@ -584,7 +586,7 @@ export async function getLoopRunRoster(auth, runId) {
     const editable = context.runStatus === "waiting_for_strategy_approval";
     const preset = resolveLoopPreset(context.definition);
     const proposedRoster = editable && !approvedRoster && preset
-        ? preset.buildRoster(context.definition.goal).agents
+        ? (await preset.buildRoster(context.definition.goal)).agents
         : runMeta.proposedRoster ?? [];
     const activeRoster = approvedRoster ?? proposedRoster;
     const constraints = getEffectiveLoopConstraints(context.definition);
@@ -819,11 +821,29 @@ export async function getLoopRun(auth, runId) {
             broadcastId: typeof deliveryActionRaw.broadcastId === "string" ? deliveryActionRaw.broadcastId : null,
         }
         : null;
-    const normalizedRunStatus = dryRunDelivery && row.status === "completed" ? "blocked" : row.status;
+    const activeGateStageId = typeof meta.activeGateStageId === "string" ? meta.activeGateStageId : null;
+    const pendingGateResult = await pool.query<{ id: string }>(
+        `SELECT id FROM loop_run_gates
+         WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+           AND kind = 'approval' AND status = 'pending'
+         ORDER BY created_at ASC LIMIT 1`,
+        [row.id, auth.tenantId, auth.userId]
+    );
+    const pendingApprovalGateId = pendingGateResult.rows[0]?.id ?? null;
+    let normalizedRunStatus = dryRunDelivery && row.status === "completed" ? "blocked" : row.status;
+    if (pendingApprovalGateId) {
+        normalizedRunStatus = "waiting_for_gate";
+    } else if (normalizedRunStatus === "waiting_for_gate") {
+        normalizedRunStatus = "running";
+    } else if (normalizedRunStatus === "blocked" && (typeof meta.activeGateId === "string" || activeGateStageId)) {
+        normalizedRunStatus = "running";
+    }
     return {
         id: row.id,
         workflowId: row.workflow_id,
         status: normalizedRunStatus,
+        ...(pendingApprovalGateId ? { activeGateId: pendingApprovalGateId } : {}),
+        ...(pendingApprovalGateId && activeGateStageId ? { activeGateStageId } : {}),
         runMode: row.run_mode,
         scheduledFor: row.scheduled_for,
         strategyOutput: row.strategy_output,

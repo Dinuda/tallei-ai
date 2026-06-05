@@ -1022,7 +1022,7 @@ export async function initDb() {
         run_mode TEXT NOT NULL DEFAULT 'scheduled'
           CHECK (run_mode IN ('scheduled', 'manual')),
         status TEXT NOT NULL DEFAULT 'scheduled'
-          CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
+          CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'waiting_for_gate', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
         scheduled_for TIMESTAMPTZ,
         strategy_output TEXT,
         waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1046,7 +1046,7 @@ export async function initDb() {
         DROP CONSTRAINT IF EXISTS workflow_runs_status_check;
       ALTER TABLE workflow_runs
         ADD CONSTRAINT workflow_runs_status_check
-        CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled'));
+        CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'waiting_for_gate', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled'));
     `);
 
     await client.query(`

@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { ChevronLeft, FileText, Loader2, Megaphone, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, FileText, Loader2, Megaphone, RefreshCw, Search, ShieldCheck } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -242,14 +242,17 @@ export function CeoRow({
   statusLabel: string;
   runStatus: string;
 }) {
+  const awaitingApproval = runStatus.includes("waiting") || label === "awaiting approval";
   const pill =
     runStatus === "completed"
       ? "bg-sky-100 text-sky-700"
       : runStatus === "running" || runStatus === "strategy_approved"
         ? "bg-blue-100 text-blue-700"
-        : runStatus.includes("waiting")
+        : awaitingApproval
           ? "bg-amber-100 text-amber-800"
-          : "bg-slate-100 text-slate-700";
+          : runStatus === "blocked" || runStatus === "failed"
+            ? "bg-rose-100 text-rose-700"
+            : "bg-slate-100 text-slate-700";
 
   return (
     <div className="flex items-start gap-3 rounded-xl bg-gradient-to-br from-orange-50/60 to-white p-3 shadow-sm ring-1 ring-orange-200/50">
@@ -264,6 +267,62 @@ export function CeoRow({
           </span>
         </div>
         <p className="mt-1 text-xs text-slate-500">Orchestrates the run</p>
+      </div>
+    </div>
+  );
+}
+
+const CHANNEL_LABELS: Record<string, string> = {
+  primary: "Primary channel",
+  email: "Email",
+  gmail: "Gmail",
+  telegram: "Telegram",
+  whatsapp: "WhatsApp",
+};
+
+export type ApprovalGateInfo = {
+  id: string;
+  title: string;
+  artifactId: string | null;
+  channels: string[];
+  status: string;
+};
+
+export function ApprovalGateRow({ gate }: { gate: ApprovalGateInfo }) {
+  const isPending = gate.status === "pending";
+  return (
+    <div className={cn(
+      "rounded-xl border p-3 shadow-sm",
+      isPending ? "border-amber-200 bg-amber-50/80 ring-1 ring-amber-200/60" : "border-slate-200 bg-white",
+    )}>
+      <div className="flex items-start gap-2">
+        <span className={cn(
+          "grid size-8 shrink-0 place-items-center rounded-lg",
+          isPending ? "bg-amber-100" : "bg-slate-100",
+        )}>
+          <ShieldCheck className={cn("size-4", isPending ? "text-amber-700" : "text-slate-500")} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm font-semibold text-slate-900">Approval gate</span>
+            <span className={cn(
+              "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium",
+              isPending ? "bg-amber-100 text-amber-800" : "bg-sky-100 text-sky-700",
+            )}>
+              {isPending ? "Awaiting approval" : gate.status}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-slate-600">{gate.title}</p>
+          {gate.channels.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {gate.channels.map((channel) => (
+                <span key={channel} className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-600 ring-1 ring-slate-200">
+                  {CHANNEL_LABELS[channel] ?? channel}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   );

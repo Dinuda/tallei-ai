@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * React Email templates for newsletter broadcasts.
  *

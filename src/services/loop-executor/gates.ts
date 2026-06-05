@@ -35,7 +35,37 @@ async function completeDynamicGate(input: {
   );
   const gate = gateResult.rows[0];
   if (!gate) throw new Error("Loop gate not found");
-  if (gate.status !== "pending") throw new Error(`Gate is ${gate.status}, not pending`);
+  if (gate.status !== "pending") {
+    if (input.status === "approved" && gate.status === "approved") {
+      const freshContext = await loadRunContext(input.runId);
+      const stuckStatuses = new Set(["waiting_for_gate", "blocked"]);
+      if (stuckStatuses.has(freshContext.runStatus)) {
+        const seq = stageSeq(context.definition.plan!, gate.stage_id);
+        await pool.query(
+          `UPDATE workflow_runs SET status = 'running',
+               metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+           WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+          [
+            input.runId,
+            input.auth.tenantId,
+            input.auth.userId,
+            JSON.stringify({
+              loop_executor: mergeLoopExecutorMeta(freshContext.metadataJson, {
+                activeGateId: null,
+                activeGateStageId: null,
+                gateCompletedAt: new Date().toISOString(),
+              }).loop_executor,
+            }),
+          ]
+        );
+        const resumedContext = await loadRunContext(input.runId);
+        const next = await scheduleNextDynamicExecutable({ context: resumedContext, afterSeq: seq });
+        return { runId: input.runId, status: next.status, gateId: gate.id, alreadyApproved: true };
+      }
+      return { runId: input.runId, status: freshContext.runStatus, gateId: gate.id, alreadyApproved: true };
+    }
+    throw new Error(`Gate is ${gate.status}, not pending`);
+  }
 
   const seq = stageSeq(context.definition.plan!, gate.stage_id);
   if (seq < 0) throw new Error(`Gate stage ${gate.stage_id} not found in plan`);

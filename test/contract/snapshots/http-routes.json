@@ -101,6 +101,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/channels/webhooks/resend-events",
+    "source": "src/routes/channels.ts"
+  },
+  {
+    "method": "POST",
     "path": "/api/channels/webhooks/telegram",
     "source": "src/routes/channels.ts"
   },
@@ -313,6 +318,21 @@
     "method": "DELETE",
     "path": "/api/keys/:id",
     "source": "src/routes/keys.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/propose",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/refine",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/save",
+    "source": "src/routes/loopBuilder.ts"
   },
   {
     "method": "POST",
@@ -566,6 +586,31 @@
   },
   {
     "method": "GET",
+    "path": "/api/workflows/loops",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/loops",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/loops/:workflowId",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/loops/:workflowId/run",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/loops/:workflowId/runs",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/workflows/loops/approvals/:token",
     "source": "src/routes/workflows.ts"
   },
@@ -596,6 +641,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/workflows/runs/:runId/artifacts",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/workflows/runs/:runId/comments",
     "source": "src/routes/workflows.ts"
   },
@@ -607,6 +657,36 @@
   {
     "method": "POST",
     "path": "/api/workflows/runs/:runId/contacts",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/runs/:runId/gates",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/gates/:gateId/approve",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/gates/:gateId/input",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/gates/:gateId/reject",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/workflows/runs/:runId/newsletter",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/newsletter/preview",
     "source": "src/routes/workflows.ts"
   },
   {

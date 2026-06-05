@@ -11,6 +11,7 @@ import { formatNewsletterForEmail, normalizeNewsletterTemplateId } from "../../.
 // NOTE: renderUnlayerNewsletterEmail is deprecated; formatNewsletterForEmail now returns full Substack-style HTML
 import {
   addLoopRunComment,
+  approveLoopRunGate,
   approveLoopStrategy,
   assignLoopToWorkspace,
   createLoopWorkflow,
@@ -24,7 +25,9 @@ import {
   getLoopRun,
   getLoopRunRoster,
   getLoopWorkflow,
+  listLoopRunArtifacts,
   listLoopRunComments,
+  listLoopRunGates,
   listLoopRunTasks,
   listLoopWorkflows,
   listWorkspaces,
@@ -34,6 +37,7 @@ import {
   rejectLoopRunGate,
   rerunLoopRunTask,
   resumeLoopRunExecution,
+  submitLoopRunGateInput,
   uploadLoopRunContacts,
   updateLoopRunNewsletterDraft,
   updateLoopRunRoster,
@@ -65,6 +69,7 @@ const createLoopSchema = z.object({
   schedulerTarget: z.enum(["internal", "cloudflare"]).optional(),
   workspaceId: z.string().uuid().nullable().optional(),
   preset_id: z.string().trim().min(1).max(80).optional(),
+  deliveryType: z.string().trim().min(1).max(80).optional(),
 });
 
 const createWorkspaceSchema = z.object({
@@ -96,6 +101,135 @@ const newsletterPreviewSchema = z.object({
   body: z.string().trim().min(1).max(200_000),
   templateId: z.string().trim().min(1).max(80).optional(),
 });
+
+const gateIdSchema = z.object({
+  gateId: z.string().uuid(),
+});
+
+const rejectGateSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+});
+
+const gateInputSchema = z.object({
+  value: z.string().min(1).max(1_000_000),
+});
+
+async function handleListLoops(req: AuthRequest, res: Response) {
+  try {
+    const loops = await listLoopWorkflows(req.authContext!);
+    res.json({ loops });
+  } catch (error) {
+    console.error("Error listing loop workflows:", error);
+    res.status(500).json({ error: "Failed to list loop workflows" });
+  }
+}
+
+async function handleCreateLoop(req: AuthRequest, res: Response) {
+  try {
+    const body = createLoopSchema.parse(req.body ?? {});
+    const loop = await createLoopWorkflow({
+      auth: req.authContext!,
+      task: body.task,
+      cron: body.cron,
+      timezone: body.timezone,
+      integrations: body.integrations,
+      allowedToolRefs: body.allowed_tool_refs,
+      agentGraph: body.agent_graph,
+      plan: body.plan,
+      schedulerTarget: body.schedulerTarget,
+      workspaceId: body.workspaceId,
+      presetId: body.preset_id,
+      deliveryType: body.deliveryType,
+    });
+    res.status(201).json({ loop });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error creating loop workflow:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to create loop workflow" });
+  }
+}
+
+async function handleGetLoop(req: AuthRequest, res: Response) {
+  try {
+    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
+    const loop = await getLoopWorkflow(req.authContext!, workflowId);
+    if (!loop) {
+      res.status(404).json({ error: "Loop workflow not found" });
+      return;
+    }
+    res.json({ loop });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error reading loop workflow:", error);
+    res.status(500).json({ error: "Failed to read loop workflow" });
+  }
+}
+
+async function handleListLoopRuns(req: AuthRequest, res: Response) {
+  try {
+    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
+    await getLoopWorkflow(req.authContext!, workflowId);
+    const result = await pool.query(
+      `SELECT id, workflow_id, status, run_mode, scheduled_for, created_at, updated_at
+       FROM workflow_runs
+       WHERE workflow_id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [workflowId, req.authContext!.tenantId, req.authContext!.userId]
+    );
+    res.json({
+      runs: result.rows.map((row) => ({
+        id: row.id,
+        workflowId: row.workflow_id,
+        status: row.status,
+        runMode: row.run_mode,
+        scheduledFor: row.scheduled_for,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      })),
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error listing loop workflow runs:", error);
+    res.status(500).json({ error: "Failed to list loop workflow runs" });
+  }
+}
+
+async function handleRunLoop(req: AuthRequest, res: Response) {
+  try {
+    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
+    await getLoopWorkflow(req.authContext!, workflowId);
+    const run = await executeLoopWorkflow({
+      auth: req.authContext!,
+      workflowId,
+      runMode: "manual",
+      scheduledFor: null,
+    });
+    res.status(201).json({ run });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error running loop workflow:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to run loop workflow" });
+  }
+}
 
 async function applyWorkflowApprovalTokenDecision(token: string, decision: "approve" | "skip") {
   const resolved = await resolveWorkflowApprovalToken(token);
@@ -281,136 +415,21 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
   }
 });
 
-router.get("/internal/loops", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const loops = await listLoopWorkflows(req.authContext!);
-    res.json({ loops });
-  } catch (error) {
-    if (error instanceof Error && /admin/i.test(error.message)) {
-      res.status(403).json({ error: error.message });
-      return;
-    }
-    console.error("Error listing internal loop workflows:", error);
-    res.status(500).json({ error: "Failed to list internal loop workflows" });
-  }
-});
+router.get("/loops", requireScopes(["memory:read"]), handleListLoops);
+router.post("/loops", requireScopes(["memory:write"]), handleCreateLoop);
+router.get("/loops/:workflowId", requireScopes(["memory:read"]), handleGetLoop);
+router.get("/loops/:workflowId/runs", requireScopes(["memory:read"]), handleListLoopRuns);
+router.post("/loops/:workflowId/run", requireScopes(["memory:write"]), handleRunLoop);
 
-router.post("/internal/loops", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = createLoopSchema.parse(req.body ?? {});
-    const loop = await createLoopWorkflow({
-      auth: req.authContext!,
-      task: body.task,
-      cron: body.cron,
-      timezone: body.timezone,
-      integrations: body.integrations,
-      allowedToolRefs: body.allowed_tool_refs,
-      agentGraph: body.agent_graph,
-      plan: body.plan,
-      schedulerTarget: body.schedulerTarget,
-      workspaceId: body.workspaceId,
-      presetId: body.preset_id,
-    });
-    res.status(201).json({ loop });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof Error && /admin/i.test(error.message)) {
-      res.status(403).json({ error: error.message });
-      return;
-    }
-    console.error("Error creating internal loop workflow:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to create internal loop workflow" });
-  }
-});
+router.get("/internal/loops", requireScopes(["memory:read"]), handleListLoops);
 
-router.get("/internal/loops/:workflowId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
-    const loop = await getLoopWorkflow(req.authContext!, workflowId);
-    if (!loop) {
-      res.status(404).json({ error: "Loop workflow not found" });
-      return;
-    }
-    res.json({ loop });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof Error && /admin/i.test(error.message)) {
-      res.status(403).json({ error: error.message });
-      return;
-    }
-    console.error("Error reading internal loop workflow:", error);
-    res.status(500).json({ error: "Failed to read internal loop workflow" });
-  }
-});
+router.post("/internal/loops", requireScopes(["memory:write"]), handleCreateLoop);
 
-router.get("/internal/loops/:workflowId/runs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
-    await getLoopWorkflow(req.authContext!, workflowId);
-    const result = await pool.query(
-      `SELECT id, workflow_id, status, run_mode, scheduled_for, created_at, updated_at
-       FROM workflow_runs
-       WHERE workflow_id = $1
-         AND tenant_id = $2
-         AND user_id = $3
-       ORDER BY created_at DESC
-       LIMIT 100`,
-      [workflowId, req.authContext!.tenantId, req.authContext!.userId]
-    );
-    const runs = result.rows.map((row) => ({
-      id: row.id,
-      workflowId: row.workflow_id,
-      status: row.status,
-      runMode: row.run_mode,
-      scheduledFor: row.scheduled_for,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-    res.json({ runs });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof Error && /not found/i.test(error.message)) {
-      res.status(404).json({ error: error.message });
-      return;
-    }
-    console.error("Error listing loop workflow runs:", error);
-    res.status(500).json({ error: "Failed to list loop workflow runs" });
-  }
-});
+router.get("/internal/loops/:workflowId", requireScopes(["memory:read"]), handleGetLoop);
 
-router.post("/internal/loops/:workflowId/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
-    await getLoopWorkflow(req.authContext!, workflowId);
-    const run = await executeLoopWorkflow({
-      auth: req.authContext!,
-      workflowId,
-      runMode: "manual",
-      scheduledFor: null,
-    });
-    res.status(201).json({ run });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    if (error instanceof Error && /admin/i.test(error.message)) {
-      res.status(403).json({ error: error.message });
-      return;
-    }
-    console.error("Error running internal loop workflow:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to run internal loop workflow" });
-  }
-});
+router.get("/internal/loops/:workflowId/runs", requireScopes(["memory:read"]), handleListLoopRuns);
+
+router.post("/internal/loops/:workflowId/run", requireScopes(["memory:write"]), handleRunLoop);
 
 router.get("/workspaces", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
@@ -704,6 +723,98 @@ router.get("/runs/:runId", requireScopes(["memory:read"]), async (req: AuthReque
     }
     console.error("Error reading loop run:", error);
     res.status(500).json({ error: "Failed to read loop run" });
+  }
+});
+
+router.get("/runs/:runId/artifacts", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const artifacts = await listLoopRunArtifacts(req.authContext!, runId);
+    res.json({ artifacts });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error listing loop run artifacts:", error);
+    res.status(500).json({ error: "Failed to list loop run artifacts" });
+  }
+});
+
+router.get("/runs/:runId/gates", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const gates = await listLoopRunGates(req.authContext!, runId);
+    res.json({ gates });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /dynamic gates/i.test(error.message)) {
+      res.json({ gates: [] });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error listing loop run gates:", error);
+    res.status(500).json({ error: "Failed to list loop run gates" });
+  }
+});
+
+router.post("/runs/:runId/gates/:gateId/approve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const { gateId } = gateIdSchema.parse({ gateId: req.params.gateId });
+    const result = await approveLoopRunGate({ auth: req.authContext!, runId, gateId });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error approving loop run gate:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to approve loop run gate" });
+  }
+});
+
+router.post("/runs/:runId/gates/:gateId/reject", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const { gateId } = gateIdSchema.parse({ gateId: req.params.gateId });
+    const body = rejectGateSchema.parse(req.body ?? {});
+    const result = await rejectLoopRunGate({ auth: req.authContext!, runId, gateId, reason: body.reason });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error rejecting loop run gate:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to reject loop run gate" });
+  }
+});
+
+router.post("/runs/:runId/gates/:gateId/input", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const { gateId } = gateIdSchema.parse({ gateId: req.params.gateId });
+    const body = gateInputSchema.parse(req.body ?? {});
+    const result = await submitLoopRunGateInput({ auth: req.authContext!, runId, gateId, value: body.value });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error submitting loop run gate input:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to submit loop run gate input" });
   }
 });
 

@@ -434,6 +434,12 @@ async function finalizeDistributionRun(input: {
                 id: "delivery_result",
                 label: "Delivery result",
                 toolRef: "internal.resend_broadcast",
+                approvalPolicy: {
+                    required: true,
+                    mode: "before",
+                    channels: ["primary"],
+                    onReject: "block",
+                },
                 inputArtifactIds: [],
             },
             artifactId: deliveryResultArtifactId,

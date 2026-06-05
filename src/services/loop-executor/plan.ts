@@ -51,6 +51,9 @@ export function executableStageToAgent(stage: LoopStage): LoopRunAgent {
       tools: [{ ref: stage.toolRef }],
     });
   }
+  if (stage.kind !== "agent") {
+    throw new Error(`Stage ${stage.id} is not executable`);
+  }
   return loopRunAgentSchema.parse({
     id: stage.id,
     name: stage.name,
