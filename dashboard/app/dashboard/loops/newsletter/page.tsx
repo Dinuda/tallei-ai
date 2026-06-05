@@ -5,12 +5,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
+  ArrowRight,
   CheckCircle2,
   Clock,
   FileText,
   Loader2,
   Megaphone,
-  Play,
   Search,
   ShieldCheck,
   Sparkles,
@@ -326,23 +326,20 @@ export default function NewsletterLoopPage() {
     }
   }
 
-  async function runLoop() {
+  async function openLoop() {
     setRunning(true);
     setError(null);
     setNotice(null);
     try {
       const activeWorkflow = workflow ?? await initializeLoop();
-      const response = await fetch(`/api/workflows/internal/loops/${activeWorkflow.id}/run`, { method: "POST" });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error ?? "Failed to run newsletter loop");
-      const nextRun = normalizeRunResponse(payload.run as RunResponse);
-      if (nextRun?.runId) {
-        router.push(`/dashboard/loops/${activeWorkflow.id}/runs/${nextRun.runId}`);
+      const latestRun = runHistory[0];
+      if (latestRun?.id) {
+        router.push(`/dashboard/loops/${activeWorkflow.id}/runs/${latestRun.id}`);
         return;
       }
-      throw new Error("Run started but backend did not return a run id");
-    } catch (runError) {
-      setError(runError instanceof Error ? runError.message : "Failed to run newsletter loop");
+      router.push(`/dashboard/loops/${activeWorkflow.id}`);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : "Failed to open newsletter loop");
     } finally {
       setRunning(false);
     }
@@ -407,9 +404,9 @@ export default function NewsletterLoopPage() {
                 Approve draft
               </Button>
             ) : null}
-            <Button type="button" className="rounded-none bg-indigo-600 text-white hover:bg-indigo-700" onClick={runLoop} disabled={running || loading}>
-              {running ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Play className="mr-1.5 h-4 w-4" />}
-              Run loop
+            <Button type="button" className="rounded-none bg-indigo-600 text-white hover:bg-indigo-700" onClick={openLoop} disabled={running || loading}>
+              {running ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-1.5 h-4 w-4" />}
+              Open loop
             </Button>
           </div>
         </div>

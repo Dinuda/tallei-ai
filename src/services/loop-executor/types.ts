@@ -45,13 +45,42 @@ export const loopArtifactDefinitionSchema = z.object({
 
 export type LoopArtifactDefinition = z.infer<typeof loopArtifactDefinitionSchema>;
 
-export const loopStageApprovalChannelSchema = z.enum(["primary", "email", "gmail", "telegram", "whatsapp"]);
+const LOOP_STAGE_APPROVAL_CHANNEL_VALUES = ["primary", "email", "gmail", "telegram", "whatsapp"] as const;
+
+export const loopStageApprovalChannelSchema = z.enum(LOOP_STAGE_APPROVAL_CHANNEL_VALUES);
 export type LoopStageApprovalChannel = z.infer<typeof loopStageApprovalChannelSchema>;
+
+const LOOP_STAGE_APPROVAL_CHANNEL_SET = new Set<LoopStageApprovalChannel>(LOOP_STAGE_APPROVAL_CHANNEL_VALUES);
+
+export function normalizeLoopStageApprovalChannel(value: string): LoopStageApprovalChannel | null {
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized) return null;
+
+  if (LOOP_STAGE_APPROVAL_CHANNEL_SET.has(normalized as LoopStageApprovalChannel)) {
+    return normalized as LoopStageApprovalChannel;
+  }
+
+  const wordMatch = normalized.match(/\b(primary|email|gmail|telegram|whatsapp)\b/);
+  if (wordMatch) {
+    return wordMatch[1] as LoopStageApprovalChannel;
+  }
+
+  if (/\b(resend|broadcast|inbox)\b/.test(normalized)) {
+    return "email";
+  }
+
+  return null;
+}
+
+export const loopStageApprovalChannelInputSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  return normalizeLoopStageApprovalChannel(value) ?? value.trim().toLowerCase();
+}, loopStageApprovalChannelSchema);
 
 export const loopStageApprovalPolicySchema = z.object({
   required: z.boolean().default(false),
   mode: z.enum(["before", "after", "manual_gate"]).default("manual_gate"),
-  channels: z.array(loopStageApprovalChannelSchema).min(1).default(["primary"]),
+  channels: z.array(loopStageApprovalChannelInputSchema).min(1).default(["primary"]),
   onReject: z.enum(["block", "revise", "skip_stage"]).default("block"),
   artifactRef: z.string().min(1).optional(),
 });
@@ -189,6 +218,12 @@ export const loopDefinitionSchema = z.object({
   plan: loopPlanSchema.optional(),
   /** Built-in preset key (e.g. `newsletter`). Resolved at runtime via presets/registry. */
   presetId: z.string().min(1).optional(),
+  builderMeta: z.object({
+    designedBy: z.literal("ceo_llm").default("ceo_llm"),
+    preApproved: z.boolean().default(true),
+    sourceTemplateIds: z.array(z.string()).optional(),
+    model: z.string().optional(),
+  }).optional(),
 });
 
 export type LoopDefinition = z.infer<typeof loopDefinitionSchema>;

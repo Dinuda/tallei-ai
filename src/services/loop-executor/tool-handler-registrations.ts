@@ -11,6 +11,7 @@ import { sendWorkflowRunApprovalPrompt, getPrimaryNotificationChannel } from "..
 import { createWorkflowApprovalRequest } from "../approval-tokens.js";
 import { buildDraftFromToolResults } from "./tool-catalog.js";
 import { isNewsletterLoopDefinition, resolveDeliveryFormatter } from "./delivery-format.js";
+import { buildUnlayerNewsletterEmail } from "./presets/newsletter-unlayer.js";
 import { registerToolHandler, type ToolHandlerContext } from "./tool-handlers.js";
 import { loopExecutorOpenAiChat, loopExecutorOpenAiModel } from "./openai-chat.js";
 import { readMemorySearchConfig, readGatewaySearchConfig, runExaWebSearch, completeText } from "./agent-runner-internals.js";
@@ -49,48 +50,89 @@ registerToolHandler("internal.email_approval_request", async (ctx: ToolHandlerCo
   const approvalUrl = `${config.publicBaseUrl.replace(/\/$/, "")}/api/workflows/loops/approvals/${approval.token}/approve`;
 
   let renderedEmail: { html: string; text: string } | null = null;
+  let emailTemplate: { html: string; text: string; design: unknown; subject: string | null; updatedAt: string; source: string } | undefined;
   if (isNewsletterLoopDefinition(ctx.definition!)) {
     try {
-      const module = await import("./presets/newsletter-react-email.js");
-      renderedEmail = await module.renderNewsletterApprovalEmail({
+      const built = buildUnlayerNewsletterEmail({
         subject: formatted.subject ?? ctx.workflowTitle ?? "Loop run",
         markdown: formatted.text || artifactBody,
-        approvalUrl,
-        runUrl: ctx.workflowId
-          ? `${config.frontendUrl.replace(/\/$/, "")}/dashboard/loops/${ctx.workflowId}/runs/${ctx.runId}`
-          : approvalUrl,
       });
+      emailTemplate = {
+        html: built.html,
+        text: built.text,
+        design: built.design,
+        subject: built.subject,
+        updatedAt: new Date().toISOString(),
+        source: "builder",
+      };
+      renderedEmail = { html: built.html, text: built.text };
     } catch {
       renderedEmail = null;
+      emailTemplate = undefined;
     }
   }
 
-  const sentPrompt = await sendWorkflowRunApprovalPrompt({
-    auth: ctx.auth,
-    runId: ctx.runId,
-    workflowId: ctx.workflowId,
-    workflowTitle: ctx.workflowTitle ?? "Loop run",
-    artifactBody,
-    approvalUrl,
-    approvalToken: approval.token,
-    artifactKind: "draft",
-    emailSubject: approvalSubject,
-    renderedEmail,
-  });
+  let sentPrompt: { to: string; sentAt: string; channel?: string };
+  let channelNote = "";
+  try {
+    sentPrompt = await sendWorkflowRunApprovalPrompt({
+      auth: ctx.auth,
+      runId: ctx.runId,
+      workflowId: ctx.workflowId,
+      workflowTitle: ctx.workflowTitle ?? "Loop run",
+      artifactBody,
+      approvalUrl,
+      approvalToken: approval.token,
+      artifactKind: "draft",
+      emailSubject: approvalSubject,
+      renderedEmail,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    sentPrompt = {
+      to: primaryChannel?.destination ?? "dashboard",
+      sentAt: new Date().toISOString(),
+      channel: primaryChannel?.kind ?? "ui",
+    };
+    channelNote = ` Channel delivery failed (${message}). Approve in the dashboard or retry notification.`;
+  }
 
   return {
-    text: `Approval request sent to ${sentPrompt.to}`,
+    text: `Approval request sent to ${sentPrompt.to}.${channelNote}`,
     emailApprovalSent: true,
     approvalRequest: { ...sentPrompt, approvalUrl, token: approval.token },
     artifactBody,
+    emailTemplate,
     shortCircuit: true,
   };
 });
 
 registerToolHandler("internal.email_builder_render", async (ctx: ToolHandlerContext) => {
   const document = ctx.assignment.config?.document;
+  const artifactBody = extractApprovalBodyFromComments(ctx.priorComments);
+  if ((!document || typeof document !== "object") && artifactBody.trim()) {
+    const formatter = ctx.definition
+      ? resolveDeliveryFormatter(ctx.definition, artifactBody)
+      : null;
+    const formatted = formatter?.formatForDelivery(artifactBody) ?? { text: artifactBody, subject: null };
+    const built = buildUnlayerNewsletterEmail({
+      subject: formatted.subject ?? ctx.workflowTitle ?? "Loop run",
+      markdown: formatted.text || artifactBody,
+    });
+    return {
+      text: `Rendered Unlayer builder email HTML (${built.html.length} bytes) from writer draft.`,
+      emailTemplate: {
+        html: built.html,
+        text: built.text,
+        design: built.design,
+        subject: built.subject,
+        updatedAt: new Date().toISOString(),
+        source: "builder",
+      },
+    };
+  }
   if (!document || typeof document !== "object") {
-    throw new Error("Email builder render requires a document config");
+    return { text: "Email builder render skipped — no document config yet. Use the builder in the dashboard or approve the markdown draft." };
   }
   try {
     const module = await import("./presets/newsletter-waypoint.js");
@@ -101,8 +143,28 @@ registerToolHandler("internal.email_builder_render", async (ctx: ToolHandlerCont
   }
 });
 
-registerToolHandler("internal.email_builder_compose", async () => {
-  return { text: "Email builder compose tool is available. Use the UI to edit the email template." };
+registerToolHandler("internal.email_builder_compose", async (ctx: ToolHandlerContext) => {
+  const artifactBody = extractApprovalBodyFromComments(ctx.priorComments);
+  if (!artifactBody.trim()) return { text: "Email builder compose skipped — no writer draft is available yet." };
+  const formatter = ctx.definition
+    ? resolveDeliveryFormatter(ctx.definition, artifactBody)
+    : null;
+  const formatted = formatter?.formatForDelivery(artifactBody) ?? { text: artifactBody, subject: null };
+  const built = buildUnlayerNewsletterEmail({
+    subject: formatted.subject ?? ctx.workflowTitle ?? "Loop run",
+    markdown: formatted.text || artifactBody,
+  });
+  return {
+    text: `Composed Unlayer builder design from writer draft. Subject: ${built.subject}`,
+    emailTemplate: {
+      html: built.html,
+      text: built.text,
+      design: built.design,
+      subject: built.subject,
+      updatedAt: new Date().toISOString(),
+      source: "builder",
+    },
+  };
 });
 
 function extractApprovalBodyFromComments(comments: Array<{ author: string; body: string }>): string {

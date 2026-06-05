@@ -166,12 +166,13 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
   return {
     strategyText: [
       "CEO strategy: run a fixed weekly newsletter pipeline.",
-      "Order: Search Agent -> Web Search Agent -> Research Agent -> Writer -> Approval handoff.",
-      "CRITICAL: The Writer MUST check memory for previous newsletters and adopt the same voice, tone, and formatting style.",
+      "Order: Search Agent -> Web Search Agent -> Research Agent -> Newsletter Writer -> Approval & Email Build Agent -> Broadcast Delivery Agent.",
+      "Each agent has one job: research agents research, the writer writes, the approval/build agent requests review and prepares email HTML, and broadcast delivery only syncs contacts/sends after approval and recipient upload.",
+      "CRITICAL: The Newsletter Writer MUST check memory for previous newsletters and adopt the same voice, tone, and formatting style.",
       "Pinned memory records to ground this run:",
       memoryContext,
       `Default lead-topic hypothesis to evaluate: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
-      "Outcome: publish-ready draft, operator approval, recipient list upload, then broadcast delivery.",
+      "Outcome: publish-ready draft, operator approval/email build, recipient list upload, then broadcast delivery.",
     ].join("\n"),
     agents: normalizeRosterAgents([
       {
@@ -180,6 +181,7 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
         task: [
           "Search memory for previous newsletters, weekly updates, and product-builder content relevant to Lenny's recent writing.",
           "Fetch every relevant memory about Lenny's Newsletter, including prior issue examples, writing style, voice, formatting, recurring sections, sign-offs, and editorial preferences.",
+          "If memory does not contain evidence for a candidate, say so directly. Do not create placeholder memory IDs, sample facts, product updates, metrics, offers, or ready-to-fill content.",
           "Output: 1) three ranked topic candidates grounded in memory with source notes, 2) a summary of Lenny's recent themes and newsletter voice/style found in memory (tone, formatting, section structure).",
           `Evaluate this hypothesis but do not blindly select it: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
           `Goal: ${goal}`,
@@ -203,6 +205,7 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
         task: [
           "Synthesize search outputs into concise research notes for the top topics.",
           "Choose one recommended lead topic, explain why it best matches Lenny's recent direction, and explicitly say why the other candidates were not selected.",
+          "Separate verified facts from missing or unverified facts. Do not pass examples, placeholders, or unsupported claims to the Writer as usable material.",
           "Preserve the voice/style summary found by the Search Agent and pass it to the Writer.",
           "Output a concise writer briefing with: selected topic, why now, core arguments, source links to cite, and tone/structure guidance.",
           `Default topic hypothesis to evaluate: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
@@ -212,26 +215,29 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
       },
       {
         id: "writer",
-        name: "Writer",
+        name: "Newsletter Writer",
         task: [
-          "Write the subscriber-facing newsletter draft using the selected topic and writer briefing from the Research Agent.",
+          "Write the subscriber-facing newsletter draft only, using the selected topic and writer briefing from the Research Agent.",
           "FIRST: Review the voice/style summary from the Search Agent. Adopt that exact tone, formatting, and section structure.",
           "If previous newsletters exist in memory, match their voice (casual vs formal, first vs third person, section types, heading style, use of bullet points, etc).",
           "Line 1 must be exactly: Subject: <email subject> (metadata only — never repeat this title in the body).",
-          "From line 2 onward: final subscriber-ready sections only.",
+          "Line 2 may be: Preview: <preview text>. From the next line onward: final subscriber-ready sections only.",
+          "Use only verified facts from the Search Agent, Web Search Agent, and Research Agent. If product/company evidence is missing, omit that section instead of inventing details.",
           "Do not fall back to a generic weekly roundup or broad link dump; build the piece around the Research Agent's selected lead topic.",
           "Use markdown links for cited sources, keep paragraphs short, and make the final draft read like a finished newsletter from the writer.",
-          "Do not include draft labels, approval instructions, publicist handoff notes, or contact-list upload notes.",
+          "Do not include subject-line options, alternate tones, one-paragraph versions, social snippets, notes, draft labels, approval instructions, publicist handoff notes, contact-list upload notes, or broadcast instructions.",
           `Goal: ${goal}`,
         ].join(" "),
         tools: [{ ref: "internal.llm_only" }],
       },
       {
         id: "approval_handoff",
-        name: "Approval Handoff",
+        name: "Approval & Email Build Agent",
         task: [
-          "Send the final draft to the operator for approval before delivery.",
-          "After approval, the operator uploads recipients and the distribution runner sends the broadcast.",
+          "Review the Newsletter Writer output, compose/render the email, and send the final draft to the operator for approval.",
+          "Ask review questions only if the draft is ambiguous or missing required approval-ready content.",
+          "Do not upload recipients, sync contacts, submit a Resend broadcast, or describe broadcast delivery as your responsibility.",
+          "After approval, the operator uploads recipients and a separate Broadcast Delivery Agent/distribution runner sends the approved broadcast.",
           `Goal: ${goal}`,
         ].join(" "),
         tools: [
@@ -307,8 +313,64 @@ function readSubjectMetadataLine(line: string): string | null {
   return cleanDisplayMarkdown(match[1].replace(/^["']|["']$/g, "").trim()).slice(0, 160);
 }
 
+function normalizeLeakedSubjectOption(value: string): string {
+  return value
+    .replace(/^[-*]\s*/, "")
+    .replace(/^[A-Z][).]\s*/i, "")
+    .trim();
+}
+
+function stripLeakedNewsletterVariants(raw: string): string {
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+  const cleaned: string[] = [];
+  let skipMode: "subject_options" | "preview" | null = null;
+  let subjectFromOption: string | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const plain = cleanDisplayMarkdown(trimmed).replace(/^#{1,6}\s*/, "").trim();
+
+    if (/^(?:suggested\s+)?subject line options?|subject lines?(?:\s*\(\d+\s*options?\))?$/i.test(plain)) {
+      skipMode = "subject_options";
+      continue;
+    }
+
+    if (/^preview text$/i.test(plain)) {
+      skipMode = "preview";
+      continue;
+    }
+
+    if (/^(?:suggested\s+)?social snippets?|linkedin|twitter\/x|x\/twitter|notes?|friendly founder update|1[-\s]?paragraph text[-\s]?only version|one[-\s]?paragraph text[-\s]?only version$/i.test(plain)) {
+      break;
+    }
+
+    if (/^(?:concise business tone|business tone|friendly tone|founder tone|email body)$/i.test(plain)) {
+      skipMode = null;
+      continue;
+    }
+
+    if (skipMode === "subject_options") {
+      const option = normalizeLeakedSubjectOption(trimmed);
+      if (!subjectFromOption && option && !/^preview text$/i.test(option)) subjectFromOption = option;
+      if (!trimmed) skipMode = null;
+      continue;
+    }
+
+    if (skipMode === "preview") {
+      if (!trimmed) skipMode = null;
+      continue;
+    }
+
+    cleaned.push(line);
+  }
+
+  const body = cleaned.join("\n").trim();
+  if (!subjectFromOption || /^subject\s*:/i.test(body)) return body;
+  return [`Subject: ${subjectFromOption}`, body].filter(Boolean).join("\n\n");
+}
+
 export function sanitizeSubscriberBody(raw: string): string {
-  const normalized = raw.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const normalized = stripLeakedNewsletterVariants(raw).replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!normalized) return "";
   const firstInternalCueIndex = [
     /please review this draft\b/i,

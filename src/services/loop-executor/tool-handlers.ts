@@ -15,6 +15,7 @@ export type ToolHandlerResult = {
   emailApprovalSent?: boolean;
   approvalRequest?: { to: string; approvalUrl: string; token: string; sentAt: string; channel?: string };
   artifactBody?: string;
+  emailTemplate?: { html: string; text?: string; design?: unknown; subject?: string | null; updatedAt?: string; source?: string };
   draft?: unknown;
 };
 

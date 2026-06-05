@@ -31,6 +31,11 @@ const AGENT_THEME = {
     active: "bg-indigo-50 ring-1 ring-indigo-200/80",
   },
   publicist: {
+    icon: ShieldCheck,
+    chip: "bg-amber-100 text-amber-700",
+    active: "bg-amber-50 ring-1 ring-amber-200/80",
+  },
+  broadcast: {
     icon: Megaphone,
     chip: "bg-orange-100 text-orange-700",
     active: "bg-orange-50 ring-1 ring-orange-200/80",
@@ -57,6 +62,8 @@ function agentTheme(task: AgentRowTask) {
   const key = `${task.agentId} ${task.toolKey} ${refs}`.toLowerCase();
   if (key.includes("memory_search") || key.includes("web_search") || key.includes("research")) return AGENT_THEME.research;
   if (isWriterThemed(task)) return AGENT_THEME.writer;
+  if (key.includes("resend_broadcast") || key.includes("broadcast") || key.includes("distribution")) return AGENT_THEME.broadcast;
+  if (key.includes("email_approval_request") || key.includes("approval") || key.includes("email_builder")) return AGENT_THEME.publicist;
   if (key.includes("gmail") || key.includes("public") || key.includes("publish")) return AGENT_THEME.publicist;
   return AGENT_THEME.default;
 }
@@ -117,6 +124,25 @@ function isEmailApprovalTask(task: AgentRowTask): boolean {
   const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
   const text = `${task.agentId} ${task.toolKey} ${getOutput(task)}`.toLowerCase();
   return refs.includes("email_approval_request") || text.includes("email approval request sent");
+}
+
+function isBroadcastDeliveryTask(task: AgentRowTask): boolean {
+  const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
+  const text = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
+  return refs.includes("resend_broadcast") || text.includes("broadcast") || text.includes("distribution");
+}
+
+function responsibilityBrief(task: AgentRowTask): string | null {
+  if (isBroadcastDeliveryTask(task)) {
+    return "After approval and recipient upload, sync contacts and submit the Resend broadcast only.";
+  }
+  if (isEmailApprovalTask(task)) {
+    return "Review the draft, ask approval questions, and build/render the email. No broadcast sending.";
+  }
+  if (isWriterThemed(task)) {
+    return "Write the subscriber-ready newsletter draft only.";
+  }
+  return null;
 }
 
 function statusPill(status: string) {
@@ -197,7 +223,7 @@ export function AgentRow({
                 </span>
               </div>
             </div>
-            <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">{brief(task)}</p>
+            <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">{responsibilityBrief(task) ?? brief(task)}</p>
             {toolBadges(task).length > 0 ? (
               <div className="mt-2 flex flex-wrap gap-1">
                 {toolBadges(task).map((label) => (

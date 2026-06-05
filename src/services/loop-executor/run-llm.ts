@@ -19,7 +19,12 @@ export async function completeLoopText(input: {
     maxTokens: input.maxTokens ?? 1200,
   });
   const text = response.text.trim();
-  if (!text) throw new Error("Loop executor LLM returned an empty response");
+  if (!text) {
+    const usage = response.usage
+      ? ` usage=${JSON.stringify(response.usage)}`
+      : "";
+    throw new Error(`Loop executor LLM returned an empty response (model=${response.model}, finish_reason=${response.finishReason ?? "unknown"}${usage})`);
+  }
   return text;
 }
 

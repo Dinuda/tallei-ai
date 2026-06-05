@@ -8,6 +8,7 @@
 export {
   buildLoopDefinition,
   createLoopWorkflow,
+  deleteLoopWorkflow,
   getLoopWorkflow,
   listLoopWorkflows,
   requireLoopAdmin,
@@ -52,6 +53,7 @@ export {
   approveLoopRunApprovalToken,
   approveLoopRunFromUi,
   approveLoopStrategy,
+  ensureRunApprovalNotification,
   resumeLoopRunExecution,
   submitLoopRunInput,
   uploadDeliveryRecipients,

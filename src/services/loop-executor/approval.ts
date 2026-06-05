@@ -4,8 +4,10 @@
 
 import { randomUUID } from "crypto";
 import type { AuthContext } from "../../domain/auth/index.js";
+import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { consumeWorkflowApprovalToken, resolveWorkflowApprovalToken } from "../approval-tokens.js";
+import { consumeWorkflowApprovalToken, createWorkflowApprovalRequest, resolveWorkflowApprovalToken } from "../approval-tokens.js";
+import { sendWorkflowRunApprovalPrompt, getPrimaryNotificationChannel } from "../channels.js";
 import { stashDocument } from "../documents.js";
 import { normalizeRosterAgents, isDynamicPlanDefinition } from "./plan.js";
 import {
@@ -13,18 +15,49 @@ import {
   loadRunContext,
   mergeLoopExecutorMeta,
   readLoopExecutorMeta,
+  type LoopRunContext,
 } from "./run-context.js";
 import { scheduleHeartbeat } from "./run-heartbeat.js";
-import { insertComment, insertEvent, readObject } from "./run-store.js";
+import { insertComment, insertEvent, loadRunComments, readObject } from "./run-store.js";
 import { materializeTasksFromPlan, materializeTasksFromRoster } from "./run-strategy.js";
 import { getEffectiveLoopConstraints, validateAgentRoster } from "./tool-catalog.js";
-import { isNewsletterLoopDefinition } from "./delivery-format.js";
-import { normalizeNewsletterTemplateId } from "./presets/newsletter.js";
+import { isNewsletterLoopDefinition, resolveDeliveryFormatter } from "./delivery-format.js";
+import { extractPrimaryContentFromComments, normalizeNewsletterTemplateId } from "./presets/newsletter.js";
+import { buildUnlayerNewsletterEmail } from "./presets/newsletter-unlayer.js";
 import { resolveLoopPreset } from "./presets/registry.js";
 import { approveLoopRunGate, advanceDynamicRunAfterSeq, submitLoopRunGateInput } from "./gates.js";
 import { parseContactListCsv } from "./csv-parser.js";
 
 const DELIVERY_RECIPIENTS_INPUT_ID = "delivery_recipients";
+
+const APPROVAL_READY_STATUSES = new Set([
+  "waiting_for_approval",
+  "waiting_for_email_approval",
+  "waiting_for_gate",
+  "blocked",
+]);
+
+async function resolveApprovalArtifactBody(context: LoopRunContext): Promise<string> {
+  const loopExecutor = readLoopExecutorMeta(context.metadataJson);
+  if (typeof loopExecutor.artifactBody === "string" && loopExecutor.artifactBody.trim()) {
+    return loopExecutor.artifactBody.trim();
+  }
+  if (typeof context.draftOutput === "string" && context.draftOutput.trim()) {
+    return context.draftOutput.trim();
+  }
+  const comments = await loadRunComments(context);
+  return extractPrimaryContentFromComments(comments.map((comment) => ({
+    author: comment.author,
+    body: comment.body,
+  }))).trim();
+}
+
+function hasStoredApprovalRequest(loopExecutor: ReturnType<typeof readLoopExecutorMeta>): boolean {
+  const approvalRequest = readObject(loopExecutor.approvalRequest);
+  return typeof approvalRequest.token === "string"
+    || typeof approvalRequest.approvalUrl === "string"
+    || typeof approvalRequest.sentAt === "string";
+}
 
 function markdownTableCell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
@@ -62,20 +95,25 @@ async function transitionRunToDelivery(input: {
   runId: string;
   approvedBy: string;
 }) {
-  const runResult = await pool.query<{ id: string; workflow_id: string; status: string; metadata_json: unknown }>(
-    `SELECT id, workflow_id, status, metadata_json FROM workflow_runs
+  const runResult = await pool.query<{ id: string; workflow_id: string; status: string; metadata_json: unknown; draft_output: string | null }>(
+    `SELECT id, workflow_id, status, metadata_json, draft_output FROM workflow_runs
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3 LIMIT 1`,
     [input.runId, input.tenantId, input.userId]
   );
   const run = runResult.rows[0];
   if (!run) throw new Error("Workflow run not found");
 
+  const canApproveFromStatus = APPROVAL_READY_STATUSES.has(run.status);
   const meta = readObject(run.metadata_json);
   const loopExecutor = readObject(meta.loop_executor);
   const approvalRequest = readObject(loopExecutor.approvalRequest);
   const hasApprovalContext = typeof approvalRequest.token === "string"
     || typeof approvalRequest.approvalUrl === "string"
     || typeof approvalRequest.sentAt === "string";
+  const artifactBodyFromMeta = typeof loopExecutor.artifactBody === "string" ? loopExecutor.artifactBody.trim() : "";
+  const draftBody = typeof run.draft_output === "string" ? run.draft_output.trim() : "";
+  const hasDraftForApproval = artifactBodyFromMeta.length > 0 || draftBody.length > 0;
+
   if (!hasApprovalContext && input.approvedBy !== "email") {
     const pendingGate = await pool.query<{ id: string }>(
       `SELECT id
@@ -89,12 +127,11 @@ async function transitionRunToDelivery(input: {
        LIMIT 1`,
       [input.runId, input.tenantId, input.userId],
     );
-    if (!pendingGate.rows[0]) {
+    if (!pendingGate.rows[0] && !(canApproveFromStatus && hasDraftForApproval)) {
       throw new Error("Run has no approval context to continue");
     }
   }
 
-  const canApproveFromStatus = run.status === "waiting_for_approval" || run.status === "waiting_for_email_approval" || run.status === "waiting_for_gate" || run.status === "blocked";
   if (!canApproveFromStatus) {
     if (["waiting_for_contact_list", "executing_action", "completed"].includes(run.status)) {
       return { runId: run.id, workflowId: run.workflow_id, status: run.status };
@@ -632,10 +669,32 @@ export async function applyEmailApprovalResult(input: {
   taskId: string;
   approvalRequest: { to: string; approvalUrl: string; token: string; sentAt: string; channel?: string };
   artifactBody: string;
+  emailTemplate?: { html: string; text?: string; design?: unknown; subject?: string | null; updatedAt?: string; source?: string };
 }) {
+  const emailTemplate = input.emailTemplate?.html?.trim()
+    ? {
+        html: input.emailTemplate.html,
+        text: input.emailTemplate.text ?? null,
+        design: input.emailTemplate.design ?? null,
+        subject: input.emailTemplate.subject ?? null,
+        updatedAt: input.emailTemplate.updatedAt ?? new Date().toISOString(),
+        source: input.emailTemplate.source ?? "builder",
+      }
+    : null;
   const loopExecutorPatch = mergeLoopExecutorMeta(input.context.metadataJson, {
     approvalRequest: { ...input.approvalRequest, channel: "email", artifactKind: "draft" },
     artifactBody: input.artifactBody,
+    ...(emailTemplate
+      ? {
+          deliveryContentBody: input.artifactBody,
+          deliveryEmailHtml: emailTemplate.html,
+          deliveryEmailText: emailTemplate.text,
+          deliveryEmailDesign: emailTemplate.design,
+          deliveryEmailUpdatedAt: emailTemplate.updatedAt,
+          deliveryEmailSource: emailTemplate.source,
+          emailTemplate,
+        }
+      : {}),
   });
   await pool.query(
     `UPDATE workflow_runs SET status = 'waiting_for_email_approval', draft_output = $4,
@@ -656,4 +715,115 @@ export async function applyEmailApprovalResult(input: {
     eventType: "run_approval_email_sent",
     payload: { to: input.approvalRequest.to, approvalUrl: input.approvalRequest.approvalUrl },
   });
+}
+
+/** Send or re-send approval notification to configured channels when a draft is ready. */
+export async function ensureRunApprovalNotification(input: { auth: AuthContext; runId: string }) {
+  await assertRunAccess(input.auth, input.runId);
+  const context = await loadRunContext(input.runId);
+  const loopExecutor = readLoopExecutorMeta(context.metadataJson);
+
+  if (hasStoredApprovalRequest(loopExecutor)) {
+    const approvalRequest = readObject(loopExecutor.approvalRequest);
+    return {
+      runId: context.runId,
+      status: context.runStatus,
+      alreadySent: true,
+      approvalRequest,
+    };
+  }
+
+  if (!APPROVAL_READY_STATUSES.has(context.runStatus)) {
+    throw new Error(`Run is ${context.runStatus}, not waiting for approval`);
+  }
+
+  const artifactBody = await resolveApprovalArtifactBody(context);
+  if (!artifactBody) {
+    throw new Error("No draft content available for approval");
+  }
+
+  const formatter = resolveDeliveryFormatter(context.definition, artifactBody);
+  const formatted = formatter.formatForDelivery(artifactBody);
+  const approvalSubject = formatted.subject
+    ? `Approval required: ${formatted.subject}`
+    : `Approval required: ${context.workflowTitle}`;
+
+  const primaryChannel = await getPrimaryNotificationChannel(input.auth);
+  const approval = await createWorkflowApprovalRequest({
+    auth: input.auth,
+    targetType: "workflow_run",
+    targetId: context.runId,
+    channel: primaryChannel?.kind === "telegram" || primaryChannel?.kind === "gmail" ? primaryChannel.kind : "email",
+  });
+  const approvalUrl = `${config.publicBaseUrl.replace(/\/$/, "")}/api/workflows/loops/approvals/${approval.token}/approve`;
+
+  let renderedEmail: { html: string; text: string } | null = null;
+  let emailTemplate: { html: string; text: string; design: unknown; subject: string | null; updatedAt: string; source: string } | undefined;
+  if (isNewsletterLoopDefinition(context.definition)) {
+    try {
+      const built = buildUnlayerNewsletterEmail({
+        subject: formatted.subject ?? context.workflowTitle,
+        markdown: formatted.text || artifactBody,
+      });
+      emailTemplate = {
+        html: built.html,
+        text: built.text,
+        design: built.design,
+        subject: built.subject,
+        updatedAt: new Date().toISOString(),
+        source: "builder",
+      };
+      renderedEmail = { html: built.html, text: built.text };
+    } catch {
+      renderedEmail = null;
+      emailTemplate = undefined;
+    }
+  }
+
+  let sentPrompt: { to: string; sentAt: string; channel?: string };
+  try {
+    sentPrompt = await sendWorkflowRunApprovalPrompt({
+      auth: input.auth,
+      runId: context.runId,
+      workflowId: context.workflowId,
+      workflowTitle: context.workflowTitle,
+      artifactBody,
+      approvalUrl,
+      approvalToken: approval.token,
+      artifactKind: "draft",
+      emailSubject: approvalSubject,
+      renderedEmail,
+    });
+  } catch {
+    sentPrompt = {
+      to: primaryChannel?.destination ?? "dashboard",
+      sentAt: new Date().toISOString(),
+      channel: primaryChannel?.kind ?? "ui",
+    };
+  }
+
+  const approvalRequest = { ...sentPrompt, approvalUrl, token: approval.token };
+  const blockedApprovalTask = await pool.query<{ id: string }>(
+    `SELECT id FROM loop_run_tasks
+     WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+       AND status = 'blocked'
+     ORDER BY seq DESC
+     LIMIT 1`,
+    [context.runId, context.tenantId, context.userId],
+  );
+
+  await applyEmailApprovalResult({
+    context,
+    taskId: blockedApprovalTask.rows[0]?.id ?? context.runId,
+    approvalRequest,
+    artifactBody,
+    emailTemplate,
+  });
+
+  return {
+    runId: context.runId,
+    status: "waiting_for_email_approval",
+    alreadySent: false,
+    approvalRequest,
+  };
 }

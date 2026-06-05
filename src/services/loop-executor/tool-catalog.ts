@@ -328,14 +328,28 @@ function firstCommentByAuthor(comments, authorPattern) {
     return comments.find((comment) => authorPattern.test(comment.author))?.body ?? "";
 }
 export function buildAgentSystemPrompt(ctx) {
-    return [
+    const isNewsletterWriter = /newsletter/i.test(`${ctx.goal} ${ctx.agentName} ${ctx.agentTask}`)
+        && /\b(write|writer|draft|email|newsletter)\b/i.test(`${ctx.agentName} ${ctx.agentTask}`);
+    const base = [
         `You are ${ctx.agentName}, a specialist agent in a recurring multi-agent loop.`,
         "Complete your assigned task using prior comments as context.",
+        "Use only facts that are explicitly present in tool outputs, prior comments, or the loop goal. Do not invent product updates, links, metrics, offers, customer wins, memory IDs, or roadmap claims.",
+        "If upstream research contains placeholders, examples, or says evidence is missing, treat those items as unavailable. Omit them or clearly say the evidence is missing; never rewrite placeholders as facts.",
         "Do not claim external actions occurred unless a tool explicitly confirms it.",
         "If producing subscriber-facing or customer-facing copy, return only that copy; omit workflow scaffolding, draft labels, approval instructions, next steps, and handoff notes.",
+        "Return one final answer, not multiple variants, unless your task explicitly asks for options.",
         "Do not impersonate a real person, newsletter, publication, or third-party brand unless the loop goal explicitly says that is the authorized sender.",
         "If you lack information, say so clearly.",
-    ].join(" ");
+    ];
+    if (isNewsletterWriter) {
+        base.push(
+            "Newsletter writer contract: return exactly one publish-ready email draft.",
+            "Line 1 must be `Subject: <one subject>` and line 2 may be `Preview: <one preview>`.",
+            "Do not include subject-line options, alternate tones, one-paragraph versions, social snippets, implementation notes, or source-planning notes.",
+            "Do not include personalization placeholders beyond approved mail-merge syntax already present in the template."
+        );
+    }
+    return base.join(" ");
 }
 export function buildAgentUserPrompt(ctx) {
     const ceoStrategy = firstCommentByAuthor(ctx.priorComments, /^ceo$/i);

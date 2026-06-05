@@ -16,6 +16,7 @@ import {
   RefreshCw,
   RotateCcw,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 
@@ -66,6 +67,8 @@ type LoopInsight = {
   status: "detected" | "looped" | "dismissed";
   conversations: Conversation[];
   memories?: LoopMemory[];
+  /** Persisted workflow from loop builder / creator */
+  isSaved?: boolean;
 };
 
 type LoopMinerEpisode = {
@@ -184,9 +187,21 @@ type LoopWorkflow = {
   id: string;
   title: string;
   workspaceId: string | null;
+  status?: string;
+  scheduleRrule?: string;
+  nextRunAt?: string | null;
+  lastScheduledAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
   definition?: {
     goal?: string;
     presetId?: string;
+    schedule?: { cron?: string; timezone?: string };
+    agentGraph?: {
+      parent?: { name?: string; task?: string };
+      children?: Array<{ id: string; name: string; task: string }>;
+    };
+    builderMeta?: { designedBy?: string; preApproved?: boolean };
   };
 };
 
@@ -563,6 +578,66 @@ function isAnyLennyNewsletterLoop(loop: LoopWorkflow): boolean {
   return isLennyNewsletterGoal(loop.definition?.goal) || /lenny/i.test(loop.title);
 }
 
+function isWorkflowId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
+function cronToFrequency(cron: string): string {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length < 5) return "Scheduled";
+  const [, , dayOfMonth, , dayOfWeek] = parts;
+  if (dayOfMonth === "*" && dayOfWeek === "*") return "Daily";
+  if (dayOfMonth !== "*") return "Monthly";
+  if (dayOfWeek !== "*") return "Weekly";
+  return "Scheduled";
+}
+
+function buildLoopInsightFromWorkflow(workflow: LoopWorkflow): LoopInsight {
+  const cron = workflow.definition?.schedule?.cron ?? workflow.scheduleRrule ?? "0 9 * * 1";
+  const children = workflow.definition?.agentGraph?.children ?? [];
+  const createdAt = workflow.createdAt ?? new Date().toISOString();
+  const nextPredicted = workflow.nextRunAt ?? createdAt;
+
+  const conversations: Conversation[] = children.length > 0
+    ? children.map((child) => ({
+        id: `${workflow.id}-${child.id}`,
+        title: child.name,
+        date: createdAt,
+        platform: "chatgpt",
+        snippet: child.task,
+      }))
+    : [{
+        id: `${workflow.id}-goal`,
+        title: workflow.definition?.agentGraph?.parent?.name ?? "Parent Agent",
+        date: createdAt,
+        platform: "chatgpt",
+        snippet: workflow.definition?.goal ?? workflow.title,
+      }];
+
+  return {
+    id: workflow.id,
+    name: workflow.title,
+    description: workflow.definition?.goal ?? workflow.title,
+    workspaceId: workflow.workspaceId,
+    primarySourceFile: workflow.definition?.builderMeta?.designedBy === "ceo_llm" ? "loop builder" : "loop creator",
+    frequency: cronToFrequency(cron),
+    conversationCount: conversations.length,
+    lastOccurred: workflow.lastScheduledAt ?? createdAt,
+    nextPredicted,
+    confidence: 98,
+    status: "detected",
+    conversations,
+    memories: conversations.slice(0, 3).map((conversation) => ({
+      id: conversation.id,
+      text: conversation.snippet,
+      date: conversation.date,
+      platform: conversation.platform,
+      reason: `${conversation.title} agent`,
+    })),
+    isSaved: true,
+  };
+}
+
 function findLennyNewsletterWorkflow(loops: LoopWorkflow[]): LoopWorkflow | null {
   return loops.find(isExplicitLennyNewsletterLoop)
     ?? loops.find(isAnyLennyNewsletterLoop)
@@ -881,14 +956,18 @@ function LoopCard({
   index,
   onDismiss,
   onLoop,
+  onDelete,
   running,
-  actionLabel = "Loop this",
+  deleting,
+  actionLabel = "Open loop",
 }: {
   loop: LoopInsight;
   index: number;
   onDismiss: (id: string) => void;
   onLoop: (id: string) => Promise<void> | void;
+  onDelete?: (id: string) => Promise<void> | void;
   running?: boolean;
+  deleting?: boolean;
   actionLabel?: string;
 }) {
   const [looped, setLooped] = useState(loop.status === "looped");
@@ -916,6 +995,12 @@ function LoopCard({
               <RotateCcw size={11} className="text-slate-500" />
               {loop.frequency}
             </div>
+            {loop.isSaved ? (
+              <div className="flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 ring-1 ring-emerald-200">
+                <Bot size={10} />
+                Your loop
+              </div>
+            ) : null}
             {days <= 3 && days > 0 && (
               <div className="flex items-center gap-1 rounded-md bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
                 <Clock size={10} />
@@ -923,12 +1008,25 @@ function LoopCard({
               </div>
             )}
           </div>
-          <button
-            onClick={() => onDismiss(loop.id)}
-            className="grid h-7 w-7 place-items-center rounded-md text-slate-400 opacity-0 transition hover:bg-white hover:text-slate-700 hover:shadow-sm group-hover:opacity-100"
-          >
-            <X size={13} />
-          </button>
+          <div className="flex items-center gap-1">
+            {loop.isSaved && onDelete ? (
+              <button
+                type="button"
+                onClick={() => void onDelete(loop.id)}
+                disabled={deleting || running}
+                className="grid h-7 w-7 place-items-center rounded-md text-slate-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 disabled:opacity-50"
+                aria-label="Delete loop"
+              >
+                {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              </button>
+            ) : null}
+            <button
+              onClick={() => onDismiss(loop.id)}
+              className="grid h-7 w-7 place-items-center rounded-md text-slate-400 opacity-0 transition hover:bg-white hover:text-slate-700 hover:shadow-sm group-hover:opacity-100"
+            >
+              <X size={13} />
+            </button>
+          </div>
         </div>
 
         <div className="px-5 pb-5 pt-3">
@@ -964,12 +1062,12 @@ function LoopCard({
               )}
             </div>
 
-            {!looped ? (
+            {!looped || loop.isSaved ? (
               <Button
                 onClick={async () => {
                   try {
                     await onLoop(loop.id);
-                    setLooped(true);
+                    if (!loop.isSaved) setLooped(true);
                   } catch {
                     setLooped(false);
                   }
@@ -978,7 +1076,7 @@ function LoopCard({
                 className="h-8 gap-2 rounded-none px-4 text-sm text-white"
                 style={{ backgroundColor: ACCENT }}
               >
-                {running ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                {running ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
                 {actionLabel}
               </Button>
             ) : (
@@ -1111,6 +1209,7 @@ export default function LoopsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loopActionError, setLoopActionError] = useState<string | null>(null);
   const [runningLoopId, setRunningLoopId] = useState<string | null>(null);
+  const [deletingLoopId, setDeletingLoopId] = useState<string | null>(null);
   const loadLoopMinerRuns = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -1125,7 +1224,12 @@ export default function LoopsPage() {
       const workspacesPayload = await workspacesResponse.json().catch(() => ({}));
       const loopsPayload = await loopsResponse.json().catch(() => ({}));
       const channelsPayload = await channelsResponse.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error ?? "Failed to load loop miner runs");
+      if (!response.ok && !loopsResponse.ok) {
+        throw new Error(payload.error ?? "Failed to load loops");
+      }
+      if (!response.ok) {
+        setError(payload.error ?? "Could not load detected patterns");
+      }
       if (workspacesResponse.ok) {
         setWorkspaces(Array.isArray(workspacesPayload.workspaces) ? workspacesPayload.workspaces as LoopWorkspace[] : []);
       }
@@ -1137,13 +1241,16 @@ export default function LoopsPage() {
       }
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
       const internalLoops = loopsResponse.ok && Array.isArray(loopsPayload.loops) ? loopsPayload.loops as LoopWorkflow[] : [];
+      const savedLoops = internalLoops.map(buildLoopInsightFromWorkflow);
       const newsletterWorkflow = findLennyNewsletterWorkflow(internalLoops);
       const displayRun = pickRunForDisplay(runs);
       const minedLoops = displayRun ? buildLoopInsightsFromRun(displayRun) : [];
       const hardcoded = { ...hardcodedNewsletterLoop(), workspaceId: newsletterWorkflow?.workspaceId ?? null };
+      const savedIds = new Set(savedLoops.map((loop) => loop.id));
       setLoops([
-        hardcoded,
-        ...minedLoops.filter((loop) => loop.id !== hardcoded.id),
+        ...savedLoops,
+        ...(newsletterWorkflow ? [] : [hardcoded]),
+        ...minedLoops.filter((loop) => loop.id !== hardcoded.id && !savedIds.has(loop.id)),
       ]);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load loop miner runs");
@@ -1170,16 +1277,40 @@ export default function LoopsPage() {
         router.push("/dashboard/loops/newsletter");
         return;
       }
+      if (isWorkflowId(id)) {
+        router.push(`/dashboard/loops/${id}`);
+        return;
+      }
       setLoops((prev) =>
         prev.map((l) => (l.id === id ? { ...l, status: "looped" as const } : l))
       );
     } catch (activateError) {
-      setLoopActionError(activateError instanceof Error ? activateError.message : "Failed to run loop");
+      setLoopActionError(activateError instanceof Error ? activateError.message : "Failed to open loop");
       throw activateError;
     } finally {
       setRunningLoopId(null);
     }
   }, [router]);
+
+  const deleteLoop = useCallback(async (id: string) => {
+    if (!isWorkflowId(id)) return;
+    if (!confirm("Delete this loop? This cannot be undone.")) return;
+    setLoopActionError(null);
+    setDeletingLoopId(id);
+    try {
+      const response = await fetch(`/api/workflows/internal/loops/${id}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error((payload as { error?: string }).error ?? "Failed to delete loop");
+      }
+      setLoops((prev) => prev.filter((loop) => loop.id !== id));
+    } catch (deleteError) {
+      setLoopActionError(deleteError instanceof Error ? deleteError.message : "Failed to delete loop");
+      throw deleteError;
+    } finally {
+      setDeletingLoopId(null);
+    }
+  }, []);
 
   const filtered = useMemo(() => {
     const byConfidence = filter === "high"
@@ -1200,7 +1331,7 @@ export default function LoopsPage() {
           <div>
             <h1 className="text-xl font-bold tracking-tight text-[var(--text)]">Loops</h1>
             <p className="mt-0.5 text-sm text-[var(--text-2)]">
-              Patterns Tallei noticed in your work
+              Your saved loops and patterns Tallei noticed in your work
             </p>
           </div>
 
@@ -1342,8 +1473,10 @@ export default function LoopsPage() {
                       index={i}
                       onDismiss={dismissLoop}
                       onLoop={openLoop}
+                      onDelete={loop.isSaved ? deleteLoop : undefined}
                       running={runningLoopId === loop.id}
-                      actionLabel={loop.id === "hardcoded-newsletter-loop-v1" ? "Open loop" : "Loop this"}
+                      deleting={deletingLoopId === loop.id}
+                      actionLabel="Open loop"
                     />
                   ))}
                 </div>

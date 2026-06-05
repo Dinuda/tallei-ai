@@ -76,7 +76,9 @@ export async function runCeoStrategyHeartbeat(runId: string) {
         const message = (rosterValidation.issues ?? []).map((issue) => issue.message).join("; ");
         throw new Error(`CEO proposed invalid roster: ${message}`);
     }
-    if (preset) {
+    const builderPreApproved = context.definition.builderMeta?.preApproved !== false
+        && (context.definition.agentGraph?.children?.length ?? 0) > 0;
+    if (preset || builderPreApproved) {
         await materializeTasksFromRoster({ context, roster: ceoOutput.agents, strategyOutput: ceoOutput.strategyText });
         const firstTask = await pool.query<{ id: string }>(
             `SELECT id FROM loop_run_tasks WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
@@ -106,8 +108,12 @@ export async function runCeoStrategyHeartbeat(runId: string) {
         ]);
         await insertEvent({
             context,
-            eventType: "preset_roster_started",
-            payload: { presetId: preset.id, firstTaskId, agentCount: ceoOutput.agents.length },
+            eventType: preset ? "preset_roster_started" : "builder_roster_started",
+            payload: {
+                ...(preset ? { presetId: preset.id } : { designedBy: context.definition.builderMeta?.designedBy ?? "ceo_llm" }),
+                firstTaskId,
+                agentCount: ceoOutput.agents.length,
+            },
         });
         if (firstTaskId) {
             await scheduleHeartbeat({
@@ -313,6 +319,7 @@ export async function runAgentHeartbeat(runId, taskId) {
                 draft: result.draft ?? null,
                 approvalRequest: result.approvalRequest ?? null,
                 artifactBody: result.artifactBody ?? null,
+                emailTemplate: result.emailTemplate ?? null,
             }),
         ]);
         await insertEvent({
@@ -345,11 +352,13 @@ export async function runAgentHeartbeat(runId, taskId) {
                 taskId: task.id,
                 approvalRequest: result.approvalRequest,
                 artifactBody: result.artifactBody,
+                emailTemplate: result.emailTemplate,
             });
             return { status: "waiting_for_email_approval", taskId: task.id };
         }
         const preset = resolveLoopPreset(context.definition);
-        if (isDynamicPlanDefinition(context.definition) && !preset) {
+        const hasAgentGraphRoster = (context.definition.agentGraph?.children?.length ?? 0) > 0;
+        if (isDynamicPlanDefinition(context.definition) && !preset && !hasAgentGraphRoster) {
             const advanced = await advanceDynamicRunAfterSeq(context, task.seq);
             return { status: advanced.status, taskId: task.id };
         }

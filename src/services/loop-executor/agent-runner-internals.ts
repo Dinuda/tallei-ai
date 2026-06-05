@@ -117,11 +117,16 @@ export async function runExaWebSearch(input: { goal: string; task: string; confi
 export async function completeText(input: { system: string; user: string; maxTokens?: number }): Promise<string> {
   const response = await withAbortTimeout(readLoopAgentTimeoutMs(), (signal) => loopExecutorOpenAiChat({
     messages: [{ role: "system", content: input.system }, { role: "user", content: input.user }],
-    temperature: 0.3,
+    temperature: 1,
     maxTokens: input.maxTokens ?? 1600,
     signal,
   }), "Loop agent model call");
   const text = response.text.trim();
-  if (!text) throw new Error("Loop agent LLM returned an empty response");
+  if (!text) {
+    const usage = response.usage
+      ? ` usage=${JSON.stringify(response.usage)}`
+      : "";
+    throw new Error(`Loop agent LLM returned an empty response (model=${response.model}, finish_reason=${response.finishReason ?? "unknown"}${usage})`);
+  }
   return text;
 }

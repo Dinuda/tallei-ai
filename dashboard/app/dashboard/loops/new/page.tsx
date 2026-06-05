@@ -3,31 +3,35 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Check, Loader2, RefreshCw, Save, Wand2 } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronUp, Loader2, RefreshCw, Save, Sparkles, Wand2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
-type TemplateId = "blog_post" | "weekly_report" | "social_content" | "custom";
+type TemplateHint = "writing_companion" | "newsletter_broadcast" | "custom";
+
+type AgentGraphChild = {
+  id: string;
+  name: string;
+  task: string;
+  tools?: Array<{ ref: string }>;
+};
 
 type BuilderProposal = {
   title: string;
   summary: string;
-  templateId: TemplateId;
+  templateId: TemplateHint;
   definition: {
     goal: string;
     schedule: { cron: string; timezone: string };
     allowedToolRefs?: string[];
-    plan?: {
-      stages: Array<{
-        id: string;
-        kind: string;
-        name?: string;
-        label?: string;
-        task?: string;
-        toolRef?: string | null;
-        approvalPolicy?: { channels?: string[] };
-      }>;
+    agentGraph?: {
+      parent?: { name: string; task: string; policy: string };
+      children?: AgentGraphChild[];
+    };
+    builderMeta?: {
+      preApproved?: boolean;
+      model?: string;
     };
   };
   suggestedChannels: string[];
@@ -35,25 +39,37 @@ type BuilderProposal = {
   memories: Array<{ id: string; text: string }>;
   preferences: Array<{ id: string; text: string; category?: string | null }>;
   rationale: string[];
+  designedBy?: string;
+  model?: string;
 };
 
-const templateOptions: Array<{ id: TemplateId; label: string }> = [
-  { id: "custom", label: "Auto" },
-  { id: "blog_post", label: "Blog post" },
-  { id: "weekly_report", label: "Weekly report" },
-  { id: "social_content", label: "Social content" },
+const inspirationTemplates: Array<{ id: Exclude<TemplateHint, "custom">; label: string; hint: string }> = [
+  {
+    id: "writing_companion",
+    label: "Writing companion",
+    hint: "Use the writing companion pattern: memory search, source research, brief, writer, approval handoff.",
+  },
+  {
+    id: "newsletter_broadcast",
+    label: "Newsletter broadcast",
+    hint: "Use the newsletter broadcast pattern with subscriber email delivery and broadcast after approval.",
+  },
 ];
 
 export default function NewLoopBuilderPage() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [feedback, setFeedback] = useState("");
-  const [templateId, setTemplateId] = useState<TemplateId>("custom");
+  const [templateHint, setTemplateHint] = useState<TemplateHint>("custom");
+  const [inspirationOpen, setInspirationOpen] = useState(false);
   const [proposal, setProposal] = useState<BuilderProposal | null>(null);
   const [busy, setBusy] = useState<"propose" | "refine" | "save" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const stages = useMemo(() => proposal?.definition.plan?.stages ?? [], [proposal]);
+  const agents = useMemo(
+    () => proposal?.definition.agentGraph?.children ?? [],
+    [proposal],
+  );
 
   async function requestProposal(mode: "propose" | "refine") {
     setBusy(mode);
@@ -64,13 +80,15 @@ export default function NewLoopBuilderPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           prompt,
-          templateId,
-          feedback: feedback.trim() ? feedback : undefined,
+          templateId: templateHint === "custom" ? undefined : templateHint,
+          feedback: mode === "refine" ? (feedback.trim() || prompt) : undefined,
+          priorProposal: mode === "refine" ? proposal : undefined,
         }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? `Failed to ${mode} loop`);
       setProposal(payload.proposal as BuilderProposal);
+      if (mode === "refine") setFeedback("");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : `Failed to ${mode} loop`);
     } finally {
@@ -88,14 +106,30 @@ export default function NewLoopBuilderPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ proposal }),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error ?? "Failed to save loop");
-      router.push("/dashboard/loops");
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string;
+        details?: Array<{ message?: string }>;
+        loop?: { id: string };
+      };
+      if (!response.ok) {
+        const detail = payload.details?.[0]?.message;
+        throw new Error(
+          detail ? `${payload.error ?? "Failed to save loop"}: ${detail}` : (payload.error ?? "Failed to save loop"),
+        );
+      }
+
+      const workflowId = payload.loop?.id;
+      if (!workflowId) throw new Error("Loop saved but no workflow id was returned");
+      router.push(`/dashboard/loops/${workflowId}`);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to save loop");
     } finally {
       setBusy(null);
     }
+  }
+
+  function appendInspirationHint(hint: string) {
+    setPrompt((current) => (current.trim() ? `${current.trim()}\n\n${hint}` : hint));
   }
 
   return (
@@ -107,6 +141,9 @@ export default function NewLoopBuilderPage() {
             Loop builder
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-[var(--text)]">Create a loop</h1>
+          <p className="mt-1 text-sm text-[var(--text-2)]">
+            Describe what you want to repeat. The CEO agent designs a bespoke agent loop from your intent and memory.
+          </p>
         </div>
         <Button asChild variant="outline" className="h-9 gap-1.5">
           <Link href="/dashboard/loops">
@@ -125,44 +162,27 @@ export default function NewLoopBuilderPage() {
           <Card className="rounded-md p-4">
             <label className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">What should repeat?</label>
             <textarea
-              className="mt-2 min-h-44 w-full rounded-md border border-[var(--border-light)] bg-white p-3 text-sm text-[var(--text)] outline-none focus:border-orange-400"
+              className="mt-2 min-h-44 w-full rounded-md border border-[var(--border-light)] bg-white p-3 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[rgba(126,183,27,.18)]"
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Example: Every Friday, create a weekly product update from memory, recent sources, and my previous writing style. Ask me to approve the draft before anything goes out."
+              placeholder="Example: Every Friday, research what's new in AI tooling, draft a product essay in my voice from memory, and send it to me for approval before publishing."
             />
-
-            <div className="mt-4 flex flex-wrap gap-2">
-              {templateOptions.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`rounded-md border px-3 py-1.5 text-sm ${
-                    templateId === option.id
-                      ? "border-orange-500 bg-orange-50 text-orange-700"
-                      : "border-[var(--border-light)] bg-white text-[var(--text-2)]"
-                  }`}
-                  onClick={() => setTemplateId(option.id)}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
 
             <div className="mt-4 flex flex-wrap gap-2">
               <Button
                 type="button"
-                className="h-9 gap-1.5 bg-orange-500 text-white hover:bg-orange-600"
+                className="h-9 gap-1.5"
                 disabled={!prompt.trim() || busy !== null}
                 onClick={() => void requestProposal("propose")}
               >
                 {busy === "propose" ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                Propose
+                {busy === "propose" ? "Designing loop…" : "Design loop"}
               </Button>
               <Button
                 type="button"
                 variant="outline"
                 className="h-9 gap-1.5"
-                disabled={!prompt.trim() || busy !== null}
+                disabled={!proposal || !feedback.trim() || busy !== null}
                 onClick={() => void requestProposal("refine")}
               >
                 {busy === "refine" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
@@ -176,50 +196,100 @@ export default function NewLoopBuilderPage() {
                 onClick={() => void saveProposal()}
               >
                 {busy === "save" ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-                Save loop
+                {busy === "save" ? "Saving…" : "Save & open"}
               </Button>
             </div>
           </Card>
 
           <Card className="rounded-md p-4">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between gap-2 text-left"
+              onClick={() => setInspirationOpen((open) => !open)}
+            >
+              <span className="flex items-center gap-2 text-sm font-semibold text-[var(--text)]">
+                <Sparkles size={15} />
+                Inspiration (optional)
+              </span>
+              {inspirationOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </button>
+            {inspirationOpen ? (
+              <div className="mt-3 space-y-2">
+                <p className="text-xs text-[var(--text-muted)]">
+                  High-potential patterns the CEO can borrow. Click to add a hint to your prompt — the LLM still designs a custom loop.
+                </p>
+                {inspirationTemplates.map((template) => (
+                  <button
+                    key={template.id}
+                    type="button"
+                    className={`w-full rounded-md border p-3 text-left transition-colors ${
+                      templateHint === template.id
+                        ? "border-[var(--accent)] bg-[var(--accent-light)]"
+                        : "border-[var(--border-light)] bg-white hover:border-[var(--border)]"
+                    }`}
+                    onClick={() => {
+                      setTemplateHint(template.id);
+                      appendInspirationHint(template.hint);
+                    }}
+                  >
+                    <div className="text-sm font-medium text-[var(--text)]">{template.label}</div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">{template.hint}</div>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </Card>
+
+          <Card className="rounded-md p-4">
             <label className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Refinement notes</label>
             <textarea
-              className="mt-2 min-h-24 w-full rounded-md border border-[var(--border-light)] bg-white p-3 text-sm text-[var(--text)] outline-none focus:border-orange-400"
+              className="mt-2 min-h-24 w-full rounded-md border border-[var(--border-light)] bg-white p-3 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
               value={feedback}
               onChange={(event) => setFeedback(event.target.value)}
-              placeholder="Optional: change the cadence, add an approval rule, prefer Telegram, or make the output more concise."
+              placeholder="After proposing: make the writer more casual, add Telegram approval, run on Fridays, etc."
             />
           </Card>
 
           {proposal ? (
             <Card className="rounded-md p-4">
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
-                    {proposal.templateId.replace(/_/g, " ")}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {proposal.definition.builderMeta?.preApproved !== false ? (
+                      <span className="rounded-full bg-[var(--accent-light)] px-2 py-0.5 text-xs font-medium text-[var(--text-2)]">
+                        Pre-approved
+                      </span>
+                    ) : null}
+                    {proposal.model ? (
+                      <span className="text-xs text-[var(--text-muted)]">Model: {proposal.model}</span>
+                    ) : null}
                   </div>
-                  <h2 className="mt-1 text-lg font-semibold text-[var(--text)]">{proposal.title}</h2>
+                  <h2 className="mt-2 text-lg font-semibold text-[var(--text)]">{proposal.title}</h2>
                   <p className="mt-1 text-sm text-[var(--text-2)]">{proposal.summary}</p>
                 </div>
                 <div className="rounded-md border border-[var(--border-light)] px-2 py-1 text-xs text-[var(--text-muted)]">
-                  {stages.length} stages
+                  {agents.length} agents
                 </div>
               </div>
 
+              {proposal.definition.agentGraph?.parent ? (
+                <div className="mt-4 rounded-md border border-dashed border-[var(--border)] bg-[var(--muted)] p-3">
+                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Parent agent</div>
+                  <div className="mt-1 text-sm font-medium text-[var(--text)]">{proposal.definition.agentGraph.parent.name}</div>
+                  <p className="mt-1 text-sm text-[var(--text-2)]">{proposal.definition.agentGraph.parent.task}</p>
+                </div>
+              ) : null}
+
               <div className="mt-4 space-y-3">
-                {stages.map((stage, index) => (
-                  <div key={stage.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-[var(--text)]">
-                        {index + 1}. {stage.name ?? stage.label ?? stage.id}
-                      </div>
-                      <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">{stage.kind}</div>
+                {agents.map((agent, index) => (
+                  <div key={agent.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
+                    <div className="text-sm font-medium text-[var(--text)]">
+                      {index + 1}. {agent.name}
                     </div>
-                    {stage.task ? <p className="mt-2 text-sm text-[var(--text-2)]">{stage.task}</p> : null}
-                    {stage.toolRef ? <p className="mt-2 text-xs text-[var(--text-muted)]">Tool: {stage.toolRef}</p> : null}
-                    {stage.approvalPolicy?.channels?.length ? (
+                    <p className="mt-2 text-sm text-[var(--text-2)]">{agent.task}</p>
+                    {agent.tools?.length ? (
                       <p className="mt-2 text-xs text-[var(--text-muted)]">
-                        Approval: {stage.approvalPolicy.channels.join(", ")}
+                        Tools: {agent.tools.map((tool) => tool.ref).join(", ")}
                       </p>
                     ) : null}
                   </div>
@@ -237,6 +307,12 @@ export default function NewLoopBuilderPage() {
             </div>
             {proposal ? (
               <div className="space-y-4">
+                <div>
+                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Schedule</div>
+                  <p className="mt-1 text-sm text-[var(--text-2)]">
+                    {proposal.definition.schedule.cron} ({proposal.definition.schedule.timezone})
+                  </p>
+                </div>
                 <div>
                   <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Tools</div>
                   <p className="mt-1 text-sm text-[var(--text-2)]">
@@ -257,7 +333,9 @@ export default function NewLoopBuilderPage() {
                 </div>
               </div>
             ) : (
-              <p className="text-sm text-[var(--text-2)]">Generate a proposal to see memory, preferences, tools, and approval routing.</p>
+              <p className="text-sm text-[var(--text-2)]">
+                Design a loop to see the CEO&apos;s agent roster, memory context, tools, and rationale. This usually takes a few seconds.
+              </p>
             )}
           </Card>
 

@@ -48,15 +48,15 @@ function parentAgentForGoal(goal: string): LoopAgentGraph["parent"] {
     id: "parent_agent",
     name: "Parent Agent",
     task: [
-      "Own the recurring loop.",
-      "Pick child agents from this loop definition, pass context between them, and make sure every external action is gated by approval.",
+      "Own the recurring loop and ensure every run produces a real deliverable.",
+      "Coordinate child agents, pass context between them, and gate every external action behind approval.",
       `Goal: ${goal}`,
     ].join(" "),
     policy: [
-      "Coordinate only.",
-      "Do not execute child tools directly.",
-      "Route specialist work to child agents.",
-      "Use Composio as the connector hub for external app/tool access.",
+      "Understand the user's outcome, not just the task label.",
+      "Route specialist work to child agents; do not execute child tools directly.",
+      "Ground writer tasks in memory voice/style findings.",
+      "Use Composio as the connector hub for external app integrations.",
     ].join(" "),
     connectorHub: {
       provider: "composio",
@@ -84,15 +84,25 @@ export function buildLoopDefinition(input: {
   schedulerTarget?: "internal" | "cloudflare";
   presetId?: string;
   deliveryType?: string;
+  builderMeta?: LoopDefinition["builderMeta"];
 }): LoopDefinition {
   const goal = normalizeText(input.task);
   const cron = validateFiveFieldCron(input.cron);
   const explicitPlan = input.plan ? loopPlanSchema.parse(input.plan) : undefined;
+  const resolvedPresetId = input.presetId?.trim() || undefined;
+
+  if (resolvedPresetId && explicitPlan?.stages.some((stage) => stage.kind === "approval_gate")) {
+    throw new Error("Cannot combine presetId with a plan containing approval_gate stages; use an approval_handoff agent in agentGraph instead");
+  }
+
   const allowedIntegrations = normalizeIntegrationList(input.integrations ?? explicitPlan?.allowedIntegrations);
   const agentGraph = input.agentGraph
     ? loopAgentGraphSchema.parse(input.agentGraph)
     : buildParentAgentGraph(goal);
-  const derivedPlan = !explicitPlan && agentGraph.children.length > 0
+  const derivedPlan = !explicitPlan
+    && agentGraph.children.length > 0
+    && !resolvedPresetId
+    && !input.builderMeta
     ? buildPlanFromAgentGraph(goal, agentGraph, allowedIntegrations)
     : undefined;
   const plan = explicitPlan ?? derivedPlan;
@@ -102,7 +112,6 @@ export function buildLoopDefinition(input: {
         ...(plan?.allowedToolRefs ?? []),
         ...agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
       ]);
-  const resolvedPresetId = input.presetId?.trim() || undefined;
   const definitionDraft = {
     definitionVersion: LOOP_DEFINITION_VERSION,
     goal,
@@ -123,6 +132,7 @@ export function buildLoopDefinition(input: {
     agentGraph,
     ...(plan ? { plan } : {}),
     ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
+    ...(input.builderMeta ? { builderMeta: input.builderMeta } : {}),
   } satisfies Partial<LoopDefinition>;
   const presetToolRefs = presetToolRefsForDefinition(definitionDraft as LoopDefinition);
   const finalAllowedToolRefs = presetToolRefs.length > 0
@@ -149,6 +159,32 @@ export function buildLoopDefinition(input: {
     agentGraph,
     ...(plan ? { plan } : {}),
     ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
+    ...(input.builderMeta ? { builderMeta: input.builderMeta } : {}),
+  });
+}
+
+export function buildLoopDefinitionFromCeoDesign(input: {
+  goal: string;
+  design: {
+    agentGraph: LoopAgentGraph;
+    schedule: { cron: string; timezone: string };
+    deliveryType?: string;
+    presetId?: string;
+    builderMeta?: LoopDefinition["builderMeta"];
+  };
+}): LoopDefinition {
+  const allowedToolRefs = uniqueStrings(
+    input.design.agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
+  );
+  return buildLoopDefinition({
+    task: input.goal,
+    cron: input.design.schedule.cron,
+    timezone: input.design.schedule.timezone,
+    agentGraph: input.design.agentGraph,
+    allowedToolRefs,
+    presetId: input.design.presetId,
+    deliveryType: input.design.deliveryType,
+    builderMeta: input.design.builderMeta,
   });
 }
 
@@ -184,7 +220,7 @@ function mapLoopWorkflowRow(row: {
 
 export async function createLoopWorkflow(input: {
   auth: AuthContext;
-  task: string;
+  task?: string;
   cron?: string;
   timezone?: string;
   integrations?: string[];
@@ -195,24 +231,30 @@ export async function createLoopWorkflow(input: {
   workspaceId?: string | null;
   presetId?: string;
   deliveryType?: string;
+  builderMeta?: LoopDefinition["builderMeta"];
+  /** Pre-validated definition from the loop builder — persisted as-is. */
+  definition?: LoopDefinition;
+  title?: string;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
-  const cron = input.cron ?? "0 9 * * 1";
-  const definition = buildLoopDefinition({
-    task: input.task,
-    cron,
-    timezone: input.timezone ?? "UTC",
-    integrations: input.integrations,
-    allowedToolRefs: input.allowedToolRefs,
-    agentGraph: input.agentGraph,
-    plan: input.plan,
-    schedulerTarget: input.schedulerTarget,
-    presetId: input.presetId,
-    deliveryType: input.deliveryType,
-  });
+  const definition = input.definition
+    ? loopDefinitionSchema.parse(input.definition)
+    : buildLoopDefinition({
+      task: input.task ?? "",
+      cron: input.cron ?? "0 9 * * 1",
+      timezone: input.timezone ?? "UTC",
+      integrations: input.integrations,
+      allowedToolRefs: input.allowedToolRefs,
+      agentGraph: input.agentGraph,
+      plan: input.plan,
+      schedulerTarget: input.schedulerTarget,
+      presetId: input.presetId,
+      deliveryType: input.deliveryType,
+      builderMeta: input.builderMeta,
+    });
 
   const workflowId = randomUUID();
-  const title = titleFromTask(input.task);
+  const title = input.title?.trim() || titleFromTask(definition.goal);
   const fingerprint = createHash("sha256")
     .update(`${LOOP_DEFINITION_VERSION}:${definition.goal}:${definition.schedule.cron}`)
     .digest("hex")
@@ -292,9 +334,28 @@ export async function listLoopWorkflows(auth: AuthContext): Promise<LoopWorkflow
      WHERE tenant_id = $1
        AND user_id = $2
        AND definition_version = $3
+       AND status = 'active'
      ORDER BY updated_at DESC
      LIMIT 50`,
     [auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION]
   );
   return result.rows.map(mapLoopWorkflowRow);
+}
+
+export async function deleteLoopWorkflow(auth: AuthContext, workflowId: string): Promise<void> {
+  await requireLoopAdmin(auth);
+  const result = await pool.query(
+    `UPDATE workflows
+     SET status = 'archived', updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND definition_version = $4
+       AND status = 'active'
+     RETURNING id`,
+    [workflowId, auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION],
+  );
+  if (!result.rowCount) {
+    throw new Error("Loop workflow not found");
+  }
 }

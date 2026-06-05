@@ -21,6 +21,17 @@ import "./tool-handler-registrations.js";
 
 export { readMemorySearchConfig, readGatewaySearchConfig, runExaWebSearch, completeText } from "./agent-runner-internals.js";
 
+const APPROVAL_TOOL_REF = "internal.email_approval_request";
+
+/** Run compose/render before approval so a render failure cannot block the approval request. */
+function sortToolsForExecution(tools: LoopToolAssignment[]): LoopToolAssignment[] {
+  return [...tools].sort((left, right) => {
+    if (left.ref === APPROVAL_TOOL_REF) return 1;
+    if (right.ref === APPROVAL_TOOL_REF) return -1;
+    return 0;
+  });
+}
+
 export type RunLoopAgentInput = {
   auth: AuthContext;
   goal: string;
@@ -41,6 +52,7 @@ export type RunLoopAgentResult = {
   emailApprovalSent?: boolean;
   approvalRequest?: { to: string; approvalUrl: string; token: string; sentAt: string; channel?: string };
   artifactBody?: string;
+  emailTemplate?: { html: string; text?: string; design?: unknown; subject?: string | null; updatedAt?: string; source?: string };
 };
 
 function buildHandlerCtx(input: RunLoopAgentInput, assignment: LoopToolAssignment): ToolHandlerContext {
@@ -61,8 +73,9 @@ async function runAssignedTools(input: RunLoopAgentInput) {
   const sections: string[] = [];
   const toolsUsed: string[] = [];
   let draft: unknown;
+  let emailTemplate: RunLoopAgentResult["emailTemplate"];
 
-  for (const assignment of input.assignedTools) {
+  for (const assignment of sortToolsForExecution(input.assignedTools)) {
     const entry = getLoopTool(assignment.ref);
     if (!entry?.isActionable || entry.ref === "internal.llm_only") continue;
 
@@ -73,11 +86,13 @@ async function runAssignedTools(input: RunLoopAgentInput) {
       toolsUsed.push(entry.ref);
       if (result.text) sections.push(result.text);
       if (result.draft) draft = result.draft;
+      if (result.emailTemplate) emailTemplate = result.emailTemplate;
 
       if (result.emailApprovalSent) {
         return {
           sections,
           draft,
+          emailTemplate,
           toolsUsed,
           emailApprovalSent: true,
           approvalRequest: result.approvalRequest!,
@@ -140,6 +155,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
         emailApprovalSent: true,
         approvalRequest: toolRun.approvalRequest,
         artifactBody: toolRun.artifactBody,
+        emailTemplate: toolRun.emailTemplate,
       };
     }
   }

@@ -531,6 +531,82 @@ test("newsletter draft update persists builder html for broadcast delivery", asy
   }
 });
 
+test("newsletter approval path can persist backend Unlayer builder output", async () => {
+  const { buildUnlayerNewsletterEmail } = await import("../../../src/services/loop-executor/presets/newsletter-unlayer.js");
+  const { applyEmailApprovalResult } = await import("../../../src/services/loop-executor/approval.js");
+  const originalQuery = db.pool.query.bind(db.pool);
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Weekly Tallei newsletter to subscribers.",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    presetId: "newsletter",
+  });
+  const built = buildUnlayerNewsletterEmail({
+    subject: "Tallei update",
+    markdown: [
+      "Subject: Tallei update",
+      "Preview: Product progress and industry context.",
+      "",
+      "Hello,",
+      "",
+      "A verified update for subscribers.",
+    ].join("\n"),
+  });
+
+  let savedLoopExecutor: Record<string, unknown> | null = null;
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string, params?: unknown[]) => {
+    if (sql.includes("UPDATE workflow_runs SET status = 'waiting_for_email_approval'")) {
+      const metadata = JSON.parse(String(params?.[4] ?? "{}")) as { loop_executor?: Record<string, unknown> };
+      savedLoopExecutor = metadata.loop_executor ?? null;
+      return { rows: [], rowCount: 1 } as unknown;
+    }
+    if (sql.includes("INSERT INTO loop_run_events")) {
+      return { rows: [], rowCount: 1 } as unknown;
+    }
+    return { rows: [], rowCount: 1 } as unknown;
+  }) as typeof db.pool.query;
+
+  try {
+    await applyEmailApprovalResult({
+      context: {
+        runId: "77777777-7777-4777-8777-777777777777",
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        workflowId: "88888888-8888-4888-8888-888888888888",
+        workflowTitle: "Newsletter Loop",
+        runStatus: "running",
+        draftOutput: null,
+        metadataJson: { loop_executor: {} },
+        definition,
+      },
+      taskId: "99999999-9999-4999-8999-999999999999",
+      approvalRequest: {
+        to: "operator@example.com",
+        approvalUrl: "https://example.com/approve",
+        token: "approval-token",
+        sentAt: "2026-06-05T00:00:00.000Z",
+      },
+      artifactBody: "Subject: Tallei update\n\nHello,\n\nA verified update for subscribers.",
+      emailTemplate: {
+        html: built.html,
+        text: built.text,
+        design: built.design,
+        subject: built.subject,
+        updatedAt: "2026-06-05T00:00:00.000Z",
+        source: "builder",
+      },
+    });
+
+    assert.equal(savedLoopExecutor?.deliveryEmailSource, "builder");
+    assert.match(String(savedLoopExecutor?.deliveryEmailHtml ?? ""), /A verified update for subscribers/);
+    assert.ok(savedLoopExecutor?.deliveryEmailDesign);
+    assert.equal((savedLoopExecutor?.emailTemplate as { source?: string } | undefined)?.source, "builder");
+    assert.match(String((savedLoopExecutor?.emailTemplate as { html?: string } | undefined)?.html ?? ""), /Tallei update/);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
 test("newsletter formatter strips internal approval instructions", async () => {
   const { formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/presets/newsletter.js");
   const raw = [
@@ -625,6 +701,49 @@ test("newsletter formatter strips leaked draft scaffolding from subscriber copy"
   assert.doesNotMatch(formatted.html, /Weekly Newsletter/);
   assert.doesNotMatch(broadcast.html, /Tallei Newsletter/);
   assert.doesNotMatch(broadcast.text, /Would you like/i);
+});
+
+test("newsletter formatter strips leaked options, alternates, social snippets, and notes", async () => {
+  const { formatNewsletterForEmail, sanitizeSubscriberNewsletterBody } = await import("../../../src/services/loop-executor/presets/newsletter.js");
+  const leaked = [
+    "Subject line options",
+    "- A) Tallei updates + industry signals: your monthly snapshot",
+    "- B) What’s new at Tallei: product updates and fintech trends",
+    "",
+    "Preview text",
+    "- A quick look at Tallei’s latest product updates.",
+    "",
+    "Concise business tone",
+    "",
+    "Hello,",
+    "",
+    "Here’s your concise update.",
+    "",
+    "Tallei updates",
+    "- Verified update only.",
+    "",
+    "1-paragraph text-only version",
+    "This alternate version should not be sent.",
+    "",
+    "Suggested social snippets",
+    "LinkedIn copy should not be sent.",
+    "",
+    "Notes",
+    "Swap in exact internal links.",
+  ].join("\n");
+
+  const sanitized = sanitizeSubscriberNewsletterBody(leaked);
+  assert.match(sanitized, /^Subject: Tallei updates \+ industry signals: your monthly snapshot/m);
+  assert.match(sanitized, /Hello,/);
+  assert.doesNotMatch(sanitized, /Subject line options/i);
+  assert.doesNotMatch(sanitized, /Preview text/i);
+  assert.doesNotMatch(sanitized, /1-paragraph/i);
+  assert.doesNotMatch(sanitized, /LinkedIn copy/i);
+  assert.doesNotMatch(sanitized, /Swap in exact internal links/i);
+
+  const formatted = formatNewsletterForEmail(leaked);
+  assert.equal(formatted.subject, "Tallei updates + industry signals: your monthly snapshot");
+  assert.doesNotMatch(formatted.text, /Subject line options|Suggested social snippets|Notes/i);
 });
 
 test("newsletter formatter strips publicist handoff and third-party draft labels", async () => {

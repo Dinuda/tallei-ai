@@ -16,11 +16,13 @@ import {
   assignLoopToWorkspace,
   createLoopWorkflow,
   createWorkspace,
+  deleteLoopWorkflow,
   dispatchDueLoopWorkflows,
   dispatchLoopHeartbeatJobs,
   approveLoopRunApprovalToken,
   approveLoopRunFromUi,
   approveLoopRunGateApprovalToken,
+  ensureRunApprovalNotification,
   executeLoopWorkflow,
   getLoopRun,
   getLoopRunRoster,
@@ -168,6 +170,25 @@ async function handleGetLoop(req: AuthRequest, res: Response) {
     }
     console.error("Error reading loop workflow:", error);
     res.status(500).json({ error: "Failed to read loop workflow" });
+  }
+}
+
+async function handleDeleteLoop(req: AuthRequest, res: Response) {
+  try {
+    const { workflowId } = workflowIdSchema.parse({ workflowId: req.params.workflowId });
+    await deleteLoopWorkflow(req.authContext!, workflowId);
+    res.json({ ok: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error deleting loop workflow:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to delete loop workflow" });
   }
 }
 
@@ -418,6 +439,7 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
 router.get("/loops", requireScopes(["memory:read"]), handleListLoops);
 router.post("/loops", requireScopes(["memory:write"]), handleCreateLoop);
 router.get("/loops/:workflowId", requireScopes(["memory:read"]), handleGetLoop);
+router.delete("/loops/:workflowId", requireScopes(["memory:write"]), handleDeleteLoop);
 router.get("/loops/:workflowId/runs", requireScopes(["memory:read"]), handleListLoopRuns);
 router.post("/loops/:workflowId/run", requireScopes(["memory:write"]), handleRunLoop);
 
@@ -426,6 +448,8 @@ router.get("/internal/loops", requireScopes(["memory:read"]), handleListLoops);
 router.post("/internal/loops", requireScopes(["memory:write"]), handleCreateLoop);
 
 router.get("/internal/loops/:workflowId", requireScopes(["memory:read"]), handleGetLoop);
+
+router.delete("/internal/loops/:workflowId", requireScopes(["memory:write"]), handleDeleteLoop);
 
 router.get("/internal/loops/:workflowId/runs", requireScopes(["memory:read"]), handleListLoopRuns);
 
@@ -507,7 +531,29 @@ router.post("/runs/:runId/approve", requireScopes(["memory:write"]), async (req:
       return;
     }
     console.error("Error approving workflow run:", error);
-    res.status(500).json({ error: "Failed to approve workflow run" });
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to approve workflow run" });
+  }
+});
+
+router.post("/runs/:runId/request-approval", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const result = await ensureRunApprovalNotification({
+      auth: req.authContext!,
+      runId,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found|not waiting|No draft/i.test(error.message)) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    console.error("Error sending run approval notification:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to send approval notification" });
   }
 });
 

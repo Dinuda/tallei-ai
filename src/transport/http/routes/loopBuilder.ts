@@ -2,10 +2,11 @@ import { Router, type Response } from "express";
 import { z } from "zod";
 
 import {
-  builderTemplateSchema,
+  builderTemplateHintSchema,
   refineLoopBuilderProposal,
   resolveLoopBuilderIntent,
   saveLoopBuilderProposal,
+  loopBuilderProposalSchema,
 } from "../../../services/loop-builder/intent-resolver.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
@@ -13,8 +14,9 @@ const router = Router();
 
 const promptSchema = z.object({
   prompt: z.string().trim().min(1).max(10_000),
-  templateId: builderTemplateSchema.optional(),
+  templateId: builderTemplateHintSchema.optional(),
   feedback: z.string().trim().min(1).max(5000).optional(),
+  priorProposal: loopBuilderProposalSchema.optional(),
 });
 
 const saveSchema = z.object({
@@ -34,6 +36,7 @@ router.post("/propose", requireScopes(["memory:read"]), async (req: AuthRequest,
       prompt: body.prompt,
       templateId: body.templateId,
       feedback: body.feedback,
+      priorProposal: body.priorProposal,
     });
     res.json({ proposal });
   } catch (error) {
@@ -49,11 +52,16 @@ router.post("/propose", requireScopes(["memory:read"]), async (req: AuthRequest,
 router.post("/refine", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = promptSchema.parse(req.body ?? {});
+    if (!body.priorProposal) {
+      res.status(400).json({ error: "priorProposal is required for refine" });
+      return;
+    }
     const proposal = await refineLoopBuilderProposal({
       auth: req.authContext!,
       prompt: body.prompt,
       templateId: body.templateId,
       feedback: body.feedback,
+      priorProposal: body.priorProposal,
     });
     res.json({ proposal });
   } catch (error) {
