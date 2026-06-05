@@ -45,6 +45,19 @@ export const loopArtifactDefinitionSchema = z.object({
 
 export type LoopArtifactDefinition = z.infer<typeof loopArtifactDefinitionSchema>;
 
+export const loopStageApprovalChannelSchema = z.enum(["primary", "email", "gmail", "telegram", "whatsapp"]);
+export type LoopStageApprovalChannel = z.infer<typeof loopStageApprovalChannelSchema>;
+
+export const loopStageApprovalPolicySchema = z.object({
+  required: z.boolean().default(false),
+  mode: z.enum(["before", "after", "manual_gate"]).default("manual_gate"),
+  channels: z.array(loopStageApprovalChannelSchema).min(1).default(["primary"]),
+  onReject: z.enum(["block", "revise", "skip_stage"]).default("block"),
+  artifactRef: z.string().min(1).optional(),
+});
+
+export type LoopStageApprovalPolicy = z.infer<typeof loopStageApprovalPolicySchema>;
+
 /** Plan stage: run one agent. */
 export const loopAgentStageSchema = z.object({
   kind: z.literal("agent"),
@@ -53,6 +66,7 @@ export const loopAgentStageSchema = z.object({
   task: z.string().min(1),
   toolRef: z.string().min(1).nullable(),
   outputArtifactId: z.string().min(1).optional(),
+  approvalPolicy: loopStageApprovalPolicySchema.optional(),
 });
 
 /** Plan stage: pause for human approval on an artifact. */
@@ -62,6 +76,12 @@ export const loopApprovalGateStageSchema = z.object({
   label: z.string().min(1),
   artifactId: z.string().min(1),
   required: z.literal(true),
+  approvalPolicy: loopStageApprovalPolicySchema.default({
+    required: true,
+    mode: "manual_gate",
+    channels: ["primary"],
+    onReject: "block",
+  }),
 });
 
 /** Plan stage: pause for structured operator input. */
@@ -71,6 +91,7 @@ export const loopInputGateStageSchema = z.object({
   label: z.string().min(1),
   inputSchema: z.record(z.unknown()).default({}),
   outputArtifactId: z.string().min(1),
+  approvalPolicy: loopStageApprovalPolicySchema.optional(),
 });
 
 /** Plan stage: execute a catalog external-action tool (e.g. broadcast). */
@@ -80,6 +101,12 @@ export const loopExternalActionStageSchema = z.object({
   label: z.string().min(1),
   toolRef: z.string().min(1),
   inputArtifactIds: z.array(z.string().min(1)).default([]),
+  approvalPolicy: loopStageApprovalPolicySchema.default({
+    required: true,
+    mode: "before",
+    channels: ["primary"],
+    onReject: "block",
+  }),
 });
 
 export const loopStageSchema = z.discriminatedUnion("kind", [
@@ -90,6 +117,8 @@ export const loopStageSchema = z.discriminatedUnion("kind", [
 ]);
 
 export type LoopStage = z.infer<typeof loopStageSchema>;
+export type LoopExternalActionStage = z.infer<typeof loopExternalActionStageSchema>;
+export type LoopInputGateStage = z.infer<typeof loopInputGateStageSchema>;
 
 /** Ordered stages and artifacts for plan-driven runs. */
 export const loopPlanSchema = z.object({
@@ -155,6 +184,7 @@ export const loopDefinitionSchema = z.object({
     requireDraftBeforeExternalAction: z.boolean().default(true),
     approvalRequiredFor: z.array(z.string()).default(["publish", "send", "external_action"]),
   }),
+  deliveryType: z.string().min(1).optional(),
   agentGraph: loopAgentGraphSchema.optional(),
   plan: loopPlanSchema.optional(),
   /** Built-in preset key (e.g. `newsletter`). Resolved at runtime via presets/registry. */

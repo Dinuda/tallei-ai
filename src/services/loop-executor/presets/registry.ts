@@ -19,8 +19,6 @@ export function getLoopPreset(presetId: string | undefined): LoopPreset | null {
 export function resolveLoopPreset(definition: LoopDefinition): LoopPreset | null {
   const explicit = getLoopPreset(definition.presetId);
   if (explicit) return explicit;
-  if (/\bnewsletter\b/i.test(definition.goal)) return newsletterPreset;
-  if (definition.allowedToolRefs?.includes("internal.resend_broadcast")) return newsletterPreset;
   return null;
 }
 

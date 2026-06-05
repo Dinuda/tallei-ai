@@ -2,6 +2,7 @@
  * approval.ts — Human approval flows for loop runs (strategy, draft, recipients).
  */
 
+import { randomUUID } from "crypto";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { consumeWorkflowApprovalToken, resolveWorkflowApprovalToken } from "../approval-tokens.js";
@@ -18,8 +19,10 @@ import { insertComment, insertEvent, readObject } from "./run-store.js";
 import { materializeTasksFromPlan, materializeTasksFromRoster } from "./run-strategy.js";
 import { getEffectiveLoopConstraints, validateAgentRoster } from "./tool-catalog.js";
 import { isNewsletterLoopDefinition } from "./delivery-format.js";
-import { normalizeNewsletterTemplateId, parseContactListCsv } from "./presets/newsletter.js";
+import { normalizeNewsletterTemplateId } from "./presets/newsletter.js";
 import { resolveLoopPreset } from "./presets/registry.js";
+import { approveLoopRunGate, advanceDynamicRunAfterSeq, submitLoopRunGateInput } from "./gates.js";
+import { parseContactListCsv } from "./csv-parser.js";
 
 const DELIVERY_RECIPIENTS_INPUT_ID = "delivery_recipients";
 
@@ -86,6 +89,67 @@ async function transitionRunToDelivery(input: {
   }
 
   const approvedAt = new Date().toISOString();
+  const context = await loadRunContext(input.runId);
+
+  if (isDynamicPlanDefinition(context.definition)) {
+    const gates = await pool.query<{ id: string }>(
+      `SELECT id
+       FROM loop_run_gates
+       WHERE workflow_run_id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+         AND kind = 'approval'
+         AND status = 'pending'
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [run.id, input.tenantId, input.userId],
+    );
+    if (gates.rows[0]) {
+      const gateResult = await approveLoopRunGate({
+        auth: { tenantId: input.tenantId, userId: input.userId, authMode: "internal", plan: "pro" },
+        runId: run.id,
+        gateId: gates.rows[0].id,
+      });
+      return { runId: run.id, workflowId: run.workflow_id, status: gateResult.status };
+    }
+
+    await pool.query(
+      `UPDATE workflow_runs SET status = 'running',
+           metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+       WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+      [
+        run.id,
+        input.tenantId,
+        input.userId,
+        JSON.stringify({
+          loop_executor: {
+            approvalDecision: { approvedAt, channel: input.approvedBy },
+          },
+        }),
+      ],
+    );
+    const seqResult = await pool.query<{ seq: number }>(
+      `SELECT seq
+       FROM loop_run_tasks
+       WHERE workflow_run_id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+         AND status = 'done'
+       ORDER BY seq DESC
+       LIMIT 1`,
+      [run.id, input.tenantId, input.userId],
+    );
+    const currentSeq = typeof seqResult.rows[0]?.seq === "number" ? seqResult.rows[0].seq : -1;
+    const freshContext = await loadRunContext(run.id);
+    const advanced = await advanceDynamicRunAfterSeq(freshContext, currentSeq);
+    await insertEvent({
+      context: freshContext,
+      eventType: "run_approval_resumed",
+      payload: { approvedAt, channel: input.approvedBy, nextStatus: advanced.status },
+    });
+    return { runId: run.id, workflowId: run.workflow_id, status: advanced.status };
+  }
+
   await pool.query(
     `UPDATE workflow_runs SET status = 'waiting_for_contact_list',
          metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
@@ -159,6 +223,39 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
   await ensureRunApproved({ tenantId: input.auth.tenantId, userId: input.auth.userId, runId: input.runId });
 
   const context = await loadRunContext(input.runId);
+
+  if (isDynamicPlanDefinition(context.definition)) {
+    const gates = await pool.query(
+      `SELECT id, stage_id FROM loop_run_gates
+       WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+         AND kind = 'input' AND status = 'pending'
+       LIMIT 1`,
+      [context.runId, context.tenantId, context.userId],
+    );
+    if (gates.rows[0]) {
+      return submitLoopRunGateInput({
+        auth: input.auth,
+        runId: input.runId,
+        gateId: gates.rows[0].id,
+        value: input.csv,
+      });
+    }
+    await pool.query(
+      `INSERT INTO loop_run_artifacts
+       (id, tenant_id, user_id, workflow_run_id, stage_id, artifact_id, kind, label, body, data_json)
+       VALUES ($1, $2, $3, $4, 'external_delivery', 'uploaded_recipients', 'recipient_list', 'Uploaded recipients', $5, $6::jsonb)`,
+      [
+        randomUUID(),
+        context.tenantId,
+        context.userId,
+        context.runId,
+        `Uploaded ${input.csv.split("\n").length - 1} recipients.`,
+        JSON.stringify({ csv: input.csv }),
+      ],
+    );
+    return { runId: context.runId, status: context.runStatus, recipientCount: input.csv.split("\n").length - 1 };
+  }
+
   const uploadableStatuses = new Set(["waiting_for_contact_list", "waiting_for_input"]);
   if (!uploadableStatuses.has(context.runStatus)) {
     throw new Error(`Run is ${context.runStatus}, not waiting for recipient upload`);
@@ -261,6 +358,25 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
 export const uploadLoopRunContacts = uploadDeliveryRecipients;
 
 export async function submitLoopRunInput(input: { auth: AuthContext; runId: string; inputId: string; value: string }) {
+  const context = await loadRunContext(input.runId);
+  if (isDynamicPlanDefinition(context.definition)) {
+    const gates = await pool.query(
+      `SELECT id FROM loop_run_gates
+       WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+         AND kind = 'input' AND status = 'pending'
+       ORDER BY created_at ASC LIMIT 1`,
+      [context.runId, context.tenantId, context.userId],
+    );
+    if (gates.rows[0]) {
+      return submitLoopRunGateInput({
+        auth: input.auth,
+        runId: input.runId,
+        gateId: gates.rows[0].id,
+        value: input.value,
+      });
+    }
+    throw new Error(`No pending input gate found for run ${input.runId}`);
+  }
   const inputId = input.inputId.trim().toLowerCase();
   if (![DELIVERY_RECIPIENTS_INPUT_ID, "contacts", "contact_list", "recipient_list_csv"].includes(inputId)) {
     throw new Error(`Unsupported input id: ${input.inputId}`);

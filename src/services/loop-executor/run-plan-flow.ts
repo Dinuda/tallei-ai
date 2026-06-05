@@ -4,13 +4,26 @@
 
 import { randomUUID } from "crypto";
 import { pool } from "../../infrastructure/db/index.js";
-import { deliverApprovalPrompt, deliverStatusNotification, getPrimaryNotificationChannel } from "../channels.js";
+import { deliverApprovalPrompt, deliverStatusNotification, getPrimaryNotificationChannel, listEnabledNotificationChannels } from "../channels.js";
 import { createWorkflowApprovalRequest } from "../approval-tokens.js";
 import { isDynamicPlanDefinition, stageSeq } from "./plan.js";
 import { authFromContext, mergeLoopExecutorMeta, type LoopRunContext } from "./run-context.js";
 import { scheduleHeartbeat } from "./run-heartbeat.js";
 import { insertEvent, loadArtifact, readObject } from "./run-store.js";
 import type { LoopStage } from "./types.js";
+
+async function resolvePreferredApprovalChannel(input: {
+  context: LoopRunContext;
+  stage: LoopStage;
+}) {
+  const preferred = input.stage.approvalPolicy?.channels ?? ["primary"];
+  const auth = authFromContext(input.context);
+  if (preferred.includes("primary")) {
+    return getPrimaryNotificationChannel(auth);
+  }
+  const channels = await listEnabledNotificationChannels(auth);
+  return channels.find((channel) => preferred.includes(channel.kind)) ?? channels[0] ?? null;
+}
 
 export async function scheduleNextDynamicExecutable(input: {
   context: LoopRunContext;
@@ -117,7 +130,7 @@ export async function pauseForDynamicGate(input: {
   const notificationAuth = authFromContext(input.context);
   if (kind === "approval") {
     void (async () => {
-      const channel = await getPrimaryNotificationChannel(notificationAuth);
+      const channel = await resolvePreferredApprovalChannel({ context: input.context, stage: input.stage });
       if (!channel) return;
       const approval = await createWorkflowApprovalRequest({
         auth: notificationAuth,

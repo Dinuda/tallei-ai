@@ -12,7 +12,9 @@ import { assertRunAccess, loadRunContext, mergeLoopExecutorMeta } from "./run-co
 import { advanceDynamicRunAfterSeq, scheduleNextDynamicExecutable } from "./run-plan-flow.js";
 import { insertEvent, insertOrUpdateArtifact } from "./run-store.js";
 import { markRunBlocked } from "./run-status.js";
-import { parseContactListCsv } from "./presets/newsletter.js";
+import { getInputGateHandler } from "./input-gate-handlers.js";
+
+import "./input-gate-handler-registrations.js";
 
 async function completeDynamicGate(input: {
   auth: AuthContext;
@@ -174,16 +176,16 @@ export async function submitLoopRunGateInput(input: {
   if (!stage || stage.kind !== "input_gate") throw new Error(`Input stage ${gate.stage_id} not found in plan`);
 
   const schemaKind = typeof stage.inputSchema.kind === "string" ? stage.inputSchema.kind : "text";
-  let body = input.value;
-  let data: Record<string, unknown> = { value: input.value };
-  let recipientCount: number | undefined;
-  if (schemaKind === "csv") {
-    const contacts = parseContactListCsv(input.value);
-    body = `Uploaded ${contacts.length} recipients.`;
-    data = { contacts, recipientCount: contacts.length };
-    recipientCount = contacts.length;
-  }
-  await insertOrUpdateArtifact({ context, stage, artifactId: stage.outputArtifactId, body, data });
+  const handler = getInputGateHandler(schemaKind) ?? getInputGateHandler("text");
+  if (!handler) throw new Error(`No input gate handler registered for ${schemaKind}`);
+  const parsed = await handler({ value: input.value, stage });
+  await insertOrUpdateArtifact({
+    context,
+    stage,
+    artifactId: stage.outputArtifactId,
+    body: parsed.body,
+    data: parsed.data,
+  });
   const result = await completeDynamicGate({
     auth: input.auth,
     runId: input.runId,
@@ -191,7 +193,11 @@ export async function submitLoopRunGateInput(input: {
     status: "submitted",
     decision: { submittedAt: new Date().toISOString(), channel: "ui", artifactId: stage.outputArtifactId },
   });
-  return { ...result, artifactId: stage.outputArtifactId, ...(recipientCount !== undefined ? { recipientCount } : {}) };
+  return {
+    ...result,
+    artifactId: stage.outputArtifactId,
+    ...(parsed.response ?? {}),
+  };
 }
 
 export { advanceDynamicRunAfterSeq };

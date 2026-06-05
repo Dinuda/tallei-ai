@@ -1,30 +1,28 @@
 /**
- * delivery-format.ts — Resolve content formatters for outbound delivery steps.
+ * delivery-format.ts — Pluggable delivery formatter registry.
+ *
+ * Formatters are registered by preset ID or delivery type.
+ * The newsletter formatter is registered at module load.
  */
 
-import { newsletterDeliveryFormatter } from "./presets/newsletter.js";
 import { getLoopPreset } from "./presets/registry.js";
 import type { DeliveryContentFormatter, LoopDefinition } from "./types.js";
 
-/** Heuristic for subscriber-facing newsletter markdown (works even on legacy loop definitions). */
-export function looksLikeNewsletterContent(body: string): boolean {
-  const sample = body.trim().slice(0, 4000);
-  if (!sample) return false;
-  return /\*\*[^*\n]{3,}\*\*/.test(sample)
-    || /^#{1,6}\s+\S/m.test(sample)
-    || /^\*\*subject:/im.test(sample)
-    || /\bhey product builders\b/i.test(sample);
+const formatters = new Map<string, DeliveryContentFormatter>();
+
+export function registerDeliveryFormatter(key: string, formatter: DeliveryContentFormatter): void {
+  formatters.set(key, formatter);
+}
+
+export function getDeliveryFormatter(key: string): DeliveryContentFormatter | undefined {
+  return formatters.get(key);
 }
 
 /** Newsletter loops use subscriber formatting + React Email for delivery. */
 export function isNewsletterLoopDefinition(definition: LoopDefinition): boolean {
   const preset = getLoopPreset(definition.presetId);
   if (preset?.id === "newsletter") return true;
-  const integrations = new Set(definition.allowedIntegrations.map((integration) => integration.trim().toLowerCase()));
-  if (integrations.has("react_email")) return true;
-  const toolRefs = new Set((definition.allowedToolRefs ?? []).map((ref) => ref.trim()));
-  if (toolRefs.has("internal.resend_broadcast") || toolRefs.has("internal.react_email_template")) return true;
-  return /\bnewsletter\b/i.test(definition.goal);
+  return false;
 }
 
 const plainDeliveryFormatter: DeliveryContentFormatter = {
@@ -37,11 +35,27 @@ const plainDeliveryFormatter: DeliveryContentFormatter = {
   formatForBroadcast: (formatted) => ({ text: formatted.text, html: formatted.html }),
 };
 
+export { plainDeliveryFormatter };
+
 export function resolveDeliveryFormatter(
   definition: LoopDefinition,
-  deliveryBody?: string,
+  _deliveryBody?: string,
 ): DeliveryContentFormatter {
-  if (isNewsletterLoopDefinition(definition)) return newsletterDeliveryFormatter;
-  if (deliveryBody && looksLikeNewsletterContent(deliveryBody)) return newsletterDeliveryFormatter;
+  if (definition.presetId) {
+    const registered = formatters.get(definition.presetId);
+    if (registered) return registered;
+  }
+
+  const deliveryType = definition.deliveryType;
+  if (typeof deliveryType === "string") {
+    const registered = formatters.get(deliveryType);
+    if (registered) return registered;
+  }
+
+  if (isNewsletterLoopDefinition(definition)) {
+    const newsletter = formatters.get("newsletter");
+    if (newsletter) return newsletter;
+  }
+
   return plainDeliveryFormatter;
 }

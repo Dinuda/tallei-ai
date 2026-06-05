@@ -9,6 +9,8 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 import { pool } from "../../infrastructure/db/index.js";
 import { deliverStatusNotification } from "../channels.js";
+import { getExternalActionHandler } from "./external-action-handlers.js";
+import "./external-action-handlers-registrations.js";
 import { runLoopAgent } from "./agent-runner.js";
 import { applyEmailApprovalResult } from "./approval.js";
 import { advanceDynamicRunAfterSeq } from "./gates.js";
@@ -254,91 +256,11 @@ export async function runAgentHeartbeat(runId, taskId) {
             : null;
         const auth = authFromContext(context);
         if (isDynamicPlanDefinition(context.definition) && stage?.kind === "external_action") {
-            if (stage.toolRef !== "internal.resend_broadcast") {
-                throw new Error(`Unsupported dynamic external action tool: ${stage.toolRef}`);
+            const handler = getExternalActionHandler(stage.toolRef as string);
+            if (!handler) {
+                throw new Error(`No external action handler registered for tool: ${stage.toolRef}`);
             }
-            const artifacts = await loadRunArtifacts(context);
-            const byId = new Map(artifacts.map((artifact) => [artifact.artifact_id, artifact]));
-            const stageArtifacts = stage.inputArtifactIds.map((artifactId) => byId.get(artifactId)).filter((artifact) => Boolean(artifact));
-            const contactArtifact = stageArtifacts.find((artifact) => artifact.kind === "contact_list" || artifact.kind === "recipient_list")
-                ?? artifacts.find((artifact) => artifact.kind === "contact_list" || artifact.kind === "recipient_list");
-            const contentArtifact = stageArtifacts.find((artifact) => artifact.id !== contactArtifact?.id)
-                ?? artifacts.find((artifact) => artifact.kind !== "contact_list" && artifact.kind !== "recipient_list" && Boolean(artifact.body?.trim()));
-            const resultArtifact = context.definition.plan.artifacts.find((artifact) => artifact.kind === "delivery_result");
-            const contactsRaw = readObject(contactArtifact?.data_json).contacts;
-            const contacts = Array.isArray(contactsRaw)
-                ? contactsRaw.map((row) => readObject(row)).map((row) => ({
-                    email: typeof row.email === "string" ? row.email : "",
-                    ...(typeof row.name === "string" ? { name: row.name } : {}),
-                })).filter((row) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.email))
-                : [];
-            if (!contentArtifact?.body?.trim())
-                throw new Error("Approved content artifact is required before broadcast");
-            if (contacts.length === 0)
-                throw new Error("Recipient artifact is required before broadcast");
-            const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
-                deliveryContentBody: contentArtifact.body,
-                deliveryContentArtifactId: contentArtifact.artifact_id,
-                deliveryResultArtifactId: resultArtifact?.id ?? null,
-                deliveryRecipients: {
-                    uploadedAt: new Date().toISOString(),
-                    contacts,
-                    recipientCount: contacts.length,
-                },
-                deliveryAction: {
-                    kind: "send_broadcast",
-                    status: "in_progress",
-                    startedAt: new Date().toISOString(),
-                    recipientCount: contacts.length,
-                    successCount: 0,
-                    failureCount: 0,
-                },
-            });
-            await insertComment({
-                context,
-                taskId: task.id,
-                author: task.agent_id,
-                body: `Prepared ${contacts.length} recipients for ${stage.label}.`,
-            });
-            await pool.query(`UPDATE loop_run_tasks
-         SET status = 'done',
-             output_json = $4::jsonb,
-             completed_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1
-           AND tenant_id = $2
-           AND user_id = $3`, [
-                task.id,
-                context.tenantId,
-                context.userId,
-                JSON.stringify({ text: `Prepared broadcast for ${contacts.length} recipients.`, stage }),
-            ]);
-            await pool.query(`UPDATE workflow_runs
-         SET status = 'executing_action',
-             connector_action_status = 'distribution_started',
-             metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb,
-             updated_at = NOW()
-         WHERE id = $1
-           AND tenant_id = $2
-           AND user_id = $3`, [
-                context.runId,
-                context.tenantId,
-                context.userId,
-                JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
-            ]);
-            await insertEvent({
-                context,
-                taskId: task.id,
-                eventType: "external_action_started",
-                payload: { stageId: stage.id, toolRef: stage.toolRef, recipientCount: contacts.length },
-            });
-            await scheduleHeartbeat({
-                tenantId: context.tenantId,
-                userId: context.userId,
-                runId: context.runId,
-                jobType: "distribution",
-            });
-            return { status: "executing_action", taskId: task.id };
+            return handler(context, task, stage as import("./types.js").LoopExternalActionStage);
         }
         const connectorValidation = await validateAgentRoster({
             agents: [{ tools: assignedTools }],

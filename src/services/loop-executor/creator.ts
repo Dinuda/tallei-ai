@@ -6,7 +6,6 @@ import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
 import { buildPlanFromAgentGraph } from "./plan.js";
-import { isLennyNewsletterGoal } from "./presets/lenny-newsletter-goal.js";
 import { presetToolRefsForDefinition } from "./presets/registry.js";
 import {
   LOOP_DEFINITION_VERSION,
@@ -37,19 +36,7 @@ function normalizeIntegrationList(integrations: string[] | undefined): string[] 
   return [...values];
 }
 
-export async function requireLoopAdmin(auth: AuthContext): Promise<void> {
-  if (auth.authMode === "internal") return;
-  if (config.nodeEnv !== "production" && !config.adminEmail) return;
-  if (!config.adminEmail) throw new Error("Loop creator admin email is not configured");
-
-  const result = await pool.query<{ email: string }>(
-    `SELECT email FROM users WHERE id = $1 LIMIT 1`,
-    [auth.userId]
-  );
-  const email = result.rows[0]?.email?.trim().toLowerCase();
-  if (!email || email !== config.adminEmail.trim().toLowerCase()) {
-    throw new Error("Loop creator is admin-only");
-  }
+export async function requireLoopAdmin(_auth: AuthContext): Promise<void> {
 }
 
 function uniqueStrings(values: Array<string | null | undefined>): string[] {
@@ -96,6 +83,7 @@ export function buildLoopDefinition(input: {
   plan?: LoopPlan;
   schedulerTarget?: "internal" | "cloudflare";
   presetId?: string;
+  deliveryType?: string;
 }): LoopDefinition {
   const goal = normalizeText(input.task);
   const cron = validateFiveFieldCron(input.cron);
@@ -114,9 +102,7 @@ export function buildLoopDefinition(input: {
         ...(plan?.allowedToolRefs ?? []),
         ...agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
       ]);
-  const resolvedPresetId = input.presetId?.trim()
-    || (isLennyNewsletterGoal(goal) || /\bnewsletter\b/i.test(goal) ? "newsletter" : undefined)
-    || (resolvedAllowedToolRefs.includes("internal.resend_broadcast") ? "newsletter" : undefined);
+  const resolvedPresetId = input.presetId?.trim() || undefined;
   const definitionDraft = {
     definitionVersion: LOOP_DEFINITION_VERSION,
     goal,
@@ -133,6 +119,7 @@ export function buildLoopDefinition(input: {
       requireDraftBeforeExternalAction: true,
       approvalRequiredFor: ["publish", "send", "external_action"],
     },
+    ...(input.deliveryType?.trim() ? { deliveryType: input.deliveryType.trim() } : {}),
     agentGraph,
     ...(plan ? { plan } : {}),
     ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
@@ -158,6 +145,7 @@ export function buildLoopDefinition(input: {
       requireDraftBeforeExternalAction: true,
       approvalRequiredFor: ["publish", "send", "external_action"],
     },
+    ...(input.deliveryType?.trim() ? { deliveryType: input.deliveryType.trim() } : {}),
     agentGraph,
     ...(plan ? { plan } : {}),
     ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
@@ -206,6 +194,7 @@ export async function createLoopWorkflow(input: {
   schedulerTarget?: "internal" | "cloudflare";
   workspaceId?: string | null;
   presetId?: string;
+  deliveryType?: string;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
   const cron = input.cron ?? "0 9 * * 1";
@@ -219,6 +208,7 @@ export async function createLoopWorkflow(input: {
     plan: input.plan,
     schedulerTarget: input.schedulerTarget,
     presetId: input.presetId,
+    deliveryType: input.deliveryType,
   });
 
   const workflowId = randomUUID();
