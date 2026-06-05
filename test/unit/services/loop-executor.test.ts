@@ -75,7 +75,7 @@ test("newsletter preset roster takes precedence over generated content plan", as
   assert.match(output.strategyText, /fixed weekly newsletter pipeline/i);
   assert.deepEqual(
     output.agents.map((agent) => agent.id),
-    ["search_agent", "web_search_agent", "research_agent", "writer", "approval_handoff"]
+    ["search_agent", "web_search_agent", "research_agent", "writer", "email_build", "approval", "broadcast_delivery"]
   );
 });
 
@@ -132,13 +132,13 @@ test("newsletter preset roster includes real Lenny seed memory, Exa web search, 
   assert.match(writer?.task ?? "", /Do not fall back to a generic weekly roundup or broad link dump/i);
 });
 
-test("buildLoopDefinition sets newsletter preset for Lenny goal", () => {
+test("buildLoopDefinition does not infer the fixed newsletter preset from a bespoke newsletter goal", () => {
   const definition = loopExecutor.buildLoopDefinition({
     task: "Lenny writes a weekly product newsletter for product builders.",
     cron: "0 9 * * 1",
     timezone: "UTC",
   });
-  assert.equal(definition.presetId, "newsletter");
+  assert.equal(definition.presetId, undefined);
   assert.match(definition.goal, /Lenny/i);
   assert.doesNotMatch(definition.goal, /xyz product/i);
 });
@@ -148,6 +148,7 @@ test("newsletter preset roster passes validation when create-time allowlist was 
     task: "Lenny writes a weekly product newsletter for product builders.",
     cron: "0 9 * * 1",
     timezone: "UTC",
+    presetId: "newsletter",
     allowedToolRefs: ["internal.llm_only"],
   });
 
@@ -174,12 +175,12 @@ test("newsletter preset roster passes validation when create-time allowlist was 
   }
 });
 
-test("configured agent graph roster is used without preset re-planning", async () => {
+test("configured bespoke newsletter graph appends broadcast delivery without preset re-planning", async () => {
   const definition = loopExecutor.buildLoopDefinition({
     task: "Weekly newsletter for builders",
     cron: "0 9 * * 1",
     timezone: "UTC",
-    presetId: "newsletter",
+    deliveryType: "newsletter",
     agentGraph: {
       parent: {
         id: "parent_agent",
@@ -206,7 +207,12 @@ test("configured agent graph roster is used without preset re-planning", async (
 
   const output = await loopExecutor.buildCeoStrategyOutput({ definition } as never);
   assert.match(output.strategyText, /configured agent roster/i);
-  assert.deepEqual(output.agents.map((agent) => agent.id), ["search_agent", "writer"]);
+  assert.equal(definition.presetId, undefined);
+  assert.deepEqual(output.agents.map((agent) => agent.id), ["search_agent", "writer", "broadcast_delivery"]);
+  const writer = output.agents.find((agent) => agent.id === "writer");
+  const broadcast = output.agents.find((agent) => agent.id === "broadcast_delivery");
+  assert.deepEqual(writer?.tools.map((tool) => tool.ref), ["internal.llm_only"]);
+  assert.deepEqual(broadcast?.tools.map((tool) => tool.ref), ["internal.resend_broadcast"]);
 });
 
 test("tool catalog rejects unknown tool refs", async () => {
@@ -785,7 +791,7 @@ test("broadcast formatter includes Resend contact properties and unsubscribe URL
   const broadcast = await formatNewsletterForBroadcast(formatted);
   assert.match(broadcast.html, /\{\{\{contact\.first_name\|there\}\}\}/);
   assert.match(broadcast.html, /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/);
-  assert.match(broadcast.html, /subscribed to updates[\s\S]*from Tallei/i);
+  assert.match(broadcast.html, /subscribed to\s+updates[\s\S]*from Tallei/i);
   assert.match(broadcast.text, /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/);
 });
 
@@ -795,9 +801,11 @@ test("broadcast formatter uses React Email by default for newsletter delivery", 
   const legacy = await formatNewsletterForBroadcast(formatted, { templateId: "editorial", useReactEmail: false });
   const templated = await formatNewsletterForBroadcast(formatted, { templateId: "editorial" });
 
-  assert.doesNotMatch(legacy.html, /vercel-logo\.png/);
-  assert.match(templated.html, /vercel-logo\.png/);
+  assert.doesNotMatch(legacy.html, /<!DOCTYPE html PUBLIC/i);
+  assert.match(templated.html, /<!DOCTYPE html PUBLIC/i);
   assert.match(templated.html, /\{\{\{contact\.first_name\|there\}\}\}/);
+  assert.match(templated.html, /\{\{\{RESEND_UNSUBSCRIBE_URL\}\}\}/);
+  assert.doesNotMatch(templated.html, /undefined/);
 });
 
 test("delivery formatter falls back to newsletter formatting from markdown body", async () => {

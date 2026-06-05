@@ -3,14 +3,14 @@ import type { LoopTemplate } from "./types.js";
 export const newsletterBroadcastTemplate: LoopTemplate = {
   id: "newsletter_broadcast",
   label: "Newsletter Broadcast",
-  description: "Subscriber-facing newsletter with distinct writing, approval/email build, and broadcast delivery steps.",
+  description: "Subscriber-facing newsletter with distinct writing, email build, approval, and broadcast delivery steps.",
   tags: ["newsletter", "email", "broadcast", "subscribers", "weekly"],
   highPotential: true,
   summary: [
     "Benchmark for subscriber email loops: same research pipeline as Writing Companion,",
-    "plus an Approval & Email Build agent that asks for review and prepares the email,",
+    "plus separate Email Build and Approval agents,",
     "then a separate broadcast delivery step that only syncs recipients and sends the approved broadcast.",
-    "Use presetId newsletter only when the user explicitly wants broadcast to a subscriber list.",
+    "Use deliveryType newsletter for bespoke subscriber loops; never set presetId from this inspiration pattern.",
   ].join(" "),
   whenToUse: "Borrow when the user wants a recurring newsletter or email blast to subscribers with broadcast delivery.",
   suggestedTools: [
@@ -48,12 +48,23 @@ export const newsletterBroadcastTemplate: LoopTemplate = {
       tools: ["internal.llm_only"],
     },
     {
-      id: "approval_handoff",
-      name: "Approval & Email Build Agent",
-      task: "Ask the operator to review the draft and prepare/render the email. Do not sync recipients or send the broadcast.",
-      tools: ["internal.email_approval_request", "internal.email_builder_compose", "internal.email_builder_render"],
+      id: "email_build",
+      name: "Email Build Agent",
+      task: "Compose and render the visual email from the writer draft only. Do not send approval requests or broadcast.",
+      tools: ["internal.email_builder_compose", "internal.email_builder_render"],
+    },
+    {
+      id: "approval",
+      name: "Approval Agent",
+      task: "Ask the operator to review the draft and send the approval request only. Do not build email HTML or broadcast.",
+      tools: ["internal.email_approval_request"],
+    },
+    {
+      id: "broadcast_delivery",
+      name: "Broadcast Delivery Agent",
+      task: "After approval and recipient upload, sync contacts and submit the approved Resend broadcast only. Do not write, approve, or build email HTML.",
+      tools: ["internal.resend_broadcast"],
     },
   ],
   deliveryTypeHint: "newsletter",
-  presetIdHint: "newsletter",
 };

@@ -6,6 +6,7 @@
  */
 
 import type { DeliveryContentFormatter, LoopDefinition } from "./types.js";
+import { isNewsletterDeliveryDefinition } from "./agent-responsibilities.js";
 
 const formatters = new Map<string, DeliveryContentFormatter>();
 
@@ -19,7 +20,16 @@ export function getDeliveryFormatter(key: string): DeliveryContentFormatter | un
 
 /** Newsletter loops use subscriber formatting + React Email for delivery. */
 export function isNewsletterLoopDefinition(definition: LoopDefinition): boolean {
-  return definition.presetId === "newsletter" || definition.presetId === "newsletter_v1";
+  return isNewsletterDeliveryDefinition(definition);
+}
+
+export function looksLikeNewsletterContent(body: string): boolean {
+  const normalized = body.trim();
+  if (!normalized) return false;
+  return /\bnewsletter\b/i.test(normalized)
+    || /\bsubject\s*:/i.test(normalized)
+    || /^#{1,3}\s+\S+/m.test(normalized)
+    || /^\*\*[^*\n]{8,120}\*\*/m.test(normalized);
 }
 
 const plainDeliveryFormatter: DeliveryContentFormatter = {
@@ -36,7 +46,7 @@ export { plainDeliveryFormatter };
 
 export function resolveDeliveryFormatter(
   definition: LoopDefinition,
-  _deliveryBody?: string,
+  deliveryBody?: string,
 ): DeliveryContentFormatter {
   if (definition.presetId) {
     const registered = formatters.get(definition.presetId);
@@ -49,7 +59,7 @@ export function resolveDeliveryFormatter(
     if (registered) return registered;
   }
 
-  if (isNewsletterLoopDefinition(definition)) {
+  if (isNewsletterLoopDefinition(definition) || (deliveryBody && looksLikeNewsletterContent(deliveryBody))) {
     const newsletter = formatters.get("newsletter");
     if (newsletter) return newsletter;
   }

@@ -5,6 +5,7 @@
  */
 
 import {
+  claimLoopHeartbeatJob,
   completeLoopHeartbeatJob,
   enqueueLoopHeartbeatJob,
   failLoopHeartbeatJob,
@@ -45,6 +46,8 @@ export async function scheduleHeartbeat(input: ScheduleHeartbeatInput): Promise<
     idempotencySuffix: input.idempotencySuffix,
   });
   if (!job) return;
+  const claimedJob = await claimLoopHeartbeatJob(job.id);
+  if (!claimedJob) return;
 
   try {
     if (input.jobType === "agent") {
@@ -68,21 +71,21 @@ export async function scheduleHeartbeat(input: ScheduleHeartbeatInput): Promise<
       }
     } else if (input.jobType === "distribution") {
       const { runDistributionHeartbeat } = await import("./distribution.js");
-      await runDistributionHeartbeat(input.runId);
+      await runDistributionHeartbeat(input.runId, input.taskId);
     } else {
       const { runCeoFinalizeHeartbeat } = await import("./executor.js");
       await runCeoFinalizeHeartbeat(input.runId);
     }
-    await completeLoopHeartbeatJob(job.id);
+    await completeLoopHeartbeatJob(claimedJob.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const attempt = job.attempts + 1;
+    const attempt = claimedJob.attempts;
     if (input.jobType === "agent" && RETRYABLE_AGENT_ERROR.test(message)) {
-      await failLoopHeartbeatJob(job.id, message, attempt, job.max_attempts);
+      await failLoopHeartbeatJob(claimedJob.id, message, attempt, claimedJob.max_attempts);
       return;
     }
-    await failLoopHeartbeatJob(job.id, message, attempt, job.max_attempts);
-    if (attempt >= job.max_attempts) {
+    await failLoopHeartbeatJob(claimedJob.id, message, attempt, claimedJob.max_attempts);
+    if (attempt >= claimedJob.max_attempts) {
       const { markRunBlocked } = await import("./run-status.js");
       await markRunBlocked(input.runId, `Heartbeat job failed: ${message}`, input.taskId ?? null).catch(() => undefined);
     }

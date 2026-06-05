@@ -34,6 +34,11 @@ import {
 import { AgentRow, AgentPlaceholder, ApprovalGateRow, CeoRow, type AgentRowTask, type ApprovalGateInfo } from "./components/agent-rows";
 import { ChatDrawer, type ChatComment } from "./components/chat-drawer";
 import { EmailBuilderDialog } from "./components/email-builder-dialog";
+import { NewsletterMetadataPanel } from "./components/newsletter-metadata-panel";
+import {
+  formatNewsletterMetadataSummary,
+  resolveNewsletterSendMetadata,
+} from "./components/newsletter-metadata";
 import {
   StrategyRosterEditor,
   type CatalogTool,
@@ -186,6 +191,8 @@ type LoopRun = {
   emailTemplate?: {
     html: string;
     design: unknown;
+    subject?: string | null;
+    preview?: string | null;
     updatedAt: string | null;
   } | null;
   createdAt: string;
@@ -246,6 +253,9 @@ const ACTIVE_STATUSES = new Set([
   "waiting_for_email_approval",
   "waiting_for_approval",
   "waiting_for_gate",
+  "executing_action",
+  "distributing",
+  "waiting_for_contact_list",
 ]);
 
 const CHANNEL_LABELS: Record<string, string> = {
@@ -267,12 +277,18 @@ function gateApprovalChannels(gate: LoopRunGate | null): string[] {
   return Array.isArray(channels) && channels.length > 0 ? channels : ["primary"];
 }
 
-function isApprovalAgentTask(task: LoopRunTask): boolean {
+function isApprovalRunTask(task: LoopRunTask): boolean {
   const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
   return (
     refs.includes("email_approval_request") ||
     task.agentId.toLowerCase().includes("approval") ||
     task.toolKey.toLowerCase().includes("email_approval")
+  );
+}
+
+function rosterHasDedicatedApprovalAgent(tasks: LoopRunTask[]): boolean {
+  return tasks.some((task) =>
+    (task.assignedTools ?? []).some((tool) => tool.ref === "internal.email_approval_request"),
   );
 }
 
@@ -305,7 +321,7 @@ function needsRunApproval(
   if (run.status === "waiting_for_approval" || run.status === "waiting_for_email_approval") return true;
   if (!hasDraftReady(run, tasks)) return false;
 
-  const approvalTask = tasks.find(isApprovalAgentTask);
+  const approvalTask = tasks.find(isApprovalRunTask);
   if (run.status === "blocked") {
     if (approvalTask && (approvalTask.status === "blocked" || approvalTask.status === "in_progress")) {
       return true;
@@ -314,7 +330,7 @@ function needsRunApproval(
       (task) => isWriterRunTask(task) && (task.status === "done" || task.status === "completed"),
     );
     const approvalPending = tasks.some(
-      (task) => isApprovalAgentTask(task) && (task.status === "todo" || task.status === "blocked"),
+      (task) => isApprovalRunTask(task) && (task.status === "todo" || task.status === "blocked"),
     );
     return writerDone && approvalPending;
   }
@@ -425,17 +441,111 @@ function getTaskOutput(task: {
   return "";
 }
 
-function isPublicistTask(task: AgentRowTask): boolean {
+function isBroadcastDeliveryTask(task: AgentRowTask): boolean {
   const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
-  return (
-    refs.includes("email_approval_request") ||
-    refs.includes("email_builder_compose") ||
-    refs.includes("email_builder_render") ||
-    task.agentId.toLowerCase().includes("approval") ||
-    task.agentId.toLowerCase().includes("publicist") ||
-    task.toolKey.toLowerCase().includes("email_approval") ||
-    task.toolKey.toLowerCase().includes("email_builder")
-  );
+  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
+  return refs.includes("resend_broadcast") || (key.includes("broadcast") && key.includes("delivery"));
+}
+
+function isApprovalAgentTask(task: AgentRowTask): boolean {
+  if (isBroadcastDeliveryTask(task) || isEmailBuildAgentTask(task)) return false;
+  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
+  return refs.includes("email_approval_request");
+}
+
+function isEmailBuildAgentTask(task: AgentRowTask): boolean {
+  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
+  return (refs.includes("email_builder_compose") || refs.includes("email_builder_render"))
+    && !refs.includes("email_approval_request");
+}
+
+function getEmailBuildHtml(task: AgentRowTask): string | null {
+  const out = readRecord(task.outputJson);
+  const template = readRecord(out.emailTemplate);
+  return typeof template.html === "string" && template.html.trim() ? template.html : null;
+}
+
+function readEmailTemplateRecord(source: unknown) {
+  const record = readRecord(source);
+  return {
+    subject: typeof record.subject === "string" ? record.subject : null,
+    preview: typeof record.preview === "string" ? record.preview : null,
+    html: typeof record.html === "string" ? record.html : null,
+  };
+}
+
+function resolveRunNewsletterMetadata(input: {
+  markdown: string;
+  task: AgentRowTask | null;
+  run: LoopRun | null;
+  html?: string | null;
+}) {
+  const taskTemplate = input.task ? readEmailTemplateRecord(readRecord(input.task.outputJson).emailTemplate) : null;
+  const runTemplate = input.run?.emailTemplate
+    ? {
+        subject: input.run.emailTemplate.subject ?? null,
+        preview: input.run.emailTemplate.preview ?? null,
+        html: input.run.emailTemplate.html ?? null,
+      }
+    : null;
+  return resolveNewsletterSendMetadata({
+    markdown: input.markdown,
+    emailTemplate: {
+      subject: taskTemplate?.subject ?? runTemplate?.subject ?? null,
+      preview: taskTemplate?.preview ?? runTemplate?.preview ?? null,
+      html: taskTemplate?.html ?? runTemplate?.html ?? input.html ?? null,
+    },
+  });
+}
+
+function getAgentMetadataSummary(
+  task: AgentRowTask,
+  draftMarkdown: string,
+  run: LoopRun | null,
+): string | null {
+  if (isWriterTask(task)) {
+    const markdown = getTaskOutput(task) || draftMarkdown;
+    return formatNewsletterMetadataSummary(resolveNewsletterSendMetadata({ markdown }));
+  }
+  if (isEmailBuildAgentTask(task)) {
+    return formatNewsletterMetadataSummary(resolveRunNewsletterMetadata({
+      markdown: draftMarkdown,
+      task,
+      run,
+    }));
+  }
+  return null;
+}
+
+function getBroadcastDeliveryOutput(task: AgentRowTask, run: LoopRun | null): string {
+  const out = readRecord(task.outputJson);
+  if (typeof out.text === "string" && out.text.trim()) return out.text.trim();
+  const distribution = readRecord(out.distribution);
+  const broadcastId = typeof distribution.broadcastId === "string"
+    ? distribution.broadcastId
+    : run?.deliveryAction?.broadcastId ?? null;
+  const successCount = typeof out.successCount === "number"
+    ? out.successCount
+    : run?.stats?.delivery?.successCount ?? run?.deliveryAction?.successCount ?? 0;
+  const failureCount = typeof out.failureCount === "number"
+    ? out.failureCount
+    : run?.stats?.delivery?.failureCount ?? run?.deliveryAction?.failureCount ?? 0;
+  const recipientCount = run?.deliveryAction?.recipientCount ?? run?.stats?.contacts?.recipientCount ?? 0;
+  if (task.status === "in_progress") {
+    return recipientCount > 0
+      ? `Syncing ${recipientCount} recipient(s) and submitting the Resend broadcast…`
+      : "Waiting for recipient upload before broadcast delivery can run.";
+  }
+  if (broadcastId || successCount > 0 || failureCount > 0) {
+    return [
+      `Resend broadcast ${broadcastId ?? "pending"}: ${successCount} submitted, ${failureCount} failed.`,
+      typeof distribution.provider === "string" ? `Provider: ${distribution.provider}` : null,
+    ].filter(Boolean).join("\n");
+  }
+  const inp = readRecord(task.inputJson);
+  const agent = readRecord(inp.agent);
+  if (typeof agent.task === "string" && agent.task.trim()) return agent.task.trim();
+  return "Broadcast delivery has not run yet.";
 }
 
 function isWriterTask(task: AgentRowTask): boolean {
@@ -453,16 +563,33 @@ function isAgentRowOpen(task: AgentRowTask, expandedTaskId: string | null): bool
   return expandedTaskId === task.id;
 }
 
-function getPublicistMeta(task: AgentRowTask) {
+function getApprovalMeta(task: AgentRowTask, run: LoopRun | null) {
   const out = readRecord(task.outputJson);
   const req = readRecord(out.approvalRequest);
+  const runApproval = run?.stats?.approval ?? null;
   return {
-    to: typeof req.to === "string" ? req.to : null,
-    channel: typeof req.channel === "string" ? req.channel : null,
-    sentAt: typeof req.sentAt === "string" ? req.sentAt : null,
+    to: typeof req.to === "string" ? req.to : runApproval?.requestedTo ?? null,
+    channel: typeof req.channel === "string" ? req.channel : runApproval?.channel ?? null,
+    sentAt: typeof req.sentAt === "string" ? req.sentAt : runApproval?.requestedAt ?? null,
+    approvedAt: runApproval?.approvedAt ?? null,
     artifactBody: typeof out.artifactBody === "string" ? out.artifactBody : null,
-    emailApprovalSent: out.emailApprovalSent === true,
+    emailApprovalSent: out.emailApprovalSent === true || Boolean(runApproval?.requestedAt ?? req.sentAt),
+    summary: typeof out.text === "string" && out.text.trim()
+      ? out.text.trim()
+      : task.latestComment?.body?.trim() ?? "",
   };
+}
+
+function getApprovalAgentOutput(task: AgentRowTask, run: LoopRun | null): string {
+  const meta = getApprovalMeta(task, run);
+  if (meta.summary && !/\bbroadcast\b/i.test(meta.summary)) return meta.summary;
+  if (meta.approvedAt) {
+    return "You approved this email. Recipient sync and Resend broadcast delivery run separately in the Broadcast Delivery Agent.";
+  }
+  if (meta.to && meta.sentAt) {
+    return `Approval request sent to ${meta.to}. The preview below is the email submitted for your review — it is not the subscriber broadcast.`;
+  }
+  return getTaskOutput(task);
 }
 
 function looksTechnicalContent(v: string): boolean {
@@ -657,16 +784,19 @@ function runAction(
   if (needsRunApproval(run, gates, tasks)) {
     const channelSent = Boolean(run?.stats?.approval?.requestedAt);
     const channelLabel = run?.stats?.approval?.requestedTo ?? run?.stats?.approval?.channel ?? null;
+    const approvalAgentHandlesNotify = rosterHasDedicatedApprovalAgent(tasks);
     return {
       show: true,
       headline: status === "blocked" ? "Newsletter draft ready for approval" : "Newsletter is ready for approval",
       sub: channelSent
         ? `Approval sent to ${channelLabel ?? "your notification channel"}. Review the draft, then approve to continue.`
-        : firstSentence(run?.draftOutput, "Review and approve this newsletter. We'll notify your configured channel."),
+        : approvalAgentHandlesNotify
+          ? firstSentence(run?.draftOutput, "Review and approve this newsletter. The approval agent will send one notification email.")
+          : firstSentence(run?.draftOutput, "Review and approve this newsletter. We'll notify your configured channel."),
       cta: "Approve newsletter",
       action: "approve",
       tone: "sky",
-      notifyChannels: !channelSent,
+      notifyChannels: !channelSent && !approvalAgentHandlesNotify,
     };
   }
   if (status === "blocked") {
@@ -811,14 +941,28 @@ export default function LoopRunDetailPage() {
   })();
   const centerOutput = run?.status === "waiting_for_strategy_approval" && !predefinedNewsletterRun && run.strategyOutput?.trim()
     ? run.strategyOutput
-    : activeAgentTask
-      ? getTaskOutput(activeAgentTask)
-      : rawPrimaryNewsletter || null;
+    : activeAgentTask && isBroadcastDeliveryTask(activeAgentTask)
+      ? getBroadcastDeliveryOutput(activeAgentTask, run)
+      : activeAgentTask && isApprovalAgentTask(activeAgentTask)
+        ? getApprovalAgentOutput(activeAgentTask, run)
+        : activeAgentTask
+          ? getTaskOutput(activeAgentTask)
+          : rawPrimaryNewsletter || null;
   const centerUpdatedAt = activeAgentTask ? activeAgentTask.completedAt ?? activeAgentTask.startedAt : run?.updatedAt ?? linkedLatestRun?.createdAt ?? null;
-  const isPublicistView = Boolean(activeAgentTask && isPublicistTask(activeAgentTask));
-  const publicistMeta = activeAgentTask && isPublicistTask(activeAgentTask) ? getPublicistMeta(activeAgentTask) : null;
+  const isApprovalView = Boolean(activeAgentTask && isApprovalAgentTask(activeAgentTask));
+  const isEmailBuildView = Boolean(activeAgentTask && isEmailBuildAgentTask(activeAgentTask));
+  const isBroadcastView = Boolean(activeAgentTask && isBroadcastDeliveryTask(activeAgentTask));
+  const approvalMeta = isApprovalView && activeAgentTask ? getApprovalMeta(activeAgentTask, run) : null;
+  const emailBuildHtml = isEmailBuildView && activeAgentTask ? getEmailBuildHtml(activeAgentTask) ?? emailHtml : null;
+  const approvalPreviewHtml = isApprovalView ? emailHtml : null;
   const isNewsletterArtifactView = !activeAgentTask;
   const showNewsletterEditor = Boolean(rawPrimaryNewsletter) && isNewsletterArtifactView;
+  const newsletterSendMetadata = useMemo(() => resolveRunNewsletterMetadata({
+    markdown: rawPrimaryNewsletter,
+    task: isEmailBuildView ? activeAgentTask : writerTask,
+    run,
+    html: emailBuildHtml ?? emailHtml,
+  }), [rawPrimaryNewsletter, isEmailBuildView, activeAgentTask, writerTask, run, emailBuildHtml, emailHtml]);
   const deliveryStats = run?.stats?.delivery ?? null;
   const sentCount = deliveryStats?.successCount ?? run?.deliveryAction?.successCount ?? 0;
   const failureCount = deliveryStats?.failureCount ?? run?.deliveryAction?.failureCount ?? 0;
@@ -1026,12 +1170,13 @@ export default function LoopRunDetailPage() {
 
   useEffect(() => {
     if (loading || !run || !decision?.notifyChannels) return;
+    if (rosterHasDedicatedApprovalAgent(tasks)) return;
     if (approvalNotifyAttemptedRef.current === run.id) return;
     approvalNotifyAttemptedRef.current = run.id;
     void fetch(`/api/workflows/runs/${runId}/request-approval`, { method: "POST" })
       .then((res) => (res.ok ? load() : undefined))
       .catch(() => undefined);
-  }, [loading, run, decision?.notifyChannels, runId, load]);
+  }, [loading, run, decision?.notifyChannels, runId, load, tasks]);
 
   useEffect(() => {
     if (loading) return;
@@ -1200,7 +1345,7 @@ export default function LoopRunDetailPage() {
     setBusy("upload-contacts");
     setError(null);
     try {
-      if ((draftDirty && draftEditor.trim()) || (emailSource === "builder" && emailHtml.trim())) {
+      if (draftDirty) {
         await saveNewsletterDraft({ keepBusy: true });
       }
       const csv = await file.text();
@@ -1221,7 +1366,8 @@ export default function LoopRunDetailPage() {
   }
 
   async function saveNewsletterDraft(options?: { keepBusy?: boolean; emailHtmlOverride?: string; emailDesignOverride?: unknown }) {
-    if (!draftEditor.trim()) {
+    const bodyToSave = draftEditor.trim() || rawPrimaryNewsletter.trim() || run?.draftOutput?.trim() || "";
+    if (!bodyToSave) {
       setError("Newsletter body is required");
       throw new Error("Newsletter body is required");
     }
@@ -1232,7 +1378,7 @@ export default function LoopRunDetailPage() {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          body: draftEditor,
+          body: bodyToSave,
           ...(options?.emailHtmlOverride
             ? { emailHtml: options.emailHtmlOverride, emailDesign: options.emailDesignOverride ?? null }
             : emailSource === "builder" && emailHtml
@@ -1251,7 +1397,7 @@ export default function LoopRunDetailPage() {
           : null;
       setRun((current) => current ? {
         ...current,
-        draftOutput: draftEditor,
+        draftOutput: bodyToSave,
         updatedAt,
         ...(savedEmailHtml
           ? {
@@ -1546,7 +1692,7 @@ export default function LoopRunDetailPage() {
               </Card>
             ) : null}
 
-            {run?.deliveryAction || run?.stats?.delivery ? (
+            {!isApprovalView && !isEmailBuildView && (run?.deliveryAction || run?.stats?.delivery) ? (
               <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
                 <CardContent className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
                   <div>
@@ -1623,202 +1769,145 @@ export default function LoopRunDetailPage() {
                   showNewsletterEditor ? "overflow-hidden" : "overflow-y-auto"
                 )}
               >
-                {isPublicistView ? (
+                {isBroadcastView ? (
                   <div className="space-y-4">
-                    {publicistMeta ? (
-                      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-                        <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-orange-100">
-                          <Megaphone className="size-4 text-orange-700" />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold text-slate-900">
-                            {publicistMeta.emailApprovalSent ? "Approval email sent" : "Draft ready for approval"}
-                          </p>
-                          <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-                            {publicistMeta.to ? (
-                              <span className="inline-flex items-center gap-1">
-                                <Mail className="size-3" />
-                                {publicistMeta.to}
-                              </span>
-                            ) : null}
-                            {publicistMeta.channel ? <span>Via {publicistMeta.channel}</span> : null}
-                            {publicistMeta.sentAt ? <span>Sent {formatRelative(publicistMeta.sentAt)}</span> : null}
-                          </div>
-                        </div>
-                        {publicistMeta.emailApprovalSent ? (
-                          <span className="shrink-0 rounded-full bg-sky-100 px-2.5 py-0.5 text-[10px] font-semibold text-sky-700">
-                            Awaiting response
-                          </span>
-                        ) : null}
+                    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                      <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-orange-100">
+                        <Megaphone className="size-4 text-orange-700" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-slate-900">Broadcast delivery</p>
+                        <p className="mt-0.5 text-sm text-slate-600">{deliveryStatusMessage}</p>
                       </div>
-                    ) : null}
-
-                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-px rounded-xl bg-slate-200/50 shadow-sm overflow-hidden">
+                      <span className={cn(
+                        "shrink-0 rounded-full px-2.5 py-0.5 text-[10px] font-semibold",
+                        activeAgentTask?.status === "in_progress" ? "bg-blue-100 text-blue-700" : "bg-sky-100 text-sky-700",
+                      )}>
+                        {activeAgentTask?.status === "in_progress" ? "Working" : activeAgentTask?.status === "done" || activeAgentTask?.status === "completed" ? "Complete" : "Queued"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-px rounded-xl bg-slate-200/50 shadow-sm overflow-hidden">
                       {[
-                        { label: "Recipients", value: recipientCount, icon: Users, color: "text-slate-500" },
-                        { label: deliveryDryRun ? "Not sent" : "Submitted", value: deliveryDryRun ? failureCount : sentCount, icon: Mail, color: deliveryDryRun ? "text-rose-600" : "text-sky-600" },
-                        { label: "Open rate", value: formatPercent(openRate), icon: Eye, color: "text-amber-600" },
-                        { label: "Click rate", value: formatPercent(clickRate), icon: MousePointerClick, color: "text-emerald-600" },
-                        { label: "Unsubscribed", value: unsubscribeCount, icon: Users, color: "text-slate-500" },
+                        { label: "Recipients", value: recipientCount },
+                        { label: deliveryDryRun ? "Not sent" : "Submitted", value: deliveryDryRun ? failureCount : sentCount },
+                        { label: "Failed", value: failureCount },
+                        { label: "Broadcast ID", value: run?.deliveryAction?.broadcastId ?? run?.stats?.delivery?.broadcastId ?? "Pending" },
                       ].map((stat) => (
                         <div key={stat.label} className="flex flex-col justify-center gap-0.5 bg-white px-4 py-3">
-                          <div className="flex items-center gap-1.5">
-                            <stat.icon className={cn("size-3.5", stat.color)} />
-                            <span className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
-                              {stat.label}
-                              {stat.label === "Open rate" ? (
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      aria-label="Open rate tracking details"
-                                      className="inline-flex size-4 items-center justify-center rounded-full text-slate-400 transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
-                                    >
-                                      <Info className="size-3.5" />
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent
-                                    side="top"
-                                    sideOffset={8}
-                                    className="max-w-[340px] px-4 py-3 text-left leading-5"
-                                  >
-                                    <div className="space-y-3 text-[13px] leading-5">
-                                      <p>{openTrackingHelpText}</p>
-                                      <p>{openTrackingSignalText}</p>
-                                      <div className="space-y-1.5">
-                                        <p className="text-[11px] font-semibold uppercase tracking-wide text-white/60">
-                                          Metrics webhook
-                                        </p>
-                                        <code className="block break-all rounded-md bg-white/10 px-2 py-1.5 font-mono text-[11px] leading-4 text-white">
-                                          {openTrackingWebhookText}
-                                        </code>
-                                      </div>
-                                      <p className="text-[11px] leading-4 text-white/75">
-                                        {openTrackingWebhookNote}
-                                      </p>
-                                    </div>
-                                  </TooltipContent>
-                                </Tooltip>
-                              ) : null}
-                            </span>
-                          </div>
-                          <span className="flex items-center gap-2 text-lg font-semibold tabular-nums text-slate-900">
-                            {stat.value}
-                            {stat.label === "Recipients" && run?.stats?.contacts ? (
-                              renderContactsDialog(
-                                <button
-                                  type="button"
-                                  className="inline-flex size-7 items-center justify-center rounded-md border border-slate-200 text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
-                                  aria-label="View uploaded contacts"
-                                >
-                                  <Users className="size-3.5" />
-                                </button>
-                              )
-                            ) : null}
-                          </span>
+                          <span className="text-[11px] font-medium text-slate-500">{stat.label}</span>
+                          <span className="text-sm font-semibold tabular-nums text-slate-900 break-all">{stat.value}</span>
                         </div>
                       ))}
                     </div>
-
-                    {run?.deliveryAction || run?.stats?.delivery ? (
-                      <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-                        <div className="flex items-center gap-2 mb-3">
-                          <BarChart3 className="size-4 text-slate-600" />
-                          <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Engagement</p>
-                        </div>
-                        <div className="space-y-2.5">
-                          {[
-                            { label: "Delivery rate", pct: deliveryRate, color: "bg-sky-400" },
-                            { label: "Open rate", pct: openRate, color: "bg-amber-400" },
-                            { label: "Click rate", pct: clickRate, color: "bg-emerald-400" },
-                          ].map((bar) => (
-                            <div key={bar.label}>
-                              <div className="flex items-center justify-between text-xs mb-1">
-                                <span className="flex items-center gap-1 text-slate-600">
-                                  {bar.label}
-                                  {bar.label === "Open rate" ? (
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <button
-                                          type="button"
-                                          aria-label="Open rate tracking details"
-                                          className="inline-flex size-4 items-center justify-center rounded-full text-slate-400 transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
-                                        >
-                                          <Info className="size-3.5" />
-                                        </button>
-                                      </TooltipTrigger>
-                                      <TooltipContent
-                                        side="top"
-                                        sideOffset={8}
-                                        className="max-w-[340px] px-4 py-3 text-left leading-5"
-                                      >
-                                        <div className="space-y-3 text-[13px] leading-5">
-                                          <p>{openTrackingHelpText}</p>
-                                          <p>{openTrackingSignalText}</p>
-                                          <div className="space-y-1.5">
-                                            <p className="text-[11px] font-semibold uppercase tracking-wide text-white/60">
-                                              Metrics webhook
-                                            </p>
-                                            <code className="block break-all rounded-md bg-white/10 px-2 py-1.5 font-mono text-[11px] leading-4 text-white">
-                                              {openTrackingWebhookText}
-                                            </code>
-                                          </div>
-                                          <p className="text-[11px] leading-4 text-white/75">
-                                            {openTrackingWebhookNote}
-                                          </p>
-                                        </div>
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  ) : null}
-                                </span>
-                                <span className="font-semibold text-slate-900">{formatPercent(bar.pct)}</span>
-                              </div>
-                              <div className="h-2 rounded-full bg-slate-100">
-                                <div className={`h-2 rounded-full ${bar.color}`} style={{ width: formatPercent(bar.pct) }} />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        <p className="mt-3 text-xs text-slate-500">
-                          {openCount} tracked opens, {clickCount} unique clicks, {totalClickCount} total clicks, {failureCount} failed deliveries.
-                        </p>
-                      </div>
+                    {centerOutput?.trim() ? (
+                      <article className="rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                        <p className="mb-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">Resend delivery output</p>
+                        <div className="text-sm leading-7 text-slate-800 whitespace-pre-wrap">{centerOutput}</div>
+                      </article>
                     ) : null}
-
-                    {emailHtml ? (
-                      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm h-full">
+                  </div>
+                ) : isEmailBuildView ? (
+                  <div className="space-y-4">
+                    <NewsletterMetadataPanel metadata={newsletterSendMetadata} title="Built email metadata" />
+                    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                      <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-amber-100">
+                        <Mail className="size-4 text-amber-700" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-slate-900">Email build complete</p>
+                        <p className="mt-0.5 text-xs text-slate-500">Visual email rendered from the writer draft. Approval runs in the next agent.</p>
+                      </div>
+                    </div>
+                    {emailBuildHtml ? (
+                      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm min-h-[420px]">
                         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
-                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Approval email preview</p>
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Built email preview</p>
                         </div>
                         <iframe
-                          title="Approval email preview"
-                          srcDoc={emailHtml}
-                          className="h-full w-full bg-white"
+                          title="Built email preview"
+                          srcDoc={emailBuildHtml}
+                          className="h-[520px] w-full bg-white"
                           sandbox=""
                         />
+                      </div>
+                    ) : centerOutput?.trim() ? (
+                      <article className="rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                        <div className="text-sm leading-7 text-slate-800">
+                          <Streamdown>{centerOutput}</Streamdown>
+                        </div>
+                      </article>
+                    ) : null}
+                  </div>
+                ) : isApprovalView ? (
+                  <div className="space-y-4">
+                    {approvalMeta ? (
+                      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                        <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-amber-100">
+                          <ShieldCheck className="size-4 text-amber-700" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-slate-900">
+                            {approvalMeta.approvedAt
+                              ? "Email approved"
+                              : approvalMeta.emailApprovalSent
+                                ? "Approval request sent"
+                                : "Draft ready for approval"}
+                          </p>
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            This agent only handles review and approval. Subscriber broadcast delivery runs in the Broadcast Delivery Agent.
+                          </p>
+                          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                            {approvalMeta.to ? (
+                              <span className="inline-flex items-center gap-1">
+                                <Mail className="size-3" />
+                                {approvalMeta.to}
+                              </span>
+                            ) : null}
+                            {approvalMeta.channel ? <span>Via {approvalMeta.channel}</span> : null}
+                            {approvalMeta.approvedAt ? (
+                              <span>Approved {formatRelative(approvalMeta.approvedAt)}</span>
+                            ) : approvalMeta.sentAt ? (
+                              <span>Sent {formatRelative(approvalMeta.sentAt)}</span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <span className={cn(
+                          "shrink-0 rounded-full px-2.5 py-0.5 text-[10px] font-semibold",
+                          approvalMeta.approvedAt
+                            ? "bg-sky-100 text-sky-700"
+                            : approvalMeta.emailApprovalSent
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-slate-100 text-slate-700",
+                        )}>
+                          {approvalMeta.approvedAt ? "Approved" : approvalMeta.emailApprovalSent ? "Awaiting response" : "Pending"}
+                        </span>
                       </div>
                     ) : null}
 
                     {centerOutput?.trim() ? (
-                      <details className="group">
-                        <summary className="cursor-pointer select-none text-xs font-medium text-slate-500 hover:text-slate-700">
-                          Show raw markdown
-                        </summary>
-                        <article className="mt-3 rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
-                          {centerUpdatedAt ? (
-                            <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-slate-500">
-                              Updated {formatRelative(centerUpdatedAt)}
-                            </p>
-                          ) : null}
-                          <div className="text-sm leading-7 text-slate-800 [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:tracking-tight [&_h2]:mb-3 [&_h2]:mt-7 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mb-2 [&_h3]:mt-5 [&_h3]:text-base [&_h3]:font-semibold [&_li]:my-1 [&_ol]:ml-5 [&_ol]:list-decimal [&_p]:mb-3.5 [&_strong]:font-semibold [&_ul]:ml-5 [&_ul]:list-disc">
-                            <Streamdown>{centerOutput}</Streamdown>
-                          </div>
-                        </article>
-                      </details>
+                      <article className="rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                        <p className="mb-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">Approval agent output</p>
+                        <div className="text-sm leading-7 text-slate-800 whitespace-pre-wrap">{centerOutput}</div>
+                      </article>
+                    ) : null}
+
+                    {approvalPreviewHtml ? (
+                      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm min-h-[420px]">
+                        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Email submitted for approval</p>
+                        </div>
+                        <iframe
+                          title="Email submitted for approval"
+                          srcDoc={approvalPreviewHtml}
+                          className="h-[520px] w-full bg-white"
+                          sandbox=""
+                        />
+                      </div>
                     ) : null}
                   </div>
                 ) : showNewsletterEditor ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-3">
+                    <NewsletterMetadataPanel metadata={newsletterSendMetadata} title="Newsletter metadata" />
                     <div className="flex shrink-0 items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
                       <div>
                         <p className="text-sm font-semibold text-slate-900">Newsletter editor</p>
@@ -1964,6 +2053,7 @@ export default function LoopRunDetailPage() {
                           key={task.id}
                           task={task}
                           open={isAgentRowOpen(task, expandedTaskId)}
+                          metadataSummary={getAgentMetadataSummary(task, rawPrimaryNewsletter, run)}
                           canRerun={runStatus !== "executing_action" && runStatus !== "distributing" && task.status !== "in_progress" && task.status !== "todo"}
                           rerunning={busy === `rerun:${task.id}`}
                           onRerun={() => void rerunTask(task.id)}

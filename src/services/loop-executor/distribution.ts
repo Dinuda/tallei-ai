@@ -57,7 +57,65 @@ function buildTrackingDiagnostics(input: {
     };
 }
 
-export async function runDistributionHeartbeat(runId: string) {
+async function markDeliveryTaskStarted(context: LoopRunContext, taskId: string | null): Promise<void> {
+    if (!taskId) return;
+    await pool.query(
+        `UPDATE loop_run_tasks
+         SET status = 'in_progress',
+             started_at = COALESCE(started_at, NOW()),
+             checkout_locked_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+           AND status IN ('todo', 'in_progress')`,
+        [taskId, context.tenantId, context.userId],
+    );
+    await insertEvent({
+        context,
+        taskId,
+        eventType: "broadcast_delivery_started",
+        payload: { provider: "resend_broadcast" },
+    });
+}
+
+async function markDeliveryTaskFinished(input: {
+    context: LoopRunContext;
+    taskId: string | null;
+    finalStatus: "completed" | "blocked";
+    distributionMeta: Record<string, unknown>;
+    successCount: number;
+    failureCount: number;
+}): Promise<void> {
+    if (!input.taskId) return;
+    await pool.query(
+        `UPDATE loop_run_tasks
+         SET status = $4,
+             output_json = $5::jsonb,
+             completed_at = NOW(),
+             checkout_locked_at = NULL,
+             updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3`,
+        [
+            input.taskId,
+            input.context.tenantId,
+            input.context.userId,
+            input.finalStatus === "completed" ? "done" : "blocked",
+            JSON.stringify({
+                text: input.finalStatus === "completed"
+                    ? `Broadcast delivery complete: ${input.successCount} submitted, ${input.failureCount} failed.`
+                    : `Broadcast delivery needs review: ${input.successCount} submitted, ${input.failureCount} failed.`,
+                distribution: input.distributionMeta,
+                successCount: input.successCount,
+                failureCount: input.failureCount,
+            }),
+        ],
+    );
+}
+
+export async function runDistributionHeartbeat(runId: string, taskId?: string | null) {
     const context = await loadRunContext(runId);
     if (context.runStatus !== "executing_action") {
         throw new Error(`Run is ${context.runStatus}, not executing delivery action`);
@@ -65,6 +123,8 @@ export async function runDistributionHeartbeat(runId: string) {
     const auth = authFromContext(context);
     const root = readObject(context.metadataJson);
     const loopExecutor = readObject(root.loop_executor);
+    const deliveryAgentTaskId = taskId ?? (typeof loopExecutor.deliveryAgentTaskId === "string" ? loopExecutor.deliveryAgentTaskId : null);
+    await markDeliveryTaskStarted(context, deliveryAgentTaskId);
     const contactListRaw = readRecipients(loopExecutor);
     const contactsRaw = Array.isArray(contactListRaw.contacts) ? contactListRaw.contacts : [];
     const contacts = contactsRaw
@@ -141,6 +201,7 @@ export async function runDistributionHeartbeat(runId: string) {
             distributionMeta,
             recipientResults,
             finalStatus: dryRun ? "blocked" : "completed",
+            deliveryAgentTaskId,
         });
     }
     const { createAndSendResendBroadcast, createResendSegment, ensureResendMetricsWebhook, resolveResendMarketingCredentials, upsertResendContactInSegment, } = await import("../notifications/resend-broadcast.js");
@@ -233,6 +294,7 @@ export async function runDistributionHeartbeat(runId: string) {
     if (processedCount < contacts.length) {
         const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
             distribution: inProgressMeta,
+            ...(deliveryAgentTaskId ? { deliveryAgentTaskId } : {}),
             deliveryAction: {
                 kind: "send_broadcast",
                 status: "syncing_contacts",
@@ -271,6 +333,7 @@ export async function runDistributionHeartbeat(runId: string) {
             userId: context.userId,
             runId: context.runId,
             jobType: "distribution",
+            taskId: deliveryAgentTaskId ?? undefined,
             delaySeconds: 2,
             idempotencySuffix: `contacts-${processedCount}`,
         });
@@ -296,15 +359,16 @@ export async function runDistributionHeartbeat(runId: string) {
             ok: false,
             error: broadcastError,
         }));
+        const failedDistributionMeta = {
+            ...inProgressMeta,
+            nextIndex: contacts.length,
+            successCount: 0,
+            failureCount: contacts.length,
+            broadcastError,
+            recipients: failedRecipients,
+        };
         const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
-            distribution: {
-                ...inProgressMeta,
-                nextIndex: contacts.length,
-                successCount: 0,
-                failureCount: contacts.length,
-                broadcastError,
-                recipients: failedRecipients,
-            },
+            distribution: failedDistributionMeta,
             deliveryAction: {
                 kind: "send_broadcast",
                 status: "failed",
@@ -328,6 +392,14 @@ export async function runDistributionHeartbeat(runId: string) {
             context.userId,
             JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
         ]);
+        await markDeliveryTaskFinished({
+            context,
+            taskId: deliveryAgentTaskId,
+            finalStatus: "blocked",
+            distributionMeta: failedDistributionMeta,
+            successCount: 0,
+            failureCount: contacts.length,
+        });
         throw new Error(broadcastError);
     }
     const dryRun = broadcast.dryRun === true || isDryRunBroadcastId(broadcast.broadcastId);
@@ -370,6 +442,7 @@ export async function runDistributionHeartbeat(runId: string) {
         distributionMeta,
         recipientResults: broadcastRecipients,
         finalStatus,
+        deliveryAgentTaskId,
     });
 }
 async function finalizeDistributionRun(input: {
@@ -380,13 +453,17 @@ async function finalizeDistributionRun(input: {
     distributionMeta: Record<string, unknown>;
     recipientResults: Array<{ email: string; ok: boolean; error?: string }>;
     finalStatus: "completed" | "blocked";
+    deliveryAgentTaskId?: string | null;
 }) {
-    const { context, loopExecutor, deliveryBody, contacts, distributionMeta, recipientResults, finalStatus } = input;
+    const { context, loopExecutor, deliveryBody, contacts, distributionMeta, recipientResults, finalStatus, deliveryAgentTaskId = null } = input;
     const auth = authFromContext(context);
     const successCount = recipientResults.filter((recipient) => recipient.ok).length;
     const failureCount = recipientResults.filter((recipient) => !recipient.ok).length;
     const dryRun = distributionMeta.dryRun === true || isDryRunBroadcastId(typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : null);
-    const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, { deliveryBatch: distributionMeta });
+    const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
+        deliveryBatch: distributionMeta,
+        ...(deliveryAgentTaskId ? { deliveryAgentTaskId } : {}),
+    });
     const loopExecutorPatchWithAction = mergeLoopExecutorMeta({ loop_executor: loopExecutorPatch.loop_executor }, {
         deliveryAction: {
             kind: "send_broadcast",
@@ -405,8 +482,17 @@ async function finalizeDistributionRun(input: {
         .filter((recipient) => !recipient.ok)
         .map((recipient) => `${recipient.email}${recipient.error ? ` (${recipient.error})` : ""}`);
     const broadcastId = typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : null;
+    await markDeliveryTaskFinished({
+        context,
+        taskId: deliveryAgentTaskId,
+        finalStatus,
+        distributionMeta,
+        successCount,
+        failureCount,
+    });
     await insertComment({
         context,
+        taskId: deliveryAgentTaskId,
         author: "ceo",
         body: [
             finalOutput,
@@ -420,6 +506,7 @@ async function finalizeDistributionRun(input: {
     });
     await insertEvent({
         context,
+        taskId: deliveryAgentTaskId,
         eventType: "ceo_finalized",
         payload: { draftRequired: false, draftCount: 0, status: finalStatus, distribution: distributionMeta },
     });
@@ -501,6 +588,7 @@ async function finalizeDistributionRun(input: {
     }).catch(() => undefined);
     await insertEvent({
         context,
+        taskId: deliveryAgentTaskId,
         eventType: "broadcast_sent",
         payload: distributionMeta,
     });

@@ -84,6 +84,10 @@ test("designLoopFromIntent validates LLM output and builds agentGraph definition
     assert.equal(result.definition.builderMeta?.designedBy, "ceo_llm");
     assert.equal(result.definition.builderMeta?.preApproved, true);
     assert.deepEqual(result.design.suggestedChannels, ["email"]);
+    assert.equal(result.trace.stages.length, 5);
+    assert.equal(result.trace.stages[0]?.stage, "delivery_classification");
+    assert.equal(result.trace.stages[2]?.stage, "loop_architect");
+    assert.equal(result.definition.builderMeta?.designDiagnostics?.trace?.stages.length, 5);
     assert.match(result.definition.agentGraph?.children[0]?.task ?? "", /casual tone/i);
     assert.equal(result.definition.plan, undefined);
   } finally {
@@ -180,11 +184,134 @@ test("designLoopFromIntent keeps bespoke broadcast roster without newsletter pre
     assert.equal(result.definition.presetId, undefined);
     const children = result.definition.agentGraph?.children ?? [];
     assert.equal(children[0]?.name, "Newsletter Writer");
-    assert.equal(children[1]?.name, "Approval & Email Build Agent");
-    assert.match(children[1]?.task ?? "", /approval email only/i);
-    assert.equal(children[2]?.name, "Broadcast Delivery Agent");
-    assert.match(children[2]?.task ?? "", /Resend broadcast only/i);
-    assert.deepEqual(children[2]?.tools.map((tool) => tool.ref), ["internal.resend_broadcast"]);
+    assert.equal(children[1]?.name, "Email Build Agent");
+    assert.match(children[1]?.task ?? "", /compose and render/i);
+    assert.equal(children[2]?.name, "Approval Agent");
+    assert.match(children[2]?.task ?? "", /approval request only/i);
+    assert.equal(children[3]?.name, "Broadcast Delivery Agent");
+    assert.match(children[3]?.task ?? "", /Resend broadcast only/i);
+    assert.deepEqual(children[3]?.tools.map((tool) => tool.ref), ["internal.resend_broadcast"]);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
+test("designLoopFromIntent ignores explicit preset wording and keeps templates inspirational", async () => {
+  const db = await import("../../../src/infrastructure/db/index.js");
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+
+  try {
+    const { designLoopFromIntent } = await import("../../../src/services/loop-builder/ceo-designer.js");
+    const result = await designLoopFromIntent({
+      auth: {
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        userId: "22222222-2222-4222-8222-222222222222",
+        authMode: "internal",
+        plan: "pro",
+      },
+      prompt: "Use the newsletter preset to send Tallei updates to subscribers",
+      testOverrides: {
+        chat: async () => ({
+          text: JSON.stringify({
+            ...SAMPLE_LLM_OUTPUT,
+            deliveryType: "newsletter",
+            presetId: "newsletter",
+          }),
+          model: "gpt-4o",
+        }),
+        recallMemories: async () => ({ memories: [] }),
+        listPreferences: async () => [],
+      },
+    });
+
+    assert.equal(result.definition.deliveryType, "newsletter");
+    assert.equal(result.definition.presetId, undefined);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
+test("designLoopFromIntent collapses duplicate writers and splits approval from broadcast", async () => {
+  const db = await import("../../../src/infrastructure/db/index.js");
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+
+  try {
+    const { designLoopFromIntent } = await import("../../../src/services/loop-builder/ceo-designer.js");
+    const result = await designLoopFromIntent({
+      auth: {
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        userId: "22222222-2222-4222-8222-222222222222",
+        authMode: "internal",
+        plan: "pro",
+      },
+      prompt: "Write a newsletter for Tallei updates and industry updates and send it to subscribers",
+      testOverrides: {
+        chat: async () => ({
+          text: JSON.stringify({
+            ...SAMPLE_LLM_OUTPUT,
+            deliveryType: "newsletter",
+            agentGraph: {
+              ...SAMPLE_LLM_OUTPUT.agentGraph,
+              children: [
+                {
+                  id: "memory",
+                  name: "Memory Search",
+                  task: "Find Tallei product context.",
+                  tools: [{ ref: "internal.memory_search" }],
+                },
+                {
+                  id: "first_writer",
+                  name: "Newsletter Writer",
+                  task: "Write the subscriber-ready newsletter draft only.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "second_writer",
+                  name: "Newsletter Writer",
+                  task: "Write the subscriber-ready newsletter draft only.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "approval_and_delivery",
+                  name: "Approval & Email Build Agent",
+                  task: "Review, build, approve, and broadcast.",
+                  tools: [
+                    { ref: "internal.email_approval_request" },
+                    { ref: "internal.email_builder_compose" },
+                    { ref: "internal.email_builder_render" },
+                    { ref: "internal.resend_broadcast" },
+                  ],
+                },
+              ],
+            },
+          }),
+          model: "gpt-4o",
+        }),
+        recallMemories: async () => ({ memories: [] }),
+        listPreferences: async () => [],
+      },
+    });
+
+    const children = result.definition.agentGraph?.children ?? [];
+    assert.equal(children.filter((child) => child.name === "Newsletter Writer").length, 1);
+    const emailBuild = children.find((child) => child.name === "Email Build Agent");
+    const approval = children.find((child) => child.name === "Approval Agent");
+    const broadcast = children.find((child) => child.name === "Broadcast Delivery Agent");
+    assert.deepEqual(emailBuild?.tools.map((tool) => tool.ref), [
+      "internal.email_builder_compose",
+      "internal.email_builder_render",
+    ]);
+    assert.deepEqual(approval?.tools.map((tool) => tool.ref), ["internal.email_approval_request"]);
+    assert.deepEqual(broadcast?.tools.map((tool) => tool.ref), ["internal.resend_broadcast"]);
+    assert.equal(result.definition.presetId, undefined);
   } finally {
     (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
   }

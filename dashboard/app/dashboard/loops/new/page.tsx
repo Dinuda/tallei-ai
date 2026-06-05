@@ -86,7 +86,14 @@ export default function NewLoopBuilderPage() {
         }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error ?? `Failed to ${mode} loop`);
+      if (!response.ok) {
+        const detail = Array.isArray(payload.details) && payload.details[0] && typeof payload.details[0] === "object"
+          ? (payload.details[0] as { message?: string }).message
+          : undefined;
+        throw new Error(
+          detail ? `${payload.error ?? `Failed to ${mode} loop`}: ${detail}` : (payload.error ?? `Failed to ${mode} loop`),
+        );
+      }
       setProposal(payload.proposal as BuilderProposal);
       if (mode === "refine") setFeedback("");
     } catch (requestError) {

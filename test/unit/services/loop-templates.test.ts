@@ -30,7 +30,8 @@ test("formatTemplateCatalogForPrompt renders quality patterns without template I
   assert.match(text, /memory_search/);
   // Broadcast delivery note must be present for the newsletter pattern
   assert.match(text, /subscribers\/mailing list/);
-  assert.match(text, /presetId.*newsletter/);
+  assert.match(text, /deliveryType: 'newsletter'/);
+  assert.match(text, /no presetId/);
 });
 
 test("getLoopTemplate returns null for unknown id", () => {

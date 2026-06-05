@@ -6,6 +6,11 @@ import { randomUUID } from "crypto";
 import { pool } from "../../infrastructure/db/index.js";
 import { listPreferences, recallMemories } from "../memory.js";
 import { loopExecutorOpenAiChat } from "./openai-chat.js";
+import {
+  isBroadcastDeliveryAgent,
+  isNewsletterDeliveryDefinition,
+  normalizeRunAgentResponsibilities,
+} from "./agent-responsibilities.js";
 import { resolveLoopPreset } from "./presets/registry.js";
 import {
   dynamicPlanRoster,
@@ -17,88 +22,11 @@ import type { LoopRunContext } from "./run-context.js";
 import { getEffectiveLoopConstraints, listAllowedLoopTools } from "./tool-catalog.js";
 import { ceoStrategyOutputSchema, type LoopDefinition, type LoopPlan, type LoopRunAgent } from "./types.js";
 
-function isNewsletterDeliveryDefinition(definition: LoopDefinition): boolean {
-  return definition.deliveryType?.trim().toLowerCase() === "newsletter"
-    || definition.presetId === "newsletter"
-    || definition.presetId === "newsletter_v1";
-}
-
-function normalizeOneResponsibilityAgent(agent: LoopRunAgent, definition: LoopDefinition): LoopRunAgent {
-  const refs = agent.tools.map((tool) => tool.ref.trim().toLowerCase());
-  const key = `${agent.id} ${agent.name} ${agent.task}`.toLowerCase();
-  const roleKey = `${agent.id} ${agent.name}`.toLowerCase();
-  const isApprovalEmailBuild = refs.includes("internal.email_approval_request")
-    || refs.includes("internal.email_builder_compose")
-    || refs.includes("internal.email_builder_render")
-    || roleKey.includes("approval");
-  const isBroadcastDelivery = isNewsletterDeliveryDefinition(definition)
-    && (refs.includes("internal.resend_broadcast") || key.includes("broadcast") || key.includes("delivery"));
-  const isWriter = isNewsletterDeliveryDefinition(definition)
-    && (key.includes("writer") || key.includes("write") || key.includes("draft"));
-
-  if (isApprovalEmailBuild) {
-    return {
-      ...agent,
-      name: "Approval & Email Build Agent",
-      task: [
-        "Review the producer's final draft, ask the operator any approval questions, compose/render the email, and send the approval email only.",
-        "Do not sync recipients, upload contacts, submit a Resend broadcast, or describe broadcast delivery as your responsibility.",
-      ].join(" "),
-      tools: agent.tools.filter((tool) => [
-        "internal.email_approval_request",
-        "internal.email_builder_compose",
-        "internal.email_builder_render",
-      ].includes(tool.ref)),
-    };
-  }
-
-  if (isBroadcastDelivery) {
-    return {
-      ...agent,
-      name: "Broadcast Delivery Agent",
-      task: [
-        "After operator approval and recipient upload, sync contacts and submit the approved Resend broadcast only.",
-        "Do not write, edit, build the approval email, ask approval questions, or send the approval email.",
-      ].join(" "),
-      tools: agent.tools.filter((tool) => tool.ref !== "internal.email_approval_request"
-        && tool.ref !== "internal.email_builder_compose"
-        && tool.ref !== "internal.email_builder_render"),
-    };
-  }
-
-  if (isWriter) {
-    return {
-      ...agent,
-      name: /newsletter/i.test(agent.name) ? agent.name : "Newsletter Writer",
-      task: [
-        "Write one subscriber-ready newsletter draft only, grounded in prior research and verified facts.",
-        "Do not ask approval questions, prepare email builder output, upload contacts, or send/broadcast anything.",
-      ].join(" "),
-    };
-  }
-
-  return agent;
-}
-
 function normalizeOneResponsibilityRoster(agents: LoopRunAgent[], definition: LoopDefinition): LoopRunAgent[] {
-  const normalized = agents.map((agent) => normalizeOneResponsibilityAgent(agent, definition));
-  const hasBroadcastDelivery = normalized.some((agent) => {
-    const refs = agent.tools.map((tool) => tool.ref.trim().toLowerCase());
-    const roleKey = `${agent.id} ${agent.name}`.toLowerCase();
-    return refs.includes("internal.resend_broadcast") || roleKey.includes("broadcast") || roleKey.includes("delivery");
-  });
-  if (isNewsletterDeliveryDefinition(definition) && !hasBroadcastDelivery) {
-    normalized.push({
-      id: "broadcast_delivery",
-      name: "Broadcast Delivery Agent",
-      task: [
-        "After operator approval and recipient upload, sync contacts and submit the approved Resend broadcast only.",
-        "Do not write, edit, build the approval email, ask approval questions, or send the approval email.",
-      ].join(" "),
-      tools: [{ ref: "internal.resend_broadcast" }],
-    });
-  }
-  return normalizeRosterAgents(normalized);
+  return normalizeRosterAgents(normalizeRunAgentResponsibilities(agents, {
+    newsletterDelivery: isNewsletterDeliveryDefinition(definition),
+    appendBroadcastDelivery: true,
+  }));
 }
 
 function rosterFromAgentGraph(definition: LoopDefinition): { strategyText: string; agents: LoopRunAgent[] } {
@@ -132,7 +60,11 @@ export async function buildCeoStrategyOutput(context: LoopRunContext) {
 
   const preset = resolveLoopPreset(context.definition);
   if (preset) {
-    return preset.buildRoster(context.definition.goal);
+    const roster = await preset.buildRoster(context.definition.goal);
+    return {
+      strategyText: roster.strategyText,
+      agents: normalizeOneResponsibilityRoster(roster.agents, context.definition),
+    };
   }
 
   if (isDynamicPlanDefinition(context.definition)) {
@@ -171,7 +103,7 @@ export async function buildCeoStrategyOutput(context: LoopRunContext) {
           "You are the Parent Agent / CEO coordinator for a recurring multi-agent loop.",
           "Spawn the smallest useful roster of child agents for this run.",
           "Each child agent must do exactly one thing. Do not combine writer, approval/email build, and broadcast delivery responsibilities.",
-          "If a subscriber broadcast is needed: writer writes only; Approval & Email Build Agent uses email approval/build tools and does not broadcast; Broadcast Delivery Agent only handles post-approval recipient sync and broadcast delivery.",
+          "If a subscriber broadcast is needed: writer writes only; Email Build Agent uses compose/render tools only; Approval Agent uses internal.email_approval_request only; Broadcast Delivery Agent only handles post-approval recipient sync and broadcast delivery.",
           'Return JSON only: {"strategyText":"...","agents":[{"id":"snake_case","name":"Role","task":"...","tools":[{"ref":"internal.llm_only"}]}]}',
           "Allowed tool catalog:",
           catalogSummary,
@@ -239,7 +171,12 @@ export async function materializeTasksFromRoster(input: {
   roster: LoopRunAgent[];
   strategyOutput: string;
 }) {
+  let deliveryAgentTaskId: string | null = null;
   for (const [seq, agent] of input.roster.entries()) {
+    const taskId = randomUUID();
+    if (isBroadcastDeliveryAgent(agent, isNewsletterDeliveryDefinition(input.context.definition))) {
+      deliveryAgentTaskId = taskId;
+    }
     await pool.query(
       `INSERT INTO loop_run_tasks
        (id, tenant_id, user_id, workflow_run_id, seq, agent_id, agent_name, tool_key, agent_spec, assigned_tools, status, input_json)
@@ -249,7 +186,7 @@ export async function materializeTasksFromRoster(input: {
              agent_spec = EXCLUDED.agent_spec, assigned_tools = EXCLUDED.assigned_tools,
              input_json = EXCLUDED.input_json, updated_at = NOW()`,
       [
-        randomUUID(),
+        taskId,
         input.context.tenantId,
         input.context.userId,
         input.context.runId,
@@ -263,4 +200,44 @@ export async function materializeTasksFromRoster(input: {
       ]
     );
   }
+  if (deliveryAgentTaskId) {
+    await pool.query(
+      `UPDATE workflow_runs
+       SET metadata_json = jsonb_set(
+             COALESCE(metadata_json, '{}'::jsonb),
+             '{loop_executor}',
+             COALESCE(metadata_json #> '{loop_executor}', '{}'::jsonb) || $4::jsonb,
+             true
+           ),
+           updated_at = NOW()
+       WHERE id = $1
+         AND tenant_id = $2
+         AND user_id = $3`,
+      [
+        input.context.runId,
+        input.context.tenantId,
+        input.context.userId,
+        JSON.stringify({ deliveryAgentTaskId }),
+      ],
+    );
+  }
+}
+
+export async function findDeliveryAgentTaskId(context: LoopRunContext): Promise<string | null> {
+  const result = await pool.query<{ id: string }>(
+    `SELECT id
+     FROM loop_run_tasks
+     WHERE workflow_run_id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND (
+         assigned_tools @> '[{"ref":"internal.resend_broadcast"}]'::jsonb
+         OR lower(agent_id || ' ' || agent_name) LIKE '%broadcast%'
+         OR lower(agent_id || ' ' || agent_name) LIKE '%delivery%'
+       )
+     ORDER BY seq ASC
+     LIMIT 1`,
+    [context.runId, context.tenantId, context.userId],
+  );
+  return result.rows[0]?.id ?? null;
 }

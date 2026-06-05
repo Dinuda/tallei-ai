@@ -35,7 +35,7 @@ export function formatTemplateCatalogForPrompt(): string {
     }
     if (template.deliveryTypeHint === "newsletter") {
       lines.push(
-        "  Delivery note: when user targets subscribers/mailing list, use presetId: 'newsletter' and include email_approval_request + email_builder_compose + email_builder_render in the approval agent.",
+        "  Delivery note: when user targets subscribers/mailing list, use deliveryType: 'newsletter' with no presetId. This pattern is inspiration only. Approval/email build gets only email approval/build tools; Broadcast Delivery gets only internal.resend_broadcast.",
       );
     }
     lines.push("");

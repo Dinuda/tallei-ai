@@ -19,7 +19,7 @@ import {
 } from "./run-context.js";
 import { scheduleHeartbeat } from "./run-heartbeat.js";
 import { insertComment, insertEvent, loadRunComments, readObject } from "./run-store.js";
-import { materializeTasksFromPlan, materializeTasksFromRoster } from "./run-strategy.js";
+import { findDeliveryAgentTaskId, materializeTasksFromPlan, materializeTasksFromRoster } from "./run-strategy.js";
 import { getEffectiveLoopConstraints, validateAgentRoster } from "./tool-catalog.js";
 import { isNewsletterLoopDefinition, resolveDeliveryFormatter } from "./delivery-format.js";
 import { extractPrimaryContentFromComments, normalizeNewsletterTemplateId } from "./presets/newsletter.js";
@@ -56,7 +56,96 @@ function hasStoredApprovalRequest(loopExecutor: ReturnType<typeof readLoopExecut
   const approvalRequest = readObject(loopExecutor.approvalRequest);
   return typeof approvalRequest.token === "string"
     || typeof approvalRequest.approvalUrl === "string"
-    || typeof approvalRequest.sentAt === "string";
+    || typeof approvalRequest.sentAt === "string"
+    || typeof approvalRequest.reservedAt === "string";
+}
+
+export async function getStoredApprovalRequest(auth: AuthContext, runId: string) {
+  const result = await pool.query<{ metadata_json: unknown }>(
+    `SELECT metadata_json
+     FROM workflow_runs
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+     LIMIT 1`,
+    [runId, auth.tenantId, auth.userId],
+  );
+  const loopExecutor = readLoopExecutorMeta(result.rows[0]?.metadata_json);
+  const approvalRequest = readObject(loopExecutor.approvalRequest);
+  const to = typeof approvalRequest.to === "string" ? approvalRequest.to : null;
+  const approvalUrl = typeof approvalRequest.approvalUrl === "string" ? approvalRequest.approvalUrl : null;
+  const token = typeof approvalRequest.token === "string" ? approvalRequest.token : null;
+  const sentAt = typeof approvalRequest.sentAt === "string" ? approvalRequest.sentAt : null;
+  const reservedAt = typeof approvalRequest.reservedAt === "string" ? approvalRequest.reservedAt : null;
+  if (!to || !approvalUrl || !token) return null;
+  return {
+    to,
+    approvalUrl,
+    token,
+    sentAt,
+    reservedAt,
+    ...(typeof approvalRequest.channel === "string" ? { channel: approvalRequest.channel } : {}),
+  };
+}
+
+/** Atomically claim the single approval-email send slot for a run. */
+export async function reserveApprovalEmailSend(input: {
+  auth: AuthContext;
+  runId: string;
+  approvalRequest: { to: string; approvalUrl: string; token: string; channel?: string };
+}): Promise<boolean> {
+  const reservedAt = new Date().toISOString();
+  const approvalRequest = {
+    ...input.approvalRequest,
+    reservedAt,
+    artifactKind: "draft",
+  };
+  const result = await pool.query(
+    `UPDATE workflow_runs
+     SET metadata_json = jsonb_set(
+           COALESCE(metadata_json, '{}'::jsonb),
+           '{loop_executor,approvalRequest}',
+           $4::jsonb,
+           true
+         ),
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND COALESCE(metadata_json #>> '{loop_executor,approvalRequest,token}', '') = ''
+       AND COALESCE(metadata_json #>> '{loop_executor,approvalRequest,sentAt}', '') = ''
+       AND COALESCE(metadata_json #>> '{loop_executor,approvalRequest,reservedAt}', '') = ''
+       AND COALESCE(metadata_json #>> '{loop_executor,publicistApproval,token}', '') = ''
+       AND COALESCE(metadata_json #>> '{loop_executor,publicistApproval,sentAt}', '') = ''
+     RETURNING id`,
+    [
+      input.runId,
+      input.auth.tenantId,
+      input.auth.userId,
+      JSON.stringify(approvalRequest),
+    ],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function runHasDedicatedApprovalAgent(context: LoopRunContext): Promise<boolean> {
+  const result = await pool.query<{ assigned_tools: unknown }>(
+    `SELECT assigned_tools
+     FROM loop_run_tasks
+     WHERE workflow_run_id = $1
+       AND tenant_id = $2
+       AND user_id = $3`,
+    [context.runId, context.tenantId, context.userId],
+  );
+  return result.rows.some((row) => {
+    if (!Array.isArray(row.assigned_tools)) return false;
+    return row.assigned_tools.some((tool) => {
+      const ref = typeof tool === "object" && tool && "ref" in tool
+        ? String((tool as { ref?: unknown }).ref ?? "")
+        : "";
+      return ref === "internal.email_approval_request";
+    });
+  });
 }
 
 function markdownTableCell(value: string): string {
@@ -335,6 +424,8 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
     || toolRefs.has("internal.react_email_template");
   const templateRequested = typeof input.templateId === "string" && input.templateId.trim().length > 0;
   const deliveryTemplateId = reactEmailEnabled || templateRequested ? normalizeNewsletterTemplateId(input.templateId) : undefined;
+  const runMeta = readLoopExecutorMeta(context.metadataJson);
+  const deliveryAgentTaskId = runMeta.deliveryAgentTaskId ?? await findDeliveryAgentTaskId(context);
   const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
     pendingInput: {
       id: DELIVERY_RECIPIENTS_INPUT_ID,
@@ -354,6 +445,7 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
       ...(contactsDocument.lotRef ? { lotRef: contactsDocument.lotRef } : {}),
     },
     ...(deliveryTemplateId ? { deliveryTemplateId } : {}),
+    ...(deliveryAgentTaskId ? { deliveryAgentTaskId } : {}),
     deliveryAction: {
       kind: "send_broadcast",
       status: "in_progress",
@@ -389,6 +481,7 @@ export async function uploadDeliveryRecipients(input: { auth: AuthContext; runId
     userId: context.userId,
     runId: context.runId,
     jobType: "distribution",
+    taskId: deliveryAgentTaskId ?? undefined,
   });
 
   const after = await loadRunContext(input.runId);
@@ -473,6 +566,7 @@ export async function approveLoopStrategy(input: {
   } else {
     await materializeTasksFromRoster({ context, roster, strategyOutput });
   }
+  const deliveryAgentTaskId = await findDeliveryAgentTaskId(context);
 
   const firstTask = await pool.query<{ id: string }>(
     `SELECT id FROM loop_run_tasks WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
@@ -484,6 +578,8 @@ export async function approveLoopStrategy(input: {
   const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
     approvedRoster: roster,
     rosterApprovedAt: new Date().toISOString(),
+    ...(deliveryAgentTaskId ? { deliveryAgentTaskId } : {}),
+    ...(context.definition.builderMeta?.designDiagnostics ? { designDiagnostics: context.definition.builderMeta.designDiagnostics } : {}),
   });
   await pool.query(
     `UPDATE workflow_runs SET status = 'strategy_approved', waiting_for_strategy_approval = FALSE,
@@ -591,13 +687,16 @@ export async function resumeLoopRunExecution(input: { auth: AuthContext; runId: 
     const recipients = readObject(loopExecutor.deliveryRecipients);
     const contactsRaw = Array.isArray(recipients.contacts) ? recipients.contacts : [];
     if (contactsRaw.length === 0) throw new Error("Run is executing delivery but has no uploaded recipients");
+    const deliveryAgentTaskId = typeof loopExecutor.deliveryAgentTaskId === "string"
+      ? loopExecutor.deliveryAgentTaskId
+      : await findDeliveryAgentTaskId(context);
     await scheduleHeartbeat({
       tenantId: context.tenantId,
       userId: context.userId,
       runId: context.runId,
       jobType: "distribution",
+      taskId: deliveryAgentTaskId ?? undefined,
       resetAttempts: true,
-      idempotencySuffix: `resume-${Date.now()}`,
     });
     return { runId: context.runId, status: context.runStatus, firstTaskId: null };
   }
@@ -663,6 +762,87 @@ export async function resumeLoopRunExecution(input: { auth: AuthContext; runId: 
   };
 }
 
+/** Persist rendered email output from the Email Build Agent before approval runs. */
+export async function persistBuiltEmailTemplate(input: {
+  context: import("./run-context.js").LoopRunContext;
+  taskId: string;
+  artifactBody: string;
+  emailTemplate: { html: string; text?: string; design?: unknown; subject?: string | null; preview?: string | null; updatedAt?: string; source?: string };
+}) {
+  const emailTemplate = {
+    html: input.emailTemplate.html,
+    text: input.emailTemplate.text ?? null,
+    design: input.emailTemplate.design ?? null,
+    subject: input.emailTemplate.subject ?? null,
+    preview: input.emailTemplate.preview ?? null,
+    updatedAt: input.emailTemplate.updatedAt ?? new Date().toISOString(),
+    source: input.emailTemplate.source ?? "builder",
+  };
+  const loopExecutorPatch = mergeLoopExecutorMeta(input.context.metadataJson, {
+    artifactBody: input.artifactBody,
+    deliveryContentBody: input.artifactBody,
+    deliveryEmailHtml: emailTemplate.html,
+    deliveryEmailText: emailTemplate.text,
+    deliveryEmailDesign: emailTemplate.design,
+    deliveryEmailUpdatedAt: emailTemplate.updatedAt,
+    deliveryEmailSource: emailTemplate.source,
+    emailTemplate,
+  });
+  await pool.query(
+    `UPDATE workflow_runs
+     SET draft_output = COALESCE(NULLIF($4, ''), draft_output),
+         metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $5::jsonb,
+         updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+    [
+      input.context.runId,
+      input.context.tenantId,
+      input.context.userId,
+      input.artifactBody,
+      JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
+    ],
+  );
+  await insertEvent({
+    context: input.context,
+    taskId: input.taskId,
+    eventType: "email_template_built",
+    payload: { source: emailTemplate.source, subject: emailTemplate.subject },
+  });
+}
+
+export function readStoredEmailTemplate(metadataJson: unknown) {
+  const root = readObject(metadataJson);
+  const loopExecutor = readObject(root.loop_executor);
+  const emailTemplate = readObject(loopExecutor.emailTemplate);
+  const html = typeof loopExecutor.deliveryEmailHtml === "string" && loopExecutor.deliveryEmailHtml.trim()
+    ? loopExecutor.deliveryEmailHtml
+    : typeof emailTemplate.html === "string" && emailTemplate.html.trim()
+      ? emailTemplate.html
+      : null;
+  if (!html) return null;
+  return {
+    html,
+    text: typeof loopExecutor.deliveryEmailText === "string"
+      ? loopExecutor.deliveryEmailText
+      : typeof emailTemplate.text === "string"
+        ? emailTemplate.text
+        : null,
+    design: loopExecutor.deliveryEmailDesign ?? emailTemplate.design ?? null,
+    subject: typeof emailTemplate.subject === "string" ? emailTemplate.subject : null,
+    preview: typeof emailTemplate.preview === "string" ? emailTemplate.preview : null,
+    updatedAt: typeof loopExecutor.deliveryEmailUpdatedAt === "string"
+      ? loopExecutor.deliveryEmailUpdatedAt
+      : typeof emailTemplate.updatedAt === "string"
+        ? emailTemplate.updatedAt
+        : new Date().toISOString(),
+    source: typeof loopExecutor.deliveryEmailSource === "string"
+      ? loopExecutor.deliveryEmailSource
+      : typeof emailTemplate.source === "string"
+        ? emailTemplate.source
+        : "builder",
+  };
+}
+
 /** Apply agent email-approval tool result to run state. */
 export async function applyEmailApprovalResult(input: {
   context: import("./run-context.js").LoopRunContext;
@@ -723,6 +903,25 @@ export async function ensureRunApprovalNotification(input: { auth: AuthContext; 
   const context = await loadRunContext(input.runId);
   const loopExecutor = readLoopExecutorMeta(context.metadataJson);
 
+  if (await runHasDedicatedApprovalAgent(context)) {
+    const existing = await getStoredApprovalRequest(input.auth, input.runId);
+    if (existing) {
+      return {
+        runId: context.runId,
+        status: context.runStatus,
+        alreadySent: true,
+        approvalRequest: existing,
+        delegatedToAgent: true,
+      };
+    }
+    return {
+      runId: context.runId,
+      status: context.runStatus,
+      alreadySent: false,
+      delegatedToAgent: true,
+    };
+  }
+
   if (hasStoredApprovalRequest(loopExecutor)) {
     const approvalRequest = readObject(loopExecutor.approvalRequest);
     return {
@@ -756,6 +955,29 @@ export async function ensureRunApprovalNotification(input: { auth: AuthContext; 
     channel: primaryChannel?.kind === "telegram" || primaryChannel?.kind === "gmail" ? primaryChannel.kind : "email",
   });
   const approvalUrl = `${config.publicBaseUrl.replace(/\/$/, "")}/api/workflows/loops/approvals/${approval.token}/approve`;
+  const to = primaryChannel?.destination ?? "dashboard";
+  const reserved = await reserveApprovalEmailSend({
+    auth: input.auth,
+    runId: context.runId,
+    approvalRequest: {
+      to,
+      approvalUrl,
+      token: approval.token,
+      ...(primaryChannel?.kind ? { channel: primaryChannel.kind } : {}),
+    },
+  });
+  if (!reserved) {
+    const existing = await getStoredApprovalRequest(input.auth, context.runId);
+    if (existing) {
+      return {
+        runId: context.runId,
+        status: context.runStatus,
+        alreadySent: true,
+        approvalRequest: existing,
+      };
+    }
+    throw new Error("Could not reserve approval email send for this run");
+  }
 
   let renderedEmail: { html: string; text: string } | null = null;
   let emailTemplate: { html: string; text: string; design: unknown; subject: string | null; updatedAt: string; source: string } | undefined;

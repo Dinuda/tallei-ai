@@ -63,7 +63,8 @@ function agentTheme(task: AgentRowTask) {
   if (key.includes("memory_search") || key.includes("web_search") || key.includes("research")) return AGENT_THEME.research;
   if (isWriterThemed(task)) return AGENT_THEME.writer;
   if (key.includes("resend_broadcast") || key.includes("broadcast") || key.includes("distribution")) return AGENT_THEME.broadcast;
-  if (key.includes("email_approval_request") || key.includes("approval") || key.includes("email_builder")) return AGENT_THEME.publicist;
+  if (key.includes("email_builder_compose") || key.includes("email_builder_render")) return AGENT_THEME.publicist;
+  if (key.includes("email_approval_request") || key.includes("approval")) return AGENT_THEME.publicist;
   if (key.includes("gmail") || key.includes("public") || key.includes("publish")) return AGENT_THEME.publicist;
   return AGENT_THEME.default;
 }
@@ -121,9 +122,9 @@ function duration(task: AgentRowTask): string {
 }
 
 function isEmailApprovalTask(task: AgentRowTask): boolean {
+  if (isBroadcastDeliveryTask(task) || isEmailBuildTask(task)) return false;
   const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
-  const text = `${task.agentId} ${task.toolKey} ${getOutput(task)}`.toLowerCase();
-  return refs.includes("email_approval_request") || text.includes("email approval request sent");
+  return refs.includes("email_approval_request");
 }
 
 function isBroadcastDeliveryTask(task: AgentRowTask): boolean {
@@ -132,12 +133,21 @@ function isBroadcastDeliveryTask(task: AgentRowTask): boolean {
   return refs.includes("resend_broadcast") || text.includes("broadcast") || text.includes("distribution");
 }
 
+function isEmailBuildTask(task: AgentRowTask): boolean {
+  const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
+  return (refs.includes("email_builder_compose") || refs.includes("email_builder_render"))
+    && !refs.includes("email_approval_request");
+}
+
 function responsibilityBrief(task: AgentRowTask): string | null {
   if (isBroadcastDeliveryTask(task)) {
     return "After approval and recipient upload, sync contacts and submit the Resend broadcast only.";
   }
   if (isEmailApprovalTask(task)) {
-    return "Review the draft, ask approval questions, and build/render the email. No broadcast sending.";
+    return "Review the draft, ask approval questions, and send the approval request only.";
+  }
+  if (isEmailBuildTask(task)) {
+    return "Compose and render the visual email from the writer draft only.";
   }
   if (isWriterThemed(task)) {
     return "Write the subscriber-ready newsletter draft only.";
@@ -175,6 +185,7 @@ export function AgentRow({
   onRerun,
   rerunning = false,
   canRerun = false,
+  metadataSummary = null,
 }: {
   task: AgentRowTask;
   open: boolean;
@@ -182,6 +193,7 @@ export function AgentRow({
   onRerun?: () => void;
   rerunning?: boolean;
   canRerun?: boolean;
+  metadataSummary?: string | null;
 }) {
   const active = task.status === "in_progress";
   const theme = agentTheme(task);
@@ -223,7 +235,12 @@ export function AgentRow({
                 </span>
               </div>
             </div>
-            <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">{responsibilityBrief(task) ?? brief(task)}</p>
+            <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">
+              {metadataSummary ?? responsibilityBrief(task) ?? brief(task)}
+            </p>
+            {metadataSummary && responsibilityBrief(task) ? (
+              <p className="mt-1 line-clamp-1 text-[10px] leading-4 text-slate-400">{responsibilityBrief(task)}</p>
+            ) : null}
             {toolBadges(task).length > 0 ? (
               <div className="mt-2 flex flex-wrap gap-1">
                 {toolBadges(task).map((label) => (

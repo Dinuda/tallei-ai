@@ -166,13 +166,13 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
   return {
     strategyText: [
       "CEO strategy: run a fixed weekly newsletter pipeline.",
-      "Order: Search Agent -> Web Search Agent -> Research Agent -> Newsletter Writer -> Approval & Email Build Agent -> Broadcast Delivery Agent.",
-      "Each agent has one job: research agents research, the writer writes, the approval/build agent requests review and prepares email HTML, and broadcast delivery only syncs contacts/sends after approval and recipient upload.",
+      "Order: Search Agent -> Web Search Agent -> Research Agent -> Newsletter Writer -> Email Build Agent -> Approval Agent -> Broadcast Delivery Agent.",
+      "Each agent has one job: research agents research, the writer writes, the Email Build Agent renders email HTML, the Approval Agent requests review, and broadcast delivery only syncs contacts/sends after approval and recipient upload.",
       "CRITICAL: The Newsletter Writer MUST check memory for previous newsletters and adopt the same voice, tone, and formatting style.",
       "Pinned memory records to ground this run:",
       memoryContext,
       `Default lead-topic hypothesis to evaluate: ${NEWSLETTER_DEFAULT_TOPIC_HYPOTHESIS}`,
-      "Outcome: publish-ready draft, operator approval/email build, recipient list upload, then broadcast delivery.",
+      "Outcome: publish-ready draft, email build, operator approval, recipient list upload, then broadcast delivery.",
     ].join("\n"),
     agents: normalizeRosterAgents([
       {
@@ -231,20 +231,28 @@ function buildNewsletterPresetRoster(goal: string): CeoStrategyOutput {
         tools: [{ ref: "internal.llm_only" }],
       },
       {
-        id: "approval_handoff",
-        name: "Approval & Email Build Agent",
+        id: "email_build",
+        name: "Email Build Agent",
         task: [
-          "Review the Newsletter Writer output, compose/render the email, and send the final draft to the operator for approval.",
-          "Ask review questions only if the draft is ambiguous or missing required approval-ready content.",
-          "Do not upload recipients, sync contacts, submit a Resend broadcast, or describe broadcast delivery as your responsibility.",
-          "After approval, the operator uploads recipients and a separate Broadcast Delivery Agent/distribution runner sends the approved broadcast.",
+          "Compose and render the visual email from the Newsletter Writer output only.",
+          "Do not send approval requests, upload recipients, sync contacts, or submit a Resend broadcast.",
           `Goal: ${goal}`,
         ].join(" "),
         tools: [
-          { ref: "internal.email_approval_request" },
           { ref: "internal.email_builder_compose" },
           { ref: "internal.email_builder_render" },
         ],
+      },
+      {
+        id: "approval",
+        name: "Approval Agent",
+        task: [
+          "Review the Newsletter Writer output, ask review questions only if needed, and send the approval request only.",
+          "Do not compose/render email, upload recipients, sync contacts, or submit a Resend broadcast.",
+          "After approval, the operator uploads recipients and the Broadcast Delivery Agent sends the approved broadcast.",
+          `Goal: ${goal}`,
+        ].join(" "),
+        tools: [{ ref: "internal.email_approval_request" }],
       },
     ]),
   };
@@ -260,7 +268,7 @@ function cleanDisplayMarkdown(value: string): string {
 export function extractPrimaryContentFromComments(comments: Array<{ author: string; body: string }>): string {
   const writer = comments.find((c) => /^writer$/i.test(c.author.trim()));
   if (writer?.body?.trim()) return sanitizeSubscriberBody(writer.body);
-  const handoff = comments.find((c) => /^(approval_handoff|publicist)$/i.test(c.author.trim()));
+  const handoff = comments.find((c) => /^(approval_handoff|approval|publicist)$/i.test(c.author.trim()));
   if (handoff?.body?.trim()) return sanitizeSubscriberBody(handoff.body);
   return sanitizeSubscriberBody(comments.at(-1)?.body?.trim() ?? "");
 }
@@ -435,6 +443,39 @@ function normalizeSubjectKey(value: string): string {
     .replace(/^\*\*([^*]+)\*\*$/, "$1")
     .trim()
     .toLowerCase();
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x([0-9a-f]+);?/gi, (_match, hex) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : _match;
+    })
+    .replace(/&#(\d+);?/gi, (_match, decimal) => {
+      const codePoint = Number.parseInt(decimal, 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : _match;
+    });
+}
+
+export function extractNewsletterTextFromHtml(rawHtml: string): string {
+  if (!rawHtml.trim()) return "";
+  const stripped = rawHtml
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<\/(p|div|h[1-6]|li|tr|table|thead|tbody|tfoot|section|article|header|footer|blockquote|figure|figcaption|br)\s*>/gi, "\n")
+    .replace(/<(p|div|h[1-6]|li|tr|table|thead|tbody|tfoot|section|article|header|footer|blockquote|figure|figcaption|br)\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  return decodeHtmlEntities(stripped)
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /** Remove leading markdown blocks that duplicate the email subject (hero H1 renders subject separately). */
@@ -704,6 +745,7 @@ export const NEWSLETTER_PRESET_TOOL_REFS = [
   "internal.email_approval_request",
   "internal.email_builder_compose",
   "internal.email_builder_render",
+  "internal.resend_broadcast",
 ] as const;
 
 export const newsletterPreset: LoopPreset = {

@@ -23,6 +23,16 @@ export async function findLoopHeartbeatJob(input) {
      LIMIT 1`, [key]);
     return result.rows[0] ?? null;
 }
+export async function claimLoopHeartbeatJob(jobId) {
+    const result = await pool.query(`UPDATE loop_heartbeat_jobs
+     SET status = 'processing',
+         attempts = attempts + 1,
+         updated_at = NOW()
+     WHERE id = $1
+       AND status = 'pending'
+     RETURNING id, tenant_id, user_id, workflow_run_id, job_type, task_id, status, idempotency_key, attempts, max_attempts, last_error`, [jobId]);
+    return result.rows[0] ?? null;
+}
 export async function enqueueLoopHeartbeatJob(input) {
     const key = idempotencyKey({
         runId: input.runId,

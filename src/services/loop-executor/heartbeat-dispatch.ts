@@ -30,7 +30,7 @@ async function executeLoopHeartbeatJob(job: {
     return;
   }
   if (job.job_type === "distribution") {
-    await runDistributionHeartbeat(job.workflow_run_id);
+    await runDistributionHeartbeat(job.workflow_run_id, job.task_id ?? undefined);
     return;
   }
   throw new Error(`Unknown heartbeat job type: ${job.job_type}`);

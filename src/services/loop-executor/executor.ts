@@ -13,7 +13,8 @@ import { deliverStatusNotification } from "../channels.js";
 import { getExternalActionHandler } from "./external-action-handlers.js";
 import "./external-action-handlers-registrations.js";
 import { runLoopAgent } from "./agent-runner.js";
-import { applyEmailApprovalResult } from "./approval.js";
+import { applyEmailApprovalResult, persistBuiltEmailTemplate } from "./approval.js";
+import { isEmailBuildAgent, isNewsletterDeliveryDefinition } from "./agent-responsibilities.js";
 import { advanceDynamicRunAfterSeq } from "./gates.js";
 import { isDynamicPlanDefinition, normalizeRosterAgents, readLoopDefinition } from "./plan.js";
 import { extractPrimaryContentFromComments, sanitizeSubscriberBody } from "./presets/newsletter.js";
@@ -29,7 +30,7 @@ import {
 import { scheduleHeartbeat } from "./run-heartbeat.js";
 import { synthesizeFinalOutput } from "./run-llm.js";
 import { insertComment, insertEvent, insertOrUpdateArtifact, loadRunArtifacts, loadRunComments, readObject } from "./run-store.js";
-import { buildCeoStrategyOutput, materializeTasksFromRoster } from "./run-strategy.js";
+import { buildCeoStrategyOutput, findDeliveryAgentTaskId, materializeTasksFromRoster } from "./run-strategy.js";
 import { getEffectiveLoopConstraints, listAllowedLoopTools, validateAgentRoster } from "./tool-catalog.js";
 import { loopRunAgentSchema, loopToolAssignmentSchema } from "./types.js";
 
@@ -80,6 +81,7 @@ export async function runCeoStrategyHeartbeat(runId: string) {
         && (context.definition.agentGraph?.children?.length ?? 0) > 0;
     if (preset || builderPreApproved) {
         await materializeTasksFromRoster({ context, roster: ceoOutput.agents, strategyOutput: ceoOutput.strategyText });
+        const deliveryAgentTaskId = await findDeliveryAgentTaskId(context);
         const firstTask = await pool.query<{ id: string }>(
             `SELECT id FROM loop_run_tasks WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
              AND status = 'todo' ORDER BY seq ASC LIMIT 1`,
@@ -90,6 +92,8 @@ export async function runCeoStrategyHeartbeat(runId: string) {
             approvedRoster: ceoOutput.agents,
             rosterApprovedAt: new Date().toISOString(),
             strategyReadyAt: new Date().toISOString(),
+            ...(deliveryAgentTaskId ? { deliveryAgentTaskId } : {}),
+            ...(context.definition.builderMeta?.designDiagnostics ? { designDiagnostics: context.definition.builderMeta.designDiagnostics } : {}),
         });
         await pool.query(`UPDATE workflow_runs
          SET status = 'strategy_approved',
@@ -151,6 +155,7 @@ export async function runCeoStrategyHeartbeat(runId: string) {
     const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
         proposedRoster: ceoOutput.agents,
         strategyReadyAt: new Date().toISOString(),
+        ...(context.definition.builderMeta?.designDiagnostics ? { designDiagnostics: context.definition.builderMeta.designDiagnostics } : {}),
     });
     await pool.query(`UPDATE workflow_runs
      SET status = 'waiting_for_strategy_approval',
@@ -269,6 +274,9 @@ export async function runAgentHeartbeat(runId, taskId) {
             }
             return handler(context, task, stage as import("./types.js").LoopExternalActionStage);
         }
+        if (assignedTools.some((tool) => tool.ref === "internal.resend_broadcast")) {
+            throw new Error("Broadcast Delivery Agent cannot run as a normal agent. It only runs through the post-approval distribution heartbeat after recipient upload.");
+        }
         const connectorValidation = await validateAgentRoster({
             agents: [{ tools: assignedTools }],
             definition: getEffectiveLoopConstraints(context.definition),
@@ -355,6 +363,21 @@ export async function runAgentHeartbeat(runId, taskId) {
                 emailTemplate: result.emailTemplate,
             });
             return { status: "waiting_for_email_approval", taskId: task.id };
+        }
+        if (result.emailTemplate?.html && isEmailBuildAgent(agentSpec, isNewsletterDeliveryDefinition(context.definition))) {
+            const artifactBody = result.artifactBody
+                ?? extractPrimaryContentFromComments([
+                    ...comments.map((comment) => ({ author: comment.author, body: comment.body })),
+                    { author: task.agent_id, body: result.text },
+                ]);
+            if (artifactBody.trim()) {
+                await persistBuiltEmailTemplate({
+                    context,
+                    taskId: task.id,
+                    artifactBody,
+                    emailTemplate: result.emailTemplate,
+                });
+            }
         }
         const preset = resolveLoopPreset(context.definition);
         const hasAgentGraphRoster = (context.definition.agentGraph?.children?.length ?? 0) > 0;
@@ -913,6 +936,8 @@ export async function getLoopRun(auth, runId) {
             ? {
                 html: deliveryEmailHtml,
                 design: deliveryEmailDesign,
+                subject: typeof emailTemplateMeta.subject === "string" ? emailTemplateMeta.subject : null,
+                preview: typeof emailTemplateMeta.preview === "string" ? emailTemplateMeta.preview : null,
                 updatedAt: deliveryEmailUpdatedAt,
             }
             : null,

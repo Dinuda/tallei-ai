@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { createLoopWorkflow } from "../loop-executor/creator.js";
 import { loopDefinitionSchema, loopStageApprovalChannelInputSchema } from "../loop-executor/types.js";
-import { channelsFromDesign, designLoopFromIntent } from "./ceo-designer.js";
+import { channelsFromDesign, designLoopFromIntent, loopBuilderTraceSchema } from "./ceo-designer.js";
 
 /** Optional UI hint passed to the LLM — does not bypass the builder. */
 export const builderTemplateHintSchema = z.enum([
@@ -29,6 +29,7 @@ export const loopBuilderProposalSchema = z.object({
   rationale: z.array(z.string().min(1)).default([]),
   designedBy: z.literal("ceo_llm").default("ceo_llm"),
   model: z.string().optional(),
+  trace: loopBuilderTraceSchema.optional(),
 });
 
 export type LoopBuilderProposal = z.infer<typeof loopBuilderProposalSchema>;
@@ -77,6 +78,7 @@ export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<L
     rationale: result.design.rationale,
     designedBy: "ceo_llm",
     model: result.model,
+    trace: result.trace,
   });
 }
 

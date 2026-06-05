@@ -7,6 +7,18 @@
 
 import { z } from "zod";
 
+/** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
+export function normalizeOptionalString(value: unknown): unknown {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  return typeof value === "string" ? value.trim() : value;
+}
+
+export const optionalNonEmptyStringSchema = z.preprocess(
+  normalizeOptionalString,
+  z.string().min(1).optional(),
+);
+
 /** Current loop definition schema version stored on `workflows.definition_version`. */
 export const LOOP_DEFINITION_VERSION = "loop_executor_v2";
 
@@ -192,7 +204,7 @@ export type LoopAgentGraph = z.infer<typeof loopAgentGraphSchema>;
 
 /**
  * Persisted loop definition (`workflows.metadata_json.loopDefinition`).
- * Use `presetId` to select a built-in CEO roster strategy (see presets/registry).
+ * `presetId` is a legacy explicit shortcut only; bespoke loops should use deliveryType/agentGraph.
  */
 export const loopDefinitionSchema = z.object({
   definitionVersion: z.literal(LOOP_DEFINITION_VERSION),
@@ -213,16 +225,17 @@ export const loopDefinitionSchema = z.object({
     requireDraftBeforeExternalAction: z.boolean().default(true),
     approvalRequiredFor: z.array(z.string()).default(["publish", "send", "external_action"]),
   }),
-  deliveryType: z.string().min(1).optional(),
+  deliveryType: optionalNonEmptyStringSchema,
   agentGraph: loopAgentGraphSchema.optional(),
   plan: loopPlanSchema.optional(),
-  /** Built-in preset key (e.g. `newsletter`). Resolved at runtime via presets/registry. */
-  presetId: z.string().min(1).optional(),
+  /** Legacy built-in preset key. Null/blank from LLM or client payloads is normalized to omitted. */
+  presetId: optionalNonEmptyStringSchema,
   builderMeta: z.object({
     designedBy: z.literal("ceo_llm").default("ceo_llm"),
     preApproved: z.boolean().default(true),
     sourceTemplateIds: z.array(z.string()).optional(),
     model: z.string().optional(),
+    designDiagnostics: z.record(z.unknown()).optional(),
   }).optional(),
 });
 
@@ -244,6 +257,8 @@ export const loopExecutorRunMetaSchema = z.object({
   approvedRoster: z.array(loopRunAgentSchema).optional(),
   strategyReadyAt: z.string().optional(),
   rosterApprovedAt: z.string().optional(),
+  deliveryAgentTaskId: z.string().optional(),
+  designDiagnostics: z.record(z.unknown()).optional(),
   approvalRequest: z.object({
     to: z.string(),
     approvalUrl: z.string(),

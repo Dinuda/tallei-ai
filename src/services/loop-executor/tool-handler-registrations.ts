@@ -6,6 +6,7 @@
  */
 
 import { config } from "../../config/index.js";
+import { pool } from "../../infrastructure/db/index.js";
 import { recallMemories } from "../memory.js";
 import { sendWorkflowRunApprovalPrompt, getPrimaryNotificationChannel } from "../channels.js";
 import { createWorkflowApprovalRequest } from "../approval-tokens.js";
@@ -15,6 +16,9 @@ import { buildUnlayerNewsletterEmail } from "./presets/newsletter-unlayer.js";
 import { registerToolHandler, type ToolHandlerContext } from "./tool-handlers.js";
 import { loopExecutorOpenAiChat, loopExecutorOpenAiModel } from "./openai-chat.js";
 import { readMemorySearchConfig, readGatewaySearchConfig, runExaWebSearch, completeText } from "./agent-runner-internals.js";
+import { readObject } from "./run-store.js";
+import { getStoredApprovalRequest, readStoredEmailTemplate, reserveApprovalEmailSend } from "./approval.js";
+import { readLoopExecutorMeta } from "./run-context.js";
 
 registerToolHandler("internal.memory_search", async (ctx: ToolHandlerContext) => {
   const memoryConfig = readMemorySearchConfig(ctx.assignment.config, ctx.agent.task);
@@ -31,8 +35,20 @@ registerToolHandler("internal.web_search", async (ctx: ToolHandlerContext) => {
 
 registerToolHandler("internal.email_approval_request", async (ctx: ToolHandlerContext) => {
   if (!ctx.runId || !ctx.workflowId) throw new Error("Email approval requires an active loop run context");
-  const artifactBody = extractApprovalBodyFromComments(ctx.priorComments);
+  const artifactBody = await resolveApprovalArtifactBodyForTool(ctx);
   if (!artifactBody.trim()) throw new Error("Content is required before sending the approval request");
+  const existingApprovalRequest = ctx.runId ? await getStoredApprovalRequest(ctx.auth, ctx.runId) : null;
+  if (existingApprovalRequest?.sentAt || existingApprovalRequest?.reservedAt) {
+    return {
+      text: existingApprovalRequest.sentAt
+        ? `Approval request already sent to ${existingApprovalRequest.to}. No duplicate approval email was sent.`
+        : `Approval request is already being sent to ${existingApprovalRequest.to}.`,
+      emailApprovalSent: true,
+      approvalRequest: existingApprovalRequest,
+      artifactBody,
+      shortCircuit: true,
+    };
+  }
 
   const formatter = resolveDeliveryFormatter(ctx.definition!, artifactBody);
   const formatted = formatter.formatForDelivery(artifactBody);
@@ -48,28 +64,41 @@ registerToolHandler("internal.email_approval_request", async (ctx: ToolHandlerCo
     channel: primaryChannel?.kind === "telegram" || primaryChannel?.kind === "gmail" ? primaryChannel.kind : "email",
   });
   const approvalUrl = `${config.publicBaseUrl.replace(/\/$/, "")}/api/workflows/loops/approvals/${approval.token}/approve`;
+  const reserved = await reserveApprovalEmailSend({
+    auth: ctx.auth,
+    runId: ctx.runId,
+    approvalRequest: {
+      to: primaryChannel?.destination ?? "dashboard",
+      approvalUrl,
+      token: approval.token,
+      ...(primaryChannel?.kind ? { channel: primaryChannel.kind } : {}),
+    },
+  });
+  if (!reserved) {
+    const reservedRequest = await getStoredApprovalRequest(ctx.auth, ctx.runId);
+    if (reservedRequest) {
+      return {
+        text: `Approval request already sent to ${reservedRequest.to}. No duplicate approval email was sent.`,
+        emailApprovalSent: true,
+        approvalRequest: reservedRequest,
+        artifactBody,
+        shortCircuit: true,
+      };
+    }
+    throw new Error("Could not reserve approval email send for this run");
+  }
 
   let renderedEmail: { html: string; text: string } | null = null;
   let emailTemplate: { html: string; text: string; design: unknown; subject: string | null; updatedAt: string; source: string } | undefined;
-  if (isNewsletterLoopDefinition(ctx.definition!)) {
-    try {
-      const built = buildUnlayerNewsletterEmail({
-        subject: formatted.subject ?? ctx.workflowTitle ?? "Loop run",
-        markdown: formatted.text || artifactBody,
-      });
-      emailTemplate = {
-        html: built.html,
-        text: built.text,
-        design: built.design,
-        subject: built.subject,
-        updatedAt: new Date().toISOString(),
-        source: "builder",
-      };
-      renderedEmail = { html: built.html, text: built.text };
-    } catch {
-      renderedEmail = null;
-      emailTemplate = undefined;
-    }
+  const storedTemplate = ctx.runId
+    ? await readStoredEmailTemplateFromRun(ctx)
+    : null;
+  if (storedTemplate) {
+    emailTemplate = storedTemplate;
+    renderedEmail = {
+      html: storedTemplate.html,
+      text: storedTemplate.text ?? storedTemplate.html,
+    };
   }
 
   let sentPrompt: { to: string; sentAt: string; channel?: string };
@@ -107,6 +136,43 @@ registerToolHandler("internal.email_approval_request", async (ctx: ToolHandlerCo
   };
 });
 
+async function readStoredEmailTemplateFromRun(ctx: ToolHandlerContext) {
+  if (!ctx.runId) return null;
+  const result = await pool.query<{ metadata_json: unknown }>(
+    `SELECT metadata_json
+     FROM workflow_runs
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+     LIMIT 1`,
+    [ctx.runId, ctx.auth.tenantId, ctx.auth.userId],
+  );
+  return readStoredEmailTemplate(result.rows[0]?.metadata_json);
+}
+
+async function resolveApprovalArtifactBodyForTool(ctx: ToolHandlerContext): Promise<string> {
+  if (ctx.runId) {
+    const result = await pool.query<{ draft_output: string | null; metadata_json: unknown }>(
+      `SELECT draft_output, metadata_json
+       FROM workflow_runs
+       WHERE id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+       LIMIT 1`,
+      [ctx.runId, ctx.auth.tenantId, ctx.auth.userId],
+    );
+    const row = result.rows[0];
+    const loopExecutor = readLoopExecutorMeta(row?.metadata_json);
+    if (typeof loopExecutor.artifactBody === "string" && loopExecutor.artifactBody.trim()) {
+      return loopExecutor.artifactBody.trim();
+    }
+    if (typeof row?.draft_output === "string" && row.draft_output.trim()) {
+      return row.draft_output.trim();
+    }
+  }
+  return extractApprovalBodyFromComments(ctx.priorComments);
+}
+
 registerToolHandler("internal.email_builder_render", async (ctx: ToolHandlerContext) => {
   const document = ctx.assignment.config?.document;
   const artifactBody = extractApprovalBodyFromComments(ctx.priorComments);
@@ -126,6 +192,7 @@ registerToolHandler("internal.email_builder_render", async (ctx: ToolHandlerCont
         text: built.text,
         design: built.design,
         subject: built.subject,
+        preview: built.preview,
         updatedAt: new Date().toISOString(),
         source: "builder",
       },
@@ -161,6 +228,7 @@ registerToolHandler("internal.email_builder_compose", async (ctx: ToolHandlerCon
       text: built.text,
       design: built.design,
       subject: built.subject,
+      preview: built.preview,
       updatedAt: new Date().toISOString(),
       source: "builder",
     },
@@ -170,14 +238,20 @@ registerToolHandler("internal.email_builder_compose", async (ctx: ToolHandlerCon
 function extractApprovalBodyFromComments(comments: Array<{ author: string; body: string }>): string {
   const ordered = comments.filter((c) => c.body.trim().length > 0);
   if (ordered.length === 0) return "";
-  let lastAgent: { author: string; body: string } | undefined;
+  const writer = ordered.find((c) => /writer/i.test(c.author.trim()));
+  if (writer?.body.trim()) return writer.body.trim();
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const author = ordered[i].author.trim().toLowerCase();
+    if (author === "user" || author === "ceo") continue;
+    if (/email_build|builder|compose|render|approval_handoff|publicist/.test(author)) continue;
+    return ordered[i].body.trim();
+  }
   for (let i = ordered.length - 1; i >= 0; i--) {
     if (ordered[i].author !== "user" && ordered[i].author !== "ceo") {
-      lastAgent = ordered[i];
-      break;
+      return ordered[i].body.trim();
     }
   }
-  return (lastAgent ?? ordered[ordered.length - 1]).body;
+  return ordered[ordered.length - 1].body.trim();
 }
 
 registerToolHandler("composio.gmail.create_draft", async (ctx: ToolHandlerContext) => {

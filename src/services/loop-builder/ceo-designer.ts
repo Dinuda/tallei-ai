@@ -3,13 +3,17 @@ import { z } from "zod";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { listPreferences, recallMemories } from "../memory.js";
 import { buildLoopDefinitionFromCeoDesign } from "../loop-executor/creator.js";
+import {
+  isNewsletterDeliveryDefinition,
+  normalizeGraphResponsibilities,
+} from "../loop-executor/agent-responsibilities.js";
 import { formatTemplateCatalogForPrompt, getLoopTemplate } from "../loop-executor/templates/registry.js";
 import { getEffectiveLoopConstraints, listLoopTools, validateAgentRoster } from "../loop-executor/tool-catalog.js";
 import {
   loopAgentGraphSchema,
   loopStageApprovalChannelInputSchema,
+  optionalNonEmptyStringSchema,
   type LoopAgentGraph,
-  type LoopAgentGraphChild,
   type LoopDefinition,
   type LoopStageApprovalChannel,
 } from "../loop-executor/types.js";
@@ -30,8 +34,8 @@ const ceoDesignOutputSchema = z.object({
     cron: z.string().min(1),
     timezone: z.string().min(1).default("UTC"),
   }),
-  deliveryType: z.string().min(1).optional(),
-  presetId: z.string().min(1).optional(),
+  deliveryType: optionalNonEmptyStringSchema,
+  presetId: optionalNonEmptyStringSchema,
   builderMeta: z.object({
     designedBy: z.literal("ceo_llm").default("ceo_llm"),
     preApproved: z.boolean().default(true),
@@ -42,6 +46,52 @@ const ceoDesignOutputSchema = z.object({
 });
 
 export type CeoDesignOutput = z.infer<typeof ceoDesignOutputSchema>;
+
+const loopDeliveryClassificationSchema = z.object({
+  deliveryType: z.enum(["newsletter", "plain", "none"]).default("none"),
+  deliveryTarget: z.enum(["subscriber_list", "operator", "none"]).default("none"),
+  approvalChannels: z.array(loopStageApprovalChannelInputSchema).default(["primary"]),
+  cadenceGuess: z.string().min(1),
+  externalActionRequired: z.boolean(),
+  subscriberBroadcastRequired: z.boolean(),
+  explicitLegacyPresetRequested: z.boolean().default(false),
+});
+
+export type LoopDeliveryClassification = z.infer<typeof loopDeliveryClassificationSchema>;
+
+const workflowCriticResultSchema = z.object({
+  pass: z.boolean(),
+  riskLevel: z.enum(["low", "medium", "high"]),
+  issues: z.array(z.string()).default([]),
+  requiredFixes: z.array(z.string()).default([]),
+  optionalImprovements: z.array(z.string()).default([]),
+});
+
+export type WorkflowCriticResult = z.infer<typeof workflowCriticResultSchema>;
+
+const loopBuilderTraceStageSchema = z.object({
+  stage: z.string().min(1),
+  model: z.string().optional(),
+  input: z.record(z.unknown()).optional(),
+  output: z.record(z.unknown()).optional(),
+});
+
+export type LoopBuilderTraceStage = z.infer<typeof loopBuilderTraceStageSchema>;
+
+export const loopBuilderTraceSchema = z.object({
+  stages: z.array(loopBuilderTraceStageSchema).default([]),
+});
+
+export type LoopBuilderTrace = z.infer<typeof loopBuilderTraceSchema>;
+
+export type FinalizedLoopDesign = CeoDesignOutput & {
+  designDiagnostics?: {
+    deliveryClassification: LoopDeliveryClassification;
+    critic: WorkflowCriticResult;
+    trace?: LoopBuilderTrace;
+  };
+  trace?: LoopBuilderTrace;
+};
 
 export type DesignLoopInput = {
   auth: AuthContext;
@@ -96,116 +146,67 @@ function collectSuggestedToolRefs(agentGraph: LoopAgentGraph): string[] {
   return [...new Set(refs.filter((ref) => known.has(ref)))];
 }
 
-function childToolRefs(child: LoopAgentGraphChild): string[] {
-  return child.tools.map((tool) => tool.ref.trim().toLowerCase()).filter(Boolean);
-}
-
-function isNewsletterDeliveryDesign(design: Pick<CeoDesignOutput, "deliveryType" | "presetId">): boolean {
-  return design.deliveryType?.trim().toLowerCase() === "newsletter"
-    || design.presetId?.trim().toLowerCase() === "newsletter"
-    || design.presetId?.trim().toLowerCase() === "newsletter_v1";
-}
-
-function isApprovalEmailBuildAgent(child: LoopAgentGraphChild): boolean {
-  const refs = childToolRefs(child).join(" ");
-  const roleKey = `${child.id} ${child.name}`.toLowerCase();
-  return refs.includes("internal.email_approval_request")
-    || refs.includes("internal.email_builder_compose")
-    || refs.includes("internal.email_builder_render")
-    || roleKey.includes("approval");
-}
-
-function isBroadcastDeliveryAgent(child: LoopAgentGraphChild): boolean {
-  const refs = childToolRefs(child).join(" ");
-  const roleKey = `${child.id} ${child.name}`.toLowerCase();
-  return refs.includes("internal.resend_broadcast") || roleKey.includes("broadcast") || roleKey.includes("delivery");
-}
-
-function isWriterAgent(child: LoopAgentGraphChild): boolean {
-  const key = `${child.id} ${child.name} ${child.task}`.toLowerCase();
-  return key.includes("writer") || key.includes("write") || key.includes("draft");
-}
-
-function normalizeCeoDesignResponsibilities(design: CeoDesignOutput): CeoDesignOutput {
-  const newsletterDelivery = isNewsletterDeliveryDesign(design);
-  const children = design.agentGraph.children.map((child) => {
-    if (isApprovalEmailBuildAgent(child)) {
-      return {
-        ...child,
-        id: child.id || "approval_email_build",
-        name: "Approval & Email Build Agent",
-        task: [
-          "Review the producer's final draft, ask the operator any approval questions, compose/render the email, and send the approval email only.",
-          "Do not sync recipients, upload contacts, submit a Resend broadcast, or describe broadcast delivery as your responsibility.",
-        ].join(" "),
-        tools: child.tools.filter((tool) => [
-          "internal.email_approval_request",
-          "internal.email_builder_compose",
-          "internal.email_builder_render",
-        ].includes(tool.ref)),
-      };
-    }
-
-    if (newsletterDelivery && isBroadcastDeliveryAgent(child)) {
-      return {
-        ...child,
-        id: child.id || "broadcast_delivery",
-        name: "Broadcast Delivery Agent",
-        task: [
-          "After operator approval and recipient upload, sync contacts and submit the approved Resend broadcast only.",
-          "Do not write, edit, build the approval email, ask approval questions, or send the approval email.",
-        ].join(" "),
-        tools: child.tools.filter((tool) => tool.ref !== "internal.email_approval_request"
-          && tool.ref !== "internal.email_builder_compose"
-          && tool.ref !== "internal.email_builder_render"),
-      };
-    }
-
-    if (newsletterDelivery && isWriterAgent(child)) {
-      return {
-        ...child,
-        name: /newsletter/i.test(child.name) ? child.name : "Newsletter Writer",
-        task: [
-          "Write one subscriber-ready newsletter draft only, grounded in prior research and verified facts.",
-          "Do not ask approval questions, prepare email builder output, upload contacts, or send/broadcast anything.",
-        ].join(" "),
-      };
-    }
-
-    return child;
-  });
-
-  if (newsletterDelivery && !children.some(isBroadcastDeliveryAgent)) {
-    children.push({
-      id: "broadcast_delivery",
-      name: "Broadcast Delivery Agent",
-      task: [
-        "After operator approval and recipient upload, sync contacts and submit the approved Resend broadcast only.",
-        "Do not write, edit, build the approval email, ask approval questions, or send the approval email.",
-      ].join(" "),
-      tools: [{ ref: "internal.resend_broadcast" }],
-    });
-  }
-
+function summarizeAgentGraph(agentGraph: LoopAgentGraph) {
   return {
-    ...design,
-    presetId: newsletterDelivery ? undefined : design.presetId,
-    deliveryType: newsletterDelivery ? "newsletter" : design.deliveryType,
-    strategyText: newsletterDelivery
-      ? [
-          design.strategyText.trim(),
-          "",
-          "Responsibility split: writer writes only; Approval & Email Build Agent handles review questions, email compose/render, and the approval email only; Broadcast Delivery Agent handles only post-approval recipient sync and Resend broadcast submission.",
-        ].join("\n")
-      : design.strategyText,
-    agentGraph: {
-      ...design.agentGraph,
-      children,
+    parent: {
+      id: agentGraph.parent.id,
+      name: agentGraph.parent.name,
     },
+    children: agentGraph.children.map((child) => ({
+      id: child.id,
+      name: child.name,
+      task: child.task,
+      tools: child.tools.map((tool) => tool.ref),
+    })),
   };
 }
 
-function buildSystemPrompt(): string {
+function classifyDeliveryIntent(input: {
+  prompt: string;
+  feedback?: string;
+  templateHint?: string;
+}): LoopDeliveryClassification {
+  const text = `${input.prompt} ${input.feedback ?? ""} ${input.templateHint ?? ""}`.toLowerCase();
+  const subscriberBroadcastRequired = /\b(subscribers?|subscriber list|mailing list|email list|audience|broadcast|send them|send to readers|send to customers)\b/i.test(text);
+  const deliveryType = subscriberBroadcastRequired
+    ? "newsletter"
+    : /\b(send to me|for my review|personal digest|internal report)\b/i.test(text)
+      ? "plain"
+      : "none";
+  const cadenceGuess = /\bmonthly\b/i.test(text)
+    ? "0 9 1 * *"
+    : /\bdaily\b/i.test(text)
+      ? "0 9 * * *"
+      : /\bfriday\b/i.test(text)
+        ? "0 9 * * 5"
+        : "0 9 * * 1";
+
+  return loopDeliveryClassificationSchema.parse({
+    deliveryType,
+    deliveryTarget: subscriberBroadcastRequired ? "subscriber_list" : deliveryType === "plain" ? "operator" : "none",
+    approvalChannels: ["primary"],
+    cadenceGuess,
+    externalActionRequired: subscriberBroadcastRequired,
+    subscriberBroadcastRequired,
+    explicitLegacyPresetRequested: false,
+  });
+}
+
+function curateEvidence(input: {
+  memories: Array<{ id: string; text: string }>;
+  preferences: Array<{ id: string; text: string; category?: string | null }>;
+}) {
+  return {
+    memories: input.memories,
+    preferences: input.preferences,
+    memoryBlock: formatMemoriesForPrompt(input.memories),
+    preferenceBlock: formatPreferencesForPrompt(input.preferences),
+    templateCatalog: formatTemplateCatalogForPrompt(),
+    toolCatalog: formatToolCatalogForPrompt(),
+  };
+}
+
+function buildSystemPrompt(classification: LoopDeliveryClassification): string {
   const outputShape = JSON.stringify({
     title: "Short descriptive loop title",
     summary: "One sentence: what this loop produces and how it delivers",
@@ -228,7 +229,7 @@ function buildSystemPrompt(): string {
     },
     schedule: { cron: "0 9 * * 1", timezone: "UTC" },
     deliveryType: "newsletter OR plain OR omit",
-    presetId: "omit unless the user explicitly asks for a legacy fixed preset",
+    presetId: "always omit",
     builderMeta: { designedBy: "ceo_llm", preApproved: true },
     rationale: ["Concrete reason this roster serves the user's stated outcome"],
     suggestedChannels: ["primary"],
@@ -247,15 +248,16 @@ function buildSystemPrompt(): string {
     "- What cadence fits?",
     "",
     "=== STEP 2: DELIVERY INTENT DETECTION ===",
-    "Read the user's intent and set delivery fields accordingly:",
+    "Use this delivery classification. Do not reclassify it:",
+    JSON.stringify(classification),
     "",
     "→ BROADCAST TO SUBSCRIBERS / AUDIENCE / MAILING LIST:",
     "  Triggers: 'subscribers', 'mailing list', 'email list', 'send to audience', 'broadcast', 'distribute to readers'",
     "  Action: set deliveryType: 'newsletter' and omit presetId.",
-    "  Do not use a fixed newsletter preset/template unless the user explicitly requests a legacy fixed preset.",
+    "  Do not use a fixed newsletter preset/template. Templates/patterns are inspiration only.",
     "  This activates: approval → recipient upload → email broadcast as the delivery mechanism, while the CEO still designs the bespoke agent roster.",
-    "  The final approval/email build agent MUST include tools: internal.email_approval_request, internal.email_builder_compose, internal.email_builder_render",
-    "  Keep responsibilities separate: writer writes only; approval/email build agent reviews, asks questions, and prepares/sends the approval email only; broadcast delivery syncs recipients and sends Resend only after approval + recipient upload.",
+    "  Spawn three separate post-writer agents in this order: Email Build Agent (internal.email_builder_compose, internal.email_builder_render), Approval Agent (internal.email_approval_request only), Broadcast Delivery Agent (internal.resend_broadcast only).",
+    "  Keep responsibilities separate: writer writes only; Email Build Agent composes/renders only; Approval Agent sends the approval request only; Broadcast Delivery Agent syncs recipients and submits Resend only after approval + recipient upload.",
     "",
     "→ POST TO SOCIAL / PUBLISH ONLINE:",
     "  Triggers: Twitter/X, LinkedIn, Instagram, blog post, publish",
@@ -274,11 +276,13 @@ function buildSystemPrompt(): string {
     "1. Research (search memory for voice/style/past work, then gather live sources if content requires it)",
     "2. Synthesize (turn research into a concrete brief for the producer)",
     "3. Produce (write, compose, generate — grounded in the brief and memory voice)",
-    "4. Approve/email build (always before any delivery; do not perform delivery here)",
-    "5. Deliver (only if Step 2 identified a delivery target — use the right tools for that delivery type and do not repeat approval/build work)",
+    "4. Email build (compose/render only — no approval request, no broadcast)",
+    "5. Approval (approval request only — no email build, no broadcast)",
+    "6. Deliver (only if Step 2 identified a delivery target — broadcast/sync only, no writing or approval work)",
     "",
     "Hard boundary rule:",
-    "- Every child agent must do exactly one thing. Do not combine writing with approval. Do not combine approval/email build with broadcast delivery. Do not combine broadcast delivery with email approval sending.",
+    "- Every child agent must do exactly one thing with one or two tightly related tools max.",
+    "- Do not combine writing with approval. Do not combine email build with approval. Do not combine approval with broadcast delivery.",
     "",
     "Every agent task must be:",
     "- Specific enough to execute without ambiguity",
@@ -315,12 +319,20 @@ function buildSystemPrompt(): string {
   ].join("\n");
 }
 
+function summarizeEvidence(evidence: ReturnType<typeof curateEvidence>) {
+  return {
+    memoryCount: evidence.memories.length,
+    preferenceCount: evidence.preferences.length,
+    memoryIds: evidence.memories.map((memory) => memory.id),
+    preferenceIds: evidence.preferences.map((preference) => preference.id),
+  };
+}
+
 function buildUserPrompt(input: {
   prompt: string;
   feedback?: string;
   templateHint?: string;
-  memories: Array<{ id: string; text: string }>;
-  preferences: Array<{ id: string; text: string; category?: string | null }>;
+  evidence: ReturnType<typeof curateEvidence>;
   priorProposal?: DesignLoopInput["priorProposal"];
 }): string {
   const sections: string[] = [
@@ -344,15 +356,15 @@ function buildUserPrompt(input: {
   sections.push(
     "",
     "## User memories",
-    formatMemoriesForPrompt(input.memories),
+    input.evidence.memoryBlock,
     "",
     "## User preferences",
-    formatPreferencesForPrompt(input.preferences),
+    input.evidence.preferenceBlock,
     "",
-    formatTemplateCatalogForPrompt(),
+    input.evidence.templateCatalog,
     "",
     "## Available tools",
-    formatToolCatalogForPrompt(),
+    input.evidence.toolCatalog,
   );
 
   if (input.priorProposal) {
@@ -371,24 +383,25 @@ function buildUserPrompt(input: {
   return sections.join("\n");
 }
 
-async function callCeoDesignerLlm(input: {
+async function callLoopArchitectLlm(input: {
   prompt: string;
   feedback?: string;
   templateHint?: string;
-  memories: Array<{ id: string; text: string }>;
-  preferences: Array<{ id: string; text: string; category?: string | null }>;
+  classification: LoopDeliveryClassification;
+  evidence: ReturnType<typeof curateEvidence>;
   priorProposal?: DesignLoopInput["priorProposal"];
   chat?: typeof loopBuilderOpenAiChat;
-}): Promise<CeoDesignOutput> {
+}): Promise<{ design: CeoDesignOutput; traceStage: LoopBuilderTraceStage }> {
   const chat = input.chat ?? loopBuilderOpenAiChat;
+  const messages = [
+    { role: "system" as const, content: buildSystemPrompt(input.classification) },
+    { role: "user" as const, content: buildUserPrompt(input) },
+  ];
   const response = await chat({
     responseFormat: "json_object",
     temperature: 1,
     maxTokens: 4096,
-    messages: [
-      { role: "system", content: buildSystemPrompt() },
-      { role: "user", content: buildUserPrompt(input) },
-    ],
+    messages,
   });
 
   let parsed: unknown;
@@ -398,13 +411,126 @@ async function callCeoDesignerLlm(input: {
     throw new Error("Loop builder returned invalid JSON");
   }
 
-  const design = normalizeCeoDesignResponsibilities(ceoDesignOutputSchema.parse(parsed));
+  const design = ceoDesignOutputSchema.parse(parsed);
   return {
-    ...design,
+    design,
+    traceStage: loopBuilderTraceStageSchema.parse({
+      stage: "loop_architect",
+      model: response.model ?? loopBuilderOpenAiModel(),
+      input: {
+        classification: input.classification,
+        evidence: summarizeEvidence(input.evidence),
+        prompt: input.prompt,
+        feedback: input.feedback ?? null,
+        templateHint: input.templateHint ?? null,
+        priorProposal: input.priorProposal
+          ? {
+              title: input.priorProposal.title,
+              summary: input.priorProposal.summary,
+              rationale: input.priorProposal.rationale,
+              childCount: input.priorProposal.definition.agentGraph?.children?.length ?? 0,
+            }
+          : null,
+        messages,
+      },
+      output: {
+        response: response.text,
+        parsedDesign: design,
+      },
+    }),
+  };
+}
+
+function critiqueWorkflowDesign(design: CeoDesignOutput, classification: LoopDeliveryClassification): WorkflowCriticResult {
+  const issues: string[] = [];
+  const requiredFixes: string[] = [];
+  const children = design.agentGraph.children;
+  const hasApproval = children.some((child) => child.tools.some((tool) => tool.ref === "internal.email_approval_request"));
+  const hasEmailBuild = children.some((child) => child.tools.some((tool) => tool.ref === "internal.email_builder_compose" || tool.ref === "internal.email_builder_render"));
+  const hasBroadcast = children.some((child) => child.tools.some((tool) => tool.ref === "internal.resend_broadcast")
+    || /\b(broadcast|delivery)\b/i.test(`${child.id} ${child.name}`));
+  const mixedApprovalBuild = children.some((child) => {
+    const refs = child.tools.map((tool) => tool.ref);
+    return refs.includes("internal.email_approval_request")
+      && refs.some((ref) => ref === "internal.email_builder_compose" || ref === "internal.email_builder_render");
+  });
+  const mixedApprovalDelivery = children.some((child) => {
+    const refs = child.tools.map((tool) => tool.ref);
+    return refs.includes("internal.email_approval_request") && refs.includes("internal.resend_broadcast");
+  });
+  const mixedBuildDelivery = children.some((child) => {
+    const refs = child.tools.map((tool) => tool.ref);
+    return refs.some((ref) => ref === "internal.email_builder_compose" || ref === "internal.email_builder_render")
+      && refs.includes("internal.resend_broadcast");
+  });
+  const overloadedAgents = children.filter((child) => child.tools.length > 2);
+
+  if (classification.subscriberBroadcastRequired && !hasBroadcast) {
+    requiredFixes.push("Add a Broadcast Delivery Agent with internal.resend_broadcast.");
+  }
+  if (classification.subscriberBroadcastRequired && !hasEmailBuild) {
+    requiredFixes.push("Add an Email Build Agent with compose/render tools.");
+  }
+  if (classification.externalActionRequired && !hasApproval) {
+    requiredFixes.push("Add an Approval Agent with internal.email_approval_request before external delivery.");
+  }
+  if (mixedApprovalBuild) {
+    requiredFixes.push("Split approval and email build into separate single-purpose agents.");
+  }
+  if (mixedApprovalDelivery || mixedBuildDelivery) {
+    requiredFixes.push("Separate approval/email-build tools from broadcast delivery tools.");
+  }
+  if (overloadedAgents.length > 0) {
+    issues.push("Some agents carry more than two tools; each spot agent should stay narrowly scoped.");
+  }
+  if (children.length > 7) {
+    issues.push("Roster is larger than the preferred specialist range.");
+  }
+
+  return workflowCriticResultSchema.parse({
+    pass: requiredFixes.length === 0,
+    riskLevel: requiredFixes.length > 0 ? "medium" : "low",
+    issues,
+    requiredFixes,
+    optionalImprovements: [],
+  });
+}
+
+function finalizeLoopDesign(input: {
+  design: CeoDesignOutput;
+  classification: LoopDeliveryClassification;
+  critic: WorkflowCriticResult;
+}): FinalizedLoopDesign {
+  const newsletterDelivery = input.classification.deliveryType === "newsletter"
+    || isNewsletterDeliveryDefinition(input.design);
+  const children = normalizeGraphResponsibilities(input.design.agentGraph.children, {
+    newsletterDelivery,
+    appendBroadcastDelivery: input.classification.subscriberBroadcastRequired,
+  });
+  const deliveryType = input.classification.deliveryType === "none" ? input.design.deliveryType : input.classification.deliveryType;
+  return {
+    ...input.design,
+    presetId: undefined,
+    deliveryType,
+    strategyText: newsletterDelivery
+      ? [
+          input.design.strategyText.trim(),
+          "",
+          "Responsibility split: writer writes only; Email Build Agent composes/renders only; Approval Agent sends the approval request only; Broadcast Delivery Agent handles only post-approval recipient sync and Resend broadcast submission.",
+        ].join("\n")
+      : input.design.strategyText,
     builderMeta: {
-      ...design.builderMeta,
+      ...input.design.builderMeta,
       designedBy: "ceo_llm",
-      preApproved: design.builderMeta.preApproved ?? true,
+      preApproved: input.design.builderMeta.preApproved ?? true,
+    },
+    agentGraph: {
+      ...input.design.agentGraph,
+      children,
+    },
+    designDiagnostics: {
+      deliveryClassification: input.classification,
+      critic: input.critic,
     },
   };
 }
@@ -416,6 +542,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
   preferences: Array<{ id: string; text: string; category?: string | null }>;
   model: string;
   suggestedToolRefs: string[];
+  trace: LoopBuilderTrace;
 }> {
   const prompt = normalizePrompt(input.prompt);
   if (!prompt) throw new Error("Prompt is required");
@@ -435,22 +562,99 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     category: preference.category ?? null,
   }));
 
-  const design = await callCeoDesignerLlm({
+  const classification = classifyDeliveryIntent({
     prompt,
     feedback: input.feedback,
     templateHint: input.templateHint,
-    memories,
-    preferences: selectedPreferences,
+  });
+  const evidence = curateEvidence({ memories, preferences: selectedPreferences });
+  const classificationTrace = loopBuilderTraceStageSchema.parse({
+    stage: "delivery_classification",
+    model: "deterministic",
+    input: {
+      prompt,
+      feedback: input.feedback ?? null,
+      templateHint: input.templateHint ?? null,
+    },
+    output: classification,
+  });
+  const evidenceTrace = loopBuilderTraceStageSchema.parse({
+    stage: "evidence_curation",
+    model: "deterministic",
+    input: {
+      memories,
+      preferences: selectedPreferences,
+    },
+    output: {
+      memoryCount: evidence.memories.length,
+      preferenceCount: evidence.preferences.length,
+      memoryIds: evidence.memories.map((memory) => memory.id),
+      preferenceIds: evidence.preferences.map((preference) => preference.id),
+    },
+  });
+  const architectResult = await callLoopArchitectLlm({
+    prompt,
+    feedback: input.feedback,
+    templateHint: input.templateHint,
+    classification,
+    evidence,
     priorProposal: input.priorProposal,
     chat: input.testOverrides?.chat,
   });
+  const critic = critiqueWorkflowDesign(architectResult.design, classification);
+  const criticTrace = loopBuilderTraceStageSchema.parse({
+    stage: "workflow_critic",
+    model: "deterministic",
+    input: {
+      design: summarizeAgentGraph(architectResult.design.agentGraph),
+      classification,
+    },
+    output: critic,
+  });
+  const designWithoutTrace = finalizeLoopDesign({ design: architectResult.design, classification, critic });
+  const finalizationTrace = loopBuilderTraceStageSchema.parse({
+    stage: "loop_finalizer",
+    model: "deterministic",
+    input: {
+      design: summarizeAgentGraph(architectResult.design.agentGraph),
+      classification,
+      critic,
+    },
+    output: {
+      deliveryType: designWithoutTrace.deliveryType ?? null,
+      presetId: designWithoutTrace.presetId ?? null,
+      childAgents: designWithoutTrace.agentGraph.children.map((child) => ({
+        id: child.id,
+        name: child.name,
+        tools: child.tools.map((tool) => tool.ref),
+      })),
+      diagnostics: designWithoutTrace.designDiagnostics,
+    },
+  });
+  const trace = loopBuilderTraceSchema.parse({
+    stages: [
+      classificationTrace,
+      evidenceTrace,
+      architectResult.traceStage,
+      criticTrace,
+      finalizationTrace,
+    ],
+  });
+  const design = {
+    ...designWithoutTrace,
+    trace,
+    designDiagnostics: {
+      ...designWithoutTrace.designDiagnostics,
+      trace,
+    },
+  };
 
   const model = loopBuilderOpenAiModel();
   const definition = buildLoopDefinitionFromCeoDesign({
     goal: prompt,
     design: {
       ...design,
-      builderMeta: { ...design.builderMeta, model },
+      builderMeta: { ...design.builderMeta, model, designDiagnostics: design.designDiagnostics },
     },
   });
 
@@ -477,6 +681,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     preferences: selectedPreferences,
     model,
     suggestedToolRefs: collectSuggestedToolRefs(design.agentGraph),
+    trace,
   };
 }
 

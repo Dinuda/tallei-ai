@@ -39,6 +39,24 @@ export async function markRunFailed(input: {
 
 export async function markRunBlocked(runId: string, message: string, taskId?: string | null): Promise<void> {
   const context = await loadRunContext(runId);
+  if (taskId) {
+    await pool.query(
+      `UPDATE loop_run_tasks
+       SET status = 'blocked',
+           error_json = $4::jsonb,
+           completed_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+         AND tenant_id = $2
+         AND user_id = $3`,
+      [
+        taskId,
+        context.tenantId,
+        context.userId,
+        JSON.stringify({ message }),
+      ],
+    ).catch(() => undefined);
+  }
   const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
     blockedAt: new Date().toISOString(),
     error: { message },

@@ -101,7 +101,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
       }
 
       if (result.shortCircuit) {
-        return { sections, draft, toolsUsed, emailApprovalSent: false as const };
+        return { sections, draft, emailTemplate, toolsUsed, emailApprovalSent: false as const };
       }
       continue;
     }
@@ -109,7 +109,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
     throw new Error(`No tool handler registered for actionable tool ${entry.ref}`);
   }
 
-  return { sections, draft, toolsUsed, emailApprovalSent: false as const };
+  return { sections, draft, emailTemplate, toolsUsed, emailApprovalSent: false as const };
 }
 
 /** Runs one agent: optional tools, then LLM synthesis unless a tool short-circuits. */
@@ -144,6 +144,17 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
           toolsUsed,
         },
         draft,
+        emailTemplate: toolRun.emailTemplate,
+      };
+    }
+
+    if (toolRun.emailTemplate && !toolRun.emailApprovalSent) {
+      const text = toolRun.sections.join("\n\n") || "Email build complete.";
+      return {
+        text,
+        data: { model: loopExecutorOpenAiModel(), mode: "tool_assisted", toolsUsed, emailBuilt: true },
+        draft,
+        emailTemplate: toolRun.emailTemplate,
       };
     }
 

@@ -12,5 +12,4 @@ export interface LoopTemplate {
   suggestedTools: string[];
   exampleAgents: Array<Pick<LoopAgentGraphChild, "id" | "name" | "task"> & { tools?: string[] }>;
   deliveryTypeHint?: string;
-  presetIdHint?: string;
 }
