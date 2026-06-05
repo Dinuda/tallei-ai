@@ -16,6 +16,7 @@ import { runLoopAgent } from "./agent-runner.js";
 import { applyEmailApprovalResult, persistBuiltEmailTemplate } from "./approval.js";
 import { isEmailBuildAgent, isNewsletterDeliveryDefinition } from "./agent-responsibilities.js";
 import { advanceDynamicRunAfterSeq } from "./gates.js";
+import { ensureDeliveryRunFinished, readDeliveryCompletionState } from "./distribution.js";
 import { isDynamicPlanDefinition, normalizeRosterAgents, readLoopDefinition } from "./plan.js";
 import { extractPrimaryContentFromComments, sanitizeSubscriberBody } from "./presets/newsletter.js";
 import { resolveLoopPreset } from "./presets/registry.js";
@@ -672,6 +673,15 @@ export async function updateLoopRunRoster(auth, input) {
 
 export async function listLoopRunTasks(auth, runId) {
     await assertRunAccess(auth, runId);
+    const runPeek = await pool.query(`SELECT metadata_json
+     FROM workflow_runs
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+     LIMIT 1`, [runId, auth.tenantId, auth.userId]);
+    if (runPeek.rows[0] && readDeliveryCompletionState(runPeek.rows[0].metadata_json).broadcastId) {
+        await ensureDeliveryRunFinished(runId).catch(() => undefined);
+    }
     const result = await pool.query(`SELECT t.id,
             t.seq,
             t.agent_id,
@@ -750,7 +760,7 @@ export async function listLoopRunTasks(auth, runId) {
 }
 
 export async function getLoopRun(auth, runId) {
-    const result = await pool.query(`SELECT id,
+    const runQuery = `SELECT id,
             workflow_id,
             status,
             run_mode,
@@ -766,10 +776,18 @@ export async function getLoopRun(auth, runId) {
      WHERE id = $1
        AND tenant_id = $2
        AND user_id = $3
-     LIMIT 1`, [runId, auth.tenantId, auth.userId]);
-    const row = result.rows[0];
+     LIMIT 1`;
+    let result = await pool.query(runQuery, [runId, auth.tenantId, auth.userId]);
+    let row = result.rows[0];
     if (!row)
         throw new Error("Loop run not found");
+    if (readDeliveryCompletionState(row.metadata_json).broadcastId) {
+        await ensureDeliveryRunFinished(runId).catch(() => undefined);
+        result = await pool.query(runQuery, [runId, auth.tenantId, auth.userId]);
+        row = result.rows[0];
+        if (!row)
+            throw new Error("Loop run not found");
+    }
     const meta = readLoopExecutorMeta(row.metadata_json);
     const approvalRequest = readObject(meta.approvalRequest ?? meta.publicistApproval);
     const approvalDecisionMeta = readObject(meta.approvalDecision);

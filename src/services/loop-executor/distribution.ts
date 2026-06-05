@@ -8,10 +8,11 @@ import { isNewsletterLoopDefinition, resolveDeliveryFormatter } from "./delivery
 import { newsletterDeliveryFormatter } from "./presets/newsletter.js";
 import { enqueueLoopHeartbeatJob } from "./heartbeat-jobs.js";
 import { isDynamicPlanDefinition } from "./plan.js";
-import { authFromContext, loadRunContext, mergeLoopExecutorMeta } from "./run-context.js";
+import { authFromContext, loadRunContext, mergeLoopExecutorMeta, readLoopExecutorMeta } from "./run-context.js";
 import { scheduleDelayedHeartbeatDispatch } from "./run-heartbeat.js";
 import { synthesizeFinalOutput } from "./run-llm.js";
 import { insertComment, insertEvent, insertOrUpdateArtifact, loadRunComments, readObject } from "./run-store.js";
+import { findDeliveryAgentTaskId } from "./run-strategy.js";
 import type { LoopRunContext } from "./run-context.js";
 
 const GMAIL_CLIPPING_WARNING_BYTES = 95_000;
@@ -22,6 +23,110 @@ function readDeliveryMeta(loopExecutor: Record<string, unknown>) {
 
 function readRecipients(loopExecutor: Record<string, unknown>) {
   return readObject(loopExecutor.deliveryRecipients ?? loopExecutor.contactList);
+}
+
+export function readDeliveryCompletionState(metadataJson: unknown) {
+  const loopExecutor = readLoopExecutorMeta(metadataJson);
+  const deliveryAction = readObject(loopExecutor.deliveryAction);
+  const distribution = readDeliveryMeta(loopExecutor as unknown as Record<string, unknown>);
+  const actionStatus = typeof deliveryAction.status === "string" ? deliveryAction.status : "";
+  const broadcastId = typeof distribution.broadcastId === "string" && distribution.broadcastId.trim()
+    ? distribution.broadcastId.trim()
+    : typeof deliveryAction.broadcastId === "string" && deliveryAction.broadcastId.trim()
+      ? deliveryAction.broadcastId.trim()
+      : null;
+  const finished = ["completed", "partial_failure", "failed"].includes(actionStatus) || Boolean(broadcastId);
+  const inFlight = ["in_progress", "syncing_contacts"].includes(actionStatus) && !finished;
+  return {
+    finished,
+    inFlight,
+    broadcastId,
+    actionStatus,
+    deliveryAgentTaskId: typeof loopExecutor.deliveryAgentTaskId === "string" ? loopExecutor.deliveryAgentTaskId : null,
+  };
+}
+
+async function resolveDeliveryAgentTaskId(context: LoopRunContext, taskId?: string | null): Promise<string | null> {
+  if (taskId) return taskId;
+  const fromMeta = readDeliveryCompletionState(context.metadataJson).deliveryAgentTaskId;
+  if (fromMeta) return fromMeta;
+  return findDeliveryAgentTaskId(context);
+}
+
+async function hasActiveDistributionHeartbeat(runId: string): Promise<boolean> {
+  const result = await pool.query<{ id: string }>(
+    `SELECT id
+     FROM loop_heartbeat_jobs
+     WHERE workflow_run_id = $1
+       AND job_type = 'distribution'
+       AND status IN ('pending', 'processing')
+     LIMIT 1`,
+    [runId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** True when a distribution heartbeat should be (re)scheduled — never after send or while one is running. */
+export async function shouldScheduleDistributionResume(context: LoopRunContext): Promise<boolean> {
+  const state = readDeliveryCompletionState(context.metadataJson);
+  if (state.finished) return false;
+  if (await hasActiveDistributionHeartbeat(context.runId)) return false;
+  const deliveryTaskId = await resolveDeliveryAgentTaskId(context, state.deliveryAgentTaskId);
+  if (deliveryTaskId) {
+    const taskResult = await pool.query<{ status: string }>(
+      `SELECT status
+       FROM loop_run_tasks
+       WHERE id = $1
+         AND tenant_id = $2
+         AND user_id = $3
+       LIMIT 1`,
+      [deliveryTaskId, context.tenantId, context.userId],
+    );
+    const taskStatus = taskResult.rows[0]?.status;
+    if (taskStatus === "done" || taskStatus === "completed") return false;
+  }
+  return true;
+}
+
+async function persistBroadcastClaim(input: {
+  context: LoopRunContext;
+  broadcastId: string;
+  distributionMeta: Record<string, unknown>;
+  deliveryAgentTaskId: string | null;
+}): Promise<boolean> {
+  const loopExecutorPatch = mergeLoopExecutorMeta(input.context.metadataJson, {
+    deliveryBatch: {
+      ...input.distributionMeta,
+      broadcastId: input.broadcastId,
+      sentAt: new Date().toISOString(),
+    },
+    ...(input.deliveryAgentTaskId ? { deliveryAgentTaskId: input.deliveryAgentTaskId } : {}),
+    deliveryAction: {
+      kind: "send_broadcast",
+      status: "in_progress",
+      broadcastId: input.broadcastId,
+      startedAt: typeof input.distributionMeta.startedAt === "string" ? input.distributionMeta.startedAt : new Date().toISOString(),
+      recipientCount: typeof input.distributionMeta.recipientCount === "number" ? input.distributionMeta.recipientCount : 0,
+    },
+  });
+  const result = await pool.query(
+    `UPDATE workflow_runs
+     SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb,
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND COALESCE(metadata_json #>> '{loop_executor,deliveryBatch,broadcastId}', '') = ''
+       AND COALESCE(metadata_json #>> '{loop_executor,distribution,broadcastId}', '') = ''
+     RETURNING id`,
+    [
+      input.context.runId,
+      input.context.tenantId,
+      input.context.userId,
+      JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
+    ],
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 function readCustomEmailHtml(loopExecutor: Record<string, unknown>): string | null {
@@ -86,8 +191,9 @@ async function markDeliveryTaskFinished(input: {
     distributionMeta: Record<string, unknown>;
     successCount: number;
     failureCount: number;
-}): Promise<void> {
-    if (!input.taskId) return;
+}): Promise<string | null> {
+    const taskId = await resolveDeliveryAgentTaskId(input.context, input.taskId);
+    if (!taskId) return null;
     await pool.query(
         `UPDATE loop_run_tasks
          SET status = $4,
@@ -99,7 +205,7 @@ async function markDeliveryTaskFinished(input: {
            AND tenant_id = $2
            AND user_id = $3`,
         [
-            input.taskId,
+            taskId,
             input.context.tenantId,
             input.context.userId,
             input.finalStatus === "completed" ? "done" : "blocked",
@@ -113,17 +219,193 @@ async function markDeliveryTaskFinished(input: {
             }),
         ],
     );
+    return taskId;
+}
+
+function readDeliveryBody(context: LoopRunContext, loopExecutor: Record<string, unknown>): string {
+    const rawDeliveryBody = typeof loopExecutor.deliveryContentBody === "string" && loopExecutor.deliveryContentBody.trim()
+        ? loopExecutor.deliveryContentBody.trim()
+        : typeof loopExecutor.artifactBody === "string" && loopExecutor.artifactBody.trim()
+            ? loopExecutor.artifactBody.trim()
+            : context.draftOutput?.trim() ?? "";
+    const formatter = resolveDeliveryFormatter(context.definition, rawDeliveryBody);
+    return formatter.sanitizeBody(rawDeliveryBody) || rawDeliveryBody.trim();
+}
+
+async function commitDeliveryRunCompletion(input: {
+    context: LoopRunContext;
+    loopExecutor: Record<string, unknown>;
+    deliveryBody: string;
+    contacts: Array<{ email: string; name?: string }>;
+    distributionMeta: Record<string, unknown>;
+    recipientResults: Array<{ email: string; ok: boolean; error?: string }>;
+    finalStatus: "completed" | "blocked";
+    deliveryAgentTaskId?: string | null;
+}): Promise<{ runId: string; status: string; deliveryAgentTaskId: string | null }> {
+    const { context, loopExecutor, deliveryBody, contacts, distributionMeta, recipientResults, finalStatus } = input;
+    const successCount = recipientResults.filter((recipient) => recipient.ok).length;
+    const failureCount = recipientResults.filter((recipient) => !recipient.ok).length;
+    const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
+        deliveryBatch: distributionMeta,
+    });
+    const loopExecutorPatchWithAction = mergeLoopExecutorMeta({ loop_executor: loopExecutorPatch.loop_executor }, {
+        deliveryAction: {
+            kind: "send_broadcast",
+            status: finalStatus === "completed" ? "completed" : "partial_failure",
+            startedAt: typeof distributionMeta.startedAt === "string" ? distributionMeta.startedAt : new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            successCount,
+            failureCount,
+            recipientCount: contacts.length,
+            broadcastId: typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : undefined,
+        },
+    });
+    const deliveryAgentTaskId = await markDeliveryTaskFinished({
+        context,
+        taskId: input.deliveryAgentTaskId ?? null,
+        finalStatus,
+        distributionMeta,
+        successCount,
+        failureCount,
+    });
+    const mergedLoopExecutor = deliveryAgentTaskId
+        ? mergeLoopExecutorMeta({ loop_executor: loopExecutorPatchWithAction.loop_executor }, {
+            deliveryAgentTaskId,
+        }).loop_executor
+        : loopExecutorPatchWithAction.loop_executor;
+    await pool.query(`UPDATE workflow_runs
+     SET status = $4,
+         waiting_for_strategy_approval = FALSE,
+         draft_output = $5,
+         connector_action_status = $6,
+         metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $7::jsonb,
+         updated_at = NOW()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND user_id = $3`, [
+        context.runId,
+        context.tenantId,
+        context.userId,
+        finalStatus,
+        deliveryBody,
+        finalStatus === "completed" ? "completed" : "partial_failure",
+        JSON.stringify({ loop_executor: mergedLoopExecutor }),
+    ]);
+    await pool.query(`UPDATE workflows
+     SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $2::jsonb,
+         updated_at = NOW()
+     WHERE id = $1`, [
+        context.workflowId,
+        JSON.stringify({
+            loop_executor: {
+                lastDeliveryRecipients: loopExecutor.deliveryRecipients ?? loopExecutor.contactList ?? null,
+                lastDeliveryBatch: distributionMeta,
+                lastDeliveryAction: {
+                    kind: "send_broadcast",
+                    status: finalStatus === "completed" ? "completed" : "partial_failure",
+                    completedAt: new Date().toISOString(),
+                    successCount,
+                    failureCount,
+                    recipientCount: contacts.length,
+                    broadcastId: typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : undefined,
+                },
+            },
+        }),
+    ]);
+    return { runId: context.runId, status: finalStatus, deliveryAgentTaskId };
+}
+
+/** Finish a run whose broadcast already sent but run/task status was not committed. */
+export async function ensureDeliveryRunFinished(runId: string, taskId?: string | null) {
+    const context = await loadRunContext(runId);
+    const root = readObject(context.metadataJson);
+    const loopExecutor = readObject(root.loop_executor);
+    const state = readDeliveryCompletionState(context.metadataJson);
+    if (!state.broadcastId) return null;
+
+    const deliveryAgentTaskId = await resolveDeliveryAgentTaskId(context, taskId ?? state.deliveryAgentTaskId);
+    let taskStatus: string | null = null;
+    if (deliveryAgentTaskId) {
+        const taskResult = await pool.query<{ status: string }>(
+            `SELECT status FROM loop_run_tasks
+             WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+             LIMIT 1`,
+            [deliveryAgentTaskId, context.tenantId, context.userId],
+        );
+        taskStatus = taskResult.rows[0]?.status ?? null;
+    }
+    const runNeedsUpdate = context.runStatus === "executing_action" || context.runStatus === "distributing";
+    const taskNeedsUpdate = taskStatus === "in_progress" || taskStatus === "todo";
+    if (!runNeedsUpdate && !taskNeedsUpdate) {
+        return { runId: context.runId, status: context.runStatus };
+    }
+
+    const contactListRaw = readRecipients(loopExecutor);
+    const contactsRaw = Array.isArray(contactListRaw.contacts) ? contactListRaw.contacts : [];
+    const contacts = contactsRaw
+        .map((row) => readObject(row))
+        .map((row) => ({
+            email: typeof row.email === "string" ? row.email.trim().toLowerCase() : "",
+            name: typeof row.name === "string" ? row.name.trim() : undefined,
+        }))
+        .filter((row) => row.email.length > 0);
+    const distribution = readDeliveryMeta(loopExecutor);
+    const dryRun = isDryRunBroadcastId(state.broadcastId) || distribution.dryRun === true;
+    const storedRecipients = Array.isArray(distribution.recipients)
+        ? distribution.recipients.map((row) => readObject(row)).map((row) => ({
+            email: typeof row.email === "string" ? row.email.trim().toLowerCase() : "",
+            ok: row.ok === true,
+            ...(typeof row.error === "string" ? { error: row.error } : {}),
+        })).filter((row) => row.email.length > 0)
+        : [];
+    const recipientResults = storedRecipients.length > 0
+        ? storedRecipients
+        : contacts.map((contact) => ({
+            email: contact.email,
+            ok: !dryRun,
+            ...(dryRun ? { error: "Outbound email dry-run; no email was sent" } : {}),
+        }));
+    const successCount = typeof distribution.successCount === "number"
+        ? distribution.successCount
+        : recipientResults.filter((recipient) => recipient.ok).length;
+    const failureCount = typeof distribution.failureCount === "number"
+        ? distribution.failureCount
+        : recipientResults.length - successCount;
+    const distributionMeta = {
+        ...distribution,
+        broadcastId: state.broadcastId,
+        sentAt: typeof distribution.sentAt === "string" ? distribution.sentAt : new Date().toISOString(),
+        successCount,
+        failureCount,
+        recipientCount: contacts.length || recipientResults.length,
+        recipients: recipientResults,
+    };
+    const finalStatus: "completed" | "blocked" = dryRun || failureCount > 0 ? "blocked" : "completed";
+    return finalizeDistributionRun({
+        context,
+        loopExecutor,
+        deliveryBody: readDeliveryBody(context, loopExecutor),
+        contacts: contacts.length > 0 ? contacts : recipientResults.map((row) => ({ email: row.email })),
+        distributionMeta,
+        recipientResults,
+        finalStatus,
+        deliveryAgentTaskId,
+    });
 }
 
 export async function runDistributionHeartbeat(runId: string, taskId?: string | null) {
     const context = await loadRunContext(runId);
+    const completion = readDeliveryCompletionState(context.metadataJson);
     if (context.runStatus !== "executing_action") {
+        if (completion.broadcastId) {
+            return ensureDeliveryRunFinished(runId, taskId);
+        }
         throw new Error(`Run is ${context.runStatus}, not executing delivery action`);
     }
     const auth = authFromContext(context);
     const root = readObject(context.metadataJson);
     const loopExecutor = readObject(root.loop_executor);
-    const deliveryAgentTaskId = taskId ?? (typeof loopExecutor.deliveryAgentTaskId === "string" ? loopExecutor.deliveryAgentTaskId : null);
+    const deliveryAgentTaskId = await resolveDeliveryAgentTaskId(context, taskId ?? null);
     await markDeliveryTaskStarted(context, deliveryAgentTaskId);
     const contactListRaw = readRecipients(loopExecutor);
     const contactsRaw = Array.isArray(contactListRaw.contacts) ? contactListRaw.contacts : [];
@@ -433,6 +715,23 @@ export async function runDistributionHeartbeat(runId: string, taskId?: string | 
         ...(dryRun ? { dryRun: true, broadcastError: "Outbound email is disabled; Resend was not called." } : {}),
         recipients: broadcastRecipients,
     };
+    const claimed = await persistBroadcastClaim({
+        context,
+        broadcastId: broadcast.broadcastId,
+        distributionMeta,
+        deliveryAgentTaskId,
+    });
+    if (!claimed) {
+        const freshContext = await loadRunContext(runId);
+        const freshRoot = readObject(freshContext.metadataJson);
+        const freshLoopExecutor = readObject(freshRoot.loop_executor);
+        const existingBroadcastId = typeof readDeliveryMeta(freshLoopExecutor).broadcastId === "string"
+            ? readDeliveryMeta(freshLoopExecutor).broadcastId as string
+            : null;
+        if (existingBroadcastId) {
+            return runDistributionHeartbeat(runId, deliveryAgentTaskId);
+        }
+    }
     const finalStatus = broadcastFailureCount > 0 ? "blocked" : "completed";
     return finalizeDistributionRun({
         context,
@@ -460,56 +759,58 @@ async function finalizeDistributionRun(input: {
     const successCount = recipientResults.filter((recipient) => recipient.ok).length;
     const failureCount = recipientResults.filter((recipient) => !recipient.ok).length;
     const dryRun = distributionMeta.dryRun === true || isDryRunBroadcastId(typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : null);
-    const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
-        deliveryBatch: distributionMeta,
-        ...(deliveryAgentTaskId ? { deliveryAgentTaskId } : {}),
-    });
-    const loopExecutorPatchWithAction = mergeLoopExecutorMeta({ loop_executor: loopExecutorPatch.loop_executor }, {
-        deliveryAction: {
-            kind: "send_broadcast",
-            status: finalStatus === "completed" ? "completed" : "partial_failure",
-            startedAt: typeof distributionMeta.startedAt === "string" ? distributionMeta.startedAt : new Date().toISOString(),
-            completedAt: new Date().toISOString(),
-            successCount,
-            failureCount,
-            recipientCount: contacts.length,
-            broadcastId: typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : undefined,
-        },
-    });
-    const comments = await loadRunComments(context);
-    const finalOutput = await synthesizeFinalOutput(context, comments);
-    const failedRecipients = recipientResults
-        .filter((recipient) => !recipient.ok)
-        .map((recipient) => `${recipient.email}${recipient.error ? ` (${recipient.error})` : ""}`);
     const broadcastId = typeof distributionMeta.broadcastId === "string" ? distributionMeta.broadcastId : null;
-    await markDeliveryTaskFinished({
+
+    const committed = await commitDeliveryRunCompletion({
         context,
-        taskId: deliveryAgentTaskId,
-        finalStatus,
+        loopExecutor,
+        deliveryBody,
+        contacts,
         distributionMeta,
-        successCount,
-        failureCount,
+        recipientResults,
+        finalStatus,
+        deliveryAgentTaskId,
     });
-    await insertComment({
-        context,
-        taskId: deliveryAgentTaskId,
-        author: "ceo",
-        body: [
-            finalOutput,
-            "",
-            dryRun
+    const resolvedTaskId = committed.deliveryAgentTaskId;
+
+    try {
+        const comments = await loadRunComments(context);
+        const finalOutput = await synthesizeFinalOutput(context, comments);
+        const failedRecipients = recipientResults
+            .filter((recipient) => !recipient.ok)
+            .map((recipient) => `${recipient.email}${recipient.error ? ` (${recipient.error})` : ""}`);
+        await insertComment({
+            context,
+            taskId: resolvedTaskId,
+            author: "ceo",
+            body: [
+                finalOutput,
+                "",
+                dryRun
+                    ? `Distribution needs review: outbound email is disabled, so no email was sent to ${contacts.length} contact(s).`
+                    : `Distribution ${finalStatus === "completed" ? "complete" : "needs review"}: Resend broadcast ${broadcastId ?? "pending"} submitted for ${successCount} contact(s), ${failureCount} failure(s).`,
+                failedRecipients.length > 0 ? `Failed recipients: ${failedRecipients.join(", ")}` : null,
+                dryRun ? null : "Broadcast sends use Resend marketing delivery (not transactional email). Delivery and bounces are tracked in Resend.",
+            ].filter(Boolean).join("\n"),
+        });
+    } catch (error) {
+        console.error("[loop-executor] delivery finalize comment failed:", error);
+        await insertComment({
+            context,
+            taskId: resolvedTaskId,
+            author: "ceo",
+            body: dryRun
                 ? `Distribution needs review: outbound email is disabled, so no email was sent to ${contacts.length} contact(s).`
                 : `Distribution ${finalStatus === "completed" ? "complete" : "needs review"}: Resend broadcast ${broadcastId ?? "pending"} submitted for ${successCount} contact(s), ${failureCount} failure(s).`,
-            failedRecipients.length > 0 ? `Failed recipients: ${failedRecipients.join(", ")}` : null,
-            dryRun ? null : "Broadcast sends use Resend marketing delivery (not transactional email). Delivery and bounces are tracked in Resend.",
-        ].filter(Boolean).join("\n"),
-    });
+        }).catch(() => undefined);
+    }
+
     await insertEvent({
         context,
-        taskId: deliveryAgentTaskId,
+        taskId: resolvedTaskId,
         eventType: "ceo_finalized",
         payload: { draftRequired: false, draftCount: 0, status: finalStatus, distribution: distributionMeta },
-    });
+    }).catch(() => undefined);
     const deliveryResultArtifactId = typeof loopExecutor.deliveryResultArtifactId === "string"
         ? loopExecutor.deliveryResultArtifactId
         : null;
@@ -537,47 +838,8 @@ async function finalizeDistributionRun(input: {
                 successCount,
                 failureCount,
             },
-        });
+        }).catch(() => undefined);
     }
-    await pool.query(`UPDATE workflows
-     SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $2::jsonb,
-         updated_at = NOW()
-     WHERE id = $1`, [
-        context.workflowId,
-        JSON.stringify({
-            loop_executor: {
-                lastDeliveryRecipients: loopExecutor.deliveryRecipients ?? loopExecutor.contactList ?? null,
-                lastDeliveryBatch: distributionMeta,
-                lastDeliveryAction: {
-                    kind: "send_broadcast",
-                    status: finalStatus === "completed" ? "completed" : "partial_failure",
-                    completedAt: new Date().toISOString(),
-                    successCount,
-                    failureCount,
-                    recipientCount: contacts.length,
-                    broadcastId,
-                },
-            },
-        }),
-    ]);
-    await pool.query(`UPDATE workflow_runs
-     SET status = $4,
-         waiting_for_strategy_approval = FALSE,
-         draft_output = $5,
-         connector_action_status = $6,
-         metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $7::jsonb,
-         updated_at = NOW()
-     WHERE id = $1
-       AND tenant_id = $2
-       AND user_id = $3`, [
-        context.runId,
-        context.tenantId,
-        context.userId,
-        finalStatus,
-        deliveryBody,
-        finalStatus === "completed" ? "completed" : "partial_failure",
-        JSON.stringify({ loop_executor: loopExecutorPatchWithAction.loop_executor }),
-    ]);
     await deliverStatusNotification({
         auth,
         title: finalStatus === "completed" ? `${context.workflowTitle} broadcast completed` : `${context.workflowTitle} broadcast needs review`,
@@ -588,9 +850,9 @@ async function finalizeDistributionRun(input: {
     }).catch(() => undefined);
     await insertEvent({
         context,
-        taskId: deliveryAgentTaskId,
+        taskId: resolvedTaskId,
         eventType: "broadcast_sent",
         payload: distributionMeta,
-    });
+    }).catch(() => undefined);
     return { runId: context.runId, status: finalStatus };
 }

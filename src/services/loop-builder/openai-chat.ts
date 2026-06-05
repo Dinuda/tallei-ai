@@ -1,6 +1,53 @@
 import OpenAI from "openai";
 
+type LoopBuilderReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+const LOOP_BUILDER_REASONING_EFFORTS = new Set<LoopBuilderReasoningEffort>([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
+
 let cachedClient: OpenAI | null = null;
+
+function isGpt5Model(model: string): boolean {
+  return model.toLowerCase().startsWith("gpt-5");
+}
+
+export function isLoopBuilderReasoningModel(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return (
+    normalized.startsWith("gpt-5")
+    || normalized.startsWith("o1")
+    || normalized.startsWith("o3")
+    || normalized.startsWith("o4")
+  );
+}
+
+export function loopBuilderOpenAiReasoningEffort(): LoopBuilderReasoningEffort | null {
+  const raw = (process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT ?? "medium").trim().toLowerCase();
+  if (!raw || raw === "false" || raw === "0" || raw === "off" || raw === "none") return null;
+  if (LOOP_BUILDER_REASONING_EFFORTS.has(raw as LoopBuilderReasoningEffort)) {
+    return raw as LoopBuilderReasoningEffort;
+  }
+  return "medium";
+}
+
+function readLoopBuilderMinCompletionTokens(): number {
+  const raw = process.env.TALLEI_LOOP_BUILDER__GPT5_MIN_COMPLETION_TOKENS;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed >= 1024) return parsed;
+  return 8192;
+}
+
+function completionTokenBudget(model: string, requested?: number): number {
+  const fallback = requested ?? 4096;
+  return isLoopBuilderReasoningModel(model)
+    ? Math.max(fallback, readLoopBuilderMinCompletionTokens())
+    : fallback;
+}
 
 function normalizeTextContent(value: unknown): string {
   if (typeof value === "string") return value;
@@ -45,16 +92,21 @@ export async function loopBuilderOpenAiChat(input: {
   signal?: AbortSignal;
 }): Promise<{ text: string; model: string }> {
   const model = loopBuilderOpenAiModel();
-  const useCompletionTokensParam = model.toLowerCase().startsWith("gpt-5");
+  const useCompletionTokensParam = isGpt5Model(model);
+  const maxCompletionTokens = completionTokenBudget(model, input.maxTokens);
+  const reasoningEffort = loopBuilderOpenAiReasoningEffort();
   const response = await openAiClient().chat.completions.create(
     {
       model,
       messages: input.messages,
-      temperature: input.temperature ?? 1,
+      ...(isGpt5Model(model) ? {} : { temperature: input.temperature ?? 1 }),
       response_format: input.responseFormat === "json_object" ? { type: "json_object" } : undefined,
+      ...(isLoopBuilderReasoningModel(model) && reasoningEffort
+        ? { reasoning_effort: reasoningEffort }
+        : {}),
       ...(useCompletionTokensParam
-        ? { max_completion_tokens: input.maxTokens ?? 4096 }
-        : { max_tokens: input.maxTokens ?? 4096 }),
+        ? { max_completion_tokens: maxCompletionTokens }
+        : { max_tokens: maxCompletionTokens }),
     },
     input.signal ? { signal: input.signal } : undefined,
   );

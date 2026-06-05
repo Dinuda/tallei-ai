@@ -27,6 +27,7 @@ import { buildUnlayerNewsletterEmail } from "./presets/newsletter-unlayer.js";
 import { resolveLoopPreset } from "./presets/registry.js";
 import { approveLoopRunGate, advanceDynamicRunAfterSeq, submitLoopRunGateInput } from "./gates.js";
 import { parseContactListCsv } from "./csv-parser.js";
+import { readDeliveryCompletionState, runDistributionHeartbeat, shouldScheduleDistributionResume, ensureDeliveryRunFinished } from "./distribution.js";
 
 const DELIVERY_RECIPIENTS_INPUT_ID = "delivery_recipients";
 
@@ -687,16 +688,28 @@ export async function resumeLoopRunExecution(input: { auth: AuthContext; runId: 
     const recipients = readObject(loopExecutor.deliveryRecipients);
     const contactsRaw = Array.isArray(recipients.contacts) ? recipients.contacts : [];
     if (contactsRaw.length === 0) throw new Error("Run is executing delivery but has no uploaded recipients");
-    const deliveryAgentTaskId = typeof loopExecutor.deliveryAgentTaskId === "string"
-      ? loopExecutor.deliveryAgentTaskId
-      : await findDeliveryAgentTaskId(context);
+    const deliveryState = readDeliveryCompletionState(context.metadataJson);
+    const deliveryAgentTaskId = deliveryState.deliveryAgentTaskId
+      ?? (typeof loopExecutor.deliveryAgentTaskId === "string" ? loopExecutor.deliveryAgentTaskId : null)
+      ?? await findDeliveryAgentTaskId(context);
+
+    if (deliveryState.finished) {
+      await ensureDeliveryRunFinished(context.runId, deliveryAgentTaskId ?? undefined).catch(() => undefined);
+      const after = await loadRunContext(context.runId);
+      return { runId: context.runId, status: after.runStatus, firstTaskId: null };
+    }
+
+    if (!(await shouldScheduleDistributionResume(context))) {
+      return { runId: context.runId, status: context.runStatus, firstTaskId: null };
+    }
+
     await scheduleHeartbeat({
       tenantId: context.tenantId,
       userId: context.userId,
       runId: context.runId,
       jobType: "distribution",
       taskId: deliveryAgentTaskId ?? undefined,
-      resetAttempts: true,
+      resetAttempts: false,
     });
     return { runId: context.runId, status: context.runStatus, firstTaskId: null };
   }

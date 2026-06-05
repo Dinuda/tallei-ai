@@ -70,7 +70,7 @@ export {
 } from "./gates.js";
 
 // Execution — delivery
-export { runDistributionHeartbeat } from "./distribution.js";
+export { runDistributionHeartbeat, ensureDeliveryRunFinished, readDeliveryCompletionState } from "./distribution.js";
 
 // Scheduling
 export { dispatchLoopHeartbeatJobs } from "./heartbeat-dispatch.js";

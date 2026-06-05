@@ -447,6 +447,22 @@ function isBroadcastDeliveryTask(task: AgentRowTask): boolean {
   return refs.includes("resend_broadcast") || (key.includes("broadcast") && key.includes("delivery"));
 }
 
+function isBroadcastRunTask(task: LoopRunTask): boolean {
+  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
+  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
+  return refs.includes("resend_broadcast") || (key.includes("broadcast") && key.includes("delivery"));
+}
+
+function isDeliveryExecutionSettled(run: LoopRun | null, tasks: LoopRunTask[]): boolean {
+  if (!run) return false;
+  const deliveryStatus = run.deliveryAction?.status ?? "";
+  if (["completed", "partial_failure", "failed"].includes(deliveryStatus)) return true;
+  if (run.deliveryAction?.broadcastId) return true;
+  return tasks.some(
+    (task) => isBroadcastRunTask(task) && (task.status === "done" || task.status === "completed"),
+  );
+}
+
 function isApprovalAgentTask(task: AgentRowTask): boolean {
   if (isBroadcastDeliveryTask(task) || isEmailBuildAgentTask(task)) return false;
   const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
@@ -890,7 +906,12 @@ export default function LoopRunDetailPage() {
   const approvalNotifyAttemptedRef = useRef<string | null>(null);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
-  const active = run ? ACTIVE_STATUSES.has(run.status) : false;
+  const broadcastTaskInProgress = tasks.some(
+    (task) => isBroadcastRunTask(task) && task.status === "in_progress",
+  );
+  const active = run
+    ? ACTIVE_STATUSES.has(run.status) || broadcastTaskInProgress
+    : false;
   const runStatus = run?.status ?? "loading";
   const wfStatus = workflow?.status ?? "active";
   const decision = runAction(run, gates, tasks);
@@ -1206,6 +1227,12 @@ export default function LoopRunDetailPage() {
     };
 
     if (run.status === "executing_action" || run.status === "distributing") {
+      const broadcastTask = tasks.find(isBroadcastRunTask);
+      const broadcastTaskDone = Boolean(
+        broadcastTask && (broadcastTask.status === "done" || broadcastTask.status === "completed"),
+      );
+      if (run.status === "completed" && broadcastTaskDone) return;
+      if (isDeliveryExecutionSettled(run, tasks) && broadcastTaskDone) return;
       attemptResume();
       return;
     }
