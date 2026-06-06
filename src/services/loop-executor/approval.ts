@@ -38,6 +38,19 @@ const APPROVAL_READY_STATUSES = new Set([
   "blocked",
 ]);
 
+export function approvalArtifactBlocker(body: string): string | null {
+  const normalized = body.trim().toLowerCase();
+  if (!normalized) return "No draft content available for approval";
+  const asksForMissingInput = /\bplease paste\b[\s\S]{0,120}\b(sprint notes?|product updates?|required notes?|missing details?)\b/.test(normalized)
+    || /\bpaste\b[\s\S]{0,160}\b(sprint notes?|product updates?|past updates?|core data)\b/.test(normalized)
+    || /\bmissing\b[\s\S]{0,120}\b(sprint notes?|product updates?|required notes?|core data|data needed)\b/.test(normalized);
+  const cannotGenerate = /\b(can't|cannot|can not|unable to)\b[\s\S]{0,80}\b(generate|write|create|draft)\b/.test(normalized);
+  if (asksForMissingInput && cannotGenerate) {
+    return "Approval blocked: the draft is missing required input. Paste the sprint notes/product updates, then rerun the writer before approval.";
+  }
+  return null;
+}
+
 async function resolveApprovalArtifactBody(context: LoopRunContext): Promise<string> {
   const loopExecutor = readLoopExecutorMeta(context.metadataJson);
   if (typeof loopExecutor.artifactBody === "string" && loopExecutor.artifactBody.trim()) {
@@ -952,6 +965,10 @@ export async function ensureRunApprovalNotification(input: { auth: AuthContext; 
   const artifactBody = await resolveApprovalArtifactBody(context);
   if (!artifactBody) {
     throw new Error("No draft content available for approval");
+  }
+  const blocker = approvalArtifactBlocker(artifactBody);
+  if (blocker) {
+    throw new Error(blocker);
   }
 
   const formatter = resolveDeliveryFormatter(context.definition, artifactBody);

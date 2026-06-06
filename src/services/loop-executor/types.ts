@@ -36,6 +36,7 @@ export const loopRunAgentSchema = z.object({
   name: z.string().min(1),
   task: z.string().min(1),
   tools: z.array(loopToolAssignmentSchema).default([]),
+  doneCriteria: z.array(z.string().min(1)).default([]).optional(),
 });
 
 export type LoopRunAgent = z.infer<typeof loopRunAgentSchema>;
@@ -178,6 +179,7 @@ export const loopAgentGraphChildSchema = z.object({
   name: z.string().min(1),
   task: z.string().min(1),
   tools: z.array(loopToolAssignmentSchema).default([]),
+  doneCriteria: z.array(z.string().min(1)).default([]).optional(),
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
 });

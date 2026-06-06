@@ -55,7 +55,10 @@ function rosterFromAgentGraph(definition: LoopDefinition): { strategyText: strin
  */
 export async function buildCeoStrategyOutput(context: LoopRunContext) {
   if (context.definition.agentGraph?.children?.length) {
-    return rosterFromAgentGraph(context.definition);
+    return {
+      ...rosterFromAgentGraph(context.definition),
+      trace: { mode: "configured_agent_graph", llmCalled: false },
+    };
   }
 
   const preset = resolveLoopPreset(context.definition);
@@ -64,6 +67,7 @@ export async function buildCeoStrategyOutput(context: LoopRunContext) {
     return {
       strategyText: roster.strategyText,
       agents: normalizeOneResponsibilityRoster(roster.agents, context.definition),
+      trace: { mode: "preset_roster", presetId: preset.id, llmCalled: false },
     };
   }
 
@@ -71,6 +75,7 @@ export async function buildCeoStrategyOutput(context: LoopRunContext) {
     return {
       strategyText: planStrategyText(context.definition.plan!),
       agents: dynamicPlanRoster(context.definition.plan!),
+      trace: { mode: "dynamic_plan", llmCalled: false },
     };
   }
 
@@ -92,6 +97,23 @@ export async function buildCeoStrategyOutput(context: LoopRunContext) {
     ? preferences.slice(0, 6).map((pref, index) => `${index + 1}. ${pref.text}`).join("\n")
     : "No saved preferences.";
 
+  const systemPrompt = [
+    "You are the Parent Agent / CEO coordinator for a recurring multi-agent loop.",
+    "Spawn the smallest useful roster of child agents for this run.",
+    "Each child agent must do exactly one thing. Do not combine writer, approval/email build, and broadcast delivery responsibilities.",
+    "If a subscriber broadcast is needed: writer writes only; Email Build Agent uses compose/render tools only; Approval Agent uses internal.email_approval_request only; Broadcast Delivery Agent only handles post-approval recipient sync and broadcast delivery.",
+    'Return JSON only: {"strategyText":"...","agents":[{"id":"snake_case","name":"Role","task":"...","tools":[{"ref":"internal.llm_only"}]}]}',
+    "Allowed tool catalog:",
+    catalogSummary,
+    `Allowed integrations: ${constraints.allowedIntegrations.join(", ")}`,
+  ].join("\n");
+  const userPrompt = [
+    `Loop goal: ${context.definition.goal}`,
+    `CEO policy: ${context.definition.ceo.policy}`,
+    `User memories:\n${memoryBlock}`,
+    `User preferences:\n${preferenceBlock}`,
+  ].join("\n\n");
+
   const response = await loopExecutorOpenAiChat({
     responseFormat: "json_object",
     temperature: 0.2,
@@ -99,25 +121,11 @@ export async function buildCeoStrategyOutput(context: LoopRunContext) {
     messages: [
       {
         role: "system",
-        content: [
-          "You are the Parent Agent / CEO coordinator for a recurring multi-agent loop.",
-          "Spawn the smallest useful roster of child agents for this run.",
-          "Each child agent must do exactly one thing. Do not combine writer, approval/email build, and broadcast delivery responsibilities.",
-          "If a subscriber broadcast is needed: writer writes only; Email Build Agent uses compose/render tools only; Approval Agent uses internal.email_approval_request only; Broadcast Delivery Agent only handles post-approval recipient sync and broadcast delivery.",
-          'Return JSON only: {"strategyText":"...","agents":[{"id":"snake_case","name":"Role","task":"...","tools":[{"ref":"internal.llm_only"}]}]}',
-          "Allowed tool catalog:",
-          catalogSummary,
-          `Allowed integrations: ${constraints.allowedIntegrations.join(", ")}`,
-        ].join("\n"),
+        content: systemPrompt,
       },
       {
         role: "user",
-        content: [
-          `Loop goal: ${context.definition.goal}`,
-          `CEO policy: ${context.definition.ceo.policy}`,
-          `User memories:\n${memoryBlock}`,
-          `User preferences:\n${preferenceBlock}`,
-        ].join("\n\n"),
+        content: userPrompt,
       },
     ],
   });
@@ -126,6 +134,20 @@ export async function buildCeoStrategyOutput(context: LoopRunContext) {
   return {
     strategyText: parsed.strategyText.trim(),
     agents: normalizeOneResponsibilityRoster(parsed.agents, context.definition),
+    trace: {
+      mode: "llm_roster",
+      llmCalled: true,
+      model: response.model,
+      finishReason: response.finishReason,
+      usage: response.usage,
+      llmInput: { system: systemPrompt, user: userPrompt },
+      llmOutput: response.text,
+      sources: {
+        memories: memoryResult.memories ?? [],
+        preferences: preferences.slice(0, 6),
+        allowedTools,
+      },
+    },
   };
 }
 

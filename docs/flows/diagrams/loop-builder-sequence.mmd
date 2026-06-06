@@ -1,0 +1,35 @@
+sequenceDiagram
+  participant UI as Loop Builder UI
+  participant BuilderRouter as /api/loop-builder
+  participant WorkflowAPI as /api/workflows
+  participant Designer as ceo-designer.ts
+  participant Creator as creator.ts
+  participant DB as PostgreSQL
+  participant Scheduler as loop scheduler
+  participant Executor as executor.ts
+  participant CEO as CEO heartbeat
+  participant User as Operator
+
+  UI->>BuilderRouter: POST /propose or /refine
+  BuilderRouter->>Designer: resolveLoopBuilderIntent()
+  Designer->>DB: recallMemories() / listPreferences()
+  Designer->>Designer: classify, curate, architect, critique, finalize
+  Designer-->>BuilderRouter: LoopBuilderProposal + trace
+
+  UI->>BuilderRouter: POST /save
+  BuilderRouter->>Creator: saveLoopBuilderProposal()
+  Creator->>DB: createLoopWorkflow()
+  Creator->>DB: insert workflows row + loopDefinition
+
+  Scheduler->>Executor: executeLoopWorkflow() when due
+  Executor->>DB: create workflow_run
+  Executor->>CEO: schedule ceo_strategy heartbeat
+  CEO->>CEO: buildCeoStrategyOutput()
+
+  CEO->>DB: materialize tasks or store proposed roster
+  CEO->>Executor: schedule first agent or wait for strategy approval
+  User->>WorkflowAPI: POST /runs/:runId/approve-strategy
+  WorkflowAPI->>Executor: approveLoopStrategy()
+
+  Executor->>DB: runAgentHeartbeat() writes comments/artifacts
+  Executor->>DB: runCeoFinalizeHeartbeat() completes or waits for approval

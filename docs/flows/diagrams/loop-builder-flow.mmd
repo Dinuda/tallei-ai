@@ -1,0 +1,26 @@
+flowchart TD
+  A["User prompt + optional template hint"] --> B["POST /api/loop-builder/propose or /refine"]
+  B --> C["resolveLoopBuilderIntent()"]
+  C --> D["designLoopFromIntent()"]
+
+  subgraph DESIGN["Design pipeline"]
+    D --> E["Normalize prompt"]
+    E --> F["Load memories + preferences"]
+    F --> G["Classify delivery intent"]
+    G --> H["Curate evidence"]
+    H --> I["Call loop architect LLM"]
+    I --> J["Run workflow critic"]
+    J --> K["Finalize design and normalize roles"]
+    K --> L["buildLoopDefinitionFromCeoDesign()"]
+    L --> M["validateAgentRoster()"]
+  end
+
+  M --> N["LoopBuilderProposal"]
+  N --> O["POST /api/loop-builder/save"]
+  O --> P["saveLoopBuilderProposal()"]
+  P --> Q["createLoopWorkflow()"]
+  Q --> R["Persist workflows row"]
+  R --> S["metadata_json.loopDefinition"]
+  R --> T["next_run_at from cron"]
+  R --> U["Scheduler later calls executeLoopWorkflow()"]
+

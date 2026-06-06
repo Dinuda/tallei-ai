@@ -49,7 +49,7 @@ export type CeoDesignOutput = z.infer<typeof ceoDesignOutputSchema>;
 
 const loopDeliveryClassificationSchema = z.object({
   deliveryType: z.enum(["newsletter", "plain", "none"]).default("none"),
-  deliveryTarget: z.enum(["subscriber_list", "operator", "none"]).default("none"),
+  deliveryTarget: z.enum(["subscriber_list", "team_email", "operator", "none"]).default("none"),
   approvalChannels: z.array(loopStageApprovalChannelInputSchema).default(["primary"]),
   cadenceGuess: z.string().min(1),
   externalActionRequired: z.boolean(),
@@ -168,9 +168,11 @@ function classifyDeliveryIntent(input: {
 }): LoopDeliveryClassification {
   const text = `${input.prompt} ${input.feedback ?? ""} ${input.templateHint ?? ""}`.toLowerCase();
   const subscriberBroadcastRequired = /\b(subscribers?|subscriber list|mailing list|email list|audience|broadcast|send them|send to readers|send to customers)\b/i.test(text);
+  const teamEmailDeliveryRequired = /\b(team|engineering|ops|internal team|coworkers?|staff)\b[\s\S]{0,80}\b(email|inbox|send|deliver|out)\b/i.test(text)
+    || /\b(email|send|deliver|out)\b[\s\S]{0,80}\b(team|engineering|ops|internal team|coworkers?|staff)\b/i.test(text);
   const deliveryType = subscriberBroadcastRequired
     ? "newsletter"
-    : /\b(send to me|for my review|personal digest|internal report)\b/i.test(text)
+    : teamEmailDeliveryRequired || /\b(send to me|for my review|personal digest|internal report)\b/i.test(text)
       ? "plain"
       : "none";
   const cadenceGuess = /\bmonthly\b/i.test(text)
@@ -183,10 +185,10 @@ function classifyDeliveryIntent(input: {
 
   return loopDeliveryClassificationSchema.parse({
     deliveryType,
-    deliveryTarget: subscriberBroadcastRequired ? "subscriber_list" : deliveryType === "plain" ? "operator" : "none",
+    deliveryTarget: subscriberBroadcastRequired ? "subscriber_list" : teamEmailDeliveryRequired ? "team_email" : deliveryType === "plain" ? "operator" : "none",
     approvalChannels: ["primary"],
     cadenceGuess,
-    externalActionRequired: subscriberBroadcastRequired,
+    externalActionRequired: subscriberBroadcastRequired || teamEmailDeliveryRequired,
     subscriberBroadcastRequired,
     explicitLegacyPresetRequested: false,
   });
@@ -224,6 +226,7 @@ function buildSystemPrompt(classification: LoopDeliveryClassification): string {
           name: "Descriptive agent name",
           task: "Concrete, executable task grounded in the user's memory and intent",
           tools: [{ ref: "internal.memory_search" }],
+          doneCriteria: ["Concrete condition that proves this one agent finished its job"],
         },
       ],
     },
@@ -239,6 +242,7 @@ function buildSystemPrompt(classification: LoopDeliveryClassification): string {
     "You are a loop architect for Tallei. Design original, bespoke recurring agent loops from the user's intent.",
     "Think from first principles. Do NOT copy any reference pattern verbatim.",
     "Never mention pattern names, template IDs, or preset labels in your output.",
+    "Copy tool refs exactly as listed in the catalog. Do not invent alternate spellings or punctuation.",
     "",
     "=== STEP 1: PARSE THE END OUTCOME ===",
     "Before designing, determine:",
@@ -267,6 +271,11 @@ function buildSystemPrompt(classification: LoopDeliveryClassification): string {
     "  Triggers: 'send to me', 'for my review', 'personal update', 'internal report'",
     "  Action: approval agent with internal.email_approval_request only; deliveryType: 'plain'",
     "",
+    "→ SEND TO TEAM EMAIL / INTERNAL INBOX:",
+    "  Triggers: 'team email', 'team inbox', 'engineering inbox', 'ops inbox', 'send to my team'",
+    "  Action: deliveryType: 'plain'; create a Channel Delivery Agent with composio.gmail.send_email only after Approval Agent.",
+    "  Keep responsibilities separate: Approval Agent sends approval request only; Channel Delivery Agent sends the approved email only.",
+    "",
     "→ PRODUCE AND APPROVE ONLY (no external delivery):",
     "  Triggers: 'draft', 'create', 'write' with no delivery target",
     "  Action: approval agent only, omit presetId and deliveryType",
@@ -283,6 +292,8 @@ function buildSystemPrompt(classification: LoopDeliveryClassification): string {
     "Hard boundary rule:",
     "- Every child agent must do exactly one thing with one or two tightly related tools max.",
     "- Do not combine writing with approval. Do not combine email build with approval. Do not combine approval with broadcast delivery.",
+    "- Every child agent must include doneCriteria: 1–3 concrete checks that prove this stage is complete before the next stage can run.",
+    "- If a stage needs missing operator input, it is not done. It must block and ask for that input instead of forwarding placeholder output.",
     "",
     "Every agent task must be:",
     "- Specific enough to execute without ambiguity",
@@ -447,6 +458,8 @@ function critiqueWorkflowDesign(design: CeoDesignOutput, classification: LoopDel
   const children = design.agentGraph.children;
   const hasApproval = children.some((child) => child.tools.some((tool) => tool.ref === "internal.email_approval_request"));
   const hasEmailBuild = children.some((child) => child.tools.some((tool) => tool.ref === "internal.email_builder_compose" || tool.ref === "internal.email_builder_render"));
+  const hasChannelDelivery = children.some((child) => child.tools.some((tool) => tool.ref === "composio.gmail.send_email")
+      || /\b(team email|email delivery|delivery agent)\b/i.test(`${child.id} ${child.name}`));
   const hasBroadcast = children.some((child) => child.tools.some((tool) => tool.ref === "internal.resend_broadcast")
     || /\b(broadcast|delivery)\b/i.test(`${child.id} ${child.name}`));
   const mixedApprovalBuild = children.some((child) => {
@@ -456,12 +469,13 @@ function critiqueWorkflowDesign(design: CeoDesignOutput, classification: LoopDel
   });
   const mixedApprovalDelivery = children.some((child) => {
     const refs = child.tools.map((tool) => tool.ref);
-    return refs.includes("internal.email_approval_request") && refs.includes("internal.resend_broadcast");
+    return refs.includes("internal.email_approval_request")
+      && (refs.includes("internal.resend_broadcast") || refs.includes("composio.gmail.send_email"));
   });
   const mixedBuildDelivery = children.some((child) => {
     const refs = child.tools.map((tool) => tool.ref);
     return refs.some((ref) => ref === "internal.email_builder_compose" || ref === "internal.email_builder_render")
-      && refs.includes("internal.resend_broadcast");
+      && (refs.includes("internal.resend_broadcast") || refs.includes("composio.gmail.send_email"));
   });
   const overloadedAgents = children.filter((child) => child.tools.length > 2);
 
@@ -471,6 +485,9 @@ function critiqueWorkflowDesign(design: CeoDesignOutput, classification: LoopDel
   if (classification.subscriberBroadcastRequired && !hasEmailBuild) {
     requiredFixes.push("Add an Email Build Agent with compose/render tools.");
   }
+  if (classification.deliveryTarget === "team_email" && !hasChannelDelivery) {
+    requiredFixes.push("Add a Channel Delivery Agent with composio.gmail.send_email.");
+  }
   if (classification.externalActionRequired && !hasApproval) {
     requiredFixes.push("Add an Approval Agent with internal.email_approval_request before external delivery.");
   }
@@ -478,7 +495,7 @@ function critiqueWorkflowDesign(design: CeoDesignOutput, classification: LoopDel
     requiredFixes.push("Split approval and email build into separate single-purpose agents.");
   }
   if (mixedApprovalDelivery || mixedBuildDelivery) {
-    requiredFixes.push("Separate approval/email-build tools from broadcast delivery tools.");
+    requiredFixes.push("Separate approval/email-build tools from delivery tools.");
   }
   if (overloadedAgents.length > 0) {
     issues.push("Some agents carry more than two tools; each spot agent should stay narrowly scoped.");
@@ -507,6 +524,21 @@ function finalizeLoopDesign(input: {
     newsletterDelivery,
     appendBroadcastDelivery: input.classification.subscriberBroadcastRequired,
   });
+  if (input.classification.deliveryTarget === "team_email") {
+    const hasChannelDelivery = children.some((child) => child.tools.some((tool) => tool.ref === "composio.gmail.send_email")
+      || /\bchannel delivery\b/i.test(`${child.id} ${child.name}`));
+    if (!hasChannelDelivery) {
+      children.push({
+        id: "channel_delivery",
+        name: "Channel Delivery Agent",
+        task: [
+          "After operator approval, send the approved internal product sync email through the channel delivery tool only.",
+          "Do not write, edit, ask approval questions, or change the approved email content.",
+        ].join(" "),
+        tools: [{ ref: "composio.gmail.send_email" }],
+      });
+    }
+  }
   const deliveryType = input.classification.deliveryType === "none" ? input.design.deliveryType : input.classification.deliveryType;
   return {
     ...input.design,
@@ -514,10 +546,10 @@ function finalizeLoopDesign(input: {
     deliveryType,
     strategyText: newsletterDelivery
       ? [
-          input.design.strategyText.trim(),
-          "",
-          "Responsibility split: writer writes only; Email Build Agent composes/renders only; Approval Agent sends the approval request only; Broadcast Delivery Agent handles only post-approval recipient sync and Resend broadcast submission.",
-        ].join("\n")
+        input.design.strategyText.trim(),
+        "",
+        "Responsibility split: writer writes only; Email Build Agent composes/renders only; Approval Agent sends the approval request only; Broadcast Delivery Agent handles only post-approval recipient sync and Resend broadcast submission; Channel Delivery Agent handles only channel-based email delivery after approval.",
+      ].join("\n")
       : input.design.strategyText,
     builderMeta: {
       ...input.design.builderMeta,

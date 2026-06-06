@@ -235,6 +235,220 @@ test("designLoopFromIntent ignores explicit preset wording and keeps templates i
   }
 });
 
+test("designLoopFromIntent adds team email delivery agent for internal inbox delivery", async () => {
+  const db = await import("../../../src/infrastructure/db/index.js");
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+
+  try {
+    const { designLoopFromIntent } = await import("../../../src/services/loop-builder/ceo-designer.js");
+    const result = await designLoopFromIntent({
+      auth: {
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        userId: "22222222-2222-4222-8222-222222222222",
+        authMode: "internal",
+        plan: "pro",
+      },
+      prompt: "Write an internal product sync email for Tallei engineering and ops. I want this email out to my team's email inbox.",
+      testOverrides: {
+        chat: async () => ({
+          text: JSON.stringify({
+            ...SAMPLE_LLM_OUTPUT,
+            deliveryType: "plain",
+            agentGraph: {
+              ...SAMPLE_LLM_OUTPUT.agentGraph,
+              children: [
+                {
+                  id: "notes_intake",
+                  name: "Sprint Notes Intake Agent",
+                  task: "Extract shipped, in progress, blockers, things to watch, customer notes, and next priorities.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "writer",
+                  name: "Product Sync Writer",
+                  task: "Write the internal product sync email draft only.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "approval",
+                  name: "Approval Agent",
+                  task: "Review the draft and send approval request only.",
+                  tools: [{ ref: "internal.email_approval_request" }],
+                },
+              ],
+            },
+          }),
+          model: "gpt-4o",
+        }),
+        recallMemories: async () => ({ memories: [] }),
+        listPreferences: async () => [],
+      },
+    });
+
+    assert.equal(result.definition.deliveryType, "plain");
+    assert.equal(result.definition.presetId, undefined);
+    const children = result.definition.agentGraph?.children ?? [];
+    assert.deepEqual(children.map((child) => child.name), [
+      "Sprint Notes Intake Agent",
+      "Product Sync Writer",
+      "Approval Agent",
+      "Channel Delivery Agent",
+    ]);
+    const approval = children.find((child) => child.name === "Approval Agent");
+    const delivery = children.find((child) => child.name === "Channel Delivery Agent");
+    assert.deepEqual(approval?.tools.map((tool) => tool.ref), ["internal.email_approval_request"]);
+    assert.deepEqual(delivery?.tools.map((tool) => tool.ref), ["composio.gmail.send_email"]);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
+test("designLoopFromIntent reorders a team email sender after approval", async () => {
+  const db = await import("../../../src/infrastructure/db/index.js");
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+
+  try {
+    const { designLoopFromIntent } = await import("../../../src/services/loop-builder/ceo-designer.js");
+    const result = await designLoopFromIntent({
+      auth: {
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        userId: "22222222-2222-4222-8222-222222222222",
+        authMode: "internal",
+        plan: "pro",
+      },
+      prompt: "Write an internal product sync email for Tallei engineering and ops. I want this email out to my team's email inbox.",
+      testOverrides: {
+        chat: async () => ({
+          text: JSON.stringify({
+            ...SAMPLE_LLM_OUTPUT,
+            deliveryType: "plain",
+            agentGraph: {
+              ...SAMPLE_LLM_OUTPUT.agentGraph,
+              children: [
+                {
+                  id: "notes_intake",
+                  name: "Sprint Notes Intake Agent",
+                  task: "Extract shipped, in progress, blockers, things to watch, customer notes, and next priorities.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "writer",
+                  name: "Product Sync Writer",
+                  task: "Write the internal product sync email draft only.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "team_sender",
+                  name: "Team Gmail Sender",
+                  task: "Send the approved email to the team inbox only.",
+                  tools: [{ ref: "composio.gmail.send_email" }],
+                },
+                {
+                  id: "approval",
+                  name: "Approval Agent",
+                  task: "Review the draft and send approval request only.",
+                  tools: [{ ref: "internal.email_approval_request" }],
+                },
+              ],
+            },
+          }),
+          model: "gpt-4o",
+        }),
+        recallMemories: async () => ({ memories: [] }),
+        listPreferences: async () => [],
+      },
+    });
+
+    const children = result.definition.agentGraph?.children ?? [];
+    assert.deepEqual(children.map((child) => child.name), [
+      "Sprint Notes Intake Agent",
+      "Product Sync Writer",
+      "Approval Agent",
+      "Channel Delivery Agent",
+    ]);
+    assert.deepEqual(children[2]?.tools.map((tool) => tool.ref), ["internal.email_approval_request"]);
+    assert.deepEqual(children[3]?.tools.map((tool) => tool.ref), ["composio.gmail.send_email"]);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
+test("designLoopFromIntent repairs composito typo in gmail send tool ref", async () => {
+  const db = await import("../../../src/infrastructure/db/index.js");
+  const originalQuery = db.pool.query.bind(db.pool);
+  (db.pool as unknown as { query: typeof db.pool.query }).query = (async (sql: string) => {
+    if (sql.includes("FROM connector_accounts")) return { rows: [], rowCount: 0 } as unknown;
+    return { rows: [], rowCount: 0 } as unknown;
+  }) as typeof db.pool.query;
+
+  try {
+    const { designLoopFromIntent } = await import("../../../src/services/loop-builder/ceo-designer.js");
+    const result = await designLoopFromIntent({
+      auth: {
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        userId: "22222222-2222-4222-8222-222222222222",
+        authMode: "internal",
+        plan: "pro",
+      },
+      prompt: "Write an internal product sync email for Tallei engineering and ops. I want this email out to my team's email inbox.",
+      testOverrides: {
+        chat: async () => ({
+          text: JSON.stringify({
+            ...SAMPLE_LLM_OUTPUT,
+            deliveryType: "plain",
+            agentGraph: {
+              ...SAMPLE_LLM_OUTPUT.agentGraph,
+              children: [
+                {
+                  id: "notes_intake",
+                  name: "Sprint Notes Intake Agent",
+                  task: "Extract shipped, in progress, blockers, things to watch, customer notes, and next priorities.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "writer",
+                  name: "Product Sync Writer",
+                  task: "Write the internal product sync email draft only.",
+                  tools: [{ ref: "internal.llm_only" }],
+                },
+                {
+                  id: "approval",
+                  name: "Approval Agent",
+                  task: "Review the draft and send approval request only.",
+                  tools: [{ ref: "internal.email_approval_request" }],
+                },
+                {
+                  id: "channel",
+                  name: "Channel Delivery Agent",
+                  task: "Send the approved internal email through the channel delivery tool only.",
+                  tools: [{ ref: "composito.gmail.send_email" }],
+                },
+              ],
+            },
+          }),
+          model: "gpt-4o",
+        }),
+        recallMemories: async () => ({ memories: [] }),
+        listPreferences: async () => [],
+      },
+    });
+
+    const children = result.definition.agentGraph?.children ?? [];
+    const delivery = children.find((child) => child.name === "Channel Delivery Agent");
+    assert.deepEqual(delivery?.tools.map((tool) => tool.ref), ["composio.gmail.send_email"]);
+  } finally {
+    (db.pool as unknown as { query: typeof db.pool.query }).query = originalQuery;
+  }
+});
+
 test("designLoopFromIntent collapses duplicate writers and splits approval from broadcast", async () => {
   const db = await import("../../../src/infrastructure/db/index.js");
   const originalQuery = db.pool.query.bind(db.pool);

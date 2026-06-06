@@ -1,6 +1,13 @@
+import { normalizeToolRef } from "./tool-catalog.js";
 import type { LoopAgentGraphChild, LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
-export type AgentResponsibility = "approval" | "email_build" | "broadcast_delivery" | "writer" | "other";
+export type AgentResponsibility =
+  | "approval"
+  | "email_build"
+  | "broadcast_delivery"
+  | "channel_delivery"
+  | "writer"
+  | "other";
 
 type AgentLike = {
   id: string;
@@ -15,6 +22,7 @@ type NormalizeOptions = {
 };
 
 const APPROVAL_TOOL = "internal.email_approval_request";
+const TEAM_EMAIL_TOOL = "composio.gmail.send_email";
 const EMAIL_BUILD_TOOLS = [
   "internal.email_builder_compose",
   "internal.email_builder_render",
@@ -34,7 +42,7 @@ export function isNewsletterDeliveryDefinition(definition: Pick<LoopDefinition, 
 }
 
 function toolRefs(agent: AgentLike): string[] {
-  return agent.tools.map((tool) => tool.ref.trim().toLowerCase()).filter(Boolean);
+  return agent.tools.map((tool) => normalizeToolRef(tool.ref)).filter(Boolean);
 }
 
 function roleKey(agent: AgentLike): string {
@@ -51,6 +59,12 @@ function hasApprovalTools(agent: AgentLike): boolean {
 
 function hasEmailBuildTools(agent: AgentLike): boolean {
   return toolRefs(agent).some((ref) => EMAIL_BUILD_TOOLS.includes(ref as typeof EMAIL_BUILD_TOOLS[number]));
+}
+
+function hasChannelDeliveryTools(agent: AgentLike): boolean {
+  return toolRefs(agent).includes(TEAM_EMAIL_TOOL)
+    || nameKey(agent).includes("channel delivery")
+    || (nameKey(agent).includes("gmail") && nameKey(agent).includes("sender"));
 }
 
 export function classifyAgentResponsibility(agent: AgentLike, options: Pick<NormalizeOptions, "newsletterDelivery">): AgentResponsibility {
@@ -74,6 +88,9 @@ export function classifyAgentResponsibility(agent: AgentLike, options: Pick<Norm
   if (hasApprovalTools(agent) || name.includes("approval")) {
     return "approval";
   }
+  if (hasChannelDeliveryTools(agent)) {
+    return "channel_delivery";
+  }
   if (options.newsletterDelivery && (name.includes("writer") || (name.includes("write") && !name.includes("research") && !name.includes("search")) || name.includes("draft") || role.includes("writer"))) {
     return "writer";
   }
@@ -81,9 +98,19 @@ export function classifyAgentResponsibility(agent: AgentLike, options: Pick<Norm
 }
 
 function emailBuildToolsFor(agent: AgentLike): LoopToolAssignment[] {
-  const kept = agent.tools.filter((tool) => EMAIL_BUILD_TOOLS.includes(tool.ref as typeof EMAIL_BUILD_TOOLS[number]));
+  const kept = agent.tools
+    .map((tool) => ({ ref: normalizeToolRef(tool.ref) }))
+    .filter((tool) => EMAIL_BUILD_TOOLS.includes(tool.ref as typeof EMAIL_BUILD_TOOLS[number]));
   if (kept.length > 0) return kept;
   return EMAIL_BUILD_TOOLS.map((ref) => ({ ref }));
+}
+
+function teamEmailToolsFor(agent: AgentLike): LoopToolAssignment[] {
+  const kept = agent.tools
+    .map((tool) => ({ ref: normalizeToolRef(tool.ref) }))
+    .filter((tool) => tool.ref === TEAM_EMAIL_TOOL);
+  if (kept.length > 0) return kept;
+  return [{ ref: TEAM_EMAIL_TOOL }];
 }
 
 function normalizeSingleAgent<T extends AgentLike>(agent: T, options: NormalizeOptions): T {
@@ -110,6 +137,18 @@ function normalizeSingleAgent<T extends AgentLike>(agent: T, options: NormalizeO
         "Do not send approval requests, upload contacts, sync recipients, or submit a Resend broadcast.",
       ].join(" "),
       tools: emailBuildToolsFor(agent),
+    };
+  }
+  if (responsibility === "channel_delivery") {
+    return {
+      ...agent,
+      id: agent.id || "channel_delivery",
+      name: "Channel Delivery Agent",
+      task: [
+        "After operator approval, send the approved internal email through the channel delivery tool only.",
+        "Do not write, edit, ask approval questions, build email HTML, or change the approved content.",
+      ].join(" "),
+      tools: teamEmailToolsFor(agent),
     };
   }
   if (responsibility === "broadcast_delivery") {
@@ -160,8 +199,9 @@ function splitMixedApprovalBuildAgent<T extends AgentLike>(agent: T, options: No
 }
 
 function isSpecialDeliveryTool(ref: string): boolean {
-  const normalized = ref.trim().toLowerCase();
+  const normalized = normalizeToolRef(ref);
   return normalized === APPROVAL_TOOL
+    || normalized === TEAM_EMAIL_TOOL
     || EMAIL_BUILD_TOOLS.includes(normalized as typeof EMAIL_BUILD_TOOLS[number])
     || normalized === "internal.resend_broadcast";
 }
@@ -172,7 +212,8 @@ function explodeCompoundAgents<T extends AgentLike>(agents: T[], options: Normal
     const hasBroadcast = options.newsletterDelivery && refs.includes("internal.resend_broadcast");
     const hasApproval = hasApprovalTools(agent);
     const hasBuild = hasEmailBuildTools(agent);
-    const specialFlags = [hasBroadcast, hasApproval, hasBuild].filter(Boolean).length;
+    const hasChannelDelivery = hasChannelDeliveryTools(agent);
+    const specialFlags = [hasBroadcast, hasApproval, hasBuild, hasChannelDelivery].filter(Boolean).length;
     if (specialFlags <= 1) {
       return splitMixedApprovalBuildAgent(agent, options);
     }
@@ -198,6 +239,14 @@ function explodeCompoundAgents<T extends AgentLike>(agents: T[], options: Normal
         tools: [{ ref: APPROVAL_TOOL }],
       });
     }
+    if (hasChannelDelivery) {
+      parts.push({
+        ...agent,
+        id: `${agent.id}_channel_delivery`,
+        name: "Channel Delivery Agent",
+        tools: teamEmailToolsFor(agent),
+      });
+    }
     if (hasBroadcast) {
       parts.push({
         ...agent,
@@ -217,6 +266,7 @@ function responsibilityOrder(responsibility: AgentResponsibility): number {
     case "email_build": return 2;
     case "approval": return 3;
     case "broadcast_delivery": return 4;
+    case "channel_delivery": return 5;
     default: return 0;
   }
 }
@@ -242,6 +292,7 @@ export function normalizeAgentResponsibilities<T extends AgentLike>(agents: T[],
   collapseResponsibility("email_build", "first");
   collapseResponsibility("approval", "first");
   collapseResponsibility("broadcast_delivery", "first");
+  collapseResponsibility("channel_delivery", "first");
 
   const deduped = normalized
     .filter((_, index) => keepIndexes.has(index))

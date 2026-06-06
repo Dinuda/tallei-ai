@@ -32,6 +32,7 @@ export {
 export {
   addLoopRunComment,
   executeLoopWorkflow,
+  getLoopRunDebugLogs,
   getLoopRun,
   getLoopRunRoster,
   listLoopRunArtifacts,

@@ -25,6 +25,7 @@ import {
   ensureRunApprovalNotification,
   executeLoopWorkflow,
   getLoopRun,
+  getLoopRunDebugLogs,
   getLoopRunRoster,
   getLoopWorkflow,
   listLoopRunArtifacts,
@@ -788,6 +789,25 @@ router.get("/runs/:runId/artifacts", requireScopes(["memory:read"]), async (req:
     }
     console.error("Error listing loop run artifacts:", error);
     res.status(500).json({ error: "Failed to list loop run artifacts" });
+  }
+});
+
+router.get("/runs/:runId/logs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse({ runId: req.params.runId });
+    const logs = await getLoopRunDebugLogs(req.authContext!, runId);
+    res.json({ logs });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    if (error instanceof Error && /not found/i.test(error.message)) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error("Error reading loop run logs:", error);
+    res.status(500).json({ error: "Failed to read loop run logs" });
   }
 });
 

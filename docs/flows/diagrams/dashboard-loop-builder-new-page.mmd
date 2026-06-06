@@ -1,0 +1,55 @@
+flowchart TD
+  A["Open /dashboard/loops/new"] --> B["Type the problem / repeatable task"]
+  B --> C{"Use inspiration hint?"}
+  C -->|yes| D["Select Writing companion or Newsletter broadcast"]
+  D --> E["Append hint text to prompt state"]
+  E --> B
+  C -->|no| F["Click Design loop"]
+  B --> F
+
+  F --> G["requestProposal('propose')"]
+  G --> H["POST /api/loop-builder/propose"]
+  H --> I["Dashboard proxy route"]
+  I --> J["Resolve user id + inject INTERNAL_API_SECRET"]
+  J --> K["Forward to backend /api/loop-builder/propose"]
+  K --> L["Backend auth middleware + memory:read scope"]
+  L --> M["normalizePrompt()"]
+  M --> N{"Prompt empty?"}
+  N -->|yes| O["Throw Prompt is required"]
+  N -->|no| P["recallMemories()"]
+  P --> Q["listPreferences()"]
+  Q --> R["classifyDeliveryIntent()"]
+  R --> S["curateEvidence()"]
+  S --> T["callLoopArchitectLlm()"]
+  T --> U["Parse CEO design JSON"]
+  U --> V["critiqueWorkflowDesign()"]
+  V --> W["finalizeLoopDesign()"]
+  W --> X["buildLoopDefinitionFromCeoDesign()"]
+  X --> Y["validateAgentRoster()"]
+  Y --> Z["Return LoopBuilderProposal"]
+  Z --> AA["Render proposal card + context sidebar"]
+
+  AA --> AB{"Need refinement?"}
+  AB -->|yes| AC["Enter refinement notes"]
+  AC --> AD["requestProposal('refine')"]
+  AD --> AE["POST /api/loop-builder/refine"]
+  AE --> AF["Send prompt + feedback + priorProposal"]
+  AF --> L
+  AB -->|no| AG["Click Save & open"]
+  AA --> AG
+
+  AG --> AH["POST /api/loop-builder/save"]
+  AH --> AI["Dashboard proxy route"]
+  AI --> AJ["Forward to backend /api/loop-builder/save"]
+  AJ --> AK["Backend auth middleware + memory:write scope"]
+  AK --> AL["parse loopBuilderProposalSchema()"]
+  AL --> AM["saveLoopBuilderProposal()"]
+  AM --> AN["createLoopWorkflow()"]
+  AN --> AO["Insert workflows row"]
+  AO --> AP["Store metadata_json.loopDefinition"]
+  AO --> AQ["Compute fingerprint + next_run_at"]
+  AO --> AR["Return workflow id"]
+  AR --> AS["router.push(/dashboard/loops/:workflowId)"]
+  AS --> AT["Scheduler later picks up the workflow"]
+  AT --> AU["executeLoopWorkflow() creates workflow_run"]
+

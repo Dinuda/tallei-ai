@@ -111,7 +111,7 @@ export async function runExaWebSearch(input: { goal: string; task: string; confi
     "Evidence:",
     ...results.slice(0, 8).map((row) => `- ${row.title}\n  URL: ${row.url}\n  Summary: ${row.snippet.replace(/\s+/g, " ").slice(0, 320)}`),
   ].join("\n");
-  return { text, model: "exa-search", provider: "exa_web_search" };
+  return { text, model: "exa-search", provider: "exa_web_search", sources: results };
 }
 
 export async function completeText(input: { system: string; user: string; maxTokens?: number }): Promise<string> {

@@ -105,6 +105,7 @@ type LoopWorkflow = {
   definition?: {
     goal: string;
     presetId?: string;
+    deliveryType?: string;
     allowedIntegrations?: string[];
     allowedToolRefs?: string[];
     schedule?: { timezone?: string };
@@ -842,7 +843,16 @@ function isNewsletterPresetWorkflow(workflow: LoopWorkflow | null): boolean {
   const definition = workflow?.definition;
   if (!definition) return false;
   return definition.presetId === "newsletter"
+    || definition.deliveryType === "newsletter"
     || /\bnewsletter\b/i.test(definition.goal)
+    || Boolean(definition.allowedToolRefs?.includes("internal.resend_broadcast"));
+}
+
+function isNewsletterDeliveryWorkflow(workflow: LoopWorkflow | null): boolean {
+  const definition = workflow?.definition;
+  if (!definition) return false;
+  return definition.presetId === "newsletter"
+    || definition.deliveryType === "newsletter"
     || Boolean(definition.allowedToolRefs?.includes("internal.resend_broadcast"));
 }
 
@@ -902,6 +912,9 @@ export default function LoopRunDetailPage() {
   const [emailSource, setEmailSource] = useState<"auto" | "builder" | null>(null);
   const [emailPreviewBusy, setEmailPreviewBusy] = useState(false);
   const [emailBuilderOpen, setEmailBuilderOpen] = useState(false);
+  const [debugLogsOpen, setDebugLogsOpen] = useState(false);
+  const [debugLogs, setDebugLogs] = useState<unknown>(null);
+  const [debugLogsLoading, setDebugLogsLoading] = useState(false);
   const resumeAttemptedRef = useRef<string | null>(null);
   const approvalNotifyAttemptedRef = useRef<string | null>(null);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
@@ -973,11 +986,12 @@ export default function LoopRunDetailPage() {
   const isApprovalView = Boolean(activeAgentTask && isApprovalAgentTask(activeAgentTask));
   const isEmailBuildView = Boolean(activeAgentTask && isEmailBuildAgentTask(activeAgentTask));
   const isBroadcastView = Boolean(activeAgentTask && isBroadcastDeliveryTask(activeAgentTask));
+  const newsletterDeliveryWorkflow = isNewsletterDeliveryWorkflow(workflow);
   const approvalMeta = isApprovalView && activeAgentTask ? getApprovalMeta(activeAgentTask, run) : null;
   const emailBuildHtml = isEmailBuildView && activeAgentTask ? getEmailBuildHtml(activeAgentTask) ?? emailHtml : null;
-  const approvalPreviewHtml = isApprovalView ? emailHtml : null;
+  const approvalPreviewHtml = isApprovalView && newsletterDeliveryWorkflow ? emailHtml : null;
   const isNewsletterArtifactView = !activeAgentTask;
-  const showNewsletterEditor = Boolean(rawPrimaryNewsletter) && isNewsletterArtifactView;
+  const showNewsletterEditor = Boolean(rawPrimaryNewsletter) && isNewsletterArtifactView && newsletterDeliveryWorkflow;
   const newsletterSendMetadata = useMemo(() => resolveRunNewsletterMetadata({
     markdown: rawPrimaryNewsletter,
     task: isEmailBuildView ? activeAgentTask : writerTask,
@@ -1188,6 +1202,21 @@ export default function LoopRunDetailPage() {
   }, [runId, workflowId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const loadDebugLogs = useCallback(async () => {
+    setDebugLogsLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/runs/${runId}/logs`, { cache: "no-store" });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to load run logs");
+      setDebugLogs((payload as { logs?: unknown }).logs ?? payload);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load run logs");
+    } finally {
+      setDebugLogsLoading(false);
+    }
+  }, [runId]);
 
   useEffect(() => {
     if (loading || !run || !decision?.notifyChannels) return;
@@ -1546,6 +1575,26 @@ export default function LoopRunDetailPage() {
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => {
+                    setDebugLogsOpen(true);
+                    void loadDebugLogs();
+                  }}
+                  disabled={debugLogsLoading}
+                  aria-label="Run logs"
+                  className="text-slate-500 hover:bg-white hover:text-slate-900"
+                >
+                  {debugLogsLoading ? <Loader2 className="size-4 animate-spin" /> : <Code className="size-4" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Run logs</TooltipContent>
+            </Tooltip>
 
             <Tooltip>
               <TooltipTrigger asChild>
@@ -2185,6 +2234,52 @@ export default function LoopRunDetailPage() {
           setMessage={setChatMessage}
           onSend={sendSteerComment}
         />
+
+        <Dialog open={debugLogsOpen} onOpenChange={setDebugLogsOpen}>
+          <DialogContent className="max-h-[86vh] gap-0 overflow-hidden p-0 sm:max-w-5xl">
+            <DialogHeader className="border-b px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <DialogTitle>Run logs</DialogTitle>
+                  <DialogDescription>
+                    Raw run state, task inputs/outputs, events, gates, artifacts, and tool/LLM traces.
+                  </DialogDescription>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    onClick={() => void loadDebugLogs()}
+                    disabled={debugLogsLoading}
+                  >
+                    <RefreshCw className={cn("size-3.5", debugLogsLoading && "animate-spin")} />
+                    Refresh
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={!debugLogs}
+                    onClick={() => navigator.clipboard?.writeText(JSON.stringify(debugLogs ?? {}, null, 2))}
+                  >
+                    <Copy className="size-3.5" />
+                    Copy
+                  </Button>
+                </div>
+              </div>
+            </DialogHeader>
+            <ScrollArea className="h-[68vh] bg-slate-950">
+              <pre className="min-w-full whitespace-pre-wrap break-words p-4 font-mono text-xs leading-relaxed text-slate-100">
+                {debugLogsLoading && !debugLogs
+                  ? "Loading run logs..."
+                  : JSON.stringify(debugLogs ?? { message: "No logs loaded yet." }, null, 2)}
+              </pre>
+            </ScrollArea>
+          </DialogContent>
+        </Dialog>
 
         <EmailBuilderDialog
           open={emailBuilderOpen}

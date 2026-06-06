@@ -6,6 +6,9 @@ Use these pages when you want the full end-to-end path, not just a module summar
 
 ## Core Flows
 
+- [Dashboard Loop Builder Page](./dashboard-loop-builder-new-page.md)
+- [Loop Builder CEO Designer](./loop-builder-ceo-designer.md)
+- [Loop Builder End-to-End](./loop-builder-end-to-end.md)
 - [Loop Miner End-to-End](./loop-miner-end-to-end.md)
 - [Memory Cleanup End-to-End](./memory-cleanup-end-to-end.md)
 - [Vertex Document Embeddings and Search](./vertex-document-embeddings.md)

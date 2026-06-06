@@ -12,6 +12,8 @@ The loop-executor turns a saved loop definition into a Paperclip-style multi-age
 
 This document describes the current implementation, not an aspirational design. The code already implements the CEO/IC split, the checkout + comments protocol, the scheduler, and workspace grouping.
 
+For the design-time path that creates these workflows, see [Loop Builder End-to-End](./flows/loop-builder-end-to-end.md).
+
 ## What This Architecture Is
 
 The executor is a small workflow runtime built on top of:

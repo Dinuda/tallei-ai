@@ -72,6 +72,12 @@ function buildHandlerCtx(input: RunLoopAgentInput, assignment: LoopToolAssignmen
 async function runAssignedTools(input: RunLoopAgentInput) {
   const sections: string[] = [];
   const toolsUsed: string[] = [];
+  const toolResults: Array<{
+    ref: string;
+    text: string;
+    data?: Record<string, unknown>;
+    shortCircuit?: boolean;
+  }> = [];
   let draft: unknown;
   let emailTemplate: RunLoopAgentResult["emailTemplate"];
 
@@ -85,6 +91,12 @@ async function runAssignedTools(input: RunLoopAgentInput) {
       const result = await handler(ctx);
       toolsUsed.push(entry.ref);
       if (result.text) sections.push(result.text);
+      toolResults.push({
+        ref: entry.ref,
+        text: result.text,
+        ...(result.data ? { data: result.data } : {}),
+        ...(result.shortCircuit ? { shortCircuit: true } : {}),
+      });
       if (result.draft) draft = result.draft;
       if (result.emailTemplate) emailTemplate = result.emailTemplate;
 
@@ -94,6 +106,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
           draft,
           emailTemplate,
           toolsUsed,
+          toolResults,
           emailApprovalSent: true,
           approvalRequest: result.approvalRequest!,
           artifactBody: result.artifactBody,
@@ -101,7 +114,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
       }
 
       if (result.shortCircuit) {
-        return { sections, draft, emailTemplate, toolsUsed, emailApprovalSent: false as const };
+        return { sections, draft, emailTemplate, toolsUsed, toolResults, emailApprovalSent: false as const };
       }
       continue;
     }
@@ -109,7 +122,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
     throw new Error(`No tool handler registered for actionable tool ${entry.ref}`);
   }
 
-  return { sections, draft, emailTemplate, toolsUsed, emailApprovalSent: false as const };
+  return { sections, draft, emailTemplate, toolsUsed, toolResults, emailApprovalSent: false as const };
 }
 
 /** Runs one agent: optional tools, then LLM synthesis unless a tool short-circuits. */
@@ -142,6 +155,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
           toolRefs: input.assignedTools.map((t) => t.ref),
           actionableToolRefs: actionableToolRefs(input.assignedTools),
           toolsUsed,
+          toolResults: toolRun.toolResults,
         },
         draft,
         emailTemplate: toolRun.emailTemplate,
@@ -152,7 +166,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
       const text = toolRun.sections.join("\n\n") || "Email build complete.";
       return {
         text,
-        data: { model: loopExecutorOpenAiModel(), mode: "tool_assisted", toolsUsed, emailBuilt: true },
+        data: { model: loopExecutorOpenAiModel(), mode: "tool_assisted", toolsUsed, toolResults: toolRun.toolResults, emailBuilt: true },
         draft,
         emailTemplate: toolRun.emailTemplate,
       };
@@ -161,7 +175,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     if (toolRun.emailApprovalSent) {
       return {
         text: toolRun.sections.join("\n\n") || "Approval request sent.",
-        data: { model: loopExecutorOpenAiModel(), mode: "tool_assisted", toolsUsed, emailApprovalSent: true },
+        data: { model: loopExecutorOpenAiModel(), mode: "tool_assisted", toolsUsed, toolResults: toolRun.toolResults, emailApprovalSent: true },
         draft,
         emailApprovalSent: true,
         approvalRequest: toolRun.approvalRequest,
@@ -180,6 +194,8 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
       toolRefs: input.assignedTools.map((t) => t.ref),
       actionableToolRefs: actionableToolRefs(input.assignedTools),
       toolsUsed,
+      llmInput: { system, user },
+      llmOutput: text,
     },
     draft,
   };

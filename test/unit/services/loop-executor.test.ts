@@ -920,3 +920,96 @@ test("tool catalog includes email approval request tool", () => {
   const tools = loopExecutor.listLoopTools();
   assert.ok(tools.some((tool) => tool.ref === "internal.email_approval_request"));
 });
+
+test("approval artifact blocker catches missing sprint notes placeholder", async () => {
+  const { approvalArtifactBlocker } = await import("../../../src/services/loop-executor/approval.js");
+  const blocker = approvalArtifactBlocker([
+    "I can't generate the email yet — I'm missing the sprint notes to pull verified facts from.",
+    "",
+    "Please paste the sprint notes here, and I'll output the internal sync email.",
+  ].join("\n"));
+
+  assert.match(blocker ?? "", /missing required input/i);
+  assert.equal(approvalArtifactBlocker("Subject: Product sync\n\nShipped this week\n- Real notes here."), null);
+});
+
+test("agent completion blocks writer output that is only a missing-input request", async () => {
+  const { evaluateAgentCompletion } = await import("../../../src/services/loop-executor/completion.js");
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Write internal product sync email and send to team inbox",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    deliveryType: "plain",
+  });
+
+  const blocked = evaluateAgentCompletion({
+    definition,
+    agent: {
+      id: "writer",
+      name: "Email writer",
+      task: "Write the internal product sync email with Subject and shipped/in-progress sections.",
+      tools: [{ ref: "internal.llm_only" }],
+    },
+    assignedTools: [{ ref: "internal.llm_only" }],
+    result: {
+      text: "I can't draft the email yet. I'm missing the core data needed. Paste the sprint notes here.",
+      data: {},
+    },
+  });
+
+  assert.equal(blocked.done, false);
+  assert.match(blocked.reason, /required input is missing|missing required input/i);
+
+  const done = evaluateAgentCompletion({
+    definition,
+    agent: {
+      id: "writer",
+      name: "Email writer",
+      task: "Write the internal product sync email with Subject and shipped/in-progress sections.",
+      tools: [{ ref: "internal.llm_only" }],
+    },
+    assignedTools: [{ ref: "internal.llm_only" }],
+    result: {
+      text: "Subject: Product sync\n\nShipped this week\n- We shipped the importer fix.\n\nIn progress\n- Gmail send wiring is still blocked.",
+      data: {},
+    },
+  });
+
+  assert.equal(done.done, true);
+});
+
+test("agent completion blocks approval when artifact is missing required input", async () => {
+  const { evaluateAgentCompletion } = await import("../../../src/services/loop-executor/completion.js");
+  const definition = loopExecutor.buildLoopDefinition({
+    task: "Write internal product sync email and send to team inbox",
+    cron: "0 9 * * 1",
+    timezone: "UTC",
+    deliveryType: "plain",
+  });
+
+  const result = evaluateAgentCompletion({
+    definition,
+    agent: {
+      id: "approval",
+      name: "Approval Agent",
+      task: "Send approval request only.",
+      tools: [{ ref: "internal.email_approval_request" }],
+    },
+    assignedTools: [{ ref: "internal.email_approval_request" }],
+    result: {
+      text: "Approval request sent.",
+      data: {},
+      emailApprovalSent: true,
+      approvalRequest: {
+        to: "user@example.com",
+        approvalUrl: "https://example.com/approve",
+        token: "token",
+        sentAt: "2026-06-06T00:00:00.000Z",
+      },
+      artifactBody: "I can't generate the email yet. Please paste the sprint notes here.",
+    },
+  });
+
+  assert.equal(result.done, false);
+  assert.match(result.reason, /missing required input/i);
+});

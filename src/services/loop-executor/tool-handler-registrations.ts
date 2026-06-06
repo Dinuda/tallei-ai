@@ -17,34 +17,55 @@ import { registerToolHandler, type ToolHandlerContext } from "./tool-handlers.js
 import { loopExecutorOpenAiChat, loopExecutorOpenAiModel } from "./openai-chat.js";
 import { readMemorySearchConfig, readGatewaySearchConfig, runExaWebSearch, completeText } from "./agent-runner-internals.js";
 import { readObject } from "./run-store.js";
-import { getStoredApprovalRequest, readStoredEmailTemplate, reserveApprovalEmailSend } from "./approval.js";
+import { approvalArtifactBlocker, getStoredApprovalRequest, readStoredEmailTemplate, reserveApprovalEmailSend } from "./approval.js";
 import { readLoopExecutorMeta } from "./run-context.js";
 
 registerToolHandler("internal.memory_search", async (ctx: ToolHandlerContext) => {
   const memoryConfig = readMemorySearchConfig(ctx.assignment.config, ctx.agent.task);
   const result = await recallMemories(memoryConfig.query, ctx.auth, memoryConfig.limit);
   const text = ["Memory search results:", ...result.memories.map((m) => `- ${m.text}`)].join("\n");
-  return { text };
+  return {
+    text,
+    data: {
+      query: memoryConfig.query,
+      limit: memoryConfig.limit,
+      sources: result.memories.map((memory) => ({
+        id: memory.id,
+        text: memory.text,
+        score: memory.score,
+        metadata: memory.metadata,
+      })),
+    },
+  };
 });
 
 registerToolHandler("internal.web_search", async (ctx: ToolHandlerContext) => {
   const result = await runExaWebSearch({ goal: ctx.goal, task: ctx.agent.task, config: ctx.assignment.config });
   const text = [`Web search results (${result.model}):`, result.text].join("\n");
-  return { text, data: { model: result.model, provider: result.provider }, shortCircuit: true };
+  return { text, data: { model: result.model, provider: result.provider, sources: result.sources }, shortCircuit: true };
 });
 
 registerToolHandler("internal.email_approval_request", async (ctx: ToolHandlerContext) => {
   if (!ctx.runId || !ctx.workflowId) throw new Error("Email approval requires an active loop run context");
   const artifactBody = await resolveApprovalArtifactBodyForTool(ctx);
   if (!artifactBody.trim()) throw new Error("Content is required before sending the approval request");
+  const blocker = approvalArtifactBlocker(artifactBody);
+  if (blocker) throw new Error(blocker);
   const existingApprovalRequest = ctx.runId ? await getStoredApprovalRequest(ctx.auth, ctx.runId) : null;
   if (existingApprovalRequest?.sentAt || existingApprovalRequest?.reservedAt) {
+    const approvalRequest = {
+      to: existingApprovalRequest.to,
+      approvalUrl: existingApprovalRequest.approvalUrl,
+      token: existingApprovalRequest.token,
+      sentAt: existingApprovalRequest.sentAt ?? existingApprovalRequest.reservedAt ?? new Date().toISOString(),
+      ...(existingApprovalRequest.channel ? { channel: existingApprovalRequest.channel } : {}),
+    };
     return {
       text: existingApprovalRequest.sentAt
         ? `Approval request already sent to ${existingApprovalRequest.to}. No duplicate approval email was sent.`
         : `Approval request is already being sent to ${existingApprovalRequest.to}.`,
       emailApprovalSent: true,
-      approvalRequest: existingApprovalRequest,
+      approvalRequest,
       artifactBody,
       shortCircuit: true,
     };
@@ -77,10 +98,17 @@ registerToolHandler("internal.email_approval_request", async (ctx: ToolHandlerCo
   if (!reserved) {
     const reservedRequest = await getStoredApprovalRequest(ctx.auth, ctx.runId);
     if (reservedRequest) {
+      const approvalRequest = {
+        to: reservedRequest.to,
+        approvalUrl: reservedRequest.approvalUrl,
+        token: reservedRequest.token,
+        sentAt: reservedRequest.sentAt ?? reservedRequest.reservedAt ?? new Date().toISOString(),
+        ...(reservedRequest.channel ? { channel: reservedRequest.channel } : {}),
+      };
       return {
         text: `Approval request already sent to ${reservedRequest.to}. No duplicate approval email was sent.`,
         emailApprovalSent: true,
-        approvalRequest: reservedRequest,
+        approvalRequest,
         artifactBody,
         shortCircuit: true,
       };
@@ -94,7 +122,14 @@ registerToolHandler("internal.email_approval_request", async (ctx: ToolHandlerCo
     ? await readStoredEmailTemplateFromRun(ctx)
     : null;
   if (storedTemplate) {
-    emailTemplate = storedTemplate;
+    emailTemplate = {
+      html: storedTemplate.html,
+      text: storedTemplate.text ?? storedTemplate.html,
+      design: storedTemplate.design,
+      subject: storedTemplate.subject,
+      updatedAt: storedTemplate.updatedAt,
+      source: storedTemplate.source,
+    };
     renderedEmail = {
       html: storedTemplate.html,
       text: storedTemplate.text ?? storedTemplate.html,
@@ -263,9 +298,11 @@ registerToolHandler("composio.gmail.send_email", async (ctx: ToolHandlerContext)
 });
 
 async function handleComposioApprovalTool(ctx: ToolHandlerContext, label: string) {
+  const system = `You prepare ${label} content for human approval. Do not claim the external action happened.`;
+  const user = [`Goal: ${ctx.goal}`, `Task: ${ctx.agent.task}`, 'Return JSON: {"subject":"","body":"","recipient_email":""}'].join("\n");
   const prepared = await completeText({
-    system: `You prepare ${label} content for human approval. Do not claim the external action happened.`,
-    user: [`Goal: ${ctx.goal}`, `Task: ${ctx.agent.task}`, 'Return JSON: {"subject":"","body":"","recipient_email":""}'].join("\n"),
+    system,
+    user,
     maxTokens: 1200,
   });
   let payload: Record<string, unknown> = { raw: prepared };
@@ -273,6 +310,11 @@ async function handleComposioApprovalTool(ctx: ToolHandlerContext, label: string
   const draft = buildDraftFromToolResults({ goal: ctx.goal, toolRef: ctx.assignment.ref, toolResult: payload });
   return {
     text: `Prepared ${label} payload for approval:\n${JSON.stringify(payload, null, 2)}`,
+    data: {
+      llmInput: { system, user },
+      llmOutput: prepared,
+      preparedPayload: payload,
+    },
     draft,
   };
 }

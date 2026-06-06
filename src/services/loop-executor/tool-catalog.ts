@@ -8,11 +8,21 @@ import { listConnectorAccounts } from "../connectors/composio.js";
 import { presetToolRefsForDefinition } from "./presets/registry.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
+export function normalizeToolRef(ref: string): string {
+  const trimmed = ref.trim();
+  if (!trimmed) return trimmed;
+  const normalized = trimmed.toLowerCase();
+  if (normalized.startsWith("composito.")) {
+    return `composio.${normalized.slice("composito.".length)}`;
+  }
+  return normalized;
+}
+
 function mergeToolRefCaps(
   base: string[] | undefined,
   extra: string[]
 ): string[] | undefined {
-  const merged = [...new Set([...(base ?? []), ...extra.map((ref) => ref.trim()).filter(Boolean)])];
+  const merged = [...new Set([...(base ?? []), ...extra.map((ref) => normalizeToolRef(ref)).filter(Boolean)])];
   return merged.length > 0 ? merged : undefined;
 }
 const CATALOG = [
@@ -194,7 +204,7 @@ export function getEffectiveLoopConstraints(definition) {
         allowedIntegrations.add("composio");
     }
     let allowedToolRefs = definition.allowedToolRefs?.length
-        ? [...definition.allowedToolRefs]
+        ? [...new Set(definition.allowedToolRefs.map((ref) => normalizeToolRef(ref)).filter(Boolean))]
         : undefined;
     if (definition.agentGraph?.children?.length) {
         allowedToolRefs = mergeToolRefCaps(
@@ -236,7 +246,7 @@ export function listAllowedLoopTools(definition) {
     });
 }
 export function getLoopTool(ref) {
-    return CATALOG_BY_REF.get(ref) ?? null;
+    return CATALOG_BY_REF.get(normalizeToolRef(ref)) ?? null;
 }
 function normalizeIntegrations(definition) {
     const values = new Set(["internal"]);
@@ -260,13 +270,14 @@ export async function validateToolAssignments(input) {
     const issues = [];
     const allowedIntegrations = normalizeIntegrations(input.definition);
     const allowedToolRefs = input.definition.allowedToolRefs
-        ? new Set(input.definition.allowedToolRefs)
+        ? new Set(input.definition.allowedToolRefs.map((ref) => normalizeToolRef(ref)))
         : null;
     const connectors = await listConnectorAccounts(input.auth);
     const toolkits = connectedToolkits(connectors);
     const strictConnectors = input.strictConnectors ?? false;
     for (const assignment of input.tools) {
-        const entry = getLoopTool(assignment.ref);
+        const normalizedRef = normalizeToolRef(assignment.ref);
+        const entry = getLoopTool(normalizedRef);
         if (!entry) {
             issues.push({
                 ref: assignment.ref,

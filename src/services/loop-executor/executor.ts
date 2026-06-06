@@ -14,6 +14,7 @@ import { getExternalActionHandler } from "./external-action-handlers.js";
 import "./external-action-handlers-registrations.js";
 import { runLoopAgent } from "./agent-runner.js";
 import { applyEmailApprovalResult, persistBuiltEmailTemplate } from "./approval.js";
+import { evaluateAgentCompletion } from "./completion.js";
 import { isEmailBuildAgent, isNewsletterDeliveryDefinition } from "./agent-responsibilities.js";
 import { advanceDynamicRunAfterSeq } from "./gates.js";
 import { ensureDeliveryRunFinished, readDeliveryCompletionState } from "./distribution.js";
@@ -93,6 +94,7 @@ export async function runCeoStrategyHeartbeat(runId: string) {
             approvedRoster: ceoOutput.agents,
             rosterApprovedAt: new Date().toISOString(),
             strategyReadyAt: new Date().toISOString(),
+            ...(ceoOutput.trace ? { strategyTrace: ceoOutput.trace } : {}),
             ...(deliveryAgentTaskId ? { deliveryAgentTaskId } : {}),
             ...(context.definition.builderMeta?.designDiagnostics ? { designDiagnostics: context.definition.builderMeta.designDiagnostics } : {}),
         });
@@ -118,6 +120,8 @@ export async function runCeoStrategyHeartbeat(runId: string) {
                 ...(preset ? { presetId: preset.id } : { designedBy: context.definition.builderMeta?.designedBy ?? "ceo_llm" }),
                 firstTaskId,
                 agentCount: ceoOutput.agents.length,
+                traceMode: ceoOutput.trace?.mode ?? null,
+                llmCalled: ceoOutput.trace?.llmCalled ?? null,
             },
         });
         if (firstTaskId) {
@@ -305,12 +309,60 @@ export async function runAgentHeartbeat(runId, taskId) {
             workflowTitle: context.workflowTitle,
             definition: context.definition,
         });
+        const completion = evaluateAgentCompletion({
+            agent: agentSpec,
+            assignedTools,
+            result,
+            definition: context.definition,
+        });
         await insertComment({
             context,
             taskId: task.id,
             author: task.agent_id,
             body: result.text,
         });
+        if (!completion.done) {
+            await pool.query(`UPDATE loop_run_tasks
+       SET status = 'blocked',
+           output_json = $4::jsonb,
+           error_json = $5::jsonb,
+           completed_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3`, [
+                task.id,
+                context.tenantId,
+                context.userId,
+                JSON.stringify({
+                    text: result.text,
+                    data: result.data,
+                    draft: result.draft ?? null,
+                    approvalRequest: result.approvalRequest ?? null,
+                    artifactBody: result.artifactBody ?? null,
+                    emailTemplate: result.emailTemplate ?? null,
+                    completion,
+                }),
+                JSON.stringify({
+                    message: completion.reason,
+                    completionCriteria: completion.criteria,
+                    code: "completion_criteria_not_met",
+                }),
+            ]);
+            await insertEvent({
+                context,
+                taskId: task.id,
+                eventType: "agent_completion_blocked",
+                payload: {
+                    agentId: task.agent_id,
+                    seq: task.seq,
+                    reason: completion.reason,
+                    criteria: completion.criteria,
+                },
+            });
+            await markRunBlocked(runId, completion.reason, task.id);
+            return { status: "blocked", taskId: task.id };
+        }
         await pool.query(`UPDATE loop_run_tasks
        SET status = 'done',
            output_json = $4::jsonb,
@@ -329,6 +381,7 @@ export async function runAgentHeartbeat(runId, taskId) {
                 approvalRequest: result.approvalRequest ?? null,
                 artifactBody: result.artifactBody ?? null,
                 emailTemplate: result.emailTemplate ?? null,
+                completion,
             }),
         ]);
         await insertEvent({
@@ -757,6 +810,110 @@ export async function listLoopRunTasks(auth, runId) {
                 : null,
         };
     });
+}
+
+export async function getLoopRunDebugLogs(auth, runId) {
+    await assertRunAccess(auth, runId);
+    const [runResult, workflowResult, taskResult, commentResult, eventResult, artifactResult, gateResult] = await Promise.all([
+        pool.query(`SELECT id,
+                tenant_id,
+                user_id,
+                workflow_id,
+                status,
+                run_mode,
+                scheduled_for,
+                strategy_output,
+                waiting_for_strategy_approval,
+                draft_output,
+                connector_action_status,
+                metadata_json,
+                created_at,
+                updated_at
+         FROM workflow_runs
+         WHERE id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+         LIMIT 1`, [runId, auth.tenantId, auth.userId]),
+        pool.query(`SELECT w.id,
+                w.title,
+                w.status,
+                w.metadata_json,
+                w.created_at,
+                w.updated_at
+         FROM workflows w
+         JOIN workflow_runs r ON r.workflow_id = w.id
+         WHERE r.id = $1
+           AND w.tenant_id = $2
+           AND w.user_id = $3
+         LIMIT 1`, [runId, auth.tenantId, auth.userId]),
+        pool.query(`SELECT id,
+                seq,
+                agent_id,
+                agent_name,
+                tool_key,
+                agent_spec,
+                assigned_tools,
+                status,
+                input_json,
+                output_json,
+                error_json,
+                started_at,
+                completed_at,
+                created_at,
+                updated_at
+         FROM loop_run_tasks
+         WHERE workflow_run_id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+         ORDER BY seq ASC`, [runId, auth.tenantId, auth.userId]),
+        pool.query(`SELECT id, task_id, author, body, created_at
+         FROM loop_run_comments
+         WHERE workflow_run_id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+         ORDER BY created_at ASC`, [runId, auth.tenantId, auth.userId]),
+        pool.query(`SELECT id, task_id, event_type, payload_json, created_at
+         FROM loop_run_events
+         WHERE workflow_run_id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+         ORDER BY created_at ASC`, [runId, auth.tenantId, auth.userId]),
+        pool.query(`SELECT id, stage_id, artifact_id, kind, label, body, data_json, created_at, updated_at
+         FROM loop_run_artifacts
+         WHERE workflow_run_id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+         ORDER BY created_at ASC`, [runId, auth.tenantId, auth.userId]),
+        pool.query(`SELECT id,
+                stage_id,
+                kind,
+                status,
+                title,
+                artifact_id,
+                payload_json,
+                decision_json,
+                created_at,
+                completed_at,
+                updated_at
+         FROM loop_run_gates
+         WHERE workflow_run_id = $1
+           AND tenant_id = $2
+           AND user_id = $3
+         ORDER BY created_at ASC`, [runId, auth.tenantId, auth.userId]),
+    ]);
+    const run = runResult.rows[0];
+    if (!run)
+        throw new Error("Loop run not found");
+    return {
+        generatedAt: new Date().toISOString(),
+        run,
+        workflow: workflowResult.rows[0] ?? null,
+        tasks: taskResult.rows,
+        comments: commentResult.rows,
+        events: eventResult.rows,
+        artifacts: artifactResult.rows,
+        gates: gateResult.rows,
+    };
 }
 
 export async function getLoopRun(auth, runId) {
