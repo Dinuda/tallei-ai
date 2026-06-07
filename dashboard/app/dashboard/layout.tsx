@@ -351,7 +351,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </aside>
 
       <main id="main-content" className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
-        <div className="mx-auto w-full max-w-7xl">
+        <div className="mx-auto w-full">
           <DashboardUpdateBanner />
           {children}
         </div>
