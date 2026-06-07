@@ -28,6 +28,8 @@ import { resolveLoopPreset } from "./presets/registry.js";
 import { approveLoopRunGate, advanceDynamicRunAfterSeq, submitLoopRunGateInput } from "./gates.js";
 import { parseContactListCsv } from "./csv-parser.js";
 import { readDeliveryCompletionState, runDistributionHeartbeat, shouldScheduleDistributionResume, ensureDeliveryRunFinished } from "./distribution.js";
+import { isEngineV3Definition } from "../loop-engine/contracts.js";
+import { resolveDeliveryProvider } from "../loop-engine/delivery-router.js";
 
 const DELIVERY_RECIPIENTS_INPUT_ID = "delivery_recipients";
 
@@ -302,6 +304,100 @@ async function transitionRunToDelivery(input: {
       payload: { approvedAt, channel: input.approvedBy, nextStatus: advanced.status },
     });
     return { runId: run.id, workflowId: run.workflow_id, status: advanced.status };
+  }
+
+  if (isEngineV3Definition(context.definition)) {
+    const provider = resolveDeliveryProvider(context);
+    const target = context.definition.delivery?.target ?? "none";
+    const usesBroadcast = target === "subscriber_list" || provider === "internal.resend_broadcast";
+
+    if (!usesBroadcast) {
+      const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
+        approvalDecision: { approvedAt, channel: input.approvedBy },
+      });
+      await pool.query(
+        `UPDATE workflow_runs SET status = 'running',
+             metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+        [
+          run.id,
+          input.tenantId,
+          input.userId,
+          JSON.stringify({ loop_executor: loopExecutorPatch.loop_executor }),
+        ],
+      );
+
+      const seqResult = await pool.query<{ seq: number }>(
+        `SELECT seq FROM loop_run_tasks
+         WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3 AND status = 'done'
+         ORDER BY seq DESC LIMIT 1`,
+        [run.id, input.tenantId, input.userId],
+      );
+      const currentSeq = typeof seqResult.rows[0]?.seq === "number" ? seqResult.rows[0].seq : -1;
+      const nextTask = await pool.query<{ id: string }>(
+        `SELECT id FROM loop_run_tasks
+         WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3 AND seq = $4 LIMIT 1`,
+        [run.id, input.tenantId, input.userId, currentSeq + 1],
+      );
+
+      if (nextTask.rows[0]?.id) {
+        await scheduleHeartbeat({
+          tenantId: input.tenantId,
+          userId: input.userId,
+          runId: run.id,
+          jobType: "agent",
+          taskId: nextTask.rows[0].id,
+        });
+        await insertEvent({
+          context,
+          eventType: "run_approval_resumed",
+          payload: { approvedAt, channel: input.approvedBy, nextTaskId: nextTask.rows[0].id },
+        });
+        return { runId: run.id, workflowId: run.workflow_id, status: "running" };
+      }
+
+      if (provider === "composio.gmail.send_email") {
+        const primaryChannel = await getPrimaryNotificationChannel({
+          tenantId: input.tenantId,
+          userId: input.userId,
+          authMode: "internal",
+          plan: "pro",
+        });
+        const operatorEmail = primaryChannel?.destination?.trim();
+        if (operatorEmail) {
+          const withRecipients = mergeLoopExecutorMeta(context.metadataJson, {
+            approvalDecision: { approvedAt, channel: input.approvedBy },
+            deliveryRecipients: {
+              uploadedAt: approvedAt,
+              contacts: [{ email: operatorEmail }],
+              recipientCount: 1,
+            },
+          });
+          await pool.query(
+            `UPDATE workflow_runs SET status = 'executing_action',
+                 metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+             WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+            [
+              run.id,
+              input.tenantId,
+              input.userId,
+              JSON.stringify({ loop_executor: withRecipients.loop_executor }),
+            ],
+          );
+        }
+        const deliveryAgentTaskId = await findDeliveryAgentTaskId(context);
+        await scheduleHeartbeat({
+          tenantId: input.tenantId,
+          userId: input.userId,
+          runId: run.id,
+          jobType: "distribution",
+          taskId: deliveryAgentTaskId ?? undefined,
+        });
+        return { runId: run.id, workflowId: run.workflow_id, status: "executing_action" };
+      }
+
+      return { runId: run.id, workflowId: run.workflow_id, status: "running" };
+    }
   }
 
   await pool.query(
@@ -640,7 +736,7 @@ export async function resumeLoopRunExecution(input: { auth: AuthContext; runId: 
     const pendingGate = await pool.query<{ id: string }>(
       `SELECT id FROM loop_run_gates
        WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
-         AND kind = 'approval' AND status = 'pending'
+         AND status = 'pending'
        ORDER BY created_at ASC LIMIT 1`,
       [context.runId, context.tenantId, context.userId],
     );

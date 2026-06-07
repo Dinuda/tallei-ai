@@ -838,7 +838,10 @@ router.post("/runs/:runId/gates/:gateId/approve", requireScopes(["memory:write"]
   try {
     const { runId } = runIdSchema.parse({ runId: req.params.runId });
     const { gateId } = gateIdSchema.parse({ gateId: req.params.gateId });
-    const result = await approveLoopRunGate({ auth: req.authContext!, runId, gateId });
+    const decision = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? req.body as Record<string, unknown>
+      : undefined;
+    const result = await approveLoopRunGate({ auth: req.authContext!, runId, gateId, decision });
     res.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {

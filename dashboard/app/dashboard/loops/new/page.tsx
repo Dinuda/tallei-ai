@@ -43,6 +43,35 @@ type BuilderProposal = {
   model?: string;
 };
 
+const BUILDER_POLL_INTERVAL_MS = 2000;
+const BUILDER_POLL_MAX_ATTEMPTS = 150;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function pollLoopBuilderJob(jobId: string): Promise<BuilderProposal> {
+  for (let attempt = 0; attempt < BUILDER_POLL_MAX_ATTEMPTS; attempt += 1) {
+    const response = await fetch(`/api/loop-builder/jobs/${jobId}`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({})) as {
+      error?: string;
+      status?: string;
+      proposal?: BuilderProposal;
+    };
+    if (!response.ok) {
+      throw new Error(payload.error ?? "Failed to check loop design status");
+    }
+    if (payload.status === "completed" && payload.proposal) {
+      return payload.proposal;
+    }
+    if (payload.status === "failed") {
+      throw new Error(payload.error ?? "Loop design failed");
+    }
+    await sleep(BUILDER_POLL_INTERVAL_MS);
+  }
+  throw new Error("Loop design is still running. Try again in a moment.");
+}
+
 const inspirationTemplates: Array<{ id: Exclude<TemplateHint, "custom">; label: string; hint: string }> = [
   {
     id: "writing_companion",
@@ -85,16 +114,27 @@ export default function NewLoopBuilderPage() {
           priorProposal: mode === "refine" ? proposal : undefined,
         }),
       });
-      const payload = await response.json().catch(() => ({}));
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string;
+        details?: Array<{ message?: string }>;
+        jobId?: string;
+        proposal?: BuilderProposal;
+      };
       if (!response.ok) {
         const detail = Array.isArray(payload.details) && payload.details[0] && typeof payload.details[0] === "object"
-          ? (payload.details[0] as { message?: string }).message
+          ? payload.details[0].message
           : undefined;
         throw new Error(
           detail ? `${payload.error ?? `Failed to ${mode} loop`}: ${detail}` : (payload.error ?? `Failed to ${mode} loop`),
         );
       }
-      setProposal(payload.proposal as BuilderProposal);
+      if (payload.jobId) {
+        setProposal(await pollLoopBuilderJob(payload.jobId));
+      } else if (payload.proposal) {
+        setProposal(payload.proposal);
+      } else {
+        throw new Error("Loop builder returned no job id or proposal");
+      }
       if (mode === "refine") setFeedback("");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : `Failed to ${mode} loop`);

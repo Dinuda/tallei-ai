@@ -1,0 +1,211 @@
+/**
+ * goal-eval.ts — Deterministic guards + LLM judge for per-agent goal evaluation.
+ */
+
+import type { LoopRunAgent, LoopDefinition } from "../loop-executor/types.js";
+import type { RunLoopAgentResult } from "../loop-executor/agent-runner.js";
+import { loopExecutorOpenAiChat } from "../loop-executor/openai-chat.js";
+import {
+  detectPlaceholderText,
+  extractMemorySources,
+  goalEvalResultSchema,
+  type GoalEvalResult,
+} from "./contracts.js";
+import { approvalArtifactBlocker } from "../loop-executor/approval.js";
+
+const judgeCache = new Map<string, GoalEvalResult>();
+
+function cacheKey(agentId: string, text: string, goal: string): string {
+  return `${agentId}:${goal.slice(0, 80)}:${text.slice(0, 200)}`;
+}
+
+function deterministicGuards(input: {
+  agent: LoopRunAgent;
+  result: RunLoopAgentResult;
+  definition: LoopDefinition;
+}): GoalEvalResult | null {
+  const text = input.result.text?.trim() ?? "";
+  if (!text) {
+    return goalEvalResultSchema.parse({
+      status: "fail",
+      reason: "Agent returned empty output.",
+      blockers: ["empty_output"],
+    });
+  }
+
+  const approvalBlock = approvalArtifactBlocker(text);
+  if (approvalBlock) {
+    return goalEvalResultSchema.parse({
+      status: "needs_input",
+      reason: approvalBlock,
+      blockers: ["missing_required_input"],
+      gateType: "missing_input",
+    });
+  }
+
+  if (detectPlaceholderText(text)) {
+    return goalEvalResultSchema.parse({
+      status: "needs_input",
+      reason: "Output contains placeholder or unfilled template text.",
+      blockers: ["placeholder_detected"],
+      gateType: input.agent.gate?.type === "missing_input" ? "missing_input" : "missing_input",
+    });
+  }
+
+  const toolRef = input.agent.tools[0]?.ref ?? "";
+  if (toolRef === "internal.memory_search") {
+    const sources = extractMemorySources(input.result.data);
+    const mentionsMissingId = /memory id:\s*(not provided|missing|unknown)/i.test(text);
+    if (sources.length === 0 && /no (verified )?memory|no relevant memory/i.test(text)) {
+      return goalEvalResultSchema.parse({
+        status: "needs_input",
+        reason: "No verified memories found for this loop.",
+        blockers: ["no_memories"],
+        gateType: "memory_confirmation",
+      });
+    }
+    if (mentionsMissingId || (sources.length > 0 && sources.some((s) => !s.id))) {
+      return goalEvalResultSchema.parse({
+        status: "fail",
+        reason: "Memory search output is missing memory IDs.",
+        blockers: ["missing_memory_ids"],
+      });
+    }
+    if (input.agent.gate?.type === "memory_confirmation" && sources.length > 0) {
+      return goalEvalResultSchema.parse({
+        status: "needs_input",
+        reason: "Confirm which memories to include before proceeding.",
+        blockers: [],
+        gateType: "memory_confirmation",
+      });
+    }
+  }
+
+  const goalText = input.definition.goal ?? "";
+  const asksOperatorForInput = /\b(please (provide|paste|send|share)|is missing|not provided|can't generate|cannot generate)\b/i.test(text)
+    && /\b(sprint|notes|input|details|content|required|sprint_notes)\b/i.test(text);
+  if (asksOperatorForInput) {
+    const requiredKey = input.definition.inputsRequired?.[0] ?? "required_input";
+    return goalEvalResultSchema.parse({
+      status: "needs_input",
+      reason: `Required input is missing. Provide ${requiredKey.replace(/_/g, " ")} to continue.`,
+      blockers: input.definition.inputsRequired ?? [requiredKey],
+      gateType: "missing_input",
+    });
+  }
+
+  for (const required of input.definition.inputsRequired ?? []) {
+    const requiredNorm = required.toLowerCase();
+    const goalNeedsInput = goalText.toLowerCase().includes(`[paste ${requiredNorm}`)
+      || goalText.toLowerCase().includes(`[${requiredNorm}`);
+    const outputMentionsMissing = text.toLowerCase().includes(requiredNorm) && /\bmissing\b/i.test(text);
+    if (goalNeedsInput || outputMentionsMissing) {
+      if (/\b(missing|paste|provide|send|can't|cannot)\b/i.test(text)) {
+        return goalEvalResultSchema.parse({
+          status: "needs_input",
+          reason: `Required input "${required}" is missing.`,
+          blockers: [required],
+          gateType: "missing_input",
+        });
+      }
+    }
+  }
+
+  if (input.agent.gate?.type === "draft_review" && toolRef === "internal.llm_only" && !asksOperatorForInput) {
+    const looksLikeDraft = text.length > 120 && !/\b(is missing|please provide|please paste)\b/i.test(text);
+    if (looksLikeDraft) {
+      return goalEvalResultSchema.parse({
+        status: "needs_input",
+        reason: "Review the draft before proceeding.",
+        blockers: [],
+        gateType: "draft_review",
+      });
+    }
+  }
+
+  return null;
+}
+
+async function llmJudge(input: {
+  agent: LoopRunAgent;
+  result: RunLoopAgentResult;
+}): Promise<GoalEvalResult> {
+  const goal = input.agent.goal?.trim();
+  if (!goal) {
+    return goalEvalResultSchema.parse({
+      status: "pass",
+      reason: "No explicit goal declared; output is non-empty.",
+    });
+  }
+
+  const text = input.result.text?.trim() ?? "";
+  const key = cacheKey(input.agent.id, text, goal);
+  const cached = judgeCache.get(key);
+  if (cached) return cached;
+
+  const response = await loopExecutorOpenAiChat({
+    temperature: 0,
+    maxTokens: 256,
+    responseFormat: "json_object",
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You evaluate whether an agent's output satisfies its goal.",
+          'Return JSON: { "status": "pass"|"fail"|"needs_input", "reason": string, "blockers": string[] }',
+          "Use needs_input when human clarification or missing data is required.",
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: [
+          `Goal: ${goal}`,
+          `Done criteria: ${(input.agent.doneCriteria ?? []).join("; ") || "none"}`,
+          `Output:\n${text.slice(0, 4000)}`,
+        ].join("\n\n"),
+      },
+    ],
+  });
+
+  let parsed: GoalEvalResult;
+  try {
+    parsed = goalEvalResultSchema.parse(JSON.parse(response.text));
+  } catch {
+    parsed = goalEvalResultSchema.parse({
+      status: "pass",
+      reason: "Goal judge unavailable; deterministic checks passed.",
+    });
+  }
+
+  judgeCache.set(key, parsed);
+  return parsed;
+}
+
+export async function evaluateAgentGoal(input: {
+  agent: LoopRunAgent;
+  result: RunLoopAgentResult;
+  definition: LoopDefinition;
+  skipLlmJudge?: boolean;
+}): Promise<GoalEvalResult> {
+  const deterministic = deterministicGuards(input);
+  if (deterministic && deterministic.status !== "pass") {
+    return deterministic;
+  }
+
+  if (input.skipLlmJudge) {
+    return goalEvalResultSchema.parse({
+      status: "pass",
+      reason: deterministic?.reason ?? "Deterministic checks passed.",
+    });
+  }
+
+  const judged = await llmJudge(input);
+  if (judged.status === "fail" || judged.status === "needs_input") {
+    return judged;
+  }
+
+  return goalEvalResultSchema.parse({
+    status: "pass",
+    reason: judged.reason || deterministic?.reason || "Goal satisfied.",
+  });
+}

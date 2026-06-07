@@ -11,6 +11,8 @@ import {
   failLoopHeartbeatJob,
   findLoopHeartbeatJob,
 } from "./heartbeat-jobs.js";
+import { hasPendingLoopRunGate } from "./run-execution-guard.js";
+import { loadRunContext } from "./run-context.js";
 const RETRYABLE_AGENT_ERROR = /timed out|timeout|aborted|aborterror|rate limit|temporarily unavailable|overloaded|ECONNRESET|ETIMEDOUT|fetch failed/i;
 
 export function scheduleDelayedHeartbeatDispatch(delaySeconds: number): void {
@@ -38,6 +40,16 @@ export type ScheduleHeartbeatInput = {
  * On failure the job remains pending for the heartbeat worker.
  */
 export async function scheduleHeartbeat(input: ScheduleHeartbeatInput): Promise<void> {
+  if (input.jobType === "agent" || input.jobType === "ceo_finalize") {
+    try {
+      const context = await loadRunContext(input.runId);
+      if (context.runStatus === "waiting_for_gate") return;
+      if (await hasPendingLoopRunGate(input.runId, input.tenantId, input.userId)) return;
+    } catch {
+      return;
+    }
+  }
+
   await enqueueLoopHeartbeatJob(input);
   const job = await findLoopHeartbeatJob({
     runId: input.runId,

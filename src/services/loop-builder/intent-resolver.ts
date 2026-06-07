@@ -27,7 +27,7 @@ export const loopBuilderProposalSchema = z.object({
     category: z.string().nullable().optional(),
   })).default([]),
   rationale: z.array(z.string().min(1)).default([]),
-  designedBy: z.literal("ceo_llm").default("ceo_llm"),
+  designedBy: z.enum(["ceo_llm", "loop_architect"]).default("loop_architect"),
   model: z.string().optional(),
   trace: loopBuilderTraceSchema.optional(),
 });
@@ -57,14 +57,15 @@ export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<L
 
   const result = await designLoopFromIntent({
     auth: input.auth,
-    prompt,
+    prompt: input.feedback
+      ? [prompt, `Template hint: ${templateHintFromRequest(input.templateId) ?? "custom"}`].filter(Boolean).join("\n\n")
+      : prompt,
     feedback: input.feedback,
-    templateHint: templateHintFromRequest(input.templateId),
     priorProposal: input.priorProposal,
   });
 
   const templateId = input.templateId ?? "custom";
-  const channels = channelsFromDesign(result.design.suggestedChannels);
+  const channels = channelsFromDesign(result.suggestedChannels);
 
   return loopBuilderProposalSchema.parse({
     title: result.design.title,
@@ -73,10 +74,10 @@ export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<L
     definition: result.definition,
     suggestedChannels: channels,
     suggestedToolRefs: result.suggestedToolRefs,
-    memories: result.memories,
+    memories: result.memories.map(({ id, text }) => ({ id, text })),
     preferences: result.preferences,
     rationale: result.design.rationale,
-    designedBy: "ceo_llm",
+    designedBy: "loop_architect",
     model: result.model,
     trace: result.trace,
   });

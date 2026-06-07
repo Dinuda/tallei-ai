@@ -6,6 +6,8 @@
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import { completeEngineGate } from "../loop-engine/gates.js";
+import { isEngineV3Definition } from "../loop-engine/contracts.js";
 import { consumeWorkflowApprovalToken, resolveWorkflowApprovalToken } from "../approval-tokens.js";
 import { isDynamicPlanDefinition, stageSeq } from "./plan.js";
 import { assertRunAccess, loadRunContext, mergeLoopExecutorMeta } from "./run-context.js";
@@ -134,7 +136,17 @@ export async function listLoopRunGates(auth: AuthContext, runId: string) {
   }));
 }
 
-export async function approveLoopRunGate(input: { auth: AuthContext; runId: string; gateId: string }) {
+export async function approveLoopRunGate(input: { auth: AuthContext; runId: string; gateId: string; decision?: Record<string, unknown> }) {
+  const context = await loadRunContext(input.runId);
+  if (isEngineV3Definition(context.definition)) {
+    return completeEngineGate({
+      auth: input.auth,
+      runId: input.runId,
+      gateId: input.gateId,
+      status: "approved",
+      decision: input.decision ?? { approvedAt: new Date().toISOString(), channel: "ui" },
+    });
+  }
   return completeDynamicGate({
     auth: input.auth,
     runId: input.runId,
@@ -172,6 +184,16 @@ export async function approveLoopRunGateApprovalToken(token: string) {
 }
 
 export async function rejectLoopRunGate(input: { auth: AuthContext; runId: string; gateId: string; reason?: string }) {
+  const context = await loadRunContext(input.runId);
+  if (isEngineV3Definition(context.definition)) {
+    return completeEngineGate({
+      auth: input.auth,
+      runId: input.runId,
+      gateId: input.gateId,
+      status: "rejected",
+      decision: { rejectedAt: new Date().toISOString(), channel: "ui", reason: input.reason ?? null },
+    });
+  }
   return completeDynamicGate({
     auth: input.auth,
     runId: input.runId,
@@ -189,6 +211,15 @@ export async function submitLoopRunGateInput(input: {
 }) {
   await assertRunAccess(input.auth, input.runId);
   const context = await loadRunContext(input.runId);
+  if (isEngineV3Definition(context.definition)) {
+    return completeEngineGate({
+      auth: input.auth,
+      runId: input.runId,
+      gateId: input.gateId,
+      status: "submitted",
+      decision: { submittedAt: new Date().toISOString(), channel: "ui", value: input.value },
+    });
+  }
   if (!isDynamicPlanDefinition(context.definition)) throw new Error("Run does not use dynamic gates");
 
   const gateResult = await pool.query(

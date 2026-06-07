@@ -20,6 +20,7 @@ import {
 } from "./plan.js";
 import type { LoopRunContext } from "./run-context.js";
 import { getEffectiveLoopConstraints, listAllowedLoopTools } from "./tool-catalog.js";
+import { isEngineV3Definition } from "../loop-engine/contracts.js";
 import { ceoStrategyOutputSchema, type LoopDefinition, type LoopPlan, type LoopRunAgent } from "./types.js";
 
 function normalizeOneResponsibilityRoster(agents: LoopRunAgent[], definition: LoopDefinition): LoopRunAgent[] {
@@ -30,15 +31,29 @@ function normalizeOneResponsibilityRoster(agents: LoopRunAgent[], definition: Lo
 }
 
 function rosterFromAgentGraph(definition: LoopDefinition): { strategyText: string; agents: LoopRunAgent[] } {
-  const agents = normalizeOneResponsibilityRoster(
-    (definition.agentGraph?.children ?? []).map((child) => ({
-      id: child.id,
-      name: child.name,
-      task: child.task,
-      tools: child.tools,
-    })),
-    definition
-  );
+  const children = definition.agentGraph?.children ?? [];
+  const agents = isEngineV3Definition(definition)
+    ? normalizeRosterAgents(children.map((child) => ({
+        id: child.id,
+        name: child.name,
+        task: child.task,
+        goal: child.goal,
+        tools: child.tools,
+        doneCriteria: child.doneCriteria,
+        gate: child.gate,
+        outputArtifactId: child.outputArtifactId,
+        inputContract: child.inputContract,
+        outputContract: child.outputContract,
+      })))
+    : normalizeOneResponsibilityRoster(
+        children.map((child) => ({
+          id: child.id,
+          name: child.name,
+          task: child.task,
+          tools: child.tools,
+        })),
+        definition,
+      );
   return {
     strategyText: [
       "Using the loop's configured agent roster (no re-planning).",
@@ -246,6 +261,23 @@ export async function materializeTasksFromRoster(input: {
 }
 
 export async function findDeliveryAgentTaskId(context: LoopRunContext): Promise<string | null> {
+  const engineProvider = context.definition.delivery?.provider?.trim().toLowerCase();
+  if (engineProvider) {
+    const exact = await pool.query<{ id: string }>(
+      `SELECT id FROM loop_run_tasks
+       WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3
+         AND assigned_tools @> $4::jsonb
+       ORDER BY seq ASC LIMIT 1`,
+      [
+        context.runId,
+        context.tenantId,
+        context.userId,
+        JSON.stringify([{ ref: engineProvider }]),
+      ],
+    );
+    if (exact.rows[0]?.id) return exact.rows[0].id;
+  }
+
   const result = await pool.query<{ id: string }>(
     `SELECT id
      FROM loop_run_tasks
@@ -254,6 +286,7 @@ export async function findDeliveryAgentTaskId(context: LoopRunContext): Promise<
        AND user_id = $3
        AND (
          assigned_tools @> '[{"ref":"internal.resend_broadcast"}]'::jsonb
+         OR assigned_tools @> '[{"ref":"composio.gmail.send_email"}]'::jsonb
          OR lower(agent_id || ' ' || agent_name) LIKE '%broadcast%'
          OR lower(agent_id || ' ' || agent_name) LIKE '%delivery%'
        )

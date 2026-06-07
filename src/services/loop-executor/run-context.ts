@@ -34,14 +34,27 @@ export function authFromContext(context: Pick<LoopRunContext, "tenantId" | "user
   };
 }
 
+function normalizeApprovalRequest(raw: unknown) {
+  const approvalRequest = readObject(raw);
+  if (Object.keys(approvalRequest).length === 0) return undefined;
+  const sentAt = typeof approvalRequest.sentAt === "string"
+    ? approvalRequest.sentAt
+    : typeof approvalRequest.reservedAt === "string"
+      ? approvalRequest.reservedAt
+      : undefined;
+  return {
+    ...approvalRequest,
+    ...(sentAt ? { sentAt } : {}),
+  };
+}
+
 /** Parses run metadata, mapping legacy newsletter field names when present. */
 export function readLoopExecutorMeta(metadataJson: unknown): LoopExecutorRunMeta {
   const root = readObject(metadataJson);
   const loopExecutor = readObject(root.loop_executor);
   const legacyApproval = readObject(loopExecutor.publicistApproval);
-  const approvalRequest = Object.keys(readObject(loopExecutor.approvalRequest)).length > 0
-    ? loopExecutor.approvalRequest
-    : Object.keys(legacyApproval).length > 0 ? legacyApproval : undefined;
+  const approvalRequest = normalizeApprovalRequest(loopExecutor.approvalRequest)
+    ?? normalizeApprovalRequest(legacyApproval);
   const artifactBody = typeof loopExecutor.artifactBody === "string"
     ? loopExecutor.artifactBody
     : typeof loopExecutor.newsletterBody === "string" ? loopExecutor.newsletterBody : undefined;

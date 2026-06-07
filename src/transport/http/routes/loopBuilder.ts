@@ -2,9 +2,12 @@ import { Router, type Response } from "express";
 import { z } from "zod";
 
 import {
+  enqueueLoopBuilderProposeJob,
+  enqueueLoopBuilderRefineJob,
+  getLoopBuilderJob,
+} from "../../../services/loop-builder/jobs.js";
+import {
   builderTemplateHintSchema,
-  refineLoopBuilderProposal,
-  resolveLoopBuilderIntent,
   saveLoopBuilderProposal,
   loopBuilderProposalSchema,
 } from "../../../services/loop-builder/intent-resolver.js";
@@ -28,17 +31,35 @@ const saveSchema = z.object({
 
 router.use(authMiddleware);
 
+router.get("/jobs/:jobId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = z.string().uuid().parse(req.params.jobId);
+    const job = getLoopBuilderJob(req.authContext!, jobId);
+    if (!job) {
+      res.status(404).json({ error: "Loop builder job not found" });
+      return;
+    }
+    res.json(job);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error reading loop builder job:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to read loop builder job" });
+  }
+});
+
 router.post("/propose", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = promptSchema.parse(req.body ?? {});
-    const proposal = await resolveLoopBuilderIntent({
+    const job = enqueueLoopBuilderProposeJob({
       auth: req.authContext!,
       prompt: body.prompt,
       templateId: body.templateId,
       feedback: body.feedback,
-      priorProposal: body.priorProposal,
     });
-    res.json({ proposal });
+    res.status(202).json(job);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });
@@ -56,14 +77,14 @@ router.post("/refine", requireScopes(["memory:read"]), async (req: AuthRequest, 
       res.status(400).json({ error: "priorProposal is required for refine" });
       return;
     }
-    const proposal = await refineLoopBuilderProposal({
+    const job = enqueueLoopBuilderRefineJob({
       auth: req.authContext!,
       prompt: body.prompt,
       templateId: body.templateId,
       feedback: body.feedback,
       priorProposal: body.priorProposal,
     });
-    res.json({ proposal });
+    res.status(202).json(job);
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: "Validation failed", details: error.errors });

@@ -1,5 +1,7 @@
 import OpenAI from "openai";
 
+import { openAiTemperatureParam } from "../llm/openai-chat-params.js";
+
 type LoopBuilderReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 
 const LOOP_BUILDER_REASONING_EFFORTS = new Set<LoopBuilderReasoningEffort>([
@@ -99,7 +101,7 @@ export async function loopBuilderOpenAiChat(input: {
     {
       model,
       messages: input.messages,
-      ...(isGpt5Model(model) ? {} : { temperature: input.temperature ?? 1 }),
+      ...openAiTemperatureParam(model, input.temperature),
       response_format: input.responseFormat === "json_object" ? { type: "json_object" } : undefined,
       ...(isLoopBuilderReasoningModel(model) && reasoningEffort
         ? { reasoning_effort: reasoningEffort }

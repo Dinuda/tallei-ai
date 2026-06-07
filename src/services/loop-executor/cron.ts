@@ -1,4 +1,26 @@
 const CRON_PARTS = 5;
+const DEFAULT_DESIGN_CRON = "0 9 * * 1";
+
+const DOW_NAME_TO_CRON: Record<string, string> = {
+  sun: "0",
+  sunday: "0",
+  mon: "1",
+  monday: "1",
+  tue: "2",
+  tues: "2",
+  tuesday: "2",
+  wed: "3",
+  weds: "3",
+  wednesday: "3",
+  thu: "4",
+  thur: "4",
+  thurs: "4",
+  thursday: "4",
+  fri: "5",
+  friday: "5",
+  sat: "6",
+  saturday: "6",
+};
 
 function parseField(raw: string, min: number, max: number, options?: { normalizeSevenToZero?: boolean }): Set<number> {
   const values = new Set<number>();
@@ -34,6 +56,47 @@ function parseField(raw: string, min: number, max: number, options?: { normalize
   }
 
   return values;
+}
+
+/**
+ * Coerce LLM/designer cron output into a valid 5-field expression.
+ * Falls back to Monday 09:00 UTC when the value cannot be parsed.
+ */
+export function normalizeDesignCron(expression: string, sourceText = ""): string {
+  let raw = expression.trim().replace(/\s+/g, " ");
+  if (!raw) return DEFAULT_DESIGN_CRON;
+
+  if (raw.startsWith("@")) {
+    const preset = raw.toLowerCase();
+    if (preset === "@daily") raw = "0 9 * * *";
+    else if (preset === "@weekly") raw = "0 9 * * 1";
+    else if (preset === "@monthly") raw = "0 9 1 * *";
+    else if (preset === "@hourly") raw = "0 * * * *";
+  }
+
+  let fields = raw.split(" ").filter(Boolean);
+  if (fields.length === 6) {
+    fields = fields.slice(1);
+  }
+
+  if (fields.length === 5) {
+    const dowKey = fields[4].toLowerCase();
+    if (DOW_NAME_TO_CRON[dowKey]) {
+      fields[4] = DOW_NAME_TO_CRON[dowKey];
+    }
+    raw = fields.join(" ");
+  }
+
+  try {
+    return validateFiveFieldCron(raw);
+  } catch {
+    const hint = `${expression} ${sourceText}`.toLowerCase();
+    if (/\bmonthly\b/.test(hint)) return validateFiveFieldCron("0 9 1 * *");
+    if (/\bfriday\b/.test(hint)) return validateFiveFieldCron("0 9 * * 5");
+    if (/\bdaily\b/.test(hint)) return validateFiveFieldCron("0 9 * * *");
+    if (/\bweekly\b/.test(hint)) return validateFiveFieldCron("0 9 * * 1");
+    return DEFAULT_DESIGN_CRON;
+  }
 }
 
 export function validateFiveFieldCron(expression: string): string {

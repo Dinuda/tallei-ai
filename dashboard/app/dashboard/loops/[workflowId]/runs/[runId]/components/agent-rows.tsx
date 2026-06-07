@@ -5,18 +5,25 @@ import { ChevronLeft, FileText, Loader2, Megaphone, RefreshCw, Search, ShieldChe
 
 import { cn } from "@/lib/utils";
 
-export type AgentRowTask = {
+import {
+  CHANNEL_LABELS,
+  engineGateHeadline,
+  getTaskOutput,
+  isApprovalTask,
+  isBroadcastDeliveryTask,
+  isEmailBuildTask,
+  isWriterTask,
+  stripMarkdown,
+  type TaskLike,
+} from "./run-view-utils";
+
+export type AgentRowTask = TaskLike & {
   id: string;
-  agentName: string;
-  toolKey: string;
-  agentId: string;
-  status: string;
   startedAt: string | null;
   completedAt: string | null;
   inputJson: unknown;
   outputJson: unknown;
   latestComment: { body: string } | null;
-  assignedTools?: Array<{ ref: string }>;
 };
 
 const AGENT_THEME = {
@@ -47,25 +54,14 @@ const AGENT_THEME = {
   },
 } as const;
 
-function isWriterThemed(task: AgentRowTask): boolean {
-  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
-  return (
-    key.includes("writer") ||
-    key.includes("creative writer") ||
-    (key.includes("write") && !key.includes("research") && !key.includes("search")) ||
-    key.includes("draft")
-  );
-}
-
 function agentTheme(task: AgentRowTask) {
-  const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ");
-  const key = `${task.agentId} ${task.toolKey} ${refs}`.toLowerCase();
+  const key = `${task.agentId} ${task.toolKey} ${(task.assignedTools ?? []).map((tool) => tool.ref).join(" ")}`.toLowerCase();
   if (key.includes("memory_search") || key.includes("web_search") || key.includes("research")) return AGENT_THEME.research;
-  if (isWriterThemed(task)) return AGENT_THEME.writer;
-  if (key.includes("resend_broadcast") || key.includes("broadcast") || key.includes("distribution")) return AGENT_THEME.broadcast;
+  if (isWriterTask(task)) return AGENT_THEME.writer;
+  if (isBroadcastDeliveryTask(task)) return AGENT_THEME.broadcast;
   if (key.includes("email_builder_compose") || key.includes("email_builder_render")) return AGENT_THEME.publicist;
-  if (key.includes("email_approval_request") || key.includes("approval")) return AGENT_THEME.publicist;
-  if (key.includes("gmail") || key.includes("public") || key.includes("publish")) return AGENT_THEME.publicist;
+  if (isApprovalTask(task)) return AGENT_THEME.publicist;
+  if (key.includes("gmail") || key.includes("public") || key.includes("publish") || key.includes("send")) return AGENT_THEME.publicist;
   return AGENT_THEME.default;
 }
 
@@ -77,38 +73,8 @@ function toolBadges(task: AgentRowTask): string[] {
   return [];
 }
 
-function readRecord(v: unknown): Record<string, unknown> {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
-}
-
-function stripMarkdown(v: string) {
-  return v
-    .replace(/```[\s\S]*?```/g, "")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/#{1,6}\s*/g, "")
-    .replace(/^\s*[-*]\s+/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function getOutput(task: AgentRowTask): string {
-  const out = readRecord(task.outputJson);
-  const candidates = [out.text, out.message, out.summary, out.draft];
-  if (task.status !== "todo" || candidates.some((value) => typeof value === "string" && value.trim())) {
-    candidates.push(task.latestComment?.body);
-  }
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim()) return c.trim();
-  }
-  const inp = readRecord(task.inputJson);
-  const agent = readRecord(inp.agent);
-  if (typeof agent.task === "string") return agent.task.trim();
-  return task.toolKey.replace(/_/g, " ");
-}
-
 function brief(task: AgentRowTask): string {
-  const full = stripMarkdown(getOutput(task));
+  const full = stripMarkdown(getTaskOutput(task));
   return full.length > 72 ? `${full.slice(0, 72)}…` : full;
 }
 
@@ -121,36 +87,18 @@ function duration(task: AgentRowTask): string {
   return `${Math.floor(s / 60)}m`;
 }
 
-function isEmailApprovalTask(task: AgentRowTask): boolean {
-  if (isBroadcastDeliveryTask(task) || isEmailBuildTask(task)) return false;
-  const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
-  return refs.includes("email_approval_request");
-}
-
-function isBroadcastDeliveryTask(task: AgentRowTask): boolean {
-  const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
-  const text = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
-  return refs.includes("resend_broadcast") || text.includes("broadcast") || text.includes("distribution");
-}
-
-function isEmailBuildTask(task: AgentRowTask): boolean {
-  const refs = (task.assignedTools ?? []).map((tool) => tool.ref).join(" ").toLowerCase();
-  return (refs.includes("email_builder_compose") || refs.includes("email_builder_render"))
-    && !refs.includes("email_approval_request");
-}
-
 function responsibilityBrief(task: AgentRowTask): string | null {
   if (isBroadcastDeliveryTask(task)) {
-    return "After approval and recipient upload, sync contacts and submit the Resend broadcast only.";
+    return "After approval and recipient upload, sync contacts and submit the broadcast.";
   }
-  if (isEmailApprovalTask(task)) {
+  if (isApprovalTask(task)) {
     return "Review the draft, ask approval questions, and send the approval request only.";
   }
   if (isEmailBuildTask(task)) {
     return "Compose and render the visual email from the writer draft only.";
   }
-  if (isWriterThemed(task)) {
-    return "Write the subscriber-ready newsletter draft only.";
+  if (isWriterTask(task)) {
+    return "Produce the draft content for this run.";
   }
   return null;
 }
@@ -162,16 +110,19 @@ function statusPill(status: string) {
   return "bg-slate-100 text-slate-600";
 }
 
-function taskStatusPill(task: AgentRowTask): string {
-  if (task.status === "blocked" && isEmailApprovalTask(task)) return "bg-amber-100 text-amber-700";
+function taskStatusPill(task: AgentRowTask, awaitingGateInput: boolean): string {
+  if (awaitingGateInput) return "bg-amber-100 text-amber-700";
+  if (task.status === "blocked" && isApprovalTask(task)) return "bg-amber-100 text-amber-700";
   return statusPill(task.status);
 }
 
-function statusLabel(task: AgentRowTask) {
+function statusLabel(task: AgentRowTask, awaitingGateInput: boolean, runPausedForGate: boolean) {
+  if (awaitingGateInput) return "Awaiting your input";
   const status = task.status;
   if (status === "done" || status === "completed") return "Done";
+  if (status === "in_progress" && runPausedForGate) return "Paused";
   if (status === "in_progress") return "Working";
-  if (status === "blocked" && isEmailApprovalTask(task)) return "Awaiting approval";
+  if (status === "blocked" && isApprovalTask(task)) return "Awaiting approval";
   if (status === "blocked") return "Blocked";
   if (status === "failed") return "Failed";
   if (status === "skipped") return "Skipped";
@@ -186,6 +137,8 @@ export function AgentRow({
   rerunning = false,
   canRerun = false,
   metadataSummary = null,
+  engineGateStageId = null,
+  runPausedForGate = false,
 }: {
   task: AgentRowTask;
   open: boolean;
@@ -194,10 +147,14 @@ export function AgentRow({
   rerunning?: boolean;
   canRerun?: boolean;
   metadataSummary?: string | null;
+  engineGateStageId?: string | null;
+  runPausedForGate?: boolean;
 }) {
-  const active = task.status === "in_progress";
+  const gateStage = Boolean(engineGateStageId && task.agentId === engineGateStageId);
+  const working = task.status === "in_progress" && !runPausedForGate;
   const theme = agentTheme(task);
   const Icon = theme.icon;
+  const awaitingGateInput = Boolean(gateStage && (task.status === "blocked" || runPausedForGate));
 
   return (
     <div className="space-y-1.5">
@@ -206,8 +163,9 @@ export function AgentRow({
         onClick={onToggle}
         className={cn(
           "w-full rounded-xl bg-white p-3 text-left shadow-sm transition-all",
-          active && theme.active,
-          open && "ring-2 ring-slate-300"
+          open && "ring-2 ring-slate-400",
+          !open && gateStage && runPausedForGate && "ring-2 ring-amber-300 bg-amber-50/40",
+          !open && working && theme.active,
         )}
       >
         <div className="flex items-start gap-2">
@@ -230,8 +188,8 @@ export function AgentRow({
                     Rerun
                   </span>
                 ) : null}
-                <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", taskStatusPill(task))}>
-                  {task.status === "done" || task.status === "completed" ? duration(task) : statusLabel(task)}
+                <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", taskStatusPill(task, awaitingGateInput))}>
+                  {task.status === "done" || task.status === "completed" ? duration(task) : statusLabel(task, awaitingGateInput, runPausedForGate)}
                 </span>
               </div>
             </div>
@@ -285,7 +243,7 @@ export function CeoRow({
   statusLabel: string;
   runStatus: string;
 }) {
-  const awaitingApproval = runStatus.includes("waiting") || label === "awaiting approval";
+  const awaitingApproval = runStatus.includes("waiting") || label.includes("approval") || label.includes("review") || label.includes("input");
   const pill =
     runStatus === "completed"
       ? "bg-sky-100 text-sky-700"
@@ -315,24 +273,20 @@ export function CeoRow({
   );
 }
 
-const CHANNEL_LABELS: Record<string, string> = {
-  primary: "Primary channel",
-  email: "Email",
-  gmail: "Gmail",
-  telegram: "Telegram",
-  whatsapp: "WhatsApp",
-};
-
 export type ApprovalGateInfo = {
   id: string;
   title: string;
   artifactId: string | null;
   channels: string[];
   status: string;
+  gateType?: string | null;
 };
 
 export function ApprovalGateRow({ gate }: { gate: ApprovalGateInfo }) {
   const isPending = gate.status === "pending";
+  const isEngineGate = Boolean(gate.gateType);
+  const label = isEngineGate ? engineGateHeadline(gate.gateType ?? null) : "Approval gate";
+
   return (
     <div className={cn(
       "rounded-xl border p-3 shadow-sm",
@@ -347,16 +301,16 @@ export function ApprovalGateRow({ gate }: { gate: ApprovalGateInfo }) {
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-sm font-semibold text-slate-900">Approval gate</span>
+            <span className="text-sm font-semibold text-slate-900">{label}</span>
             <span className={cn(
               "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium",
               isPending ? "bg-amber-100 text-amber-800" : "bg-sky-100 text-sky-700",
             )}>
-              {isPending ? "Awaiting approval" : gate.status}
+              {isPending ? (isEngineGate ? "Action required" : "Awaiting approval") : gate.status}
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-600">{gate.title}</p>
-          {gate.channels.length > 0 ? (
+          {!isEngineGate && gate.channels.length > 0 ? (
             <div className="mt-2 flex flex-wrap gap-1">
               {gate.channels.map((channel) => (
                 <span key={channel} className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-600 ring-1 ring-slate-200">

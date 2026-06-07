@@ -82,6 +82,17 @@ export { startLoopHeartbeatWorker, stopLoopHeartbeatWorker } from "./heartbeat-w
 export { newsletterPreset } from "./presets/newsletter.js";
 export { getLoopPreset } from "./presets/registry.js";
 
+// Agentic loop engine (v3)
+export {
+  LOOP_ENGINE_VERSION,
+  designLoopFromIntent,
+  runEngineAgentStep,
+  runEngineDeliveryHeartbeat,
+  recallForDesigner,
+  evaluateAgentGoal,
+  isEngineV3Definition,
+} from "../loop-engine/index.js";
+
 // Types
 export {
   LOOP_DEFINITION_VERSION,

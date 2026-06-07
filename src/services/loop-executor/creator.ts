@@ -4,16 +4,18 @@ import { z } from "zod";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { config } from "../../config/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { nextCronRunAt, validateFiveFieldCron } from "./cron.js";
+import { nextCronRunAt, normalizeDesignCron } from "./cron.js";
 import { buildPlanFromAgentGraph } from "./plan.js";
 import { presetToolRefsForDefinition } from "./presets/registry.js";
 import {
   LOOP_DEFINITION_VERSION,
+  LOOP_ENGINE_VERSION,
   loopAgentGraphSchema,
   loopDefinitionSchema,
   loopPlanSchema,
   type LoopAgentGraph,
   type LoopDefinition,
+  type LoopDeliveryRouting,
   type LoopPlan,
   type LoopWorkflowView,
 } from "./types.js";
@@ -84,10 +86,13 @@ export function buildLoopDefinition(input: {
   schedulerTarget?: "internal" | "cloudflare";
   presetId?: string;
   deliveryType?: string;
+  delivery?: LoopDeliveryRouting;
+  inputsRequired?: string[];
+  engineVersion?: typeof LOOP_ENGINE_VERSION;
   builderMeta?: LoopDefinition["builderMeta"];
 }): LoopDefinition {
   const goal = normalizeText(input.task);
-  const cron = validateFiveFieldCron(input.cron);
+  const cron = normalizeDesignCron(input.cron, input.task);
   const explicitPlan = input.plan ? loopPlanSchema.parse(input.plan) : undefined;
   const resolvedPresetId = input.presetId?.trim() || undefined;
 
@@ -129,6 +134,9 @@ export function buildLoopDefinition(input: {
       approvalRequiredFor: ["publish", "send", "external_action"],
     },
     ...(input.deliveryType?.trim() ? { deliveryType: input.deliveryType.trim() } : {}),
+    ...(input.delivery ? { delivery: input.delivery } : {}),
+    ...(input.inputsRequired?.length ? { inputsRequired: input.inputsRequired } : {}),
+    ...(input.engineVersion ? { engineVersion: input.engineVersion } : {}),
     agentGraph,
     ...(plan ? { plan } : {}),
     ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
@@ -156,6 +164,9 @@ export function buildLoopDefinition(input: {
       approvalRequiredFor: ["publish", "send", "external_action"],
     },
     ...(input.deliveryType?.trim() ? { deliveryType: input.deliveryType.trim() } : {}),
+    ...(input.delivery ? { delivery: input.delivery } : {}),
+    ...(input.inputsRequired?.length ? { inputsRequired: input.inputsRequired } : {}),
+    ...(input.engineVersion ? { engineVersion: input.engineVersion } : {}),
     agentGraph,
     ...(plan ? { plan } : {}),
     ...(resolvedPresetId ? { presetId: resolvedPresetId } : {}),
@@ -172,6 +183,9 @@ export function buildLoopDefinitionFromCeoDesign(input: {
     presetId?: string;
     builderMeta?: LoopDefinition["builderMeta"];
   };
+  delivery?: LoopDeliveryRouting;
+  inputsRequired?: string[];
+  engineVersion?: typeof LOOP_ENGINE_VERSION;
 }): LoopDefinition {
   const allowedToolRefs = uniqueStrings(
     input.design.agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
@@ -184,6 +198,9 @@ export function buildLoopDefinitionFromCeoDesign(input: {
     allowedToolRefs,
     presetId: input.design.presetId,
     deliveryType: input.design.deliveryType,
+    delivery: input.delivery,
+    inputsRequired: input.inputsRequired,
+    engineVersion: input.engineVersion,
     builderMeta: input.design.builderMeta,
   });
 }

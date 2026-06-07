@@ -5,7 +5,7 @@ import {
   failLoopHeartbeatJob,
 } from "./heartbeat-jobs.js";
 import { runAgentHeartbeat, runCeoFinalizeHeartbeat, runCeoStrategyHeartbeat } from "./executor.js";
-import { runDistributionHeartbeat } from "./distribution.js";
+import { runEngineDeliveryHeartbeat } from "../loop-engine/delivery-router.js";
 import { markRunBlocked } from "./run-status.js";
 
 async function executeLoopHeartbeatJob(job: {
@@ -30,7 +30,7 @@ async function executeLoopHeartbeatJob(job: {
     return;
   }
   if (job.job_type === "distribution") {
-    await runDistributionHeartbeat(job.workflow_run_id, job.task_id ?? undefined);
+    await runEngineDeliveryHeartbeat(job.workflow_run_id, job.task_id ?? undefined);
     return;
   }
   throw new Error(`Unknown heartbeat job type: ${job.job_type}`);

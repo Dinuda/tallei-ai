@@ -7,6 +7,7 @@ import { pool } from "../../infrastructure/db/index.js";
 import { artifactDefinition, isDynamicPlanDefinition } from "./plan.js";
 import type { LoopRunContext } from "./run-context.js";
 import type { LoopStage } from "./types.js";
+import { isEngineV3Definition } from "../loop-engine/contracts.js";
 
 export function readObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -115,6 +116,44 @@ export async function loadRunArtifacts(context: LoopRunContext) {
     [context.runId, context.tenantId, context.userId]
   );
   return result.rows;
+}
+
+export async function upsertEngineArtifact(input: {
+  context: LoopRunContext;
+  artifactId: string;
+  kind: string;
+  label: string;
+  body: string;
+  data: Record<string, unknown>;
+  stageId: string;
+}): Promise<void> {
+  if (!isEngineV3Definition(input.context.definition) && !isDynamicPlanDefinition(input.context.definition)) {
+    return;
+  }
+  await pool.query(
+    `INSERT INTO loop_run_artifacts
+     (id, tenant_id, user_id, workflow_run_id, stage_id, artifact_id, kind, label, body, data_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+     ON CONFLICT (tenant_id, user_id, workflow_run_id, artifact_id) DO UPDATE
+       SET stage_id = EXCLUDED.stage_id,
+           kind = EXCLUDED.kind,
+           label = EXCLUDED.label,
+           body = EXCLUDED.body,
+           data_json = EXCLUDED.data_json,
+           updated_at = NOW()`,
+    [
+      randomUUID(),
+      input.context.tenantId,
+      input.context.userId,
+      input.context.runId,
+      input.stageId,
+      input.artifactId,
+      input.kind,
+      input.label,
+      input.body,
+      JSON.stringify(input.data),
+    ],
+  );
 }
 
 export async function loadArtifact(context: LoopRunContext, artifactId: string) {

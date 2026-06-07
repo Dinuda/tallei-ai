@@ -23,7 +23,10 @@ import { readLoopExecutorMeta } from "./run-context.js";
 registerToolHandler("internal.memory_search", async (ctx: ToolHandlerContext) => {
   const memoryConfig = readMemorySearchConfig(ctx.assignment.config, ctx.agent.task);
   const result = await recallMemories(memoryConfig.query, ctx.auth, memoryConfig.limit);
-  const text = ["Memory search results:", ...result.memories.map((m) => `- ${m.text}`)].join("\n");
+  const text = [
+    "Memory search results:",
+    ...result.memories.map((m) => `- [${m.id}] ${m.text}`),
+  ].join("\n");
   return {
     text,
     data: {

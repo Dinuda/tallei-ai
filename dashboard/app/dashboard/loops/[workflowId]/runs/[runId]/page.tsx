@@ -32,6 +32,29 @@ import {
 } from "lucide-react";
 
 import { AgentRow, AgentPlaceholder, ApprovalGateRow, CeoRow, type AgentRowTask, type ApprovalGateInfo } from "./components/agent-rows";
+import { GateActionPanel } from "./components/gate-action-panel";
+import {
+  CHANNEL_LABELS,
+  contentPanelLabel,
+  engineGateStatusLabel,
+  gateApprovalChannels,
+  getTaskOutput,
+  isApprovalTask,
+  isBroadcastDeliveryTask,
+  isEmailBuildTask,
+  isEngineV3Workflow,
+  isNewsletterDeliveryWorkflow,
+  isNewsletterPresetWorkflow,
+  isDraftArtifactTask,
+  isWriterTask,
+  looksLikeMissingInputPrompt,
+  readEngineGateType,
+  readGateDraft,
+  readRecord,
+  stripMarkdown,
+  type LoopRunGateView,
+  type WorkflowDefinition,
+} from "./components/run-view-utils";
 import { ChatDrawer, type ChatComment } from "./components/chat-drawer";
 import { EmailBuilderDialog } from "./components/email-builder-dialog";
 import { NewsletterMetadataPanel } from "./components/newsletter-metadata-panel";
@@ -102,13 +125,7 @@ type LoopWorkflow = {
   title: string;
   status: string;
   nextRunAt: string | null;
-  definition?: {
-    goal: string;
-    presetId?: string;
-    deliveryType?: string;
-    allowedIntegrations?: string[];
-    allowedToolRefs?: string[];
-    schedule?: { timezone?: string };
+  definition?: WorkflowDefinition & {
     ceo: { name: string; task: string; policy: string };
   };
 };
@@ -129,6 +146,7 @@ type LoopRun = {
     kind: string;
     label: string;
     status: "pending" | "submitted";
+    requestedAt?: string | null;
     instructions: string | null;
   } | null;
   deliveryAction?: {
@@ -157,6 +175,7 @@ type LoopRun = {
     } | null;
     delivery: {
       sentAt: string | null;
+      broadcastId?: string | null;
       successCount: number;
       failureCount: number;
       dryRun?: boolean;
@@ -228,14 +247,7 @@ type WorkflowListItem = {
   latestRun: WorkflowListRun | null;
 };
 
-type LoopRunGate = {
-  id: string;
-  stageId: string;
-  kind: string;
-  status: string;
-  title: string;
-  artifactId: string | null;
-  payload: unknown;
+type LoopRunGate = LoopRunGateView & {
   createdAt: string;
   completedAt: string | null;
 };
@@ -259,32 +271,45 @@ const ACTIVE_STATUSES = new Set([
   "waiting_for_contact_list",
 ]);
 
-const CHANNEL_LABELS: Record<string, string> = {
-  primary: "Primary channel",
-  email: "Email",
-  gmail: "Gmail",
-  telegram: "Telegram",
-  whatsapp: "WhatsApp",
-};
-
 function pendingApprovalGate(gates: LoopRunGate[]): LoopRunGate | null {
-  return gates.find((gate) => gate.kind === "approval" && gate.status === "pending") ?? null;
+  return gates.find((gate) => gate.status === "pending" && readEngineGateType(gate.payload))
+    ?? gates.find((gate) => gate.kind === "approval" && gate.status === "pending" && !readEngineGateType(gate.payload))
+    ?? null;
 }
 
-function gateApprovalChannels(gate: LoopRunGate | null): string[] {
-  if (!gate?.payload || typeof gate.payload !== "object" || Array.isArray(gate.payload)) return ["primary"];
-  const stage = (gate.payload as { stage?: { approvalPolicy?: { channels?: string[] } } }).stage;
-  const channels = stage?.approvalPolicy?.channels;
-  return Array.isArray(channels) && channels.length > 0 ? channels : ["primary"];
+function pendingEngineGateForRun(gates: LoopRunGate[]): LoopRunGate | null {
+  return gates.find((gate) => gate.status === "pending" && readEngineGateType(gate.payload)) ?? null;
+}
+
+function resolveEffectiveEngineGate(
+  gates: LoopRunGate[],
+  run: LoopRun | null,
+): LoopRunGate | null {
+  const fromGates = pendingEngineGateForRun(gates);
+  if (fromGates) return fromGates;
+  if (run?.pendingInput?.status !== "pending") return null;
+  return {
+    id: run.pendingInput.id,
+    stageId: run.activeGateStageId ?? "",
+    kind: "input",
+    status: "pending",
+    title: run.pendingInput.label,
+    artifactId: null,
+    payload: {
+      gateType: "missing_input",
+      question: run.pendingInput.instructions ?? run.pendingInput.label,
+    },
+    createdAt: run.pendingInput.requestedAt ?? new Date().toISOString(),
+    completedAt: null,
+  };
+}
+
+function pendingLegacyGateForRun(gates: LoopRunGate[]): LoopRunGate | null {
+  return gates.find((gate) => gate.kind === "approval" && gate.status === "pending" && !readEngineGateType(gate.payload)) ?? null;
 }
 
 function isApprovalRunTask(task: LoopRunTask): boolean {
-  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
-  return (
-    refs.includes("email_approval_request") ||
-    task.agentId.toLowerCase().includes("approval") ||
-    task.toolKey.toLowerCase().includes("email_approval")
-  );
+  return isApprovalTask(task);
 }
 
 function rosterHasDedicatedApprovalAgent(tasks: LoopRunTask[]): boolean {
@@ -294,13 +319,7 @@ function rosterHasDedicatedApprovalAgent(tasks: LoopRunTask[]): boolean {
 }
 
 function isWriterRunTask(task: LoopRunTask): boolean {
-  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
-  return (
-    key.includes("writer") ||
-    key.includes("creative writer") ||
-    (key.includes("write") && !key.includes("research") && !key.includes("search")) ||
-    key.includes("draft")
-  );
+  return isWriterTask(task);
 }
 
 function hasDraftReady(run: LoopRun | null, tasks: LoopRunTask[]): boolean {
@@ -316,9 +335,15 @@ function needsRunApproval(
   run: LoopRun | null,
   gates: LoopRunGate[],
   tasks: LoopRunTask[],
+  isV3: boolean,
 ): boolean {
   if (!run) return false;
-  if (pendingApprovalGate(gates)) return true;
+  if (isV3) {
+    if (pendingEngineGateForRun(gates)) return false;
+    if (run.status === "waiting_for_email_approval") return true;
+    return false;
+  }
+  if (pendingLegacyGateForRun(gates)) return true;
   if (run.status === "waiting_for_approval" || run.status === "waiting_for_email_approval") return true;
   if (!hasDraftReady(run, tasks)) return false;
 
@@ -344,17 +369,15 @@ function isAwaitingApprovalStatus(
   gates: LoopRunGate[],
   tasks: LoopRunTask[] = [],
   run: LoopRun | null = null,
+  isV3 = false,
 ): boolean {
-  if (needsRunApproval(run, gates, tasks)) return true;
+  if (needsRunApproval(run, gates, tasks, isV3)) return true;
   if (status === "waiting_for_approval" || status === "waiting_for_email_approval") {
     return true;
   }
-  if (pendingApprovalGate(gates)) return true;
+  if (pendingEngineGateForRun(gates)) return true;
+  if (!isV3 && pendingLegacyGateForRun(gates)) return true;
   return false;
-}
-
-function readRecord(v: unknown): Record<string, unknown> {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
 function formatDayDate(v: string | null) {
@@ -381,23 +404,21 @@ function formatRelative(v: string | null) {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-function prettyStatus(s: string, gates: LoopRunGate[] = [], tasks: LoopRunTask[] = [], run: LoopRun | null = null) {
-  if (needsRunApproval(run, gates, tasks) || pendingApprovalGate(gates)) return "awaiting approval";
+function prettyStatus(
+  s: string,
+  gates: LoopRunGate[] = [],
+  tasks: LoopRunTask[] = [],
+  run: LoopRun | null = null,
+  isV3 = false,
+) {
+  const engineGate = pendingEngineGateForRun(gates);
+  if (engineGate) return engineGateStatusLabel(readEngineGateType(engineGate.payload));
+  if (needsRunApproval(run, gates, tasks, isV3) || pendingLegacyGateForRun(gates)) return "awaiting approval";
   if (s === "waiting_for_email_approval" || s === "waiting_for_approval") return "awaiting approval";
   if (s === "waiting_for_contact_list") return "awaiting contacts";
   if (s === "waiting_for_input") return "awaiting input";
+  if (s === "waiting_for_gate") return "waiting for gate";
   return s.replace(/_/g, " ");
-}
-
-function stripMarkdown(v: string) {
-  return v
-    .replace(/```[\s\S]*?```/g, "")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/#{1,6}\s*/g, "")
-    .replace(/^\s*[-*]\s+/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function firstSentence(v: string | null | undefined, fallback: string) {
@@ -417,41 +438,19 @@ function statusBadgeClass(
   gates: LoopRunGate[] = [],
   tasks: LoopRunTask[] = [],
   run: LoopRun | null = null,
+  isV3 = false,
 ) {
   if (s === "completed" || s === "done") return "bg-sky-100 text-sky-800";
   if (s === "running" || s === "strategy_approved") return "bg-blue-100 text-blue-800";
-  if (s.includes("waiting") || isAwaitingApprovalStatus(s, gates, tasks, run)) return "bg-amber-100 text-amber-800";
-  if (s === "blocked" && needsRunApproval(run, gates, tasks)) return "bg-amber-100 text-amber-800";
+  if (s.includes("waiting") || isAwaitingApprovalStatus(s, gates, tasks, run, isV3)) return "bg-amber-100 text-amber-800";
+  if (s === "blocked" && needsRunApproval(run, gates, tasks, isV3)) return "bg-amber-100 text-amber-800";
+  if (pendingEngineGateForRun(gates)) return "bg-amber-100 text-amber-800";
   if (s === "blocked" || s === "failed") return "bg-rose-100 text-rose-800";
   return "bg-slate-100 text-slate-700";
 }
 
-function getTaskOutput(task: {
-  status: string;
-  outputJson: unknown;
-  latestComment?: { body: string } | null;
-}): string {
-  const out = readRecord(task.outputJson);
-  const candidates = [out.text, out.message, out.summary, out.draft, out.artifactBody];
-  if (task.status !== "todo" || candidates.some((value) => typeof value === "string" && value.trim())) {
-    candidates.push(task.latestComment?.body);
-  }
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-  }
-  return "";
-}
-
-function isBroadcastDeliveryTask(task: AgentRowTask): boolean {
-  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
-  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
-  return refs.includes("resend_broadcast") || (key.includes("broadcast") && key.includes("delivery"));
-}
-
 function isBroadcastRunTask(task: LoopRunTask): boolean {
-  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
-  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
-  return refs.includes("resend_broadcast") || (key.includes("broadcast") && key.includes("delivery"));
+  return isBroadcastDeliveryTask(task);
 }
 
 function isDeliveryExecutionSettled(run: LoopRun | null, tasks: LoopRunTask[]): boolean {
@@ -465,15 +464,11 @@ function isDeliveryExecutionSettled(run: LoopRun | null, tasks: LoopRunTask[]): 
 }
 
 function isApprovalAgentTask(task: AgentRowTask): boolean {
-  if (isBroadcastDeliveryTask(task) || isEmailBuildAgentTask(task)) return false;
-  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
-  return refs.includes("email_approval_request");
+  return isApprovalTask(task);
 }
 
 function isEmailBuildAgentTask(task: AgentRowTask): boolean {
-  const refs = (task.assignedTools ?? []).map((t) => t.ref).join(" ").toLowerCase();
-  return (refs.includes("email_builder_compose") || refs.includes("email_builder_render"))
-    && !refs.includes("email_approval_request");
+  return isEmailBuildTask(task);
 }
 
 function getEmailBuildHtml(task: AgentRowTask): string | null {
@@ -565,18 +560,7 @@ function getBroadcastDeliveryOutput(task: AgentRowTask, run: LoopRun | null): st
   return "Broadcast delivery has not run yet.";
 }
 
-function isWriterTask(task: AgentRowTask): boolean {
-  const key = `${task.agentId} ${task.agentName} ${task.toolKey}`.toLowerCase();
-  return (
-    key.includes("writer") ||
-    key.includes("creative writer") ||
-    (key.includes("write") && !key.includes("research") && !key.includes("search")) ||
-    key.includes("draft")
-  );
-}
-
 function isAgentRowOpen(task: AgentRowTask, expandedTaskId: string | null): boolean {
-  if (isWriterTask(task)) return expandedTaskId === null;
   return expandedTaskId === task.id;
 }
 
@@ -745,8 +729,9 @@ function needsApprovalHandoffContinue(
   run: LoopRun | null,
   tasks: LoopRunTask[],
   gates: LoopRunGate[],
+  isV3: boolean,
 ): boolean {
-  if (!run || run.status !== "running") return false;
+  if (!run || run.status !== "running" || isV3) return false;
   if (pendingApprovalGate(gates)) return false;
   const handoffTodo = tasks.some(
     (t) => /approval_handoff|publicist/i.test(t.agentId) && t.status === "todo",
@@ -762,6 +747,7 @@ function runAction(
   run: LoopRun | null,
   gates: LoopRunGate[],
   tasks: LoopRunTask[],
+  isV3: boolean,
 ): {
   show: boolean;
   headline: string;
@@ -773,8 +759,9 @@ function runAction(
   notifyChannels?: boolean;
 } | null {
   const status = run?.status ?? "";
-  const pendingGate = pendingApprovalGate(gates);
-  const gateChannels = gateApprovalChannels(pendingGate);
+  const engineGate = pendingEngineGateForRun(gates);
+  const legacyGate = pendingLegacyGateForRun(gates);
+  const gateChannels = gateApprovalChannels(legacyGate);
 
   if (status === "waiting_for_strategy_approval") {
     return {
@@ -786,11 +773,14 @@ function runAction(
       tone: "amber",
     };
   }
-  if (pendingGate) {
+  if (engineGate) {
+    return null;
+  }
+  if (legacyGate) {
     const channelText = gateChannels.map((c) => CHANNEL_LABELS[c] ?? c).join(", ");
     return {
       show: true,
-      headline: pendingGate.title,
+      headline: legacyGate.title,
       sub: `Approval required via ${channelText}. Review the draft, then approve to continue.`,
       cta: "Approve",
       action: "approve-gate",
@@ -798,7 +788,7 @@ function runAction(
       channels: gateChannels,
     };
   }
-  if (needsRunApproval(run, gates, tasks)) {
+  if (needsRunApproval(run, gates, tasks, isV3)) {
     const channelSent = Boolean(run?.stats?.approval?.requestedAt);
     const channelLabel = run?.stats?.approval?.requestedTo ?? run?.stats?.approval?.channel ?? null;
     const approvalAgentHandlesNotify = rosterHasDedicatedApprovalAgent(tasks);
@@ -816,17 +806,17 @@ function runAction(
       notifyChannels: !channelSent && !approvalAgentHandlesNotify,
     };
   }
-  if (status === "blocked") {
+  if (status === "blocked" && !isV3) {
     return {
       show: true,
       headline: "Run needs a decision",
-      sub: "Use steer or skip this run to continue.",
+      sub: "Use steer or reject the gate to continue.",
       cta: "Skip this run",
       action: "skip",
       tone: "rose",
     };
   }
-  if (needsApprovalHandoffContinue(run, tasks, gates)) {
+  if (needsApprovalHandoffContinue(run, tasks, gates, isV3)) {
     return {
       show: true,
       headline: "Draft ready — continue to approval",
@@ -839,38 +829,23 @@ function runAction(
   return null;
 }
 
-function isNewsletterPresetWorkflow(workflow: LoopWorkflow | null): boolean {
-  const definition = workflow?.definition;
-  if (!definition) return false;
-  return definition.presetId === "newsletter"
-    || definition.deliveryType === "newsletter"
-    || /\bnewsletter\b/i.test(definition.goal)
-    || Boolean(definition.allowedToolRefs?.includes("internal.resend_broadcast"));
-}
-
-function isNewsletterDeliveryWorkflow(workflow: LoopWorkflow | null): boolean {
-  const definition = workflow?.definition;
-  if (!definition) return false;
-  return definition.presetId === "newsletter"
-    || definition.deliveryType === "newsletter"
-    || Boolean(definition.allowedToolRefs?.includes("internal.resend_broadcast"));
-}
-
 function RunBadge({
   status,
   gates = [],
   tasks = [],
   run = null,
+  isV3 = false,
 }: {
   status: string;
   gates?: LoopRunGate[];
   tasks?: LoopRunTask[];
   run?: LoopRun | null;
+  isV3?: boolean;
 }) {
   const isRunning = status === "running" || status === "strategy_approved";
-  const awaiting = isAwaitingApprovalStatus(status, gates, tasks, run);
+  const awaiting = isAwaitingApprovalStatus(status, gates, tasks, run, isV3);
   return (
-    <Badge variant="secondary" className={cn("gap-1.5 border-0 capitalize shadow-none", statusBadgeClass(status, gates, tasks, run))}>
+    <Badge variant="secondary" className={cn("gap-1.5 border-0 capitalize shadow-none", statusBadgeClass(status, gates, tasks, run, isV3))}>
       <span
         className={cn(
           "size-1.5 rounded-full",
@@ -880,7 +855,7 @@ function RunBadge({
           "bg-muted-foreground/50"
         )}
       />
-      {prettyStatus(status, gates, tasks, run)}
+      {prettyStatus(status, gates, tasks, run, isV3)}
     </Badge>
   );
 }
@@ -927,19 +902,31 @@ export default function LoopRunDetailPage() {
     : false;
   const runStatus = run?.status ?? "loading";
   const wfStatus = workflow?.status ?? "active";
-  const decision = runAction(run, gates, tasks);
+  const workflowDefinition = workflow?.definition ?? null;
+  const isV3 = isEngineV3Workflow(workflowDefinition);
+  const decision = runAction(run, gates, tasks, isV3);
   const pendingGate = pendingApprovalGate(gates);
+  const engineGate = resolveEffectiveEngineGate(gates, run);
+  const engineGateType = engineGate ? readEngineGateType(engineGate.payload) : null;
+  const runPausedForGate = Boolean(
+    engineGate
+    || run?.status === "waiting_for_gate"
+    || run?.pendingInput?.status === "pending",
+  );
   const approvalGateInfo: ApprovalGateInfo | null = pendingGate
     ? {
         id: pendingGate.id,
         title: pendingGate.title,
         artifactId: pendingGate.artifactId,
-        channels: gateApprovalChannels(pendingGate),
+        channels: readEngineGateType(pendingGate.payload) ? [] : gateApprovalChannels(pendingGate),
         status: pendingGate.status,
+        gateType: readEngineGateType(pendingGate.payload),
       }
     : null;
-  const predefinedNewsletterRun = isNewsletterPresetWorkflow(workflow);
-  const showCsvUpload = runStatus === "waiting_for_contact_list" || runStatus === "waiting_for_input";
+  const predefinedNewsletterRun = isNewsletterPresetWorkflow(workflowDefinition);
+  const newsletterDeliveryWorkflow = isNewsletterDeliveryWorkflow(workflowDefinition);
+  const showCsvUpload = !isV3 && (runStatus === "waiting_for_contact_list" || runStatus === "waiting_for_input");
+  const showDeliveryMetrics = newsletterDeliveryWorkflow;
 
   const agentTasks = useMemo((): AgentRowTask[] => {
     return [...tasks]
@@ -961,10 +948,15 @@ export default function LoopRunDetailPage() {
 
   const memoryEntries = useMemo(() => extractMemoryEntries(tasks), [tasks]);
   const activeAgentTask = expandedTaskId ? agentTasks.find((task) => task.id === expandedTaskId) ?? null : null;
-  const writerTask = agentTasks.find(isWriterTask) ?? null;
+  const writerTask = [...agentTasks].reverse().find(isDraftArtifactTask) ?? null;
+  const gateDraftContent = engineGate ? readGateDraft(engineGate.payload) : null;
   const rawPrimaryNewsletter = (() => {
+    if (gateDraftContent) return gateDraftContent;
     const runDraft = run?.draftOutput?.trim() ?? "";
     const writerOutput = writerTask ? getTaskOutput(writerTask) : "";
+    if (isV3 && writerOutput && !looksLikeMissingInputPrompt(writerOutput)) {
+      return writerOutput;
+    }
     if (runDraft && !looksTechnicalContent(runDraft)) return runDraft;
     if (writerOutput && (looksNewsletterContent(writerOutput) || looksTechnicalContent(runDraft))) return writerOutput;
     if (runDraft) return cleanNewsletterContent(runDraft);
@@ -986,12 +978,24 @@ export default function LoopRunDetailPage() {
   const isApprovalView = Boolean(activeAgentTask && isApprovalAgentTask(activeAgentTask));
   const isEmailBuildView = Boolean(activeAgentTask && isEmailBuildAgentTask(activeAgentTask));
   const isBroadcastView = Boolean(activeAgentTask && isBroadcastDeliveryTask(activeAgentTask));
-  const newsletterDeliveryWorkflow = isNewsletterDeliveryWorkflow(workflow);
   const approvalMeta = isApprovalView && activeAgentTask ? getApprovalMeta(activeAgentTask, run) : null;
   const emailBuildHtml = isEmailBuildView && activeAgentTask ? getEmailBuildHtml(activeAgentTask) ?? emailHtml : null;
   const approvalPreviewHtml = isApprovalView && newsletterDeliveryWorkflow ? emailHtml : null;
   const isNewsletterArtifactView = !activeAgentTask;
-  const showNewsletterEditor = Boolean(rawPrimaryNewsletter) && isNewsletterArtifactView && newsletterDeliveryWorkflow;
+  const showDraftContent = Boolean(rawPrimaryNewsletter) && isNewsletterArtifactView
+    && (newsletterDeliveryWorkflow || (isV3 && engineGateType === "draft_review"));
+  const showNewsletterEditor = showDraftContent && newsletterDeliveryWorkflow;
+  const showGenericDraftView = showDraftContent && !newsletterDeliveryWorkflow && engineGateType !== "missing_input";
+  const showMissingInputInCenter = Boolean(
+    engineGateType === "missing_input"
+    || (isV3 && !engineGate && looksLikeMissingInputPrompt(centerOutput)),
+  );
+  const panelLabel = contentPanelLabel({
+    definition: workflowDefinition,
+    engineGateType,
+    waitingForStrategy: runStatus === "waiting_for_strategy_approval",
+    predefinedNewsletter: predefinedNewsletterRun,
+  });
   const newsletterSendMetadata = useMemo(() => resolveRunNewsletterMetadata({
     markdown: rawPrimaryNewsletter,
     task: isEmailBuildView ? activeAgentTask : writerTask,
@@ -1219,14 +1223,14 @@ export default function LoopRunDetailPage() {
   }, [runId]);
 
   useEffect(() => {
-    if (loading || !run || !decision?.notifyChannels) return;
+    if (loading || !run || !decision?.notifyChannels || isV3) return;
     if (rosterHasDedicatedApprovalAgent(tasks)) return;
     if (approvalNotifyAttemptedRef.current === run.id) return;
     approvalNotifyAttemptedRef.current = run.id;
     void fetch(`/api/workflows/runs/${runId}/request-approval`, { method: "POST" })
       .then((res) => (res.ok ? load() : undefined))
       .catch(() => undefined);
-  }, [loading, run, decision?.notifyChannels, runId, load, tasks]);
+  }, [loading, run, decision?.notifyChannels, runId, load, tasks, isV3]);
 
   useEffect(() => {
     if (loading) return;
@@ -1260,14 +1264,17 @@ export default function LoopRunDetailPage() {
       const broadcastTaskDone = Boolean(
         broadcastTask && (broadcastTask.status === "done" || broadcastTask.status === "completed"),
       );
-      if (run.status === "completed" && broadcastTaskDone) return;
       if (isDeliveryExecutionSettled(run, tasks) && broadcastTaskDone) return;
       attemptResume();
       return;
     }
 
-    if (run.status === "waiting_for_gate" && !pendingApprovalGate(gates)) {
-      attemptResume();
+    if (
+      run.status === "waiting_for_gate"
+      || resolveEffectiveEngineGate(gates, run)
+      || pendingLegacyGateForRun(gates)
+      || run.pendingInput?.status === "pending"
+    ) {
       return;
     }
 
@@ -1335,6 +1342,63 @@ export default function LoopRunDetailPage() {
     return pendingApprovalGate(fetched)?.id ?? null;
   }
 
+  async function approveEngineGate(gateId: string, decision: Record<string, unknown>) {
+    setBusy("approve-gate");
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/runs/${runId}/gates/${gateId}/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(decision),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to approve gate");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to approve gate");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function rejectEngineGate(gateId: string) {
+    setBusy("reject-gate");
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/runs/${runId}/gates/${gateId}/reject`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "Rejected by operator" }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to reject gate");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to reject gate");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function submitEngineGateInput(gateId: string, value: string) {
+    setBusy("gate-input");
+    setError(null);
+    try {
+      const res = await fetch(`/api/workflows/runs/${runId}/gates/${gateId}/input`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to submit gate input");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to submit gate input");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function doAction(action: RunAction) {
     setBusy(action);
     setError(null);
@@ -1347,9 +1411,23 @@ export default function LoopRunDetailPage() {
         return;
       }
 
+      if (action === "skip") {
+        if (engineGate) {
+          await rejectEngineGate(engineGate.id);
+          return;
+        }
+        throw new Error("Skip is not available for this run");
+      }
+
       if (action === "approve-gate") {
         const gateId = await resolvePendingGateId();
         if (gateId) {
+          const gate = gates.find((row) => row.id === gateId) ?? pendingApprovalGate(gates);
+          const gateType = gate ? readEngineGateType(gate.payload) : null;
+          if (gateType) {
+            await approveEngineGate(gateId, { approvedAt: new Date().toISOString(), channel: "ui" });
+            return;
+          }
           const res = await fetch(`/api/workflows/runs/${runId}/gates/${gateId}/approve`, { method: "POST" });
           const payload = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error((payload as { error?: string }).error ?? "Failed to approve gate");
@@ -1528,7 +1606,7 @@ export default function LoopRunDetailPage() {
                 <BreadcrumbSeparator />
                 <BreadcrumbItem>
                   <BreadcrumbLink asChild>
-                    <Link href="/dashboard/loops/newsletter" className="text-xs">Newsletter</Link>
+                    <Link href={`/dashboard/loops/${workflowId}`} className="text-xs">{workflow?.title ?? "Loop"}</Link>
                   </BreadcrumbLink>
                 </BreadcrumbItem>
                 <BreadcrumbSeparator />
@@ -1538,8 +1616,8 @@ export default function LoopRunDetailPage() {
               </BreadcrumbList>
             </Breadcrumb>
             <div className="flex items-center gap-2">
-              <h1 className="text-lg font-bold tracking-tight text-slate-900">Newsletter</h1>
-              <RunBadge status={runStatus} gates={gates} tasks={tasks} run={run} />
+              <h1 className="text-lg font-bold tracking-tight text-slate-900">{workflow?.title ?? panelLabel}</h1>
+              <RunBadge status={runStatus} gates={gates} tasks={tasks} run={run} isV3={isV3} />
             </div>
           </div>
 
@@ -1648,11 +1726,11 @@ export default function LoopRunDetailPage() {
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   variant="destructive"
-                  disabled={busy !== null || runStatus === "completed"}
+                  disabled={busy !== null || runStatus === "completed" || (!engineGate && isV3)}
                   onClick={() => void doAction("skip")}
                 >
                   <XCircle className="size-4" />
-                  Skip run
+                  {engineGate ? "Reject gate" : "Skip run"}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1669,7 +1747,31 @@ export default function LoopRunDetailPage() {
               </Alert>
             ) : null}
 
-            {decision ? (
+            {engineGate ? (
+              <GateActionPanel
+                gateId={engineGate.id}
+                title={engineGate.title}
+                payload={engineGate.payload}
+                busy={busy !== null}
+                prominent={engineGateType === "missing_input"}
+                onApprove={(decision) => approveEngineGate(engineGate.id, decision)}
+                onReject={() => rejectEngineGate(engineGate.id)}
+                onSubmitInput={(value) => submitEngineGateInput(engineGate.id, value)}
+              />
+            ) : showMissingInputInCenter && run?.activeGateId ? (
+              <GateActionPanel
+                gateId={run.activeGateId}
+                title="Required input"
+                payload={{ gateType: "missing_input", question: "Paste sprint notes and required details to continue." }}
+                busy={busy !== null}
+                prominent
+                onApprove={() => Promise.resolve()}
+                onReject={() => rejectEngineGate(run.activeGateId!)}
+                onSubmitInput={(value) => submitEngineGateInput(run.activeGateId!, value)}
+              />
+            ) : null}
+
+            {decision && !engineGate ? (
               <Card className={cn("shrink-0 gap-0 py-0 ring-0 shadow-md", toneCardClass[decision.tone])}>
                 <CardContent className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
                   <div className="flex min-w-0 items-start gap-3">
@@ -1768,7 +1870,7 @@ export default function LoopRunDetailPage() {
               </Card>
             ) : null}
 
-            {!isApprovalView && !isEmailBuildView && (run?.deliveryAction || run?.stats?.delivery) ? (
+            {showDeliveryMetrics && !isApprovalView && !isEmailBuildView && (run?.deliveryAction || run?.stats?.delivery) ? (
               <Card className="shrink-0 gap-0 py-0 ring-0 shadow-md">
                 <CardContent className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
                   <div>
@@ -1815,14 +1917,16 @@ export default function LoopRunDetailPage() {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2.5">
                     <span className="rounded-full bg-slate-900 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
-                      Newsletter
+                      {panelLabel}
                     </span>
                     <CardDescription className="text-slate-600">
                       {run?.status === "waiting_for_strategy_approval" && !predefinedNewsletterRun
                         ? "CEO strategy proposal"
                         : activeAgentTask
                           ? `${activeAgentTask.agentName} output`
-                          : "Written content"}
+                          : engineGateType === "draft_review"
+                            ? "Review the draft below"
+                            : "Written content"}
                     </CardDescription>
                   </div>
                   {activeAgentTask ? (
@@ -1833,7 +1937,7 @@ export default function LoopRunDetailPage() {
                       className="h-8 border-slate-300 text-slate-700 hover:bg-slate-100"
                       onClick={() => setExpandedTaskId(null)}
                     >
-                      Show newsletter
+                      Show {panelLabel.toLowerCase()}
                     </Button>
                   ) : null}
                 </div>
@@ -1981,6 +2085,22 @@ export default function LoopRunDetailPage() {
                       </div>
                     ) : null}
                   </div>
+                ) : showMissingInputInCenter && !engineGate && !run?.activeGateId ? (
+                  <div className="rounded-xl border border-sky-200 bg-sky-50/50 px-5 py-5 text-sm text-slate-700">
+                    <p className="font-medium text-slate-900">Waiting for your input</p>
+                    <p className="mt-2">This run needs sprint notes before it can continue. If you do not see an input box above, refresh the page — the run should pause momentarily.</p>
+                  </div>
+                ) : showGenericDraftView ? (
+                  <article className="rounded-xl border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                    {centerUpdatedAt ? (
+                      <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                        Updated {formatRelative(centerUpdatedAt)}
+                      </p>
+                    ) : null}
+                    <div className="text-sm leading-7 text-slate-800 [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:tracking-tight [&_h2]:mb-3 [&_h2]:mt-7 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mb-2 [&_h3]:mt-5 [&_h3]:text-base [&_h3]:font-semibold [&_li]:my-1 [&_ol]:ml-5 [&_ol]:list-decimal [&_p]:mb-3.5 [&_strong]:font-semibold [&_ul]:ml-5 [&_ul]:list-disc">
+                      <Streamdown>{rawPrimaryNewsletter}</Streamdown>
+                    </div>
+                  </article>
                 ) : showNewsletterEditor ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-3">
                     <NewsletterMetadataPanel metadata={newsletterSendMetadata} title="Newsletter metadata" />
@@ -2066,7 +2186,7 @@ export default function LoopRunDetailPage() {
                         <div className="grid size-14 place-items-center rounded-2xl bg-slate-100">
                           <FileText className="size-6 text-slate-500" />
                         </div>
-                        <p className="mt-4 text-sm font-medium text-slate-800">No newsletter content available yet.</p>
+                        <p className="mt-4 text-sm font-medium text-slate-800">No {panelLabel.toLowerCase()} content available yet.</p>
                         <p className="mt-1 text-xs text-slate-500">
                           {active ? "Click an agent row to view its output here." : "Start a new run to generate output."}
                         </p>
@@ -2099,7 +2219,7 @@ export default function LoopRunDetailPage() {
                       <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-slate-100">
                         <FileText className="size-3.5" />
                       </span>
-                      <span className="flex-1 text-sm font-semibold">Newsletter</span>
+                      <span className="flex-1 text-sm font-semibold">{panelLabel}</span>
                       <ChevronLeft className={cn("size-4 shrink-0", expandedTaskId === null ? "text-slate-900" : "text-slate-400")} />
                     </button>
                   </CardContent>
@@ -2117,7 +2237,7 @@ export default function LoopRunDetailPage() {
                   <CardContent className="space-y-2 px-3">
                     <CeoRow
                       name={workflow?.definition?.ceo?.name ?? "CEO"}
-                      statusLabel={prettyStatus(runStatus, gates, tasks, run)}
+                      statusLabel={prettyStatus(runStatus, gates, tasks, run, isV3)}
                       runStatus={runStatus}
                     />
                     {approvalGateInfo ? <ApprovalGateRow gate={approvalGateInfo} /> : null}
@@ -2129,15 +2249,13 @@ export default function LoopRunDetailPage() {
                           key={task.id}
                           task={task}
                           open={isAgentRowOpen(task, expandedTaskId)}
+                          engineGateStageId={engineGate?.stageId ?? run?.activeGateStageId ?? null}
+                          runPausedForGate={runPausedForGate}
                           metadataSummary={getAgentMetadataSummary(task, rawPrimaryNewsletter, run)}
                           canRerun={runStatus !== "executing_action" && runStatus !== "distributing" && task.status !== "in_progress" && task.status !== "todo"}
                           rerunning={busy === `rerun:${task.id}`}
                           onRerun={() => void rerunTask(task.id)}
                           onToggle={() => {
-                            if (isWriterTask(task)) {
-                              setExpandedTaskId(null);
-                              return;
-                            }
                             setExpandedTaskId((current) => (current === task.id ? null : task.id));
                           }}
                         />

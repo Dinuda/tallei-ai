@@ -37,6 +37,7 @@ import { getEffectiveLoopConstraints, listAllowedLoopTools, validateAgentRoster 
 import { loopRunAgentSchema, loopToolAssignmentSchema } from "./types.js";
 
 import { markRunBlocked } from "./run-status.js";
+import { runEngineAgentStep, shouldUseEngineController } from "../loop-engine/controller.js";
 
 export { markRunBlocked } from "./run-status.js";
 
@@ -202,6 +203,14 @@ async function checkoutTask(runId, taskId) {
          AND t.id = $2
          AND t.status = 'todo'
          AND r.status IN ('strategy_approved', 'running')
+         AND NOT EXISTS (
+           SELECT 1 FROM loop_run_gates g
+           WHERE g.workflow_run_id = r.id AND g.status = 'pending'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM loop_run_tasks t2
+           WHERE t2.workflow_run_id = r.id AND t2.status = 'in_progress'
+         )
        FOR UPDATE OF t SKIP LOCKED
        LIMIT 1`, [runId, taskId]);
         const task = result.rows[0];
@@ -245,6 +254,9 @@ function isRetryableLoopAgentError(error) {
 
 export async function runAgentHeartbeat(runId, taskId) {
     const context = await loadRunContext(runId);
+    if (shouldUseEngineController(context.definition)) {
+        return runEngineAgentStep(runId, taskId);
+    }
     const task = await checkoutTask(runId, taskId);
     if (!task) {
         throw new Error(`Agent task ${taskId} could not be checked out (run status: ${context.runStatus})`);
@@ -969,7 +981,11 @@ export async function getLoopRun(auth, runId) {
         || (typeof distribution.broadcastId === "string" && distribution.broadcastId.startsWith("dry_broadcast_"))
         || (typeof deliveryActionRaw.broadcastId === "string" && deliveryActionRaw.broadcastId.startsWith("dry_broadcast_"));
     const requestedTo = typeof approvalRequest.to === "string" ? approvalRequest.to : null;
-    const requestedAt = typeof approvalRequest.sentAt === "string" ? approvalRequest.sentAt : null;
+    const requestedAt = typeof approvalRequest.sentAt === "string"
+        ? approvalRequest.sentAt
+        : typeof approvalRequest.reservedAt === "string"
+            ? approvalRequest.reservedAt
+            : null;
     const approvedAt = typeof approvalDecisionMeta.approvedAt === "string"
         ? approvalDecisionMeta.approvedAt
         : typeof meta.emailApprovedAt === "string"

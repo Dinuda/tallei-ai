@@ -22,6 +22,48 @@ export const optionalNonEmptyStringSchema = z.preprocess(
 /** Current loop definition schema version stored on `workflows.definition_version`. */
 export const LOOP_DEFINITION_VERSION = "loop_executor_v2";
 
+/** Agentic loop engine generation — preset-free design + gated controller runs. */
+export const LOOP_ENGINE_VERSION = "loop_engine_v3";
+
+export const loopGateTypeSchema = z.enum([
+  "memory_confirmation",
+  "missing_input",
+  "draft_review",
+  "pre_send",
+]);
+
+export type LoopGateType = z.infer<typeof loopGateTypeSchema>;
+
+export const loopAgentGateSchema = z.object({
+  type: loopGateTypeSchema,
+  question: z.string().min(1),
+});
+
+export type LoopAgentGate = z.infer<typeof loopAgentGateSchema>;
+
+export const loopAgentContractSchema = z.object({
+  description: z.string().min(1),
+  schema: z.record(z.unknown()).default({}),
+});
+
+export type LoopAgentContract = z.infer<typeof loopAgentContractSchema>;
+
+export const loopDeliveryTargetSchema = z.enum([
+  "subscriber_list",
+  "team_email",
+  "operator",
+  "none",
+]);
+
+export type LoopDeliveryTarget = z.infer<typeof loopDeliveryTargetSchema>;
+
+export const loopDeliveryRoutingSchema = z.object({
+  provider: z.string().min(1),
+  target: loopDeliveryTargetSchema,
+});
+
+export type LoopDeliveryRouting = z.infer<typeof loopDeliveryRoutingSchema>;
+
 /** Tool binding on an agent: catalog ref plus optional JSON config. */
 export const loopToolAssignmentSchema = z.object({
   ref: z.string().min(1),
@@ -35,8 +77,13 @@ export const loopRunAgentSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   task: z.string().min(1),
+  goal: z.string().min(1).optional(),
   tools: z.array(loopToolAssignmentSchema).default([]),
   doneCriteria: z.array(z.string().min(1)).default([]).optional(),
+  inputContract: loopAgentContractSchema.optional(),
+  outputContract: loopAgentContractSchema.optional(),
+  gate: loopAgentGateSchema.optional(),
+  outputArtifactId: z.string().min(1).optional(),
 });
 
 export type LoopRunAgent = z.infer<typeof loopRunAgentSchema>;
@@ -178,8 +225,12 @@ export const loopAgentGraphChildSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   task: z.string().min(1),
+  goal: z.string().min(1).optional(),
   tools: z.array(loopToolAssignmentSchema).default([]),
   doneCriteria: z.array(z.string().min(1)).default([]).optional(),
+  inputContract: loopAgentContractSchema.optional(),
+  outputContract: loopAgentContractSchema.optional(),
+  gate: loopAgentGateSchema.optional(),
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
 });
@@ -228,12 +279,17 @@ export const loopDefinitionSchema = z.object({
     approvalRequiredFor: z.array(z.string()).default(["publish", "send", "external_action"]),
   }),
   deliveryType: optionalNonEmptyStringSchema,
+  /** LLM-chosen delivery routing for the agentic engine (replaces regex classification). */
+  delivery: loopDeliveryRoutingSchema.optional(),
+  inputsRequired: z.array(z.string().min(1)).default([]).optional(),
+  engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
   agentGraph: loopAgentGraphSchema.optional(),
   plan: loopPlanSchema.optional(),
   /** Legacy built-in preset key. Null/blank from LLM or client payloads is normalized to omitted. */
   presetId: optionalNonEmptyStringSchema,
   builderMeta: z.object({
-    designedBy: z.literal("ceo_llm").default("ceo_llm"),
+    designedBy: z.enum(["ceo_llm", "loop_architect"]).default("ceo_llm"),
+    engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
     preApproved: z.boolean().default(true),
     sourceTemplateIds: z.array(z.string()).optional(),
     model: z.string().optional(),
@@ -265,7 +321,8 @@ export const loopExecutorRunMetaSchema = z.object({
     to: z.string(),
     approvalUrl: z.string(),
     token: z.string(),
-    sentAt: z.string(),
+    sentAt: z.string().optional(),
+    reservedAt: z.string().optional(),
     channel: z.string().optional(),
     artifactKind: z.string().optional(),
   }).optional(),

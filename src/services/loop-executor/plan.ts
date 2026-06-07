@@ -93,7 +93,13 @@ export function normalizeRosterAgents(agents: LoopRunAgent[]): LoopRunAgent[] {
       id,
       name: agent.name.trim(),
       task: agent.task.trim(),
+      ...(agent.goal ? { goal: agent.goal } : {}),
       tools: agent.tools.map((tool) => loopToolAssignmentSchema.parse(tool)),
+      ...(agent.doneCriteria ? { doneCriteria: agent.doneCriteria } : {}),
+      ...(agent.inputContract ? { inputContract: agent.inputContract } : {}),
+      ...(agent.outputContract ? { outputContract: agent.outputContract } : {}),
+      ...(agent.gate ? { gate: agent.gate } : {}),
+      ...(agent.outputArtifactId ? { outputArtifactId: agent.outputArtifactId } : {}),
     });
   });
 }

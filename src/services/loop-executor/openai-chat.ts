@@ -1,5 +1,8 @@
 // @ts-nocheck
 import OpenAI from "openai";
+
+import { openAiTemperatureParam } from "../llm/openai-chat-params.js";
+
 let cachedClient = null;
 
 function isGpt5Model(model) {
@@ -57,7 +60,7 @@ export async function loopExecutorOpenAiChat(input) {
     const requestBody = {
         model,
         messages: input.messages,
-        temperature: input.temperature,
+        ...openAiTemperatureParam(model, input.temperature),
         response_format: input.responseFormat === "json_object" ? { type: "json_object" } : undefined,
         ...(useCompletionTokensParam
             ? { max_completion_tokens: maxCompletionTokens }

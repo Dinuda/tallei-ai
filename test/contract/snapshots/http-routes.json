@@ -320,6 +320,11 @@
     "source": "src/routes/keys.ts"
   },
   {
+    "method": "GET",
+    "path": "/api/loop-builder/jobs/:jobId",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
     "method": "POST",
     "path": "/api/loop-builder/propose",
     "source": "src/routes/loopBuilder.ts"
@@ -560,6 +565,11 @@
     "source": "src/routes/workflows.ts"
   },
   {
+    "method": "DELETE",
+    "path": "/api/workflows/internal/loops/:workflowId",
+    "source": "src/routes/workflows.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/workflows/internal/loops/:workflowId",
     "source": "src/routes/workflows.ts"
@@ -592,6 +602,11 @@
   {
     "method": "POST",
     "path": "/api/workflows/loops",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/workflows/loops/:workflowId",
     "source": "src/routes/workflows.ts"
   },
   {
@@ -680,6 +695,11 @@
     "source": "src/routes/workflows.ts"
   },
   {
+    "method": "GET",
+    "path": "/api/workflows/runs/:runId/logs",
+    "source": "src/routes/workflows.ts"
+  },
+  {
     "method": "PATCH",
     "path": "/api/workflows/runs/:runId/newsletter",
     "source": "src/routes/workflows.ts"
@@ -687,6 +707,11 @@
   {
     "method": "POST",
     "path": "/api/workflows/runs/:runId/newsletter/preview",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/request-approval",
     "source": "src/routes/workflows.ts"
   },
   {
