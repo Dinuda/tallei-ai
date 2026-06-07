@@ -6,6 +6,12 @@ import type { LoopRunAgent, LoopDefinition } from "../loop-executor/types.js";
 import type { RunLoopAgentResult } from "../loop-executor/agent-runner.js";
 import { loopExecutorOpenAiChat } from "../loop-executor/openai-chat.js";
 import {
+  hasRequiredRunInputs,
+  isInputValidationAgent,
+  resolveRequiredInputKeys,
+  type RunMemory,
+} from "../loop-runtime/memory.js";
+import {
   detectPlaceholderText,
   extractMemorySources,
   goalEvalResultSchema,
@@ -20,15 +26,19 @@ function asksOperatorForInput(text: string): boolean {
 function looksLikeEmailDraft(text: string): boolean {
   return /\b(shipped this week|in progress|things to watch|going out to customers|next week)\b/i.test(text);
 }
-import { approvalArtifactBlocker } from "../loop-executor/approval.js";
-import {
-  hasRequiredRunInputs,
-  isInputValidationAgent,
-  resolveRequiredInputKeys,
-  type RunMemory,
-} from "./run-memory.js";
-
 const judgeCache = new Map<string, GoalEvalResult>();
+
+function approvalArtifactBlocker(body: string): string | null {
+  const normalized = body.trim().toLowerCase();
+  if (!normalized) return "No draft content available for approval";
+  const asksForMissingInput = /\bplease paste\b[\s\S]{0,120}\b(sprint notes?|product updates?|required notes?|missing details?)\b/.test(normalized)
+    || /\bpaste\b[\s\S]{0,160}\b(sprint notes?|product updates?|past updates?|core data)\b/.test(normalized)
+    || /\bmissing\b[\s\S]{0,120}\b(sprint notes?|product updates?|required notes?|core data|data needed)\b/.test(normalized);
+  const cannotGenerate = /\b(can't|cannot|can not|unable to)\b[\s\S]{0,80}\b(generate|write|create|draft)\b/.test(normalized);
+  return asksForMissingInput && cannotGenerate
+    ? "Approval blocked: the draft is missing required input."
+    : null;
+}
 
 function cacheKey(agentId: string, text: string, goal: string): string {
   return `${agentId}:${goal.slice(0, 80)}:${text.slice(0, 200)}`;
@@ -44,6 +54,7 @@ function deterministicGuards(input: {
   const inputsSatisfied = input.runMemory
     ? hasRequiredRunInputs(input.definition, input.runMemory)
     : false;
+  const goalText = input.definition.goal ?? "";
 
   if (inputsSatisfied && isInputValidationAgent(input.agent)) {
     return goalEvalResultSchema.parse({
@@ -68,6 +79,26 @@ function deterministicGuards(input: {
       blockers: ["missing_required_input"],
       gateType: "missing_input",
     });
+  }
+
+  for (const required of resolveRequiredInputKeys(input.definition)) {
+    if (inputsSatisfied && input.runMemory?.inputs[required]?.trim()) continue;
+    const requiredNorm = required.toLowerCase();
+    const normalizedText = text.toLowerCase();
+    const goalNeedsInput = goalText.toLowerCase().includes(`[paste ${requiredNorm}`)
+      || goalText.toLowerCase().includes(`[${requiredNorm}`);
+    const mentionsRequired = normalizedText.includes(requiredNorm);
+    const outputMentionsMissing = mentionsRequired && /\b(missing|not provided|no\b|absent|placeholder|actual content has not been provided|need real|paste the actual)\b/i.test(text);
+    if (goalNeedsInput || outputMentionsMissing) {
+      if (/\b(missing|paste|provide|send|can't|cannot|not provided|no\b|absent|placeholder|need real|actual content)\b/i.test(text)) {
+        return goalEvalResultSchema.parse({
+          status: "needs_input",
+          reason: `Required input "${required}" is missing.`,
+          blockers: [required],
+          gateType: "missing_input",
+        });
+      }
+    }
   }
 
   if (detectPlaceholderText(text)) {
@@ -115,7 +146,6 @@ function deterministicGuards(input: {
     }
   }
 
-  const goalText = input.definition.goal ?? "";
   if (!inputsSatisfied && asksOperatorForInput(text)) {
     const requiredKey = input.definition.inputsRequired?.[0] ?? "required_input";
     return goalEvalResultSchema.parse({
@@ -124,24 +154,6 @@ function deterministicGuards(input: {
       blockers: input.definition.inputsRequired ?? [requiredKey],
       gateType: "missing_input",
     });
-  }
-
-  for (const required of resolveRequiredInputKeys(input.definition)) {
-    if (inputsSatisfied && input.runMemory?.inputs[required]?.trim()) continue;
-    const requiredNorm = required.toLowerCase();
-    const goalNeedsInput = goalText.toLowerCase().includes(`[paste ${requiredNorm}`)
-      || goalText.toLowerCase().includes(`[${requiredNorm}`);
-    const outputMentionsMissing = text.toLowerCase().includes(requiredNorm) && /\bmissing\b/i.test(text);
-    if (goalNeedsInput || outputMentionsMissing) {
-      if (/\b(missing|paste|provide|send|can't|cannot)\b/i.test(text)) {
-        return goalEvalResultSchema.parse({
-          status: "needs_input",
-          reason: `Required input "${required}" is missing.`,
-          blockers: [required],
-          gateType: "missing_input",
-        });
-      }
-    }
   }
 
   if (input.agent.gate?.type === "draft_review" && toolRef === "internal.llm_only" && !asksOperatorForInput(text)) {
@@ -234,6 +246,19 @@ export async function evaluateAgentGoal(input: {
   }
 
   const judged = await llmJudge(input);
+  if (
+    !hasRequiredRunInputs(input.definition, input.runMemory ?? { inputs: {}, approvedMemories: [], updatedAt: new Date(0).toISOString() }) &&
+    judged.status === "fail" &&
+    /\b(required input|input .*missing|missing .*input|not provided|placeholder)\b/i.test(judged.reason)
+  ) {
+    const requiredKey = input.definition.inputsRequired?.[0] ?? "required_input";
+    return goalEvalResultSchema.parse({
+      status: "needs_input",
+      reason: judged.reason,
+      blockers: [requiredKey],
+      gateType: "missing_input",
+    });
+  }
   if (judged.status === "fail" || judged.status === "needs_input") {
     return judged;
   }

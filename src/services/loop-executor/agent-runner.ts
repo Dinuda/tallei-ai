@@ -13,26 +13,15 @@ import {
   hasOnlyLlmTools,
 } from "./tool-catalog.js";
 import { getToolHandler, type ToolHandlerContext } from "./tool-handlers.js";
-import { loopExecutorOpenAiChat, loopExecutorOpenAiModel } from "./openai-chat.js";
+import { loopExecutorOpenAiModel } from "./openai-chat.js";
 import { completeText } from "./agent-runner-internals.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
 import { extractMemorySources, formatMemorySearchText } from "../loop-engine/contracts.js";
 
-import "./tool-handler-registrations.js";
+import "../loop-runtime/tool-registrations.js";
 
 export { readMemorySearchConfig, readGatewaySearchConfig, runExaWebSearch, completeText } from "./agent-runner-internals.js";
-
-const APPROVAL_TOOL_REF = "internal.email_approval_request";
-
-/** Run compose/render before approval so a render failure cannot block the approval request. */
-function sortToolsForExecution(tools: LoopToolAssignment[]): LoopToolAssignment[] {
-  return [...tools].sort((left, right) => {
-    if (left.ref === APPROVAL_TOOL_REF) return 1;
-    if (right.ref === APPROVAL_TOOL_REF) return -1;
-    return 0;
-  });
-}
 
 export type RunLoopAgentInput = {
   auth: AuthContext;
@@ -51,10 +40,6 @@ export type RunLoopAgentResult = {
   text: string;
   data: Record<string, unknown>;
   draft?: unknown;
-  emailApprovalSent?: boolean;
-  approvalRequest?: { to: string; approvalUrl: string; token: string; sentAt: string; channel?: string };
-  artifactBody?: string;
-  emailTemplate?: { html: string; text?: string; design?: unknown; subject?: string | null; updatedAt?: string; source?: string };
 };
 
 function buildHandlerCtx(input: RunLoopAgentInput, assignment: LoopToolAssignment): ToolHandlerContext {
@@ -81,9 +66,8 @@ async function runAssignedTools(input: RunLoopAgentInput) {
     shortCircuit?: boolean;
   }> = [];
   let draft: unknown;
-  let emailTemplate: RunLoopAgentResult["emailTemplate"];
 
-  for (const assignment of sortToolsForExecution(input.assignedTools)) {
+  for (const assignment of input.assignedTools) {
     const entry = getLoopTool(assignment.ref);
     if (!entry?.isActionable || entry.ref === "internal.llm_only") continue;
 
@@ -100,23 +84,8 @@ async function runAssignedTools(input: RunLoopAgentInput) {
         ...(result.shortCircuit ? { shortCircuit: true } : {}),
       });
       if (result.draft) draft = result.draft;
-      if (result.emailTemplate) emailTemplate = result.emailTemplate;
-
-      if (result.emailApprovalSent) {
-        return {
-          sections,
-          draft,
-          emailTemplate,
-          toolsUsed,
-          toolResults,
-          emailApprovalSent: true,
-          approvalRequest: result.approvalRequest!,
-          artifactBody: result.artifactBody,
-        };
-      }
-
       if (result.shortCircuit) {
-        return { sections, draft, emailTemplate, toolsUsed, toolResults, emailApprovalSent: false as const };
+        return { sections, draft, toolsUsed, toolResults };
       }
       continue;
     }
@@ -124,7 +93,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
     throw new Error(`No tool handler registered for actionable tool ${entry.ref}`);
   }
 
-  return { sections, draft, emailTemplate, toolsUsed, toolResults, emailApprovalSent: false as const };
+  return { sections, draft, toolsUsed, toolResults };
 }
 
 /** Runs one agent: optional tools, then LLM synthesis unless a tool short-circuits. */
@@ -160,7 +129,6 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
           toolResults: toolRun.toolResults,
         },
         draft,
-        emailTemplate: toolRun.emailTemplate,
       };
     }
 
@@ -179,29 +147,6 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
           toolResults: toolRun.toolResults,
         },
         draft,
-        emailTemplate: toolRun.emailTemplate,
-      };
-    }
-
-    if (toolRun.emailTemplate && !toolRun.emailApprovalSent) {
-      const text = toolRun.sections.join("\n\n") || "Email build complete.";
-      return {
-        text,
-        data: { model: loopExecutorOpenAiModel(), mode: "tool_assisted", toolsUsed, toolResults: toolRun.toolResults, emailBuilt: true },
-        draft,
-        emailTemplate: toolRun.emailTemplate,
-      };
-    }
-
-    if (toolRun.emailApprovalSent) {
-      return {
-        text: toolRun.sections.join("\n\n") || "Approval request sent.",
-        data: { model: loopExecutorOpenAiModel(), mode: "tool_assisted", toolsUsed, toolResults: toolRun.toolResults, emailApprovalSent: true },
-        draft,
-        emailApprovalSent: true,
-        approvalRequest: toolRun.approvalRequest,
-        artifactBody: toolRun.artifactBody,
-        emailTemplate: toolRun.emailTemplate,
       };
     }
   }

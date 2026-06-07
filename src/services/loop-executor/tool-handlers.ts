@@ -12,10 +12,6 @@ export type ToolHandlerResult = {
   text: string;
   data?: Record<string, unknown>;
   shortCircuit?: boolean;
-  emailApprovalSent?: boolean;
-  approvalRequest?: { to: string; approvalUrl: string; token: string; sentAt: string; channel?: string };
-  artifactBody?: string;
-  emailTemplate?: { html: string; text?: string; design?: unknown; subject?: string | null; updatedAt?: string; source?: string };
   draft?: unknown;
 };
 

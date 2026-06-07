@@ -7,8 +7,6 @@ import { channelsFromDesign, designLoopFromIntent, loopBuilderTraceSchema } from
 
 /** Optional UI hint passed to the LLM — does not bypass the builder. */
 export const builderTemplateHintSchema = z.enum([
-  "writing_companion",
-  "newsletter_broadcast",
   "custom",
 ]);
 export type LoopBuilderTemplateHint = z.infer<typeof builderTemplateHintSchema>;
@@ -47,8 +45,8 @@ function normalizePrompt(value: string): string {
 }
 
 function templateHintFromRequest(templateId?: LoopBuilderTemplateHint): string | undefined {
-  if (!templateId || templateId === "custom") return undefined;
-  return templateId;
+  void templateId;
+  return undefined;
 }
 
 export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<LoopBuilderProposal> {

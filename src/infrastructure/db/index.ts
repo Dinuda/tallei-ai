@@ -1206,6 +1206,150 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_engine_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'queued'
+          CHECK (status IN ('queued', 'running', 'waiting_for_gate', 'blocked', 'succeeded', 'failed', 'cancelled')),
+        definition_snapshot JSONB NOT NULL,
+        context_json JSONB NOT NULL DEFAULT '{"inputs":{},"approvedMemories":[]}'::jsonb,
+        current_step_index INTEGER,
+        error_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_runs_scope_created
+        ON loop_engine_runs(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_runs_workflow_created
+        ON loop_engine_runs(workflow_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS loop_engine_step_attempts (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
+        step_index INTEGER NOT NULL,
+        agent_id TEXT NOT NULL,
+        agent_snapshot JSONB NOT NULL,
+        attempt INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued'
+          CHECK (status IN ('queued', 'running', 'waiting_for_gate', 'succeeded', 'failed', 'cancelled')),
+        input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        lease_owner TEXT,
+        lease_expires_at TIMESTAMPTZ,
+        heartbeat_at TIMESTAMPTZ,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (run_id, step_index, attempt)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_attempts_run_step
+        ON loop_engine_step_attempts(run_id, step_index, attempt DESC);
+
+      CREATE TABLE IF NOT EXISTS loop_engine_commands (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
+        step_attempt_id UUID REFERENCES loop_engine_step_attempts(id) ON DELETE CASCADE,
+        command_type TEXT NOT NULL
+          CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_gate', 'finalize_run', 'retry_step')),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled')),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        not_before TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        lease_owner TEXT,
+        lease_expires_at TIMESTAMPTZ,
+        last_error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_commands_dispatch
+        ON loop_engine_commands(status, not_before, created_at);
+
+      CREATE TABLE IF NOT EXISTS loop_engine_gates (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
+        step_attempt_id UUID NOT NULL REFERENCES loop_engine_step_attempts(id) ON DELETE CASCADE,
+        gate_type TEXT NOT NULL
+          CHECK (gate_type IN ('memory_confirmation', 'missing_input', 'draft_review', 'pre_send')),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'approved', 'submitted', 'rejected')),
+        question TEXT NOT NULL,
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        decision_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_gates_run_status
+        ON loop_engine_gates(run_id, status, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS loop_engine_artifacts (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
+        step_attempt_id UUID REFERENCES loop_engine_step_attempts(id) ON DELETE SET NULL,
+        artifact_key TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        data_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        invalidated_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (run_id, artifact_key, version)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_artifacts_run_key
+        ON loop_engine_artifacts(run_id, artifact_key, version DESC);
+
+      CREATE TABLE IF NOT EXISTS loop_engine_events (
+        id BIGSERIAL PRIMARY KEY,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
+        step_attempt_id UUID REFERENCES loop_engine_step_attempts(id) ON DELETE SET NULL,
+        event_type TEXT NOT NULL,
+        payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_events_run_created
+        ON loop_engine_events(run_id, created_at ASC, id ASC);
+
+      UPDATE workflows
+      SET status = 'archived', updated_at = NOW()
+      WHERE definition_version = 'loop_executor_v2'
+        AND status <> 'archived'
+        AND COALESCE(metadata_json->'loopDefinition'->>'engineVersion', metadata_json->'loopDefinition'->'builderMeta'->>'engineVersion', '') <> 'loop_engine_v3';
+
+      UPDATE workflow_runs
+      SET status = 'cancelled', updated_at = NOW()
+      WHERE status NOT IN ('completed', 'failed', 'cancelled', 'skipped')
+        AND workflow_id IN (
+          SELECT id FROM workflows WHERE status = 'archived' AND definition_version = 'loop_executor_v2'
+        );
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS approvals (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

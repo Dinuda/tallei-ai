@@ -1,28 +1,16 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 
-import { pool } from "../../../infrastructure/db/index.js";
 import {
   completeChannelSetup,
   disconnectChannel,
   listChannelsOverview,
   processResendInboundWebhook,
-  processResendMetricsWebhook,
   processTelegramWebhook,
   sendChannelTest,
   setPrimaryChannel,
   startChannelSetup,
 } from "../../../services/channels.js";
-import {
-  consumeWorkflowApprovalToken,
-  resolveWorkflowApprovalToken,
-} from "../../../services/approval-tokens.js";
-import {
-  approveLoopRunApprovalToken,
-  approveLoopRunGateApprovalToken,
-  rejectLoopRunGate,
-  submitLoopRunGateInput,
-} from "../../../services/loop-executor/index.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -42,63 +30,6 @@ const channelIdSchema = z.object({
   id: z.string().uuid(),
 });
 
-async function applyInboundAction(action: Awaited<ReturnType<typeof processTelegramWebhook>>): Promise<void> {
-  if (!action.tenantId || !action.userId) return;
-  const auth = {
-    tenantId: action.tenantId,
-    userId: action.userId,
-    authMode: "internal" as const,
-    plan: "pro" as const,
-  };
-
-  if ((action.type === "approve" || action.type === "skip") && action.token) {
-    const token = await resolveWorkflowApprovalToken(action.token);
-    if (!token || token.expired || token.consumedAt) return;
-    if (token.targetType === "workflow_run") {
-      if (action.type === "approve") {
-        await approveLoopRunApprovalToken(action.token);
-        return;
-      }
-      return;
-    }
-    if (token.targetType === "workflow_gate") {
-      if (action.type === "approve") {
-        await approveLoopRunGateApprovalToken(action.token);
-        return;
-      }
-      const gateResult = await pool.query<{ workflow_run_id: string }>(
-        `SELECT workflow_run_id
-         FROM loop_run_gates
-         WHERE id = $1
-           AND tenant_id = $2
-           AND user_id = $3
-         LIMIT 1`,
-        [token.targetId, auth.tenantId, auth.userId]
-      );
-      const runId = gateResult.rows[0]?.workflow_run_id;
-      if (!runId) return;
-      await rejectLoopRunGate({
-        auth,
-        runId,
-        gateId: token.targetId,
-        reason: "channel_skip",
-      });
-      await consumeWorkflowApprovalToken(action.token);
-      return;
-    }
-    return;
-  }
-
-  if (action.type === "gate_input" && action.runId && action.gateId && action.value) {
-    await submitLoopRunGateInput({
-      auth,
-      runId: action.runId,
-      gateId: action.gateId,
-      value: action.value,
-    });
-  }
-}
-
 router.post("/webhooks/telegram", async (req, res: Response) => {
   try {
     const action = await processTelegramWebhook({
@@ -107,7 +38,6 @@ router.post("/webhooks/telegram", async (req, res: Response) => {
         ? req.headers["x-telegram-bot-api-secret-token"]
         : undefined,
     });
-    await applyInboundAction(action);
     res.json({ ok: true, action: action.type });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Telegram webhook failed";
@@ -118,25 +48,9 @@ router.post("/webhooks/telegram", async (req, res: Response) => {
 router.post("/webhooks/resend", async (req, res: Response) => {
   try {
     const action = await processResendInboundWebhook({ body: req.body });
-    await applyInboundAction(action);
     res.json({ ok: true, action: action.type });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Resend inbound webhook failed";
-    res.status(400).json({ error: message });
-  }
-});
-
-router.post("/webhooks/resend-events", async (req, res: Response) => {
-  try {
-    const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody;
-    const result = await processResendMetricsWebhook({
-      body: req.body,
-      rawBody,
-      headers: req.headers,
-    });
-    res.json(result);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Resend metrics webhook failed";
     res.status(400).json({ error: message });
   }
 });

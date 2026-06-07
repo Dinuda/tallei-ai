@@ -74,10 +74,10 @@ function formatPreferences(preferences: Array<{ id: string; text: string; catego
 function buildArchitectSystemPrompt(): string {
   const outputExample = JSON.stringify({
     title: "Weekly product sync",
-    summary: "Internal email summarizing product progress for the engineering team.",
-    strategyText: "Research memories, synthesize facts, write email, get approval, send via Gmail.",
+    summary: "Reviewed internal brief summarizing product progress for the engineering team.",
+    strategyText: "Research memories, synthesize facts, write a reviewed artifact.",
     inputsRequired: ["sprint_notes"],
-    delivery: { provider: "composio.gmail.send_email", target: "team_email" },
+    delivery: { provider: "none", target: "none" },
     schedule: { cron: "0 9 * * 1", timezone: "UTC" },
     agents: [
       {
@@ -92,7 +92,7 @@ function buildArchitectSystemPrompt(): string {
         gate: { type: "memory_confirmation", question: "Are these the items you want to cover?" },
       },
     ],
-    rationale: ["Minimal roster tailored to team email delivery"],
+    rationale: ["Minimal roster tailored to producing a reviewed artifact"],
     suggestedChannels: ["primary"],
   }, null, 2);
 
@@ -100,17 +100,12 @@ function buildArchitectSystemPrompt(): string {
     "You are a loop architect for Tallei. Design bespoke recurring agent loops from first principles.",
     "Do NOT copy preset patterns. Do NOT mention template IDs or preset names.",
     "Every child agent must have exactly ONE tool, a clear goal (success condition), task, inputContract, outputContract, and 1-3 doneCriteria.",
-    "Declare delivery routing explicitly:",
-    "  subscriber_list -> internal.resend_broadcast",
-    "  team_email -> composio.gmail.send_email",
-    "  operator -> internal.email_approval_request (no external send)",
-    "  none -> no delivery agent",
+    'Always use delivery: { "provider": "none", "target": "none" }. Outbound delivery is disabled.',
     "Insert human gates where uncertainty is high:",
     "  memory_confirmation after memory search",
     "  missing_input when required inputs (inputsRequired) are absent",
     "  draft_review before approval",
-    "  pre_send before external delivery",
-    "Keep rosters minimal (2-6 agents). Separate writing, approval, and delivery responsibilities.",
+    "Keep rosters minimal (2-6 agents). End with a reviewed artifact, not a delivery agent.",
     "Copy tool refs exactly from the catalog.",
     "",
     "=== SCHEDULE ===",

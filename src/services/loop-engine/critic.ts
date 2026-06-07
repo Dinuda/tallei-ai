@@ -17,6 +17,10 @@ export function critiqueLoopDesign(design: LoopArchitectOutput): WorkflowCriticR
   const issues: string[] = [];
   const requiredFixes: string[] = [];
 
+  if (design.delivery.target !== "none" || design.delivery.provider !== "none") {
+    requiredFixes.push('Outbound delivery is disabled. Use delivery provider "none" and target "none".');
+  }
+
   if (design.agents.length > ENGINE_MAX_AGENTS) {
     requiredFixes.push(`Reduce agent count to at most ${ENGINE_MAX_AGENTS}.`);
   }
@@ -68,11 +72,6 @@ export function critiqueLoopDesign(design: LoopArchitectOutput): WorkflowCriticR
     if (!covered) {
       issues.push(`inputsRequired "${inputKey}" has no obvious producing agent or missing_input gate.`);
     }
-  }
-
-  const hasApproval = design.agents.some((a) => a.tool === "internal.email_approval_request");
-  if (design.delivery.target !== "none" && !hasApproval) {
-    requiredFixes.push("External delivery requires an approval agent with internal.email_approval_request.");
   }
 
   const riskLevel = requiredFixes.length > 2 ? "high" : requiredFixes.length > 0 ? "medium" : "low";

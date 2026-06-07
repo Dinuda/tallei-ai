@@ -9,7 +9,6 @@ import {
   loopAgentGraphChildSchema,
   loopAgentGraphSchema,
   loopDeliveryRoutingSchema,
-  loopDeliveryTargetSchema,
   loopGateTypeSchema,
   type LoopDefinition,
   type LoopDeliveryTarget,
@@ -23,9 +22,9 @@ export const DESIGNER_MEMORY_TOP_K = 8;
 
 /** Valid delivery provider for each target. */
 export const DELIVERY_PROVIDER_BY_TARGET: Record<LoopDeliveryTarget, string[]> = {
-  subscriber_list: ["internal.resend_broadcast"],
-  team_email: ["composio.gmail.send_email"],
-  operator: ["internal.email_approval_request"],
+  subscriber_list: [],
+  team_email: [],
+  operator: [],
   none: [],
 };
 
@@ -96,7 +95,7 @@ export function isEngineV3Definition(definition: LoopDefinition): boolean {
 
 export function deliveryProviderMatchesTarget(provider: string, target: LoopDeliveryTarget): boolean {
   const allowed = DELIVERY_PROVIDER_BY_TARGET[target];
-  if (target === "none") return true;
+  if (target === "none") return provider.trim().toLowerCase() === "none";
   return allowed.includes(provider.trim().toLowerCase());
 }
 

@@ -4,7 +4,7 @@ Use this folder for orchestration-facing application services only.
 
 ## High-traffic files
 
-- `approval-tokens.ts`: approval token creation, lookup, and consumption shared by loop gates and notifications.
+- `loop-runtime/`: durable command worker, gates, attempts, artifacts, and run projections.
 - `connectors/`: connector account/auth integrations, including Composio.
 - `memory-cleanup.ts`: cleanup pipeline orchestration and admin reporting.
 - `memory.ts`: memory save/recall service facade.
@@ -14,7 +14,7 @@ Use this folder for orchestration-facing application services only.
 - `chatgpt-import/`: ChatGPT import job orchestration + import artifact storage.
 - `notifications/`: email templates, resend delivery, signup/payment notification flows.
 - `collab/`: collaboration task orchestration service.
-- `loop-executor/`: loop workflow execution, approvals, tools, and scheduling.
+- `loop-executor/`: v3 loop authoring and stable agent/tool execution helpers.
 
 ## Editing rules
 

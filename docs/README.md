@@ -5,7 +5,7 @@
 Start here to understand the system:
 
 - **[Technical Architecture](../ARCHITECTURE.md)** — Deep dive into the graph-aware memory system, async extraction pipeline, dual recall modes, and performance optimizations
-- **[Loop Executor Architecture](./loop-executor-architecture.md)** — CEO/IC heartbeats, checkout+comments protocol, event-driven execution, scheduler, and workspace grouping
+- **[Stable Loop Runtime](./flows/loop-engine-v3-run-end-to-end.md)** — Durable command worker, gates, retries, leases, projection API, and legacy cutover
 - **[Architecture Diagrams](./DIAGRAMS.md)** — Visual walkthroughs of the system with ASCII diagrams:
   - High-level architecture
   - Fire-and-forget save flow

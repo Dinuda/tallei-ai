@@ -50,7 +50,7 @@ test("memory search returns verified tool output without LLM synthesis", async (
       }],
     });
 
-    assert.equal(result.text, "Memory search results:\n- [memory-1] Shipped persistent storage endpoints.");
+    assert.equal(result.text, "Found 1 memories (id + excerpt):\n- [memory-1] Shipped persistent storage endpoints.");
     assert.equal(result.data.mode, "tool_output_only");
     assert.deepEqual(result.data.sources, [
       { id: "memory-1", text: "Shipped persistent storage endpoints.", score: 0.91 },

@@ -7,7 +7,8 @@ import {
   emptyRunMemory,
   hasRequiredRunInputs,
   resolveRequiredInputKeys,
-} from "../../../src/services/loop-engine/run-memory.js";
+} from "../../../src/services/loop-runtime/memory.js";
+import { evaluateAgentGoal } from "../../../src/services/loop-engine/goal-eval.js";
 
 test("applyGateDecisionToRunMemory stores sprint_notes from missing_input gate", () => {
   const patch = applyGateDecisionToRunMemory({
@@ -92,4 +93,36 @@ test("buildAgentHandoff injects run memory and prior agent artifacts for draft w
   assert.deepEqual(handoff.approved_memories, [{ id: "mem-1", excerpt: "Recall fix shipped." }]);
   assert.ok(handoff.memory_search);
   assert.equal(handoff.draft_writer, undefined);
+});
+
+test("input validator placeholder output opens missing input gate instead of failing", async () => {
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "input_validator",
+      name: "Inputs Validator",
+      task: "Check that sprint_notes are present and readable.",
+      goal: "Confirm sprint_notes are provided.",
+      tools: [{ ref: "internal.llm_only" }],
+      gate: { type: "missing_input", question: "Paste sprint notes to continue." },
+    },
+    result: {
+      text: [
+        "Short checklist:",
+        "- sprint_notes present: No. The input is a placeholder [PASTE SPRINT NOTES / TASKS HERE] instead of actual content.",
+        "- Readability assessable: Not assessable yet; need real sprint notes.",
+        "- Next steps to proceed: Paste the actual sprint notes.",
+      ].join("\n"),
+      data: {},
+    },
+    definition: {
+      inputsRequired: ["sprint_notes"],
+      goal: "Create weekly product sync email from [PASTE SPRINT NOTES / TASKS HERE].",
+    },
+    runMemory: emptyRunMemory(),
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.gateType, "missing_input");
+  assert.deepEqual(result.blockers, ["sprint_notes"]);
 });

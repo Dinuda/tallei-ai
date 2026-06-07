@@ -101,11 +101,6 @@
   },
   {
     "method": "POST",
-    "path": "/api/channels/webhooks/resend-events",
-    "source": "src/routes/channels.ts"
-  },
-  {
-    "method": "POST",
     "path": "/api/channels/webhooks/telegram",
     "source": "src/routes/channels.ts"
   },
@@ -536,26 +531,6 @@
   },
   {
     "method": "GET",
-    "path": "/api/workflows/approvals/:token",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows/approvals/:token/approve",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/approvals/:token/approve",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/approvals/:token/skip",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
     "path": "/api/workflows/internal/loops",
     "source": "src/routes/workflows.ts"
   },
@@ -572,11 +547,6 @@
   {
     "method": "GET",
     "path": "/api/workflows/internal/loops/:workflowId",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/internal/loops/:workflowId/run",
     "source": "src/routes/workflows.ts"
   },
   {
@@ -586,12 +556,7 @@
   },
   {
     "method": "POST",
-    "path": "/api/workflows/internal/loops/heartbeat/dispatch",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/internal/loops/scheduler/wake",
+    "path": "/api/workflows/internal/loops/:workflowId/runs",
     "source": "src/routes/workflows.ts"
   },
   {
@@ -615,28 +580,13 @@
     "source": "src/routes/workflows.ts"
   },
   {
-    "method": "POST",
-    "path": "/api/workflows/loops/:workflowId/run",
-    "source": "src/routes/workflows.ts"
-  },
-  {
     "method": "GET",
     "path": "/api/workflows/loops/:workflowId/runs",
     "source": "src/routes/workflows.ts"
   },
   {
-    "method": "GET",
-    "path": "/api/workflows/loops/approvals/:token",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows/loops/approvals/:token/approve",
-    "source": "src/routes/workflows.ts"
-  },
-  {
     "method": "POST",
-    "path": "/api/workflows/loops/approvals/:token/approve",
+    "path": "/api/workflows/loops/:workflowId/runs",
     "source": "src/routes/workflows.ts"
   },
   {
@@ -646,37 +596,7 @@
   },
   {
     "method": "POST",
-    "path": "/api/workflows/runs/:runId/approve",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/approve-strategy",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows/runs/:runId/artifacts",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows/runs/:runId/comments",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/comments",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/contacts",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows/runs/:runId/gates",
+    "path": "/api/workflows/runs/:runId/cancel",
     "source": "src/routes/workflows.ts"
   },
   {
@@ -695,48 +615,8 @@
     "source": "src/routes/workflows.ts"
   },
   {
-    "method": "GET",
-    "path": "/api/workflows/runs/:runId/logs",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "PATCH",
-    "path": "/api/workflows/runs/:runId/newsletter",
-    "source": "src/routes/workflows.ts"
-  },
-  {
     "method": "POST",
-    "path": "/api/workflows/runs/:runId/newsletter/preview",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/request-approval",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/resume",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows/runs/:runId/roster",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "PUT",
-    "path": "/api/workflows/runs/:runId/roster",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/workflows/runs/:runId/tasks",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/tasks/:taskId/rerun",
+    "path": "/api/workflows/runs/:runId/steps/:stepId/retry",
     "source": "src/routes/workflows.ts"
   },
   {

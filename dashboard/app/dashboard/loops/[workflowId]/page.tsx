@@ -86,7 +86,7 @@ export default function LoopWorkflowPage() {
     setBusy("run");
     setError(null);
     try {
-      const response = await fetch(`/api/workflows/internal/loops/${workflowId}/run`, { method: "POST" });
+      const response = await fetch(`/api/workflows/internal/loops/${workflowId}/runs`, { method: "POST" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.run?.id) {
         throw new Error((payload as { error?: string }).error ?? "Failed to start run");

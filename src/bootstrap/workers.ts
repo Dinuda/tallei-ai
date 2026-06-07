@@ -10,12 +10,7 @@ import {
   startVertexDocumentBackfillWorker,
   stopVertexDocumentBackfillWorker,
 } from "../services/vertex-document-backfill.js";
-import {
-  startLoopExecutorScheduler,
-  startLoopHeartbeatWorker,
-  stopLoopExecutorScheduler,
-  stopLoopHeartbeatWorker,
-} from "../services/loop-executor/index.js";
+import { startLoopRuntimeWorker, stopLoopRuntimeWorker } from "../services/loop-runtime/index.js";
 
 let workersRunning = false;
 
@@ -25,8 +20,7 @@ export function startWorkers(): void {
   startChatGptImportWorker();
   startUploadedFileIngestWorker();
   startVertexDocumentBackfillWorker();
-  startLoopExecutorScheduler();
-  startLoopHeartbeatWorker();
+  startLoopRuntimeWorker();
 }
 
 export function stopWorkers(): void {
@@ -35,6 +29,5 @@ export function stopWorkers(): void {
   stopChatGptImportWorker();
   stopUploadedFileIngestWorker();
   stopVertexDocumentBackfillWorker();
-  stopLoopExecutorScheduler();
-  stopLoopHeartbeatWorker();
+  stopLoopRuntimeWorker();
 }

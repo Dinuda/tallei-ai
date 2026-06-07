@@ -3,10 +3,7 @@
  * tool-catalog.ts — Loop tool registry, validation, and agent prompt builders.
  */
 
-import type { AuthContext } from "../../domain/auth/index.js";
 import { listConnectorAccounts } from "../connectors/composio.js";
-import { presetToolRefsForDefinition } from "./presets/registry.js";
-import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
 export function normalizeToolRef(ref: string): string {
   const trimmed = ref.trim();
@@ -74,135 +71,16 @@ const CATALOG = [
         integrationKey: "internal",
         isActionable: true,
     },
-    {
-        ref: "internal.email_approval_request",
-        label: "Email approval",
-        description: "Send the current run artifact to the operator via the Resend email adapter for approval.",
-        provider: "internal",
-        toolkit: null,
-        requiresConnector: false,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"] },
-        outputSchema: { type: "object", properties: { approvalUrl: { type: "string" }, token: { type: "string" } }, required: ["approvalUrl", "token"] },
-        requiredArtifactKinds: ["draft", "message", "outbound_payload", "content"],
-        producesArtifactKind: "approval_request",
-        riskLevel: "review",
-        integrationKey: "internal",
-        isActionable: true,
-    },
-    {
-        ref: "internal.resend_broadcast",
-        label: "Resend broadcast",
-        description: "Send an approved artifact to an uploaded recipient list through the Resend broadcast runner.",
-        provider: "internal",
-        toolkit: null,
-        requiresConnector: false,
-        requiresApproval: true,
-        inputSchema: { type: "object", properties: { contentArtifactId: { type: "string" }, recipientsArtifactId: { type: "string" } }, required: ["contentArtifactId", "recipientsArtifactId"] },
-        outputSchema: { type: "object", properties: { broadcastId: { type: "string" }, successCount: { type: "number" }, failureCount: { type: "number" } }, required: ["successCount", "failureCount"] },
-        requiredArtifactKinds: ["content", "draft", "message", "contact_list"],
-        producesArtifactKind: "delivery_result",
-        riskLevel: "external_action",
-        integrationKey: "internal",
-        isActionable: true,
-    },
-    {
-        ref: "internal.react_email_template",
-        label: "React Email template",
-        description: "Render newsletter broadcast HTML with an optional React Email template before Resend sends it.",
-        provider: "internal",
-        toolkit: null,
-        requiresConnector: false,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { templateId: { type: "string" } } },
-        outputSchema: { type: "object", properties: { html: { type: "string" }, text: { type: "string" } } },
-        requiredArtifactKinds: ["content", "draft", "message"],
-        producesArtifactKind: "email_template",
-        riskLevel: "none",
-        integrationKey: "react_email",
-        isActionable: false,
-    },
-    {
-        ref: "composio.gmail.create_draft",
-        label: "Gmail draft",
-        description: "Prepare a Gmail draft for human approval before sending.",
-        provider: "composio",
-        toolkit: "gmail",
-        requiresConnector: true,
-        requiresApproval: true,
-        inputSchema: { type: "object", properties: { subject: { type: "string" }, body: { type: "string" }, recipientEmail: { type: "string" } }, required: ["subject", "body"] },
-        outputSchema: { type: "object", properties: { draftId: { type: "string" }, subject: { type: "string" }, body: { type: "string" } } },
-        requiredArtifactKinds: ["message", "draft", "content"],
-        producesArtifactKind: "draft",
-        riskLevel: "review",
-        integrationKey: "composio",
-        composioAction: "GMAIL_CREATE_EMAIL_DRAFT",
-        isActionable: true,
-    },
-    {
-        ref: "composio.gmail.send_email",
-        label: "Gmail send",
-        description: "Send email via Gmail after final run approval.",
-        provider: "composio",
-        toolkit: "gmail",
-        requiresConnector: true,
-        requiresApproval: true,
-        inputSchema: { type: "object", properties: { subject: { type: "string" }, body: { type: "string" }, recipientEmail: { type: "string" } }, required: ["subject", "body", "recipientEmail"] },
-        outputSchema: { type: "object", properties: { messageId: { type: "string" }, status: { type: "string" } } },
-        requiredArtifactKinds: ["message", "draft"],
-        producesArtifactKind: "delivery_result",
-        riskLevel: "external_action",
-        integrationKey: "composio",
-        composioAction: "GMAIL_SEND_EMAIL",
-        isActionable: true,
-    },
-    {
-        ref: "internal.email_builder_compose",
-        label: "Email builder",
-        description: "Compose and edit email templates using the Waypoint EmailBuilder.js JSON format.",
-        provider: "internal",
-        toolkit: null,
-        requiresConnector: false,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { document: { type: "object" } }, required: ["document"] },
-        outputSchema: { type: "object", properties: { document: { type: "object" }, html: { type: "string" } }, required: ["document", "html"] },
-        requiredArtifactKinds: ["draft", "message", "content"],
-        producesArtifactKind: "email_template",
-        riskLevel: "none",
-        integrationKey: "internal",
-        isActionable: true,
-    },
-    {
-        ref: "internal.email_builder_render",
-        label: "Render email",
-        description: "Render a Waypoint EmailBuilder.js JSON document to HTML.",
-        provider: "internal",
-        toolkit: null,
-        requiresConnector: false,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { document: { type: "object" } }, required: ["document"] },
-        outputSchema: { type: "object", properties: { html: { type: "string" } }, required: ["html"] },
-        requiredArtifactKinds: ["email_template", "draft", "message", "content"],
-        producesArtifactKind: "email_html",
-        riskLevel: "none",
-        integrationKey: "internal",
-        isActionable: true,
-    },
 ];
 const CATALOG_BY_REF = new Map(CATALOG.map((entry) => [entry.ref, entry]));
 export function listLoopTools() {
-    return CATALOG.map(({ integrationKey: _i, composioAction: _a, isActionable: _x, ...view }) => view);
+    return CATALOG
+        .map(({ integrationKey: _i, composioAction: _a, isActionable: _x, ...view }) => view);
 }
-function goalImpliesExternalDelivery(goal) {
-    return /\b(email|gmail|outlook|slack|discord|publish|send|deliver|distribute|post)\b/i.test(goal);
-}
-/** Effective constraints for validation/prompting — repairs overly narrow create-time caps. */
+/** Effective constraints for stable artifact-only execution. */
 export function getEffectiveLoopConstraints(definition) {
     const allowedIntegrations = new Set(definition.allowedIntegrations.map((v) => v.trim().toLowerCase()));
     allowedIntegrations.add("internal");
-    if (goalImpliesExternalDelivery(definition.goal)) {
-        allowedIntegrations.add("composio");
-    }
     let allowedToolRefs = definition.allowedToolRefs?.length
         ? [...new Set(definition.allowedToolRefs.map((ref) => normalizeToolRef(ref)).filter(Boolean))]
         : undefined;
@@ -210,17 +88,6 @@ export function getEffectiveLoopConstraints(definition) {
         allowedToolRefs = mergeToolRefCaps(
             allowedToolRefs,
             definition.agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
-        );
-    }
-    allowedToolRefs = mergeToolRefCaps(allowedToolRefs, presetToolRefsForDefinition(definition));
-    if (definition.plan?.stages?.length) {
-        allowedToolRefs = mergeToolRefCaps(
-            allowedToolRefs,
-            definition.plan.stages.flatMap((stage) => {
-                if (stage.kind === "agent" && stage.toolRef) return [stage.toolRef];
-                if (stage.kind === "external_action") return [stage.toolRef];
-                return [];
-            }),
         );
     }
     return {

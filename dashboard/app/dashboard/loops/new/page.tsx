@@ -3,12 +3,10 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Check, ChevronDown, ChevronUp, Loader2, RefreshCw, Save, Sparkles, Wand2 } from "lucide-react";
+import { ArrowLeft, Check, Loader2, RefreshCw, Save, Wand2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-
-type TemplateHint = "writing_companion" | "newsletter_broadcast" | "custom";
 
 type AgentGraphChild = {
   id: string;
@@ -20,7 +18,6 @@ type AgentGraphChild = {
 type BuilderProposal = {
   title: string;
   summary: string;
-  templateId: TemplateHint;
   definition: {
     goal: string;
     schedule: { cron: string; timezone: string };
@@ -72,25 +69,10 @@ async function pollLoopBuilderJob(jobId: string): Promise<BuilderProposal> {
   throw new Error("Loop design is still running. Try again in a moment.");
 }
 
-const inspirationTemplates: Array<{ id: Exclude<TemplateHint, "custom">; label: string; hint: string }> = [
-  {
-    id: "writing_companion",
-    label: "Writing companion",
-    hint: "Use the writing companion pattern: memory search, source research, brief, writer, approval handoff.",
-  },
-  {
-    id: "newsletter_broadcast",
-    label: "Newsletter broadcast",
-    hint: "Use the newsletter broadcast pattern with subscriber email delivery and broadcast after approval.",
-  },
-];
-
 export default function NewLoopBuilderPage() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [feedback, setFeedback] = useState("");
-  const [templateHint, setTemplateHint] = useState<TemplateHint>("custom");
-  const [inspirationOpen, setInspirationOpen] = useState(false);
   const [proposal, setProposal] = useState<BuilderProposal | null>(null);
   const [busy, setBusy] = useState<"propose" | "refine" | "save" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -109,7 +91,6 @@ export default function NewLoopBuilderPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           prompt,
-          templateId: templateHint === "custom" ? undefined : templateHint,
           feedback: mode === "refine" ? (feedback.trim() || prompt) : undefined,
           priorProposal: mode === "refine" ? proposal : undefined,
         }),
@@ -173,10 +154,6 @@ export default function NewLoopBuilderPage() {
     } finally {
       setBusy(null);
     }
-  }
-
-  function appendInspirationHint(hint: string) {
-    setPrompt((current) => (current.trim() ? `${current.trim()}\n\n${hint}` : hint));
   }
 
   return (
@@ -246,45 +223,6 @@ export default function NewLoopBuilderPage() {
                 {busy === "save" ? "Saving…" : "Save & open"}
               </Button>
             </div>
-          </Card>
-
-          <Card className="rounded-md p-4">
-            <button
-              type="button"
-              className="flex w-full items-center justify-between gap-2 text-left"
-              onClick={() => setInspirationOpen((open) => !open)}
-            >
-              <span className="flex items-center gap-2 text-sm font-semibold text-[var(--text)]">
-                <Sparkles size={15} />
-                Inspiration (optional)
-              </span>
-              {inspirationOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-            </button>
-            {inspirationOpen ? (
-              <div className="mt-3 space-y-2">
-                <p className="text-xs text-[var(--text-muted)]">
-                  High-potential patterns the CEO can borrow. Click to add a hint to your prompt — the LLM still designs a custom loop.
-                </p>
-                {inspirationTemplates.map((template) => (
-                  <button
-                    key={template.id}
-                    type="button"
-                    className={`w-full rounded-md border p-3 text-left transition-colors ${
-                      templateHint === template.id
-                        ? "border-[var(--accent)] bg-[var(--accent-light)]"
-                        : "border-[var(--border-light)] bg-white hover:border-[var(--border)]"
-                    }`}
-                    onClick={() => {
-                      setTemplateHint(template.id);
-                      appendInspirationHint(template.hint);
-                    }}
-                  >
-                    <div className="text-sm font-medium text-[var(--text)]">{template.label}</div>
-                    <div className="mt-1 text-xs text-[var(--text-muted)]">{template.hint}</div>
-                  </button>
-                ))}
-              </div>
-            ) : null}
           </Card>
 
           <Card className="rounded-md p-4">
