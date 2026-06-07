@@ -13,7 +13,6 @@ import { scheduleHeartbeat } from "../loop-executor/run-heartbeat.js";
 import {
   insertComment,
   insertEvent,
-  loadArtifact,
   loadRunArtifacts,
   loadRunComments,
   readObject,
@@ -29,6 +28,12 @@ import {
 } from "./contracts.js";
 import { evaluateAgentGoal } from "./goal-eval.js";
 import { buildGatePayload, createEngineGate } from "./gates.js";
+import {
+  buildAgentHandoff,
+  hasRequiredRunInputs,
+  isInputValidationAgent,
+  loadRunMemory,
+} from "./run-memory.js";
 
 function readAgentSpec(
   task: { agent_spec: unknown; agent_id: string; agent_name: string; tool_key: string; assigned_tools: unknown },
@@ -60,7 +65,10 @@ function readAssignedTools(
   return agentSpec.tools;
 }
 
-async function buildStructuredInput(context: Awaited<ReturnType<typeof loadRunContext>>, agentSpec: ReturnType<typeof readAgentSpec>) {
+async function collectPriorAgentArtifacts(
+  context: Awaited<ReturnType<typeof loadRunContext>>,
+  agentSpec: ReturnType<typeof readAgentSpec>,
+) {
   const artifacts = await loadRunArtifacts(context);
   const byId = new Map(artifacts.map((row) => [row.artifact_id as string, row]));
   const children = context.definition.agentGraph?.children ?? [];
@@ -78,25 +86,27 @@ async function buildStructuredInput(context: Awaited<ReturnType<typeof loadRunCo
     }
   }
 
-  const gateInput = await loadArtifact(context, `gate_input_${agentSpec.id}`);
-  if (gateInput) {
-    priorOutputs.operator_input = { body: gateInput.body, data: gateInput.data_json };
-  }
-
-  const approvedMemories = await loadArtifact(context, `approved_memories_${agentSpec.id}`);
-  if (approvedMemories) {
-    priorOutputs.approved_memories = approvedMemories.data_json ?? approvedMemories.body;
-  }
-
   return priorOutputs;
+}
+
+async function buildStructuredInput(context: Awaited<ReturnType<typeof loadRunContext>>, agentSpec: ReturnType<typeof readAgentSpec>) {
+  const [runMemory, priorOutputs] = await Promise.all([
+    loadRunMemory(context),
+    collectPriorAgentArtifacts(context, agentSpec),
+  ]);
+  return buildAgentHandoff(agentSpec, runMemory, priorOutputs);
 }
 
 function formatStructuredInputBlock(structuredInput: Record<string, unknown>): string {
   if (Object.keys(structuredInput).length === 0) return "";
-  return [
+  const lines = [
     "Structured input from prior agents (use this instead of re-parsing prior comments):",
-    JSON.stringify(structuredInput, null, 2),
-  ].join("\n");
+  ];
+  if (typeof structuredInput.sprint_notes === "string" && structuredInput.sprint_notes.trim()) {
+    lines.push("", "Operator-provided sprint_notes:", structuredInput.sprint_notes.trim());
+  }
+  lines.push("", JSON.stringify(structuredInput, null, 2));
+  return lines.join("\n");
 }
 
 async function loadNextTask(context: Awaited<ReturnType<typeof loadRunContext>>, currentSeq: number) {
@@ -208,8 +218,81 @@ export async function runEngineAgentStep(runId: string, taskId: string): Promise
       throw new Error(message);
     }
 
-    const structuredInput = await buildStructuredInput(context, agentSpec);
+    const runMemory = await loadRunMemory(context);
+    const structuredInput = buildAgentHandoff(
+      agentSpec,
+      runMemory,
+      await collectPriorAgentArtifacts(context, agentSpec),
+    );
     const structuredBlock = formatStructuredInputBlock(structuredInput);
+
+    if (isInputValidationAgent(agentSpec) && hasRequiredRunInputs(context.definition, runMemory)) {
+      const keys = Object.keys(runMemory.inputs);
+      const result = {
+        text: [
+          "valid=true",
+          `missing=[]`,
+          `note=Required inputs provided by operator: ${keys.join(", ")}`,
+        ].join("\n"),
+        data: {
+          mode: "run_memory_short_circuit",
+          valid: true,
+          missing: [],
+          provided: runMemory.inputs,
+        },
+      };
+      const goalEval = await evaluateAgentGoal({
+        agent: agentSpec,
+        result,
+        definition: context.definition,
+        runMemory,
+        skipLlmJudge: true,
+      });
+      const outputPayload = {
+        text: result.text,
+        data: result.data,
+        draft: null,
+        approvalRequest: null,
+        artifactBody: null,
+        emailTemplate: null,
+        goalEval,
+      };
+      await insertComment({ context, taskId: task.id, author: task.agent_id, body: result.text });
+      await pool.query(
+        `UPDATE loop_run_tasks SET status = 'done', output_json = $4::jsonb, completed_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+        [task.id, context.tenantId, context.userId, JSON.stringify(outputPayload)],
+      );
+      if (agentSpec.outputArtifactId) {
+        await upsertEngineArtifact({
+          context,
+          artifactId: agentSpec.outputArtifactId,
+          kind: "structured_output",
+          label: agentSpec.name,
+          body: result.text,
+          data: { valid: true, missing: [], provided: runMemory.inputs },
+          stageId: agentSpec.id,
+        });
+      }
+      const nextTask = await loadNextTask(context, task.seq);
+      if (nextTask) {
+        await scheduleHeartbeat({
+          tenantId: context.tenantId,
+          userId: context.userId,
+          runId,
+          jobType: "agent",
+          taskId: nextTask.id,
+        });
+      } else {
+        await scheduleHeartbeat({
+          tenantId: context.tenantId,
+          userId: context.userId,
+          runId,
+          jobType: "ceo_finalize",
+        });
+      }
+      return { status: "running", taskId: task.id };
+    }
 
     const result = await runLoopAgent({
       auth,
@@ -238,6 +321,7 @@ export async function runEngineAgentStep(runId: string, taskId: string): Promise
       agent: agentSpec,
       result,
       definition: context.definition,
+      runMemory,
     });
 
     await insertComment({
@@ -293,7 +377,9 @@ export async function runEngineAgentStep(runId: string, taskId: string): Promise
 
     if (goalEval.status === "needs_input") {
       const gateType = goalEval.gateType ?? agentSpec.gate?.type ?? "missing_input";
-      const question = agentSpec.gate?.question ?? goalEval.reason;
+      const question = gateType === agentSpec.gate?.type
+        ? (agentSpec.gate?.question ?? goalEval.reason)
+        : goalEval.reason;
       await pool.query(
         `UPDATE loop_run_tasks SET status = 'blocked', output_json = $4::jsonb, completed_at = NOW(), updated_at = NOW()
          WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,

@@ -89,7 +89,7 @@ export function engineGateHeadline(gateType: string | null): string {
 
 export function looksLikeMissingInputPrompt(text: string | null | undefined): boolean {
   if (!text?.trim()) return false;
-  return /\b(please (provide|paste|send|share)|is missing|not provided|can't generate|cannot generate)\b/i.test(text)
+  return /\b(please (provide|paste|send|share)|is missing|not provided|don't have|do not have|can't draft|cannot draft|can't generate|cannot generate|lacks?|missing)\b/i.test(text)
     && /\b(sprint|notes|input|details|content|required|sprint_notes)\b/i.test(text);
 }
 

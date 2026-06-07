@@ -51,7 +51,9 @@ function normalizeApprovalRequest(raw: unknown) {
 /** Parses run metadata, mapping legacy newsletter field names when present. */
 export function readLoopExecutorMeta(metadataJson: unknown): LoopExecutorRunMeta {
   const root = readObject(metadataJson);
-  const loopExecutor = readObject(root.loop_executor);
+  const loopExecutorRaw = readObject(root.loop_executor);
+  const loopExecutor = { ...loopExecutorRaw };
+  if (loopExecutor.pendingInput === null) delete loopExecutor.pendingInput;
   const legacyApproval = readObject(loopExecutor.publicistApproval);
   const approvalRequest = normalizeApprovalRequest(loopExecutor.approvalRequest)
     ?? normalizeApprovalRequest(legacyApproval);

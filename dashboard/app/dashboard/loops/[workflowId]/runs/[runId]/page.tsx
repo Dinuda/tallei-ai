@@ -288,20 +288,9 @@ function resolveEffectiveEngineGate(
   const fromGates = pendingEngineGateForRun(gates);
   if (fromGates) return fromGates;
   if (run?.pendingInput?.status !== "pending") return null;
-  return {
-    id: run.pendingInput.id,
-    stageId: run.activeGateStageId ?? "",
-    kind: "input",
-    status: "pending",
-    title: run.pendingInput.label,
-    artifactId: null,
-    payload: {
-      gateType: "missing_input",
-      question: run.pendingInput.instructions ?? run.pendingInput.label,
-    },
-    createdAt: run.pendingInput.requestedAt ?? new Date().toISOString(),
-    completedAt: null,
-  };
+  const matchedGate = gates.find((gate) => gate.id === run.pendingInput?.id && gate.status === "pending");
+  if (!matchedGate) return null;
+  return matchedGate;
 }
 
 function pendingLegacyGateForRun(gates: LoopRunGate[]): LoopRunGate | null {
@@ -1757,17 +1746,6 @@ export default function LoopRunDetailPage() {
                 onApprove={(decision) => approveEngineGate(engineGate.id, decision)}
                 onReject={() => rejectEngineGate(engineGate.id)}
                 onSubmitInput={(value) => submitEngineGateInput(engineGate.id, value)}
-              />
-            ) : showMissingInputInCenter && run?.activeGateId ? (
-              <GateActionPanel
-                gateId={run.activeGateId}
-                title="Required input"
-                payload={{ gateType: "missing_input", question: "Paste sprint notes and required details to continue." }}
-                busy={busy !== null}
-                prominent
-                onApprove={() => Promise.resolve()}
-                onReject={() => rejectEngineGate(run.activeGateId!)}
-                onSubmitInput={(value) => submitEngineGateInput(run.activeGateId!, value)}
               />
             ) : null}
 

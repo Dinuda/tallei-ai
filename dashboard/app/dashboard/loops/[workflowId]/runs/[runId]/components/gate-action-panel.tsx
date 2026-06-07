@@ -51,6 +51,12 @@ export function GateActionPanel({
   const [missingInput, setMissingInput] = useState("");
 
   const headline = useMemo(() => engineGateHeadline(gateType), [gateType]);
+  const promptText = useMemo(() => {
+    if (data.question?.trim()) return data.question.trim();
+    if (gateType === "missing_input") return "Paste the required input to continue this run.";
+    if (gateType === "memory_confirmation") return "Confirm which memories to include, then approve.";
+    return title;
+  }, [data.question, gateType, title]);
 
   return (
     <div className={cn(
@@ -59,8 +65,10 @@ export function GateActionPanel({
     )}>
       <div className="mb-3">
         <p className="text-sm font-semibold text-amber-950">{headline}</p>
-        <p className="mt-1 text-sm text-amber-900/80">{data.question ?? title}</p>
-        {gateType === "draft_review" ? (
+        <p className="mt-1 text-sm text-amber-900/80">{promptText}</p>
+        {gateType === "missing_input" ? (
+          <p className="mt-1 text-xs text-amber-900/70">The paused agent will re-run with your input after you submit.</p>
+        ) : gateType === "draft_review" ? (
           <p className="mt-1 text-xs text-amber-900/70">Review the full draft below, then approve or reject here.</p>
         ) : null}
       </div>
@@ -97,7 +105,7 @@ export function GateActionPanel({
       {gateType === "missing_input" ? (
         <div className="mb-4 space-y-2">
           <p className="text-xs font-medium text-slate-600">
-            Paste the required details below, then submit. The run will continue after you provide this input.
+            Paste the required details below, then submit.
           </p>
           <Textarea
             value={missingInput}

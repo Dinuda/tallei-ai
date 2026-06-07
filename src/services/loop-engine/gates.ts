@@ -6,14 +6,20 @@ import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { assertRunAccess, loadRunContext, mergeLoopExecutorMeta } from "../loop-executor/run-context.js";
+import { assertRunAccess, loadRunContext, mergeLoopExecutorMeta, readLoopExecutorMeta } from "../loop-executor/run-context.js";
 import { scheduleHeartbeat } from "../loop-executor/run-heartbeat.js";
-import { insertEvent, upsertEngineArtifact } from "../loop-executor/run-store.js";
+import { insertComment, insertEvent, upsertEngineArtifact } from "../loop-executor/run-store.js";
 import { releaseInProgressTasksExcept } from "../loop-executor/run-execution-guard.js";
 import { markRunBlocked } from "../loop-executor/run-status.js";
 import type { LoopGateType, LoopRunAgent } from "../loop-executor/types.js";
 import type { LoopRunContext } from "../loop-executor/run-context.js";
 import { isEngineV3Definition } from "./contracts.js";
+import {
+  applyGateDecisionToRunMemory,
+  isInputValidationAgent,
+  mergeRunMemory,
+  resolveRequiredInputKeys,
+} from "./run-memory.js";
 
 export type EngineGatePayload = {
   gateType: LoopGateType;
@@ -144,13 +150,25 @@ export async function completeEngineGate(input: {
   );
   const gate = gateResult.rows[0];
   if (!gate) throw new Error("Loop gate not found");
-  if (gate.status !== "pending") {
-    throw new Error(`Gate is ${gate.status}, not pending`);
-  }
 
   const payload = gate.payload_json && typeof gate.payload_json === "object"
     ? gate.payload_json as EngineGatePayload
     : null;
+  const gateType = payload?.gateType ?? null;
+
+  if (gate.status !== "pending") {
+    if (input.status === "submitted" && gate.status === "submitted") {
+      return resumeEngineGateAfterSubmit({
+        auth: input.auth,
+        runId: input.runId,
+        gateId: gate.id,
+        gateType,
+        stageId: gate.stage_id,
+        alreadySubmitted: true,
+      });
+    }
+    throw new Error(`Gate is ${gate.status}, not pending`);
+  }
 
   if (input.status === "rejected") {
     await pool.query(
@@ -162,19 +180,42 @@ export async function completeEngineGate(input: {
     return { runId: input.runId, status: "blocked", gateId: gate.id };
   }
 
-  if (payload?.gateType === "missing_input" && typeof input.decision.value === "string") {
+  if (gateType) {
+    const memoryPatch = applyGateDecisionToRunMemory({
+      gateType,
+      decision: input.decision,
+      definition: context.definition,
+      gateFields: payload?.fields,
+    });
+    if (Object.keys(memoryPatch).length > 0) {
+      await mergeRunMemory(context, memoryPatch);
+    }
+  }
+
+  if (gateType === "missing_input" && typeof input.decision.value === "string") {
     await upsertEngineArtifact({
       context,
       artifactId: `gate_input_${gate.stage_id}`,
       kind: "gate_input",
       label: "Operator input",
       body: input.decision.value,
-      data: { gateId: gate.id, gateType: payload.gateType },
+      data: { gateId: gate.id, gateType },
       stageId: gate.stage_id,
+    });
+    const inputKey = resolveRequiredInputKeys(context.definition, payload?.fields)[0] ?? "sprint_notes";
+    await insertComment({
+      context,
+      taskId: payload?.taskId ?? null,
+      author: "operator",
+      body: `Operator provided ${inputKey.replace(/_/g, " ")} (${input.decision.value.trim().length} chars).`,
     });
   }
 
-  if (payload?.gateType === "memory_confirmation" && Array.isArray(input.decision.items)) {
+  if (gateType === "memory_confirmation" && Array.isArray(input.decision.items)) {
+    const included = input.decision.items.filter((row) => {
+      const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
+      return item.include !== false;
+    });
     await upsertEngineArtifact({
       context,
       artifactId: `approved_memories_${gate.stage_id}`,
@@ -183,6 +224,12 @@ export async function completeEngineGate(input: {
       body: JSON.stringify(input.decision.items, null, 2),
       data: { items: input.decision.items },
       stageId: gate.stage_id,
+    });
+    await insertComment({
+      context,
+      taskId: payload?.taskId ?? null,
+      author: "operator",
+      body: `Operator confirmed ${included.length} memor${included.length === 1 ? "y" : "ies"} for this run.`,
     });
   }
 
@@ -199,19 +246,40 @@ export async function completeEngineGate(input: {
     [input.runId, input.auth.tenantId, input.auth.userId, gate.stage_id],
   );
   const task = taskResult.rows[0];
+  const rerunSameTask = gateType === "missing_input" && !isInputValidationAgent({ id: gate.stage_id });
 
   if (task && task.status === "blocked") {
-    await pool.query(
-      `UPDATE loop_run_tasks SET status = 'done', updated_at = NOW() WHERE id = $1`,
-      [task.id],
-    );
+    if (rerunSameTask) {
+      await pool.query(
+        `UPDATE loop_run_tasks
+         SET status = 'todo', completed_at = NULL, checkout_locked_at = NULL, error_json = '{}'::jsonb, updated_at = NOW()
+         WHERE id = $1`,
+        [task.id],
+      );
+    } else {
+      await pool.query(
+        `UPDATE loop_run_tasks SET status = 'done', updated_at = NOW() WHERE id = $1`,
+        [task.id],
+      );
+    }
   }
 
+  const priorPending = readLoopExecutorMeta(context.metadataJson).pendingInput;
   const loopExecutorPatch = mergeLoopExecutorMeta(context.metadataJson, {
     activeGateId: null,
     activeGateStageId: null,
     gateCompletedAt: new Date().toISOString(),
-    pendingInput: undefined,
+    pendingInput: input.status === "submitted"
+      ? {
+          id: gate.id,
+          kind: "text",
+          label: gate.title,
+          status: "submitted",
+          requestedAt: priorPending?.requestedAt ?? new Date().toISOString(),
+          submittedAt: new Date().toISOString(),
+          instructions: payload?.question ?? gate.title,
+        }
+      : null,
   });
 
   await pool.query(
@@ -233,18 +301,59 @@ export async function completeEngineGate(input: {
     payload: { gateId: gate.id, gateType: payload?.gateType ?? null, status: input.status },
   });
 
-  const freshContext = await loadRunContext(input.runId);
-  const nextTaskId = task ? await loadNextTaskAfterSeq(freshContext, task.seq) : null;
+  return resumeEngineGateAfterSubmit({
+    auth: input.auth,
+    runId: input.runId,
+    gateId: gate.id,
+    gateType,
+    stageId: gate.stage_id,
+    task,
+    rerunSameTask,
+  });
+}
 
-  if (nextTaskId) {
+async function resumeEngineGateAfterSubmit(input: {
+  auth: AuthContext;
+  runId: string;
+  gateId: string;
+  gateType: LoopGateType | null;
+  stageId: string;
+  task?: { id: string; seq: number; status: string } | null;
+  rerunSameTask?: boolean;
+  alreadySubmitted?: boolean;
+}): Promise<{ runId: string; status: string; gateId: string; alreadySubmitted?: boolean }> {
+  const freshContext = await loadRunContext(input.runId);
+  let task = input.task ?? null;
+  if (!task) {
+    const taskResult = await pool.query<{ id: string; seq: number; status: string }>(
+      `SELECT id, seq, status FROM loop_run_tasks
+       WHERE workflow_run_id = $1 AND tenant_id = $2 AND user_id = $3 AND agent_id = $4
+       ORDER BY seq DESC LIMIT 1`,
+      [input.runId, input.auth.tenantId, input.auth.userId, input.stageId],
+    );
+    task = taskResult.rows[0] ?? null;
+  }
+
+  const rerunSameTask = input.rerunSameTask ?? (
+    input.gateType === "missing_input" && !isInputValidationAgent({ id: input.stageId })
+  );
+  const nextTask = task ? await loadNextTaskAfterSeq(freshContext, task.seq) : null;
+  const scheduleTaskId = rerunSameTask && task ? task.id : nextTask?.id ?? null;
+
+  if (scheduleTaskId) {
     await scheduleHeartbeat({
       tenantId: freshContext.tenantId,
       userId: freshContext.userId,
       runId: input.runId,
       jobType: "agent",
-      taskId: nextTaskId,
+      taskId: scheduleTaskId,
     });
-    return { runId: input.runId, status: "running", gateId: gate.id };
+    return {
+      runId: input.runId,
+      status: "running",
+      gateId: input.gateId,
+      ...(input.alreadySubmitted ? { alreadySubmitted: true } : {}),
+    };
   }
 
   await scheduleHeartbeat({
@@ -253,7 +362,12 @@ export async function completeEngineGate(input: {
     runId: input.runId,
     jobType: "ceo_finalize",
   });
-  return { runId: input.runId, status: "running", gateId: gate.id };
+  return {
+    runId: input.runId,
+    status: "running",
+    gateId: input.gateId,
+    ...(input.alreadySubmitted ? { alreadySubmitted: true } : {}),
+  };
 }
 
 export function buildGatePayload(input: {
@@ -279,12 +393,13 @@ export function buildGatePayload(input: {
   }
 
   if (input.gateType === "missing_input") {
-    const fields = (input.definition.inputsRequired ?? []).map((key) => ({
+    const keys = resolveRequiredInputKeys(input.definition);
+    const fields = keys.map((key) => ({
       key,
       label: key.replace(/_/g, " "),
       required: true,
     }));
-    return { fields: fields.length > 0 ? fields : [{ key: "input", label: "Required input", required: true }] };
+    return { fields: fields.length > 0 ? fields : [{ key: "sprint_notes", label: "sprint notes", required: true }] };
   }
 
   if (input.gateType === "draft_review") {

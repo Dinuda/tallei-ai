@@ -1012,12 +1012,14 @@ export async function getLoopRun(auth, runId) {
             }))
             .filter((contact) => contact.email.length > 0)
         : [];
-    const pendingInput = typeof pendingInputRaw.id === "string" && typeof pendingInputRaw.kind === "string"
+    const pendingInput = typeof pendingInputRaw.id === "string"
+        && typeof pendingInputRaw.kind === "string"
+        && pendingInputRaw.status !== "submitted"
         ? {
             id: pendingInputRaw.id,
             kind: pendingInputRaw.kind,
             label: typeof pendingInputRaw.label === "string" ? pendingInputRaw.label : pendingInputRaw.id,
-            status: pendingInputRaw.status === "submitted" ? "submitted" : "pending",
+            status: "pending" as const,
             requestedAt: typeof pendingInputRaw.requestedAt === "string" ? pendingInputRaw.requestedAt : null,
             submittedAt: typeof pendingInputRaw.submittedAt === "string" ? pendingInputRaw.submittedAt : null,
             instructions: typeof pendingInputRaw.instructions === "string" ? pendingInputRaw.instructions : null,

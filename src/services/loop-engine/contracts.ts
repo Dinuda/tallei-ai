@@ -167,20 +167,56 @@ export function detectPlaceholderText(text: string): boolean {
   return false;
 }
 
+function readMemorySourceRow(row: unknown): { id: string; text: string; score?: number } | null {
+  const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
+  const id = typeof item.id === "string" ? item.id : "";
+  const text = typeof item.text === "string" ? item.text : "";
+  if (!id || !text) return null;
+  return {
+    id,
+    text,
+    ...(typeof item.score === "number" ? { score: item.score } : {}),
+  };
+}
+
 export function extractMemorySources(data: unknown): Array<{ id: string; text: string; score?: number }> {
   const root = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
-  const sources = Array.isArray(root.sources) ? root.sources : [];
   const rows: Array<{ id: string; text: string; score?: number }> = [];
-  for (const row of sources) {
-    const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
-    const id = typeof item.id === "string" ? item.id : "";
-    const text = typeof item.text === "string" ? item.text : "";
-    if (!id || !text) continue;
-    rows.push({
-      id,
-      text,
-      ...(typeof item.score === "number" ? { score: item.score } : {}),
-    });
+  const seen = new Set<string>();
+
+  const pushRow = (row: unknown) => {
+    const parsed = readMemorySourceRow(row);
+    if (!parsed || seen.has(parsed.id)) return;
+    seen.add(parsed.id);
+    rows.push(parsed);
+  };
+
+  for (const row of Array.isArray(root.sources) ? root.sources : []) {
+    pushRow(row);
   }
+
+  for (const toolResult of Array.isArray(root.toolResults) ? root.toolResults : []) {
+    const item = toolResult && typeof toolResult === "object" ? toolResult as Record<string, unknown> : {};
+    if (item.ref !== "internal.memory_search") continue;
+    const toolData = item.data && typeof item.data === "object" ? item.data as Record<string, unknown> : {};
+    for (const row of Array.isArray(toolData.sources) ? toolData.sources : []) {
+      pushRow(row);
+    }
+  }
+
   return rows;
+}
+
+export function formatMemorySearchText(sources: Array<{ id: string; text: string; score?: number }>): string {
+  if (sources.length === 0) {
+    return "No relevant memories found for this query.";
+  }
+  return [
+    `Found ${sources.length} memories (id + excerpt):`,
+    ...sources.map((source) => {
+      const excerpt = source.text.trim().replace(/\s+/g, " ");
+      const clipped = excerpt.length > 280 ? `${excerpt.slice(0, 280)}…` : excerpt;
+      return `- [${source.id}] ${clipped}`;
+    }),
+  ].join("\n");
 }

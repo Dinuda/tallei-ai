@@ -11,7 +11,22 @@ import {
   goalEvalResultSchema,
   type GoalEvalResult,
 } from "./contracts.js";
+
+function asksOperatorForInput(text: string): boolean {
+  return /\b(please (provide|paste|send|share)|is missing|not provided|don't have|do not have|can't draft|cannot draft|can't generate|cannot generate|lacks?|missing)\b/i.test(text)
+    && /\b(sprint|notes|input|details|content|required|sprint_notes)\b/i.test(text);
+}
+
+function looksLikeEmailDraft(text: string): boolean {
+  return /\b(shipped this week|in progress|things to watch|going out to customers|next week)\b/i.test(text);
+}
 import { approvalArtifactBlocker } from "../loop-executor/approval.js";
+import {
+  hasRequiredRunInputs,
+  isInputValidationAgent,
+  resolveRequiredInputKeys,
+  type RunMemory,
+} from "./run-memory.js";
 
 const judgeCache = new Map<string, GoalEvalResult>();
 
@@ -23,8 +38,20 @@ function deterministicGuards(input: {
   agent: LoopRunAgent;
   result: RunLoopAgentResult;
   definition: LoopDefinition;
+  runMemory?: RunMemory;
 }): GoalEvalResult | null {
   const text = input.result.text?.trim() ?? "";
+  const inputsSatisfied = input.runMemory
+    ? hasRequiredRunInputs(input.definition, input.runMemory)
+    : false;
+
+  if (inputsSatisfied && isInputValidationAgent(input.agent)) {
+    return goalEvalResultSchema.parse({
+      status: "pass",
+      reason: "Required operator inputs are present in run memory.",
+    });
+  }
+
   if (!text) {
     return goalEvalResultSchema.parse({
       status: "fail",
@@ -56,6 +83,13 @@ function deterministicGuards(input: {
   if (toolRef === "internal.memory_search") {
     const sources = extractMemorySources(input.result.data);
     const mentionsMissingId = /memory id:\s*(not provided|missing|unknown)/i.test(text);
+    if (looksLikeEmailDraft(text) && sources.length === 0) {
+      return goalEvalResultSchema.parse({
+        status: "fail",
+        reason: "Memory search returned a draft email instead of memory items with ids and excerpts. Return a list of memories only; drafting happens in a later agent.",
+        blockers: ["wrong_output_format"],
+      });
+    }
     if (sources.length === 0 && /no (verified )?memory|no relevant memory/i.test(text)) {
       return goalEvalResultSchema.parse({
         status: "needs_input",
@@ -82,9 +116,7 @@ function deterministicGuards(input: {
   }
 
   const goalText = input.definition.goal ?? "";
-  const asksOperatorForInput = /\b(please (provide|paste|send|share)|is missing|not provided|can't generate|cannot generate)\b/i.test(text)
-    && /\b(sprint|notes|input|details|content|required|sprint_notes)\b/i.test(text);
-  if (asksOperatorForInput) {
+  if (!inputsSatisfied && asksOperatorForInput(text)) {
     const requiredKey = input.definition.inputsRequired?.[0] ?? "required_input";
     return goalEvalResultSchema.parse({
       status: "needs_input",
@@ -94,7 +126,8 @@ function deterministicGuards(input: {
     });
   }
 
-  for (const required of input.definition.inputsRequired ?? []) {
+  for (const required of resolveRequiredInputKeys(input.definition)) {
+    if (inputsSatisfied && input.runMemory?.inputs[required]?.trim()) continue;
     const requiredNorm = required.toLowerCase();
     const goalNeedsInput = goalText.toLowerCase().includes(`[paste ${requiredNorm}`)
       || goalText.toLowerCase().includes(`[${requiredNorm}`);
@@ -111,7 +144,7 @@ function deterministicGuards(input: {
     }
   }
 
-  if (input.agent.gate?.type === "draft_review" && toolRef === "internal.llm_only" && !asksOperatorForInput) {
+  if (input.agent.gate?.type === "draft_review" && toolRef === "internal.llm_only" && !asksOperatorForInput(text)) {
     const looksLikeDraft = text.length > 120 && !/\b(is missing|please provide|please paste)\b/i.test(text);
     if (looksLikeDraft) {
       return goalEvalResultSchema.parse({
@@ -185,6 +218,7 @@ export async function evaluateAgentGoal(input: {
   agent: LoopRunAgent;
   result: RunLoopAgentResult;
   definition: LoopDefinition;
+  runMemory?: RunMemory;
   skipLlmJudge?: boolean;
 }): Promise<GoalEvalResult> {
   const deterministic = deterministicGuards(input);

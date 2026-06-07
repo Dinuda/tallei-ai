@@ -17,6 +17,8 @@ import { loopExecutorOpenAiChat, loopExecutorOpenAiModel } from "./openai-chat.j
 import { completeText } from "./agent-runner-internals.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
+import { extractMemorySources, formatMemorySearchText } from "../loop-engine/contracts.js";
+
 import "./tool-handler-registrations.js";
 
 export { readMemorySearchConfig, readGatewaySearchConfig, runExaWebSearch, completeText } from "./agent-runner-internals.js";
@@ -152,6 +154,25 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
         data: {
           model: "exa-search",
           mode: "tool_output_only",
+          toolRefs: input.assignedTools.map((t) => t.ref),
+          actionableToolRefs: actionableToolRefs(input.assignedTools),
+          toolsUsed,
+          toolResults: toolRun.toolResults,
+        },
+        draft,
+        emailTemplate: toolRun.emailTemplate,
+      };
+    }
+
+    if (toolRun.toolsUsed.includes("internal.memory_search")) {
+      const memoryTool = toolRun.toolResults.find((row) => row.ref === "internal.memory_search");
+      const sources = extractMemorySources(memoryTool?.data ?? { sources: [] });
+      const text = formatMemorySearchText(sources);
+      return {
+        text,
+        data: {
+          mode: "tool_output_only",
+          sources,
           toolRefs: input.assignedTools.map((t) => t.ref),
           actionableToolRefs: actionableToolRefs(input.assignedTools),
           toolsUsed,
