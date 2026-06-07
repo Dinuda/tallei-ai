@@ -30,6 +30,7 @@ export type RunLoopAgentInput = {
   assignedTools: LoopToolAssignment[];
   draftPolicy: LoopDefinition["draftPolicy"];
   priorComments: Array<{ author: string; body: string; taskId?: string | null; createdAt?: string }>;
+  agentHandoff?: Record<string, unknown>;
   runId?: string;
   workflowId?: string;
   workflowTitle?: string;
@@ -104,6 +105,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     agentName: input.agent.name,
     agentTask: input.agent.task,
     priorComments: input.priorComments.map((c) => ({ author: c.author, body: c.body })),
+    agentHandoff: input.agentHandoff,
     draftPolicy: input.draftPolicy,
   };
   const system = buildAgentSystemPrompt(bindCtx);

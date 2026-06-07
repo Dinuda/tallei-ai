@@ -202,6 +202,40 @@ function commentsAsContext(comments) {
         .join("\n\n")
         .slice(-12_000);
 }
+function stringifyHandoffValue(value, maxChars) {
+    if (typeof value === "string")
+        return value.length > maxChars ? `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]` : value;
+    try {
+        const text = JSON.stringify(value, null, 2);
+        return text.length > maxChars ? `${text.slice(0, maxChars)}\n[truncated ${text.length - maxChars} chars]` : text;
+    }
+    catch {
+        return String(value);
+    }
+}
+function handoffAsContext(handoff) {
+    if (!handoff || typeof handoff !== "object" || Array.isArray(handoff))
+        return "No structured handoff was provided.";
+    const entries = Object.entries(handoff);
+    if (entries.length === 0)
+        return "No structured handoff was provided.";
+    const priorityKeys = ["operator_input", "sprint_notes", "approved_memories", "memories"];
+    const priority = [];
+    const rest = [];
+    for (const entry of entries) {
+        if (priorityKeys.includes(entry[0]))
+            priority.push(entry);
+        else
+            rest.push(entry);
+    }
+    return [...priority, ...rest]
+        .map(([key, value]) => {
+            const maxChars = key === "sprint_notes" || key === "operator_input" ? 6000 : 3000;
+            return `### ${key}\n${stringifyHandoffValue(value, maxChars)}`;
+        })
+        .join("\n\n")
+        .slice(0, 24_000);
+}
 function firstCommentByAuthor(comments, authorPattern) {
     return comments.find((comment) => authorPattern.test(comment.author))?.body ?? "";
 }
@@ -232,6 +266,11 @@ export function buildAgentSystemPrompt(ctx) {
 export function buildAgentUserPrompt(ctx) {
     const ceoStrategy = firstCommentByAuthor(ctx.priorComments, /^ceo$/i);
     return [
+        "Authoritative agent handoff:",
+        handoffAsContext(ctx.agentHandoff),
+        "",
+        "Use the handoff above as the source of truth for named inputs and upstream artifacts. If the loop goal contains placeholder text but the handoff contains a real value for that field, use the handoff value.",
+        "",
         `Loop goal: ${ctx.goal}`,
         "",
         `Your task: ${ctx.agentTask}`,

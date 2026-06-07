@@ -72,6 +72,9 @@ export const loopToolAssignmentSchema = z.object({
 
 export type LoopToolAssignment = z.infer<typeof loopToolAssignmentSchema>;
 
+export const loopRenderTargetSchema = z.enum(["canvas.email"]);
+export type LoopRenderTarget = z.infer<typeof loopRenderTargetSchema>;
+
 /** One specialist agent in a run roster or task row. */
 export const loopRunAgentSchema = z.object({
   id: z.string().min(1),
@@ -84,6 +87,7 @@ export const loopRunAgentSchema = z.object({
   outputContract: loopAgentContractSchema.optional(),
   gate: loopAgentGateSchema.optional(),
   outputArtifactId: z.string().min(1).optional(),
+  renderTarget: loopRenderTargetSchema.optional(),
 });
 
 export type LoopRunAgent = z.infer<typeof loopRunAgentSchema>;
@@ -233,6 +237,7 @@ export const loopAgentGraphChildSchema = z.object({
   gate: loopAgentGateSchema.optional(),
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
+  renderTarget: loopRenderTargetSchema.optional(),
 });
 
 export type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;

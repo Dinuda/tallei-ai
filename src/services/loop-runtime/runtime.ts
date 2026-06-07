@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
-import { applyGateDecisionToRunMemory, type RunMemory } from "./memory.js";
+import { applyGateDecisionToRunMemory, buildAgentHandoff, type RunMemory } from "./memory.js";
 import { runLoopAgent } from "../loop-executor/agent-runner.js";
 import { loopRunAgentSchema, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
+import { buildCanvasEmailTemplate, type CanvasEmailTemplate } from "./email-canvas.js";
 import { runtimeContextSchema, runtimeDefinitionSchema, type RuntimeContext, type RuntimeDefinition } from "./types.js";
 
 const WORKER_LEASE_MS = 60_000;
@@ -34,6 +35,31 @@ function runMemoryFromContext(context: RuntimeContext): RunMemory {
     approvedMemories: context.approvedMemories,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function compactArtifactBody(body: string, maxChars = 6_000) {
+  if (body.length <= maxChars) return body;
+  const headChars = Math.floor(maxChars * 0.7);
+  const tailChars = Math.floor(maxChars * 0.2);
+  return [
+    body.slice(0, headChars),
+    `[truncated ${body.length - headChars - tailChars} chars]`,
+    body.slice(body.length - tailChars),
+  ].join("\n");
+}
+
+function compactArtifactData(data: unknown, maxChars = 6_000) {
+  try {
+    const text = JSON.stringify(data);
+    if (text.length <= maxChars) return data;
+    return {
+      truncated: true,
+      originalSizeChars: text.length,
+      excerpt: text.slice(0, maxChars),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function isRetryableError(error: unknown): boolean {
@@ -293,6 +319,27 @@ async function persistArtifact(input: {
   );
 }
 
+async function persistCanvasEmailArtifact(input: {
+  command: CommandRow;
+  attemptId: string;
+  artifactKey: string;
+  markdown: string;
+}) {
+  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown });
+  await persistArtifact({
+    command: input.command,
+    attemptId: input.attemptId,
+    artifactKey: input.artifactKey,
+    kind: "canvas_email",
+    body: emailTemplate.html,
+    data: {
+      renderTarget: "canvas.email",
+      emailTemplate,
+    },
+  });
+  return emailTemplate;
+}
+
 async function queueNextStep(command: CommandRow, definition: RuntimeDefinition, currentStep: number) {
   const nextIndex = currentStep + 1;
   const nextAgent = definition.agentGraph!.children[nextIndex];
@@ -363,21 +410,43 @@ async function handleExecuteStep(command: CommandRow) {
     [command.step_attempt_id, workerId],
   );
 
-  const artifactRows = await pool.query<{ artifact_key: string; body: string; data_json: unknown }>(
-    `SELECT DISTINCT ON (artifact_key) artifact_key, body, data_json
-     FROM loop_engine_artifacts
-     WHERE run_id = $1 AND invalidated_at IS NULL
+  const artifactRows = await pool.query<{
+    artifact_key: string;
+    kind: string;
+    body: string;
+    data_json: unknown;
+    step_index: number;
+  }>(
+    `SELECT DISTINCT ON (artifact_key) artifact_key, kind, body, data_json, step_index
+     FROM (
+       SELECT a.artifact_key, a.kind, a.body, a.data_json, s.step_index, a.version
+       FROM loop_engine_artifacts a
+       JOIN loop_engine_step_attempts s ON s.id = a.step_attempt_id
+       WHERE a.run_id = $1
+         AND a.invalidated_at IS NULL
+         AND a.kind <> 'canvas_email'
+         AND s.step_index < $2
+     ) upstream
      ORDER BY artifact_key, version DESC`,
-    [command.run_id],
+    [command.run_id, row.step_index],
   );
+  const priorOutputs = Object.fromEntries(
+    artifactRows.rows.map((artifact) => [
+      artifact.artifact_key,
+      {
+        artifactId: artifact.artifact_key,
+        kind: artifact.kind,
+        stepIndex: artifact.step_index,
+        body: compactArtifactBody(artifact.body),
+        data: compactArtifactData(artifact.data_json),
+      },
+    ]),
+  );
+  const agentHandoff = buildAgentHandoff(agent, runMemoryFromContext(context), priorOutputs);
   const priorComments = artifactRows.rows.map((artifact) => ({
     author: artifact.artifact_key,
-    body: artifact.body,
+    body: compactArtifactBody(artifact.body),
   }));
-  const structuredContext = JSON.stringify({ inputs: context.inputs, approvedMemories: context.approvedMemories });
-  if (structuredContext !== '{"inputs":{},"approvedMemories":[]}') {
-    priorComments.push({ author: "run_context", body: structuredContext });
-  }
 
   const agentResult = await runLoopAgent({
     auth: {
@@ -391,6 +460,7 @@ async function handleExecuteStep(command: CommandRow) {
     assignedTools: agent.tools,
     draftPolicy: definition.draftPolicy,
     priorComments,
+    agentHandoff,
     runId: command.run_id,
     workflowId: row.workflow_id,
     workflowTitle: row.workflow_title,
@@ -450,6 +520,17 @@ async function handleExecuteStep(command: CommandRow) {
     body: agentResult.text,
     data: output,
   });
+  const canvasArtifactKey = agent.renderTarget === "canvas.email"
+    ? `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.email`
+    : null;
+  if (canvasArtifactKey) {
+    await persistCanvasEmailArtifact({
+      command,
+      attemptId: command.step_attempt_id,
+      artifactKey: canvasArtifactKey,
+      markdown: agentResult.text,
+    });
+  }
 
   if (goalEval.status === "needs_input") {
     const gateType = goalEval.gateType ?? agent.gate?.type ?? "missing_input";
@@ -458,7 +539,10 @@ async function handleExecuteStep(command: CommandRow) {
       attemptId: command.step_attempt_id,
       gateType,
       question: agent.gate?.question ?? goalEval.reason,
-      payload: gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
+      payload: {
+        ...gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
+        ...(canvasArtifactKey ? { renderTarget: "canvas.email", canvasArtifactKey } : {}),
+      },
     });
     return;
   }
@@ -872,6 +956,70 @@ export async function retryLoopRuntimeStep(auth: AuthContext, runId: string, ste
     idempotencyKey: `attempt:${retryId}:retry`,
   });
   return getLoopRuntimeProjection(auth, runId);
+}
+
+export async function saveCanvasEmailArtifact(input: {
+  auth: AuthContext;
+  runId: string;
+  artifactKey: string;
+  emailTemplate: Pick<CanvasEmailTemplate, "design" | "html" | "text" | "subject" | "preview">;
+}) {
+  const existing = await pool.query<{
+    tenant_id: string;
+    user_id: string;
+    step_attempt_id: string | null;
+  }>(
+    `SELECT a.tenant_id, a.user_id, a.step_attempt_id
+     FROM loop_engine_artifacts a
+     JOIN loop_engine_runs r ON r.id = a.run_id
+     WHERE a.run_id = $1
+       AND a.artifact_key = $2
+       AND a.kind = 'canvas_email'
+       AND a.invalidated_at IS NULL
+       AND r.tenant_id = $3
+       AND r.user_id = $4
+     ORDER BY a.version DESC
+     LIMIT 1`,
+    [input.runId, input.artifactKey, input.auth.tenantId, input.auth.userId],
+  );
+  const row = existing.rows[0];
+  if (!row) throw new Error("Canvas email artifact not found");
+  const emailTemplate: CanvasEmailTemplate = {
+    ...input.emailTemplate,
+    text: input.emailTemplate.text ?? "",
+    subject: input.emailTemplate.subject ?? "Email draft",
+    preview: input.emailTemplate.preview ?? input.emailTemplate.subject ?? "Email draft",
+    updatedAt: new Date().toISOString(),
+    source: "dashboard",
+  };
+  await pool.query(
+    `INSERT INTO loop_engine_artifacts
+     (tenant_id, user_id, run_id, step_attempt_id, artifact_key, version, kind, body, data_json)
+     SELECT $1, $2, $3, $4, $5,
+            COALESCE(MAX(version), 0) + 1, 'canvas_email', $6, $7::jsonb
+     FROM loop_engine_artifacts WHERE run_id = $3 AND artifact_key = $5`,
+    [
+      row.tenant_id,
+      row.user_id,
+      input.runId,
+      row.step_attempt_id,
+      input.artifactKey,
+      emailTemplate.html,
+      JSON.stringify({
+        renderTarget: "canvas.email",
+        emailTemplate,
+      }),
+    ],
+  );
+  await insertEvent({
+    tenantId: row.tenant_id,
+    userId: row.user_id,
+    runId: input.runId,
+    stepAttemptId: row.step_attempt_id,
+    eventType: "canvas_email_saved",
+    payload: { artifactKey: input.artifactKey },
+  });
+  return getLoopRuntimeProjection(input.auth, input.runId);
 }
 
 let timer: NodeJS.Timeout | null = null;

@@ -41,6 +41,12 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
   }
   for (const agent of definition.agentGraph?.children ?? []) {
     for (const tool of agent.tools) {
+      if (tool.ref === "canvas.email") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "canvas.email is a render target, not an agent tool",
+        });
+      }
       if (
         tool.ref === "internal.resend_broadcast"
         || tool.ref === "composio.gmail.send_email"

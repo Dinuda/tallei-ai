@@ -5,6 +5,7 @@ export {
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
   retryLoopRuntimeStep,
+  saveCanvasEmailArtifact,
   startLoopRuntimeWorker,
   startManualLoopRun,
   stopLoopRuntimeWorker,

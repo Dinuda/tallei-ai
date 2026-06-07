@@ -10,6 +10,7 @@ import {
   loopAgentGraphSchema,
   loopDeliveryRoutingSchema,
   loopGateTypeSchema,
+  loopRenderTargetSchema,
   type LoopDefinition,
   type LoopDeliveryTarget,
 } from "../loop-executor/types.js";
@@ -47,6 +48,7 @@ export const loopArchitectAgentSchema = z.object({
     type: loopGateTypeSchema,
     question: z.string().min(1),
   }).optional(),
+  renderTarget: loopRenderTargetSchema.optional(),
 });
 
 export const loopArchitectOutputSchema = z.object({
@@ -148,6 +150,7 @@ export function architectOutputToAgentGraph(output: LoopArchitectOutput): z.infe
       ...(agent.gate ? { gate: agent.gate } : {}),
       outputArtifactId: slugArtifactId(agent.id),
       outputArtifactKind: "structured_output",
+      ...(agent.renderTarget ? { renderTarget: agent.renderTarget } : {}),
     })),
   });
 }

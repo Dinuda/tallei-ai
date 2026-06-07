@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CanvasEmailEditor, type CanvasEmailTemplate } from "./components/canvas-email-editor";
 
 type StepAttempt = {
   id: string;
@@ -54,6 +55,10 @@ type Artifact = {
   version: number;
   kind: string;
   body: string;
+  data_json?: {
+    renderTarget?: string;
+    emailTemplate?: CanvasEmailTemplate;
+  };
   invalidated_at: string | null;
 };
 
@@ -219,23 +224,46 @@ export default function StableLoopRunPage() {
     return [...byStep.values()].sort((a, b) => a.step_index - b.step_index);
   }, [orderedSteps]);
   const visibleArtifacts = useMemo(() => run?.artifacts.filter((artifact) => !artifact.invalidated_at) ?? [], [run]);
+  const latestArtifacts = useMemo(() => {
+    const byKey = new Map<string, Artifact>();
+    for (const artifact of visibleArtifacts) {
+      const current = byKey.get(artifact.artifact_key);
+      if (!current || artifact.version > current.version) byKey.set(artifact.artifact_key, artifact);
+    }
+    return [...byKey.values()].sort((a, b) => a.artifact_key.localeCompare(b.artifact_key));
+  }, [visibleArtifacts]);
   const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run]);
   const selectedStep = useMemo(() => {
     if (selectedStepId) return orderedSteps.find((step) => step.id === selectedStepId) ?? null;
     return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_gate" || step.status === "running") ?? null;
   }, [orderedSteps, selectedStepId]);
-  const latestArtifact = visibleArtifacts.at(-1) ?? null;
-  const finalArtifacts = latestArtifact ? [latestArtifact] : [];
+  const latestArtifact = latestArtifacts.at(-1) ?? null;
   const selectedArtifact = useMemo(() => {
-    if (selectedArtifactId) return visibleArtifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null;
+    if (selectedArtifactId) return latestArtifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null;
     return latestArtifact;
-  }, [latestArtifact, selectedArtifactId, visibleArtifacts]);
+  }, [latestArtifact, latestArtifacts, selectedArtifactId]);
   const attemptsForSelectedStep = useMemo(() => {
     if (!selectedStep) return [];
     return orderedSteps.filter((step) => step.step_index === selectedStep.step_index);
   }, [orderedSteps, selectedStep]);
 
   const finalArtifactName = inferGoalArtifactName(run, selectedArtifact);
+  const activeCanvasArtifact = useMemo(() => {
+    const gateCanvasKey = typeof pendingGate?.payload_json.canvasArtifactKey === "string"
+      ? pendingGate.payload_json.canvasArtifactKey
+      : null;
+    if (gateCanvasKey) {
+      const fromGate = latestArtifacts.find((artifact) => artifact.artifact_key === gateCanvasKey);
+      if (fromGate) return fromGate;
+    }
+    if (selectedArtifact?.kind === "canvas_email") return selectedArtifact;
+    if (selectedArtifact) {
+      const paired = latestArtifacts.find((artifact) => artifact.artifact_key === `${selectedArtifact.artifact_key}:canvas.email`);
+      if (paired) return paired;
+    }
+    return latestArtifacts.find((artifact) => artifact.kind === "canvas_email") ?? null;
+  }, [latestArtifacts, pendingGate, selectedArtifact]);
+  const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
   const centerTitle = inspectingAgentOutput
     ? `${selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id} output`
@@ -270,6 +298,10 @@ export default function StableLoopRunPage() {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function saveCanvasEmail(artifact: Artifact, value: { design: unknown; html: string; text?: string; subject?: string; preview?: string }) {
+    await post(`/api/workflows/runs/${runId}/artifacts/${encodeURIComponent(artifact.artifact_key)}/canvas/email`, value);
   }
 
   function submitGate(gate: Gate, action: "approve" | "input" | "reject") {
@@ -420,7 +452,14 @@ export default function StableLoopRunPage() {
                           </div>
                         ) : null}
 
-                        {centerBody ? (
+                        {activeCanvasArtifact && activeCanvasTemplate ? (
+                          <CanvasEmailEditor
+                            artifactKey={activeCanvasArtifact.artifact_key}
+                            template={activeCanvasTemplate}
+                            saving={busy?.includes("/canvas/email") ?? false}
+                            onSave={(value) => saveCanvasEmail(activeCanvasArtifact, value)}
+                          />
+                        ) : centerBody ? (
                           <div className="prose prose-slate max-w-none text-[16px] leading-7">
                             <Streamdown>{centerBody}</Streamdown>
                           </div>
@@ -478,7 +517,7 @@ export default function StableLoopRunPage() {
                             This is the run result. Agent rows are intermediate work; the artifact is the reviewed end result.
                           </p>
                         </div>
-                        {finalArtifacts.map((artifact) => (
+                        {latestArtifacts.map((artifact) => (
                           <button
                             key={artifact.id}
                             onClick={() => {
@@ -497,7 +536,7 @@ export default function StableLoopRunPage() {
                             </div>
                           </button>
                         ))}
-                        {finalArtifacts.length === 0 ? (
+                        {latestArtifacts.length === 0 ? (
                           <div className="grid min-h-[360px] place-items-center rounded-2xl border border-dashed bg-slate-50 p-8 text-sm text-slate-500">
                             No {finalArtifactName.toLowerCase()} artifact yet.
                           </div>
@@ -515,7 +554,7 @@ export default function StableLoopRunPage() {
                 <CardTitle className="text-[20px] font-extrabold">Final result</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 p-4">
-                {finalArtifacts.map((artifact) => (
+                {latestArtifacts.map((artifact) => (
                   <button
                     key={artifact.id}
                     onClick={() => {
@@ -537,7 +576,7 @@ export default function StableLoopRunPage() {
                     </div>
                   </button>
                 ))}
-                {finalArtifacts.length === 0 ? (
+                {latestArtifacts.length === 0 ? (
                   <p className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">No {finalArtifactName.toLowerCase()} artifact yet.</p>
                 ) : null}
               </CardContent>

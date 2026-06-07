@@ -17,6 +17,7 @@ import {
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
   retryLoopRuntimeStep,
+  saveCanvasEmailArtifact,
   startManualLoopRun,
 } from "../../../services/loop-runtime/index.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
@@ -28,6 +29,7 @@ const workflowIdSchema = z.object({ workflowId: z.string().uuid() });
 const runIdSchema = z.object({ runId: z.string().uuid() });
 const gateIdSchema = z.object({ gateId: z.string().uuid() });
 const stepIdSchema = z.object({ stepId: z.string().uuid() });
+const artifactKeySchema = z.object({ artifactKey: z.string().trim().min(1).max(240) });
 
 const createLoopSchema = z.object({
   definition: loopDefinitionSchema,
@@ -47,6 +49,13 @@ const assignWorkspaceSchema = z.object({
 
 const gateInputSchema = z.object({ value: z.string().min(1).max(1_000_000) });
 const gateRejectSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() });
+const canvasEmailSaveSchema = z.object({
+  design: z.unknown(),
+  html: z.string().min(1).max(5_000_000),
+  text: z.string().max(1_000_000).optional(),
+  subject: z.string().max(500).optional(),
+  preview: z.string().max(1_000).optional(),
+});
 
 function sendError(res: Response, error: unknown, fallback: string) {
   if (error instanceof z.ZodError) {
@@ -194,6 +203,30 @@ router.post("/runs/:runId/steps/:stepId/retry", requireScopes(["memory:write"]),
     res.status(202).json({ run: await retryLoopRuntimeStep(req.authContext!, runId, stepId) });
   } catch (error) {
     sendError(res, error, "Failed to retry step");
+  }
+});
+
+router.post("/runs/:runId/artifacts/:artifactKey/canvas/email", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const { artifactKey } = artifactKeySchema.parse(req.params);
+    const body = canvasEmailSaveSchema.parse(req.body ?? {});
+    res.status(201).json({
+      run: await saveCanvasEmailArtifact({
+        auth: req.authContext!,
+        runId,
+        artifactKey,
+        emailTemplate: {
+          design: body.design as never,
+          html: body.html,
+          text: body.text ?? "",
+          subject: body.subject ?? "Email draft",
+          preview: body.preview ?? body.subject ?? "Email draft",
+        },
+      }),
+    });
+  } catch (error) {
+    sendError(res, error, "Failed to save canvas email");
   }
 });
 

@@ -9,6 +9,7 @@ import {
   resolveRequiredInputKeys,
 } from "../../../src/services/loop-runtime/memory.js";
 import { evaluateAgentGoal } from "../../../src/services/loop-engine/goal-eval.js";
+import { buildAgentUserPrompt } from "../../../src/services/loop-executor/tool-catalog.js";
 
 test("applyGateDecisionToRunMemory stores sprint_notes from missing_input gate", () => {
   const patch = applyGateDecisionToRunMemory({
@@ -93,6 +94,49 @@ test("buildAgentHandoff injects run memory and prior agent artifacts for draft w
   assert.deepEqual(handoff.approved_memories, [{ id: "mem-1", excerpt: "Recall fix shipped." }]);
   assert.ok(handoff.memory_search);
   assert.equal(handoff.draft_writer, undefined);
+});
+
+test("agent prompt pins structured handoff inputs ahead of bulky prior context", () => {
+  const sprintNotes = [
+    "Sprint Goal: Improve memory persistence and add user workspace isolation",
+    "Completed:",
+    "- Implemented persistent storage API endpoints",
+    "- Added workspace authentication layer",
+  ].join("\n");
+  const hugeMemoryBlob = "memory excerpt ".repeat(2_000);
+  const handoff = buildAgentHandoff(
+    {
+      id: "draft_writer",
+      name: "Internal Draft Writer",
+      task: "Use the validated sprint_notes to write the internal sync email.",
+      tools: [{ ref: "internal.llm_only" }],
+    },
+    {
+      ...emptyRunMemory(),
+      inputs: { sprint_notes: sprintNotes },
+      approvedMemories: Array.from({ length: 25 }, (_, index) => ({
+        id: `mem-${index}`,
+        excerpt: `${hugeMemoryBlob}${index}`,
+      })),
+    },
+    {
+      memory_search_output: {
+        artifactId: "memory_search_output",
+        body: hugeMemoryBlob,
+      },
+    },
+  );
+
+  const prompt = buildAgentUserPrompt({
+    goal: "Write an update from [PASTE SPRINT NOTES / TASKS HERE].",
+    agentTask: "Using approved memories and the validated sprint_notes, write a casual internal sync.",
+    priorComments: [{ author: "memory_search_output", body: hugeMemoryBlob }],
+    agentHandoff: handoff,
+  });
+
+  assert.match(prompt, /Authoritative agent handoff:/);
+  assert.match(prompt, /Sprint Goal: Improve memory persistence/);
+  assert.ok(prompt.indexOf("Sprint Goal: Improve memory persistence") < prompt.indexOf("[PASTE SPRINT NOTES / TASKS HERE]"));
 });
 
 test("input validator placeholder output opens missing input gate instead of failing", async () => {

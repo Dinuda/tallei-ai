@@ -44,6 +44,18 @@ export function critiqueLoopDesign(design: LoopArchitectOutput): WorkflowCriticR
       requiredFixes.push(`Agent "${agent.name}" uses unknown tool: ${agent.tool}`);
     }
 
+    if (agent.tool === "canvas.email") {
+      requiredFixes.push(`Agent "${agent.name}" uses canvas.email as a tool; use renderTarget instead.`);
+    }
+
+    if (
+      /email|newsletter/i.test(`${agent.name} ${agent.goal} ${agent.task}`)
+      && !agent.renderTarget
+      && agent.tool === "internal.llm_only"
+    ) {
+      issues.push(`Agent "${agent.name}" writes email-like copy but does not set renderTarget.`);
+    }
+
     if (!agent.inputContract?.description?.trim() || !agent.outputContract?.description?.trim()) {
       requiredFixes.push(`Agent "${agent.name}" must declare input and output contracts.`);
     }

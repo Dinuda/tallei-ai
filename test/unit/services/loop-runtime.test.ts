@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { buildCanvasEmailTemplate } from "../../../src/services/loop-runtime/email-canvas.js";
 import { runtimeDefinitionSchema } from "../../../src/services/loop-runtime/types.js";
+import { listLoopTools } from "../../../src/services/loop-executor/tool-catalog.js";
 
 function stableDefinition() {
   return {
@@ -32,6 +34,31 @@ test("stable runtime accepts a v3 artifact-only definition", () => {
   assert.equal(runtimeDefinitionSchema.parse(stableDefinition()).engineVersion, "loop_engine_v3");
 });
 
+test("stable runtime accepts canvas.email as a render target, not a tool", () => {
+  const parsed = runtimeDefinitionSchema.parse({
+    ...stableDefinition(),
+    agentGraph: {
+      ...stableDefinition().agentGraph,
+      children: [{
+        ...stableDefinition().agentGraph.children[0],
+        renderTarget: "canvas.email",
+      }],
+    },
+  });
+  assert.equal(parsed.agentGraph?.children[0]?.renderTarget, "canvas.email");
+  assert.equal(listLoopTools().some((tool) => tool.ref === "canvas.email"), false);
+  assert.equal(runtimeDefinitionSchema.safeParse({
+    ...stableDefinition(),
+    agentGraph: {
+      ...stableDefinition().agentGraph,
+      children: [{
+        ...stableDefinition().agentGraph.children[0],
+        renderTarget: "canvas.document",
+      }],
+    },
+  }).success, false);
+});
+
 test("stable runtime rejects legacy definitions and outbound delivery", () => {
   assert.equal(runtimeDefinitionSchema.safeParse({ ...stableDefinition(), engineVersion: undefined }).success, false);
   assert.equal(runtimeDefinitionSchema.safeParse({
@@ -42,4 +69,24 @@ test("stable runtime rejects legacy definitions and outbound delivery", () => {
     ...stableDefinition(),
     presetId: "newsletter",
   }).success, false);
+});
+
+test("canvas email renderer returns editable template without delivery footer", () => {
+  const template = buildCanvasEmailTemplate({
+    markdown: [
+      "Subject: Product update",
+      "Preview: The short version.",
+      "",
+      "# Product update",
+      "",
+      "We shipped **stable loops**.",
+      "- No outbound delivery",
+    ].join("\n"),
+  });
+  assert.equal(template.subject, "Product update");
+  assert.equal(template.preview, "The short version.");
+  assert.equal(template.source, "runtime");
+  assert.match(template.html, /stable loops/);
+  assert.equal(template.html.includes("RESEND_UNSUBSCRIBE_URL"), false);
+  assert.equal(template.design.body.rows.length > 0, true);
 });

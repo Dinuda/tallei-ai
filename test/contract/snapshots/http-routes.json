@@ -596,6 +596,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/workflows/runs/:runId/artifacts/:artifactKey/canvas/email",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
     "path": "/api/workflows/runs/:runId/cancel",
     "source": "src/routes/workflows.ts"
   },

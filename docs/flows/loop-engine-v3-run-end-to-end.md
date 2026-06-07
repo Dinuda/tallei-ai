@@ -8,6 +8,7 @@
 - sequential architect-generated agent graphs;
 - dashboard-only input, review, and memory-confirmation gates;
 - versioned reviewed artifacts;
+- optional `canvas.email` render-target artifacts for editable email drafts;
 - bounded retries and lease recovery.
 
 It does not support scheduling, presets, email approval, contact uploads, outbound delivery,
@@ -45,6 +46,7 @@ worker claims execute_step
   -> execute stable tools and agent
   -> evaluate the result
   -> persist artifact
+  -> persist canvas_email artifact when the agent has renderTarget: "canvas.email"
   -> create gate, queue retry, queue next step, or queue finalize_run
 
 worker claims finalize_run
@@ -95,12 +97,20 @@ GET /runs/:runId
 This returns the authoritative run projection with attempts, gates, artifacts, and events.
 The dashboard may poll this endpoint, but polling never mutates execution state.
 
+```http
+POST /runs/:runId/artifacts/:artifactKey/canvas/email
+```
+
+This saves an edited Unlayer email design as a new `canvas_email` artifact version.
+It does not enqueue commands, approve gates, or advance execution.
+
 ## Key Files
 
 | File | Responsibility |
 |---|---|
 | `src/services/loop-runtime/runtime.ts` | Run creation, command worker, gates, retries, leases, and projection |
 | `src/services/loop-runtime/types.ts` | Strict stable-runtime definition validation |
+| `src/services/loop-runtime/email-canvas.ts` | Runtime markdown-to-Unlayer email canvas rendering |
 | `src/services/loop-runtime/memory.ts` | Run-context and gate-decision memory handling |
 | `src/services/loop-runtime/tool-registrations.ts` | Stable tool handlers |
 | `src/infrastructure/db/index.ts` | Durable runtime schema and hard-cutover initialization |
