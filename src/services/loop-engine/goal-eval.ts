@@ -234,14 +234,14 @@ export async function evaluateAgentGoal(input: {
   skipLlmJudge?: boolean;
 }): Promise<GoalEvalResult> {
   const deterministic = deterministicGuards(input);
-  if (deterministic && deterministic.status !== "pass") {
+  if (deterministic) {
     return deterministic;
   }
 
   if (input.skipLlmJudge) {
     return goalEvalResultSchema.parse({
       status: "pass",
-      reason: deterministic?.reason ?? "Deterministic checks passed.",
+      reason: "Deterministic checks passed.",
     });
   }
 
@@ -265,6 +265,6 @@ export async function evaluateAgentGoal(input: {
 
   return goalEvalResultSchema.parse({
     status: "pass",
-    reason: judged.reason || deterministic?.reason || "Goal satisfied.",
+    reason: judged.reason || "Goal satisfied.",
   });
 }
