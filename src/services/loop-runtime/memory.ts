@@ -17,7 +17,7 @@ export function emptyRunMemory(): RunMemory {
 
 export function isInputValidationAgent(agent: { id: string; name?: string }): boolean {
   const label = `${agent.id} ${agent.name ?? ""}`.toLowerCase();
-  return label.includes("validator") || label.includes("input_gate");
+  return label.includes("validator") || label.includes("input_gate") || label.includes("input checker");
 }
 
 export function resolveRequiredInputKeys(

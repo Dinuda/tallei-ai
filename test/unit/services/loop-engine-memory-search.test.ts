@@ -50,7 +50,7 @@ test("memory search returns verified tool output without LLM synthesis", async (
       }],
     });
 
-    assert.equal(result.text, "Found 1 memories (id + excerpt):\n- [memory-1] Shipped persistent storage endpoints.");
+    assert.equal(result.text, "Found 1 validated memories (id + excerpt):\n- [memory-1] Shipped persistent storage endpoints.");
     assert.equal(result.data.mode, "tool_output_only");
     assert.deepEqual(result.data.sources, [
       { id: "memory-1", text: "Shipped persistent storage endpoints.", score: 0.91 },
@@ -85,4 +85,33 @@ test("memory search sources trigger confirmation gate", async () => {
 
   assert.equal(result.status, "needs_input");
   assert.equal(result.gateType, "memory_confirmation");
+});
+
+test("validated-empty memory search does not trigger confirmation gate", async () => {
+  const { evaluateAgentGoal } = await import("../../../src/services/loop-engine/goal-eval.js");
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "memory_search",
+      name: "Memory Search Agent",
+      task: "Search memories for this week's product updates.",
+      goal: "Return relevant memories with ids and excerpts.",
+      tools: [{ ref: "internal.memory_search" }],
+      gate: { type: "memory_confirmation", question: "Use these memories?" },
+    },
+    result: {
+      text: "No validated memories found for this run intent.",
+      data: {
+        sources: [],
+        confidence: "none",
+        rejectedCount: 3,
+        noEvidenceReason: "No candidate directly supports the requested output.",
+      },
+    },
+    definition: {
+      goal: "Write and send a weekly product sync email.",
+    } as never,
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "pass");
 });

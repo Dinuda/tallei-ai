@@ -165,11 +165,21 @@ export function detectPlaceholderText(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) return true;
   if (/\[(?:paste|tbd|todo|fill|insert)[^\]]*\]/i.test(normalized)) return true;
-  if (/\b(?:tbd|pending|details pending|to be determined|placeholder)\b/i.test(normalized)) return true;
+  if (/\b(?:tbd|details pending|to be determined|placeholder)\b/i.test(normalized)) return true;
   return false;
 }
 
-function readMemorySourceRow(row: unknown): { id: string; text: string; score?: number } | null {
+export type MemorySearchSource = {
+  id: string;
+  text: string;
+  score?: number;
+  confidence?: number;
+  reason?: string;
+  evidenceRole?: string;
+  metadata?: Record<string, unknown>;
+};
+
+function readMemorySourceRow(row: unknown): MemorySearchSource | null {
   const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
   const id = typeof item.id === "string" ? item.id : "";
   const text = typeof item.text === "string" ? item.text : "";
@@ -178,12 +188,18 @@ function readMemorySourceRow(row: unknown): { id: string; text: string; score?: 
     id,
     text,
     ...(typeof item.score === "number" ? { score: item.score } : {}),
+    ...(typeof item.confidence === "number" ? { confidence: item.confidence } : {}),
+    ...(typeof item.reason === "string" ? { reason: item.reason } : {}),
+    ...(typeof item.evidenceRole === "string" ? { evidenceRole: item.evidenceRole } : {}),
+    ...(item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata)
+      ? { metadata: item.metadata as Record<string, unknown> }
+      : {}),
   };
 }
 
-export function extractMemorySources(data: unknown): Array<{ id: string; text: string; score?: number }> {
+export function extractMemorySources(data: unknown): MemorySearchSource[] {
   const root = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
-  const rows: Array<{ id: string; text: string; score?: number }> = [];
+  const rows: MemorySearchSource[] = [];
   const seen = new Set<string>();
 
   const pushRow = (row: unknown) => {
@@ -209,12 +225,12 @@ export function extractMemorySources(data: unknown): Array<{ id: string; text: s
   return rows;
 }
 
-export function formatMemorySearchText(sources: Array<{ id: string; text: string; score?: number }>): string {
+export function formatMemorySearchText(sources: MemorySearchSource[]): string {
   if (sources.length === 0) {
     return "No relevant memories found for this query.";
   }
   return [
-    `Found ${sources.length} memories (id + excerpt):`,
+    `Found ${sources.length} validated memories (id + excerpt):`,
     ...sources.map((source) => {
       const excerpt = source.text.trim().replace(/\s+/g, " ");
       const clipped = excerpt.length > 280 ? `${excerpt.slice(0, 280)}…` : excerpt;

@@ -292,6 +292,25 @@ function gatePayloadForResult(
   };
 }
 
+function gateQuestionForEvaluation(input: {
+  agent: LoopRunAgent;
+  gateType: LoopGateType;
+  reason: string;
+}) {
+  return input.agent.gate?.type === input.gateType
+    ? input.agent.gate.question
+    : input.reason;
+}
+
+function isAffirmativeGateInput(value: Record<string, unknown>) {
+  const raw = typeof value.value === "string"
+    ? value.value
+    : typeof value.text === "string"
+      ? value.text
+      : "";
+  return /\b(yes|yep|yeah|approve|approved|go ahead|looks good|proceed|continue|ship|use it|ok|okay)\b/i.test(raw.trim());
+}
+
 async function persistArtifact(input: {
   command: CommandRow;
   attemptId: string;
@@ -598,7 +617,7 @@ async function handleExecuteStep(command: CommandRow) {
       command,
       attemptId: command.step_attempt_id,
       gateType,
-      question: agent.gate?.question ?? goalEval.reason,
+      question: gateQuestionForEvaluation({ agent, gateType, reason: goalEval.reason }),
       payload: {
         ...gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
         ...(canvasArtifactKey ? { renderTarget: agent.renderTarget, canvasArtifactKey } : {}),
@@ -903,7 +922,13 @@ export async function decideLoopRuntimeGate(input: {
       await client.query("COMMIT");
       return { runId: input.runId, gateId: input.gateId, status: gate.status, decision: gate.decision_json };
     }
-    if (input.decision === "reject") {
+    const decision = input.decision === "input" && gate.gate_type !== "missing_input" && isAffirmativeGateInput(input.value)
+      ? "approve"
+      : input.decision;
+    if (input.decision === "input" && gate.gate_type !== "missing_input" && decision !== "approve") {
+      throw new Error("Approval gate requires an explicit approve or reject decision");
+    }
+    if (decision === "reject") {
       await client.query(
         `UPDATE loop_engine_gates SET status = 'rejected', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
          WHERE id = $1`,
@@ -934,13 +959,13 @@ export async function decideLoopRuntimeGate(input: {
       inputs: { ...currentContext.inputs, ...(patch.inputs ?? {}) },
       approvedMemories: patch.approvedMemories ?? currentContext.approvedMemories,
     });
-    const status = input.decision === "input" ? "submitted" : "approved";
+    const status = decision === "input" ? "submitted" : "approved";
     await client.query(
       `UPDATE loop_engine_gates SET status = $2, decision_json = $3::jsonb, completed_at = NOW(), updated_at = NOW()
        WHERE id = $1`,
       [input.gateId, status, JSON.stringify(input.value)],
     );
-    if (input.decision === "approve") {
+    if (decision === "approve") {
       const gatePayload = asObject(gate.payload_json);
       const canvasArtifactKey = typeof gatePayload.canvasArtifactKey === "string" ? gatePayload.canvasArtifactKey : null;
       if (canvasArtifactKey) {

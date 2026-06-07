@@ -28,6 +28,21 @@ function looksLikeEmailDraft(text: string): boolean {
 }
 const judgeCache = new Map<string, GoalEvalResult>();
 
+function readToolConfidence(data: unknown): string | null {
+  const root = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+  return typeof root.confidence === "string" ? root.confidence : null;
+}
+
+function confirmsRequiredInputPresent(text: string, requiredKeys: string[]) {
+  const normalized = text.toLowerCase();
+  const hasPositiveSignal = /\b(input|notes?|content)\s+(?:provided|present|available):?\s*(?:yes|true)\b/i.test(text)
+    || /\bprovided:?\s*(?:yes|true)\b/i.test(text)
+    || /\bmissing fields?:?\s*(?:none|none detected|no missing fields)\b/i.test(text)
+    || /\bno missing fields?\b/i.test(text);
+  if (!hasPositiveSignal) return false;
+  return requiredKeys.some((key) => normalized.includes(key.toLowerCase()));
+}
+
 function approvalArtifactBlocker(body: string): string | null {
   const normalized = body.trim().toLowerCase();
   if (!normalized) return "No draft content available for approval";
@@ -55,11 +70,17 @@ function deterministicGuards(input: {
     ? hasRequiredRunInputs(input.definition, input.runMemory)
     : false;
   const goalText = input.definition.goal ?? "";
+  const requiredKeys = resolveRequiredInputKeys(input.definition);
 
-  if (inputsSatisfied && isInputValidationAgent(input.agent)) {
+  if (
+    isInputValidationAgent(input.agent) &&
+    (inputsSatisfied || confirmsRequiredInputPresent(text, requiredKeys))
+  ) {
     return goalEvalResultSchema.parse({
       status: "pass",
-      reason: "Required operator inputs are present in run memory.",
+      reason: inputsSatisfied
+        ? "Required operator inputs are present in run memory."
+        : "Input checker verified the required input is present.",
     });
   }
 
@@ -81,7 +102,7 @@ function deterministicGuards(input: {
     });
   }
 
-  for (const required of resolveRequiredInputKeys(input.definition)) {
+  for (const required of requiredKeys) {
     if (inputsSatisfied && input.runMemory?.inputs[required]?.trim()) continue;
     const requiredNorm = required.toLowerCase();
     const normalizedText = text.toLowerCase();
@@ -119,6 +140,12 @@ function deterministicGuards(input: {
         status: "fail",
         reason: "Memory search returned a draft email instead of memory items with ids and excerpts. Return a list of memories only; drafting happens in a later agent.",
         blockers: ["wrong_output_format"],
+      });
+    }
+    if (sources.length === 0 && readToolConfidence(input.result.data) === "none") {
+      return goalEvalResultSchema.parse({
+        status: "pass",
+        reason: "Memory search found no validated memories for this run intent.",
       });
     }
     if (sources.length === 0 && /no (verified )?memory|no relevant memory/i.test(text)) {

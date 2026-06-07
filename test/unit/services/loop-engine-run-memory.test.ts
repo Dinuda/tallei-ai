@@ -8,6 +8,7 @@ import {
   hasRequiredRunInputs,
   resolveRequiredInputKeys,
 } from "../../../src/services/loop-runtime/memory.js";
+import { detectPlaceholderText } from "../../../src/services/loop-engine/contracts.js";
 import { evaluateAgentGoal } from "../../../src/services/loop-engine/goal-eval.js";
 import { buildAgentUserPrompt } from "../../../src/services/loop-executor/tool-catalog.js";
 
@@ -169,4 +170,96 @@ test("input validator placeholder output opens missing input gate instead of fai
   assert.equal(result.status, "needs_input");
   assert.equal(result.gateType, "missing_input");
   assert.deepEqual(result.blockers, ["sprint_notes"]);
+});
+
+test("input checker output that verifies notes are present passes instead of asking again", async () => {
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "input_checker",
+      name: "Input Checker",
+      task: "Check that sprint_notes are present and readable.",
+      goal: "Confirm sprint_notes are provided.",
+      tools: [{ ref: "internal.llm_only" }],
+      gate: { type: "missing_input", question: "Please provide the sprint notes." },
+    },
+    result: {
+      text: [
+        "Verification result:",
+        "",
+        "sprint_notes input provided: yes",
+        "",
+        "Fields present in the input:",
+        "Sprint Goal",
+        "Completed",
+        "In Progress",
+        "Blockers",
+        "",
+        "Missing fields: none detected",
+      ].join("\n"),
+      data: {},
+    },
+    definition: {
+      inputsRequired: ["sprint_notes"],
+      goal: "Create weekly product sync email.",
+    },
+    runMemory: emptyRunMemory(),
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "pass");
+});
+
+test("draft review output with normal pending work language opens draft gate", async () => {
+  const draft = [
+    "Progress on past items",
+    "",
+    "Multi-tenant data isolation: 70% complete; edge-case/open criteria still outstanding.",
+    "API documentation generation: pending final review.",
+    "",
+    "Shipped this week",
+    "",
+    "Memory retrieval now filters unrelated personal memories before drafting.",
+    "",
+    "In progress",
+    "",
+    "Dashboard review flow hardening is still in progress.",
+    "",
+    "Things to watch",
+    "",
+    "Approval gates should only advance on explicit operator approval.",
+    "",
+    "Going out to customers",
+    "",
+    "Partial, after internal review.",
+    "",
+    "Next week",
+    "",
+    "Finish durable run continuation and retry recovery.",
+  ].join("\n");
+
+  assert.equal(detectPlaceholderText(draft), false);
+
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "internal_sync_draft_writer",
+      name: "Internal Sync Draft Writer",
+      task: "Write the internal sync email from validated sprint notes.",
+      goal: "Produce a complete internal product sync email.",
+      tools: [{ ref: "internal.llm_only" }],
+      gate: { type: "draft_review", question: "Review and approve this internal sync email?" },
+    },
+    result: { text: draft, data: {} },
+    definition: {
+      inputsRequired: ["sprint_notes"],
+      goal: "Create weekly product sync email.",
+    },
+    runMemory: {
+      ...emptyRunMemory(),
+      inputs: { sprint_notes: "Memory retrieval filtering shipped. Gate continuation hardening in progress." },
+    },
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.gateType, "draft_review");
 });
