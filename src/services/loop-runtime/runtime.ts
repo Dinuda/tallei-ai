@@ -319,6 +319,32 @@ async function persistArtifact(input: {
   );
 }
 
+type QueryExecutor = Pick<typeof pool, "query">;
+
+function canvasPreviewArtifactKeys(artifactKey: string) {
+  const keys = new Set([artifactKey]);
+  keys.add(artifactKey.replace(/:canvas\.preview$/, ":canvas.email"));
+  return [...keys];
+}
+
+async function markCanvasArtifactPreview(
+  db: QueryExecutor,
+  input: {
+    runId: string;
+    artifactKey: string;
+  },
+) {
+  const previewState = JSON.stringify({ canvas_state: "preview" });
+  for (const artifactKey of canvasPreviewArtifactKeys(input.artifactKey)) {
+    await db.query(
+      `UPDATE loop_engine_artifacts
+       SET data_json = data_json || $1::jsonb
+       WHERE run_id = $2 AND artifact_key = $3 AND kind IN ('canvas_email', 'canvas_preview') AND invalidated_at IS NULL`,
+      [previewState, input.runId, artifactKey],
+    );
+  }
+}
+
 async function persistCanvasEmailArtifact(input: {
   command: CommandRow;
   attemptId: string;
@@ -336,6 +362,31 @@ async function persistCanvasEmailArtifact(input: {
       renderTarget: "canvas.email",
       emailTemplate,
     },
+  });
+  return emailTemplate;
+}
+
+async function persistCanvasPreviewArtifact(input: {
+  command: CommandRow;
+  attemptId: string;
+  artifactKey: string;
+  markdown: string;
+}) {
+  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown });
+  await persistArtifact({
+    command: input.command,
+    attemptId: input.attemptId,
+    artifactKey: input.artifactKey,
+    kind: "canvas_email",
+    body: emailTemplate.html,
+    data: {
+      renderTarget: "canvas.preview",
+      emailTemplate,
+    },
+  });
+  await markCanvasArtifactPreview(pool, {
+    runId: input.command.run_id,
+    artifactKey: input.artifactKey,
   });
   return emailTemplate;
 }
@@ -520,14 +571,23 @@ async function handleExecuteStep(command: CommandRow) {
     body: agentResult.text,
     data: output,
   });
-  const canvasArtifactKey = agent.renderTarget === "canvas.email"
-    ? `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.email`
-    : null;
-  if (canvasArtifactKey) {
+  const canvasArtifactKey = (() => {
+    if (agent.renderTarget === "canvas.email") return `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.email`;
+    if (agent.renderTarget === "canvas.preview") return `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.email`;
+    return null;
+  })();
+  if (agent.renderTarget === "canvas.email") {
     await persistCanvasEmailArtifact({
       command,
       attemptId: command.step_attempt_id,
-      artifactKey: canvasArtifactKey,
+      artifactKey: canvasArtifactKey!,
+      markdown: agentResult.text,
+    });
+  } else if (agent.renderTarget === "canvas.preview") {
+    await persistCanvasPreviewArtifact({
+      command,
+      attemptId: command.step_attempt_id,
+      artifactKey: canvasArtifactKey!,
       markdown: agentResult.text,
     });
   }
@@ -541,7 +601,7 @@ async function handleExecuteStep(command: CommandRow) {
       question: agent.gate?.question ?? goalEval.reason,
       payload: {
         ...gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
-        ...(canvasArtifactKey ? { renderTarget: "canvas.email", canvasArtifactKey } : {}),
+        ...(canvasArtifactKey ? { renderTarget: agent.renderTarget, canvasArtifactKey } : {}),
       },
     });
     return;
@@ -628,6 +688,22 @@ async function handleFinalizeRun(command: CommandRow) {
     [command.run_id],
   );
   if (pending.rows[0]) throw new Error("Cannot finalize a run with a pending gate");
+  const reviewedArtifacts = await pool.query<{ canvas_artifact_key: string | null }>(
+    `SELECT DISTINCT payload_json->>'canvasArtifactKey' AS canvas_artifact_key
+     FROM loop_engine_gates
+     WHERE run_id = $1
+       AND status = 'approved'
+       AND payload_json ? 'canvasArtifactKey'`,
+    [command.run_id],
+  );
+  for (const row of reviewedArtifacts.rows) {
+    if (row.canvas_artifact_key) {
+      await markCanvasArtifactPreview(pool, {
+        runId: command.run_id,
+        artifactKey: row.canvas_artifact_key,
+      });
+    }
+  }
   await pool.query(
     `UPDATE loop_engine_runs
      SET status = 'succeeded', finished_at = NOW(), updated_at = NOW()
@@ -809,12 +885,13 @@ export async function decideLoopRuntimeGate(input: {
       status: string;
       gate_type: LoopGateType;
       decision_json: unknown;
+      payload_json: unknown;
       definition_snapshot: unknown;
       context_json: unknown;
       tenant_id: string;
       user_id: string;
     }>(
-      `SELECT g.id, g.status, g.gate_type, g.decision_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id
+      `SELECT g.id, g.status, g.gate_type, g.decision_json, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id
        FROM loop_engine_gates g JOIN loop_engine_runs r ON r.id = g.run_id
        WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
        FOR UPDATE`,
@@ -863,6 +940,16 @@ export async function decideLoopRuntimeGate(input: {
        WHERE id = $1`,
       [input.gateId, status, JSON.stringify(input.value)],
     );
+    if (input.decision === "approve") {
+      const gatePayload = asObject(gate.payload_json);
+      const canvasArtifactKey = typeof gatePayload.canvasArtifactKey === "string" ? gatePayload.canvasArtifactKey : null;
+      if (canvasArtifactKey) {
+        await markCanvasArtifactPreview(client, {
+          runId: input.runId,
+          artifactKey: canvasArtifactKey,
+        });
+      }
+    }
     await client.query(
       `UPDATE loop_engine_runs SET context_json = $2::jsonb, status = 'running', updated_at = NOW() WHERE id = $1`,
       [input.runId, JSON.stringify(nextContext)],

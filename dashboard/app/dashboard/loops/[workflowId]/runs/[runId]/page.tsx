@@ -28,7 +28,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { CanvasEmailEditor, type CanvasEmailTemplate } from "./components/canvas-email-editor";
+import { ArtifactRenderer } from "@/components/renderers";
+import type { CanvasEmailTemplate } from "./components/canvas-email-editor";
 
 type StepAttempt = {
   id: string;
@@ -51,6 +52,7 @@ type Gate = {
 
 type Artifact = {
   id: string;
+  step_attempt_id: string | null;
   artifact_key: string;
   version: number;
   kind: string;
@@ -232,47 +234,64 @@ export default function StableLoopRunPage() {
     }
     return [...byKey.values()].sort((a, b) => a.artifact_key.localeCompare(b.artifact_key));
   }, [visibleArtifacts]);
+  const finalArtifacts = useMemo(
+    () => latestArtifacts.filter((artifact) => artifact.kind !== "structured_output"),
+    [latestArtifacts],
+  );
   const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run]);
   const selectedStep = useMemo(() => {
     if (selectedStepId) return orderedSteps.find((step) => step.id === selectedStepId) ?? null;
     return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_gate" || step.status === "running") ?? null;
   }, [orderedSteps, selectedStepId]);
-  const latestArtifact = latestArtifacts.at(-1) ?? null;
+  const selectedStepContext = selectedStepId ? selectedStep : null;
+  const latestArtifact = finalArtifacts.at(-1) ?? null;
   const selectedArtifact = useMemo(() => {
-    if (selectedArtifactId) return latestArtifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null;
-    return latestArtifact;
-  }, [latestArtifact, latestArtifacts, selectedArtifactId]);
+    if (!selectedArtifactId) return null;
+    return visibleArtifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null;
+  }, [selectedArtifactId, visibleArtifacts]);
+  const selectedArtifactStep = useMemo(() => {
+    if (!selectedArtifact?.step_attempt_id) return null;
+    return orderedSteps.find((step) => step.id === selectedArtifact.step_attempt_id) ?? null;
+  }, [orderedSteps, selectedArtifact]);
+  const activeArtifact = selectedArtifact ?? latestArtifact;
   const attemptsForSelectedStep = useMemo(() => {
-    if (!selectedStep) return [];
-    return orderedSteps.filter((step) => step.step_index === selectedStep.step_index);
-  }, [orderedSteps, selectedStep]);
+    const attemptContextStep = selectedStepContext ?? selectedArtifactStep ?? selectedStep;
+    if (!attemptContextStep) return [];
+    return orderedSteps.filter((step) => step.step_index === attemptContextStep.step_index);
+  }, [orderedSteps, selectedArtifactStep, selectedStep, selectedStepContext]);
 
-  const finalArtifactName = inferGoalArtifactName(run, selectedArtifact);
+  const finalArtifactName = inferGoalArtifactName(run, activeArtifact);
   const activeCanvasArtifact = useMemo(() => {
     const gateCanvasKey = typeof pendingGate?.payload_json.canvasArtifactKey === "string"
       ? pendingGate.payload_json.canvasArtifactKey
       : null;
     if (gateCanvasKey) {
-      const fromGate = latestArtifacts.find((artifact) => artifact.artifact_key === gateCanvasKey);
+      const fromGate = finalArtifacts.find((artifact) => artifact.artifact_key === gateCanvasKey);
       if (fromGate) return fromGate;
     }
-    if (selectedArtifact?.kind === "canvas_email") return selectedArtifact;
+    if (selectedArtifact?.kind === "canvas_email" || selectedArtifact?.kind === "canvas_preview") return selectedArtifact;
     if (selectedArtifact) {
-      const paired = latestArtifacts.find((artifact) => artifact.artifact_key === `${selectedArtifact.artifact_key}:canvas.email`);
+      const paired = finalArtifacts.find(
+        (artifact) =>
+          artifact.artifact_key === `${selectedArtifact.artifact_key}:canvas.email` ||
+          artifact.artifact_key === `${selectedArtifact.artifact_key}:canvas.preview`,
+      );
       if (paired) return paired;
     }
-    return latestArtifacts.find((artifact) => artifact.kind === "canvas_email") ?? null;
-  }, [latestArtifacts, pendingGate, selectedArtifact]);
+    return finalArtifacts.find(
+      (artifact) => artifact.kind === "canvas_email" || artifact.kind === "canvas_preview",
+    ) ?? null;
+  }, [finalArtifacts, pendingGate, selectedArtifact]);
   const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
   const centerTitle = inspectingAgentOutput
     ? `${selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id} output`
-    : selectedArtifact
+    : activeArtifact
       ? `${finalArtifactName} artifact`
       : `${finalArtifactName} artifact`;
   const centerBody = inspectingAgentOutput
     ? getStepText(selectedStep)
-    : selectedArtifact?.body || pendingGate?.payload_json.result?.text || getStepText(selectedStep);
+    : activeArtifact?.body || pendingGate?.payload_json.result?.text || getStepText(selectedStep);
   const contextEntries = readContextEntries(run?.context);
   const doneSteps = latestSteps.filter((step) => step.status === "succeeded").length;
   const gateHeading = pendingGate
@@ -280,6 +299,30 @@ export default function StableLoopRunPage() {
       ? "Input is needed to continue"
       : `${label(pendingGate.gate_type)} is ready for approval`
     : null;
+  const artifactPanelArtifacts = useMemo(() => {
+    if (selectedStepContext) {
+      const attemptIds = new Set(attemptsForSelectedStep.map((attempt) => attempt.id));
+      return visibleArtifacts
+        .filter((artifact) => artifact.step_attempt_id ? attemptIds.has(artifact.step_attempt_id) : false)
+        .sort((a, b) => a.artifact_key.localeCompare(b.artifact_key) || b.version - a.version);
+    }
+    if (selectedArtifact) {
+      return visibleArtifacts
+        .filter((artifact) => artifact.artifact_key === selectedArtifact.artifact_key)
+        .sort((a, b) => b.version - a.version);
+    }
+    return finalArtifacts;
+  }, [attemptsForSelectedStep, finalArtifacts, selectedArtifact, selectedStepContext, visibleArtifacts]);
+  const artifactPanelTitle = selectedStepContext
+    ? `${selectedStepContext.agent_snapshot?.name ?? selectedStepContext.agent_id} artifacts`
+    : selectedArtifact
+      ? `${inferGoalArtifactName(run, selectedArtifact)} artifact`
+      : `${finalArtifactName} artifact`;
+  const artifactPanelDescription = selectedStepContext
+    ? "Artifacts produced by the selected step and its attempts."
+    : selectedArtifact
+      ? `Versions of ${selectedArtifact.artifact_key}.`
+      : "This is the run result. Agent rows are intermediate work; the artifact is the reviewed end result.";
 
   async function post(path: string, body?: Record<string, unknown>) {
     setBusy(path);
@@ -435,7 +478,7 @@ export default function StableLoopRunPage() {
                 <CardContent className="p-7">
                     <TabsContent value="output" className="mt-0">
                       <div className="rounded-2xl border bg-white p-7 shadow-sm">
-                        {selectedStep?.status === "waiting_for_gate" || pendingGate ? (
+                        {pendingGate ? (
                           <div className="mb-6 flex items-start gap-4 rounded-2xl border border-amber-100 bg-amber-50 p-4">
                             <div className="grid size-12 place-items-center rounded-xl bg-amber-100 text-amber-700">
                               <ShieldCheck className="size-6" />
@@ -452,12 +495,18 @@ export default function StableLoopRunPage() {
                           </div>
                         ) : null}
 
-                        {activeCanvasArtifact && activeCanvasTemplate ? (
-                          <CanvasEmailEditor
-                            artifactKey={activeCanvasArtifact.artifact_key}
-                            template={activeCanvasTemplate}
+                        {inspectingAgentOutput ? (
+                          <div className="prose prose-slate max-w-none text-[16px] leading-7">
+                            <Streamdown>{centerBody}</Streamdown>
+                          </div>
+                        ) : activeCanvasArtifact && activeCanvasTemplate ? (
+                          <ArtifactRenderer
+                            artifact={activeCanvasArtifact}
+                            runId={runId}
                             saving={busy?.includes("/canvas/email") ?? false}
-                            onSave={(value) => saveCanvasEmail(activeCanvasArtifact, value)}
+                            onSave={async (data) => {
+                              await saveCanvasEmail(activeCanvasArtifact, data as Parameters<typeof saveCanvasEmail>[1]);
+                            }}
                           />
                         ) : centerBody ? (
                           <div className="prose prose-slate max-w-none text-[16px] leading-7">
@@ -512,12 +561,12 @@ export default function StableLoopRunPage() {
                     <TabsContent value="artifact" className="mt-0">
                       <div className="space-y-4">
                         <div className="rounded-2xl border border-sky-100 bg-sky-50 p-5">
-                          <h3 className="text-lg font-extrabold text-[#172139]">{finalArtifactName} artifact</h3>
+                          <h3 className="text-lg font-extrabold text-[#172139]">{artifactPanelTitle}</h3>
                           <p className="mt-1 text-sm font-medium leading-6 text-[#64718a]">
-                            This is the run result. Agent rows are intermediate work; the artifact is the reviewed end result.
+                            {artifactPanelDescription}
                           </p>
                         </div>
-                        {latestArtifacts.map((artifact) => (
+                        {artifactPanelArtifacts.map((artifact) => (
                           <button
                             key={artifact.id}
                             onClick={() => {
@@ -536,9 +585,9 @@ export default function StableLoopRunPage() {
                             </div>
                           </button>
                         ))}
-                        {latestArtifacts.length === 0 ? (
+                        {artifactPanelArtifacts.length === 0 ? (
                           <div className="grid min-h-[360px] place-items-center rounded-2xl border border-dashed bg-slate-50 p-8 text-sm text-slate-500">
-                            No {finalArtifactName.toLowerCase()} artifact yet.
+                            No artifacts found for this selection.
                           </div>
                         ) : null}
                       </div>
@@ -554,7 +603,7 @@ export default function StableLoopRunPage() {
                 <CardTitle className="text-[20px] font-extrabold">Final result</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 p-4">
-                {latestArtifacts.map((artifact) => (
+                {finalArtifacts.map((artifact) => (
                   <button
                     key={artifact.id}
                     onClick={() => {
@@ -576,7 +625,7 @@ export default function StableLoopRunPage() {
                     </div>
                   </button>
                 ))}
-                {latestArtifacts.length === 0 ? (
+                {finalArtifacts.length === 0 ? (
                   <p className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">No {finalArtifactName.toLowerCase()} artifact yet.</p>
                 ) : null}
               </CardContent>

@@ -72,7 +72,7 @@ export const loopToolAssignmentSchema = z.object({
 
 export type LoopToolAssignment = z.infer<typeof loopToolAssignmentSchema>;
 
-export const loopRenderTargetSchema = z.enum(["canvas.email"]);
+export const loopRenderTargetSchema = z.enum(["canvas.email", "canvas.preview"]);
 export type LoopRenderTarget = z.infer<typeof loopRenderTargetSchema>;
 
 /** One specialist agent in a run roster or task row. */

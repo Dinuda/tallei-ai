@@ -34,7 +34,7 @@ test("stable runtime accepts a v3 artifact-only definition", () => {
   assert.equal(runtimeDefinitionSchema.parse(stableDefinition()).engineVersion, "loop_engine_v3");
 });
 
-test("stable runtime accepts canvas.email as a render target, not a tool", () => {
+test("stable runtime accepts canvas.email and canvas.preview as a render target, not a tool", () => {
   const parsed = runtimeDefinitionSchema.parse({
     ...stableDefinition(),
     agentGraph: {
@@ -47,6 +47,16 @@ test("stable runtime accepts canvas.email as a render target, not a tool", () =>
   });
   assert.equal(parsed.agentGraph?.children[0]?.renderTarget, "canvas.email");
   assert.equal(listLoopTools().some((tool) => tool.ref === "canvas.email"), false);
+  assert.equal(runtimeDefinitionSchema.safeParse({
+    ...stableDefinition(),
+    agentGraph: {
+      ...stableDefinition().agentGraph,
+      children: [{
+        ...stableDefinition().agentGraph.children[0],
+        renderTarget: "canvas.preview",
+      }],
+    },
+  }).success, true);
   assert.equal(runtimeDefinitionSchema.safeParse({
     ...stableDefinition(),
     agentGraph: {
