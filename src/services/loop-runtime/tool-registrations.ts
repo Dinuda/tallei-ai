@@ -26,6 +26,8 @@ registerToolHandler("internal.memory_search", async (ctx: ToolHandlerContext) =>
       confidence: result.confidence,
       rejectedCount: result.rejectedCount,
       noEvidenceReason: result.noEvidenceReason,
+      usage: result.usage,
+      trace: result.trace,
       sources: result.sources.map((memory) => ({
         id: memory.id,
         text: memory.text,

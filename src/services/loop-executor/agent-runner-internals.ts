@@ -4,6 +4,8 @@
  */
 
 import { loopExecutorOpenAiChat } from "./openai-chat.js";
+import { emptyCleanupAiUsage, recordCleanupAiUsage } from "../../orchestration/memory-cleanup/usage.js";
+import type { CleanupAiUsage } from "../../orchestration/memory-cleanup/types.js";
 
 export function readGatewaySearchConfig(raw: unknown) {
   const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
@@ -114,7 +116,12 @@ export async function runExaWebSearch(input: { goal: string; task: string; confi
   return { text, model: "exa-search", provider: "exa_web_search", sources: results };
 }
 
-export async function completeText(input: { system: string; user: string; maxTokens?: number }): Promise<string> {
+export async function completeText(input: { system: string; user: string; maxTokens?: number }): Promise<{
+  text: string;
+  model: string;
+  finishReason: string | null;
+  usage: CleanupAiUsage;
+}> {
   const response = await withAbortTimeout(readLoopAgentTimeoutMs(), (signal) => loopExecutorOpenAiChat({
     messages: [{ role: "system", content: input.system }, { role: "user", content: input.user }],
     temperature: 1,
@@ -128,5 +135,30 @@ export async function completeText(input: { system: string; user: string; maxTok
       : "";
     throw new Error(`Loop agent LLM returned an empty response (model=${response.model}, finish_reason=${response.finishReason ?? "unknown"}${usage})`);
   }
-  return text;
+  const usage = emptyCleanupAiUsage();
+  recordCleanupAiUsage(
+    usage,
+    {
+      messages: [
+        { role: "system", content: input.system },
+        { role: "user", content: input.user },
+      ],
+      maxTokens: input.maxTokens ?? 1600,
+    } as never,
+    {
+      text: response.text,
+      model: response.model,
+      finishReason: response.finishReason,
+      usage: response.usage,
+    } as never,
+  );
+  return {
+    text,
+    model: response.model,
+    finishReason: response.finishReason,
+    usage: {
+      ...usage,
+      estimatedCostUsd: Number(usage.estimatedCostUsd.toFixed(6)),
+    } as CleanupAiUsage,
+  };
 }

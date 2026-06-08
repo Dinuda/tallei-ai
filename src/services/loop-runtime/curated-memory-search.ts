@@ -5,19 +5,84 @@ import { embedText } from "../../infrastructure/cache/embedding-cache.js";
 import { decryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
 import { MemoryRepository, type MemoryRecordRow } from "../../infrastructure/repositories/memory.repository.js";
 import { VectorRepository } from "../../infrastructure/repositories/vector.repository.js";
+import { emptyCleanupAiUsage, recordCleanupAiUsage } from "../../orchestration/memory-cleanup/usage.js";
+import type { CleanupAiUsage } from "../../orchestration/memory-cleanup/types.js";
 import type { LoopRunAgent } from "../loop-executor/types.js";
 import { loopExecutorOpenAiChat } from "../loop-executor/openai-chat.js";
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
 
-const MAX_PLAN_QUERIES = 5;
-const MIN_PLAN_QUERIES = 3;
-const MAX_CANDIDATES = 30;
+const MAX_PLAN_QUERIES = 4;
+const MAX_CANDIDATES = 24;
 const MAX_ACCEPTED = 8;
-const MAX_CANDIDATE_TEXT_CHARS = 900;
-const VECTOR_RESULTS_PER_QUERY = 10;
-const LEXICAL_RESULTS_PER_QUERY = 8;
+const LLM_VALIDATION_CANDIDATES = 8;
+const MAX_VALIDATION_TEXT_CHARS = 700;
+const VECTOR_RESULTS_PER_QUERY = 14;
+const BM25_RESULTS_PER_QUERY = 16;
+const ENTITY_RESULTS_PER_QUERY = 12;
+const RRF_K = 60;
+const MIN_ACCEPT_SCORE = 0.18;
+const MIN_ACCEPT_SIMILARITY = 0.22;
+const DEDUP_SIMILARITY_THRESHOLD = 0.86;
+
+const STOP_WORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "agent",
+  "all",
+  "also",
+  "and",
+  "any",
+  "are",
+  "ask",
+  "been",
+  "before",
+  "blog",
+  "can",
+  "customer",
+  "draft",
+  "email",
+  "for",
+  "from",
+  "get",
+  "has",
+  "have",
+  "how",
+  "input",
+  "into",
+  "internal",
+  "loop",
+  "memory",
+  "not",
+  "now",
+  "only",
+  "output",
+  "past",
+  "please",
+  "post",
+  "product",
+  "provide",
+  "run",
+  "search",
+  "sync",
+  "task",
+  "that",
+  "the",
+  "their",
+  "them",
+  "this",
+  "to",
+  "update",
+  "updates",
+  "user",
+  "what",
+  "when",
+  "with",
+  "workflow",
+  "write",
+]);
 
 const evidenceRoleSchema = z.enum([
   "past_update",
@@ -63,11 +128,59 @@ export interface CuratedMemorySearchSource {
   metadata: Record<string, unknown>;
 }
 
+type CandidateMatch = {
+  kind: "vector" | "bm25" | "entity";
+  query: string;
+  score: number;
+  rank: number;
+};
+
+export interface CuratedMemorySearchTrace {
+  query: string;
+  queryPlan: CuratedMemoryQueryPlan;
+  retrieval: {
+    mode: "deterministic_hybrid";
+    temporalPolicy: BlogCyclePolicy;
+    vectorQueries: Array<{
+      query: string;
+      hitCount: number;
+      topMatches: Array<{ id: string; score: number }>;
+    }>;
+    lexicalMatchCount: number;
+    entityMatchCount: number;
+    mergedCandidateCount: number;
+    acceptedScoreFloor: number;
+    acceptedSimilarityFloor: number;
+  };
+  candidates: Array<{
+    id: string;
+    text: string;
+    score: number;
+    similarity: number;
+    metadata: Record<string, unknown>;
+    matches: CandidateMatch[];
+    accepted: boolean;
+    acceptedConfidence?: number;
+    acceptedReason?: string;
+    evidenceRole?: CuratedMemoryEvidenceRole;
+  }>;
+  validation: {
+    method: "llm_shortlist" | "deterministic_hybrid" | "llm_unavailable_fallback";
+    acceptedCount: number;
+    acceptedIds: string[];
+    rejectedCount: number;
+    confidence: "high" | "medium" | "low" | "none";
+    noEvidenceReason?: string;
+  };
+}
+
 export interface CuratedMemorySearchResult {
   queryPlan: CuratedMemoryQueryPlan;
   sources: CuratedMemorySearchSource[];
   rejectedCount: number;
   confidence: "high" | "medium" | "low" | "none";
+  usage: CleanupAiUsage;
+  trace: CuratedMemorySearchTrace;
   noEvidenceReason?: string;
 }
 
@@ -78,13 +191,49 @@ export interface CuratedMemorySearchInput {
   configuredQuery?: string | null;
   workflowTitle?: string;
   priorComments?: Array<{ author: string; body: string }>;
+  now?: Date;
 }
 
 interface CandidateMemory {
   id: string;
   text: string;
   score: number;
+  similarity: number;
+  matches: CandidateMatch[];
   metadata: Record<string, unknown>;
+}
+
+interface DecryptedMemory {
+  id: string;
+  text: string;
+  row: MemoryRecordRow;
+  metadata: Record<string, unknown>;
+}
+
+interface VectorCandidateResult {
+  hitsById: Map<string, CandidateMatch[]>;
+  vectorQueries: CuratedMemorySearchTrace["retrieval"]["vectorQueries"];
+}
+
+interface Bm25Doc {
+  id: string;
+  tokens: string[];
+  tf: Map<string, number>;
+}
+
+interface Bm25Index {
+  docs: Bm25Doc[];
+  df: Map<string, number>;
+  avgdl: number;
+  n: number;
+}
+
+interface BlogCyclePolicy {
+  applies: boolean;
+  currentCycleStartIso: string | null;
+  previousCycleStartIso: string | null;
+  previousCycleEndIso: string | null;
+  rule: string;
 }
 
 export interface CuratedMemorySearchDeps {
@@ -139,23 +288,24 @@ function rowMetadata(row: MemoryRecordRow): Record<string, unknown> {
   };
 }
 
-function decryptRow(
-  row: MemoryRecordRow,
-  score: number,
+function decryptRows(
+  rows: MemoryRecordRow[],
   deps: Pick<CuratedMemorySearchDeps, "decryptMemoryContent">,
-): CandidateMemory | null {
-  try {
-    const text = normalizeWhitespace(deps.decryptMemoryContent(row.content_ciphertext));
-    if (!text) return null;
-    return {
-      id: row.id,
-      text,
-      score,
-      metadata: rowMetadata(row),
-    };
-  } catch {
-    return null;
-  }
+): DecryptedMemory[] {
+  return rows.flatMap((row) => {
+    try {
+      const text = normalizeWhitespace(deps.decryptMemoryContent(row.content_ciphertext));
+      if (!text) return [];
+      return [{
+        id: row.id,
+        text,
+        row,
+        metadata: rowMetadata(row),
+      }];
+    } catch {
+      return [];
+    }
+  });
 }
 
 function tokenize(text: string): string[] {
@@ -165,244 +315,665 @@ function tokenize(text: string): string[] {
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .map((token) => token.trim())
-    .filter((token) => token.length >= 2);
+    .filter((token) => token.length >= 2 && !STOP_WORDS.has(token));
 }
 
-function lexicalScore(query: string, text: string): number {
-  const queryTokens = new Set(tokenize(query));
-  if (queryTokens.size === 0) return 0;
-  const textTokens = new Set(tokenize(text));
-  let overlap = 0;
-  for (const token of queryTokens) {
-    if (textTokens.has(token)) overlap += 1;
+function keywordTokens(text: string): string[] {
+  const counts = new Map<string, number>();
+  for (const token of tokenize(text)) {
+    counts.set(token, (counts.get(token) ?? 0) + 1);
   }
-  return overlap / queryTokens.size;
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([token]) => token);
 }
 
-function buildFallbackPlan(input: CuratedMemorySearchInput): CuratedMemoryQueryPlan {
-  const seed = normalizeWhitespace(input.configuredQuery || input.agent.task || input.goal);
-  const baseQueries = uniqueStrings([
-    seed,
-    `${seed} product updates sprint shipped in progress blockers`,
-    `${seed} customer-facing founder-style post tone`,
-    `${input.goal} ${input.workflowTitle ?? ""}`,
-  ], MAX_PLAN_QUERIES);
-  while (baseQueries.length < MIN_PLAN_QUERIES) {
-    baseQueries.push(`${seed} context ${baseQueries.length + 1}`);
+function extractEntities(text: string): string[] {
+  const entities = new Set<string>();
+  for (const match of text.matchAll(/\b[A-Z][A-Za-z0-9]*(?:[- ][A-Z][A-Za-z0-9]*){0,3}\b/g)) {
+    const value = normalizeWhitespace(match[0]);
+    if (value.length > 1 && !/^(I|The|This|That|Please|Can|What|How|When)$/.test(value)) {
+      entities.add(value);
+    }
   }
+  for (const match of text.matchAll(/`([^`]+)`|"([^"]+)"/g)) {
+    const value = normalizeWhitespace(match[1] ?? match[2] ?? "");
+    if (value) entities.add(value);
+  }
+  return [...entities].slice(0, 8);
+}
+
+function detectOutputType(input: CuratedMemorySearchInput): string {
+  const combined = `${input.goal} ${input.agent.task} ${input.agent.outputContract?.description ?? ""}`.toLowerCase();
+  if (combined.includes("blog")) return "customer_blog_post";
+  if (combined.includes("email") || combined.includes("sync")) return "internal_sync_email";
+  if (combined.includes("artifact")) return "artifact_context";
+  return "loop_run_memory_context";
+}
+
+function isThisWeekBlogRequest(input: CuratedMemorySearchInput): boolean {
+  const combined = [
+    input.configuredQuery ?? "",
+    input.workflowTitle ?? "",
+    input.goal,
+    input.agent.name,
+    input.agent.task,
+    input.agent.goal ?? "",
+    input.agent.outputContract?.description ?? "",
+  ].join(" ").toLowerCase();
+  return /\b(blog|customer-facing|customer post|product update)\b/.test(combined) &&
+    /\b(this week|weekly|this sprint|sprint)\b/.test(combined);
+}
+
+function startOfMondayWeek(input: Date): Date {
+  const out = new Date(input);
+  out.setHours(0, 0, 0, 0);
+  const day = out.getDay();
+  const daysSinceMonday = (day + 6) % 7;
+  out.setDate(out.getDate() - daysSinceMonday);
+  return out;
+}
+
+function addDays(input: Date, days: number): Date {
+  const out = new Date(input);
+  out.setDate(out.getDate() + days);
+  return out;
+}
+
+function buildBlogCyclePolicy(input: CuratedMemorySearchInput): BlogCyclePolicy {
+  if (!isThisWeekBlogRequest(input)) {
+    return {
+      applies: false,
+      currentCycleStartIso: null,
+      previousCycleStartIso: null,
+      previousCycleEndIso: null,
+      rule: "No blog-cycle constraint detected.",
+    };
+  }
+
+  const currentCycleStart = startOfMondayWeek(input.now ?? new Date());
+  const previousCycleStart = addDays(currentCycleStart, -7);
   return {
-    intent: seed,
-    outputType: "loop_run_memory_context",
-    entities: [],
-    dateHints: [],
-    queries: baseQueries,
-    requiredEvidence: ["task-relevant past work", "specific usable context"],
+    applies: true,
+    currentCycleStartIso: currentCycleStart.toISOString(),
+    previousCycleStartIso: previousCycleStart.toISOString(),
+    previousCycleEndIso: currentCycleStart.toISOString(),
+    rule:
+      "For a this-week blog/product-update run, memory search should provide prior-cycle context. " +
+      "Reject product-update memories created on or after currentCycleStart; prefer the previous completed weekly cycle. " +
+      "Reusable style, decision, and constraint memories may still pass.",
   };
 }
 
-function buildIntentPrompt(input: CuratedMemorySearchInput) {
-  const configuredQuery = input.configuredQuery ? normalizeWhitespace(input.configuredQuery) : "";
-  const priorComments = (input.priorComments ?? [])
-    .slice(-4)
-    .map((comment) => `${comment.author}: ${normalizeWhitespace(comment.body).slice(0, 500)}`)
-    .join("\n");
-
-  return [
-    "Create a focused memory retrieval plan for a loop-run memory search.",
-    "Return JSON only with keys: intent, outputType, entities, dateHints, queries, requiredEvidence.",
-    `Loop goal: ${input.goal}`,
-    `Workflow title: ${input.workflowTitle ?? "unknown"}`,
-    `Agent name: ${input.agent.name}`,
-    `Agent task: ${input.agent.task}`,
-    `Agent goal: ${input.agent.goal ?? "none"}`,
-    `Configured query: ${configuredQuery || "none"}`,
-    `Output contract: ${input.agent.outputContract?.description ?? "none"}`,
-    priorComments ? `Recent prior comments:\n${priorComments}` : "Recent prior comments: none",
-    "Rules:",
-    "- Generate 3 to 5 concise search queries.",
-    "- Include entity names and output intent words.",
-    "- Do not broaden into personal memories unless the requested output needs personal context.",
-    "- Include style/tone only when the requested output explicitly needs writing style.",
-  ].join("\n\n");
+function requiredEvidenceFor(input: CuratedMemorySearchInput): string[] {
+  const combined = `${input.goal} ${input.agent.task} ${input.agent.outputContract?.description ?? ""}`.toLowerCase();
+  const required = ["specific task-relevant context"];
+  if (/\b(shipped|progress|sprint|blocker|rollout|customer|blog|sync|update)\b/.test(combined)) {
+    required.push("past product updates or rollout context");
+  }
+  if (/\b(style|tone|voice|founder|customer-facing|copy)\b/.test(combined)) {
+    required.push("writing style or audience guidance");
+  }
+  if (/\b(constraint|must|avoid|do not|don't|approval|gate)\b/.test(combined)) {
+    required.push("constraints or decisions");
+  }
+  return required;
 }
 
-async function buildQueryPlan(
-  input: CuratedMemorySearchInput,
-  deps: Pick<CuratedMemorySearchDeps, "chat">,
-): Promise<CuratedMemoryQueryPlan> {
-  try {
-    const response = await deps.chat({
-      temperature: 0,
-      maxTokens: 900,
-      responseFormat: "json_object",
-      messages: [
-        {
-          role: "system",
-          content: "You are a precise retrieval planner. Return strict JSON and no prose.",
-        },
-        { role: "user", content: buildIntentPrompt(input) },
-      ],
-    });
-    const parsed = queryPlanSchema.parse(safeJsonParse(response.text));
-    const queries = uniqueStrings([
-      input.configuredQuery ?? "",
-      ...parsed.queries,
-    ], MAX_PLAN_QUERIES);
-    return {
-      ...parsed,
-      queries: queries.length >= MIN_PLAN_QUERIES
-        ? queries
-        : buildFallbackPlan(input).queries,
-    };
-  } catch {
-    return buildFallbackPlan(input);
+function buildQueryPlan(input: CuratedMemorySearchInput): CuratedMemoryQueryPlan {
+  const seed = normalizeWhitespace(input.configuredQuery || input.agent.task || input.goal);
+  const combined = normalizeWhitespace([
+    input.configuredQuery ?? "",
+    input.workflowTitle ?? "",
+    input.goal,
+    input.agent.name,
+    input.agent.task,
+    input.agent.goal ?? "",
+    input.agent.outputContract?.description ?? "",
+    ...(input.priorComments ?? []).slice(-2).map((comment) => comment.body),
+  ].join(" "));
+  const entities = extractEntities(combined);
+  const keywords = keywordTokens(combined).slice(0, 10);
+  const entityQuery = entities.length > 0 ? entities.slice(0, 4).join(" ") : "";
+  const keywordQuery = keywords.join(" ");
+  const queries = uniqueStrings([
+    seed,
+    [entityQuery, keywordQuery].filter(Boolean).join(" "),
+    `${seed} ${keywordQuery}`.trim(),
+    `${input.workflowTitle ?? ""} ${input.goal}`.trim(),
+  ], MAX_PLAN_QUERIES);
+
+  return queryPlanSchema.parse({
+    intent: seed,
+    outputType: detectOutputType(input),
+    entities,
+    dateHints: extractDateHints(combined),
+    queries,
+    requiredEvidence: requiredEvidenceFor(input),
+  });
+}
+
+function extractDateHints(text: string): string[] {
+  const hints = new Set<string>();
+  for (const pattern of [
+    /\bthis week\b/gi,
+    /\blast week\b/gi,
+    /\bnext week\b/gi,
+    /\bthis sprint\b/gi,
+    /\bnext sprint\b/gi,
+    /\blast sprint\b/gi,
+    /\btoday\b/gi,
+    /\byesterday\b/gi,
+  ]) {
+    for (const match of text.matchAll(pattern)) {
+      hints.add(match[0].toLowerCase());
+    }
   }
+  return [...hints];
 }
 
 async function vectorCandidates(
   auth: AuthContext,
   queries: string[],
-  deps: Pick<CuratedMemorySearchDeps, "embedText" | "vectorRepository" | "memoryRepository" | "decryptMemoryContent">,
-): Promise<CandidateMemory[]> {
-  const bestScoreById = new Map<string, number>();
+  deps: Pick<CuratedMemorySearchDeps, "embedText" | "vectorRepository">,
+): Promise<VectorCandidateResult> {
+  const hitsById = new Map<string, CandidateMatch[]>();
+  const vectorQueries: VectorCandidateResult["vectorQueries"] = [];
   for (const query of queries) {
     try {
       const vector = await deps.embedText(query);
       const hits = await deps.vectorRepository.searchVectors(auth, vector, VECTOR_RESULTS_PER_QUERY);
-      for (const hit of hits) {
-        bestScoreById.set(hit.memoryId, Math.max(bestScoreById.get(hit.memoryId) ?? 0, hit.score));
-      }
+      vectorQueries.push({
+        query,
+        hitCount: hits.length,
+        topMatches: hits.slice(0, 5).map((hit) => ({
+          id: hit.memoryId,
+          score: hit.score,
+        })),
+      });
+      hits.forEach((hit, index) => {
+        const existing = hitsById.get(hit.memoryId) ?? [];
+        existing.push({
+          kind: "vector",
+          query,
+          score: hit.score,
+          rank: index + 1,
+        });
+        hitsById.set(hit.memoryId, existing);
+      });
     } catch {
-      // Vector search is a candidate source only; lexical retrieval still covers the tool.
+      // Hybrid retrieval is best-effort; BM25/entity signals still run.
     }
   }
-
-  const ids = [...bestScoreById.keys()].slice(0, MAX_CANDIDATES);
-  const rows = await deps.memoryRepository.getByIds(auth, ids, false).catch(() => []);
-  return rows
-    .map((row) => decryptRow(row, bestScoreById.get(row.id) ?? 0, deps))
-    .filter((row): row is CandidateMemory => row !== null);
+  return { hitsById, vectorQueries };
 }
 
-async function lexicalCandidates(
-  auth: AuthContext,
-  queries: string[],
-  deps: Pick<CuratedMemorySearchDeps, "memoryRepository" | "decryptMemoryContent">,
-): Promise<CandidateMemory[]> {
-  const rows = await deps.memoryRepository.listAll(auth, { includeSuperseded: false }).catch(() => []);
-  const decrypted = rows
-    .map((row) => decryptRow(row, 0, deps))
-    .filter((row): row is CandidateMemory => row !== null);
+function buildBm25Index(docs: DecryptedMemory[]): Bm25Index {
+  const bm25Docs = docs.map((doc) => {
+    const tokens = tokenize(doc.text);
+    const tf = new Map<string, number>();
+    for (const token of tokens) {
+      tf.set(token, (tf.get(token) ?? 0) + 1);
+    }
+    return { id: doc.id, tokens, tf };
+  });
+  const df = new Map<string, number>();
+  for (const doc of bm25Docs) {
+    for (const token of doc.tf.keys()) {
+      df.set(token, (df.get(token) ?? 0) + 1);
+    }
+  }
+  const totalLength = bm25Docs.reduce((sum, doc) => sum + doc.tokens.length, 0);
+  return {
+    docs: bm25Docs,
+    df,
+    avgdl: totalLength / Math.max(1, bm25Docs.length),
+    n: bm25Docs.length,
+  };
+}
 
-  const scored: CandidateMemory[] = [];
-  for (const candidate of decrypted) {
-    const score = Math.max(...queries.map((query) => lexicalScore(query, candidate.text)), 0);
-    if (score <= 0) continue;
-    scored.push({
-      ...candidate,
-      score: Math.max(candidate.score, score),
+function bm25Search(index: Bm25Index, query: string, limit: number): Array<{ id: string; score: number }> {
+  const queryTokens = tokenize(query);
+  if (queryTokens.length === 0 || index.n === 0) return [];
+  const k1 = 1.5;
+  const b = 0.75;
+  return index.docs
+    .map((doc) => {
+      let score = 0;
+      for (const token of queryTokens) {
+        const freq = doc.tf.get(token) ?? 0;
+        if (freq === 0) continue;
+        const df = index.df.get(token) ?? 0;
+        const idf = Math.log((index.n - df + 0.5) / (df + 0.5) + 1);
+        score += idf * ((freq * (k1 + 1)) / (freq + k1 * (1 - b + b * (doc.tokens.length / index.avgdl))));
+      }
+      return { id: doc.id, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+function entitySearch(docs: DecryptedMemory[], entities: string[], query: string, limit: number): Array<{ id: string; score: number }> {
+  const normalizedEntities = entities.map((entity) => entity.toLowerCase()).filter(Boolean);
+  const queryTokens = keywordTokens(query).slice(0, 8);
+  if (normalizedEntities.length === 0 && queryTokens.length === 0) return [];
+  return docs
+    .map((doc) => {
+      const text = doc.text.toLowerCase();
+      let score = 0;
+      for (const entity of normalizedEntities) {
+        if (text.includes(entity)) score += 2;
+      }
+      for (const token of queryTokens) {
+        if (text.includes(token)) score += 0.5;
+      }
+      return { id: doc.id, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+function candidateRrfScore(matches: CandidateMatch[]): number {
+  return matches.reduce((sum, match) => sum + (1 / (RRF_K + match.rank)), 0);
+}
+
+function signalSimilarity(matches: CandidateMatch[]): number {
+  const byKind = new Map<CandidateMatch["kind"], number>();
+  for (const match of matches) {
+    byKind.set(match.kind, Math.max(byKind.get(match.kind) ?? 0, match.score));
+  }
+  const values = [...byKind.values()];
+  if (values.length === 0) return 0;
+  return Math.max(...values);
+}
+
+function ageDays(createdAtIso: unknown): number {
+  if (typeof createdAtIso !== "string") return 0;
+  const parsed = new Date(createdAtIso).getTime();
+  if (Number.isNaN(parsed)) return 0;
+  return Math.max(0, (Date.now() - parsed) / 86_400_000);
+}
+
+function metadataBoost(memory: DecryptedMemory): number {
+  const referenceCount = Number(memory.metadata.reference_count ?? 1);
+  const importance = Number(memory.metadata.importance ?? 0.6);
+  const age = ageDays(memory.metadata.createdAt);
+  const type = typeof memory.metadata.memory_type === "string" ? memory.metadata.memory_type : "";
+  const category = typeof memory.metadata.category === "string" ? memory.metadata.category : "";
+  let boost = 1;
+  boost *= 1 + Math.min(0.18, Math.log1p(Math.max(0, referenceCount)) * 0.04);
+  boost *= 1 + Math.min(0.16, Math.max(0, importance - 0.5) * 0.32);
+  if (type === "decision" || type === "lesson") boost *= 1.06;
+  if (category === "personal" || category === "identity") boost *= 0.72;
+  if ((type === "event" || type === "note") && age > 45) boost *= 0.78;
+  if (age <= 21) boost *= 1.08;
+  return boost;
+}
+
+function textSimilarity(a: string, b: string): number {
+  const aTokens = new Set(tokenize(a));
+  const bTokens = new Set(tokenize(b));
+  if (aTokens.size === 0 || bTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) overlap += 1;
+  }
+  const union = aTokens.size + bTokens.size - overlap;
+  return union > 0 ? overlap / union : 0;
+}
+
+function inferEvidenceRole(source: CuratedMemorySearchInput, memory: DecryptedMemory): CuratedMemoryEvidenceRole {
+  const combined = `${source.goal} ${source.agent.task} ${source.agent.outputContract?.description ?? ""}`.toLowerCase();
+  const text = memory.text.toLowerCase();
+  const type = typeof memory.metadata.memory_type === "string" ? memory.metadata.memory_type : "";
+  if (/\b(style|tone|voice|founder|customer-facing|copy)\b/.test(combined) && /\b(style|tone|voice|founder|customer|blog|copy)\b/.test(text)) {
+    return "style";
+  }
+  if (type === "decision" || /\b(decided|decision|approved|rejected|must|avoid|constraint)\b/.test(text)) {
+    return "decision";
+  }
+  if (/\b(blocker|must|avoid|constraint|watch|support|ops)\b/.test(text)) {
+    return "constraint";
+  }
+  if (/\b(shipped|sprint|progress|rollout|customer|blog|update|fixed|improved)\b/.test(text)) {
+    return "past_update";
+  }
+  return "project_context";
+}
+
+function parsedCreatedAt(memory: Pick<DecryptedMemory, "metadata">): Date | null {
+  const createdAt = memory.metadata.createdAt;
+  if (typeof createdAt !== "string") return null;
+  const parsed = new Date(createdAt);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function temporalDecision(input: {
+  policy: BlogCyclePolicy;
+  role: CuratedMemoryEvidenceRole;
+  memory: Pick<DecryptedMemory, "metadata" | "text">;
+}): { allowed: boolean; reason: string; bucket: "not_applicable" | "previous_cycle" | "older_prior_context" | "current_cycle_allowed" | "current_cycle_rejected" | "unknown_date" } {
+  if (!input.policy.applies) {
+    return { allowed: true, reason: "No blog-cycle temporal filter applies.", bucket: "not_applicable" };
+  }
+  const createdAt = parsedCreatedAt(input.memory);
+  if (!createdAt || !input.policy.currentCycleStartIso) {
+    return {
+      allowed: input.role === "style" || input.role === "decision" || input.role === "constraint",
+      reason: "Memory has no reliable createdAt; only reusable style, decision, or constraint evidence may pass.",
+      bucket: "unknown_date",
+    };
+  }
+  const currentCycleStart = new Date(input.policy.currentCycleStartIso);
+  const previousCycleStart = input.policy.previousCycleStartIso
+    ? new Date(input.policy.previousCycleStartIso)
+    : null;
+  const reusable = input.role === "style" || input.role === "decision" || input.role === "constraint";
+  if (createdAt >= currentCycleStart) {
+    return reusable
+      ? {
+          allowed: true,
+          reason: "Current-cycle memory accepted only because it is reusable style, decision, or constraint context.",
+          bucket: "current_cycle_allowed",
+        }
+      : {
+          allowed: false,
+          reason: "Current-cycle product/update memory rejected; this-week blog runs should use pasted sprint notes for current facts.",
+          bucket: "current_cycle_rejected",
+        };
+  }
+  if (previousCycleStart && createdAt >= previousCycleStart) {
+    return {
+      allowed: true,
+      reason: "Memory belongs to the previous completed weekly cycle.",
+      bucket: "previous_cycle",
+    };
+  }
+  return {
+    allowed: true,
+    reason: "Memory predates the current cycle and may provide prior context.",
+    bucket: "older_prior_context",
+  };
+}
+
+function buildReason(memory: DecryptedMemory, matches: CandidateMatch[]): string {
+  const kinds = [...new Set(matches.map((match) => match.kind))].join(", ");
+  const entityHits = matches.filter((match) => match.kind === "entity").length;
+  const lexicalHits = matches.filter((match) => match.kind === "bm25").length;
+  const vectorHits = matches.filter((match) => match.kind === "vector").length;
+  const parts = [`Matched by ${kinds || "hybrid ranking"}`];
+  if (entityHits > 0) parts.push(`${entityHits} entity/keyword hit${entityHits === 1 ? "" : "s"}`);
+  if (lexicalHits > 0) parts.push(`${lexicalHits} BM25 hit${lexicalHits === 1 ? "" : "s"}`);
+  if (vectorHits > 0) parts.push(`${vectorHits} vector hit${vectorHits === 1 ? "" : "s"}`);
+  const category = typeof memory.metadata.category === "string" ? memory.metadata.category : null;
+  if (category) parts.push(`category: ${category}`);
+  return `${parts.join("; ")}.`;
+}
+
+function normalizeHitScores(hits: Array<{ id: string; score: number }>): Map<string, number> {
+  const max = Math.max(0, ...hits.map((hit) => hit.score));
+  return new Map(hits.map((hit) => [hit.id, max > 0 ? hit.score / max : 0]));
+}
+
+function rankCandidates(input: {
+  run: CuratedMemorySearchInput;
+  docs: DecryptedMemory[];
+  queryPlan: CuratedMemoryQueryPlan;
+  vector: VectorCandidateResult;
+}): {
+  candidates: CandidateMemory[];
+  lexicalMatchCount: number;
+  entityMatchCount: number;
+} {
+  const docsById = new Map(input.docs.map((doc) => [doc.id, doc]));
+  const matchMap = new Map<string, CandidateMatch[]>();
+  for (const [id, matches] of input.vector.hitsById) {
+    if (docsById.has(id)) matchMap.set(id, [...matches]);
+  }
+
+  const bm25Index = buildBm25Index(input.docs);
+  let lexicalMatchCount = 0;
+  let entityMatchCount = 0;
+  for (const query of input.queryPlan.queries) {
+    const bm25Hits = bm25Search(bm25Index, query, BM25_RESULTS_PER_QUERY);
+    lexicalMatchCount += bm25Hits.length;
+    const bm25Norm = normalizeHitScores(bm25Hits);
+    bm25Hits.forEach((hit, index) => {
+      const matches = matchMap.get(hit.id) ?? [];
+      matches.push({
+        kind: "bm25",
+        query,
+        score: Number((bm25Norm.get(hit.id) ?? 0).toFixed(6)),
+        rank: index + 1,
+      });
+      matchMap.set(hit.id, matches);
+    });
+
+    const entityHits = entitySearch(input.docs, input.queryPlan.entities, query, ENTITY_RESULTS_PER_QUERY);
+    entityMatchCount += entityHits.length;
+    const entityNorm = normalizeHitScores(entityHits);
+    entityHits.forEach((hit, index) => {
+      const matches = matchMap.get(hit.id) ?? [];
+      matches.push({
+        kind: "entity",
+        query,
+        score: Number((entityNorm.get(hit.id) ?? 0).toFixed(6)),
+        rank: index + 1,
+      });
+      matchMap.set(hit.id, matches);
     });
   }
 
-  return scored
-    .sort((a, b) => b.score - a.score)
-    .slice(0, LEXICAL_RESULTS_PER_QUERY * Math.max(1, queries.length));
+  const candidates = [...matchMap.entries()].flatMap(([id, matches]) => {
+    const doc = docsById.get(id);
+    if (!doc || matches.length === 0) return [];
+    const similarity = signalSimilarity(matches);
+    const score = Number((candidateRrfScore(matches) * metadataBoost(doc) * (1 + similarity)).toFixed(6));
+    return [{
+      id,
+      text: doc.text,
+      score,
+      similarity,
+      matches: matches.sort((a, b) => a.rank - b.rank),
+      metadata: doc.metadata,
+    }];
+  });
+
+  return {
+    candidates: dedupeCandidates(
+      candidates
+        .sort((a, b) => b.score - a.score || b.similarity - a.similarity)
+        .slice(0, MAX_CANDIDATES),
+    ),
+    lexicalMatchCount,
+    entityMatchCount,
+  };
 }
 
-function mergeCandidates(candidates: CandidateMemory[]): CandidateMemory[] {
-  const byId = new Map<string, CandidateMemory>();
+function dedupeCandidates(candidates: CandidateMemory[]): CandidateMemory[] {
+  const out: CandidateMemory[] = [];
   for (const candidate of candidates) {
-    const existing = byId.get(candidate.id);
-    if (!existing || candidate.score > existing.score) {
-      byId.set(candidate.id, candidate);
-    }
+    const duplicate = out.some((existing) => textSimilarity(existing.text, candidate.text) > DEDUP_SIMILARITY_THRESHOLD);
+    if (!duplicate) out.push(candidate);
   }
-  return [...byId.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_CANDIDATES);
+  return out;
+}
+
+function acceptedSources(input: {
+  run: CuratedMemorySearchInput;
+  candidates: CandidateMemory[];
+  temporalPolicy: BlogCyclePolicy;
+}): CuratedMemorySearchSource[] {
+  return input.candidates
+    .filter((candidate) => candidate.score >= MIN_ACCEPT_SCORE && candidate.similarity >= MIN_ACCEPT_SIMILARITY)
+    .flatMap((candidate) => {
+      const syntheticMemory: DecryptedMemory = {
+        id: candidate.id,
+        text: candidate.text,
+        row: null as never,
+        metadata: candidate.metadata,
+      };
+      const evidenceRole = inferEvidenceRole(input.run, syntheticMemory);
+      const temporal = temporalDecision({
+        policy: input.temporalPolicy,
+        role: evidenceRole,
+        memory: syntheticMemory,
+      });
+      if (!temporal.allowed) return [];
+      const confidence = Math.min(0.96, Math.max(0.45, candidate.similarity * 0.72 + candidate.score * 1.7));
+      return [{
+        id: candidate.id,
+        text: candidate.text,
+        score: candidate.score,
+        confidence: Number(confidence.toFixed(3)),
+        reason: `${buildReason(syntheticMemory, candidate.matches)} ${temporal.reason}`,
+        evidenceRole,
+        metadata: {
+          ...candidate.metadata,
+          temporalBucket: temporal.bucket,
+          temporalReason: temporal.reason,
+        },
+      }];
+    })
+    .slice(0, MAX_ACCEPTED);
+}
+
+function confidenceFromSources(sources: CuratedMemorySearchSource[]): "high" | "medium" | "low" | "none" {
+  if (sources.length === 0) return "none";
+  const best = Math.max(...sources.map((source) => source.confidence));
+  if (best >= 0.78) return "high";
+  if (best >= 0.58) return "medium";
+  return "low";
+}
+
+function noEvidenceReasonFor(candidates: CandidateMemory[]): string {
+  if (candidates.length === 0) {
+    return "No vector, BM25, or entity candidates matched the run intent.";
+  }
+  const best = candidates[0];
+  return `No candidate crossed the deterministic relevance floor. Best score ${best?.score ?? 0}, similarity ${best?.similarity ?? 0}.`;
 }
 
 function buildValidationPrompt(input: {
   run: CuratedMemorySearchInput;
   queryPlan: CuratedMemoryQueryPlan;
-  candidates: CandidateMemory[];
+  temporalPolicy: BlogCyclePolicy;
+  sources: CuratedMemorySearchSource[];
 }) {
-  const candidates = input.candidates.map((candidate, index) => ({
+  const candidates = input.sources.slice(0, LLM_VALIDATION_CANDIDATES).map((source, index) => ({
     index: index + 1,
-    id: candidate.id,
-    score: candidate.score,
+    id: source.id,
+    score: source.score,
+    confidence: source.confidence,
+    evidenceRole: source.evidenceRole,
+    reason: source.reason,
     metadata: {
-      memory_type: candidate.metadata.memory_type,
-      category: candidate.metadata.category,
-      platform: candidate.metadata.platform,
-      createdAt: candidate.metadata.createdAt,
+      createdAt: source.metadata.createdAt,
+      memory_type: source.metadata.memory_type,
+      category: source.metadata.category,
+      temporalBucket: source.metadata.temporalBucket,
+      temporalReason: source.metadata.temporalReason,
     },
-    text: candidate.text.slice(0, MAX_CANDIDATE_TEXT_CHARS),
+    text: source.text.slice(0, MAX_VALIDATION_TEXT_CHARS),
   }));
 
   return [
-    "Validate memory candidates for this loop run. Return JSON only.",
-    "Accepted memories must directly help produce the expected output.",
-    "Reject unrelated personal memories, stale one-off chats, broad preferences, and style-only memories unless the output explicitly requires style/tone.",
+    "Fact-check this shortlisted memory set for a loop run. Return JSON only.",
+    "Only accept memories that directly help the requested output. Keep useful excerpts short and faithful.",
+    "Reject memories that are merely semantically similar, personal/unrelated, stale for the requested task, or current-cycle product facts that should come from pasted sprint notes.",
+    "For this-week blog/product-update runs, enforce the temporal policy exactly unless the memory is reusable style, decision, or constraint context.",
     "Use evidenceRole values only from: past_update, style, decision, project_context, constraint.",
     "Return shape: { accepted: [{ id, excerpt, reason, evidenceRole, confidence }], rejectedIds, confidence, noEvidenceReason }.",
     `Loop goal: ${input.run.goal}`,
+    `Workflow title: ${input.run.workflowTitle ?? "unknown"}`,
     `Agent task: ${input.run.agent.task}`,
     `Agent output contract: ${input.run.agent.outputContract?.description ?? "none"}`,
     `Retrieval plan: ${JSON.stringify(input.queryPlan)}`,
-    `Candidates: ${JSON.stringify(candidates)}`,
+    `Temporal policy: ${JSON.stringify(input.temporalPolicy)}`,
+    `Shortlisted candidates: ${JSON.stringify(candidates)}`,
   ].join("\n\n");
 }
 
-async function validateCandidates(
-  input: CuratedMemorySearchInput,
-  queryPlan: CuratedMemoryQueryPlan,
-  candidates: CandidateMemory[],
-  deps: Pick<CuratedMemorySearchDeps, "chat">,
-) {
-  if (candidates.length === 0) {
-    return validationSchema.parse({
-      accepted: [],
-      rejectedIds: [],
+async function validateShortlistedSources(input: {
+  run: CuratedMemorySearchInput;
+  queryPlan: CuratedMemoryQueryPlan;
+  temporalPolicy: BlogCyclePolicy;
+  sources: CuratedMemorySearchSource[];
+  deps: Pick<CuratedMemorySearchDeps, "chat">;
+  usage: CleanupAiUsage;
+}): Promise<{
+  method: CuratedMemorySearchTrace["validation"]["method"];
+  sources: CuratedMemorySearchSource[];
+  confidence: "high" | "medium" | "low" | "none";
+  rejectedCount: number;
+  noEvidenceReason?: string;
+}> {
+  if (input.sources.length === 0) {
+    return {
+      method: "deterministic_hybrid",
+      sources: [],
       confidence: "none",
-      noEvidenceReason: "No vector or lexical candidates matched the run intent.",
-    });
+      rejectedCount: 0,
+    };
   }
+
+  const prompt = buildValidationPrompt(input);
+  const request = {
+    temperature: 0,
+    maxTokens: 1200,
+    responseFormat: "json_object" as const,
+    messages: [
+      {
+        role: "system" as const,
+        content:
+          "You are a strict memory relevance and temporal fact checker. Prefer rejecting weak evidence over accepting noisy memory.",
+      },
+      { role: "user" as const, content: prompt },
+    ],
+  };
 
   try {
-    const response = await deps.chat({
-      temperature: 0,
-      maxTokens: 1600,
-      responseFormat: "json_object",
-      messages: [
-        {
-          role: "system",
-          content: "You are a strict memory evidence validator. Prefer rejecting weak evidence over accepting noisy memory.",
-        },
-        { role: "user", content: buildValidationPrompt({ run: input, queryPlan, candidates }) },
-      ],
-    });
-    return validationSchema.parse(safeJsonParse(response.text));
+    const response = await input.deps.chat(request);
+    recordCleanupAiUsage(input.usage, request as never, response as never);
+    const validation = validationSchema.parse(safeJsonParse(response.text));
+    const sourceById = new Map(input.sources.map((source) => [source.id, source]));
+    const acceptedSources = validation.accepted.flatMap((accepted) => {
+      const source = sourceById.get(accepted.id);
+      if (!source) return [];
+      return [{
+        ...source,
+        text: normalizeWhitespace(accepted.excerpt || source.text),
+        confidence: accepted.confidence,
+        reason: accepted.reason,
+        evidenceRole: accepted.evidenceRole,
+      }];
+    }).slice(0, MAX_ACCEPTED);
+    const acceptedIds = new Set(acceptedSources.map((source) => source.id));
+    const rejectedCount = Math.max(
+      validation.rejectedIds.length,
+      input.sources.filter((source) => !acceptedIds.has(source.id)).length,
+    );
+    const confidence = confidenceFromSources(acceptedSources);
+    return {
+      method: "llm_shortlist",
+      sources: acceptedSources,
+      confidence: acceptedSources.length > 0 ? (validation.confidence === "none" ? confidence : validation.confidence) : "none",
+      rejectedCount,
+      ...(acceptedSources.length === 0
+        ? { noEvidenceReason: validation.noEvidenceReason ?? "No shortlisted memories passed LLM validation." }
+        : {}),
+    };
   } catch {
-    return validationSchema.parse({
-      accepted: [],
-      rejectedIds: candidates.map((candidate) => candidate.id),
-      confidence: "none",
-      noEvidenceReason: "Memory validation was unavailable, so no unvalidated memories were returned.",
-    });
+    return {
+      method: "llm_unavailable_fallback",
+      sources: input.sources,
+      confidence: confidenceFromSources(input.sources),
+      rejectedCount: 0,
+      noEvidenceReason: undefined,
+    };
   }
-}
-
-function confidenceFromSources(
-  requested: "high" | "medium" | "low" | "none",
-  sources: CuratedMemorySearchSource[],
-): "high" | "medium" | "low" | "none" {
-  if (sources.length === 0) return "none";
-  if (requested !== "none") return requested;
-  const best = Math.max(...sources.map((source) => source.confidence));
-  if (best >= 0.8) return "high";
-  if (best >= 0.55) return "medium";
-  return "low";
 }
 
 export async function runCuratedMemorySearch(
@@ -415,42 +986,33 @@ export async function runCuratedMemorySearch(
     chat: loopExecutorOpenAiChat,
   },
 ): Promise<CuratedMemorySearchResult> {
-  const queryPlan = await buildQueryPlan(input, deps);
+  const usage = emptyCleanupAiUsage();
+  const queryPlan = buildQueryPlan(input);
+  const temporalPolicy = buildBlogCyclePolicy(input);
   const queries = uniqueStrings(queryPlan.queries, MAX_PLAN_QUERIES);
-  const candidates = mergeCandidates([
-    ...await vectorCandidates(input.auth, queries, deps),
-    ...await lexicalCandidates(input.auth, queries, deps),
+  const [rows, vectorRetrieval] = await Promise.all([
+    deps.memoryRepository.listAll(input.auth, { includeSuperseded: false }).catch(() => []),
+    vectorCandidates(input.auth, queries, deps),
   ]);
-  const validation = await validateCandidates(input, queryPlan, candidates, deps);
-  const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
-  const seen = new Set<string>();
-  const sources = validation.accepted
-    .map((accepted) => {
-      const candidate = candidateById.get(accepted.id);
-      if (!candidate || seen.has(candidate.id)) return null;
-      seen.add(candidate.id);
-      return {
-        id: candidate.id,
-        text: normalizeWhitespace(accepted.excerpt || candidate.text),
-        score: candidate.score,
-        confidence: accepted.confidence,
-        reason: accepted.reason,
-        evidenceRole: accepted.evidenceRole,
-        metadata: candidate.metadata,
-      };
-    })
-    .filter((source): source is CuratedMemorySearchSource => source !== null)
-    .sort((a, b) => {
-      if (b.confidence !== a.confidence) return b.confidence - a.confidence;
-      return b.score - a.score;
-    })
-    .slice(0, MAX_ACCEPTED);
-
-  const rejectedIds = new Set(validation.rejectedIds);
-  const rejectedCount = Math.max(
-    rejectedIds.size,
-    candidates.length - sources.length,
-  );
+  const docs = decryptRows(rows, deps);
+  const ranked = rankCandidates({
+    run: input,
+    docs,
+    queryPlan: {
+      ...queryPlan,
+      queries,
+    },
+    vector: vectorRetrieval,
+  });
+  const sources = acceptedSources({
+    run: input,
+    candidates: ranked.candidates,
+    temporalPolicy,
+  });
+  const confidence = confidenceFromSources(sources);
+  const rejectedCount = Math.max(0, ranked.candidates.length - sources.length);
+  const acceptedById = new Map(sources.map((source) => [source.id, source]));
+  const noEvidenceReason = sources.length === 0 ? noEvidenceReasonFor(ranked.candidates) : undefined;
 
   return {
     queryPlan: {
@@ -459,9 +1021,53 @@ export async function runCuratedMemorySearch(
     },
     sources,
     rejectedCount,
-    confidence: confidenceFromSources(validation.confidence, sources),
-    ...(sources.length === 0
-      ? { noEvidenceReason: validation.noEvidenceReason ?? "No candidate memories passed validation." }
-      : {}),
+    confidence,
+    usage: {
+      ...usage,
+      estimatedCostUsd: Number(usage.estimatedCostUsd.toFixed(6)),
+    },
+    trace: {
+      query: normalizeWhitespace(input.configuredQuery || input.agent.task || input.goal),
+      queryPlan: {
+        ...queryPlan,
+        queries,
+      },
+      retrieval: {
+        mode: "deterministic_hybrid",
+        temporalPolicy,
+        vectorQueries: vectorRetrieval.vectorQueries,
+        lexicalMatchCount: ranked.lexicalMatchCount,
+        entityMatchCount: ranked.entityMatchCount,
+        mergedCandidateCount: ranked.candidates.length,
+        acceptedScoreFloor: MIN_ACCEPT_SCORE,
+        acceptedSimilarityFloor: MIN_ACCEPT_SIMILARITY,
+      },
+      candidates: ranked.candidates.map((candidate) => {
+        const accepted = acceptedById.get(candidate.id) ?? null;
+        return {
+          id: candidate.id,
+          text: candidate.text,
+          score: candidate.score,
+          similarity: Number(candidate.similarity.toFixed(6)),
+          metadata: candidate.metadata,
+          matches: candidate.matches,
+          accepted: Boolean(accepted),
+          ...(accepted ? {
+            acceptedConfidence: accepted.confidence,
+            acceptedReason: accepted.reason,
+            evidenceRole: accepted.evidenceRole,
+          } : {}),
+        };
+      }),
+      validation: {
+        method: "deterministic_hybrid",
+        acceptedCount: sources.length,
+        acceptedIds: sources.map((source) => source.id),
+        rejectedCount,
+        confidence,
+        ...(noEvidenceReason ? { noEvidenceReason } : {}),
+      },
+    },
+    ...(noEvidenceReason ? { noEvidenceReason } : {}),
   };
 }

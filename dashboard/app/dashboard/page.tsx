@@ -308,6 +308,16 @@ function resolveMemoryPlatform(metadata: Record<string, unknown> | undefined): P
   return normalizePlatform(metadata.platform);
 }
 
+function resolveImportSourceLabel(metadata: Record<string, unknown> | undefined): string | null {
+  if (!metadata || metadata.source_import !== true) return null;
+  const raw =
+    metadata.source_import_mode ??
+    metadata.source_import_source ??
+    metadata.source_platform ??
+    metadata.platform;
+  return typeof raw === "string" && raw.trim() ? titleCase(raw) : "Imported";
+}
+
 function normalizeMemoryType(raw: unknown): MemoryType {
   if (typeof raw !== "string") return "unknown";
   const value = raw.trim().toLowerCase();
@@ -774,7 +784,8 @@ export default function DashboardMemoriesPage() {
           category,
           keywords: extractKeywords(memory.text || ""),
           importance: importanceScore(memory),
-          sourceImport
+          sourceImport,
+          importSourceLabel: resolveImportSourceLabel(metadata),
         };
       })
       .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));

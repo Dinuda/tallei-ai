@@ -13,7 +13,6 @@ import {
   hasOnlyLlmTools,
 } from "./tool-catalog.js";
 import { getToolHandler, type ToolHandlerContext } from "./tool-handlers.js";
-import { loopExecutorOpenAiModel } from "./openai-chat.js";
 import { completeText } from "./agent-runner-internals.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
@@ -153,17 +152,18 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     }
   }
 
-  const text = await completeText({ system, user, maxTokens: 1800 });
+  const llmResult = await completeText({ system, user, maxTokens: 1800 });
   return {
-    text,
+    text: llmResult.text,
     data: {
-      model: loopExecutorOpenAiModel(),
+      model: llmResult.model,
       mode: hasOnlyLlmTools(input.assignedTools) ? "llm_only" : "tool_assisted",
       toolRefs: input.assignedTools.map((t) => t.ref),
       actionableToolRefs: actionableToolRefs(input.assignedTools),
       toolsUsed,
+      usage: llmResult.usage,
       llmInput: { system, user },
-      llmOutput: text,
+      llmOutput: llmResult.text,
     },
     draft,
   };

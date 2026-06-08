@@ -281,9 +281,20 @@ function gatePayloadForResult(
       const item = asObject(row);
       const id = typeof item.id === "string" ? item.id : "";
       const excerpt = typeof item.text === "string" ? item.text : typeof item.excerpt === "string" ? item.excerpt : "";
-      return id && excerpt ? { id, excerpt, include: true } : null;
+      return id && excerpt
+        ? {
+            id,
+            excerpt,
+            include: true,
+            ...(typeof item.score === "number" ? { score: item.score } : {}),
+            ...(typeof item.confidence === "number" ? { confidence: item.confidence } : {}),
+            ...(typeof item.reason === "string" ? { reason: item.reason } : {}),
+            ...(typeof item.evidenceRole === "string" ? { evidenceRole: item.evidenceRole } : {}),
+            ...(asObject(item.metadata) ? { metadata: asObject(item.metadata) } : {}),
+          }
+        : null;
     })
-    .filter((row): row is { id: string; excerpt: string; include: boolean } => row !== null);
+    .filter((row): row is { id: string; excerpt: string; include: boolean } & Record<string, unknown> => row !== null);
   return {
     agentId,
     stepIndex,

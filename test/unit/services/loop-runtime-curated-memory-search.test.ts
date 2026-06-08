@@ -45,9 +45,9 @@ function row(input: {
   };
 }
 
-function makeDeps(rows: MemoryRecordRow[], validationAcceptedIds: string[]) {
+function makeDeps(rows: MemoryRecordRow[]) {
   let chatCalls = 0;
-  return {
+  const deps = {
     memoryRepository: {
       listAll: async () => rows,
       getByIds: async (_inputAuth: AuthContext, ids: string[]) =>
@@ -64,44 +64,16 @@ function makeDeps(rows: MemoryRecordRow[], validationAcceptedIds: string[]) {
     decryptMemoryContent: (value: string) => value,
     chat: async () => {
       chatCalls += 1;
-      if (chatCalls === 1) {
-        return {
-          text: JSON.stringify({
-            intent: "internal product sync for Tallei",
-            outputType: "internal_sync_email",
-            entities: ["Tallei", "product sync", "sprint"],
-            dateHints: ["this week"],
-            queries: [
-              "Tallei product sync sprint shipped this week",
-              "Tallei customer-facing blog post product updates",
-              "Tallei in progress blockers things to watch",
-            ],
-            requiredEvidence: ["past product updates", "customer-facing changes"],
-          }),
-          model: "test",
-          finishReason: "stop",
-          usage: null,
-        };
-      }
       return {
-        text: JSON.stringify({
-          accepted: validationAcceptedIds.map((id) => ({
-            id,
-            excerpt: rows.find((candidate) => candidate.id === id)?.content_ciphertext ?? id,
-            reason: "Directly describes a product update for this sync.",
-            evidenceRole: "past_update",
-            confidence: 0.92,
-          })),
-          rejectedIds: rows.map((candidate) => candidate.id).filter((id) => !validationAcceptedIds.includes(id)),
-          confidence: validationAcceptedIds.length > 0 ? "high" : "none",
-          noEvidenceReason: validationAcceptedIds.length > 0 ? undefined : "No candidate directly supports the requested output.",
-        }),
+        text: "{}",
         model: "test",
         finishReason: "stop",
         usage: null,
       };
     },
+    getChatCalls: () => chatCalls,
   };
+  return deps;
 }
 
 test("curated memory search returns only validated task-relevant memories", async () => {
@@ -109,12 +81,15 @@ test("curated memory search returns only validated task-relevant memories", asyn
     id: "11111111-1111-4111-8111-111111111111",
     text: "Tallei shipped memory deduplication and context handoff improvements for this week's product sync.",
     category: "product",
+    createdAt: "2026-05-25T00:00:00.000Z",
   });
   const personal = row({
     id: "22222222-2222-4222-8222-222222222222",
     text: "Airbnb guest asked to store meat in a downstairs refrigerator.",
     category: "personal",
   });
+
+  const deps = makeDeps([sprint, personal]);
 
   const result = await runCuratedMemorySearch({
     auth,
@@ -126,9 +101,14 @@ test("curated memory search returns only validated task-relevant memories", asyn
       tools: [{ ref: "internal.memory_search" }],
     },
     configuredQuery: "Tallei product sync sprint updates",
-  }, makeDeps([sprint, personal], [sprint.id]));
+  }, deps);
 
-  assert.equal(result.confidence, "high");
+  assert.equal(deps.getChatCalls(), 0);
+  assert.equal(result.trace.queryPlan.intent, "Tallei product sync sprint updates");
+  assert.equal(result.trace.retrieval.mode, "deterministic_hybrid");
+  assert.ok(result.trace.retrieval.vectorQueries.length > 0);
+  assert.equal(result.trace.validation.acceptedCount, 1);
+  assert.equal(result.trace.validation.rejectedCount, 1);
   assert.equal(result.sources.length, 1);
   assert.equal(result.sources[0]?.id, sprint.id);
   assert.equal(result.sources[0]?.evidenceRole, "past_update");
@@ -142,6 +122,7 @@ test("curated memory search returns no sources when validation rejects all candi
     category: "personal",
   });
 
+  const deps = makeDeps([personal]);
   const result = await runCuratedMemorySearch({
     auth,
     goal: "Write an internal product sync email for Tallei engineering and ops.",
@@ -152,9 +133,12 @@ test("curated memory search returns no sources when validation rejects all candi
       tools: [{ ref: "internal.memory_search" }],
     },
     configuredQuery: "Tallei product sync sprint updates",
-  }, makeDeps([personal], []));
+  }, deps);
 
+  assert.equal(deps.getChatCalls(), 0);
   assert.equal(result.confidence, "none");
+  assert.equal(result.trace.validation.confidence, "none");
+  assert.match(result.trace.validation.noEvidenceReason ?? "", /No candidate crossed|No vector/);
   assert.equal(result.sources.length, 0);
-  assert.match(result.noEvidenceReason ?? "", /No candidate directly supports/);
+  assert.match(result.noEvidenceReason ?? "", /No candidate crossed|No vector/);
 });
