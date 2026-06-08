@@ -1,10 +1,13 @@
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
+import { HeroSection } from "../components/landing/hero-section";
+import { ShowcaseSection } from "../components/landing/showcase-section";
+import { HowLoopsWorkSection } from "../components/landing/how-loops-work-section";
+import { MemorySection } from "../components/landing/memory-section";
 import { IntegrationsSection } from "../components/integrations-section";
 import { PerformanceSection } from "../components/performance-section";
-
-
+import "../components/landing/landing.css";
 
 const PRICING_PLANS = [
   {
@@ -12,7 +15,7 @@ const PRICING_PLANS = [
     name: "Free",
     price: "$0",
     period: "",
-    description: "Get started with basic memory features",
+    description: "Get started with loops and memory",
     features: ["50 saves/month", "200 recalls/month", "All 3 AI platforms"],
     href: "/login",
     cta: "Get Tallei",
@@ -23,7 +26,7 @@ const PRICING_PLANS = [
     name: "Pro",
     price: "$9",
     period: "/mo",
-    description: "For developers building with AI memory",
+    description: "For people running loops every day",
     features: ["5,000 saves/month included", "100,000 recalls/month included", "All 3 AI platforms", "Link memories to PDFs"],
     href: "/login?plan=pro",
     cta: "Get Tallei Pro",
@@ -42,193 +45,112 @@ const PRICING_PLANS = [
   },
 ] as const;
 
-
-/* ─── Component ─────────────────────────────────────────────── */
+const JSON_LD = [
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "Tallei",
+    url: "https://tallei.com",
+    description: "Intent-driven agent loops with shared memory across ChatGPT, Claude, and Gemini",
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: "Tallei",
+    applicationCategory: "ProductivityApplication",
+    operatingSystem: "Web",
+    description:
+      "Tallei designs and runs agent loops from your intent, with shared memory across ChatGPT, Claude, and Gemini.",
+    url: "https://tallei.com",
+    offers: {
+      "@type": "Offer",
+      price: "0",
+      priceCurrency: "USD",
+      description: "Free tier available",
+    },
+    featureList: [
+      "Intent-driven agent loops",
+      "Sync memory across ChatGPT, Claude, and Gemini",
+      "MCP protocol support for Claude Desktop",
+      "Scheduled loop execution",
+      "Automatic context retrieval",
+    ],
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "Is it secure?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Yes. Your memories are encrypted. We don't read them, and we don't train models on them.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "How does it connect?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "We use the open MCP protocol for desktop apps and secure API keys for web environments. Setup takes minutes.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "What is a loop?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "A loop is a recurring workflow designed from your intent — agents, tools, and schedule included.",
+        },
+      },
+    ],
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: "Tallei",
+    url: "https://tallei.com",
+    logo: "https://tallei.com/tallei.svg",
+    contactPoint: {
+      "@type": "ContactPoint",
+      email: "hello@tallei.com",
+      contactType: "customer support",
+    },
+    sameAs: [],
+  },
+];
 
 export function HomeContent() {
   return (
-    <div className="landing-root">
-      {/* JSON-LD Structured Data */}
+    <div className="landing-v2">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify([
-            {
-              "@context": "https://schema.org",
-              "@type": "WebSite",
-              "name": "Tallei",
-              "url": "https://tallei.com",
-              "description": "Persistent memory sync across ChatGPT, Claude, and Gemini",
-              "potentialAction": {
-                "@type": "SearchAction",
-                "target": {
-                  "@type": "EntryPoint",
-                  "urlTemplate": "https://tallei.com/?q={search_term_string}",
-                },
-                "query-input": "required name=search_term_string",
-              },
-            },
-            {
-              "@context": "https://schema.org",
-              "@type": "SoftwareApplication",
-              "name": "Tallei",
-              "applicationCategory": "ProductivityApplication",
-              "operatingSystem": "Web",
-              "description":
-                "Tallei is a shared memory layer for AI assistants. It syncs persistent context across ChatGPT, Claude, and Gemini so you never have to repeat yourself.",
-              "url": "https://tallei.com",
-              "offers": {
-                "@type": "Offer",
-                "price": "0",
-                "priceCurrency": "USD",
-                "description": "Free tier available",
-              },
-              "featureList": [
-                "Sync memory across ChatGPT, Claude, and Gemini",
-                "MCP protocol support for Claude Desktop",
-                "Encrypted private memory storage",
-                "High-volume memory allowances",
-                "Automatic context retrieval",
-              ],
-            },
-            {
-              "@context": "https://schema.org",
-              "@type": "FAQPage",
-              "mainEntity": [
-                {
-                  "@type": "Question",
-                  "name": "Is it secure?",
-                  "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text":
-                      "Yes. Your memories are encrypted. We don't read them, and we definitely don't train models on them. It's your private data.",
-                  },
-                },
-                {
-                  "@type": "Question",
-                  "name": "How does it connect?",
-                  "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text":
-                      "We use the open MCP protocol for desktop apps (like Claude Desktop) and secure API keys for web environments. Setup takes minutes.",
-                  },
-                },
-                {
-                  "@type": "Question",
-                  "name": "Is there a limit?",
-                  "acceptedAnswer": {
-                    "@type": "Answer",
-                    "text":
-                      "Tallei plans include high monthly allowances designed for normal daily and team workflows, with fair-use protections in place.",
-                  },
-                },
-              ],
-            },
-            {
-              "@context": "https://schema.org",
-              "@type": "Organization",
-              "name": "Tallei",
-              "url": "https://tallei.com",
-              "logo": "https://tallei.com/tallei.svg",
-              "contactPoint": {
-                "@type": "ContactPoint",
-                "email": "hello@tallei.com",
-                "contactType": "customer support",
-              },
-              "sameAs": [],
-            },
-          ]),
-        }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
       />
 
-      {/* ═════════════════════════════════════════════════════
-          HERO — Two-column layout with illustration
-      ═════════════════════════════════════════════════════ */}
-      <header className="hero">
-        <div className="hero-inner">
-          <h1 className="hero-h1">
-            Make your AI tools<br/>
-            <em>actually</em> talk<br/>
-            <em>to each other.</em>
-          </h1>
+      <HeroSection />
+      <ShowcaseSection />
+      <HowLoopsWorkSection />
+      <MemorySection />
 
-          {/* ─ Right Panel ─ */}
-          <div className="hero-right">
-            <figure className="hero-right-inner">
-              <div className="hero-illustration">
-                <Image
-                  src="/hero-image-bg.png"
-                  alt="Person at desk with floating AI cards"
-                  width={1540}
-                  height={1021}
-                  style={{ width: "100%", height: "auto" }}
-                  priority
-                />
-              </div>
-              <figcaption className="hero-caption">Before Tallei — Every tool, isolated</figcaption>
-            </figure>
-          </div>
-
-          <p className="hero-sub">
-            Tell one AI how you like things done. Every other AI just knows. No copy-pasting, no re-explaining, no starting from scratch every time.
-          </p>
-          <div className="hero-actions">
-            <Link href="/login" className="landing-btn landing-btn-base">
-              Try it for free
-              <ArrowRight size={16} />
-            </Link>
-            <p className="hero-guarantee">Takes 2 minutes · No credit card required</p>
+      <section id="integrations" className="landing-proof">
+        <div className="landing-section-inner">
+          <div className="landing-section-header">
+            <h2 className="landing-section-title">Memory in every conversation</h2>
+            <p className="landing-section-sub">
+              Watch context follow you across tools — no copy-paste, no re-explaining.
+            </p>
           </div>
         </div>
-      </header>
-
-      {/* ═════════════════════════════════════════════════════
-          FEATURES — Honest, simple narrative
-      ═════════════════════════════════════════════════════ */}
-      <section id="how-it-works" className="features-section">
-        <div className="features-inner">
-          <span className="section-eyebrow">WHY WE BUILT THIS</span>
-          <h2 className="section-h2">Why we built this</h2>
-
-          <div className="story-grid">
-            <div className="story-card">
-              <div className="story-num">01</div>
-              <h3 className="story-h3">The blank slate sucks</h3>
-              <p className="story-p">
-                Every time you switch from ChatGPT to Claude, it&apos;s like meeting someone for the first time. You have to explain your business, your tone of voice, and your rules all over again. It&apos;s exhausting.
-              </p>
-            </div>
-
-            <div className="story-card">
-              <div className="story-num">02</div>
-              <h3 className="story-h3">Stop copy-pasting</h3>
-              <p className="story-p">
-                Right now, you&apos;re acting as the messenger between two supercomputers. Copying custom instructions from one chat to paste into another is busywork you shouldn&apos;t be doing.
-              </p>
-            </div>
-
-            <div className="story-card">
-              <div className="story-num">03</div>
-              <h3 className="story-h3">Teach one, both learn</h3>
-              <p className="story-p">
-                Tallei sits quietly in the background. If you tell ChatGPT how you prefer your weekly reports formatted, Claude will automatically know it for your next project. It&apos;s just one continuous memory.
-              </p>
-            </div>
-          </div>
-        </div>
+        <IntegrationsSection />
       </section>
 
-      <IntegrationsSection />
-
-{/* ═════════════════════════════════════════════════════
-          PRICING
-      ═════════════════════════════════════════════════════ */}
       <section id="pricing" className="pricing-section">
         <div className="pricing-inner">
-          <span className="section-eyebrow">PRICING</span>
-          <h2 className="section-h2 pricing-heading">Simple, transparent pricing</h2>
+          <h2 className="section-h2 pricing-heading">Simple pricing</h2>
           <p className="pricing-sub">
-            Start free, upgrade when you need more. All paid plans include a 14-day free trial.
+            Start free. Upgrade when your loops need more room.
           </p>
 
           <div className="pricing-grid">
@@ -237,34 +159,21 @@ export function HomeContent() {
                 key={plan.key}
                 className={`pricing-card ${plan.featured ? "pricing-card-featured" : ""}`}
               >
-                {/* Plan Badge Row */}
                 <div className="pricing-plan-row">
                   <span className={`pricing-plan-label ${plan.featured ? "pricing-plan-label-featured" : ""}`}>
                     {plan.name}
                   </span>
-                  {plan.featured && (
-                    <span className="pricing-popular-pill">
-                      Most popular
-                    </span>
-                  )}
+                  {plan.featured && <span className="pricing-popular-pill">Most popular</span>}
                 </div>
 
-                {/* Price */}
                 <div className="pricing-price-wrap">
                   <div className="pricing-price">
                     {plan.price}
-                    {plan.period && (
-                      <span className="pricing-period">
-                        {plan.period}
-                      </span>
-                    )}
+                    {plan.period && <span className="pricing-period">{plan.period}</span>}
                   </div>
-                  <p className="pricing-description">
-                    {plan.description}
-                  </p>
+                  <p className="pricing-description">{plan.description}</p>
                 </div>
 
-                {/* Features */}
                 <ul className="pricing-features">
                   {plan.features.map((feature) => (
                     <li key={feature} className="pricing-feature-item">
@@ -274,7 +183,6 @@ export function HomeContent() {
                   ))}
                 </ul>
 
-                {/* CTA */}
                 <div className="pricing-cta-wrap">
                   <Link
                     href={plan.href}
@@ -283,16 +191,7 @@ export function HomeContent() {
                     {plan.cta}
                     <ArrowRight size={14} />
                   </Link>
-                  {!plan.featured && plan.key !== "free" && (
-                    <p className="pricing-trial">
-                      14-day free trial
-                    </p>
-                  )}
-                  {plan.featured && (
-                    <p className="pricing-trial">
-                      14-day free trial
-                    </p>
-                  )}
+                  {plan.key !== "free" && <p className="pricing-trial">14-day free trial</p>}
                 </div>
               </article>
             ))}
@@ -302,59 +201,46 @@ export function HomeContent() {
 
       <PerformanceSection />
 
-      {/* ═════════════════════════════════════════════════════
-          FAQ / DETAILS
-      ═════════════════════════════════════════════════════ */}
       <section className="faq-section">
         <div className="faq-inner">
-          <span className="section-eyebrow">FAQ</span>
-          <h2 className="section-h2">The details</h2>
+          <h2 className="section-h2">Questions</h2>
           <ul className="faq-grid">
             <li className="solid-card detail-card">
               <h3 className="detail-h4">Is it secure?</h3>
               <p className="detail-p">
-                Yes. Your memories are encrypted. We don&apos;t read them, and we definitely
-                don&apos;t train models on them. It&apos;s your private data.
+                Yes. Your memories are encrypted. We don&apos;t read them, and we don&apos;t train models on them.
+              </p>
+            </li>
+            <li className="solid-card detail-card">
+              <h3 className="detail-h4">What is a loop?</h3>
+              <p className="detail-p">
+                Describe what should repeat. Tallei designs the agents, tools, and schedule — then runs it for you.
               </p>
             </li>
             <li className="solid-card detail-card">
               <h3 className="detail-h4">How does it connect?</h3>
               <p className="detail-p">
-                We use the open MCP protocol for desktop apps (like Claude Desktop) and
-                secure API keys for web environments. Setup takes minutes.
-              </p>
-            </li>
-            <li className="solid-card detail-card">
-              <h3 className="detail-h4">Is there a limit?</h3>
-              <p className="detail-p">
-                No. Save as many facts, preferences, and details as you need. Tallei
-                automatically retrieves only what&apos;s relevant to your current conversation.
+                MCP for desktop apps like Claude. Secure API keys for web. Setup takes a few minutes.
               </p>
             </li>
           </ul>
         </div>
       </section>
 
-      {/* ═════════════════════════════════════════════════════
-          CTA
-      ═════════════════════════════════════════════════════ */}
       <section className="cta-section">
         <div className="cta-inner">
           <div className="solid-card cta-card">
             <h2 className="section-h2 text-center mt-0">Stop repeating yourself.</h2>
             <p className="cta-sub">
-              Give your AI tools a shared memory, and stop acting as the middleman.
+              Start a loop. Let every AI already know how you work.
             </p>
-            <Link href="/login" className="landing-btn landing-btn-large">
-              Start syncing your AI
+            <Link href="/login" className="landing-btn landing-btn-base landing-cta--lime">
+              Start a loop
             </Link>
           </div>
         </div>
       </section>
 
-      {/* ═════════════════════════════════════════════════════
-          FOOTER
-      ═════════════════════════════════════════════════════ */}
       <footer className="footer-section">
         <div className="footer-inner">
           <div className="footer-brand">
@@ -364,7 +250,9 @@ export function HomeContent() {
             <Link href="/privacy">Privacy</Link>
             <Link href="/terms">Terms of Service</Link>
             <a href="mailto:hello@tallei.com">Contact</a>
-            <a href="https://github.com/Dinuda/tallei-ai" target="_blank" rel="noopener noreferrer" className="footer-link-open-source">Open Source</a>
+            <a href="https://github.com/Dinuda/tallei-ai" target="_blank" rel="noopener noreferrer" className="footer-link-open-source">
+              Open Source
+            </a>
           </div>
         </div>
       </footer>

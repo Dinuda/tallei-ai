@@ -1,18 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { PenLine, FileText } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
-  DialogHeader,
-  DialogTitle,
 } from "@/components/ui/dialog";
 import { getRenderer, type ArtifactRendererProps, type RendererDef } from "./registry";
+import {
+  EditorialArtifactToolbar,
+  EditorialEditorDialogHeader,
+  EditorialOpenEditorButton,
+  EditorialPreviewFrame,
+  editorialEditorDialogClass,
+  inferArtifactDisplayTitle,
+} from "./editorial-artifact-ui";
 
 export function ArtifactRenderer(props: ArtifactRendererProps) {
   const def = getRenderer(props.artifact.kind);
@@ -32,41 +35,35 @@ export function ArtifactRenderer(props: ArtifactRendererProps) {
 function DialogRenderer({ def, ...props }: ArtifactRendererProps & { def: RendererDef }) {
   const [open, setOpen] = useState(false);
   const Comp = def.component;
+  const displayTitle = inferArtifactDisplayTitle(props.artifact, def.label);
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1 rounded-2xl border border-sky-100 bg-sky-50 p-4">
-          <p className="text-xs font-bold uppercase tracking-wide text-sky-700">{def.label}</p>
-          <p className="mt-1 text-sm text-slate-600">
-            Artifact <span className="font-mono">{props.artifact.artifact_key}</span> v{props.artifact.version}
-          </p>
-        </div>
-        <Button
-          onClick={() => setOpen(true)}
-          className="shrink-0 rounded-lg bg-[#0077b6] font-bold hover:bg-[#00689f]"
-        >
-          <PenLine className="mr-2 size-4" />
-          Open editor
-        </Button>
-      </div>
-      <iframe
-        srcDoc={props.artifact.body}
-        className="w-full rounded-2xl border"
-        style={{ minHeight: "620px" }}
-        sandbox=""
-        title={def.label}
+    <div className="space-y-0">
+      <EditorialArtifactToolbar
+        tag={def.label}
+        title={displayTitle}
+        hint="Review the preview below. Open the editor to make changes."
+        action={<EditorialOpenEditorButton onClick={() => setOpen(true)} />}
       />
+      <EditorialPreviewFrame title={def.label}>
+        <iframe
+          srcDoc={props.artifact.body}
+          className="w-full border-0"
+          style={{ minHeight: "620px" }}
+          sandbox=""
+          title={def.label}
+        />
+      </EditorialPreviewFrame>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className={def.dialogWidth ?? "max-w-[90vw]"}>
-          <DialogHeader>
-            <DialogTitle>{def.label}</DialogTitle>
-            <DialogDescription>
-              Editing <span className="font-mono">{props.artifact.artifact_key}</span>
-            </DialogDescription>
-          </DialogHeader>
-          <Comp {...props} />
-          <DialogFooter showCloseButton />
+        <DialogContent className={editorialEditorDialogClass(def.dialogWidth)}>
+          <EditorialEditorDialogHeader
+            title={`Edit ${def.label.toLowerCase()}`}
+            description="Adjust content before approving this step."
+          />
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+            <Comp {...props} />
+          </div>
+          <DialogFooter showCloseButton className="border-t border-[#e5e7eb] bg-[#fafafa] px-6 py-4" />
         </DialogContent>
       </Dialog>
     </div>
@@ -74,23 +71,19 @@ function DialogRenderer({ def, ...props }: ArtifactRendererProps & { def: Render
 }
 
 function DefaultRenderer({ artifact }: ArtifactRendererProps) {
+  const displayTitle = inferArtifactDisplayTitle(artifact, artifact.kind.replace(/_/g, " "));
+
   return (
-    <div className="space-y-4">
-      <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
-        <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-emerald-700">
-          <FileText className="size-3" />
-          {artifact.kind}
-        </p>
-        <p className="mt-1 text-sm text-slate-600">
-          Artifact <span className="font-mono">{artifact.artifact_key}</span> v{artifact.version}
-        </p>
-      </div>
+    <div className="space-y-0">
+      <EditorialArtifactToolbar tag="Artifact" title={displayTitle} />
       {artifact.body ? (
-        <div className="prose prose-slate max-w-none text-[16px] leading-7 whitespace-pre-wrap">
-          {artifact.body}
+        <div className="border border-t-0 border-[#d1d5db] bg-white px-6 py-6">
+          <div className="prose prose-slate max-w-none text-[16px] leading-7 whitespace-pre-wrap">
+            {artifact.body}
+          </div>
         </div>
       ) : (
-        <div className="grid min-h-[360px] place-items-center rounded-2xl border border-dashed bg-slate-50 p-8 text-center text-sm text-slate-500">
+        <div className="grid min-h-[360px] place-items-center border border-t-0 border-dashed border-[#d1d5db] bg-[#fafafa] p-8 text-center text-[13px] text-[#9ca3af]">
           Empty artifact
         </div>
       )}

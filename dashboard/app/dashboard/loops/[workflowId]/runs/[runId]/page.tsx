@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 import {
   Bot,
@@ -10,30 +12,52 @@ import {
   ChevronRight,
   Code,
   Columns2,
+  Database,
   FileText,
-  Eye,
   Info,
-  ListChecks,
   Loader2,
   MoreHorizontal,
-  PenLine,
   RefreshCw,
-  RotateCcw,
-  Search,
-  ShieldCheck,
+  Target,
   X,
+  Brain,
+  Puzzle,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
+import {
+  EditorialDialogBody,
+  EditorialDialogHeader,
+  EditorialEmpty,
+  EditorialField,
+  EditorialListRow,
+  EditorialMetaTag,
+  EditorialPanel,
+  EditorialStat,
+  EditorialStatGrid,
+  editorialDialogContentClass,
+} from "./components/editorial-run-ui";
+import {
+  ChildAgentRow,
+  ChildAgentsHeader,
+  ChildAgentsShell,
+  ParentAgentRow,
+  AgentIconBox,
+  AttemptChip,
+  LegendaryToolBadge,
+  formatSupervisorDisplayName,
+  formatWorkerDisplayName,
+  resolveChildAgentIcon,
+  resolveStepToolRefs,
+  workerSlotLabel,
+} from "./components/agent-panel-ui";
+import { EditorialActionButton } from "./components/glyph-icons";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -56,7 +80,7 @@ type StepAttempt = {
   id: string;
   step_index: number;
   agent_id: string;
-  agent_snapshot: { id?: string; name?: string; task?: string };
+  agent_snapshot: { id?: string; name?: string; task?: string; tools?: Array<{ ref: string }> };
   attempt: number;
   status: string;
   created_at: string;
@@ -122,7 +146,7 @@ type RunProjection = {
     goal?: string;
     agentGraph?: {
       parent?: { name?: string; task?: string };
-      children?: Array<{ id: string; name?: string; task?: string }>;
+      children?: Array<{ id: string; name?: string; task?: string; tools?: Array<{ ref: string }> }>;
     };
   };
   context?: Record<string, unknown>;
@@ -141,6 +165,8 @@ const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
 });
 
 function label(value: string) {
+  if (value === "waiting_for_gate") return "Paused · Needs Approval";
+  if (value === "waiting_for_approval") return "Paused · Needs Approval";
   return value.replaceAll("_", " ");
 }
 
@@ -174,28 +200,65 @@ function inferGoalArtifactName(run: RunProjection | null, artifact?: Artifact | 
   return "Final result";
 }
 
-function badgeClass(status: string) {
-  if (status === "succeeded" || status === "approved" || status === "submitted") return "bg-emerald-50 text-emerald-700";
-  if (status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected") return "bg-red-50 text-red-700";
-  if (status === "waiting_for_gate" || status === "pending") return "bg-amber-100 text-amber-700";
-  if (status === "running") return "bg-sky-100 text-sky-700";
-  return "bg-slate-100 text-slate-600";
-}
-
 function StatusBadge({ status }: { status: string }) {
-  return (
-    <Badge variant="secondary" className={cn("rounded-full border-0 px-3 py-1 text-xs font-bold capitalize", badgeClass(status))}>
-      {label(status)}
-    </Badge>
-  );
+  const tone = status === "succeeded" || status === "approved" || status === "submitted"
+    ? "neutral"
+    : status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected"
+      ? "red"
+      : status === "waiting_for_gate" || status === "pending"
+        ? "amber"
+        : status === "running"
+          ? "blue"
+          : "neutral";
+  return <EditorialMetaTag tone={tone}>{label(status)}</EditorialMetaTag>;
 }
 
 function RunStatusPill({ status }: { status: string }) {
+  const tone = status === "succeeded" || status === "approved"
+    ? "border-[#86c8a8] bg-[#edf8f2] text-[#166534]"
+    : status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected"
+      ? "border-[#d9a3a3] bg-[#fdf2f2] text-[#991b1b]"
+      : status === "waiting_for_gate" || status === "pending"
+        ? "border-[#9bb8d9] bg-[#edf3fb] text-[#1e4070]"
+        : status === "running"
+          ? "border-[#b8c9dc] bg-[#f0f4f9] text-[#334155]"
+          : "border-[#e5e7eb] bg-[#fafafa] text-[#6b7280]";
   return (
-    <span className={cn("inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-bold capitalize", badgeClass(status))}>
-      <span className="size-2 rounded-full bg-amber-400" />
+    <span
+      className={cn("inline-flex items-center border px-2.5 py-1 text-[11px] font-semibold tracking-wide uppercase", tone)}
+      style={{ fontFamily: "var(--font-fustat)" }}
+    >
       {label(status)}
     </span>
+  );
+}
+
+function EditorialToolbarButton({
+  children,
+  onClick,
+  disabled,
+  title,
+  danger,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  title: string;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "grid size-9 place-items-center border border-[#d1d5db] bg-white text-[#6b7280] transition-colors hover:bg-[#fafafa] hover:text-[#111827] disabled:opacity-50",
+        danger && "hover:border-[#d9a3a3] hover:text-[#991b1b]",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -203,16 +266,174 @@ function getStepText(step: StepAttempt | null | undefined) {
   return step?.output_json?.text?.trim() ?? "";
 }
 
-function agentVisual(step: StepAttempt | null | undefined) {
-  const source = `${step?.agent_snapshot?.name ?? ""} ${step?.agent_snapshot?.task ?? ""}`.toLowerCase();
-  if (source.includes("memory") || source.includes("search")) return { icon: Search, className: "bg-cyan-100 text-sky-700" };
-  if (source.includes("draft") || source.includes("write") || source.includes("content")) return { icon: PenLine, className: "bg-indigo-100 text-indigo-700" };
-  if (source.includes("input") || source.includes("validat")) return { icon: ListChecks, className: "bg-slate-100 text-slate-600" };
-  if (source.includes("approval") || source.includes("review") || step?.status === "waiting_for_gate") return { icon: ShieldCheck, className: "bg-amber-100 text-amber-700" };
-  if (step?.status === "running") return { icon: Bot, className: "bg-sky-100 text-sky-700" };
-  if (step?.status === "succeeded") return { icon: Check, className: "bg-emerald-100 text-emerald-700" };
-  if (step?.status === "failed" || step?.status === "blocked") return { icon: X, className: "bg-red-100 text-red-700" };
-  return { icon: Bot, className: "bg-slate-100 text-slate-600" };
+function gateTypeShortLabel(gateType: Gate["gate_type"]) {
+  if (gateType === "memory_confirmation") return "memory review";
+  if (gateType === "missing_input") return "missing input";
+  if (gateType === "draft_review") return "draft review";
+  return "pre-send check";
+}
+
+function buildParentAgentNarrative({
+  run,
+  parentRunPhase,
+  currentStep,
+  currentStepLabel,
+  pendingGate,
+  latestSteps,
+  doneSteps,
+}: {
+  run: RunProjection;
+  parentRunPhase: ParentRunPhase;
+  currentStep: StepAttempt | null;
+  currentStepLabel: string;
+  pendingGate: Gate | null;
+  latestSteps: StepAttempt[];
+  doneSteps: number;
+}) {
+  const parentName = formatSupervisorDisplayName(run.definition?.agentGraph?.parent?.name?.trim() || "Tallei Agent");
+  const parentTask = run.definition?.agentGraph?.parent?.task?.trim()
+    || "Dispatches agents in order, checks task completion, and routes outputs between slots.";
+  const goal = run.definition?.goal?.trim();
+  const workerNames = latestSteps
+    .map((step) => step.agent_snapshot?.name ?? step.agent_id)
+    .filter((name, index, array) => array.indexOf(name) === index);
+  const roster = workerNames.length > 0
+    ? `Queue: ${workerNames.map(formatWorkerDisplayName).join(" → ")}.`
+    : "Queue: waiting for agents.";
+  const orchestration = workerNames.length > 0
+    ? `Coordinates ${workerNames.length} agents — assigns each slot, validates output, passes deliverables downstream, and holds at approval gates until you respond.`
+    : "Coordinates the job — assigns agents, validates output, and holds at gates until you respond.";
+  const upNextWorker = pendingGate
+    ? getNextWorkerName(run, latestSteps)
+    : currentStep
+      ? latestSteps.find((step) => step.step_index === currentStep.step_index + 1)?.agent_snapshot?.name
+        ?? latestSteps.find((step) => step.step_index === currentStep.step_index + 1)?.agent_id
+        ?? null
+      : latestSteps[0]?.agent_snapshot?.name ?? latestSteps[0]?.agent_id ?? null;
+  const upNextWorkerLabel = upNextWorker ? formatWorkerDisplayName(upNextWorker) : null;
+
+  let statusLine = "";
+  if (parentRunPhase === "paused" && pendingGate) {
+    const gateHint = pendingGate.gate_type === "memory_confirmation"
+      ? "Select which memories the next agent may use."
+      : pendingGate.gate_type === "missing_input"
+        ? "Provide the missing input in the workspace."
+        : pendingGate.gate_type === "draft_review"
+          ? "Review the draft in the workspace, then approve or request changes."
+          : "Confirm in the workspace before the run continues.";
+    statusLine = `Paused at ${currentStepLabel.toLowerCase()} for ${gateTypeShortLabel(pendingGate.gate_type)}. ${gateHint}${upNextWorkerLabel ? ` After approval, ${upNextWorkerLabel} is next.` : ""}`;
+  } else if (parentRunPhase === "running" && currentStep) {
+    statusLine = `Live: ${currentStepLabel.toLowerCase()}. ${doneSteps} of ${latestSteps.length} agents complete${upNextWorkerLabel ? `; next is ${upNextWorkerLabel}` : "; final agent in queue"}.`;
+  } else if (parentRunPhase === "blocked") {
+    statusLine = `Job blocked${currentStep ? ` at ${currentStepLabel.toLowerCase()}` : ""}. Fix the failed agent or rejected gate, then rerun to resume the queue.`;
+  } else if (parentRunPhase === "done") {
+    statusLine = `All ${latestSteps.length} agents finished. The orchestrator has routed final outputs for this job.`;
+  } else {
+    statusLine = `Spinning up${currentStep ? ` — next slot is ${currentStepLabel.toLowerCase()}` : ""}.`;
+  }
+
+  return {
+    parentName,
+    parentTask,
+    goalLine: goal ? `Goal: ${goal}` : null,
+    orchestration,
+    roster,
+    statusLine,
+  };
+}
+
+function stripDisplayEmoji(value: string) {
+  return value.replace(/\p{Extended_Pictographic}/gu, "").replace(/\s{2,}/g, " ").trim();
+}
+
+type StepRowPhase =
+  | "current_gate"
+  | "current_running"
+  | "running"
+  | "done"
+  | "queued"
+  | "failed"
+  | "idle";
+
+type ParentRunPhase = "paused" | "running" | "blocked" | "done" | "idle";
+
+function resolveCurrentStep(
+  latestSteps: StepAttempt[],
+  pendingGate: Gate | null,
+  currentStepIndex: number | null | undefined,
+): StepAttempt | null {
+  const gateStep = latestSteps.find((step) => step.status === "waiting_for_gate");
+  if (pendingGate && gateStep) return gateStep;
+
+  const runningStep = latestSteps.find((step) => step.status === "running");
+  if (runningStep) return runningStep;
+
+  if (typeof currentStepIndex === "number") {
+    const indexed = latestSteps.find((step) => step.step_index === currentStepIndex);
+    if (indexed && indexed.status !== "succeeded") return indexed;
+  }
+
+  return latestSteps.find((step) => (
+    step.status !== "succeeded"
+    && step.status !== "cancelled"
+    && step.status !== "approved"
+  )) ?? null;
+}
+
+function resolveStepRowPhase(
+  step: StepAttempt,
+  currentStep: StepAttempt | null,
+  pendingGate: Gate | null,
+): StepRowPhase {
+  const isCurrent = currentStep?.id === step.id;
+  if (isCurrent && pendingGate && step.status === "waiting_for_gate") return "current_gate";
+  if (isCurrent && step.status === "running") return "current_running";
+  if (step.status === "running") return "running";
+  if (step.status === "failed" || step.status === "cancelled") return "failed";
+  if (step.status === "succeeded" || step.status === "approved") return "done";
+  if (currentStep && step.step_index > currentStep.step_index) return "queued";
+  if (!step.started_at) return "queued";
+  return "idle";
+}
+
+function resolveParentRunPhase(
+  runStatus: string,
+  pendingGate: Gate | null,
+  hasFailure: boolean,
+): ParentRunPhase {
+  if (pendingGate) return "paused";
+  if (hasFailure || runStatus === "blocked" || runStatus === "failed" || runStatus === "cancelled") return "blocked";
+  if (runStatus === "running" || runStatus === "waiting_for_gate") return "running";
+  if (runStatus === "succeeded") return "done";
+  return "idle";
+}
+
+function EditorialSidebarPanel({
+  title,
+  icon: Icon,
+  meta,
+  children,
+}: {
+  title: string;
+  icon?: React.ComponentType<{ className?: string }>;
+  meta?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="border border-[#d1d5db] bg-white">
+      <header className="flex items-center justify-between border-b border-[#e5e7eb] bg-[#fafafa] px-5 py-3.5">
+        <h2
+          className="flex items-center gap-2 text-[14px] font-bold tracking-[-0.02em] text-[#111827]"
+          style={{ fontFamily: "var(--font-title)" }}
+        >
+          {Icon ? <Icon className="size-4 text-[#6b7280]" /> : null}
+          {title}
+        </h2>
+        {meta}
+      </header>
+      {children}
+    </section>
+  );
 }
 
 function readContextEntries(context: Record<string, unknown> | undefined): Array<{ key: string; value: string }> {
@@ -451,97 +672,496 @@ function memoryItemSummary(item: MemoryGateItem) {
   return item.excerpt.replace(/\s+/g, " ").trim();
 }
 
+function memoryItemTitle(item: MemoryGateItem) {
+  const meta = item.metadata;
+  if (meta && typeof meta.title === "string" && meta.title.trim()) return meta.title.trim();
+  if (meta && typeof meta.key === "string" && meta.key.trim()) return titleCase(meta.key.trim());
+  const summary = memoryItemSummary(item);
+  const words = summary.split(" ").slice(0, 8).join(" ");
+  return words.length < summary.length ? `${words}…` : words;
+}
+
+function memoryItemMeta(item: MemoryGateItem) {
+  const shortId = item.id.length > 8 ? `${item.id.slice(0, 8)}…` : item.id;
+  const parts = [shortId];
+  if (item.evidenceRole) parts.push(label(item.evidenceRole));
+  if (typeof item.confidence === "number") parts.push(`${Math.round(item.confidence * 100)}% match`);
+  else if (typeof item.score === "number") parts.push(`score ${item.score.toFixed(2)}`);
+  return parts.join(" · ");
+}
+
+function gateWorkspaceTitle(gateType: Gate["gate_type"]) {
+  if (gateType === "memory_confirmation") return "Select memories";
+  if (gateType === "missing_input") return "Provide input";
+  if (gateType === "draft_review") return "Review the draft";
+  return "Approve to send";
+}
+
+function gateWorkspaceSubtitle(gate: Gate) {
+  if (gate.gate_type === "memory_confirmation") return "Choose what the next agent can use.";
+  if (gate.gate_type === "missing_input") return gate.question ?? "Provide the required input to continue.";
+  if (gate.gate_type === "draft_review") return "Review the artifact below and approve or request changes.";
+  return gate.question ?? "Confirm before this run sends or publishes.";
+}
+
+function getNextWorkerName(
+  run: RunProjection | null,
+  latestSteps: StepAttempt[],
+): string | null {
+  const gateStep = latestSteps.find((step) => step.status === "waiting_for_gate");
+  if (gateStep) {
+    const next = latestSteps.find((step) => step.step_index === gateStep.step_index + 1);
+    if (next) return next.agent_snapshot?.name ?? next.agent_id;
+  }
+  const children = run?.definition?.agentGraph?.children ?? [];
+  const completed = latestSteps.filter((step) => step.status === "succeeded").length;
+  const child = children[completed] ?? children[completed - 1];
+  return child?.name ?? child?.id ?? null;
+}
+
+function buildRunningStages(activeStageName: string) {
+  return [activeStageName, "Processing agent output", "Updating job state"].filter(
+    (value, index, array) => array.indexOf(value) === index,
+  );
+}
+
+const statusBandTexture = [
+  "repeating-linear-gradient(0deg, transparent, transparent 11px, rgba(37,99,235,0.028) 11px, rgba(37,99,235,0.028) 12px)",
+  "repeating-linear-gradient(90deg, transparent, transparent 11px, rgba(37,99,235,0.02) 11px, rgba(37,99,235,0.02) 12px)",
+  "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(59,130,246,0.07), transparent 55%)",
+].join(", ");
+
+const failureBandTexture = [
+  "repeating-linear-gradient(0deg, transparent, transparent 11px, rgba(220,38,38,0.028) 11px, rgba(220,38,38,0.028) 12px)",
+  "repeating-linear-gradient(90deg, transparent, transparent 11px, rgba(220,38,38,0.02) 11px, rgba(220,38,38,0.02) 12px)",
+  "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(248,113,113,0.08), transparent 55%)",
+].join(", ");
+
+function gateTypeStamp(gateType: Gate["gate_type"]) {
+  if (gateType === "memory_confirmation") return { tag: "Approval", name: "Memory" };
+  if (gateType === "missing_input") return { tag: "Input", name: "Required" };
+  if (gateType === "draft_review") return { tag: "Review", name: "Draft" };
+  return { tag: "Send", name: "Final check" };
+}
+
+function RejectionTypeStamp({ subject = "Gate" }: { subject?: string }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2.5">
+      <span
+        className="shrink-0 border border-[#d9a3a3] bg-white/70 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-[#991b1b] uppercase"
+        style={{ fontFamily: "var(--font-title)" }}
+      >
+        Rejected
+      </span>
+      <span className="shrink-0 text-[15px] text-[#d9a3a3]">/</span>
+      <span
+        className="truncate text-[17px] font-semibold tracking-[-0.02em] text-[#7f1d1d]"
+        style={{ fontFamily: "var(--font-title)" }}
+      >
+        {subject}
+      </span>
+    </div>
+  );
+}
+
+function FailureTypeStamp({ agentName }: { agentName: string }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2.5">
+      <span
+        className="shrink-0 border border-[#d9a3a3] bg-white/70 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-[#991b1b] uppercase"
+        style={{ fontFamily: "var(--font-title)" }}
+      >
+        Failed
+      </span>
+      <span className="shrink-0 text-[15px] text-[#d9a3a3]">/</span>
+      <span
+        className="truncate text-[17px] font-semibold tracking-[-0.02em] text-[#7f1d1d]"
+        style={{ fontFamily: "var(--font-title)" }}
+      >
+        {agentName}
+      </span>
+    </div>
+  );
+}
+
+function GateTypeStamp({ gateType }: { gateType: Gate["gate_type"] }) {
+  const stamp = gateTypeStamp(gateType);
+  return (
+    <div className="flex min-w-0 items-center gap-2.5">
+      <span
+        className="shrink-0 border border-[#9bb8d9] bg-white/70 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-[#2d5a87] uppercase"
+        style={{ fontFamily: "var(--font-title)" }}
+      >
+        {stamp.tag}
+      </span>
+      <span className="shrink-0 text-[15px] text-[#9bb8d9]">/</span>
+      <span
+        className="truncate text-[17px] font-semibold tracking-[-0.02em] text-[#1e4070]"
+        style={{ fontFamily: "var(--font-title)" }}
+      >
+        {stamp.name}
+      </span>
+    </div>
+  );
+}
+
+function EditorialWorkspaceShell({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={cn("flex min-h-[720px] flex-col border border-[#d1d5db] bg-white", className)}>
+      {children}
+    </div>
+  );
+}
+
+function RunningSlotText({ stages }: { stages: string[] }) {
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    if (stages.length <= 1) return undefined;
+    const timer = window.setInterval(() => {
+      setIndex((current) => (current + 1) % stages.length);
+    }, 2_500);
+    return () => window.clearInterval(timer);
+  }, [stages]);
+
+  const stage = stages[index] ?? stages[0] ?? "";
+
+  return (
+    <span className="block min-h-[22px] overflow-hidden">
+      <AnimatePresence mode="wait">
+        <motion.span
+          key={stage}
+          initial={{ y: 8, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: -8, opacity: 0 }}
+          transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+          className="block truncate text-[15px] font-medium text-[#334155]"
+          style={{ fontFamily: "var(--font-fustat)" }}
+        >
+          {stage}
+        </motion.span>
+      </AnimatePresence>
+    </span>
+  );
+}
+
+function RunStatusBand({
+  gateResolvedFlash,
+  transitioningAfterGate,
+  pendingGate,
+  runStatus,
+  failureStep,
+  failureMessage,
+  isGateRejected,
+  activeStageName,
+  busy,
+  approveLabel,
+  approveDisabled,
+  onApprove,
+  onReject,
+  onRerun,
+}: {
+  gateResolvedFlash: boolean;
+  transitioningAfterGate: boolean;
+  pendingGate: Gate | null;
+  runStatus: string;
+  failureStep: StepAttempt | null;
+  failureMessage: string | null;
+  isGateRejected: boolean;
+  activeStageName: string;
+  busy: boolean;
+  approveLabel: string;
+  approveDisabled: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+  onRerun: () => void;
+}) {
+  const runningStages = useMemo(() => buildRunningStages(activeStageName), [activeStageName]);
+  const isSucceeded = runStatus === "succeeded";
+  const showFailure = Boolean((failureStep || failureMessage) && !pendingGate && !gateResolvedFlash && !transitioningAfterGate);
+  const bandHeight = (pendingGate && !gateResolvedFlash) || showFailure ? 80 : 64;
+
+  const shellClass = gateResolvedFlash
+    ? "border-[#86c8a8] bg-[#edf8f2]"
+    : isSucceeded
+      ? "border-[#86c8a8] bg-[#edf8f2]"
+    : transitioningAfterGate
+      ? "border-[#b8c9dc] bg-[#f0f4f9]"
+    : pendingGate
+      ? "border-[#9bb8d9] bg-[#edf3fb]"
+      : showFailure
+        ? "border-[#d9a3a3] bg-[#fdf2f2]"
+        : "border-[#b8c9dc] bg-[#f0f4f9]";
+
+  const shellTexture = gateResolvedFlash
+    ? [
+        "repeating-linear-gradient(0deg, transparent, transparent 11px, rgba(5,150,105,0.028) 11px, rgba(5,150,105,0.028) 12px)",
+        "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(16,185,129,0.07), transparent 55%)",
+      ].join(", ")
+    : isSucceeded
+      ? [
+          "repeating-linear-gradient(0deg, transparent, transparent 11px, rgba(5,150,105,0.028) 11px, rgba(5,150,105,0.028) 12px)",
+          "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(16,185,129,0.06), transparent 55%)",
+        ].join(", ")
+    : pendingGate
+      ? statusBandTexture
+      : transitioningAfterGate
+        ? [
+            "repeating-linear-gradient(0deg, transparent, transparent 11px, rgba(100,116,139,0.025) 11px, rgba(100,116,139,0.025) 12px)",
+            "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(148,163,184,0.05), transparent 55%)",
+          ].join(", ")
+      : showFailure
+        ? failureBandTexture
+        : [
+            "repeating-linear-gradient(0deg, transparent, transparent 11px, rgba(100,116,139,0.025) 11px, rgba(100,116,139,0.025) 12px)",
+            "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(148,163,184,0.06), transparent 55%)",
+          ].join(", ");
+
+  const failureSubtitle = preview(
+    failureMessage ?? failureStep?.error_json?.message ?? "This step failed and needs a rerun.",
+    120,
+  );
+
+  return (
+    <motion.div
+      animate={{ height: bandHeight }}
+      transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+      className={cn("relative mb-5 flex overflow-hidden border", shellClass)}
+      style={{ backgroundImage: shellTexture }}
+    >
+      <AnimatePresence mode="wait">
+        {gateResolvedFlash ? (
+          <motion.div
+            key="flash"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+            className="flex min-w-0 flex-1 items-center justify-between gap-4 px-6"
+            style={{ fontFamily: "var(--font-fustat)" }}
+          >
+            <div className="min-w-0">
+              <p
+                className="text-[11px] font-semibold tracking-[0.1em] text-[#3d8b6a] uppercase"
+                style={{ fontFamily: "var(--font-title)" }}
+              >
+                Resolved
+              </p>
+              <p className="truncate text-[15px] font-medium text-[#14532d]">Continuing — {activeStageName}</p>
+            </div>
+          </motion.div>
+        ) : isSucceeded ? (
+          <motion.div
+            key="complete"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex min-w-0 flex-1 items-center px-6"
+            style={{ fontFamily: "var(--font-fustat)" }}
+          >
+            <div className="min-w-0 flex-1">
+              <p
+                className="text-[11px] font-semibold tracking-[0.1em] text-[#3d8b6a] uppercase"
+                style={{ fontFamily: "var(--font-title)" }}
+              >
+                Complete
+              </p>
+              <p className="truncate text-[15px] font-medium text-[#14532d]">
+                Job finished. Final artifact is ready.
+              </p>
+            </div>
+          </motion.div>
+        ) : transitioningAfterGate ? (
+          <motion.div
+            key="transition"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex min-w-0 flex-1 items-center justify-between gap-4 px-6"
+            style={{ fontFamily: "var(--font-fustat)" }}
+          >
+            <div className="min-w-0">
+              <p
+                className="text-[11px] font-semibold tracking-[0.1em] text-[#64748b] uppercase"
+                style={{ fontFamily: "var(--font-title)" }}
+              >
+                Working
+              </p>
+              <p className="truncate text-[15px] font-medium text-[#334155]">
+                Approval received. The next step is still running.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2 text-[#64748b]">
+              <Loader2 className="size-4 animate-spin" />
+              <span className="text-[13px] font-medium">Processing</span>
+            </div>
+          </motion.div>
+        ) : pendingGate ? (
+          <motion.div
+            key="gate"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="flex min-w-0 flex-1 items-center justify-between gap-5 px-6"
+            style={{ fontFamily: "var(--font-fustat)" }}
+          >
+            <div className="min-w-0 flex-1">
+              <GateTypeStamp gateType={pendingGate.gate_type} />
+              <p className="mt-1 truncate text-[14px] font-medium text-[#4a6f96]">Waiting for your decision</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-3">
+              {(pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send" || pendingGate.gate_type === "memory_confirmation") ? (
+                <EditorialActionButton
+                  label="Request changes"
+                  glyph="reject"
+                  variant="secondary"
+                  onClick={onReject}
+                  disabled={busy}
+                  className="px-5 text-[14px]"
+                />
+              ) : null}
+              <EditorialActionButton
+                label={approveLabel}
+                glyph={approveLabel.startsWith("Submit") ? "submit" : "approve"}
+                variant="primary"
+                onClick={onApprove}
+                disabled={busy || approveDisabled}
+                className="px-6 text-[14px]"
+              />
+            </div>
+          </motion.div>
+        ) : showFailure ? (
+          <motion.div
+            key="failure"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex min-w-0 flex-1 items-center justify-between gap-5 px-6"
+            style={{ fontFamily: "var(--font-fustat)" }}
+          >
+            <div className="min-w-0 flex-1">
+              {isGateRejected ? (
+                <RejectionTypeStamp />
+              ) : (
+                <FailureTypeStamp agentName={formatWorkerDisplayName(failureStep?.agent_snapshot?.name ?? failureStep?.agent_id ?? "Agent")} />
+              )}
+              <p className="mt-1 truncate text-[14px] font-medium text-[#991b1b]">{failureSubtitle}</p>
+            </div>
+            {failureStep ? (
+              <EditorialActionButton
+                label="Rerun"
+                glyph="rerun"
+                variant="danger"
+                onClick={onRerun}
+                disabled={busy}
+                className="px-6 text-[14px]"
+              />
+            ) : null}
+          </motion.div>
+        ) : (
+          <motion.div
+            key="running"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex min-w-0 flex-1 items-center px-6"
+            style={{ fontFamily: "var(--font-fustat)" }}
+          >
+            <div className="min-w-0 flex-1">
+              <p
+                className="text-[11px] font-semibold tracking-[0.1em] text-[#64748b] uppercase"
+                style={{ fontFamily: "var(--font-title)" }}
+              >
+                Running
+              </p>
+              <RunningSlotText stages={runningStages} />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+function StepStatusBadge({ status, needsAttention }: { status: string; needsAttention?: boolean }) {
+  if (needsAttention) {
+    return <EditorialMetaTag tone="blue">Needs you</EditorialMetaTag>;
+  }
+  if (status === "succeeded" || status === "approved" || status === "submitted") {
+    return <EditorialMetaTag tone="neutral">Succeeded</EditorialMetaTag>;
+  }
+  if (status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected") {
+    return <EditorialMetaTag tone="red">Failed</EditorialMetaTag>;
+  }
+  if (status === "waiting_for_gate" || status === "pending") {
+    return <EditorialMetaTag tone="amber">Waiting</EditorialMetaTag>;
+  }
+  if (status === "running") {
+    return <EditorialMetaTag tone="blue">Running</EditorialMetaTag>;
+  }
+  return <EditorialMetaTag>{label(status)}</EditorialMetaTag>;
+}
+
 function MemoryEditCanvas({
   gateId,
   items,
   selectedIds,
   onToggle,
   onInspect,
-  compact = false,
 }: {
   gateId: string;
   items: MemoryGateItem[];
   selectedIds: Set<string>;
   onToggle: (gateId: string, memoryId: string, checked: boolean) => void;
   onInspect: (item: MemoryGateItem) => void;
-  compact?: boolean;
 }) {
   if (items.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed bg-white/70 p-4 text-sm font-medium text-slate-500">
-        canvas.memory_edit has no validated memories to review.
-      </div>
+      <p className="py-16 text-center text-sm text-[#9ca3af]">No validated memories to review.</p>
     );
   }
 
   return (
-    <div className="rounded-2xl border border-sky-100 bg-white shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-extrabold text-[#172139]">canvas.memory_edit</p>
-            <Badge variant="secondary" className="rounded-full bg-sky-50 text-sky-700">
-              {selectedIds.size}/{items.length} selected
-            </Badge>
-          </div>
-          <p className="mt-1 text-xs font-medium text-slate-500">
-            Select the memories that should be passed to the next agent.
-          </p>
-        </div>
-      </div>
-      <div className={cn("divide-y", compact ? "max-h-64 overflow-y-auto" : "")}>
-        {items.map((item) => {
-          const selected = selectedIds.has(item.id);
-          const summary = memoryItemSummary(item);
-          return (
-            <div
-              key={item.id}
-              className={cn(
-                "grid gap-3 px-4 py-4 transition sm:grid-cols-[auto_minmax(180px,260px)_minmax(0,1fr)_auto]",
-                selected ? "bg-sky-50/45" : "bg-white",
-              )}
-            >
-              <Checkbox
-                checked={selected}
-                onCheckedChange={(checked) => onToggle(gateId, item.id, checked === true)}
-                aria-label={`Include memory ${item.id}`}
-                className="mt-1"
-              />
-              <div className="min-w-0">
-                <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Memory ID</p>
-                <button
-                  type="button"
-                  onClick={() => onInspect(item)}
-                  className="mt-1 block max-w-full truncate font-mono text-xs font-semibold text-slate-800 underline-offset-2 hover:underline"
-                  title={item.id}
-                >
-                  {item.id}
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={() => onInspect(item)}
-                className="min-w-0 text-left"
-              >
-                <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Memory content</p>
-                <p className={cn("mt-1 text-sm font-medium leading-6 text-slate-700", compact ? "line-clamp-2" : "line-clamp-3")}>
-                  {summary}
-                </p>
-              </button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => onInspect(item)}
-                className="self-start rounded-full"
-              >
-                <Eye className="mr-1 size-3.5" />
-                View
-              </Button>
+    <div>
+      {items.map((item) => {
+        const selected = selectedIds.has(item.id);
+        const title = memoryItemTitle(item);
+        const summary = memoryItemSummary(item);
+        const meta = memoryItemMeta(item);
+        return (
+          <div
+            key={item.id}
+            className={cn(
+              "flex items-start gap-4 border-b border-[#e5e7eb] px-7 py-4 transition-colors hover:bg-[#fafafa]",
+              selected && "bg-[#f9fafb] ring-1 ring-inset ring-[#111827]/10",
+            )}
+          >
+            <Checkbox
+              checked={selected}
+              onCheckedChange={(checked) => onToggle(gateId, item.id, checked === true)}
+              aria-label={`Include memory ${title}`}
+              className="mt-1 rounded-[2px]"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-[15px] font-semibold text-[#111827]">{title}</p>
+              <p className="mt-1 line-clamp-2 text-[14px] leading-6 text-[#4b5563]">{summary}</p>
+              <p className="mt-1.5 font-mono text-[12px] text-[#9ca3af]">{meta}</p>
             </div>
-          );
-        })}
-      </div>
+            <button
+              type="button"
+              onClick={() => onInspect(item)}
+              className="shrink-0 pt-0.5 text-[13px] text-[#6b7280] underline-offset-2 hover:text-[#111827] hover:underline"
+            >
+              View →
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -651,6 +1271,15 @@ export default function StableLoopRunPage() {
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [leftTab, setLeftTab] = useState<"output" | "attempts" | "artifact">("output");
+  const [gateResolvedFlash, setGateResolvedFlash] = useState(false);
+  const [gateTransitionStepId, setGateTransitionStepId] = useState<string | null>(null);
+  const [prevGateId, setPrevGateId] = useState<string | null>(null);
+  const [agentInfoStepId, setAgentInfoStepId] = useState<string | null>(null);
+  const showHiringToast = useCallback((roleName: string) => {
+    toast.success("Hiring coming soon", {
+      description: `You’ll be able to hire and fine-tune ${roleName} here.`,
+    });
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -714,6 +1343,112 @@ export default function StableLoopRunPage() {
     [latestArtifacts],
   );
   const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run]);
+  const rejectedGate = useMemo(
+    () => [...(run?.gates ?? [])].reverse().find((gate) => gate.status === "rejected") ?? null,
+    [run?.gates],
+  );
+  const runHasTerminalFailure = run?.status === "failed" || run?.status === "blocked" || run?.status === "cancelled";
+  const failureRetryTarget = useMemo(() => {
+    if (!runHasTerminalFailure) return null;
+    const failedLatest = [...latestSteps]
+      .filter((step) => step.status === "failed" || step.status === "cancelled")
+      .sort((left, right) => right.step_index - left.step_index)[0];
+    if (failedLatest) return failedLatest;
+    return [...orderedSteps]
+      .filter((step) => step.status === "failed" || step.status === "cancelled")
+      .sort((left, right) => right.step_index - left.step_index)[0] ?? null;
+  }, [latestSteps, orderedSteps, runHasTerminalFailure]);
+  const isGateRejected = useMemo(() => {
+    const message = `${error ?? ""} ${run?.error_json?.message ?? ""}`.toLowerCase();
+    return message.includes("gate rejected") || Boolean(rejectedGate);
+  }, [error, rejectedGate, run?.error_json?.message]);
+  const failureMessage = useMemo(() => {
+    if (error) return error;
+    if (failureRetryTarget?.error_json?.message) return failureRetryTarget.error_json.message;
+    if (runHasTerminalFailure && run?.error_json?.message) return run.error_json.message;
+    return null;
+  }, [error, failureRetryTarget, run?.error_json?.message, runHasTerminalFailure]);
+
+  useEffect(() => {
+    if (prevGateId && !pendingGate) {
+      setGateResolvedFlash(true);
+      const timer = window.setTimeout(() => setGateResolvedFlash(false), 400);
+      return () => window.clearTimeout(timer);
+    }
+    setPrevGateId(pendingGate?.id ?? null);
+  }, [pendingGate, prevGateId]);
+
+  const currentStep = useMemo(
+    () => resolveCurrentStep(latestSteps, pendingGate, run?.current_step_index),
+    [latestSteps, pendingGate, run?.current_step_index],
+  );
+  const activelyExecutingAfterGate = Boolean(
+    !pendingGate &&
+      run?.status === "running" &&
+      currentStep?.status === "running" &&
+      finalArtifacts.length > 0,
+  );
+  const transitioningAfterGate = Boolean(
+    !pendingGate &&
+      !terminalStatuses.has(run?.status ?? "idle") &&
+      (gateTransitionStepId || activelyExecutingAfterGate),
+  );
+  const currentStepLabel = useMemo(() => {
+    if (!currentStep) return "Starting run";
+    const name = currentStep.agent_snapshot?.name ?? currentStep.agent_id;
+    return workerSlotLabel(currentStep.step_index, name);
+  }, [currentStep]);
+  const agentPanelStatusLabel = run?.status === "succeeded"
+    ? "Complete"
+    : run?.status === "blocked" || run?.status === "failed" || run?.status === "cancelled"
+      ? "Needs attention"
+      : currentStepLabel;
+  useEffect(() => {
+    if (!gateTransitionStepId) return;
+    if (!run || terminalStatuses.has(run.status) || pendingGate) {
+      setGateTransitionStepId(null);
+    }
+  }, [gateTransitionStepId, pendingGate, run]);
+  const doneSteps = latestSteps.filter((step) => step.status === "succeeded").length;
+  const nextWorkerName = useMemo(
+    () => {
+      const raw = pendingGate ? getNextWorkerName(run, latestSteps) : null;
+      return raw ? formatWorkerDisplayName(raw) : null;
+    },
+    [latestSteps, pendingGate, run],
+  );
+  const parentRunPhase = useMemo(
+    () => resolveParentRunPhase(run?.status ?? "idle", pendingGate, Boolean(failureRetryTarget) && !transitioningAfterGate),
+    [failureRetryTarget, pendingGate, run?.status, transitioningAfterGate],
+  );
+  const parentAgentNarrative = useMemo(() => {
+    if (!run) {
+      return {
+        parentName: "Tallei Agent",
+        parentTask: "Coordinates agents on this job.",
+        goalLine: null,
+        orchestration: "",
+        roster: "",
+        statusLine: "",
+      };
+    }
+    return buildParentAgentNarrative({
+      run,
+      parentRunPhase,
+      currentStep,
+      currentStepLabel,
+      pendingGate,
+      latestSteps,
+      doneSteps,
+    });
+  }, [currentStep, currentStepLabel, doneSteps, latestSteps, parentRunPhase, pendingGate, run]);
+  const activeStageName = useMemo(() => {
+    if (currentStep) {
+      return formatWorkerDisplayName(currentStep.agent_snapshot?.name ?? `Slot ${currentStep.step_index + 1}`);
+    }
+    if (pendingGate) return pendingGate.gate_type;
+    return "Initializing";
+  }, [currentStep, pendingGate]);
   const memoryGateItems = useMemo(
     () => pendingGate?.gate_type === "memory_confirmation" ? readMemoryGateItems(pendingGate) : [],
     [pendingGate],
@@ -724,8 +1459,9 @@ export default function StableLoopRunPage() {
   );
   const selectedStep = useMemo(() => {
     if (selectedStepId) return orderedSteps.find((step) => step.id === selectedStepId) ?? null;
+    if (currentStep) return orderedSteps.find((step) => step.id === currentStep.id) ?? currentStep;
     return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_gate" || step.status === "running") ?? null;
-  }, [orderedSteps, selectedStepId]);
+  }, [currentStep, orderedSteps, selectedStepId]);
   const selectedStepContext = selectedStepId ? selectedStep : null;
   const latestArtifact = finalArtifacts.at(-1) ?? null;
   const selectedArtifact = useMemo(() => {
@@ -768,20 +1504,14 @@ export default function StableLoopRunPage() {
   const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
   const centerTitle = inspectingAgentOutput
-    ? `${selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id} output`
+    ? `${formatWorkerDisplayName(selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id ?? "Agent")} output`
     : activeArtifact
       ? `${finalArtifactName} artifact`
       : `${finalArtifactName} artifact`;
   const centerBody = inspectingAgentOutput
     ? getStepText(selectedStep)
-    : activeArtifact?.body || pendingGate?.payload_json.result?.text || getStepText(selectedStep);
+    : activeArtifact?.body || getStepText(selectedStep);
   const contextEntries = readContextEntries(run?.context);
-  const doneSteps = latestSteps.filter((step) => step.status === "succeeded").length;
-  const gateHeading = pendingGate
-    ? pendingGate.gate_type === "missing_input"
-      ? "Input is needed to continue"
-      : `${label(pendingGate.gate_type)} is ready for approval`
-    : null;
   const artifactPanelArtifacts = useMemo(() => {
     if (selectedStepContext) {
       const attemptIds = new Set(attemptsForSelectedStep.map((attempt) => attempt.id));
@@ -797,15 +1527,15 @@ export default function StableLoopRunPage() {
     return finalArtifacts;
   }, [attemptsForSelectedStep, finalArtifacts, selectedArtifact, selectedStepContext, visibleArtifacts]);
   const artifactPanelTitle = selectedStepContext
-    ? `${selectedStepContext.agent_snapshot?.name ?? selectedStepContext.agent_id} artifacts`
+    ? `${formatWorkerDisplayName(selectedStepContext.agent_snapshot?.name ?? selectedStepContext.agent_id)} artifacts`
     : selectedArtifact
       ? `${inferGoalArtifactName(run, selectedArtifact)} artifact`
       : `${finalArtifactName} artifact`;
   const artifactPanelDescription = selectedStepContext
-    ? "Artifacts produced by the selected step and its attempts."
+    ? "Artifacts produced by the selected agent and its attempts."
     : selectedArtifact
       ? `Versions of ${selectedArtifact.artifact_key}.`
-      : "This is the run result. Agent rows are intermediate work; the artifact is the reviewed end result.";
+      : "This is the job result. Agent outputs are intermediate; the artifact is the reviewed deliverable.";
   const runLogEvents = useMemo(
     () => [...(run?.events ?? [])].sort((a, b) => a.created_at.localeCompare(b.created_at)),
     [run],
@@ -841,7 +1571,7 @@ export default function StableLoopRunPage() {
     const steps = orderedSteps.map((step) => ({
       id: `step:${step.id}`,
       time: step.finished_at ?? step.started_at ?? step.created_at,
-      title: `Step ${step.step_index + 1} · ${step.agent_snapshot?.name ?? step.agent_id}`,
+      title: workerSlotLabel(step.step_index, step.agent_snapshot?.name ?? step.agent_id),
       status: step.status,
       body: preview(
         getStepText(step) ||
@@ -893,9 +1623,17 @@ export default function StableLoopRunPage() {
       return;
     }
     if (action === "input") {
+      setSelectedStepId(null);
+      setSelectedArtifactId(null);
+      setLeftTab("output");
+      setGateTransitionStepId(currentStep?.id ?? gate.id);
       void post(`/api/workflows/runs/${runId}/gates/${gate.id}/input`, { value: inputValues[gate.id] ?? "" });
       return;
     }
+    setSelectedStepId(null);
+    setSelectedArtifactId(null);
+    setLeftTab("output");
+    setGateTransitionStepId(currentStep?.id ?? gate.id);
     void post(`/api/workflows/runs/${runId}/gates/${gate.id}/approve`, {
       channel: "dashboard",
       ...(gate.gate_type === "memory_confirmation"
@@ -911,168 +1649,302 @@ export default function StableLoopRunPage() {
 
   if (loading) {
     return (
-      <div className="grid min-h-screen place-items-center bg-slate-50">
-        <Loader2 className="size-7 animate-spin text-slate-500" />
+      <div className="grid min-h-screen place-items-center bg-[#f7f8fb]" style={{ fontFamily: "var(--font-fustat)" }}>
+        <div className="flex items-center gap-3 border border-[#d1d5db] bg-white px-5 py-4">
+          <Loader2 className="size-5 animate-spin text-[#6b7280]" />
+          <span className="text-[14px] font-medium text-[#6b7280]">Loading run…</span>
+        </div>
       </div>
     );
   }
 
-  if (!run) return <main className="p-8 text-sm text-red-700">{error ?? "Run not found"}</main>;
+  if (!run) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f7f8fb] p-8" style={{ fontFamily: "var(--font-fustat)" }}>
+        <p className="border border-[#d9a3a3] bg-[#fdf2f2] px-5 py-4 text-[14px] text-[#991b1b]">
+          {error ?? "Job not found"}
+        </p>
+      </main>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-[#f7f8fb] text-[#121a31]">
+    <main className="min-h-screen bg-[#f7f8fb] text-[#121a31]" style={{ fontFamily: "var(--font-fustat)" }}>
       <div className="mx-auto max-w-[1660px] px-7 py-6">
         <header className="mb-7 flex items-start justify-between gap-4">
           <div>
-            <nav className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-500">
-              <Link href="/dashboard/loops" className="hover:text-slate-900">Loops</Link>
-              <ChevronRight className="size-4" />
-              <Link href={`/dashboard/loops/${workflowId}`} className="hover:text-slate-900">{run.workflow_title}</Link>
-              <ChevronRight className="size-4" />
-              <span className="text-slate-900">Run {run.id.slice(0, 6)}</span>
+            <nav className="mb-2 flex items-center gap-2 text-[13px] font-medium text-[#9ca3af]">
+              <Link href="/dashboard/loops" className="hover:text-[#111827]">Loops</Link>
+              <ChevronRight className="size-3.5" />
+              <Link href={`/dashboard/loops/${workflowId}`} className="hover:text-[#111827]">{run.workflow_title}</Link>
+              <ChevronRight className="size-3.5" />
+              <span className="text-[#111827]">Job #{run.id.slice(0, 6)}</span>
             </nav>
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-[25px] font-extrabold leading-tight tracking-[-0.02em]">{run.workflow_title}</h1>
+              <h1
+                className="text-[25px] font-bold leading-tight tracking-[-0.02em] text-[#111827]"
+                style={{ fontFamily: "var(--font-title)" }}
+              >
+                {run.workflow_title}
+              </h1>
               <RunStatusPill status={run.status} />
             </div>
           </div>
-          <div className="flex items-center gap-3 text-slate-500">
-            <button className="rounded-lg p-2 hover:bg-white hover:text-slate-900" title="Info"><Info className="size-5" /></button>
-            <button
-              className="rounded-lg p-2 hover:bg-white hover:text-slate-900"
-              title="Run details"
-              onClick={() => setDetailsOpen(true)}
-            >
-              <Code className="size-5" />
-            </button>
-            <button onClick={() => void load()} className="rounded-lg p-2 hover:bg-white hover:text-slate-900" title="Refresh"><RefreshCw className="size-5" /></button>
-            <button className="rounded-lg p-2 hover:bg-white hover:text-slate-900" title="Panels"><Columns2 className="size-5" /></button>
+          <div className="flex items-center gap-2">
+            <EditorialToolbarButton title="Info"><Info className="size-4" /></EditorialToolbarButton>
+            <EditorialToolbarButton title="Job details" onClick={() => setDetailsOpen(true)}>
+              <Code className="size-4" />
+            </EditorialToolbarButton>
+            <EditorialToolbarButton title="Refresh" onClick={() => void load()}>
+              <RefreshCw className="size-4" />
+            </EditorialToolbarButton>
+            <EditorialToolbarButton title="Panels"><Columns2 className="size-4" /></EditorialToolbarButton>
             {!terminalStatuses.has(run.status) ? (
-              <button
-                onClick={() => void post(`/api/workflows/runs/${runId}/cancel`)}
-                disabled={Boolean(busy)}
-                className="rounded-lg p-2 hover:bg-white hover:text-red-700 disabled:opacity-50"
+              <EditorialToolbarButton
                 title="Cancel"
+                danger
+                disabled={Boolean(busy)}
+                onClick={() => void post(`/api/workflows/runs/${runId}/cancel`)}
               >
-                <X className="size-5" />
-              </button>
+                <X className="size-4" />
+              </EditorialToolbarButton>
             ) : null}
-            <button className="rounded-lg p-2 hover:bg-white hover:text-slate-900" title="More"><MoreHorizontal className="size-5" /></button>
+            <EditorialToolbarButton title="More"><MoreHorizontal className="size-4" /></EditorialToolbarButton>
           </div>
         </header>
 
-        {error || run.error_json?.message ? (
-          <div className="mb-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-            {error ?? run.error_json?.message}
-          </div>
-        ) : null}
+        <RunStatusBand
+          gateResolvedFlash={gateResolvedFlash}
+          transitioningAfterGate={transitioningAfterGate}
+          pendingGate={pendingGate}
+          runStatus={run.status}
+          failureStep={failureRetryTarget}
+          failureMessage={failureMessage}
+          isGateRejected={isGateRejected}
+          activeStageName={activeStageName}
+          busy={Boolean(busy)}
+          approveLabel={
+            pendingGate?.gate_type === "missing_input"
+              ? "Submit"
+              : pendingGate?.gate_type === "memory_confirmation" && selectedMemoryIds.size > 0
+                ? `Approve (${selectedMemoryIds.size})`
+                : "Approve"
+          }
+          approveDisabled={
+            pendingGate?.gate_type === "missing_input"
+              ? !(inputValues[pendingGate.id] ?? "").trim()
+              : false
+          }
+          onApprove={() => {
+            if (!pendingGate) return;
+            submitGate(
+              pendingGate,
+              pendingGate.gate_type === "missing_input" ? "input" : "approve",
+            );
+          }}
+          onReject={() => pendingGate && submitGate(pendingGate, "reject")}
+          onRerun={() => {
+            if (!failureRetryTarget) return;
+            void post(`/api/workflows/runs/${runId}/steps/${failureRetryTarget.id}/retry`);
+          }}
+        />
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_490px]">
           <section className="space-y-5">
-            {pendingGate ? (
-              <Card className="overflow-hidden rounded-[22px] border-0 bg-[#eefdff] shadow-md shadow-slate-300/60">
-                <CardContent className="flex min-h-[178px] gap-5 p-7">
-                  <div className="grid size-14 shrink-0 place-items-center rounded-2xl border border-slate-200 bg-white shadow-sm">
-                    <ShieldCheck className="size-7 text-slate-700" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h2 className="text-[19px] font-extrabold">{gateHeading}</h2>
-                    <p className="mt-2 max-w-4xl text-[18px] font-medium leading-7 text-[#53627a]">
-                      {pendingGate.gate_type === "missing_input"
-                        ? pendingGate.question
-                        : preview(centerBody || pendingGate.question || run.definition?.goal, "Review the current artifact and approve or request changes.")}
-                    </p>
-                    {pendingGate.gate_type === "missing_input" ? (
-                      <textarea
-                        value={inputValues[pendingGate.id] ?? ""}
-                        onChange={(event) => setInputValues((current) => ({ ...current, [pendingGate.id]: event.target.value }))}
-                        className="mt-5 min-h-28 w-full rounded-xl border border-cyan-200 bg-white p-3 text-sm outline-none focus:border-cyan-400"
-                        placeholder="Provide the required input"
-                      />
-                    ) : null}
-                    {pendingGate.gate_type === "memory_confirmation" ? (
-                      <div className="mt-5">
+
+            <AnimatePresence mode="wait">
+              {pendingGate ? (
+                <motion.div
+                  key="gate-review"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <EditorialWorkspaceShell>
+                    <div className="border-b border-[#e5e7eb] px-7 py-6">
+                      <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
+                        {gateWorkspaceTitle(pendingGate.gate_type)}
+                      </h2>
+                      <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
+                        {gateWorkspaceSubtitle(pendingGate)}
+                        {nextWorkerName ? (
+                          <>
+                            {" "}
+                            <span className="font-medium text-[#374151]">Then → {nextWorkerName}</span>
+                          </>
+                        ) : null}
+                      </p>
+                    </div>
+
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                      {pendingGate.gate_type === "memory_confirmation" ? (
                         <MemoryEditCanvas
                           gateId={pendingGate.id}
                           items={memoryGateItems}
                           selectedIds={selectedMemoryIds}
                           onToggle={toggleMemorySelection}
                           onInspect={setMemoryDetail}
-                          compact
                         />
+                      ) : null}
+                      {pendingGate.gate_type === "missing_input" ? (
+                        <div className="px-7 py-6">
+                          <textarea
+                            value={inputValues[pendingGate.id] ?? ""}
+                            onChange={(event) => setInputValues((current) => ({ ...current, [pendingGate.id]: event.target.value }))}
+                            className="min-h-40 w-full border border-[#d1d5db] bg-white p-4 text-[14px] leading-relaxed text-[#111827] outline-none focus:border-[#9ca3af]"
+                            placeholder={pendingGate.question ?? "Provide the required input"}
+                          />
+                        </div>
+                      ) : null}
+                      {(pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send") ? (
+                        <div className="px-7 py-6">
+                          {activeCanvasArtifact && activeCanvasTemplate ? (
+                            <ArtifactRenderer
+                              artifact={activeCanvasArtifact}
+                              runId={runId}
+                              saving={busy?.includes("/canvas/email") ?? false}
+                              onSave={async (data) => {
+                                await saveCanvasEmail(activeCanvasArtifact, data as Parameters<typeof saveCanvasEmail>[1]);
+                              }}
+                            />
+                          ) : centerBody ? (
+                            <div className="prose prose-slate max-w-none text-[16px] leading-7">
+                              <Streamdown>{centerBody}</Streamdown>
+                            </div>
+                          ) : (
+                            <p className="py-16 text-center text-sm text-[#9ca3af]">No draft artifact available yet.</p>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {(pendingGate.gate_type === "memory_confirmation" || pendingGate.gate_type === "missing_input") ? (
+                      <div className="mt-auto flex items-center justify-between gap-4 border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4">
+                        <p className="text-[13px] text-[#6b7280]">
+                          {pendingGate.gate_type === "memory_confirmation"
+                            ? `${memoryGateItems.length} proposed · ${selectedMemoryIds.size} selected`
+                            : "Required before the run can continue"}
+                        </p>
+                        <div className="flex items-center gap-4">
+                          {pendingGate.gate_type === "memory_confirmation" ? (
+                            <EditorialActionButton
+                              label="Request changes"
+                              glyph="reject"
+                              variant="ghost"
+                              onClick={() => submitGate(pendingGate, "reject")}
+                              disabled={Boolean(busy)}
+                              className="text-[14px]"
+                            />
+                          ) : null}
+                          <EditorialActionButton
+                            label={
+                              pendingGate.gate_type === "missing_input"
+                                ? "Submit"
+                                : `Approve${selectedMemoryIds.size > 0 ? ` (${selectedMemoryIds.size})` : ""}`
+                            }
+                            glyph={pendingGate.gate_type === "missing_input" ? "submit" : "approve"}
+                            variant="primary"
+                            onClick={() => submitGate(pendingGate, pendingGate.gate_type === "missing_input" ? "input" : "approve")}
+                            disabled={Boolean(busy) || (pendingGate.gate_type === "missing_input" && !(inputValues[pendingGate.id] ?? "").trim())}
+                            className="px-5 text-[14px]"
+                          />
+                        </div>
+                      </div>
+                    ) : (pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send") ? (
+                      <div className="mt-auto flex items-center justify-between gap-4 border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4 lg:hidden">
+                        <p className="text-[13px] text-[#6b7280]">Review the draft above</p>
+                        <div className="flex items-center gap-4">
+                          <EditorialActionButton
+                            label="Request changes"
+                            glyph="reject"
+                            variant="ghost"
+                            onClick={() => submitGate(pendingGate, "reject")}
+                            disabled={Boolean(busy)}
+                            className="text-[14px]"
+                          />
+                          <EditorialActionButton
+                            label="Approve"
+                            glyph="approve"
+                            variant="primary"
+                            onClick={() => submitGate(pendingGate, "approve")}
+                            disabled={Boolean(busy)}
+                            className="px-5 text-[14px]"
+                          />
+                        </div>
                       </div>
                     ) : null}
-                    <div className="mt-7 flex flex-wrap items-center gap-4">
-                      <Button
-                        disabled={Boolean(busy) || (pendingGate.gate_type === "missing_input" && !(inputValues[pendingGate.id] ?? "").trim())}
-                        onClick={() => submitGate(pendingGate, pendingGate.gate_type === "missing_input" ? "input" : "approve")}
-                        className="h-9 rounded-lg bg-[#0077b6] px-5 text-[16px] font-bold shadow-md shadow-sky-800/20 hover:bg-[#00689f]"
-                      >
-                        <Check className="mr-2 size-4" />
-                        {pendingGate.gate_type === "missing_input"
-                          ? "Submit input"
-                          : pendingGate.gate_type === "memory_confirmation"
-                            ? "Approve selected"
-                            : "Approve"}
-                      </Button>
-                      <Button variant="ghost" disabled={Boolean(busy)} onClick={() => submitGate(pendingGate, "reject")} className="text-[16px] font-semibold text-[#364761]">
-                        Request changes
-                      </Button>
+                  </EditorialWorkspaceShell>
+                </motion.div>
+              ) : transitioningAfterGate ? (
+                <motion.div
+                  key="gate-transition"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <EditorialWorkspaceShell className="min-h-[860px] overflow-hidden">
+                    <div className="flex min-h-[860px] flex-col items-center justify-center px-10 py-16 text-center">
+                      <div className="flex size-20 items-center justify-center rounded-full border border-[#d1d5db] bg-white shadow-sm">
+                        <Loader2 className="size-7 animate-spin text-[#2563eb]" />
+                      </div>
+                      <p className="mt-6 text-[22px] font-bold tracking-[-0.02em] text-[#111827]">
+                        Approval received
+                      </p>
+                      <p className="mt-2 max-w-[28rem] text-[15px] leading-7 text-[#6b7280]">
+                        The process is still running. We’ll show the next reviewed output as soon as the runtime settles.
+                      </p>
+                      <div className="mt-7 flex items-center gap-2">
+                        {[0, 1, 2].map((index) => (
+                          <motion.span
+                            key={index}
+                            className="size-2 rounded-full bg-[#9bb8d9]"
+                            animate={{ opacity: [0.35, 1, 0.35], y: [0, -2, 0] }}
+                            transition={{
+                              duration: 1.2,
+                              repeat: Infinity,
+                              ease: "easeInOut",
+                              delay: index * 0.15,
+                            }}
+                          />
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : null}
-
-            <Card className="min-h-[860px] overflow-hidden rounded-[22px] border-0 bg-white shadow-sm">
-              <Tabs value={leftTab} onValueChange={(value) => setLeftTab(value as typeof leftTab)} className="gap-0">
-                <CardHeader className="border-b bg-gradient-to-r from-[#fffaf2] via-white to-[#f0fbff] px-7 py-6">
+                  </EditorialWorkspaceShell>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="report-artifact"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <EditorialWorkspaceShell className="min-h-[860px] overflow-hidden">
+              <Tabs value={leftTab} onValueChange={(value) => setLeftTab(value as typeof leftTab)} className="flex min-h-0 flex-1 flex-col gap-0">
+                <CardHeader className="border-b border-[#e5e7eb] bg-white px-7 py-6">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex min-w-0 items-center gap-3">
-                      <CardTitle className="truncate text-[20px] font-bold text-[#35455f]">{centerTitle}</CardTitle>
+                      <CardTitle className="truncate text-[20px] font-bold tracking-[-0.02em] text-[#111827]">{centerTitle}</CardTitle>
                     </div>
                   </div>
                   <TabsList variant="line" className="mt-5 h-auto gap-1 rounded-none bg-transparent p-0">
-                    <TabsTrigger value="output" className="h-10 rounded-none px-4 text-sm font-semibold capitalize text-slate-500 data-[state=active]:bg-transparent data-[state=active]:text-[#10182d] data-[state=active]:shadow-none">
+                    <TabsTrigger value="output" className="h-10 rounded-none border-b-2 border-transparent px-4 text-sm font-semibold capitalize text-[#6b7280] data-[state=active]:border-[#111827] data-[state=active]:bg-transparent data-[state=active]:text-[#111827] data-[state=active]:shadow-none">
                       Output
                     </TabsTrigger>
-                    <TabsTrigger value="attempts" className="h-10 rounded-none px-4 text-sm font-semibold capitalize text-slate-500 data-[state=active]:bg-transparent data-[state=active]:text-[#10182d] data-[state=active]:shadow-none">
+                    <TabsTrigger value="attempts" className="h-10 rounded-none border-b-2 border-transparent px-4 text-sm font-semibold capitalize text-[#6b7280] data-[state=active]:border-[#111827] data-[state=active]:bg-transparent data-[state=active]:text-[#111827] data-[state=active]:shadow-none">
                       Attempts
                     </TabsTrigger>
-                    <TabsTrigger value="artifact" className="h-10 rounded-none px-4 text-sm font-semibold capitalize text-slate-500 data-[state=active]:bg-transparent data-[state=active]:text-[#10182d] data-[state=active]:shadow-none">
+                    <TabsTrigger value="artifact" className="h-10 rounded-none border-b-2 border-transparent px-4 text-sm font-semibold capitalize text-[#6b7280] data-[state=active]:border-[#111827] data-[state=active]:bg-transparent data-[state=active]:text-[#111827] data-[state=active]:shadow-none">
                       Artifact
                     </TabsTrigger>
                   </TabsList>
                 </CardHeader>
-                <CardContent className="p-7">
+                <CardContent className="min-h-0 flex-1 overflow-y-auto p-7">
                     <TabsContent value="output" className="mt-0">
-                      <div className="rounded-2xl border bg-white p-7 shadow-sm">
-                        {pendingGate ? (
-                          <div className="mb-6 flex items-start gap-4 rounded-2xl border border-amber-100 bg-amber-50 p-4">
-                            <div className="grid size-12 place-items-center rounded-xl bg-amber-100 text-amber-700">
-                              <ShieldCheck className="size-6" />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center justify-between gap-3">
-                                <h3 className="text-[18px] font-extrabold">Awaiting operator response</h3>
-                                <StatusBadge status="pending" />
-                              </div>
-                              <p className="mt-1 text-[15px] text-slate-600">
-                                {pendingGate?.question ?? "The selected step is paused at a gate."}
-                              </p>
-                            </div>
-                          </div>
-                        ) : null}
-
-                        {pendingGate?.gate_type === "memory_confirmation" ? (
-                          <MemoryEditCanvas
-                            gateId={pendingGate.id}
-                            items={memoryGateItems}
-                            selectedIds={selectedMemoryIds}
-                            onToggle={toggleMemorySelection}
-                            onInspect={setMemoryDetail}
-                          />
-                        ) : inspectingAgentOutput ? (
+                      <div className="border border-[#e5e7eb] bg-white p-7">
+                        {inspectingAgentOutput ? (
                           <div className="prose prose-slate max-w-none text-[16px] leading-7">
                             <Streamdown>{centerBody}</Streamdown>
                           </div>
@@ -1090,34 +1962,32 @@ export default function StableLoopRunPage() {
                             <Streamdown>{centerBody}</Streamdown>
                           </div>
                         ) : (
-                          <div className="grid min-h-[560px] place-items-center rounded-2xl border border-dashed bg-slate-50 p-8 text-center text-sm text-slate-500">
-                            No {finalArtifactName.toLowerCase()} artifact yet. The stable worker will update this projection when the run produces its reviewed result.
+                          <div className="grid min-h-[560px] place-items-center border border-dashed border-[#d1d5db] bg-[#fafafa] p-8 text-center text-sm text-[#6b7280]">
+                            No {finalArtifactName.toLowerCase()} artifact yet. The stable runtime will update this projection when the job produces its reviewed result.
                           </div>
                         )}
                       </div>
                     </TabsContent>
 
                     <TabsContent value="attempts" className="mt-0">
-                      <div className="space-y-4">
+                      <div className="space-y-0 divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                         {(attemptsForSelectedStep.length > 0 ? attemptsForSelectedStep : orderedSteps).map((attempt) => (
-                          <div key={attempt.id} className="rounded-2xl border bg-white p-5 shadow-sm">
+                          <div key={attempt.id} className="bg-white p-5">
                             <div className="flex items-start justify-between gap-4">
                               <div>
-                                <p className="text-sm font-bold uppercase tracking-wide text-slate-500">Step {attempt.step_index + 1} · Attempt {attempt.attempt}</p>
-                                <h3 className="mt-1 text-lg font-extrabold">{attempt.agent_snapshot?.name ?? attempt.agent_id}</h3>
+                                <p className="text-sm font-bold uppercase tracking-wide text-slate-500">Agent {attempt.step_index + 1} · Attempt {attempt.attempt}</p>
+                                <h3 className="mt-1 text-lg font-extrabold">{formatWorkerDisplayName(attempt.agent_snapshot?.name ?? attempt.agent_id)}</h3>
                               </div>
                               <div className="flex items-center gap-2">
                                 {(attempt.status === "failed" || attempt.status === "cancelled") ? (
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
+                                  <EditorialActionButton
+                                    label="Rerun"
+                                    glyph="rerun"
+                                    variant="secondary"
                                     disabled={Boolean(busy)}
                                     onClick={() => void post(`/api/workflows/runs/${runId}/steps/${attempt.id}/retry`)}
-                                    className="rounded-full"
-                                  >
-                                    <RotateCcw className="mr-1 size-3" />
-                                    Rerun
-                                  </Button>
+                                    className="h-8 px-3 text-[12px]"
+                                  />
                                 ) : null}
                                 <StatusBadge status={attempt.status} />
                               </div>
@@ -1128,18 +1998,18 @@ export default function StableLoopRunPage() {
                           </div>
                         ))}
                         {orderedSteps.length === 0 ? (
-                          <div className="grid min-h-[360px] place-items-center rounded-2xl border border-dashed bg-slate-50 p-8 text-sm text-slate-500">
-                            No attempts have been created yet.
+                          <div className="grid min-h-[360px] place-items-center border border-dashed border-[#d1d5db] bg-[#fafafa] p-8 text-sm text-[#6b7280]">
+                            No agent attempts yet.
                           </div>
                         ) : null}
                       </div>
                     </TabsContent>
 
                     <TabsContent value="artifact" className="mt-0">
-                      <div className="space-y-4">
-                        <div className="rounded-2xl border border-sky-100 bg-sky-50 p-5">
-                          <h3 className="text-lg font-extrabold text-[#172139]">{artifactPanelTitle}</h3>
-                          <p className="mt-1 text-sm font-medium leading-6 text-[#64718a]">
+                      <div className="border border-[#e5e7eb]">
+                        <div className="border-b border-[#e5e7eb] bg-[#fafafa] p-5">
+                          <h3 className="text-lg font-bold text-[#111827]">{artifactPanelTitle}</h3>
+                          <p className="mt-1 text-sm leading-6 text-[#6b7280]">
                             {artifactPanelDescription}
                           </p>
                         </div>
@@ -1151,19 +2021,19 @@ export default function StableLoopRunPage() {
                               setSelectedStepId(null);
                               setLeftTab("output");
                             }}
-                            className="flex w-full items-center gap-4 rounded-2xl border bg-white p-5 text-left shadow-sm hover:border-slate-300"
+                            className="flex w-full items-center gap-4 border-b border-[#e5e7eb] bg-white p-5 text-left transition-colors last:border-b-0 hover:bg-[#fafafa]"
                           >
-                            <div className="grid size-12 place-items-center rounded-xl bg-slate-100 text-slate-600">
+                            <div className="grid size-12 place-items-center bg-[#f3f4f6] text-[#4b5563]">
                               <FileText className="size-5" />
                             </div>
                             <div className="min-w-0 flex-1">
-                              <p className="truncate font-extrabold">{inferGoalArtifactName(run, artifact)} artifact</p>
-                              <p className="mt-1 text-sm text-slate-500">Version {artifact.version} · {artifact.kind}</p>
+                              <p className="truncate font-bold text-[#111827]">{inferGoalArtifactName(run, artifact)} artifact</p>
+                              <p className="mt-1 text-sm text-[#6b7280]">Version {artifact.version} · {artifact.kind}</p>
                             </div>
                           </button>
                         ))}
                         {artifactPanelArtifacts.length === 0 ? (
-                          <div className="grid min-h-[360px] place-items-center rounded-2xl border border-dashed bg-slate-50 p-8 text-sm text-slate-500">
+                          <div className="grid min-h-[360px] place-items-center p-8 text-sm text-[#6b7280]">
                             No artifacts found for this selection.
                           </div>
                         ) : null}
@@ -1171,504 +2041,439 @@ export default function StableLoopRunPage() {
                     </TabsContent>
                   </CardContent>
               </Tabs>
-            </Card>
+                  </EditorialWorkspaceShell>
+                  </motion.div>
+              )}
+            </AnimatePresence>
           </section>
 
-          <aside className="space-y-4 overflow-hidden">
-            <Card className="overflow-hidden rounded-[22px] border-0 bg-white shadow-md shadow-slate-300/60">
-              <CardHeader className="border-b px-5 py-5">
-                <CardTitle className="text-[20px] font-extrabold">Final result</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 p-4">
-                {finalArtifacts.map((artifact) => (
-                  <button
-                    key={artifact.id}
-                    onClick={() => {
-                      setSelectedArtifactId(artifact.id);
-                      setSelectedStepId(null);
-                      setLeftTab("output");
-                    }}
-                    className={cn(
-                      "flex w-full items-center gap-3 rounded-2xl border p-4 text-left shadow-sm transition hover:border-slate-300",
-                      (selectedArtifactId === artifact.id || (!selectedArtifactId && latestArtifact?.id === artifact.id)) ? "border-sky-200 bg-sky-50" : "bg-white",
-                    )}
-                  >
-                    <div className="grid size-11 place-items-center rounded-xl bg-slate-100 text-slate-600">
-                      <FileText className="size-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="truncate text-[17px] font-extrabold text-[#26334d]">{inferGoalArtifactName(run, artifact)} artifact</p>
-                      <p className="text-xs font-medium text-slate-500">v{artifact.version} · {artifact.kind}</p>
-                    </div>
-                  </button>
-                ))}
-                {finalArtifacts.length === 0 ? (
-                  <p className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">No {finalArtifactName.toLowerCase()} artifact yet.</p>
-                ) : null}
-              </CardContent>
-            </Card>
-
-            <Card className="overflow-hidden rounded-[22px] border-0 bg-white shadow-md shadow-slate-300/60">
-              <CardHeader className="flex flex-row items-center justify-between border-b px-5 py-5">
-                <CardTitle className="text-[20px] font-extrabold">Agents</CardTitle>
-                <Badge variant="secondary" className="rounded-full">{doneSteps}/{latestSteps.length} done</Badge>
-              </CardHeader>
-              <CardContent className="space-y-3 p-4">
+          <aside className="space-y-5 overflow-hidden" style={{ fontFamily: "var(--font-fustat)" }}>
+            <EditorialSidebarPanel title="Final result" icon={Puzzle}>
+              {finalArtifacts.map((artifact) => (
                 <button
+                  key={artifact.id}
+                  type="button"
                   onClick={() => {
-                    setSelectedArtifactId(null);
-                    setSelectedStepId(selectedStep?.id ?? latestSteps[0]?.id ?? null);
+                    setSelectedArtifactId(artifact.id);
+                    setSelectedStepId(null);
                     setLeftTab("output");
                   }}
-                  className="w-full rounded-2xl border border-amber-200 bg-white p-4 text-left shadow-sm"
+                  className={cn(
+                    "flex w-full items-center gap-3 border-b border-[#e5e7eb] px-5 py-4 text-left transition-colors last:border-b-0 hover:bg-[#fafafa]",
+                    (selectedArtifactId === artifact.id || (!selectedArtifactId && latestArtifact?.id === artifact.id))
+                      && "bg-[#f8fbff] ring-1 ring-inset ring-[#2563eb]/20",
+                  )}
                 >
-                  <div className="flex gap-4">
-                    <div className="grid size-11 shrink-0 place-items-center rounded-xl bg-[#10182d] text-white shadow">
-                      <Bot className="size-5" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="truncate text-[18px] font-extrabold">Parent Agent</p>
-                        <StatusBadge status={run.status} />
-                      </div>
-                      <p className="mt-1 line-clamp-2 text-[15px] font-medium leading-5 text-[#637089]">
-                        {run.definition?.agentGraph?.parent?.task ?? "Orchestrates the run"}
-                      </p>
-                    </div>
+                  <div className="grid size-9 shrink-0 place-items-center rounded-md border border-[#d1d5db] bg-[#f9fafb] text-[#4b5563]">
+                    <FileText className="size-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <p
+                      className="truncate text-[15px] font-semibold text-[#111827]"
+                      style={{ fontFamily: "var(--font-title)" }}
+                    >
+                      {inferGoalArtifactName(run, artifact)} artifact
+                    </p>
+                    <p className="mt-0.5 font-mono text-[11px] text-[#9ca3af]">v{artifact.version} · {artifact.kind}</p>
                   </div>
                 </button>
+              ))}
+              {finalArtifacts.length === 0 ? (
+                <p className="border border-dashed border-[#d1d5db] bg-[#fafafa] px-5 py-6 text-[13px] text-[#9ca3af]">
+                  {pendingGate
+                    ? "Blocked until approval completes."
+                    : transitioningAfterGate
+                      ? "Approval received. Waiting for the next artifact."
+                      : `No ${finalArtifactName.toLowerCase()} artifact yet.`}
+                </p>
+              ) : null}
+            </EditorialSidebarPanel>
 
+            <EditorialSidebarPanel
+              title="Agents"
+              icon={Bot}
+              meta={(
+                <div className="flex flex-col items-end gap-1.5">
+                  <EditorialMetaTag tone={run.status === "succeeded" ? "neutral" : "blue"}>{agentPanelStatusLabel}</EditorialMetaTag>
+                  <EditorialMetaTag>{doneSteps}/{latestSteps.length} agents done</EditorialMetaTag>
+                </div>
+              )}
+            >
+              <ParentAgentRow
+                parentName={parentAgentNarrative.parentName}
+                roster={parentAgentNarrative.roster}
+                statusLine={parentAgentNarrative.statusLine}
+                parentRunPhase={parentRunPhase}
+                onHire={() => showHiringToast(parentAgentNarrative.parentName)}
+                onSelect={() => {
+                  setSelectedArtifactId(null);
+                  setSelectedStepId(selectedStep?.id ?? latestSteps[0]?.id ?? null);
+                  setLeftTab("output");
+                }}
+                onInfo={() => setAgentInfoStepId("parent")}
+              />
+
+              <ChildAgentsShell>
+                <ChildAgentsHeader count={latestSteps.length} />
                 {latestSteps.map((step) => {
                   const selected = selectedStepId === step.id || (!selectedStepId && selectedStep?.id === step.id);
-                  const visual = agentVisual(step);
-                  const Icon = visual.icon;
-                  const canRetry = step.status === "failed" || step.status === "cancelled";
+                  const phase = resolveStepRowPhase(step, currentStep, pendingGate);
+                  const isCurrent = currentStep?.id === step.id;
                   return (
-                    <button
+                    <ChildAgentRow
                       key={step.id}
-                      onClick={() => {
+                      step={step}
+                      phase={phase}
+                      selected={selected}
+                      isCurrent={isCurrent}
+                      toolRefs={resolveStepToolRefs(step, run?.definition)}
+                      onSelect={() => {
                         setSelectedStepId(step.id);
                         setSelectedArtifactId(null);
                         setLeftTab("output");
                       }}
-                      className={cn(
-                        "w-full rounded-2xl border p-4 text-left transition",
-                        selected ? "border-[#8aa0bd] bg-white shadow-sm ring-2 ring-[#8aa0bd]/40" : "border-slate-100 bg-white hover:border-slate-300",
-                        step.status === "waiting_for_gate" ? "border-amber-200 bg-amber-50/70" : "",
-                        step.status === "running" ? "border-yellow-200 bg-yellow-50/70" : "",
-                      )}
+                      onHire={() => showHiringToast(formatWorkerDisplayName(step.agent_snapshot?.name ?? step.agent_id))}
+                      onInfo={() => setAgentInfoStepId(step.id)}
+                      onRerun={() => void post(`/api/workflows/runs/${runId}/steps/${step.id}/retry`)}
+                    />
+                  );
+                })}
+              </ChildAgentsShell>
+              {latestSteps.length === 0 ? (
+                <p className="px-5 py-6 text-[13px] text-[#9ca3af]">Waiting for an agent claim.</p>
+              ) : null}
+            </EditorialSidebarPanel>
+
+            <EditorialSidebarPanel title="From memory" icon={Brain}>
+              {contextEntries.map((entry) => (
+                <div key={`${entry.key}:${entry.value}`} className="border-b border-[#e5e7eb] px-5 py-4 last:border-b-0">
+                  <div className="flex items-center justify-between gap-3">
+                    <p
+                      className="truncate text-[14px] font-semibold text-[#111827]"
+                      style={{ fontFamily: "var(--font-title)" }}
                     >
-                      <div className="flex gap-4">
-                        <div className={cn("grid size-11 shrink-0 place-items-center rounded-xl", visual.className)}>
-                          <Icon className="size-5" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-start justify-between gap-2">
-                            <p className="truncate text-[18px] font-extrabold text-[#172139]">{step.agent_snapshot?.name ?? step.agent_id}</p>
-                            <div className="flex shrink-0 items-center gap-2">
-                              {canRetry ? (
-                                <span
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void post(`/api/workflows/runs/${runId}/steps/${step.id}/retry`);
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter" || event.key === " ") {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      void post(`/api/workflows/runs/${runId}/steps/${step.id}/retry`);
-                                    }
-                                  }}
-                                  className="inline-flex items-center rounded-full border bg-white px-3 py-1 text-xs font-bold hover:bg-slate-50"
-                                >
-                                  <RotateCcw className="mr-1 size-3" />
-                                  Rerun
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center rounded-full border bg-white px-3 py-1 text-xs font-bold text-slate-400 opacity-70">
-                                  <RotateCcw className="mr-1 size-3" />
-                                  Rerun
-                                </span>
-                              )}
-                              <StatusBadge status={step.status} />
-                            </div>
-                          </div>
-                          <p className="mt-1 line-clamp-2 text-[15px] font-medium leading-5 text-[#64718a]">
-                            {preview(getStepText(step) || step.error_json?.message || step.agent_snapshot?.task)}
+                      {entry.key}
+                    </p>
+                    <EditorialMetaTag tone="amber">context</EditorialMetaTag>
+                  </div>
+                  <p className="mt-2 line-clamp-2 text-[13px] leading-5 text-[#6b7280]">
+                    {stripDisplayEmoji(entry.value)}
+                  </p>
+                </div>
+              ))}
+              {contextEntries.length === 0 ? (
+                <p className="border border-dashed border-[#d1d5db] bg-[#fafafa] px-5 py-6 text-[13px] text-[#9ca3af]">
+                  {pendingGate ? "Pending your selection above." : "No approved memory or submitted input yet."}
+                </p>
+              ) : null}
+            </EditorialSidebarPanel>
+          </aside>
+        </div>
+
+        <Dialog open={agentInfoStepId !== null} onOpenChange={(open) => { if (!open) setAgentInfoStepId(null); }}>
+          <DialogContent className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[520px] flex-col overflow-hidden p-0 sm:!max-w-[520px]">
+            {agentInfoStepId === "parent" ? (
+              <>
+                <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-6 py-5">
+                  <h2 className="text-[18px] font-bold tracking-[-0.02em] text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+                    {parentAgentNarrative.parentName}
+                  </h2>
+                  <p className="mt-1 text-[13px] text-[#9ca3af]">{parentAgentNarrative.roster}</p>
+                </div>
+                <div className="min-h-0 overflow-y-auto px-6 py-5 space-y-4 text-[14px] leading-6 text-[#374151]">
+                  <p>{parentAgentNarrative.parentTask}</p>
+                  {parentAgentNarrative.goalLine ? (
+                    <p className="font-medium text-[#1f2937]">{parentAgentNarrative.goalLine}</p>
+                  ) : null}
+                  <p>{parentAgentNarrative.orchestration}</p>
+                  <p className="font-medium text-[#4a6f96]">{parentAgentNarrative.statusLine}</p>
+                </div>
+              </>
+            ) : agentInfoStepId ? (
+              (() => {
+                const step = orderedSteps.find((s) => s.id === agentInfoStepId);
+                if (!step) return null;
+                const toolRefs = resolveStepToolRefs(step, run?.definition);
+                return (
+                  <>
+                    <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-6 py-5">
+                      <div className="flex items-center gap-3">
+                        <AgentIconBox {...resolveChildAgentIcon(step)} />
+                        <div>
+                          <p className="font-mono text-[9px] font-semibold tracking-[0.12em] text-[#9ca3af] uppercase">
+                            Agent · slot {step.step_index + 1}
                           </p>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <Badge variant="secondary" className="rounded-full border-0 text-xs">attempt {step.attempt}</Badge>
-                            <Badge variant="secondary" className="rounded-full border-0 text-xs">
-                              {step.output_json?.data?.mode ? String(step.output_json.data.mode) : "llm only"}
-                            </Badge>
+                          <h2 className="text-[18px] font-bold tracking-[-0.02em] text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+                            {formatWorkerDisplayName(step.agent_snapshot?.name ?? step.agent_id)}
+                          </h2>
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <AttemptChip attempt={step.attempt} />
+                            {toolRefs.map((toolRef) => (
+                              <LegendaryToolBadge key={`${step.id}-info-${toolRef}`} toolRef={toolRef} />
+                            ))}
                           </div>
                         </div>
                       </div>
-                    </button>
-                  );
-                })}
-                {latestSteps.length === 0 ? (
-                  <p className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">Waiting for worker claim.</p>
-                ) : null}
-              </CardContent>
-            </Card>
-
-            <Card className="overflow-hidden rounded-[22px] border-0 bg-white shadow-md shadow-slate-300/60">
-              <CardHeader className="border-b px-5 py-5">
-                <CardTitle className="text-[20px] font-extrabold">From memory</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 p-4">
-                {contextEntries.map((entry) => (
-                  <div key={`${entry.key}:${entry.value}`} className="rounded-2xl border p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="truncate font-medium">{entry.key}</p>
-                      <Badge variant="secondary" className="bg-amber-50 text-amber-700">context</Badge>
                     </div>
-                    <p className="mt-2 line-clamp-2 text-sm text-slate-600">{entry.value}</p>
-                  </div>
-                ))}
-                {contextEntries.length === 0 ? (
-                  <p className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">No approved memory or submitted input yet.</p>
-                ) : null}
-              </CardContent>
-            </Card>
-          </aside>
-        </div>
+                    <div className="min-h-0 overflow-y-auto px-6 py-5 text-[14px] leading-6 text-[#374151]">
+                      <p>{step.agent_snapshot?.task ?? "No task description available."}</p>
+                      {getStepText(step) ? (
+                        <div className="mt-4 rounded border border-[#e5e7eb] bg-[#fafafa] p-4">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-[#9ca3af] mb-2">Latest output</p>
+                          <p className="text-[13px] leading-6 text-[#6b7280] whitespace-pre-wrap">
+                            {stripDisplayEmoji(preview(getStepText(step) || ""))}
+                          </p>
+                        </div>
+                      ) : null}
+                      {step.error_json?.message ? (
+                        <div className="mt-4 rounded border border-red-200 bg-red-50 p-4">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-red-600 mb-2">Error</p>
+                          <p className="text-[13px] leading-6 text-red-700">{step.error_json.message}</p>
+                        </div>
+                      ) : null}
+                    </div>
+                  </>
+                );
+              })()
+            ) : null}
+          </DialogContent>
+        </Dialog>
 
         <Dialog open={Boolean(memoryDetail)} onOpenChange={(open) => {
           if (!open) setMemoryDetail(null);
         }}>
-          <DialogContent className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[860px] flex-col overflow-hidden p-0 sm:!max-w-[860px]">
-            <div className="border-b px-6 py-5">
-              <DialogHeader>
-                <DialogTitle className="text-[21px] font-extrabold tracking-[-0.02em]">Memory details</DialogTitle>
-                <DialogDescription>
-                  Review the memory before deciding whether it should be included.
-                </DialogDescription>
-              </DialogHeader>
-            </div>
+          <DialogContent className={cn(editorialDialogContentClass, "max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] sm:!max-w-[860px]")}>
+            <EditorialDialogHeader
+              title="Memory details"
+              description="Review the memory before deciding whether it should be included."
+            />
             {memoryDetail ? (
-              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
-                <div className="rounded-2xl border bg-slate-50 p-4">
-                  <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Memory ID</p>
-                  <p className="mt-2 break-all font-mono text-sm font-semibold text-slate-900">{memoryDetail.id}</p>
-                </div>
-                <div className="rounded-2xl border bg-white p-4">
-                  <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Memory content</p>
-                  <div className="mt-3 whitespace-pre-wrap text-sm font-medium leading-7 text-slate-800">
-                    {memoryDetail.excerpt}
+              <EditorialDialogBody className="space-y-4">
+                <EditorialField label="Memory ID">
+                  <p className="break-all font-mono text-[13px] font-semibold">{memoryDetail.id}</p>
+                </EditorialField>
+                <EditorialField label="Memory content">
+                  <div className="whitespace-pre-wrap text-[14px] leading-7 text-[#374151]">
+                    {stripDisplayEmoji(memoryDetail.excerpt)}
                   </div>
-                </div>
+                </EditorialField>
                 <div className="grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-2xl border bg-white p-4">
-                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Score</p>
-                    <p className="mt-2 text-lg font-extrabold">{typeof memoryDetail.score === "number" ? memoryDetail.score.toFixed(4) : "n/a"}</p>
-                  </div>
-                  <div className="rounded-2xl border bg-white p-4">
-                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Confidence</p>
-                    <p className="mt-2 text-lg font-extrabold">{typeof memoryDetail.confidence === "number" ? memoryDetail.confidence.toFixed(3) : "n/a"}</p>
-                  </div>
-                  <div className="rounded-2xl border bg-white p-4">
-                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Role</p>
-                    <p className="mt-2 text-sm font-extrabold">{memoryDetail.evidenceRole ? label(memoryDetail.evidenceRole) : "n/a"}</p>
-                  </div>
+                  <EditorialField label="Score">
+                    <p className="text-[18px] font-bold">
+                      {typeof memoryDetail.score === "number" ? memoryDetail.score.toFixed(4) : "n/a"}
+                    </p>
+                  </EditorialField>
+                  <EditorialField label="Confidence">
+                    <p className="text-[18px] font-bold">
+                      {typeof memoryDetail.confidence === "number" ? memoryDetail.confidence.toFixed(3) : "n/a"}
+                    </p>
+                  </EditorialField>
+                  <EditorialField label="Role">
+                    <p className="font-semibold">{memoryDetail.evidenceRole ? label(memoryDetail.evidenceRole) : "n/a"}</p>
+                  </EditorialField>
                 </div>
                 {memoryDetail.reason ? (
-                  <div className="rounded-2xl border bg-white p-4">
-                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Why it matched</p>
-                    <p className="mt-2 text-sm font-medium leading-6 text-slate-700">{memoryDetail.reason}</p>
-                  </div>
+                  <EditorialField label="Why it matched">{memoryDetail.reason}</EditorialField>
                 ) : null}
                 {memoryDetail.metadata ? (
-                  <div className="rounded-2xl border bg-white p-4">
-                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Metadata</p>
-                    <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-950 p-4 text-xs leading-5 text-slate-100">
+                  <EditorialField label="Metadata">
+                    <pre className="max-h-72 overflow-auto whitespace-pre-wrap border border-[#111827] bg-[#111827] p-4 font-mono text-[11px] leading-5 text-[#f3f4f6]">
                       {formatJsonFull(memoryDetail.metadata)}
                     </pre>
-                  </div>
+                  </EditorialField>
                 ) : null}
-              </div>
+              </EditorialDialogBody>
             ) : null}
           </DialogContent>
         </Dialog>
 
         <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
-          <DialogContent className="flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[1400px] flex-col overflow-hidden border-0 bg-[#f7f8fb] p-0 sm:!max-w-[1400px]">
-            <div className="border-b bg-white/95 px-6 py-5 shadow-sm backdrop-blur">
-              <DialogHeader className="max-w-3xl">
-                <DialogTitle className="text-[22px] font-extrabold tracking-[-0.02em]">Run details</DialogTitle>
-                <DialogDescription className="text-sm text-slate-600">
-                  Logs, step outputs, token usage, and estimated cost for this run.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <Badge variant="secondary" className="rounded-full bg-slate-100 text-slate-700">
-                  {label(run.status)}
-                </Badge>
-                <Badge variant="secondary" className="rounded-full bg-slate-100 text-slate-700">
-                  {latestSteps.length} steps
-                </Badge>
-                <Badge variant="secondary" className="rounded-full bg-slate-100 text-slate-700">
-                  {runLogEvents.length} events
-                </Badge>
-                <Badge variant="secondary" className="rounded-full bg-slate-100 text-slate-700">
-                  {numberFormatter.format(usageSummary.calls)} AI calls
-                </Badge>
-              </div>
-            </div>
+          <DialogContent className={cn(editorialDialogContentClass, "h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] bg-[#f7f8fb] sm:!max-w-[1400px]")}>
+            <EditorialDialogHeader
+              title="Job details"
+              description="Logs, agent outputs, token usage, and estimated cost for this job."
+              meta={(
+                <>
+                  <EditorialMetaTag tone="blue">{label(run.status)}</EditorialMetaTag>
+                  <EditorialMetaTag>{latestSteps.length} agents</EditorialMetaTag>
+                  <EditorialMetaTag>{runLogEvents.length} events</EditorialMetaTag>
+                  <EditorialMetaTag>{numberFormatter.format(usageSummary.calls)} AI calls</EditorialMetaTag>
+                </>
+              )}
+            />
 
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <div className="space-y-5 px-6 py-6">
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                  <Card className="border-0 bg-white shadow-sm">
-                    <CardContent className="p-4">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Prompt tokens</p>
-                      <p className="mt-2 text-2xl font-extrabold">{numberFormatter.format(usageSummary.promptTokens)}</p>
-                    </CardContent>
-                  </Card>
-                  <Card className="border-0 bg-white shadow-sm">
-                    <CardContent className="p-4">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Completion tokens</p>
-                      <p className="mt-2 text-2xl font-extrabold">{numberFormatter.format(usageSummary.completionTokens)}</p>
-                    </CardContent>
-                  </Card>
-                  <Card className="border-0 bg-white shadow-sm">
-                    <CardContent className="p-4">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total tokens</p>
-                      <p className="mt-2 text-2xl font-extrabold">{numberFormatter.format(usageSummary.totalTokens)}</p>
-                    </CardContent>
-                  </Card>
-                  <Card className="border-0 bg-white shadow-sm">
-                    <CardContent className="p-4">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Estimated cost</p>
-                      <p className="mt-2 text-2xl font-extrabold">{currencyFormatter.format(usageSummary.estimatedCostUsd)}</p>
-                    </CardContent>
-                  </Card>
-                </div>
+            <EditorialDialogBody className="bg-[#f7f8fb]">
+              <div className="space-y-5">
+                <EditorialStatGrid>
+                  <EditorialStat label="Prompt tokens" value={numberFormatter.format(usageSummary.promptTokens)} />
+                  <EditorialStat label="Completion tokens" value={numberFormatter.format(usageSummary.completionTokens)} />
+                  <EditorialStat label="Total tokens" value={numberFormatter.format(usageSummary.totalTokens)} />
+                  <EditorialStat label="Estimated cost" value={currencyFormatter.format(usageSummary.estimatedCostUsd)} />
+                </EditorialStatGrid>
 
                 <div className="grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
                   <section className="space-y-4">
-                    <Card className="border-0 bg-white shadow-sm">
-                      <CardHeader className="border-b px-5 py-4">
-                        <CardTitle className="text-lg font-extrabold">Logs</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-3 p-4">
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                          <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500">Timeline</h3>
-                          <div className="mt-3 space-y-3">
+                    <EditorialPanel title="Logs">
+                      <div className="space-y-4">
+                        <EditorialField label="Timeline">
+                          <div className="divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                             {logEntries.length > 0 ? logEntries.map((entry) => (
-                              <div key={entry.id} className="rounded-2xl border bg-white p-4 shadow-sm">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                  <div>
-                                    <p className="text-sm font-extrabold text-[#172139]">{entry.title}</p>
-                                    <p className="text-xs text-slate-500">{formatDateTime(entry.time)}</p>
-                                  </div>
-                                  <StatusBadge status={entry.status} />
-                                </div>
-                                {entry.body ? (
-                                  <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{entry.body}</pre>
-                                ) : null}
-                              </div>
+                              <EditorialListRow
+                                key={entry.id}
+                                title={entry.title}
+                                subtitle={formatDateTime(entry.time)}
+                                meta={<StatusBadge status={entry.status} />}
+                                body={entry.body ? <pre className="whitespace-pre-wrap break-words font-sans">{entry.body}</pre> : null}
+                              />
                             )) : (
-                              <p className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">No run events yet.</p>
+                              <EditorialEmpty>No run events yet.</EditorialEmpty>
                             )}
                           </div>
-                        </div>
+                        </EditorialField>
 
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                          <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500">Step outputs</h3>
-                          <div className="mt-3 space-y-3">
+                        <EditorialField label="Agent outputs">
+                          <div className="divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                             {orderedSteps.length > 0 ? orderedSteps.map((step) => (
-                              <div key={step.id} className="rounded-2xl border bg-white p-4 shadow-sm">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                  <div>
-                                    <p className="text-sm font-extrabold text-[#172139]">
-                                      Step {step.step_index + 1} · Attempt {step.attempt}
-                                    </p>
-                                    <p className="text-xs text-slate-500">
-                                      {step.agent_snapshot?.name ?? step.agent_id} · {formatDateTime(step.finished_at ?? step.started_at ?? step.created_at)}
-                                    </p>
-                                  </div>
-                                  <StatusBadge status={step.status} />
-                                </div>
-                                <p className="mt-3 text-sm leading-6 text-slate-600">
-                                  {preview(getStepText(step) || step.error_json?.message || formatJsonPreview(step.output_json?.data), 480)}
-                                </p>
-                              </div>
+                              <EditorialListRow
+                                key={step.id}
+                                title={`Agent ${step.step_index + 1} · Attempt ${step.attempt}`}
+                                subtitle={`${formatWorkerDisplayName(step.agent_snapshot?.name ?? step.agent_id)} · ${formatDateTime(step.finished_at ?? step.started_at ?? step.created_at)}`}
+                                meta={<StatusBadge status={step.status} />}
+                                body={preview(getStepText(step) || step.error_json?.message || formatJsonPreview(step.output_json?.data), 480)}
+                              />
                             )) : (
-                              <p className="rounded-2xl border border-dashed p-4 text-sm text-slate-500">No step outputs yet.</p>
+                              <EditorialEmpty>No step outputs yet.</EditorialEmpty>
                             )}
                           </div>
-                        </div>
-                      </CardContent>
-                    </Card>
+                        </EditorialField>
+                      </div>
+                    </EditorialPanel>
 
                     {memorySearchTraces.length > 0 ? (
-                      <Card className="border-0 bg-white shadow-sm">
-                        <CardHeader className="border-b px-5 py-4">
-                          <CardTitle className="text-lg font-extrabold">Memory search trace</CardTitle>
-                        </CardHeader>
-                        <CardContent className="space-y-4 p-4">
+                      <EditorialPanel title="Memory search trace">
+                        <div className="space-y-4">
                           {memorySearchTraces.map((entry, index) => (
-                            <div key={`${entry.step.id}:${index}`} className="rounded-2xl border bg-slate-50 p-4">
-                              <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div key={`${entry.step.id}:${index}`} className="border border-[#e5e7eb] bg-[#fafafa]">
+                              <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#e5e7eb] px-4 py-3">
                                 <div>
-                                  <p className="text-sm font-extrabold text-[#172139]">
-                                    {entry.step.agent_snapshot?.name ?? entry.step.agent_id}
+                                  <p className="text-[14px] font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+                                    {formatWorkerDisplayName(entry.step.agent_snapshot?.name ?? entry.step.agent_id)}
                                   </p>
-                                  <p className="text-xs text-slate-500">
-                                    Step {entry.step.step_index + 1} · Attempt {entry.step.attempt}
+                                  <p className="text-[12px] text-[#9ca3af]">
+                                    Agent {entry.step.step_index + 1} · Attempt {entry.step.attempt}
                                   </p>
                                 </div>
-                                <Badge variant="secondary" className="rounded-full bg-slate-100 text-slate-700">
-                                  {entry.validation?.confidence ?? "unknown"} confidence
-                                </Badge>
+                                <EditorialMetaTag>{entry.validation?.confidence ?? "unknown"} confidence</EditorialMetaTag>
                               </div>
 
-                              <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                                <div className="rounded-xl border bg-white p-3">
-                                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Search log</p>
-                                  <div className="mt-2 space-y-1 text-sm text-slate-700">
+                              <div className="grid gap-0 lg:grid-cols-2 lg:divide-x lg:divide-[#e5e7eb]">
+                                <EditorialField label="Search log" className="border-0 border-b border-[#e5e7eb] lg:border-b-0">
+                                  <div className="space-y-1 text-[13px] text-[#374151]">
                                     <p>Query: {entry.query ?? "unknown"}</p>
                                     <p>Accepted: {entry.validation?.acceptedCount ?? 0} memories</p>
                                     <p>Rejected: {entry.validation?.rejectedCount ?? 0} candidates</p>
                                     {entry.validation?.noEvidenceReason ? (
-                                      <p className="text-slate-500">{entry.validation.noEvidenceReason}</p>
+                                      <p className="text-[#6b7280]">{entry.validation.noEvidenceReason}</p>
                                     ) : null}
                                   </div>
-                                </div>
+                                </EditorialField>
 
-                                <div className="rounded-xl border bg-white p-3">
-                                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Retrieval trace</p>
-                                  <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">
+                                <EditorialField label="Retrieval trace" className="border-0">
+                                  <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[#6b7280]">
                                     {formatJsonFull({
                                       queryPlan: entry.queryPlan,
                                       retrieval: entry.retrieval,
                                       validation: entry.validation,
                                     })}
                                   </pre>
-                                </div>
+                                </EditorialField>
                               </div>
 
-                              <div className="mt-3 rounded-xl border bg-white p-3">
-                                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Memories found</p>
-                                <div className="mt-2 space-y-2">
+                              <EditorialField label="Memories found" className="border-0 border-t border-[#e5e7eb]">
+                                <div className="divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                                   {entry.sources.length > 0 ? entry.sources.map((source) => (
-                                    <div key={source.id} className="rounded-xl border bg-slate-50 p-3">
+                                    <div key={source.id} className="bg-white px-3 py-3">
                                       <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <p className="text-sm font-bold text-slate-800">{source.id}</p>
-                                        <div className="flex flex-wrap gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        <p className="font-mono text-[12px] font-semibold text-[#111827]">{source.id}</p>
+                                        <div className="flex flex-wrap gap-2">
                                           {typeof source.confidence === "number" ? (
-                                            <span>confidence {Math.round(source.confidence * 100)}%</span>
+                                            <EditorialMetaTag>confidence {Math.round(source.confidence * 100)}%</EditorialMetaTag>
                                           ) : null}
-                                          {source.evidenceRole ? <span>{source.evidenceRole}</span> : null}
+                                          {source.evidenceRole ? <EditorialMetaTag>{source.evidenceRole}</EditorialMetaTag> : null}
                                         </div>
                                       </div>
-                                      <p className="mt-2 max-h-[18rem] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{source.text}</p>
-                                      {source.reason ? (
-                                        <p className="mt-2 text-xs text-slate-500">{source.reason}</p>
-                                      ) : null}
+                                      <p className="mt-2 max-h-[18rem] overflow-auto whitespace-pre-wrap break-words text-[13px] leading-6 text-[#6b7280]">{source.text}</p>
+                                      {source.reason ? <p className="mt-2 text-[12px] text-[#9ca3af]">{source.reason}</p> : null}
                                     </div>
                                   )) : (
-                                    <p className="rounded-xl border border-dashed p-3 text-sm text-slate-500">No validated memories were returned.</p>
+                                    <EditorialEmpty>No validated memories were returned.</EditorialEmpty>
                                   )}
                                 </div>
-                              </div>
+                              </EditorialField>
 
-                              <div className="mt-3 rounded-xl border bg-white p-3">
-                                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">All candidates</p>
-                                <div className="mt-2 space-y-2">
+                              <EditorialField label="All candidates" className="border-0 border-t border-[#e5e7eb]">
+                                <div className="divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                                   {entry.candidates.length > 0 ? entry.candidates.map((candidate) => (
-                                    <div key={candidate.id} className="rounded-xl border bg-slate-50 p-3">
+                                    <div key={candidate.id} className="bg-white px-3 py-3">
                                       <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <p className="text-sm font-bold text-slate-800">{candidate.id}</p>
-                                        <div className="flex flex-wrap gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                          <span>score {candidate.score.toFixed(3)}</span>
-                                          <span>{candidate.accepted ? "accepted" : "rejected"}</span>
-                                          {candidate.evidenceRole ? <span>{candidate.evidenceRole}</span> : null}
+                                        <p className="font-mono text-[12px] font-semibold text-[#111827]">{candidate.id}</p>
+                                        <div className="flex flex-wrap gap-2">
+                                          <EditorialMetaTag>score {candidate.score.toFixed(3)}</EditorialMetaTag>
+                                          <EditorialMetaTag tone={candidate.accepted ? "blue" : "neutral"}>
+                                            {candidate.accepted ? "accepted" : "rejected"}
+                                          </EditorialMetaTag>
                                         </div>
                                       </div>
-                                      <p className="mt-2 max-h-[16rem] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{candidate.text}</p>
-                                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
-                                        {typeof candidate.acceptedConfidence === "number" ? (
-                                          <span>confidence {Math.round(candidate.acceptedConfidence * 100)}%</span>
-                                        ) : null}
-                                        {candidate.acceptedReason ? (
-                                          <span>{candidate.acceptedReason}</span>
-                                        ) : null}
-                                      </div>
+                                      <p className="mt-2 max-h-[16rem] overflow-auto whitespace-pre-wrap break-words text-[13px] leading-6 text-[#6b7280]">{candidate.text}</p>
                                     </div>
                                   )) : (
-                                    <p className="rounded-xl border border-dashed p-3 text-sm text-slate-500">No candidates were collected for this search.</p>
+                                    <EditorialEmpty>No candidates were collected for this search.</EditorialEmpty>
                                   )}
                                 </div>
-                              </div>
+                              </EditorialField>
                             </div>
                           ))}
-                        </CardContent>
-                      </Card>
+                        </div>
+                      </EditorialPanel>
                     ) : null}
                   </section>
 
                   <aside className="space-y-4">
-                    <Card className="border-0 bg-white shadow-sm">
-                      <CardHeader className="border-b px-5 py-4">
-                        <CardTitle className="text-lg font-extrabold">Usage</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-4 p-4">
+                    <EditorialPanel title="Usage">
+                      <div className="space-y-4">
                         <div className="grid grid-cols-2 gap-3">
-                          <div className="rounded-2xl border bg-slate-50 p-4">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Estimated prompt tokens</p>
-                            <p className="mt-2 text-xl font-extrabold">{numberFormatter.format(usageSummary.estimatedPromptTokens)}</p>
-                          </div>
-                          <div className="rounded-2xl border bg-slate-50 p-4">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Estimated completion tokens</p>
-                            <p className="mt-2 text-xl font-extrabold">{numberFormatter.format(usageSummary.estimatedCompletionTokens)}</p>
-                          </div>
-                          <div className="rounded-2xl border bg-slate-50 p-4">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Estimated total tokens</p>
-                            <p className="mt-2 text-xl font-extrabold">{numberFormatter.format(usageSummary.estimatedTotalTokens)}</p>
-                          </div>
-                          <div className="rounded-2xl border bg-slate-50 p-4">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI calls</p>
-                            <p className="mt-2 text-xl font-extrabold">{numberFormatter.format(usageSummary.calls)}</p>
-                          </div>
+                          <EditorialStat label="Est. prompt tokens" value={numberFormatter.format(usageSummary.estimatedPromptTokens)} />
+                          <EditorialStat label="Est. completion tokens" value={numberFormatter.format(usageSummary.estimatedCompletionTokens)} />
+                          <EditorialStat label="Est. total tokens" value={numberFormatter.format(usageSummary.estimatedTotalTokens)} />
+                          <EditorialStat label="AI calls" value={numberFormatter.format(usageSummary.calls)} />
                         </div>
 
-                        <div className="rounded-2xl border bg-slate-50 p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Models</p>
-                          <div className="mt-3 space-y-2">
+                        <EditorialField label="Models">
+                          <div className="divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                             {usageModels.length > 0 ? usageModels.map(([model, count]) => (
-                              <div key={model} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 shadow-sm">
-                                <span className="truncate text-sm font-semibold text-slate-700">{model}</span>
-                                <Badge variant="secondary" className="rounded-full bg-slate-100 text-slate-700">
-                                  {numberFormatter.format(count)}
-                                </Badge>
+                              <div key={model} className="flex items-center justify-between gap-3 bg-white px-3 py-2">
+                                <span className="truncate text-[13px] font-semibold text-[#374151]">{model}</span>
+                                <EditorialMetaTag>{numberFormatter.format(count)}</EditorialMetaTag>
                               </div>
                             )) : (
-                              <p className="text-sm text-slate-500">No model usage recorded.</p>
+                              <EditorialEmpty>No model usage recorded.</EditorialEmpty>
                             )}
                           </div>
-                        </div>
+                        </EditorialField>
 
-                        <div className="rounded-2xl border bg-slate-50 p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Usage by step</p>
-                          <div className="mt-3 space-y-2">
+                        <EditorialField label="Usage by agent">
+                          <div className="divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                             {stepUsageRows.filter((row) => row.usage.calls > 0 || row.usage.promptTokens > 0 || row.usage.completionTokens > 0).length > 0 ? stepUsageRows
                               .filter((row) => row.usage.calls > 0 || row.usage.promptTokens > 0 || row.usage.completionTokens > 0)
                               .map((row) => (
-                                <div key={row.step.id} className="rounded-xl bg-white p-3 shadow-sm">
+                                <div key={row.step.id} className="bg-white px-3 py-3">
                                   <div className="flex items-center justify-between gap-2">
-                                    <p className="truncate text-sm font-semibold text-slate-700">
-                                      {row.step.agent_snapshot?.name ?? row.step.agent_id}
+                                    <p className="truncate text-[13px] font-semibold text-[#111827]">
+                                      {formatWorkerDisplayName(row.step.agent_snapshot?.name ?? row.step.agent_id)}
                                     </p>
-                                    <Badge variant="secondary" className="rounded-full bg-slate-100 text-slate-700">
-                                      attempt {row.step.attempt}
-                                    </Badge>
+                                    <EditorialMetaTag>attempt {row.step.attempt}</EditorialMetaTag>
                                   </div>
-                                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-600">
+                                  <div className="mt-2 grid grid-cols-2 gap-2 text-[12px] text-[#6b7280]">
                                     <span>Prompt: {numberFormatter.format(row.usage.promptTokens)}</span>
                                     <span>Completion: {numberFormatter.format(row.usage.completionTokens)}</span>
                                     <span>Total: {numberFormatter.format(row.usage.totalTokens)}</span>
@@ -1676,18 +2481,43 @@ export default function StableLoopRunPage() {
                                   </div>
                                 </div>
                               )) : (
-                              <p className="text-sm text-slate-500">No LLM usage recorded.</p>
+                              <EditorialEmpty>No LLM usage recorded.</EditorialEmpty>
                             )}
                           </div>
-                        </div>
-                      </CardContent>
-                    </Card>
+                        </EditorialField>
+                      </div>
+                    </EditorialPanel>
                   </aside>
                 </div>
               </div>
-            </div>
+            </EditorialDialogBody>
           </DialogContent>
         </Dialog>
+
+        {pendingGate && (pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send") ? (
+          <div className="fixed inset-x-0 bottom-0 z-50 border-t border-[#d1d5db] bg-white px-4 py-3 lg:hidden">
+            <div className="flex items-center gap-3">
+              <EditorialActionButton
+                label="Request changes"
+                glyph="reject"
+                variant="ghost"
+                onClick={() => submitGate(pendingGate, "reject")}
+                disabled={Boolean(busy)}
+                size="lg"
+                fullWidth
+              />
+              <EditorialActionButton
+                label="Approve"
+                glyph="approve"
+                variant="primary"
+                onClick={() => submitGate(pendingGate, "approve")}
+                disabled={Boolean(busy)}
+                size="lg"
+                fullWidth
+              />
+            </div>
+          </div>
+        ) : null}
       </div>
     </main>
   );

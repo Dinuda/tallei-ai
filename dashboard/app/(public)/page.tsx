@@ -3,7 +3,7 @@ import { HomeContent } from "./home-content";
 
 export const metadata: Metadata = {
   title: {
-    absolute: "Tallei — Sync Memory Between ChatGPT, Claude & Gemini",
+    absolute: "Tallei — Agent Loops That Remember You",
   },
   alternates: {
     canonical: "https://tallei.com",

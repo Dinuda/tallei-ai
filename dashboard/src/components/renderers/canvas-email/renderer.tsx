@@ -1,18 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { Check, PenLine } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
-  DialogHeader,
-  DialogTitle,
 } from "@/components/ui/dialog";
 import type { ArtifactRendererProps } from "../registry";
+import {
+  EditorialArtifactToolbar,
+  EditorialEditorDialogHeader,
+  EditorialOpenEditorButton,
+  EditorialPreviewFrame,
+  editorialEditorDialogClass,
+  inferArtifactDisplayTitle,
+} from "../editorial-artifact-ui";
 import { CanvasEmailEditor } from "../../../../app/dashboard/loops/[workflowId]/runs/[runId]/components/canvas-email-editor";
 
 type EmailTemplate = {
@@ -30,10 +33,11 @@ export function CanvasEmailRenderer({ artifact, saving, onSave }: ArtifactRender
   const template = artifact.data_json?.emailTemplate as EmailTemplate | undefined;
   const canvasState = artifact.data_json?.canvas_state as string | undefined;
   const isPreview = canvasState === "preview";
+  const displayTitle = inferArtifactDisplayTitle(artifact, "Email");
 
   if (!template) {
     return (
-      <div className="rounded-2xl border border-dashed bg-slate-50 p-8 text-center text-sm text-slate-500">
+      <div className="border border-dashed border-[#d1d5db] bg-[#fafafa] px-6 py-10 text-center text-[13px] text-[#9ca3af]">
         No editable email template found in this artifact.
       </div>
     );
@@ -41,23 +45,21 @@ export function CanvasEmailRenderer({ artifact, saving, onSave }: ArtifactRender
 
   if (isPreview) {
     return (
-      <div className="space-y-4">
-        <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
-          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-emerald-700">
-            <Check className="size-3" />
-            Final preview — this email is ready
-          </p>
-          <p className="mt-1 text-sm text-slate-600">
-            Approved artifact <span className="font-mono">{artifact.artifact_key}</span>.
-          </p>
-        </div>
-        <iframe
-          srcDoc={template.html}
-          className="w-full rounded-2xl border"
-          style={{ minHeight: "620px" }}
-          sandbox=""
-          title="Email preview"
+      <div className="space-y-0">
+        <EditorialArtifactToolbar
+          tag="Ready"
+          title={displayTitle}
+          hint="Final preview — approved and ready to send."
         />
+        <EditorialPreviewFrame title="Email preview">
+          <iframe
+            srcDoc={template.html}
+            className="w-full border-0"
+            style={{ minHeight: "620px" }}
+            sandbox=""
+            title="Email preview"
+          />
+        </EditorialPreviewFrame>
       </div>
     );
   }
@@ -65,44 +67,37 @@ export function CanvasEmailRenderer({ artifact, saving, onSave }: ArtifactRender
   const handleSave = onSave ?? (async () => {});
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1 rounded-2xl border border-sky-100 bg-sky-50 p-4">
-          <p className="text-xs font-bold uppercase tracking-wide text-sky-700">Email</p>
-          <p className="mt-1 text-sm text-slate-600">
-            Artifact <span className="font-mono">{artifact.artifact_key}</span> v{artifact.version}
-          </p>
-        </div>
-        <Button
-          onClick={() => setOpen(true)}
-          className="shrink-0 rounded-lg bg-[#0077b6] font-bold hover:bg-[#00689f]"
-        >
-          <PenLine className="mr-2 size-4" />
-          Open editor
-        </Button>
-      </div>
-      <iframe
-        srcDoc={template.html}
-        className="w-full rounded-2xl border"
-        style={{ minHeight: "620px" }}
-        sandbox=""
-        title="Email preview"
+    <div className="space-y-0">
+      <EditorialArtifactToolbar
+        tag="Email"
+        title={displayTitle}
+        hint="Review the preview below. Open the editor to adjust copy or layout."
+        action={<EditorialOpenEditorButton onClick={() => setOpen(true)} />}
       />
+      <EditorialPreviewFrame title="Email preview">
+        <iframe
+          srcDoc={template.html}
+          className="w-full border-0"
+          style={{ minHeight: "620px" }}
+          sandbox=""
+          title="Email preview"
+        />
+      </EditorialPreviewFrame>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-[90vw]">
-          <DialogHeader>
-            <DialogTitle>Email</DialogTitle>
-            <DialogDescription>
-              Editing <span className="font-mono">{artifact.artifact_key}</span>
-            </DialogDescription>
-          </DialogHeader>
-          <CanvasEmailEditor
-            artifactKey={artifact.artifact_key}
-            template={template}
-            saving={saving}
-            onSave={handleSave}
+        <DialogContent className={editorialEditorDialogClass()}>
+          <EditorialEditorDialogHeader
+            title="Edit email draft"
+            description="Adjust subject, body, and layout. Changes save to this run's draft."
           />
-          <DialogFooter showCloseButton />
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+            <CanvasEmailEditor
+              artifactKey={artifact.artifact_key}
+              template={template}
+              saving={saving}
+              onSave={handleSave}
+            />
+          </div>
+          <DialogFooter showCloseButton className="m-0 rounded-none border-t border-[#e5e7eb] bg-[#fafafa] px-6 py-4" />
         </DialogContent>
       </Dialog>
     </div>

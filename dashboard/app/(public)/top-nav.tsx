@@ -139,6 +139,13 @@ export function TopNav() {
         {isHome && (
           <div className="site-nav-links">
             <Link
+              href="/#showcase"
+              onClick={handleAnchorClick("#showcase")}
+              style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}
+            >
+              Loops
+            </Link>
+            <Link
               href="/#how-it-works"
               onClick={handleAnchorClick("#how-it-works")}
               style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}
@@ -286,6 +293,7 @@ export function TopNav() {
       <div className={`site-mobile-menu ${mobileMenuOpen ? "open" : ""}`}>
         {isHome && (
           <div className="site-mobile-menu-links">
+            <Link href="/#showcase" onClick={handleAnchorClick("#showcase", () => setMobileMenuOpen(false))}>Loops</Link>
             <Link href="/#how-it-works" onClick={handleAnchorClick("#how-it-works", () => setMobileMenuOpen(false))}>How it works</Link>
             <Link href="/#integrations" onClick={handleAnchorClick("#integrations", () => setMobileMenuOpen(false))}>Integrations</Link>
             <Link href="/#pricing" onClick={handleAnchorClick("#pricing", () => setMobileMenuOpen(false))}>Pricing</Link>

@@ -82,7 +82,7 @@ function buildArchitectSystemPrompt(): string {
     agents: [
       {
         id: "memory_search",
-        name: "Memory Search Agent",
+        name: "Recall Agent",
         goal: "Return at least one memory with id and excerpt attached",
         task: "Search memories for specific past product updates that directly support the requested sync email. Include style signals only if they affect the expected output.",
         tool: "internal.memory_search",
@@ -93,7 +93,7 @@ function buildArchitectSystemPrompt(): string {
       },
       {
         id: "draft_writer",
-        name: "Draft Writer",
+        name: "Draft Agent",
         goal: "Produce one reviewed email draft",
         task: "Write the final email draft from approved memories and inputs.",
         tool: "internal.llm_only",
@@ -110,6 +110,7 @@ function buildArchitectSystemPrompt(): string {
 
   return [
     "You are a loop architect for Tallei. Design bespoke recurring agent loops from first principles.",
+    "Use role names people understand immediately: child roles should be named as Agents, and the parent coordinator should be an Orchestrator.",
     "Do NOT copy preset patterns. Do NOT mention template IDs or preset names.",
     "Every child agent must have exactly ONE tool, a clear goal (success condition), task, inputContract, outputContract, and 1-3 doneCriteria.",
     'For email or newsletter writing agents, use renderTarget (NOT a tool, must not appear in tool):',

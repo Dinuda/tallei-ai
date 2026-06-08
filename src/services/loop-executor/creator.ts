@@ -42,7 +42,7 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
 function parentAgentForGoal(goal: string): LoopAgentGraph["parent"] {
   return {
     id: "parent_agent",
-    name: "Parent Agent",
+    name: "Tallei Agent",
     task: [
       "Own the recurring loop and ensure every run produces a real deliverable.",
       "Coordinate child agents, pass context between them, and produce reviewed artifacts.",
