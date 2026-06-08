@@ -153,7 +153,7 @@ function iconBoxForPhase(phase: StepRowPhase | undefined, kind: "search" | "defa
 
 export function AgentIconBox({ Icon, boxClass }: AgentIconSpec) {
   return (
-    <div className={cn("grid size-15 shrink-0 place-items-center border-none", boxClass)}>
+    <div className={cn("grid size-14 shrink-0 place-items-center border-none", boxClass)}>
       <Icon className="size-5" strokeWidth={2} />
     </div>
   );
@@ -217,6 +217,48 @@ function StepPhaseTag({ phase }: { phase: StepRowPhase }) {
   if (phase === "queued") return <EditorialMetaTag>Up next</EditorialMetaTag>;
   if (phase === "failed") return <EditorialMetaTag tone="red">Failed</EditorialMetaTag>;
   return <EditorialMetaTag>Waiting</EditorialMetaTag>;
+}
+
+function RunningIndicator() {
+  return (
+    <span className="inline-flex items-center gap-1" aria-label="Running">
+      {[0, 1, 2].map((index) => (
+        <span
+          key={index}
+          className="size-1.5 rounded-full bg-[#8ca0ff]"
+          style={{
+            animation: "agent-running-pulse 1s ease-in-out infinite",
+            animationDelay: `${index * 130}ms`,
+          }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function AgentPanelAnimationStyles() {
+  return (
+    <style jsx global>{`
+      @keyframes agent-running-pulse {
+        0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
+        40% { opacity: 1; transform: translateY(-2px); }
+      }
+
+      @keyframes agent-name-shimmer {
+        0% { background-position: 140% 50%; }
+        100% { background-position: -40% 50%; }
+      }
+
+      .agent-name-shimmer {
+        background-image: linear-gradient(90deg, #111827 0%, #8ca0ff 42%, #c7d2fe 50%, #8ca0ff 58%, #111827 100%);
+        background-size: 220% 100%;
+        color: transparent;
+        -webkit-background-clip: text;
+        background-clip: text;
+        animation: agent-name-shimmer 2.4s ease-in-out infinite;
+      }
+    `}</style>
+  );
 }
 
 function ParentRunBadge({ phase }: { phase: ParentRunPhase }) {
@@ -340,6 +382,7 @@ export function ChildAgentRow({
   const canRetry = step.status === "failed" || step.status === "cancelled";
   const displayName = formatWorkerDisplayName(step.agent_snapshot.name ?? step.agent_id);
   const icon = resolveChildAgentIcon(step, phase);
+  const isRunning = phase === "current_running" || phase === "running";
 
   return (
     <button
@@ -347,24 +390,29 @@ export function ChildAgentRow({
       onClick={onSelect}
       className={cn(
         "relative flex w-full items-start gap-3 border-b border-[#e5e7eb] px-5 py-3.5 pr-10 text-left transition-colors last:border-b-0",
-        isCurrent && phase === "current_gate" && "bg-[#fffbeb] ring-1 ring-inset ring-[#f59e0b]/25",
-        isCurrent && phase === "current_running" && "bg-[#eff6ff] ring-1 ring-inset ring-[#2563eb]/25",
-        isCurrent && phase !== "current_gate" && phase !== "current_running" && "bg-[#f8fbff] ring-1 ring-inset ring-[#2563eb]/20",
+        isCurrent && phase === "current_gate" && "bg-[#fffbeb] ring-2 ring-inset ring-[#a5b4fc]",
+        isCurrent && phase === "current_running" && "bg-[#eff6ff] ring-2 ring-inset ring-[#a5b4fc]",
+        isCurrent && phase !== "current_gate" && phase !== "current_running" && "bg-[#f8fbff] ring-2 ring-inset ring-[#a5b4fc]",
         !isCurrent && "bg-white hover:bg-[#fafafa]",
-        selected && !isCurrent && "ring-1 ring-inset ring-[#d1d5db]",
+        selected && !isCurrent && "ring-2 ring-inset ring-[#a5b4fc]",
       )}
     >
+      <AgentPanelAnimationStyles />
       <AgentIconBox {...icon} />
 
       <div className="min-w-0 flex-1">
         <div className="pr-20">
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
             <p
-              className="truncate text-[14px] font-semibold text-[#111827]"
+              className={cn(
+                "truncate text-[14px] font-semibold text-[#111827]",
+                isRunning && "agent-name-shimmer",
+              )}
               style={{ fontFamily: "var(--font-title)" }}
             >
               {displayName}
             </p>
+            {isRunning ? <RunningIndicator /> : null}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <AttemptChip attempt={step.attempt} />
