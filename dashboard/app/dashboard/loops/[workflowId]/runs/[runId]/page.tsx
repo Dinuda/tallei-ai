@@ -807,7 +807,7 @@ function GateTypeStamp({ gateType }: { gateType: Gate["gate_type"] }) {
 
 function EditorialWorkspaceShell({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div className={cn("flex min-h-[720px] flex-col border border-[#d1d5db] bg-white", className)}>
+    <div className={cn("flex h-full min-h-0 flex-col border border-[#d1d5db] bg-white", className)}>
       {children}
     </div>
   );
@@ -1749,8 +1749,8 @@ export default function StableLoopRunPage() {
           }}
         />
 
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_490px]">
-          <section className="space-y-5">
+        <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_490px]">
+          <section className="flex h-full min-h-0 flex-col space-y-5">
 
             <AnimatePresence mode="wait">
               {pendingGate ? (
@@ -1883,9 +1883,10 @@ export default function StableLoopRunPage() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
+                  className="h-full"
                 >
-                  <EditorialWorkspaceShell className="min-h-[860px] overflow-hidden">
-                    <div className="flex min-h-[860px] flex-col items-center justify-center px-10 py-16 text-center">
+                  <EditorialWorkspaceShell className="h-full min-h-0 overflow-hidden">
+                    <div className="flex min-h-full flex-col items-center justify-center px-10 py-16 text-center">
                       <div className="flex size-20 items-center justify-center rounded-full border border-[#d1d5db] bg-white shadow-sm">
                         <Loader2 className="size-7 animate-spin text-[#2563eb]" />
                       </div>
@@ -1920,9 +1921,10 @@ export default function StableLoopRunPage() {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.15 }}
+                  className="h-full"
                 >
-                  <EditorialWorkspaceShell className="min-h-[860px] overflow-hidden">
-              <Tabs value={leftTab} onValueChange={(value) => setLeftTab(value as typeof leftTab)} className="flex min-h-0 flex-1 flex-col gap-0">
+                  <EditorialWorkspaceShell className="h-full min-h-0 overflow-hidden">
+              <Tabs value={leftTab} onValueChange={(value) => setLeftTab(value as typeof leftTab)} className="flex h-full min-h-0 flex-1 flex-col gap-0">
                 <CardHeader className="border-b border-[#e5e7eb] bg-white px-7 py-6">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex min-w-0 items-center gap-3">
@@ -1942,8 +1944,8 @@ export default function StableLoopRunPage() {
                   </TabsList>
                 </CardHeader>
                 <CardContent className="min-h-0 flex-1 overflow-y-auto p-7">
-                    <TabsContent value="output" className="mt-0">
-                      <div className="border border-[#e5e7eb] bg-white p-7">
+                    <TabsContent value="output" className="mt-0 h-full">
+                      <div className="flex min-h-full flex-col border border-[#e5e7eb] bg-white p-7">
                         {inspectingAgentOutput ? (
                           <div className="prose prose-slate max-w-none text-[16px] leading-7">
                             <Streamdown>{centerBody}</Streamdown>
@@ -1969,8 +1971,8 @@ export default function StableLoopRunPage() {
                       </div>
                     </TabsContent>
 
-                    <TabsContent value="attempts" className="mt-0">
-                      <div className="space-y-0 divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
+                    <TabsContent value="attempts" className="mt-0 h-full">
+                      <div className="flex min-h-full flex-col space-y-0 divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
                         {(attemptsForSelectedStep.length > 0 ? attemptsForSelectedStep : orderedSteps).map((attempt) => (
                           <div key={attempt.id} className="bg-white p-5">
                             <div className="flex items-start justify-between gap-4">
@@ -2005,8 +2007,8 @@ export default function StableLoopRunPage() {
                       </div>
                     </TabsContent>
 
-                    <TabsContent value="artifact" className="mt-0">
-                      <div className="border border-[#e5e7eb]">
+                    <TabsContent value="artifact" className="mt-0 h-full">
+                      <div className="flex min-h-full flex-col border border-[#e5e7eb]">
                         <div className="border-b border-[#e5e7eb] bg-[#fafafa] p-5">
                           <h3 className="text-lg font-bold text-[#111827]">{artifactPanelTitle}</h3>
                           <p className="mt-1 text-sm leading-6 text-[#6b7280]">

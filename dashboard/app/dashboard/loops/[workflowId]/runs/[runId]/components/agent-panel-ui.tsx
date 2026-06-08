@@ -221,17 +221,13 @@ function StepPhaseTag({ phase }: { phase: StepRowPhase }) {
 
 function RunningIndicator() {
   return (
-    <span className="inline-flex items-center gap-1" aria-label="Running">
-      {[0, 1, 2].map((index) => (
-        <span
-          key={index}
-          className="size-1.5 rounded-full bg-[#8ca0ff]"
-          style={{
-            animation: "agent-running-pulse 1s ease-in-out infinite",
-            animationDelay: `${index * 130}ms`,
-          }}
-        />
-      ))}
+    <span className="inline-flex items-center" aria-label="Running">
+      <span
+        className="agent-running-underscore text-[16px] font-semibold leading-none text-[#8ca0ff]"
+        style={{ fontFamily: "var(--font-title)" }}
+      >
+        _
+      </span>
     </span>
   );
 }
@@ -239,9 +235,17 @@ function RunningIndicator() {
 function AgentPanelAnimationStyles() {
   return (
     <style jsx global>{`
-      @keyframes agent-running-pulse {
-        0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
-        40% { opacity: 1; transform: translateY(-2px); }
+      @keyframes agent-running-underscore {
+        0%, 100% {
+          opacity: 0.2;
+          filter: drop-shadow(0 0 0 rgba(140, 160, 255, 0));
+          transform: translateY(0);
+        }
+        50% {
+          opacity: 1;
+          filter: drop-shadow(0 0 6px rgba(140, 160, 255, 0.8));
+          transform: translateY(-1px);
+        }
       }
 
       @keyframes agent-name-shimmer {
@@ -256,6 +260,10 @@ function AgentPanelAnimationStyles() {
         -webkit-background-clip: text;
         background-clip: text;
         animation: agent-name-shimmer 2.4s ease-in-out infinite;
+      }
+
+      .agent-running-underscore {
+        animation: agent-running-underscore 1.1s ease-in-out infinite;
       }
     `}</style>
   );
@@ -390,11 +398,11 @@ export function ChildAgentRow({
       onClick={onSelect}
       className={cn(
         "relative flex w-full items-start gap-3 border-b border-[#e5e7eb] px-5 py-3.5 pr-10 text-left transition-colors last:border-b-0",
-        isCurrent && phase === "current_gate" && "bg-[#fffbeb] ring-2 ring-inset ring-[#a5b4fc]",
-        isCurrent && phase === "current_running" && "bg-[#eff6ff] ring-2 ring-inset ring-[#a5b4fc]",
-        isCurrent && phase !== "current_gate" && phase !== "current_running" && "bg-[#f8fbff] ring-2 ring-inset ring-[#a5b4fc]",
+        isCurrent && phase === "current_gate" && "bg-[#fffbeb] ring-2 ring-inset ring-[#f9a8d4]",
+        isCurrent && phase === "current_running" && "bg-[#eff6ff] ring-2 ring-inset ring-[#f9a8d4]",
+        isCurrent && phase !== "current_gate" && phase !== "current_running" && "bg-[#f8fbff] ring-2 ring-inset ring-[#f9a8d4]",
         !isCurrent && "bg-white hover:bg-[#fafafa]",
-        selected && !isCurrent && "ring-2 ring-inset ring-[#a5b4fc]",
+        selected && !isCurrent && "ring-2 ring-inset ring-[#f9a8d4]",
       )}
     >
       <AgentPanelAnimationStyles />
