@@ -6,6 +6,8 @@ import type { LoopRunAgent, LoopDefinition } from "../loop-executor/types.js";
 import type { RunLoopAgentResult } from "../loop-executor/agent-runner.js";
 import { loopExecutorOpenAiChat } from "../loop-executor/openai-chat.js";
 import {
+  contentInputKeys,
+  hasRequiredContentInputs,
   hasRequiredRunInputs,
   isInputValidationAgent,
   resolveRequiredInputKeys,
@@ -14,6 +16,7 @@ import {
 import {
   detectPlaceholderText,
   extractMemorySources,
+  extractWebSearchSources,
   goalEvalResultSchema,
   type GoalEvalResult,
 } from "./contracts.js";
@@ -25,6 +28,16 @@ function asksOperatorForInput(text: string): boolean {
 
 function looksLikeEmailDraft(text: string): boolean {
   return /\b(shipped this week|in progress|things to watch|going out to customers|next week)\b/i.test(text);
+}
+
+function isCanvasDraftAgent(agent: LoopRunAgent): boolean {
+  return agent.renderTarget === "canvas.email"
+    || agent.renderTarget === "canvas.preview"
+    || agent.gate?.type === "draft_review";
+}
+
+function looksLikeReviewableDraft(text: string): boolean {
+  return text.length > 120 && !/\b(is missing|please provide|please paste)\b/i.test(text);
 }
 const judgeCache = new Map<string, GoalEvalResult>();
 
@@ -59,6 +72,84 @@ function cacheKey(agentId: string, text: string, goal: string): string {
   return `${agentId}:${goal.slice(0, 80)}:${text.slice(0, 200)}`;
 }
 
+function isShortCircuitTool(toolRef: string): boolean {
+  return toolRef === "internal.web_search" 
+    || toolRef === "internal.memory_search" 
+    || toolRef.match(/^composio\.[a-z0-9_-]+\.search$/i) !== null;
+}
+
+function validateShortCircuitOutput(toolRef: string, result: RunLoopAgentResult): GoalEvalResult | null {
+  const text = result.text?.trim() ?? "";
+  const data = result.data ?? {};
+  
+  if (!text) {
+    return goalEvalResultSchema.parse({
+      status: "fail",
+      reason: "Short-circuit tool returned empty output.",
+      blockers: ["empty_output"],
+    });
+  }
+  
+  // Validate web_search output structure
+  if (toolRef === "internal.web_search") {
+    const sources = extractWebSearchSources(data);
+    if (sources.length === 0) {
+      return goalEvalResultSchema.parse({
+        status: "fail",
+        reason: "Web search returned no sources.",
+        blockers: ["no_sources"],
+      });
+    }
+    const invalidSource = sources.find((s) => !s.title || !s.url || !s.snippet);
+    if (invalidSource) {
+      return goalEvalResultSchema.parse({
+        status: "fail",
+        reason: "Web search source missing required fields (title, url, snippet).",
+        blockers: ["invalid_source_format"],
+      });
+    }
+    return goalEvalResultSchema.parse({
+      status: "pass",
+      reason: `Web search returned ${sources.length} valid sources.`,
+    });
+  }
+  
+  // Validate memory_search output structure
+  if (toolRef === "internal.memory_search") {
+    const sources = extractMemorySources(data);
+    if (sources.length === 0) {
+      // Empty result is valid for memory search
+      return goalEvalResultSchema.parse({
+        status: "pass",
+        reason: "Memory search returned no results (valid empty result).",
+      });
+    }
+    // Check that memories have required fields
+    const invalidMemory = sources.find((s: any) => !s.id || !s.text);
+    if (invalidMemory) {
+      return goalEvalResultSchema.parse({
+        status: "fail",
+        reason: "Memory search result missing required fields (id, text).",
+        blockers: ["invalid_memory_format"],
+      });
+    }
+    return goalEvalResultSchema.parse({
+      status: "pass",
+      reason: `Memory search returned ${sources.length} valid memories.`,
+    });
+  }
+  
+  // For composio search tools, just check we got some output
+  if (toolRef.match(/^composio\.[a-z0-9_-]+\.search$/i)) {
+    return goalEvalResultSchema.parse({
+      status: "pass",
+      reason: "Composio search returned results.",
+    });
+  }
+  
+  return null;
+}
+
 function deterministicGuards(input: {
   agent: LoopRunAgent;
   result: RunLoopAgentResult;
@@ -69,8 +160,13 @@ function deterministicGuards(input: {
   const inputsSatisfied = input.runMemory
     ? hasRequiredRunInputs(input.definition, input.runMemory)
     : false;
+  const contentInputsSatisfied = input.runMemory
+    ? hasRequiredContentInputs(input.definition, input.runMemory)
+    : true;
   const goalText = input.definition.goal ?? "";
   const requiredKeys = resolveRequiredInputKeys(input.definition);
+  const contentKeys = contentInputKeys(input.definition);
+  const canvasDraftAgent = isCanvasDraftAgent(input.agent);
 
   if (
     isInputValidationAgent(input.agent) &&
@@ -102,7 +198,7 @@ function deterministicGuards(input: {
     });
   }
 
-  for (const required of requiredKeys) {
+  for (const required of (canvasDraftAgent ? contentKeys : requiredKeys)) {
     if (inputsSatisfied && input.runMemory?.inputs[required]?.trim()) continue;
     const requiredNorm = required.toLowerCase();
     const normalizedText = text.toLowerCase();
@@ -184,24 +280,28 @@ function deterministicGuards(input: {
     }
   }
 
-  if (!inputsSatisfied && asksOperatorForInput(text)) {
-    const requiredKey = input.definition.inputsRequired?.[0] ?? "required_input";
+  if (!contentInputsSatisfied && asksOperatorForInput(text) && !canvasDraftAgent) {
+    const requiredKey = contentKeys[0] ?? input.definition.inputsRequired?.[0] ?? "required_input";
     return goalEvalResultSchema.parse({
       status: "needs_input",
       reason: `Required input is missing. Provide ${requiredKey.replace(/_/g, " ")} to continue.`,
-      blockers: input.definition.inputsRequired ?? [requiredKey],
+      blockers: contentKeys.length > 0 ? contentKeys : [requiredKey],
       gateType: "missing_input",
     });
   }
 
-  if (input.agent.gate?.type === "draft_review" && toolRef === "internal.llm_only" && !asksOperatorForInput(text)) {
-    const looksLikeDraft = text.length > 120 && !/\b(is missing|please provide|please paste)\b/i.test(text);
-    if (looksLikeDraft) {
+  if (
+    toolRef === "internal.llm_only"
+    && !asksOperatorForInput(text)
+    && (canvasDraftAgent || looksLikeEmailDraft(text) || looksLikeReviewableDraft(text))
+  ) {
+    if (looksLikeReviewableDraft(text)) {
+      const reviewGateType = input.agent.gate?.type === "pre_send" ? "pre_send" : "draft_review";
       return goalEvalResultSchema.parse({
         status: "needs_input",
         reason: "Review the draft before proceeding.",
         blockers: [],
-        gateType: "draft_review",
+        gateType: reviewGateType,
       });
     }
   }
@@ -212,6 +312,7 @@ function deterministicGuards(input: {
 async function llmJudge(input: {
   agent: LoopRunAgent;
   result: RunLoopAgentResult;
+  definition: LoopDefinition;
 }): Promise<GoalEvalResult> {
   const goal = input.agent.goal?.trim();
   if (!goal) {
@@ -222,6 +323,7 @@ async function llmJudge(input: {
   }
 
   const text = input.result.text?.trim() ?? "";
+  const noSlopSpec = input.definition.builderMeta?.noSlopSpec;
   const key = cacheKey(input.agent.id, text, goal);
   const cached = judgeCache.get(key);
   if (cached) return cached;
@@ -244,8 +346,15 @@ async function llmJudge(input: {
         content: [
           `Goal: ${goal}`,
           `Done criteria: ${(input.agent.doneCriteria ?? []).join("; ") || "none"}`,
+          noSlopSpec
+            ? [
+                `Approved loop spec: ${noSlopSpec.title}`,
+                `Global guardrails: ${noSlopSpec.specJson.guardrails.join("; ") || "none"}`,
+                `Success criteria: ${noSlopSpec.specJson.successCriteria.join("; ") || "none"}`,
+              ].join("\n")
+            : null,
           `Output:\n${text.slice(0, 4000)}`,
-        ].join("\n\n"),
+        ].filter(Boolean).join("\n\n"),
       },
     ],
   });
@@ -276,6 +385,15 @@ export async function evaluateAgentGoal(input: {
     return deterministic;
   }
 
+  // For short-circuit tools, validate raw output structure and skip LLM judge
+  const toolRef = input.agent.tools[0]?.ref ?? "";
+  if (isShortCircuitTool(toolRef)) {
+    const shortCircuitResult = validateShortCircuitOutput(toolRef, input.result);
+    if (shortCircuitResult) {
+      return shortCircuitResult;
+    }
+  }
+
   if (input.skipLlmJudge) {
     return goalEvalResultSchema.parse({
       status: "pass",
@@ -284,8 +402,10 @@ export async function evaluateAgentGoal(input: {
   }
 
   const judged = await llmJudge(input);
+  const runMemory = input.runMemory ?? { inputs: {}, approvedMemories: [], updatedAt: new Date(0).toISOString() };
   if (
-    !hasRequiredRunInputs(input.definition, input.runMemory ?? { inputs: {}, approvedMemories: [], updatedAt: new Date(0).toISOString() }) &&
+    !hasRequiredContentInputs(input.definition, runMemory) &&
+    !isCanvasDraftAgent(input.agent) &&
     judged.status === "fail" &&
     /\b(required input|input .*missing|missing .*input|not provided|placeholder)\b/i.test(judged.reason)
   ) {

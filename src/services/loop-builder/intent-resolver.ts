@@ -3,7 +3,9 @@ import { z } from "zod";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { createLoopWorkflow } from "../loop-executor/creator.js";
 import { loopDefinitionSchema, loopStageApprovalChannelInputSchema } from "../loop-executor/types.js";
+import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { channelsFromDesign, designLoopFromIntent, loopBuilderTraceSchema } from "./ceo-designer.js";
+import { approvedSpecSnapshot, getLoopSpec } from "./specs.js";
 
 /** Optional UI hint passed to the LLM — does not bypass the builder. */
 export const builderTemplateHintSchema = z.enum([
@@ -27,6 +29,7 @@ export const loopBuilderProposalSchema = z.object({
   rationale: z.array(z.string().min(1)).default([]),
   designedBy: z.enum(["ceo_llm", "loop_architect"]).default("loop_architect"),
   model: z.string().optional(),
+  noSlopSpec: noSlopSpecSnapshotSchema.optional(),
   trace: loopBuilderTraceSchema.optional(),
 });
 
@@ -37,6 +40,7 @@ type BuilderContext = {
   prompt: string;
   templateId?: LoopBuilderTemplateHint;
   feedback?: string;
+  specId?: string;
   priorProposal?: LoopBuilderProposal;
 };
 
@@ -52,6 +56,15 @@ function templateHintFromRequest(templateId?: LoopBuilderTemplateHint): string |
 export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<LoopBuilderProposal> {
   const prompt = normalizePrompt(input.prompt);
   if (!prompt) throw new Error("Prompt is required");
+  const noSlopSpec = input.specId
+    ? approvedSpecSnapshot(
+        await getLoopSpec(input.auth, input.specId)
+          .then((spec) => {
+            if (!spec) throw new Error("Loop spec not found");
+            return spec;
+          }),
+      )
+    : undefined;
 
   const result = await designLoopFromIntent({
     auth: input.auth,
@@ -59,6 +72,7 @@ export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<L
       ? [prompt, `Template hint: ${templateHintFromRequest(input.templateId) ?? "custom"}`].filter(Boolean).join("\n\n")
       : prompt,
     feedback: input.feedback,
+    noSlopSpec,
     priorProposal: input.priorProposal,
   });
 
@@ -77,6 +91,7 @@ export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<L
     rationale: result.design.rationale,
     designedBy: "loop_architect",
     model: result.model,
+    ...(noSlopSpec ? { noSlopSpec } : {}),
     trace: result.trace,
   });
 }
@@ -88,6 +103,7 @@ export async function refineLoopBuilderProposal(input: BuilderContext & { priorP
     prompt,
     templateId: input.templateId,
     feedback: input.feedback ?? prompt,
+    specId: input.specId ?? input.priorProposal.noSlopSpec?.id,
     priorProposal: input.priorProposal,
   });
 }

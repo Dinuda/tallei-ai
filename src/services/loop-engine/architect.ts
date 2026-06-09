@@ -8,7 +8,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { listPreferences } from "../memory.js";
 import { buildLoopDefinitionFromCeoDesign } from "../loop-executor/creator.js";
 import { normalizeDesignCron } from "../loop-executor/cron.js";
-import { getEffectiveLoopConstraints, listLoopTools, validateAgentRoster } from "../loop-executor/tool-catalog.js";
+import { getEffectiveLoopConstraints, listAvailableLoopToolsForAuth, validateAgentRoster } from "../loop-executor/tool-catalog.js";
 import {
   LOOP_ENGINE_VERSION,
   loopStageApprovalChannelInputSchema,
@@ -22,11 +22,13 @@ import {
   assertDeliveryRouting,
   deliveryTypeFromRouting,
   loopArchitectOutputSchema,
+  type NoSlopSpecSnapshot,
   type LoopArchitectOutput,
   type WorkflowCriticResult,
 } from "./contracts.js";
 import { critiqueLoopDesign } from "./critic.js";
 import { formatMemoriesForArchitect, recallForDesigner } from "./recall.js";
+import { buildToolSpecRegistry, renderOutcomesForArchitect, renderToolsForArchitect, type ToolSpecRegistry } from "../tool-spec/index.js";
 
 export type DesignerTestOverrides = {
   chat?: typeof loopBuilderOpenAiChat;
@@ -51,6 +53,7 @@ export type DesignLoopInput = {
   auth: AuthContext;
   prompt: string;
   feedback?: string;
+  noSlopSpec?: NoSlopSpecSnapshot;
   priorProposal?: {
     title: string;
     summary: string;
@@ -60,8 +63,14 @@ export type DesignLoopInput = {
   testOverrides?: DesignerTestOverrides;
 };
 
-function formatToolCatalog(): string {
-  return listLoopTools()
+async function formatToolCatalog(auth: AuthContext, noSlopSpec?: NoSlopSpecSnapshot): Promise<string> {
+  const baseTools = await listAvailableLoopToolsForAuth(auth);
+  const writeTools = (noSlopSpec?.specJson.connectorPolicy.allowedWriteActions ?? []).map((action) => ({
+    ref: `composio.${action.toolkit.toLowerCase()}.action.${action.actionSlug.toLowerCase()}`,
+    description: `${action.description ?? action.actionSlug} (approved ${action.risk} action; must use pre_send gate)`,
+    riskLevel: action.risk === "write" ? "medium" : "high",
+  }));
+  return [...baseTools, ...writeTools]
     .map((tool) => `- ${tool.ref}: ${tool.description} (risk: ${tool.riskLevel})`)
     .join("\n");
 }
@@ -71,7 +80,7 @@ function formatPreferences(preferences: Array<{ id: string; text: string; catego
   return preferences.map((p, i) => `${i + 1}. [${p.id}] ${p.text}`).join("\n");
 }
 
-function buildArchitectSystemPrompt(): string {
+function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
   const outputExample = JSON.stringify({
     title: "Weekly product sync",
     summary: "Reviewed internal brief summarizing product progress for the engineering team.",
@@ -81,26 +90,27 @@ function buildArchitectSystemPrompt(): string {
     schedule: { cron: "0 9 * * 1", timezone: "UTC" },
     agents: [
       {
-        id: "memory_search",
-        name: "Recall Agent",
-        goal: "Return at least one memory with id and excerpt attached",
-        task: "Search memories for specific past product updates that directly support the requested sync email. Include style signals only if they affect the expected output.",
-        tool: "internal.memory_search",
-        inputContract: { description: "Focused memory search query derived from the loop goal", schema: { query: "string", expected_output: "string" } },
-        outputContract: { description: "Validated task-relevant memories with ids, excerpts, reasons, and confidence", schema: { memories: [{ id: "string", excerpt: "string", reason: "string", confidence: "number" }] } },
-        doneCriteria: ["Every memory includes an id", "At least one relevant result or explicit none found"],
-        gate: { type: "memory_confirmation", question: "Are these the items you want to cover?" },
+        id: "web_research",
+        name: "Research Agent",
+        goal: "Find recent news articles on the requested topic with source URLs and snippets",
+        task: "Search the web for the most relevant and recent articles. Return raw results with URLs, titles, and snippets.",
+        tool: "internal.web_search",
+        artifactRole: "source_evidence",
+        inputContract: { description: "Search query derived from the loop goal", schema: { query: "string", recency_days: "number" } },
+        outputContract: { description: "Raw search results from Exa API", schema: { text: "string", model: "string", provider: "string", sources: [{ title: "string", url: "string", snippet: "string" }] } },
+        doneCriteria: ["At least 5 sources returned", "Each source has title, url, and snippet", "Sources are from credible news sources"],
       },
       {
-        id: "draft_writer",
-        name: "Draft Agent",
-        goal: "Produce one reviewed email draft",
-        task: "Write the final email draft from approved memories and inputs.",
+        id: "newsletter_writer",
+        name: "Writer Agent",
+        goal: "Produce one complete newsletter draft ready for human review",
+        task: "Synthesize research sources into a newsletter with Subject, Preview, and body sections. Cite sources inline.",
         tool: "internal.llm_only",
-        inputContract: { description: "Approved memories and operator inputs", schema: { context: "string" } },
-        outputContract: { description: "Email copy with subject and preview", schema: { text: "string" } },
-        doneCriteria: ["Includes a Subject line", "Includes one complete draft", "No delivery or sending claims"],
-        gate: { type: "draft_review", question: "Review and approve this email draft?" },
+        artifactRole: "draft_body",
+        inputContract: { description: "Research handoff from prior agent", schema: { handoff: { web_research: { sources: "array" } } } },
+        outputContract: { description: "Newsletter email copy rendered in canvas.email", schema: { text: "string", subject: "string", preview: "string", body: "string" } },
+        doneCriteria: ["Includes a Subject line", "Includes a Preview line", "Includes one complete newsletter body", "No delivery or sending claims"],
+        gate: { type: "draft_review", question: "Review this newsletter draft. Approve to continue, or edit to improve it." },
         renderTarget: "canvas.email",
       },
     ],
@@ -109,21 +119,71 @@ function buildArchitectSystemPrompt(): string {
   }, null, 2);
 
   return [
-    "You are a loop architect for Tallei. Design bespoke recurring agent loops from first principles.",
+    "You are a loop architect for Tallei. Generate executable recurring agent loops from reviewed human specs and API/tool contracts.",
     "Use role names people understand immediately: child roles should be named as Agents, and the parent coordinator should be an Orchestrator.",
-    "Do NOT copy preset patterns. Do NOT mention template IDs or preset names.",
-    "Every child agent must have exactly ONE tool, a clear goal (success condition), task, inputContract, outputContract, and 1-3 doneCriteria.",
-    'For email or newsletter writing agents, use renderTarget (NOT a tool, must not appear in tool):',
-    '  "canvas.email" — for the draft-writer step that produces an editable email draft',
-    '  "canvas.preview" — for a final/preview step after approval, shown as a read-only rendered email',
-    'Always use delivery: { "provider": "none", "target": "none" }. Outbound delivery is disabled.',
-    "Insert human gates where uncertainty is high:",
-    "  memory_confirmation after memory search",
-    "  missing_input when required inputs (inputsRequired) are absent",
-    "  draft_review before approval",
-    "Keep rosters minimal (2-6 agents). End with a reviewed artifact, not a delivery agent.",
+    "When a no-slop spec is provided, it is the behavioral source of truth. Satisfy it directly and do not override it with guesses from the raw prompt.",
+    "Do NOT mention template IDs or preset names.",
+    "Every child agent must have exactly ONE tool, a clear goal (success condition), task, inputContract, outputContract, and 1-8 doneCriteria.",
+    "=== ARTIFACT ROLES, OUTPUT FORMAT & APPROVAL GATES ===",
+    "For EVERY agent, decide:",
+    "  1. artifactRole — how this agent contributes to the final loop outcome:",
+    '     "source_evidence" — raw research/memory (handoff only, not the final artifact)',
+    '     "draft_body" — produces the editable final draft in canvas.email',
+    '     "final_preview" — read-only preview in canvas.preview after approval',
+    '     "delivery" — executes the approved connector send action',
+    "  2. outputContract — exact shape the agent produces (match tool outputSchema for short-circuit tools)",
+    "  3. gate — human approval type when the agent pauses:",
+    '     missing_input — operator must PASTE text (sprint notes, briefs). Use ONLY for content inputs in inputsRequired.',
+    '     memory_confirmation — operator SELECTS which memories to include',
+    '     draft_review — operator REVIEWS a draft in the canvas; can approve as-is or edit to improve',
+    '     pre_send — operator CONFIRMS final send/delivery (recipients come from connectorPolicy.recipientSource)',
+    "  4. renderTarget — when output is email/newsletter copy, MUST use canvas (NOT a tool ref):",
+    '     "canvas.email" — editable draft workspace (pair with gate draft_review and artifactRole draft_body)',
+    '     "canvas.preview" — read-only rendered email after approval (pair with artifactRole final_preview)',
+    "",
+    "GATE RULES BY TOOL TYPE:",
+    "  - internal.web_search / internal.memory_search / composio.*.search: NO draft_review gate. memory_search may use memory_confirmation.",
+    "  - internal.llm_only writing email/newsletter/digest: MUST set renderTarget canvas.email, artifactRole draft_body, gate draft_review.",
+    "  - composio.*.action send/write: MUST set artifactRole delivery, gate pre_send. Recipients from connectorPolicy, NOT inputsRequired.",
+    "",
+    "inputsRequired is ONLY for operator-provided CONTENT needed before drafting (e.g. sprint_notes, product_brief).",
+    "NEVER put delivery configuration in inputsRequired (subscriber_list_id, audience_id, recipient_email, mailing_list).",
+    "Delivery recipients are resolved by connectorPolicy.recipientSource on the send agent at pre_send time.",
+    "",
+    'Default to delivery: { "provider": "none", "target": "none" } unless the approved no-slop spec includes connectorPolicy.allowedWriteActions.',
+    "If the approved spec allows outbound delivery, delivery.provider must be the exact approved connector action tool ref and the delivery agent must use gate.type pre_send.",
+    "For subscriber_list/newsletter delivery, choose a real send/broadcast/campaign tool from connectorPolicy.allowedWriteActions. Prefer Resend or newsletter/email-service actions over Gmail when available.",
+    "Never use create_email_draft, draft, compose, or preview actions as delivery providers. Drafting belongs in a canvas.email writer step; delivery must be a send-capable connector action.",
+    "Keep rosters minimal (2-6 agents). End with a canvas-reviewed artifact unless the approved spec explicitly authorizes a gated connector send action.",
     "Copy tool refs exactly from the catalog.",
     "For internal.memory_search configs, write a focused query for the requested output. Do not ask for broad memory categories unless the user explicitly needs them.",
+    "",
+    "=== TOOL OUTPUT CONTRACTS & AGENT HANDOFF ===",
+    "CRITICAL: When designing agents, you MUST use the exact tool output schemas provided in the TOOL REFERENCE section.",
+    "For each agent, generate inputContract and outputContract based on the tool's actual output schema:",
+    "  - inputContract.schema must match what the agent expects to receive (from prior agent handoff or tool output)",
+    "  - outputContract.schema must match the tool's outputSchema (for short-circuit tools) or the LLM-generated output (for llm_only tools)",
+    "",
+    "For SHORT-CIRCUIT tools (web_search, memory_search, composio.*.search):",
+    "  - The agent output IS the raw tool result (no LLM synthesis)",
+    "  - doneCriteria must validate the RAW tool output format, not expect synthesized content",
+    "  - Example: For web_search, doneCriteria should check 'sources array has N items', 'each source has title, url, snippet' — NOT '4-6 ranked stories with summaries'",
+    "  - The next agent in the flow receives this raw output via handoff and must synthesize it",
+    "",
+    "For LLM_SYNTHESIS tools (llm_only):",
+    "  - The agent receives prior agent outputs via handoff and synthesizes them",
+    "  - inputContract.schema should describe what the agent expects from upstream agents",
+    "  - outputContract.schema should describe the synthesized output (e.g., newsletter draft, summary)",
+    "  - doneCriteria should validate the synthesized content quality",
+    "",
+    "AGENT HANDOFF FORMAT:",
+    "  - Each agent's output is passed to downstream agents as `handoff.<agent_id>`",
+    "  - Downstream agents receive the full output object (text, data, sources, etc.)",
+    "  - Design inputContract/outputContract to explicitly document what is passed between agents",
+    "  - Example: If Research Agent uses web_search, Draft Agent's inputContract should reference `handoff.web_research.sources` array",
+    "",
+    "=== AVAILABLE CAPABILITIES ===",
+    outcomesMarkdown,
     "",
     "=== SCHEDULE ===",
     "schedule.cron MUST be a standard 5-field cron: minute hour day-of-month month day-of-week.",
@@ -143,13 +203,29 @@ function buildArchitectUserPrompt(input: {
   preferences: string;
   priorProposal?: DesignLoopInput["priorProposal"];
   criticFixes?: string[];
+  noSlopSpec?: NoSlopSpecSnapshot;
+  toolCatalog: string;
+  outcomesMarkdown: string;
+  toolsMarkdown: string;
 }): string {
   const sections = [
     `User intent:\n${input.prompt}`,
+    input.noSlopSpec
+      ? [
+          "Approved no-slop spec (behavioral source of truth):",
+          input.noSlopSpec.bodyMarkdown,
+          "",
+          "Normalized no-slop spec JSON:",
+          JSON.stringify(input.noSlopSpec.specJson, null, 2),
+        ].join("\n")
+      : null,
     input.feedback ? `Feedback:\n${input.feedback}` : null,
     `Memories (with ids and scores):\n${input.memories}`,
     `Preferences:\n${input.preferences}`,
-    `Tool catalog:\n${formatToolCatalog()}`,
+    `Tool catalog:\n${input.toolCatalog}`,
+    "",
+    "=== TOOL REFERENCE (for agent assignment) ===",
+    input.toolsMarkdown,
     input.priorProposal
       ? `Prior proposal (revise, do not copy blindly):\n${JSON.stringify(input.priorProposal, null, 2)}`
       : null,
@@ -167,6 +243,10 @@ async function callArchitectLlm(input: {
   preferences: string;
   priorProposal?: DesignLoopInput["priorProposal"];
   criticFixes?: string[];
+  noSlopSpec?: NoSlopSpecSnapshot;
+  toolCatalog: string;
+  outcomesMarkdown: string;
+  toolsMarkdown: string;
   chat?: typeof loopBuilderOpenAiChat;
 }): Promise<{ design: LoopArchitectOutput; model: string }> {
   const chat = input.chat ?? loopBuilderOpenAiChat;
@@ -174,12 +254,21 @@ async function callArchitectLlm(input: {
     responseFormat: "json_object",
     temperature: 0.3,
     maxTokens: 4096,
+    reasoningEffort: "minimal",
     messages: [
-      { role: "system", content: buildArchitectSystemPrompt() },
+      { role: "system", content: buildArchitectSystemPrompt(input.outcomesMarkdown) },
       { role: "user", content: buildArchitectUserPrompt(input) },
     ],
   });
-  const parsed = loopArchitectOutputSchema.parse(JSON.parse(response.text));
+  
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(response.text);
+  } catch (parseError) {
+    throw new Error(`Failed to parse architect LLM response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}\n\nResponse text (first 500 chars):\n${response.text.slice(0, 500)}`);
+  }
+  
+  const parsed = loopArchitectOutputSchema.parse(parsedJson);
   const design: LoopArchitectOutput = {
     ...parsed,
     schedule: {
@@ -220,6 +309,11 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
 
   const memoryBlock = formatMemoriesForArchitect(memories);
   const preferenceBlock = formatPreferences(selectedPreferences);
+  const toolCatalog = await formatToolCatalog(input.auth, input.noSlopSpec);
+
+  const toolSpecRegistry = await buildToolSpecRegistry(input.auth);
+  const outcomesMarkdown = renderOutcomesForArchitect(toolSpecRegistry);
+  const toolsMarkdown = renderToolsForArchitect(toolSpecRegistry);
 
   const evidenceTrace = loopBuilderTraceStageSchema.parse({
     stage: "evidence_curation",
@@ -247,11 +341,15 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
       preferences: preferenceBlock,
       priorProposal: input.priorProposal,
       criticFixes: attempt > 0 ? criticFixes : undefined,
+      noSlopSpec: input.noSlopSpec,
+      toolCatalog,
+      outcomesMarkdown,
+      toolsMarkdown,
       chat: input.testOverrides?.chat,
     });
     design = result.design;
     model = result.model;
-    critic = critiqueLoopDesign(design);
+    critic = critiqueLoopDesign(design, input.noSlopSpec);
 
     architectTrace = loopBuilderTraceStageSchema.parse({
       stage: "loop_architect",
@@ -261,6 +359,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         agentCount: design.agents.length,
         delivery: design.delivery,
         inputsRequired: design.inputsRequired,
+        noSlopSpecId: input.noSlopSpec?.id,
       },
     });
 
@@ -305,10 +404,17 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         engineVersion: LOOP_ENGINE_VERSION,
         model,
         preApproved: true,
+        ...(input.noSlopSpec ? { noSlopSpec: input.noSlopSpec } : {}),
+        agentSpecGeneration: {
+          mode: "hybrid",
+          model,
+          generatedAt: new Date().toISOString(),
+        },
         designDiagnostics: { critic, trace, delivery: design.delivery, inputsRequired: design.inputsRequired },
       },
     },
     delivery: design.delivery,
+    connectorPolicy: input.noSlopSpec?.specJson.connectorPolicy,
     inputsRequired: design.inputsRequired,
     engineVersion: LOOP_ENGINE_VERSION,
   });

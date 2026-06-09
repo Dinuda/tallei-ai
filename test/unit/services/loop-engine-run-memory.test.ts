@@ -264,6 +264,41 @@ test("draft review output with normal pending work language opens draft gate", a
   assert.equal(result.gateType, "draft_review");
 });
 
+test("newsletter writer with missing delivery config opens draft review not missing input", async () => {
+  const draft = [
+    "Subject: This Week in AI",
+    "",
+    "Preview: Siri overhaul, liability questions, and Gemini architectures.",
+    "",
+    "Hello AI Readers,",
+    "",
+    "Apple's long-awaited AI Siri overhaul is finally here.",
+    "The lawsuits that could give AI its Big Tobacco moment continue to unfold.",
+  ].join("\n");
+
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "newsletter_writer",
+      name: "Writer Agent",
+      task: "Write the weekly AI industry newsletter from research sources.",
+      goal: "Produce a complete newsletter draft ready for human review.",
+      tools: [{ ref: "internal.llm_only" }],
+      gate: { type: "draft_review", question: "Review this newsletter draft?" },
+      renderTarget: "canvas.email",
+    },
+    result: { text: draft, data: {} },
+    definition: {
+      inputsRequired: ["subscriber_list_id"],
+      goal: "Write and send a weekly AI industry newsletter.",
+    },
+    runMemory: emptyRunMemory(),
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.gateType, "draft_review");
+});
+
 test("draft placeholder output with required input present opens draft review gate", async () => {
   const result = await evaluateAgentGoal({
     agent: {

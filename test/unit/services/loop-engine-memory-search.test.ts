@@ -87,6 +87,74 @@ test("memory search sources trigger confirmation gate", async () => {
   assert.equal(result.gateType, "memory_confirmation");
 });
 
+test("web search returns sources at top level for goal eval and handoff", async () => {
+  const [{ runLoopAgent }, { evaluateAgentGoal }, { getToolHandler, registerToolHandler }] = await Promise.all([
+    import("../../../src/services/loop-executor/agent-runner.js"),
+    import("../../../src/services/loop-engine/goal-eval.js"),
+    import("../../../src/services/loop-executor/tool-handlers.js"),
+  ]);
+  const originalHandler = getToolHandler("internal.web_search");
+  assert.ok(originalHandler);
+
+  registerToolHandler("internal.web_search", async () => ({
+    text: "Web search results (exa-search):\nTop themes:\n- Apple AI update",
+    data: {
+      model: "exa-search",
+      provider: "exa_web_search",
+      sources: [{
+        title: "Apple AI update",
+        url: "https://example.com/apple-ai",
+        snippet: "Apple revealed a new AI architecture.",
+      }],
+    },
+    shortCircuit: true,
+  }));
+
+  try {
+    const result = await runLoopAgent({
+      auth,
+      goal: "Write a weekly AI industry newsletter.",
+      agent: {
+        id: "web_research",
+        name: "Research Agent",
+        task: "Find recent AI industry news with URLs.",
+        goal: "Return recent web sources with title, url, and snippet.",
+        tools: [{ ref: "internal.web_search" }],
+      },
+      assignedTools: [{ ref: "internal.web_search" }],
+      draftPolicy: "approval_required",
+      priorComments: [],
+    });
+
+    assert.equal(result.data.mode, "tool_output_only");
+    assert.deepEqual(result.data.sources, [{
+      title: "Apple AI update",
+      url: "https://example.com/apple-ai",
+      snippet: "Apple revealed a new AI architecture.",
+    }]);
+
+    const goalEval = await evaluateAgentGoal({
+      agent: {
+        id: "web_research",
+        name: "Research Agent",
+        task: "Find recent AI industry news with URLs.",
+        goal: "Return recent web sources with title, url, and snippet.",
+        tools: [{ ref: "internal.web_search" }],
+      },
+      result,
+      definition: {
+        goal: "Write a weekly AI industry newsletter.",
+      } as never,
+      skipLlmJudge: true,
+    });
+
+    assert.equal(goalEval.status, "pass");
+    assert.match(goalEval.reason ?? "", /1 valid sources/i);
+  } finally {
+    registerToolHandler("internal.web_search", originalHandler);
+  }
+});
+
 test("validated-empty memory search does not trigger confirmation gate", async () => {
   const { evaluateAgentGoal } = await import("../../../src/services/loop-engine/goal-eval.js");
   const result = await evaluateAgentGoal({

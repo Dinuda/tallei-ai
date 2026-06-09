@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
@@ -10,6 +10,8 @@ import {
   type RunMemory,
 } from "./memory.js";
 import { runLoopAgent } from "../loop-executor/agent-runner.js";
+import { executeApprovedComposioAction } from "../connectors/composio.js";
+import { getLoopTool } from "../loop-executor/tool-catalog.js";
 import { loopRunAgentSchema, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
 import { buildCanvasEmailTemplate, type CanvasEmailTemplate } from "./email-canvas.js";
 import { runtimeContextSchema, runtimeDefinitionSchema, type RuntimeContext, type RuntimeDefinition } from "./types.js";
@@ -65,6 +67,68 @@ function compactArtifactData(data: unknown, maxChars = 6_000) {
   } catch {
     return null;
   }
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Json(value: unknown): string {
+  return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function parseComposioActionRef(ref: string): { toolkit: string; actionSlug: string } | null {
+  const match = ref.toLowerCase().match(/^composio\.([a-z0-9_-]+)\.action\.(.+)$/);
+  return match ? { toolkit: match[1], actionSlug: match[2] } : null;
+}
+
+function approvedConnectorAction(definition: RuntimeDefinition, agent: LoopRunAgent) {
+  const assignment = agent.tools.find((tool) => parseComposioActionRef(tool.ref));
+  if (!assignment) return null;
+  const parsed = parseComposioActionRef(assignment.ref);
+  if (!parsed) return null;
+  const policy = definition.connectorPolicy?.allowedWriteActions.find((action) =>
+    action.toolkit.toLowerCase() === parsed.toolkit
+    && action.actionSlug.toLowerCase() === parsed.actionSlug
+    && action.requiresPreSendApproval
+  );
+  if (!policy) return null;
+  return { assignment, toolkit: policy.toolkit, actionSlug: policy.actionSlug, policy };
+}
+
+function buildConnectorActionPayload(input: {
+  assignmentConfig: Record<string, unknown>;
+  priorOutputs: Record<string, unknown>;
+  latestBody: string;
+  definition: RuntimeDefinition;
+}) {
+  return {
+    ...input.assignmentConfig,
+    loopGoal: input.definition.goal,
+    content: input.latestBody,
+    priorOutputs: input.priorOutputs,
+  };
+}
+
+function summarizeConnectorActionPayload(payload: Record<string, unknown>) {
+  const subject = typeof payload.subject === "string"
+    ? payload.subject
+    : typeof payload.title === "string"
+      ? payload.title
+      : "";
+  const content = typeof payload.content === "string" ? payload.content : "";
+  return {
+    subject,
+    preview: content.slice(0, 1200),
+    recipientCount: Array.isArray(payload.recipients) ? payload.recipients.length : undefined,
+  };
 }
 
 function isRetryableError(error: unknown): boolean {
@@ -534,6 +598,46 @@ async function handleExecuteStep(command: CommandRow) {
     body: compactArtifactBody(artifact.body),
   }));
 
+  const connectorAction = approvedConnectorAction(definition, agent);
+  if (connectorAction) {
+    const latestBody = artifactRows.rows[artifactRows.rows.length - 1]?.body ?? "";
+    const payload = buildConnectorActionPayload({
+      assignmentConfig: asObject(connectorAction.assignment.config),
+      priorOutputs,
+      latestBody,
+      definition,
+    });
+    const specSnapshot = definition.builderMeta?.noSlopSpec ?? null;
+    const payloadHash = sha256Json(payload);
+    const specHash = sha256Json(specSnapshot);
+    await createGate({
+      command,
+      attemptId: command.step_attempt_id,
+      gateType: "pre_send",
+      question: agent.gate?.question ?? `Approve ${getLoopTool(connectorAction.assignment.ref)?.label ?? connectorAction.actionSlug}?`,
+      payload: {
+        kind: "connector_action",
+        provider: "composio",
+        toolkit: connectorAction.toolkit,
+        actionSlug: connectorAction.actionSlug,
+        toolRef: connectorAction.assignment.ref,
+        actionRisk: connectorAction.policy.risk,
+        contactSource: definition.connectorPolicy?.recipientSource ?? { kind: "none" },
+        delivery: definition.delivery ?? { provider: "none", target: "none" },
+        payload,
+        payloadHash,
+        specHash,
+        noSlopSpecId: specSnapshot?.id ?? null,
+        summary: summarizeConnectorActionPayload(payload),
+      },
+    });
+    await pool.query(
+      `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+      [command.step_attempt_id, JSON.stringify({ text: "Waiting for pre-send approval.", data: { payloadHash, specHash } })],
+    );
+    return;
+  }
+
   const agentResult = await runLoopAgent({
     auth: {
       tenantId: command.tenant_id,
@@ -687,6 +791,64 @@ async function handleContinueAfterGate(command: CommandRow) {
   const definition = runtimeDefinitionSchema.parse(row.definition_snapshot);
   const context = runtimeContextSchema.parse(row.context_json);
   const agent = loopRunAgentSchema.parse(row.agent_snapshot);
+  if (row.gate_type === "pre_send") {
+    if (row.status !== "approved") return;
+    const gatePayload = asObject(row.payload_json);
+    const payload = asObject(gatePayload.payload);
+    const payloadHash = typeof gatePayload.payloadHash === "string" ? gatePayload.payloadHash : "";
+    const specHash = typeof gatePayload.specHash === "string" ? gatePayload.specHash : "";
+    if (!payloadHash || payloadHash !== sha256Json(payload)) {
+      throw new Error("Approved connector action payload hash does not match current payload");
+    }
+    if (specHash !== sha256Json(definition.builderMeta?.noSlopSpec ?? null)) {
+      throw new Error("Approved connector action spec hash does not match current workflow spec");
+    }
+    const connectorAction = approvedConnectorAction(definition, agent);
+    if (!connectorAction) throw new Error("Approved connector action is no longer allowed by the workflow policy");
+    const result = await executeApprovedComposioAction({
+      auth: {
+        tenantId: command.tenant_id,
+        userId: command.user_id,
+        authMode: "internal",
+        plan: "pro",
+      },
+      toolkit: connectorAction.toolkit,
+      actionSlug: connectorAction.actionSlug,
+      payload,
+      idempotencyKey: `run:${command.run_id}:step:${row.step_index}:action:${payloadHash}`,
+    });
+    await persistArtifact({
+      command,
+      attemptId: row.step_attempt_id,
+      artifactKey: agent.outputArtifactId ?? `${agent.id}_connector_action`,
+      kind: "connector_action_result",
+      body: result.ok
+        ? `Connector action completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`
+        : `Connector action failed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
+      data: {
+        result,
+        payloadHash,
+        specHash,
+        toolRef: connectorAction.assignment.ref,
+      },
+    });
+    await pool.query(
+      `UPDATE loop_engine_step_attempts
+       SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'waiting_for_gate'`,
+      [row.step_attempt_id, JSON.stringify({ text: "Connector action completed.", data: { result, payloadHash, specHash } })],
+    );
+    await insertEvent({
+      tenantId: command.tenant_id,
+      userId: command.user_id,
+      runId: command.run_id,
+      stepAttemptId: row.step_attempt_id,
+      eventType: "connector_action_completed",
+      payload: { toolkit: connectorAction.toolkit, actionSlug: connectorAction.actionSlug, payloadHash, replayed: result.replayed ?? false },
+    });
+    await queueNextStep(command, definition, row.step_index);
+    return;
+  }
   const treatAsDraftReview = isMisclassifiedDraftReviewGate({
     gateType: row.gate_type,
     gateStatus: row.status,

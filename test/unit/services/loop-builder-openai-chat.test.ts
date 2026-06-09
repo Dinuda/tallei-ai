@@ -12,13 +12,13 @@ test("isLoopBuilderReasoningModel detects gpt-5 and o-series models", async () =
   assert.equal(isLoopBuilderReasoningModel("gpt-4o"), false);
 });
 
-test("loopBuilderOpenAiReasoningEffort defaults to medium and can be disabled", async () => {
+test("loopBuilderOpenAiReasoningEffort defaults to minimal and can be disabled", async () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
   delete process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
 
   try {
     const mod = await import("../../../src/services/loop-builder/openai-chat.js?t=default");
-    assert.equal(mod.loopBuilderOpenAiReasoningEffort(), "medium");
+    assert.equal(mod.loopBuilderOpenAiReasoningEffort(), "minimal");
 
     process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT = "high";
     const modHigh = await import("../../../src/services/loop-builder/openai-chat.js?t=high");

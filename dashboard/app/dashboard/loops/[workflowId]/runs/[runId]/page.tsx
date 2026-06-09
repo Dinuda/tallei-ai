@@ -758,11 +758,21 @@ function isInputValidationAgentSnapshot(agent: StepAttempt["agent_snapshot"] | u
   return label.includes("validator") || label.includes("input_gate") || label.includes("input checker");
 }
 
+const DELIVERY_CONFIG_INPUT_PATTERN = /subscriber|audience|recipient|mailing.?list|contact.?list|list.?id|send.?to|broadcast.?list/i;
+
+function isDeliveryConfigInputKey(key: string): boolean {
+  return DELIVERY_CONFIG_INPUT_PATTERN.test(key.trim());
+}
+
+function contentInputsRequired(definition: RunProjection["definition"]): string[] {
+  return (definition?.inputsRequired ?? []).filter((key) => !isDeliveryConfigInputKey(key));
+}
+
 function runInputsSatisfied(
   definition: RunProjection["definition"],
   context: Record<string, unknown> | undefined,
 ): boolean {
-  const keys = definition?.inputsRequired ?? [];
+  const keys = contentInputsRequired(definition);
   if (keys.length === 0) return true;
   const inputs = context?.inputs && typeof context.inputs === "object" && !Array.isArray(context.inputs)
     ? context.inputs as Record<string, unknown>
@@ -1016,6 +1026,7 @@ function RunStatusBand({
   onApprove,
   onReject,
   onRerun,
+  onShowFailureDetails,
 }: {
   gateResolvedFlash: boolean;
   transitioningAfterGate: boolean;
@@ -1032,6 +1043,7 @@ function RunStatusBand({
   onApprove: () => void;
   onReject: () => void;
   onRerun: () => void;
+  onShowFailureDetails: () => void;
 }) {
   const runningStages = useMemo(() => buildRunningStages(activeStageName), [activeStageName]);
   const isSucceeded = runStatus === "succeeded";
@@ -1208,7 +1220,13 @@ function RunStatusBand({
               ) : (
                 <FailureTypeStamp agentName={formatWorkerDisplayName(failureStep?.agent_snapshot?.name ?? failureStep?.agent_id ?? "Agent")} />
               )}
-              <p className="mt-1 truncate text-[14px] font-medium text-[#991b1b]">{failureSubtitle}</p>
+              <button
+                type="button"
+                onClick={onShowFailureDetails}
+                className="mt-1 block w-full cursor-pointer text-left text-[14px] font-medium text-[#991b1b] hover:text-[#7f1d1d]"
+              >
+                {failureSubtitle}
+              </button>
             </div>
             {failureStep ? (
               <EditorialActionButton
@@ -1430,6 +1448,8 @@ export default function StableLoopRunPage() {
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [leftTab, setLeftTab] = useState<"output" | "attempts" | "artifact">("output");
+  const [expandedAttemptIds, setExpandedAttemptIds] = useState<Set<string>>(new Set());
+  const [failureDialogOpen, setFailureDialogOpen] = useState(false);
   const [gateResolvedFlash, setGateResolvedFlash] = useState(false);
   const [gateTransitionStepId, setGateTransitionStepId] = useState<string | null>(null);
   const [prevGateId, setPrevGateId] = useState<string | null>(null);
@@ -1928,6 +1948,7 @@ export default function StableLoopRunPage() {
             if (!failureRetryTarget) return;
             void post(`/api/workflows/runs/${runId}/steps/${failureRetryTarget.id}/retry`);
           }}
+          onShowFailureDetails={() => setFailureDialogOpen(true)}
         />
 
         <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_490px]">
@@ -1954,8 +1975,8 @@ export default function StableLoopRunPage() {
                     <MissingInputWorkspace
                       agentOutput={gateAgentOutput}
                       agentName={formatWorkerDisplayName(gateStep?.agent_snapshot?.name ?? gateStep?.agent_id ?? "the agent")}
-                      fieldLabel={resolveInputFieldLabel(run.definition?.inputsRequired, pendingGate.question)}
-                      fieldPlaceholder={resolveInputFieldPlaceholder(run.definition?.inputsRequired)}
+                      fieldLabel={resolveInputFieldLabel(contentInputsRequired(run.definition), pendingGate.question)}
+                      fieldPlaceholder={resolveInputFieldPlaceholder(contentInputsRequired(run.definition))}
                       value={inputValues[pendingGate.id] ?? ""}
                       onChange={(value) => setInputValues((current) => ({ ...current, [pendingGate.id]: value }))}
                       onSubmit={() => submitGate(pendingGate, "input")}
@@ -2101,32 +2122,62 @@ export default function StableLoopRunPage() {
 
                     <TabsContent value="attempts" className="mt-0 h-full">
                       <div className="flex min-h-full flex-col space-y-0 divide-y divide-[#e5e7eb] border border-[#e5e7eb]">
-                        {(attemptsForSelectedStep.length > 0 ? attemptsForSelectedStep : orderedSteps).map((attempt) => (
-                          <div key={attempt.id} className="bg-white p-5">
-                            <div className="flex items-start justify-between gap-4">
-                              <div>
-                                <p className="text-sm font-bold uppercase tracking-wide text-slate-500">Agent {attempt.step_index + 1} · Attempt {attempt.attempt}</p>
-                                <h3 className="mt-1 text-lg font-extrabold">{formatWorkerDisplayName(attempt.agent_snapshot?.name ?? attempt.agent_id)}</h3>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                {(attempt.status === "failed" || attempt.status === "cancelled") ? (
-                                  <EditorialActionButton
-                                    label="Rerun"
-                                    glyph="rerun"
-                                    variant="secondary"
-                                    disabled={Boolean(busy)}
-                                    onClick={() => void post(`/api/workflows/runs/${runId}/steps/${attempt.id}/retry`)}
-                                    className="h-8 px-3 text-[12px]"
-                                  />
-                                ) : null}
-                                <StatusBadge status={attempt.status} />
-                              </div>
+                        {(attemptsForSelectedStep.length > 0 ? attemptsForSelectedStep : orderedSteps).map((attempt) => {
+                          const expanded = expandedAttemptIds.has(attempt.id);
+                          const fullText = getStepDisplayContent(attempt);
+                          const truncated = preview(fullText, 280);
+                          const isExpandable = fullText.length > 280;
+                          return (
+                            <div key={attempt.id} className="bg-white">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!isExpandable) return;
+                                  setExpandedAttemptIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (expanded) next.delete(attempt.id);
+                                    else next.add(attempt.id);
+                                    return next;
+                                  });
+                                }}
+                                className="flex w-full items-start justify-between gap-4 p-5 text-left"
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-bold uppercase tracking-wide text-slate-500">Agent {attempt.step_index + 1} · Attempt {attempt.attempt}</p>
+                                  <h3 className="mt-1 text-lg font-extrabold">{formatWorkerDisplayName(attempt.agent_snapshot?.name ?? attempt.agent_id)}</h3>
+                                  <div className={cn("mt-3 text-sm leading-6 text-slate-600", !expanded && "line-clamp-3")}>
+                                    {fullText
+                                      ? (expanded ? fullText : truncated)
+                                      : attempt.agent_snapshot?.task || "No output yet."}
+                                  </div>
+                                </div>
+                                <div className="flex shrink-0 flex-col items-end gap-2">
+                                  <div className="flex items-center gap-2">
+                                    {(attempt.status === "failed" || attempt.status === "cancelled") ? (
+                                      <EditorialActionButton
+                                        label="Rerun"
+                                        glyph="rerun"
+                                        variant="secondary"
+                                        disabled={Boolean(busy)}
+                                        onClick={() => void post(`/api/workflows/runs/${runId}/steps/${attempt.id}/retry`)}
+                                        className="h-8 px-3 text-[12px]"
+                                      />
+                                    ) : null}
+                                    <StatusBadge status={attempt.status} />
+                                  </div>
+                                  {isExpandable ? (
+                                    <ChevronRight
+                                      className={cn(
+                                        "size-4 text-slate-400 transition-transform",
+                                        expanded && "rotate-90",
+                                      )}
+                                    />
+                                  ) : null}
+                                </div>
+                              </button>
                             </div>
-                            <p className="mt-3 text-sm leading-6 text-slate-600">
-                              {preview(getStepText(attempt) || attempt.error_json?.message || attempt.agent_snapshot?.task)}
-                            </p>
-                          </div>
-                        ))}
+                          );
+                        })}
                         {orderedSteps.length === 0 ? (
                           <div className="grid min-h-[360px] place-items-center border border-dashed border-[#d1d5db] bg-[#fafafa] p-8 text-sm text-[#6b7280]">
                             No agent attempts yet.
@@ -2663,6 +2714,36 @@ export default function StableLoopRunPage() {
                   </aside>
                 </div>
               </div>
+            </EditorialDialogBody>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={failureDialogOpen} onOpenChange={setFailureDialogOpen}>
+          <DialogContent showCloseButton={false} className={cn(editorialDialogContentClass, "max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] sm:!max-w-[640px]")}>
+            <DialogClose asChild>
+              <button
+                type="button"
+                className="absolute right-3 top-3 z-10 grid size-7 place-items-center text-[#9ca3af] transition-colors hover:text-[#6b7280]"
+                aria-label="Close"
+              >
+                <X className="size-4" />
+              </button>
+            </DialogClose>
+            <VisuallyHidden asChild>
+              <DialogTitle>Failure details</DialogTitle>
+            </VisuallyHidden>
+            <EditorialDialogHeader
+              title="Failure details"
+              description={
+                failureRetryTarget
+                  ? `Agent: ${formatWorkerDisplayName(failureRetryTarget.agent_snapshot?.name ?? failureRetryTarget.agent_id)}`
+                  : "This run ended with a failure."
+              }
+            />
+            <EditorialDialogBody>
+              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-[#991b1b]">
+                {failureMessage ?? failureRetryTarget?.error_json?.message ?? "No additional details available."}
+              </pre>
             </EditorialDialogBody>
           </DialogContent>
         </Dialog>

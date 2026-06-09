@@ -6,6 +6,7 @@ import {
   getConnectorAuthSession,
   handleComposioWebhook,
   getResendConnectorSetup,
+  listComposioToolkitTools,
   listComposioToolkits,
   listConnectorAccounts,
   removeResendConnector,
@@ -51,6 +52,16 @@ router.get("/composio/toolkits", requireScopes(["memory:read"]), async (_req: Au
   } catch (error) {
     console.error("Error listing Composio toolkits:", error);
     res.json({ toolkits: [] });
+  }
+});
+
+router.get("/composio/toolkits/:toolkit/tools", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const tools = await listComposioToolkitTools(String(req.params.toolkit || ""));
+    res.json({ tools });
+  } catch (error) {
+    console.error("Error listing Composio toolkit tools:", error);
+    res.status(500).json({ error: "Failed to list Composio toolkit tools" });
   }
 });
 

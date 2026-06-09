@@ -36,9 +36,11 @@ export function registerToolHandler(ref: string, handler: ToolHandler): void {
 }
 
 export function getToolHandler(ref: string): ToolHandler | undefined {
-  return handlers.get(ref);
+  return handlers.get(ref)
+    ?? (/^composio\.[a-z0-9_-]+\.search$/i.test(ref) ? handlers.get("composio.*.search") : undefined)
+    ?? (/^composio\.[a-z0-9_-]+\.action\./i.test(ref) ? handlers.get("composio.*.action") : undefined);
 }
 
 export function hasToolHandler(ref: string): boolean {
-  return handlers.has(ref);
+  return Boolean(getToolHandler(ref));
 }

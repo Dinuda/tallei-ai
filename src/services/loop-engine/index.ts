@@ -5,6 +5,14 @@ export {
   type LoopArchitectOutput,
   type GoalEvalResult,
 } from "./contracts.js";
+export {
+  noSlopSpecSchema,
+  noSlopSpecSnapshotSchema,
+  noSlopSpecStatusSchema,
+  type NoSlopSpec,
+  type NoSlopSpecSnapshot,
+  type NoSlopSpecStatus,
+} from "./spec-contracts.js";
 export { designLoopFromIntent, channelsFromDesign, loopBuilderTraceSchema } from "./architect.js";
 export type { DesignLoopInput, LoopBuilderTrace } from "./architect.js";
 export { recallForDesigner } from "./recall.js";

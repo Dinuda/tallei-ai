@@ -20,6 +20,12 @@ export function isInputValidationAgent(agent: { id: string; name?: string }): bo
   return label.includes("validator") || label.includes("input_gate") || label.includes("input checker");
 }
 
+const DELIVERY_CONFIG_INPUT_PATTERN = /subscriber|audience|recipient|mailing.?list|contact.?list|list.?id|send.?to|broadcast.?list/i;
+
+export function isDeliveryConfigInputKey(key: string): boolean {
+  return DELIVERY_CONFIG_INPUT_PATTERN.test(key.trim());
+}
+
 export function resolveRequiredInputKeys(
   definition: LoopDefinition,
   gateFields?: Array<{ key: string }>,
@@ -38,12 +44,29 @@ export function resolveRequiredInputKeys(
   return ["sprint_notes"];
 }
 
+export function contentInputKeys(
+  definition: LoopDefinition,
+  gateFields?: Array<{ key: string }>,
+): string[] {
+  return resolveRequiredInputKeys(definition, gateFields).filter((key) => !isDeliveryConfigInputKey(key));
+}
+
 export function hasRequiredRunInputs(
   definition: LoopDefinition,
   runMemory: RunMemory,
   gateFields?: Array<{ key: string }>,
 ): boolean {
   const keys = resolveRequiredInputKeys(definition, gateFields);
+  return keys.every((key) => Boolean(runMemory.inputs[key]?.trim()));
+}
+
+export function hasRequiredContentInputs(
+  definition: LoopDefinition,
+  runMemory: RunMemory,
+  gateFields?: Array<{ key: string }>,
+): boolean {
+  const keys = contentInputKeys(definition, gateFields);
+  if (keys.length === 0) return true;
   return keys.every((key) => Boolean(runMemory.inputs[key]?.trim()));
 }
 

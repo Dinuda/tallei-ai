@@ -1,0 +1,305 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { noSlopSpecSchema, noSlopSpecSnapshotSchema } from "../../../src/services/loop-engine/spec-contracts.js";
+import { critiqueLoopDesign } from "../../../src/services/loop-engine/critic.js";
+import type { LoopArchitectOutput } from "../../../src/services/loop-engine/contracts.js";
+import { approvedSpecSnapshot, mapLoopSpecRowForTest, type LoopSpecView } from "../../../src/services/loop-builder/specs.js";
+
+const specJson = noSlopSpecSchema.parse({
+  purpose: "Create a weekly market research digest.",
+  agents: [
+    {
+      name: "Research Agent",
+      goal: "Find recent market sources.",
+      guardrails: ["Sources must be recent and cited."],
+      doneWhen: ["At least five sources include URLs."],
+      failureModes: ["Pause if fewer than three sources are found."],
+    },
+    {
+      name: "Synthesis Agent",
+      goal: "Write a cited digest.",
+      guardrails: ["Every claim must cite a source."],
+      doneWhen: ["Digest includes executive summary and trends."],
+      failureModes: ["Skip synthesis if research is insufficient."],
+    },
+  ],
+  guardrails: ["Do not invent facts."],
+  successCriteria: ["The final digest is cited and ready for review."],
+  failureModes: ["Pause for input when source quality is insufficient."],
+  schedule: { description: "Weekly Monday morning", cron: "0 9 * * 1", timezone: "UTC" },
+  delivery: { target: "none", description: "Dashboard only." },
+});
+
+const snapshot = noSlopSpecSnapshotSchema.parse({
+  id: "11111111-1111-4111-8111-111111111111",
+  slug: "market-research",
+  version: 1,
+  title: "Market research digest",
+  bodyMarkdown: "# Market research digest\n\nApproved spec.",
+  specJson,
+  approvedAt: "2026-06-09T00:00:00.000Z",
+});
+
+function baseDesign(): LoopArchitectOutput {
+  return {
+    title: "Weekly market digest",
+    summary: "Create a cited weekly market research digest ready for review.",
+    strategyText: "Find recent sources, synthesize cited trends, and prepare a reviewed digest.",
+    inputsRequired: [],
+    delivery: { provider: "none", target: "none" },
+    schedule: { cron: "0 9 * * 1", timezone: "UTC" },
+    agents: [
+      {
+        id: "research_agent",
+        name: "Research Agent",
+        goal: "Find recent market sources with URLs.",
+        task: "Find at least five recent and cited market sources. Pause if fewer than three sources are found.",
+        tool: "internal.memory_search",
+        inputContract: { description: "Focused research topic", schema: { query: "string" } },
+        outputContract: { description: "Recent sources with URLs", schema: { sources: [{ url: "string" }] } },
+        doneCriteria: ["At least five sources include URLs", "Sources are recent and cited"],
+      },
+      {
+        id: "synthesis_agent",
+        name: "Synthesis Agent",
+        goal: "Write a cited digest.",
+        task: "Write a digest with executive summary and trends. Every claim must cite a source and do not invent facts.",
+        tool: "internal.llm_only",
+        inputContract: { description: "Research sources", schema: { sources: "array" } },
+        outputContract: { description: "Final cited digest ready for review", schema: { digest: "string" } },
+        doneCriteria: ["Digest includes executive summary and trends", "The final digest is cited and ready for review"],
+      },
+    ],
+    rationale: [],
+    suggestedChannels: ["primary"],
+  };
+}
+
+test("no-slop spec schema requires purpose and at least one agent", () => {
+  assert.equal(noSlopSpecSchema.safeParse(specJson).success, true);
+  assert.equal(noSlopSpecSchema.safeParse({ ...specJson, purpose: "" }).success, false);
+  assert.equal(noSlopSpecSchema.safeParse({ ...specJson, agents: [] }).success, false);
+});
+
+test("no-slop spec outbound delivery requires approved connector write policy", () => {
+  assert.equal(noSlopSpecSchema.safeParse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send the newsletter." },
+  }).success, false);
+  assert.equal(noSlopSpecSchema.safeParse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send the newsletter." },
+    connectorPolicy: {
+      enabledToolkits: ["gmail"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "gmail",
+        actionSlug: "gmail_send_email",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "uploaded", description: "Uploaded contacts." },
+      deliveryExpectation: "Send only after per-run approval.",
+    },
+  }).success, true);
+  assert.equal(noSlopSpecSchema.safeParse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send the newsletter." },
+    connectorPolicy: {
+      enabledToolkits: ["gmail"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "gmail",
+        actionSlug: "gmail_send_email",
+        risk: "send",
+        requiresPreSendApproval: false,
+      }],
+      recipientSource: { kind: "uploaded" },
+      deliveryExpectation: "Send automatically.",
+    },
+  }).success, false);
+});
+
+test("no-slop spec normalizes connected mailing list delivery alias", () => {
+  const parsed = noSlopSpecSchema.parse({
+    ...specJson,
+    delivery: { target: "connected_mailing_list", description: "Send to connected contacts." },
+    connectorPolicy: {
+      enabledToolkits: ["gmail"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "gmail",
+        actionSlug: "gmail_send_email",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "uploaded", description: "Uploaded contacts." },
+      deliveryExpectation: "Send only after per-run approval.",
+    },
+  });
+  assert.equal(parsed.delivery.target, "subscriber_list");
+});
+
+test("no-slop spec rejects draft-only actions for subscriber delivery", () => {
+  const result = noSlopSpecSchema.safeParse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send to subscribers." },
+    connectorPolicy: {
+      enabledToolkits: ["create_email_draft"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "create_email_draft",
+        actionSlug: "create_email_draft",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "uploaded", description: "Uploaded contacts." },
+      deliveryExpectation: "Send after approval.",
+    },
+  });
+  assert.equal(result.success, false);
+  assert.match(result.success ? "" : result.error.message, /draft-only/i);
+});
+
+test("approved snapshot requires approved spec status", () => {
+  const draft: LoopSpecView = {
+    id: snapshot.id,
+    slug: snapshot.slug,
+    title: snapshot.title,
+    status: "draft",
+    version: snapshot.version,
+    sourcePrompt: "Create a weekly digest.",
+    bodyMarkdown: snapshot.bodyMarkdown,
+    specJson: snapshot.specJson,
+    approvedAt: null,
+    approvedByUserId: null,
+    createdAt: "2026-06-09T00:00:00.000Z",
+    updatedAt: "2026-06-09T00:00:00.000Z",
+  };
+
+  assert.throws(() => approvedSpecSnapshot(draft), /approved/i);
+});
+
+test("loop spec row mapper serializes Date timestamps", () => {
+  const approvedAt = new Date("2026-06-09T01:02:03.000Z");
+  const view = mapLoopSpecRowForTest({
+    id: snapshot.id,
+    slug: snapshot.slug,
+    title: snapshot.title,
+    status: "approved",
+    version: snapshot.version,
+    source_prompt: "Create a weekly digest.",
+    body_markdown: snapshot.bodyMarkdown,
+    spec_json: snapshot.specJson,
+    approved_at: approvedAt,
+    approved_by_user_id: "11111111-1111-4111-8111-111111111111",
+    created_at: new Date("2026-06-09T00:00:00.000Z"),
+    updated_at: new Date("2026-06-09T02:00:00.000Z"),
+  });
+
+  assert.equal(view.approvedAt, "2026-06-09T01:02:03.000Z");
+  assert.equal(view.createdAt, "2026-06-09T00:00:00.000Z");
+  assert.equal(approvedSpecSnapshot(view).approvedAt, "2026-06-09T01:02:03.000Z");
+});
+
+test("critic passes a design that reflects the approved spec", () => {
+  const result = critiqueLoopDesign(baseDesign(), snapshot);
+  assert.equal(result.pass, true);
+  assert.deepEqual(result.requiredFixes, []);
+});
+
+test("critic rejects a design missing approved spec criteria", () => {
+  const design = baseDesign();
+  design.agents[1] = {
+    ...design.agents[1],
+    task: "Write a short summary.",
+    doneCriteria: ["Includes one summary"],
+    outputContract: { description: "Short summary", schema: { summary: "string" } },
+  };
+
+  const result = critiqueLoopDesign(design, snapshot);
+  assert.equal(result.pass, false);
+  assert.match(result.requiredFixes.join("\n"), /Spec (guardrail|success criterion|done criterion) is not reflected/i);
+});
+
+test("critic requires canvas.email and draft_review for newsletter writer agents", () => {
+  const design = baseDesign();
+  design.agents = [
+    {
+      id: "web_research",
+      name: "Research Agent",
+      goal: "Find recent AI industry sources with URLs.",
+      task: "Search the web for recent AI industry news with URLs and snippets.",
+      tool: "internal.web_search",
+      inputContract: { description: "Research topic", schema: { query: "string" } },
+      outputContract: { description: "Raw search results", schema: { sources: "array" } },
+      doneCriteria: ["At least five sources include URLs"],
+      artifactRole: "source_evidence",
+    },
+    {
+      id: "newsletter_writer",
+      name: "Writer Agent",
+      goal: "Write the weekly AI industry newsletter.",
+      task: "Synthesize research into a newsletter email with subject and preview.",
+      tool: "internal.llm_only",
+      inputContract: { description: "Research handoff", schema: { handoff: { web_research: "object" } } },
+      outputContract: { description: "Newsletter email copy", schema: { text: "string" } },
+      doneCriteria: ["Includes a Subject line", "Includes one complete newsletter body"],
+    },
+  ];
+
+  const result = critiqueLoopDesign(design, snapshot);
+  assert.equal(result.pass, false);
+  assert.match(result.requiredFixes.join("\n"), /renderTarget "canvas.email"/i);
+  assert.match(result.requiredFixes.join("\n"), /draft_review/i);
+});
+
+test("critic rejects delivery config in inputsRequired", () => {
+  const design = baseDesign();
+  design.inputsRequired = ["subscriber_list_id"];
+  const result = critiqueLoopDesign(design, snapshot);
+  assert.equal(result.pass, false);
+  assert.match(result.requiredFixes.join("\n"), /subscriber_list_id/i);
+  assert.match(result.requiredFixes.join("\n"), /recipientSource/i);
+});
+
+test("critic rejects subscriber delivery provider that is not the approved send action", () => {
+  const newsletterSpec = noSlopSpecSnapshotSchema.parse({
+    ...snapshot,
+    specJson: noSlopSpecSchema.parse({
+      ...specJson,
+      purpose: "Send a weekly newsletter.",
+      delivery: { target: "subscriber_list", description: "Send to subscribers." },
+      connectorPolicy: {
+        enabledToolkits: ["resend"],
+        allowedReadActions: [],
+        allowedWriteActions: [{
+          toolkit: "resend",
+          actionSlug: "RESEND_SEND_EMAIL",
+          risk: "send",
+          requiresPreSendApproval: true,
+        }],
+        recipientSource: { kind: "uploaded", description: "Uploaded contacts." },
+        deliveryExpectation: "Send after approval.",
+      },
+    }),
+  });
+  const design = baseDesign();
+  design.delivery = { provider: "composio.create_email_draft.action.create_email_draft", target: "subscriber_list" };
+  design.agents.push({
+    id: "sender",
+    name: "Sender Agent",
+    goal: "Send the newsletter after approval.",
+    task: "Send the newsletter after pre-send approval.",
+    tool: "composio.create_email_draft.action.create_email_draft",
+    inputContract: { description: "Approved newsletter draft", schema: {} },
+    outputContract: { description: "Connector action result", schema: {} },
+    doneCriteria: ["Send action result is recorded"],
+    gate: { type: "pre_send", question: "Approve send?" },
+  });
+
+  const result = critiqueLoopDesign(design, newsletterSpec);
+  assert.equal(result.pass, false);
+  assert.match(result.requiredFixes.join("\n"), /approved connector write actions/i);
+});

@@ -12,7 +12,9 @@ import {
   type LoopDeliveryRouting,
   type LoopWorkflowView,
 } from "./types.js";
+import { normalizeLoopDefinitionForRuntime } from "../loop-runtime/normalize-definition.js";
 import { runtimeDefinitionSchema } from "../loop-runtime/types.js";
+import { getLoopTool } from "./tool-catalog.js";
 
 function normalizeText(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -73,16 +75,22 @@ export function buildLoopDefinition(input: {
   agentGraph?: LoopAgentGraph;
   deliveryType?: string;
   delivery?: LoopDeliveryRouting;
+  connectorPolicy?: LoopDefinition["connectorPolicy"];
   inputsRequired?: string[];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
   builderMeta?: LoopDefinition["builderMeta"];
 }): LoopDefinition {
   const goal = normalizeText(input.task);
   const cron = normalizeDesignCron(input.cron, input.task);
-  const allowedIntegrations = normalizeIntegrationList(input.integrations);
   const agentGraph = input.agentGraph
     ? loopAgentGraphSchema.parse(input.agentGraph)
     : buildParentAgentGraph(goal);
+  const graphIntegrationKeys = uniqueStrings(
+    agentGraph.children.flatMap((child) =>
+      child.tools.map((tool) => getLoopTool(tool.ref)?.integrationKey)
+    ),
+  );
+  const allowedIntegrations = normalizeIntegrationList([...(input.integrations ?? []), ...graphIntegrationKeys]);
   const resolvedAllowedToolRefs = input.allowedToolRefs?.length
     ? input.allowedToolRefs
     : uniqueStrings([
@@ -105,6 +113,7 @@ export function buildLoopDefinition(input: {
     },
     ...(input.deliveryType?.trim() ? { deliveryType: input.deliveryType.trim() } : {}),
     ...(input.delivery ? { delivery: input.delivery } : {}),
+    ...(input.connectorPolicy ? { connectorPolicy: input.connectorPolicy } : {}),
     ...(input.inputsRequired?.length ? { inputsRequired: input.inputsRequired } : {}),
     ...(input.engineVersion ? { engineVersion: input.engineVersion } : {}),
     agentGraph,
@@ -121,6 +130,7 @@ export function buildLoopDefinitionFromCeoDesign(input: {
     builderMeta?: LoopDefinition["builderMeta"];
   };
   delivery?: LoopDeliveryRouting;
+  connectorPolicy?: LoopDefinition["connectorPolicy"];
   inputsRequired?: string[];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
 }): LoopDefinition {
@@ -135,6 +145,7 @@ export function buildLoopDefinitionFromCeoDesign(input: {
     allowedToolRefs,
     deliveryType: input.design.deliveryType,
     delivery: input.delivery,
+    connectorPolicy: input.connectorPolicy,
     inputsRequired: input.inputsRequired,
     engineVersion: input.engineVersion,
     builderMeta: input.design.builderMeta,
@@ -178,7 +189,7 @@ export async function createLoopWorkflow(input: {
   title?: string;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
-  const definition = loopDefinitionSchema.parse(input.definition);
+  const definition = normalizeLoopDefinitionForRuntime(loopDefinitionSchema.parse(input.definition));
   runtimeDefinitionSchema.parse(definition);
 
   const workflowId = randomUUID();

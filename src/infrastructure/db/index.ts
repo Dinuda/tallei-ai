@@ -1206,6 +1206,30 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS loop_specs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft'
+          CHECK (status IN ('draft', 'approved', 'archived')),
+        version INTEGER NOT NULL DEFAULT 1,
+        source_prompt TEXT NOT NULL DEFAULT '',
+        body_markdown TEXT NOT NULL,
+        spec_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        approved_at TIMESTAMPTZ,
+        approved_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, user_id, slug, version)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_specs_scope_updated
+        ON loop_specs(tenant_id, user_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_loop_specs_scope_status
+        ON loop_specs(tenant_id, user_id, status, updated_at DESC);
+
       CREATE TABLE IF NOT EXISTS loop_engine_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

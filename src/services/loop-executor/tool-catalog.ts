@@ -3,7 +3,7 @@
  * tool-catalog.ts — Loop tool registry, validation, and agent prompt builders.
  */
 
-import { listConnectorAccounts } from "../connectors/composio.js";
+import { listComposioToolkitTools, listConnectorAccounts } from "../connectors/composio.js";
 
 export function normalizeToolRef(ref: string): string {
   const trimmed = ref.trim();
@@ -71,11 +71,181 @@ const CATALOG = [
         integrationKey: "internal",
         isActionable: true,
     },
+    {
+        ref: "composio.gmail.search",
+        label: "Gmail search",
+        description: "Search and summarize connected Gmail messages. Read-only; does not send email.",
+        provider: "composio",
+        toolkit: "gmail",
+        requiresConnector: true,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "app_context",
+        riskLevel: "low",
+        integrationKey: "gmail",
+        isActionable: true,
+        composioToolkit: "gmail",
+    },
+    {
+        ref: "composio.slack.search",
+        label: "Slack search",
+        description: "Search and summarize connected Slack messages or channels. Read-only; does not post.",
+        provider: "composio",
+        toolkit: "slack",
+        requiresConnector: true,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "app_context",
+        riskLevel: "low",
+        integrationKey: "slack",
+        isActionable: true,
+        composioToolkit: "slack",
+    },
+    {
+        ref: "composio.googlecalendar.search",
+        label: "Google Calendar search",
+        description: "Search and summarize connected Google Calendar events. Read-only; does not create events.",
+        provider: "composio",
+        toolkit: "googlecalendar",
+        requiresConnector: true,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "app_context",
+        riskLevel: "low",
+        integrationKey: "googlecalendar",
+        isActionable: true,
+        composioToolkit: "googlecalendar",
+    },
+    {
+        ref: "composio.github.search",
+        label: "GitHub search",
+        description: "Search and summarize connected GitHub repositories, issues, pull requests, or commits. Read-only.",
+        provider: "composio",
+        toolkit: "github",
+        requiresConnector: true,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "app_context",
+        riskLevel: "low",
+        integrationKey: "github",
+        isActionable: true,
+        composioToolkit: "github",
+    },
+    {
+        ref: "composio.notion.search",
+        label: "Notion search",
+        description: "Search and summarize connected Notion pages or databases. Read-only; does not create pages.",
+        provider: "composio",
+        toolkit: "notion",
+        requiresConnector: true,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "app_context",
+        riskLevel: "low",
+        integrationKey: "notion",
+        isActionable: true,
+        composioToolkit: "notion",
+    },
+    {
+        ref: "composio.linear.search",
+        label: "Linear search",
+        description: "Search and summarize connected Linear issues, projects, or cycles. Read-only.",
+        provider: "composio",
+        toolkit: "linear",
+        requiresConnector: true,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "app_context",
+        riskLevel: "low",
+        integrationKey: "linear",
+        isActionable: true,
+        composioToolkit: "linear",
+    },
 ];
 const CATALOG_BY_REF = new Map(CATALOG.map((entry) => [entry.ref, entry]));
+
+function connectedSearchTool(toolkit) {
+    const key = normalizeToolRef(toolkit);
+    return {
+        ref: `composio.${key}.search`,
+        label: `${key} search`,
+        description: `Search and summarize connected ${key} data. Read-only; does not mutate the connected app.`,
+        provider: "composio",
+        toolkit: key,
+        requiresConnector: true,
+        requiresApproval: false,
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "app_context",
+        riskLevel: "low",
+        integrationKey: key,
+        isActionable: true,
+        composioToolkit: key,
+        dynamic: true,
+    };
+}
+
+function parseComposioActionRef(ref) {
+    const match = normalizeToolRef(ref).match(/^composio\.([a-z0-9_-]+)\.action\.(.+)$/);
+    if (!match)
+        return null;
+    return { toolkit: match[1], actionSlug: match[2] };
+}
+
+function dynamicActionTool(toolkit, action) {
+    const riskLevel = action.risk === "read" ? "low" : action.risk === "write" ? "medium" : "high";
+    return {
+        ref: `composio.${toolkit}.action.${normalizeToolRef(action.actionSlug)}`,
+        label: action.name || action.actionSlug,
+        description: action.description || `${action.risk} Composio action for ${toolkit}`,
+        provider: "composio",
+        toolkit,
+        requiresConnector: true,
+        requiresApproval: action.risk !== "read",
+        inputSchema: action.inputSchema || { type: "object" },
+        outputSchema: { type: "object" },
+        requiredArtifactKinds: [],
+        producesArtifactKind: action.risk === "read" ? "app_context" : "connector_action_result",
+        riskLevel,
+        integrationKey: toolkit,
+        isActionable: true,
+        composioToolkit: toolkit,
+        composioAction: action.actionSlug,
+        actionRisk: action.risk,
+        dynamic: true,
+    };
+}
+
 export function listLoopTools() {
     return CATALOG
         .map(({ integrationKey: _i, composioAction: _a, isActionable: _x, ...view }) => view);
+}
+export async function listAvailableLoopToolsForAuth(auth) {
+    const accounts = await listConnectorAccounts(auth).catch(() => []);
+    const connected = connectedToolkits(accounts);
+    const staticTools = listLoopTools().filter((tool) => {
+        const entry = getLoopTool(tool.ref);
+        if (!entry)
+            return false;
+        if (!entry.requiresConnector)
+            return true;
+        return Boolean(entry.toolkit && connected.has(entry.toolkit));
+    });
+    const dynamicSearchTools = [...connected].map(connectedSearchTool);
+    return [...staticTools, ...dynamicSearchTools.filter((tool) => !staticTools.some((existing) => existing.ref === tool.ref))];
 }
 /** Effective constraints for stable artifact-only execution. */
 export function getEffectiveLoopConstraints(definition) {
@@ -113,7 +283,32 @@ export function listAllowedLoopTools(definition) {
     });
 }
 export function getLoopTool(ref) {
-    return CATALOG_BY_REF.get(normalizeToolRef(ref)) ?? null;
+    const normalized = normalizeToolRef(ref);
+    const staticTool = CATALOG_BY_REF.get(normalized);
+    if (staticTool)
+        return staticTool;
+    const searchMatch = normalized.match(/^composio\.([a-z0-9_-]+)\.search$/);
+    if (searchMatch)
+        return connectedSearchTool(searchMatch[1]);
+    const action = parseComposioActionRef(normalized);
+    if (action) {
+        return dynamicActionTool(action.toolkit, {
+            toolkit: action.toolkit,
+            actionSlug: action.actionSlug,
+            name: action.actionSlug,
+            description: `Approved Composio action ${action.actionSlug}`,
+            risk: "write",
+            inputSchema: { type: "object" },
+        });
+    }
+    return null;
+}
+export function isKnownLoopToolRef(ref) {
+    return Boolean(getLoopTool(ref));
+}
+export async function listAvailableConnectorActionTools(input) {
+    const actions = await listComposioToolkitTools(input.toolkit);
+    return actions.map((action) => dynamicActionTool(normalizeToolRef(input.toolkit), action));
 }
 function normalizeIntegrations(definition) {
     const values = new Set(["internal"]);

@@ -14,6 +14,16 @@ import {
   type LoopDefinition,
   type LoopDeliveryTarget,
 } from "../loop-executor/types.js";
+export {
+  noSlopSpecAgentSchema,
+  noSlopSpecSchema,
+  noSlopSpecSnapshotSchema,
+  noSlopSpecStatusSchema,
+  type NoSlopSpec,
+  type NoSlopSpecAgent,
+  type NoSlopSpecSnapshot,
+  type NoSlopSpecStatus,
+} from "./spec-contracts.js";
 
 export const ENGINE_MAX_AGENTS = 8;
 export const ENGINE_MAX_CRITIC_RETRIES = 2;
@@ -43,12 +53,21 @@ export const loopArchitectAgentSchema = z.object({
     description: z.string().min(1),
     schema: z.record(z.unknown()).default({}),
   }),
-  doneCriteria: z.array(z.string().min(1)).min(1).max(3),
+  doneCriteria: z.preprocess(
+    (v) => Array.isArray(v) ? v.slice(0, 8) : v,
+    z.array(z.string().min(1)).min(1),
+  ),
   gate: z.object({
     type: loopGateTypeSchema,
     question: z.string().min(1),
   }).optional(),
   renderTarget: loopRenderTargetSchema.optional(),
+  artifactRole: z.enum([
+    "source_evidence",
+    "draft_body",
+    "final_preview",
+    "delivery",
+  ]).optional(),
 });
 
 export const loopArchitectOutputSchema = z.object({
@@ -98,6 +117,7 @@ export function isEngineV3Definition(definition: LoopDefinition): boolean {
 export function deliveryProviderMatchesTarget(provider: string, target: LoopDeliveryTarget): boolean {
   const allowed = DELIVERY_PROVIDER_BY_TARGET[target];
   if (target === "none") return provider.trim().toLowerCase() === "none";
+  if (/^composio\.[a-z0-9_-]+\.action\./.test(provider.trim().toLowerCase())) return true;
   return allowed.includes(provider.trim().toLowerCase());
 }
 
@@ -149,7 +169,11 @@ export function architectOutputToAgentGraph(output: LoopArchitectOutput): z.infe
       outputContract: agent.outputContract,
       ...(agent.gate ? { gate: agent.gate } : {}),
       outputArtifactId: slugArtifactId(agent.id),
-      outputArtifactKind: "structured_output",
+      outputArtifactKind: agent.artifactRole === "draft_body"
+        || agent.artifactRole === "final_preview"
+        || agent.renderTarget
+        ? "canvas_email"
+        : "structured_output",
       ...(agent.renderTarget ? { renderTarget: agent.renderTarget } : {}),
     })),
   });
@@ -238,6 +262,49 @@ export function extractMemorySources(data: unknown): MemorySearchSource[] {
   for (const toolResult of Array.isArray(root.toolResults) ? root.toolResults : []) {
     const item = toolResult && typeof toolResult === "object" ? toolResult as Record<string, unknown> : {};
     if (item.ref !== "internal.memory_search") continue;
+    const toolData = item.data && typeof item.data === "object" ? item.data as Record<string, unknown> : {};
+    for (const row of Array.isArray(toolData.sources) ? toolData.sources : []) {
+      pushRow(row);
+    }
+  }
+
+  return rows;
+}
+
+export type WebSearchSource = {
+  title: string;
+  url: string;
+  snippet: string;
+};
+
+function readWebSearchSourceRow(row: unknown): WebSearchSource | null {
+  const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
+  const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : "";
+  const url = typeof item.url === "string" && item.url.trim() ? item.url.trim() : "";
+  const snippet = typeof item.snippet === "string" && item.snippet.trim() ? item.snippet.trim() : "";
+  if (!title || !url || !snippet) return null;
+  return { title, url, snippet };
+}
+
+export function extractWebSearchSources(data: unknown): WebSearchSource[] {
+  const root = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+  const rows: WebSearchSource[] = [];
+  const seen = new Set<string>();
+
+  const pushRow = (row: unknown) => {
+    const parsed = readWebSearchSourceRow(row);
+    if (!parsed || seen.has(parsed.url)) return;
+    seen.add(parsed.url);
+    rows.push(parsed);
+  };
+
+  for (const row of Array.isArray(root.sources) ? root.sources : []) {
+    pushRow(row);
+  }
+
+  for (const toolResult of Array.isArray(root.toolResults) ? root.toolResults : []) {
+    const item = toolResult && typeof toolResult === "object" ? toolResult as Record<string, unknown> : {};
+    if (item.ref !== "internal.web_search") continue;
     const toolData = item.data && typeof item.data === "object" ? item.data as Record<string, unknown> : {};
     for (const row of Array.isArray(toolData.sources) ? toolData.sources : []) {
       pushRow(row);

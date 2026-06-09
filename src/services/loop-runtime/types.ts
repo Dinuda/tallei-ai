@@ -37,7 +37,26 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Legacy plans and presets are not supported" });
   }
   if (definition.delivery && (definition.delivery.target !== "none" || definition.delivery.provider !== "none")) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Outbound delivery is disabled in the stable runtime" });
+    if (!definition.connectorPolicy || definition.connectorPolicy.allowedWriteActions.length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Outbound delivery requires an approved connector policy" });
+    }
+  }
+  const approvedWriteActions = definition.connectorPolicy?.allowedWriteActions ?? [];
+  const approvedWriteRefs = new Set(approvedWriteActions.map((action) =>
+    `composio.${action.toolkit.toLowerCase()}.action.${action.actionSlug.toLowerCase()}`
+  ));
+  if (definition.delivery?.target === "subscriber_list") {
+    const provider = definition.delivery.provider.toLowerCase();
+    const selected = approvedWriteActions.find((action) =>
+      `composio.${action.toolkit.toLowerCase()}.action.${action.actionSlug.toLowerCase()}` === provider
+    );
+    const selectedText = selected ? `${selected.toolkit} ${selected.actionSlug} ${selected.description ?? ""}`.toLowerCase() : "";
+    if (!selected || selected.risk !== "send" || /\bdraft\b|create[_ -]?draft|email[_ -]?draft/.test(selectedText)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Subscriber-list delivery requires an approved send-capable connector action",
+      });
+    }
   }
   for (const agent of definition.agentGraph?.children ?? []) {
     for (const tool of agent.tools) {
@@ -47,19 +66,26 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
           message: "canvas.email is a render target, not an agent tool",
         });
       }
-      if (
-        tool.ref === "internal.resend_broadcast"
-        || tool.ref === "composio.gmail.send_email"
-        || tool.ref === "internal.email_approval_request"
-      ) {
+      const normalizedRef = tool.ref.toLowerCase();
+      if (tool.ref === "internal.resend_broadcast" || tool.ref === "internal.email_approval_request") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `Outbound tool ${tool.ref} is disabled in the stable runtime`,
         });
       }
+      if (/^composio\.[a-z0-9_-]+\.action\./.test(normalizedRef) && !approvedWriteRefs.has(normalizedRef)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Connector action ${tool.ref} is not approved by this workflow's connector policy`,
+        });
+      }
     }
-    if (agent.gate?.type === "pre_send") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pre_send gates require outbound delivery and are disabled" });
+    const hasApprovedWrite = agent.tools.some((tool) => approvedWriteRefs.has(tool.ref.toLowerCase()));
+    if (hasApprovedWrite && agent.gate?.type !== "pre_send") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Approved connector actions require a pre_send gate" });
+    }
+    if (agent.gate?.type === "pre_send" && !hasApprovedWrite) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pre_send gates require an approved connector action" });
     }
   }
 });

@@ -6,6 +6,9 @@
  */
 
 import { z } from "zod";
+import { connectorPolicySchema } from "../loop-engine/spec-contracts.js";
+
+import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 
 /** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
 export function normalizeOptionalString(value: unknown): unknown {
@@ -48,12 +51,28 @@ export const loopAgentContractSchema = z.object({
 
 export type LoopAgentContract = z.infer<typeof loopAgentContractSchema>;
 
-export const loopDeliveryTargetSchema = z.enum([
+function normalizeDeliveryTarget(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, "_");
+  // Composio action refs masquerading as delivery targets (e.g. "composio.resend.action.resend_send_email")
+  if (normalized.includes("composio.") && normalized.includes(".action.")) {
+    if (normalized.includes("email") || normalized.includes("mail") || normalized.includes("send")) {
+      return "subscriber_list";
+    }
+    return "none";
+  }
+  if (["mailing_list", "subscriber", "email_list", "contact_list", "contacts_list", "audience", "resend"].some((kw) => normalized.includes(kw))) {
+    return "subscriber_list";
+  }
+  return normalized;
+}
+
+export const loopDeliveryTargetSchema = z.preprocess(normalizeDeliveryTarget, z.enum([
   "subscriber_list",
   "team_email",
   "operator",
   "none",
-]);
+]));
 
 export type LoopDeliveryTarget = z.infer<typeof loopDeliveryTargetSchema>;
 
@@ -286,6 +305,7 @@ export const loopDefinitionSchema = z.object({
   deliveryType: optionalNonEmptyStringSchema,
   /** LLM-chosen delivery routing for the agentic engine (replaces regex classification). */
   delivery: loopDeliveryRoutingSchema.optional(),
+  connectorPolicy: connectorPolicySchema.optional(),
   inputsRequired: z.array(z.string().min(1)).default([]).optional(),
   engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
   agentGraph: loopAgentGraphSchema.optional(),
@@ -298,6 +318,12 @@ export const loopDefinitionSchema = z.object({
     preApproved: z.boolean().default(true),
     sourceTemplateIds: z.array(z.string()).optional(),
     model: z.string().optional(),
+    noSlopSpec: noSlopSpecSnapshotSchema.optional(),
+    agentSpecGeneration: z.object({
+      mode: z.literal("hybrid"),
+      model: z.string().optional(),
+      generatedAt: z.string().min(1),
+    }).optional(),
     designDiagnostics: z.record(z.unknown()).optional(),
   }).optional(),
 });

@@ -1,0 +1,486 @@
+import type { AuthContext } from "../../domain/auth/index.js";
+import { pool } from "../../infrastructure/db/index.js";
+import { listDeliveryActionCandidates, selectBestDeliveryAction, type ConnectorDeliveryActionCandidate } from "../connectors/composio.js";
+import { normalizeDesignCron } from "../loop-executor/cron.js";
+import { loopBuilderOpenAiChat } from "./openai-chat.js";
+import {
+  noSlopSpecDeliveryTargetSchema,
+  noSlopSpecSchema,
+  noSlopSpecSnapshotSchema,
+  noSlopSpecStatusSchema,
+  type NoSlopSpec,
+  type NoSlopSpecSnapshot,
+  type NoSlopSpecStatus,
+} from "../loop-engine/spec-contracts.js";
+
+export type LoopSpecView = {
+  id: string;
+  slug: string;
+  title: string;
+  status: NoSlopSpecStatus;
+  version: number;
+  sourcePrompt: string;
+  bodyMarkdown: string;
+  specJson: NoSlopSpec;
+  approvedAt: string | null;
+  approvedByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type LoopSpecRow = {
+  id: string;
+  slug: string;
+  title: string;
+  status: string;
+  version: number;
+  source_prompt: string;
+  body_markdown: string;
+  spec_json: unknown;
+  approved_at: string | Date | null;
+  approved_by_user_id: string | null;
+  created_at: string | Date;
+  updated_at: string | Date;
+};
+
+function slugify(value: string): string {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 64);
+  return slug || "loop-spec";
+}
+
+function titleFromPurpose(purpose: string): string {
+  const normalized = purpose.trim().replace(/\s+/g, " ");
+  return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized || "Loop spec";
+}
+
+function renderSpecMarkdown(spec: NoSlopSpec): string {
+  const lines = [
+    `# ${titleFromPurpose(spec.purpose)}`,
+    "",
+    "## Purpose",
+    spec.purpose,
+    "",
+    "## Agents",
+  ];
+
+  for (const agent of spec.agents) {
+    lines.push("", `### ${agent.name}`, `- Goal: ${agent.goal}`);
+    for (const guardrail of agent.guardrails) lines.push(`- Guardrail: ${guardrail}`);
+    for (const done of agent.doneWhen) lines.push(`- Done when: ${done}`);
+    for (const failure of agent.failureModes) lines.push(`- Failure mode: ${failure}`);
+  }
+
+  lines.push("", "## Guardrails");
+  for (const guardrail of spec.guardrails.length ? spec.guardrails : ["No additional global guardrails."]) {
+    lines.push(`- ${guardrail}`);
+  }
+
+  lines.push("", "## Success Criteria");
+  for (const criterion of spec.successCriteria.length ? spec.successCriteria : ["The loop produces the requested reviewed artifact."]) {
+    lines.push(`- ${criterion}`);
+  }
+
+  lines.push("", "## Failure Modes");
+  for (const failure of spec.failureModes.length ? spec.failureModes : ["If required input is missing, pause for operator input."]) {
+    lines.push(`- ${failure}`);
+  }
+
+  lines.push(
+    "",
+    "## Connector Policy",
+    `Delivery expectation: ${spec.connectorPolicy.deliveryExpectation}`,
+    `Recipient source: ${spec.connectorPolicy.recipientSource.kind}${spec.connectorPolicy.recipientSource.description ? ` — ${spec.connectorPolicy.recipientSource.description}` : ""}`,
+  );
+  lines.push("", "### Approved Internal Tools");
+  lines.push(`- Read tools: ${spec.connectorPolicy.approvedInternalTools.readToolRefs.join(", ")}`);
+  lines.push(`- Write tools: ${spec.connectorPolicy.approvedInternalTools.writeToolRefs.join(", ")}`);
+  if (spec.connectorPolicy.approvedComposioToolkits.length > 0) {
+    lines.push("", "### Approved Composio Toolkits");
+    for (const toolkit of spec.connectorPolicy.approvedComposioToolkits) {
+      lines.push(`- ${toolkit}`);
+    }
+  }
+  if (spec.connectorPolicy.enabledToolkits.length > 0) {
+    lines.push("", "### Enabled Toolkits");
+    for (const toolkit of spec.connectorPolicy.enabledToolkits) lines.push(`- ${toolkit}`);
+  }
+  for (const action of spec.connectorPolicy.allowedReadActions) {
+    lines.push(`- Read action: ${action.toolkit}/${action.actionSlug} (${action.risk})`);
+  }
+  for (const action of spec.connectorPolicy.allowedWriteActions) {
+    lines.push(`- Write action: ${action.toolkit}/${action.actionSlug} (${action.risk}, pre-send approval required)`);
+  }
+  for (const action of spec.connectorPolicy.allowedWriteActions) {
+    lines.push(`- Write action: ${action.toolkit}/${action.actionSlug} (${action.risk}, pre-send approval required)`);
+  }
+
+  return lines.join("\n");
+}
+
+function normalizeGeneratedSpec(input: NoSlopSpec, prompt: string): NoSlopSpec {
+  return noSlopSpecSchema.parse({
+    ...input,
+    schedule: {
+      ...input.schedule,
+      ...(input.schedule.cron ? { cron: normalizeDesignCron(input.schedule.cron, prompt) } : {}),
+      timezone: input.schedule.timezone?.trim() || "UTC",
+    },
+    delivery: {
+      ...input.delivery,
+      target: input.delivery.target ?? "none",
+    },
+    connectorPolicy: input.connectorPolicy ?? undefined,
+  });
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function actionPolicyFromCandidate(candidate: ConnectorDeliveryActionCandidate) {
+  return {
+    toolkit: candidate.toolkit,
+    actionSlug: candidate.actionSlug,
+    risk: "send" as const,
+    description: `${candidate.name}: ${candidate.description || candidate.reason}`,
+    requiresPreSendApproval: true,
+  };
+}
+
+function scoreRawWriteAction(action: unknown, target: NoSlopSpec["delivery"]["target"]): number {
+  const row = readObject(action);
+  const toolkit = typeof row.toolkit === "string" ? row.toolkit : "";
+  const actionSlug = typeof row.actionSlug === "string" ? row.actionSlug : "";
+  const description = typeof row.description === "string" ? row.description : "";
+  const risk = typeof row.risk === "string" ? row.risk : "";
+  const text = `${toolkit} ${actionSlug} ${description}`.toLowerCase();
+  if (risk !== "send") return 0;
+  if (/\bdraft\b|create[_ -]?draft|email[_ -]?draft/.test(text)) return 0;
+  let score = 10;
+  if (toolkit.toLowerCase() === "resend") score += 100;
+  if (/\b(mailchimp|sendgrid|mailgun|postmark|brevo|beehiiv|convertkit|mailerlite|customerio)\b/.test(toolkit.toLowerCase())) score += 90;
+  if (/\bbroadcast|campaign|audience|segment|newsletter|contact\b/.test(text)) score += 25;
+  if (/\bsend[_ -]?email|email[_ -]?send|send\b/.test(text)) score += 15;
+  if (target === "subscriber_list" && /\b(gmail|outlook)\b/.test(toolkit.toLowerCase())) score -= 25;
+  return Math.max(0, score);
+}
+
+function applyDeliveryCandidateToRawSpec(rawSpec: unknown, candidate: ConnectorDeliveryActionCandidate | null): unknown {
+  if (!candidate) return rawSpec;
+  const root = readObject(rawSpec);
+  const delivery = readObject(root.delivery);
+  const parsedTarget = noSlopSpecDeliveryTargetSchema.safeParse(delivery.target ?? "none");
+  const target = parsedTarget.success ? parsedTarget.data : "none";
+  if (target === "none") return rawSpec;
+
+  const connectorPolicy = readObject(root.connectorPolicy);
+  const existingWriteActions = Array.isArray(connectorPolicy.allowedWriteActions)
+    ? connectorPolicy.allowedWriteActions
+    : [];
+  const existingBest = existingWriteActions.reduce((max, action) => Math.max(max, scoreRawWriteAction(action, target)), 0);
+  if (existingBest >= candidate.score) return rawSpec;
+
+  return {
+    ...root,
+    connectorPolicy: {
+      ...connectorPolicy,
+      enabledToolkits: [...new Set([
+        ...(Array.isArray(connectorPolicy.enabledToolkits) ? connectorPolicy.enabledToolkits.filter((v): v is string => typeof v === "string") : []),
+        candidate.toolkit,
+      ])],
+      allowedWriteActions: [actionPolicyFromCandidate(candidate)],
+      recipientSource: connectorPolicy.recipientSource ?? { kind: target === "subscriber_list" ? "uploaded" : "operator_input" },
+      deliveryExpectation: connectorPolicy.deliveryExpectation ?? `Send via ${candidate.toolkit}/${candidate.actionSlug} after per-run approval.`,
+    },
+  };
+}
+
+async function bestDeliveryCandidateForRawSpec(auth: AuthContext, rawSpec: unknown): Promise<ConnectorDeliveryActionCandidate | null> {
+  const delivery = readObject(readObject(rawSpec).delivery);
+  const parsedTarget = noSlopSpecDeliveryTargetSchema.safeParse(delivery.target ?? "none");
+  if (!parsedTarget.success || parsedTarget.data === "none") return null;
+  return selectBestDeliveryAction({ auth, target: parsedTarget.data });
+}
+
+export function mapLoopSpecRowForTest(row: LoopSpecRow): LoopSpecView {
+  const toIso = (value: string | Date | null): string | null => {
+    if (!value) return null;
+    return value instanceof Date ? value.toISOString() : value;
+  };
+
+  return {
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    status: noSlopSpecStatusSchema.parse(row.status),
+    version: row.version,
+    sourcePrompt: row.source_prompt,
+    bodyMarkdown: row.body_markdown,
+    specJson: noSlopSpecSchema.parse(row.spec_json),
+    approvedAt: toIso(row.approved_at),
+    approvedByUserId: row.approved_by_user_id,
+    createdAt: toIso(row.created_at) ?? new Date(0).toISOString(),
+    updatedAt: toIso(row.updated_at) ?? new Date(0).toISOString(),
+  };
+}
+
+const mapSpecRow = mapLoopSpecRowForTest;
+
+function normalizeSpecJson(input: unknown): unknown {
+  if (typeof input !== "string") return input;
+  const trimmed = input.trim();
+  if (!trimmed) return input;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return input;
+  }
+}
+
+function specSystemPrompt(): string {
+  return [
+    "You draft human-reviewed no-slop specs for recurring Tallei agent loops.",
+    "Return JSON only. Do not return markdown.",
+    "The spec is the behavioral source of truth a user approves before agents are generated.",
+    "Write precise goals, guardrails, success criteria, and failure modes.",
+    "Default to delivery.target none unless the user explicitly asks the loop to send, post, publish, create, update, or delete through a connected app.",
+    "If outbound delivery is requested, add connectorPolicy.allowedWriteActions with requiresPreSendApproval true and a non-agent recipientSource. Never let agents invent recipients.",
+    "Use only Connected delivery action candidates for outbound delivery. For subscriber/newsletter delivery, prefer the highest-scored Resend/newsletter/email-service send action. Do not use draft/compose/preview actions as delivery actions.",
+    "Use a 5-field cron only when cadence is clear; otherwise describe the schedule and omit cron.",
+    "",
+    "JSON shape:",
+    JSON.stringify({
+      purpose: "One sentence describing the recurring outcome.",
+      agents: [
+        {
+          name: "Research Agent",
+          goal: "Concrete success condition.",
+          guardrails: ["Constraint this agent must obey."],
+          doneWhen: ["Observable completion condition."],
+          failureModes: ["When to pause or stop."],
+        },
+      ],
+      guardrails: ["Global behavioral constraint."],
+      successCriteria: ["End-to-end success criterion."],
+      failureModes: ["End-to-end failure mode."],
+      schedule: { description: "Weekly on Friday morning", cron: "0 9 * * 5", timezone: "UTC" },
+      delivery: { target: "none", description: "Dashboard only; no outbound delivery." },
+      connectorPolicy: {
+        enabledToolkits: [],
+        approvedInternalTools: {
+          readToolRefs: ["internal.web_search", "internal.memory_search"],
+          writeToolRefs: ["internal.llm_only"],
+        },
+        approvedComposioToolkits: [],
+        allowedReadActions: [],
+        allowedWriteActions: [],
+        recipientSource: { kind: "none" },
+        deliveryExpectation: "No outbound delivery.",
+      },
+    }, null, 2),
+  ].join("\n");
+}
+
+async function generateSpecJson(input: {
+  auth: AuthContext;
+  prompt: string;
+  feedback?: string;
+  currentSpec?: LoopSpecView;
+}): Promise<NoSlopSpec> {
+  const [subscriberCandidates, teamCandidates] = await Promise.all([
+    listDeliveryActionCandidates({ auth: input.auth, target: "subscriber_list" }).catch(() => []),
+    listDeliveryActionCandidates({ auth: input.auth, target: "team_email" }).catch(() => []),
+  ]);
+  const sections = [
+    `User loop request:\n${input.prompt}`,
+    input.currentSpec ? `Current spec markdown:\n${input.currentSpec.bodyMarkdown}` : null,
+    input.feedback ? `Requested refinement:\n${input.feedback}` : null,
+    [
+      "Connected delivery action candidates:",
+      ...[...subscriberCandidates, ...teamCandidates]
+        .slice(0, 12)
+        .map((candidate) => `- ${candidate.toolRef} (${candidate.reason}, score ${candidate.score})`),
+      subscriberCandidates.length === 0 && teamCandidates.length === 0
+        ? "- none discovered; default delivery.target to none until a send-capable connector is connected"
+        : "",
+    ].filter(Boolean).join("\n"),
+  ].filter(Boolean).join("\n\n");
+
+  const response = await loopBuilderOpenAiChat({
+    responseFormat: "json_object",
+    temperature: 0.2,
+    maxTokens: 2500,
+    reasoningEffort: "minimal",
+    messages: [
+      { role: "system", content: specSystemPrompt() },
+      { role: "user", content: sections },
+    ],
+  });
+
+  let rawSpec: unknown;
+  try {
+    rawSpec = JSON.parse(response.text);
+  } catch (parseError) {
+    throw new Error(`Failed to parse spec LLM response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}\n\nResponse text (first 500 chars):\n${response.text.slice(0, 500)}`);
+  }
+
+  const candidate = await bestDeliveryCandidateForRawSpec(input.auth, rawSpec);
+  const normalizedRawSpec = applyDeliveryCandidateToRawSpec(rawSpec, candidate);
+  return normalizeGeneratedSpec(noSlopSpecSchema.parse(normalizedRawSpec), input.prompt);
+}
+
+export async function draftLoopSpec(input: {
+  auth: AuthContext;
+  prompt: string;
+}): Promise<LoopSpecView> {
+  const prompt = input.prompt.trim();
+  if (!prompt) throw new Error("Prompt is required");
+  const specJson = await generateSpecJson({ auth: input.auth, prompt });
+  const title = titleFromPurpose(specJson.purpose);
+  const slug = slugify(title);
+  const bodyMarkdown = renderSpecMarkdown(specJson);
+
+  const result = await pool.query<LoopSpecRow>(
+    `INSERT INTO loop_specs
+       (tenant_id, user_id, slug, title, status, version, source_prompt, body_markdown, spec_json)
+     VALUES ($1, $2, $3, $4, 'draft', 1, $5, $6, $7::jsonb)
+     RETURNING id, slug, title, status, version, source_prompt, body_markdown, spec_json,
+       approved_at, approved_by_user_id, created_at, updated_at`,
+    [
+      input.auth.tenantId,
+      input.auth.userId,
+      `${slug}-${Date.now().toString(36)}`,
+      title,
+      prompt,
+      bodyMarkdown,
+      JSON.stringify(specJson),
+    ],
+  );
+  return mapSpecRow(result.rows[0]);
+}
+
+export async function listLoopSpecs(auth: AuthContext): Promise<LoopSpecView[]> {
+  const result = await pool.query<LoopSpecRow>(
+    `SELECT id, slug, title, status, version, source_prompt, body_markdown, spec_json,
+       approved_at, approved_by_user_id, created_at, updated_at
+     FROM loop_specs
+     WHERE tenant_id = $1 AND user_id = $2 AND status <> 'archived'
+     ORDER BY updated_at DESC
+     LIMIT 100`,
+    [auth.tenantId, auth.userId],
+  );
+  return result.rows.map(mapSpecRow);
+}
+
+export async function getLoopSpec(auth: AuthContext, specId: string): Promise<LoopSpecView | null> {
+  const result = await pool.query<LoopSpecRow>(
+    `SELECT id, slug, title, status, version, source_prompt, body_markdown, spec_json,
+       approved_at, approved_by_user_id, created_at, updated_at
+     FROM loop_specs
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+     LIMIT 1`,
+    [specId, auth.tenantId, auth.userId],
+  );
+  return result.rows[0] ? mapSpecRow(result.rows[0]) : null;
+}
+
+export async function refineLoopSpec(input: {
+  auth: AuthContext;
+  specId: string;
+  feedback: string;
+}): Promise<LoopSpecView> {
+  const current = await getLoopSpec(input.auth, input.specId);
+  if (!current || current.status === "archived") throw new Error("Loop spec not found");
+  if (current.status === "approved") throw new Error("Approved loop specs cannot be refined");
+  const feedback = input.feedback.trim();
+  if (!feedback) throw new Error("Feedback is required");
+  const specJson = await generateSpecJson({
+    auth: input.auth,
+    prompt: current.sourcePrompt,
+    feedback,
+    currentSpec: current,
+  });
+  const title = titleFromPurpose(specJson.purpose);
+  const bodyMarkdown = renderSpecMarkdown(specJson);
+  const result = await pool.query<LoopSpecRow>(
+    `UPDATE loop_specs
+     SET title = $4,
+         body_markdown = $5,
+         spec_json = $6::jsonb,
+         version = version + 1,
+         updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND status = 'draft'
+     RETURNING id, slug, title, status, version, source_prompt, body_markdown, spec_json,
+       approved_at, approved_by_user_id, created_at, updated_at`,
+    [input.specId, input.auth.tenantId, input.auth.userId, title, bodyMarkdown, JSON.stringify(specJson)],
+  );
+  if (!result.rows[0]) throw new Error("Loop spec not found or not editable");
+  return mapSpecRow(result.rows[0]);
+}
+
+export async function approveLoopSpec(input: {
+  auth: AuthContext;
+  specId: string;
+  bodyMarkdown?: string;
+  specJson?: unknown;
+}): Promise<LoopSpecView> {
+  const current = await getLoopSpec(input.auth, input.specId);
+  if (!current || current.status === "archived") throw new Error("Loop spec not found");
+  if (current.status === "approved") return current;
+  const bodyMarkdown = input.bodyMarkdown?.trim() || current.bodyMarkdown;
+  if (!bodyMarkdown) throw new Error("Spec markdown is required");
+  const rawSpec = normalizeSpecJson(input.specJson ?? current.specJson);
+  const candidate = await bestDeliveryCandidateForRawSpec(input.auth, rawSpec);
+  const parsedSpec = noSlopSpecSchema.parse(applyDeliveryCandidateToRawSpec(rawSpec, candidate));
+  if (
+    parsedSpec.delivery.target !== "none"
+    && parsedSpec.connectorPolicy.allowedWriteActions.length === 0
+  ) {
+    throw new Error("Outbound specs require at least one approved connector write action");
+  }
+
+  const result = await pool.query<LoopSpecRow>(
+    `UPDATE loop_specs
+     SET status = 'approved',
+         body_markdown = $4,
+         spec_json = $5::jsonb,
+         approved_at = NOW(),
+         approved_by_user_id = $3,
+         updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND status = 'draft'
+     RETURNING id, slug, title, status, version, source_prompt, body_markdown, spec_json,
+       approved_at, approved_by_user_id, created_at, updated_at`,
+    [input.specId, input.auth.tenantId, input.auth.userId, bodyMarkdown, JSON.stringify(parsedSpec)],
+  );
+  if (!result.rows[0]) throw new Error("Loop spec not found or not approvable");
+  return mapSpecRow(result.rows[0]);
+}
+
+export async function archiveLoopSpec(auth: AuthContext, specId: string): Promise<void> {
+  await pool.query(
+    `UPDATE loop_specs
+     SET status = 'archived', updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+    [specId, auth.tenantId, auth.userId],
+  );
+}
+
+export function approvedSpecSnapshot(spec: LoopSpecView): NoSlopSpecSnapshot {
+  if (spec.status !== "approved" || !spec.approvedAt) {
+    throw new Error("Loop spec must be approved before generation");
+  }
+  return noSlopSpecSnapshotSchema.parse({
+    id: spec.id,
+    slug: spec.slug,
+    version: spec.version,
+    title: spec.title,
+    bodyMarkdown: spec.bodyMarkdown,
+    specJson: spec.specJson,
+    approvedAt: spec.approvedAt,
+  });
+}

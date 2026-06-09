@@ -7,10 +7,11 @@ import {
   type LoopBuilderProposal,
   type LoopBuilderTemplateHint,
 } from "./intent-resolver.js";
+import { draftLoopSpec, refineLoopSpec, type LoopSpecView } from "./specs.js";
 
 export type LoopBuilderJobStatus = "pending" | "running" | "completed" | "failed";
 
-export type LoopBuilderJobKind = "propose" | "refine";
+export type LoopBuilderJobKind = "propose" | "refine" | "draft-spec" | "refine-spec";
 
 export interface LoopBuilderJobView {
   jobId: string;
@@ -19,6 +20,7 @@ export interface LoopBuilderJobView {
   createdAt: string;
   updatedAt: string;
   proposal?: LoopBuilderProposal;
+  spec?: LoopSpecView;
   error?: string;
 }
 
@@ -51,6 +53,7 @@ function toView(job: LoopBuilderJobRecord): LoopBuilderJobView {
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     ...(job.proposal ? { proposal: job.proposal } : {}),
+    ...(job.spec ? { spec: job.spec } : {}),
     ...(job.error ? { error: job.error } : {}),
   };
 }
@@ -68,7 +71,10 @@ async function runJob(jobId: string, runner: () => Promise<LoopBuilderProposal>)
     job.error = undefined;
   } catch (error) {
     job.status = "failed";
-    job.error = error instanceof Error ? error.message : String(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    job.error = errorStack ? `${errorMessage}\n\nStack trace:\n${errorStack}` : errorMessage;
+    console.error(`[loop-builder] Job ${jobId} failed:`, error);
   } finally {
     job.updatedAt = new Date().toISOString();
   }
@@ -79,6 +85,7 @@ export function enqueueLoopBuilderProposeJob(input: {
   prompt: string;
   templateId?: LoopBuilderTemplateHint;
   feedback?: string;
+  specId?: string;
 }): LoopBuilderJobView {
   pruneExpiredJobs();
   const jobId = randomUUID();
@@ -99,6 +106,7 @@ export function enqueueLoopBuilderProposeJob(input: {
     prompt: input.prompt,
     templateId: input.templateId,
     feedback: input.feedback,
+    specId: input.specId,
   }));
 
   return toView(record);
@@ -109,6 +117,7 @@ export function enqueueLoopBuilderRefineJob(input: {
   prompt: string;
   templateId?: LoopBuilderTemplateHint;
   feedback?: string;
+  specId?: string;
   priorProposal: LoopBuilderProposal;
 }): LoopBuilderJobView {
   pruneExpiredJobs();
@@ -130,6 +139,7 @@ export function enqueueLoopBuilderRefineJob(input: {
     prompt: input.prompt,
     templateId: input.templateId,
     feedback: input.feedback,
+    specId: input.specId,
     priorProposal: input.priorProposal,
   }));
 
@@ -141,4 +151,80 @@ export function getLoopBuilderJob(auth: AuthContext, jobId: string): LoopBuilder
   const job = jobs.get(jobKey(auth, jobId));
   if (!job) return null;
   return toView(job);
+}
+
+export function enqueueSpecDraftJob(input: {
+  auth: AuthContext;
+  prompt: string;
+}): LoopBuilderJobView {
+  pruneExpiredJobs();
+  const jobId = randomUUID();
+  const now = new Date().toISOString();
+  const record: LoopBuilderJobRecord = {
+    jobId,
+    kind: "draft-spec",
+    status: "pending",
+    tenantId: input.auth.tenantId,
+    userId: input.auth.userId,
+    createdAt: now,
+    updatedAt: now,
+  };
+  jobs.set(jobKey(input.auth, jobId), record);
+
+  void runSpecJob(jobKey(input.auth, jobId), () => draftLoopSpec({
+    auth: input.auth,
+    prompt: input.prompt,
+  }));
+
+  return toView(record);
+}
+
+export function enqueueSpecRefineJob(input: {
+  auth: AuthContext;
+  specId: string;
+  feedback: string;
+}): LoopBuilderJobView {
+  pruneExpiredJobs();
+  const jobId = randomUUID();
+  const now = new Date().toISOString();
+  const record: LoopBuilderJobRecord = {
+    jobId,
+    kind: "refine-spec",
+    status: "pending",
+    tenantId: input.auth.tenantId,
+    userId: input.auth.userId,
+    createdAt: now,
+    updatedAt: now,
+  };
+  jobs.set(jobKey(input.auth, jobId), record);
+
+  void runSpecJob(jobKey(input.auth, jobId), () => refineLoopSpec({
+    auth: input.auth,
+    specId: input.specId,
+    feedback: input.feedback,
+  }));
+
+  return toView(record);
+}
+
+async function runSpecJob(jobId: string, runner: () => Promise<LoopSpecView>): Promise<void> {
+  const job = jobs.get(jobId);
+  if (!job) return;
+
+  job.status = "running";
+  job.updatedAt = new Date().toISOString();
+
+  try {
+    job.spec = await runner();
+    job.status = "completed";
+    job.error = undefined;
+  } catch (error) {
+    job.status = "failed";
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    job.error = errorStack ? `${errorMessage}\n\nStack trace:\n${errorStack}` : errorMessage;
+    console.error(`[loop-builder] Spec job ${jobId} failed:`, error);
+  } finally {
+    job.updatedAt = new Date().toISOString();
+  }
 }

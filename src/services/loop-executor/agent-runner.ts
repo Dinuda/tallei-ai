@@ -16,7 +16,7 @@ import { getToolHandler, type ToolHandlerContext } from "./tool-handlers.js";
 import { completeText } from "./agent-runner-internals.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
-import { extractMemorySources, formatMemorySearchText } from "../loop-engine/contracts.js";
+import { extractMemorySources, extractWebSearchSources, formatMemorySearchText } from "../loop-engine/contracts.js";
 
 import "../loop-runtime/tool-registrations.js";
 
@@ -85,7 +85,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
       });
       if (result.draft) draft = result.draft;
       if (result.shortCircuit) {
-        return { sections, draft, toolsUsed, toolResults };
+        return { sections, draft, toolsUsed, toolResults, shortCircuit: true };
       }
       continue;
     }
@@ -93,7 +93,7 @@ async function runAssignedTools(input: RunLoopAgentInput) {
     throw new Error(`No tool handler registered for actionable tool ${entry.ref}`);
   }
 
-  return { sections, draft, toolsUsed, toolResults };
+  return { sections, draft, toolsUsed, toolResults, shortCircuit: false };
 }
 
 /** Runs one agent: optional tools, then LLM synthesis unless a tool short-circuits. */
@@ -119,11 +119,18 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     if (toolRun.sections.length > 0) user = [user, "", ...toolRun.sections].join("\n");
 
     if (toolRun.toolsUsed.includes("internal.web_search")) {
+      const webSearchTool = toolRun.toolResults.find((row) => row.ref === "internal.web_search");
+      const sources = extractWebSearchSources(webSearchTool?.data ?? { sources: [] });
+      const toolData = webSearchTool?.data && typeof webSearchTool.data === "object"
+        ? webSearchTool.data as Record<string, unknown>
+        : {};
       return {
         text: toolRun.sections.join("\n\n"),
         data: {
-          model: "exa-search",
+          model: typeof toolData.model === "string" ? toolData.model : "exa-search",
+          ...(typeof toolData.provider === "string" ? { provider: toolData.provider } : {}),
           mode: "tool_output_only",
+          sources,
           toolRefs: input.assignedTools.map((t) => t.ref),
           actionableToolRefs: actionableToolRefs(input.assignedTools),
           toolsUsed,
@@ -142,6 +149,20 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
         data: {
           mode: "tool_output_only",
           sources,
+          toolRefs: input.assignedTools.map((t) => t.ref),
+          actionableToolRefs: actionableToolRefs(input.assignedTools),
+          toolsUsed,
+          toolResults: toolRun.toolResults,
+        },
+        draft,
+      };
+    }
+
+    if (toolRun.shortCircuit) {
+      return {
+        text: toolRun.sections.join("\n\n"),
+        data: {
+          mode: "tool_output_only",
           toolRefs: input.assignedTools.map((t) => t.ref),
           actionableToolRefs: actionableToolRefs(input.assignedTools),
           toolsUsed,

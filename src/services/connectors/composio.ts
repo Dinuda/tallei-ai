@@ -8,6 +8,7 @@ import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { encryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../../infrastructure/db/index.js";
+import type { ConnectorActionRisk } from "../loop-engine/spec-contracts.js";
 
 export type ConnectorSetupState =
   | "not_required"
@@ -44,6 +45,32 @@ export interface ResendConnectorSetupView {
     last4: string | null;
     label: string | null;
   };
+}
+
+export interface ComposioActionView {
+  toolkit: string;
+  actionSlug: string;
+  name: string;
+  description: string;
+  risk: ConnectorActionRisk;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ConnectorActionResult {
+  ok: boolean;
+  provider: "composio";
+  toolkit: string;
+  actionSlug: string;
+  connectorAccountId: string;
+  idempotencyKey: string;
+  output: Record<string, unknown>;
+  replayed?: boolean;
+}
+
+export interface ConnectorDeliveryActionCandidate extends ComposioActionView {
+  toolRef: string;
+  score: number;
+  reason: string;
 }
 
 interface ConnectorAdapter {
@@ -117,6 +144,64 @@ function normalizeComposioAppKey(appKey: string | null | undefined): string {
   if (key === "google-mail" || key === "googlemail") return "gmail";
   if (key === "resend_email") return "resend";
   return key;
+}
+
+function classifyComposioAction(value: {
+  slug: string;
+  name?: string | null;
+  description?: string | null;
+}): ConnectorActionRisk {
+  const text = `${value.slug} ${value.name ?? ""} ${value.description ?? ""}`.toLowerCase();
+  if (/\b(delete|remove|destroy|revoke|disable|archive|trash|purge)\b/.test(text)) return "destructive";
+  if (/\b(send|reply|forward|post|publish|broadcast|invite|message|email|sms|notify|schedule)\b/.test(text)) return "send";
+  if (/\b(create|update|edit|patch|write|add|set|insert|upload|move|assign|comment|merge|close|open)\b/.test(text)) return "write";
+  return "read";
+}
+
+function actionSearchText(action: Pick<ComposioActionView, "toolkit" | "actionSlug" | "name" | "description">): string {
+  return `${action.toolkit} ${action.actionSlug} ${action.name} ${action.description}`.toLowerCase();
+}
+
+export function isDraftOnlyComposioAction(action: Pick<ComposioActionView, "toolkit" | "actionSlug" | "name" | "description">): boolean {
+  return /\bdraft\b|create[_ -]?draft|email[_ -]?draft/.test(actionSearchText(action));
+}
+
+function newsletterProviderScore(toolkit: string): number {
+  const key = normalizeComposioAppKey(toolkit);
+  if (key === "resend") return 100;
+  if (["mailchimp", "mailerlite", "beehiiv", "convertkit", "sendgrid", "mailgun", "postmark", "brevo", "customerio"].includes(key)) return 90;
+  if (["gmail", "outlook"].includes(key)) return 35;
+  if (/\b(mail|email|newsletter|campaign|marketing)\b/.test(key)) return 55;
+  return 0;
+}
+
+export function scoreComposioActionForDelivery(input: {
+  action: ComposioActionView;
+  target: "subscriber_list" | "team_email" | "operator" | "none";
+}): ConnectorDeliveryActionCandidate | null {
+  if (input.target === "none") return null;
+  if (input.action.risk !== "send") return null;
+  if (isDraftOnlyComposioAction(input.action)) return null;
+  const text = actionSearchText(input.action);
+  if (/\b(cancel|delete|remove|revoke|disable|unsubscribe|suppress|bounce|webhook|domain|api[_ -]?key)\b/.test(text)) return null;
+  const hasSendSignal = /\b(send|broadcast|campaign|email|message|mail)\b/.test(text);
+  if (!hasSendSignal) return null;
+
+  let score = newsletterProviderScore(input.action.toolkit);
+  if (/\bbroadcast|campaign|audience|segment|newsletter|contact\b/.test(text)) score += 25;
+  if (/\bsend[_ -]?email|email[_ -]?send|send\b/.test(text)) score += 15;
+  if (input.target === "subscriber_list" && ["gmail", "outlook"].includes(normalizeComposioAppKey(input.action.toolkit))) score -= 25;
+  if (input.target !== "subscriber_list" && ["gmail", "outlook"].includes(normalizeComposioAppKey(input.action.toolkit))) score += 20;
+  if (score <= 0) return null;
+
+  return {
+    ...input.action,
+    toolRef: `composio.${normalizeComposioAppKey(input.action.toolkit)}.action.${input.action.actionSlug}`,
+    score,
+    reason: input.target === "subscriber_list"
+      ? "send-capable action ranked for subscriber/newsletter delivery"
+      : "send-capable action ranked for direct email delivery",
+  };
 }
 
 const COMPOSIO_NATIVE_MODEL = process.env.TALLEI_CONNECTORS__COMPOSIO_NATIVE_MODEL || "claude-3-5-sonnet-latest";
@@ -227,6 +312,15 @@ async function composioRequest<T>(input: {
     body: input.body ? JSON.stringify(input.body) : undefined,
   });
   const text = await response.text();
+  // Guard against HTML error pages (404, 500, etc.)
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    if (!response.ok) {
+      throw new Error(`Composio request failed (${response.status}): non-JSON response (${contentType})`);
+    }
+    // Empty or non-JSON success — return empty object
+    return {} as T;
+  }
   const data = text ? JSON.parse(text) as unknown : {};
   if (!response.ok) throw new Error(`Composio request failed (${response.status}): ${JSON.stringify(data)}`);
   return data as T;
@@ -268,7 +362,9 @@ export async function listComposioToolkits(): Promise<Array<{
   } catch (error) {
     console.warn("[connectors] composio toolkits sdk list failed:", error);
   }
-  for (const path of ["/api/v3/toolkits", "/api/v3.1/toolkits"]) {
+  const paths = ["/api/v3/toolkits", "/api/v3.1/toolkits"];
+  let lastError: Error | null = null;
+  for (const path of paths) {
     try {
       const data = await composioRequest<{ items?: ToolkitRow[] }>({ path });
       const items = normalizeItems(data.items);
@@ -280,10 +376,132 @@ export async function listComposioToolkits(): Promise<Array<{
         logo: item.meta?.logo ?? item.logo ?? "",
       })).filter((item) => item.slug.length > 0);
     } catch (error) {
-      console.warn(`[connectors] composio toolkit fallback failed for ${path}:`, error);
+      lastError = error instanceof Error ? error : new Error(String(error));
     }
   }
+  if (lastError) {
+    console.warn(`[connectors] composio toolkit discovery failed (tried ${paths.length} paths): ${lastError.message}`);
+  }
   return [];
+}
+
+function normalizeComposioAction(toolkit: string, raw: unknown): ComposioActionView | null {
+  const row = toObjectRecord(raw);
+  const slug = String(row.slug ?? row.name ?? row.id ?? row.action ?? "").trim();
+  if (!slug) return null;
+  const name = String(row.displayName ?? row.name ?? slug).trim();
+  const meta = toObjectRecord(row.meta);
+  const description = String(row.description ?? meta.description ?? "").trim();
+  const inputSchema = toObjectRecord(row.inputSchema ?? row.parameters ?? row.schema ?? row.argsSchema);
+  return {
+    toolkit,
+    actionSlug: slug,
+    name,
+    description,
+    risk: classifyComposioAction({ slug, name, description }),
+    inputSchema,
+  };
+}
+
+export async function listComposioToolkitTools(toolkitSlug: string): Promise<ComposioActionView[]> {
+  const toolkit = normalizeComposioAppKey(toolkitSlug);
+  if (!isComposioConfigured()) return [];
+  const normalizeItems = (items: unknown): ComposioActionView[] =>
+    (Array.isArray(items) ? items : [])
+      .map((item) => normalizeComposioAction(toolkit, item))
+      .filter((item): item is ComposioActionView => Boolean(item));
+
+  try {
+    const composio = getComposioVercelClient() as unknown as {
+      tools?: { list?: (args?: Record<string, unknown>) => Promise<unknown> };
+      toolkits?: { tools?: { list?: (args?: Record<string, unknown>) => Promise<unknown> } };
+    };
+    const sdkList = composio.tools?.list ?? composio.toolkits?.tools?.list;
+    if (sdkList) {
+      const response = await sdkList({ toolkit });
+      const items = normalizeItems(toObjectRecord(response).items ?? response);
+      if (items.length > 0) return items;
+    }
+  } catch (error) {
+    console.warn(`[connectors] composio toolkit tools sdk list failed for ${toolkit}:`, error);
+  }
+
+  const paths = [
+    `/api/v3.1/tools?toolkit=${encodeURIComponent(toolkit)}`,
+    `/api/v3/tools?toolkit=${encodeURIComponent(toolkit)}`,
+    `/api/v3.1/toolkits/${encodeURIComponent(toolkit)}/tools`,
+    `/api/v3/toolkits/${encodeURIComponent(toolkit)}/tools`,
+  ];
+  let lastError: Error | null = null;
+  for (const path of paths) {
+    try {
+      const data = await composioRequest<{ items?: unknown[]; tools?: unknown[] }>({ path });
+      const items = normalizeItems(data.items ?? data.tools);
+      if (items.length > 0) return items;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (lastError) {
+    console.warn(`[connectors] composio toolkit tools discovery failed for ${toolkit} (tried ${paths.length} paths): ${lastError.message}`);
+  }
+  return [];
+}
+
+function fallbackDeliveryActionsForToolkit(toolkit: string): ComposioActionView[] {
+  const key = normalizeComposioAppKey(toolkit);
+  if (key === "resend") {
+    return [{
+      toolkit: "resend",
+      actionSlug: "RESEND_SEND_EMAIL",
+      name: "Send Email",
+      description: "Send an email using Resend.",
+      risk: "send",
+      inputSchema: { type: "object" },
+    }];
+  }
+  if (key === "gmail") {
+    return [{
+      toolkit: "gmail",
+      actionSlug: "GMAIL_SEND_EMAIL",
+      name: "Send Email",
+      description: "Send an email using Gmail.",
+      risk: "send",
+      inputSchema: { type: "object" },
+    }];
+  }
+  return [];
+}
+
+export async function listDeliveryActionCandidates(input: {
+  auth: AuthContext;
+  target: "subscriber_list" | "team_email" | "operator" | "none";
+}): Promise<ConnectorDeliveryActionCandidate[]> {
+  if (input.target === "none") return [];
+  const accounts = await listConnectorAccounts(input.auth).catch(() => []);
+  const connectedToolkits = [...new Set(accounts
+    .filter((account) => account.status === "connected")
+    .map((account) => account.appKey?.trim().toLowerCase())
+    .filter((value): value is string => Boolean(value)))];
+  const candidates: ConnectorDeliveryActionCandidate[] = [];
+
+  for (const toolkit of connectedToolkits) {
+    const discovered = await listComposioToolkitTools(toolkit).catch(() => []);
+    const actions = discovered.length > 0 ? discovered : fallbackDeliveryActionsForToolkit(toolkit);
+    for (const action of actions) {
+      const candidate = scoreComposioActionForDelivery({ action, target: input.target });
+      if (candidate) candidates.push(candidate);
+    }
+  }
+
+  return candidates.sort((a, b) => b.score - a.score || a.toolkit.localeCompare(b.toolkit));
+}
+
+export async function selectBestDeliveryAction(input: {
+  auth: AuthContext;
+  target: "subscriber_list" | "team_email" | "operator" | "none";
+}): Promise<ConnectorDeliveryActionCandidate | null> {
+  return (await listDeliveryActionCandidates(input))[0] ?? null;
 }
 
 const COMPOSIO_ADAPTER: ConnectorAdapter = {
@@ -418,6 +636,204 @@ const COMPOSIO_ADAPTER: ConnectorAdapter = {
 
 export function selectComposioConnectorAdapter(): ConnectorAdapter {
   return COMPOSIO_ADAPTER;
+}
+
+async function getConnectedComposioAccount(input: {
+  auth: AuthContext;
+  toolkit: string;
+}): Promise<ConnectorAccountView> {
+  const toolkit = normalizeComposioAppKey(input.toolkit);
+  const accounts = await listConnectorAccounts(input.auth);
+  const account = accounts.find((row) =>
+    row.status === "connected" && row.appKey?.trim().toLowerCase() === toolkit
+  );
+  if (!account) throw new Error(`Connect ${toolkit} before executing connector actions`);
+  return account;
+}
+
+async function executeComposioActionDirect(input: {
+  auth: AuthContext;
+  toolkit: string;
+  actionSlug: string;
+  accountId: string;
+  payload: Record<string, unknown>;
+}): Promise<Record<string, unknown>> {
+  const composio = getComposioVercelClient() as unknown as {
+    tools?: {
+      execute?: (slug: string, args: Record<string, unknown>) => Promise<unknown>;
+    };
+  };
+  if (composio.tools?.execute) {
+    try {
+      const result = await composio.tools.execute(input.actionSlug, {
+        userId: getComposioEntityId(input.auth),
+        connectedAccountId: input.accountId,
+        arguments: input.payload,
+      });
+      return { adapter: "composio-sdk", result: toObjectRecord(result) };
+    } catch (error) {
+      console.warn(`[connectors] composio sdk execute failed for ${input.actionSlug}; falling back to REST:`, error);
+    }
+  }
+  const result = await composioRequest<Record<string, unknown>>({
+    path: `/api/v3.1/tools/execute/${encodeURIComponent(input.actionSlug)}`,
+    method: "POST",
+    body: {
+      connected_account_id: input.accountId,
+      user_id: getComposioEntityId(input.auth),
+      arguments: input.payload,
+    },
+  });
+  return { adapter: "composio-rest", result };
+}
+
+export async function executeApprovedComposioAction(input: {
+  auth: AuthContext;
+  toolkit: string;
+  actionSlug: string;
+  payload: Record<string, unknown>;
+  idempotencyKey: string;
+}): Promise<ConnectorActionResult> {
+  const toolkit = normalizeComposioAppKey(input.toolkit);
+  if (!isComposioConfigured()) throw new Error("Composio is not configured");
+  const account = await getConnectedComposioAccount({ auth: input.auth, toolkit });
+
+  const existing = await pool.query<{
+    status: "started" | "completed" | "failed" | "skipped";
+    response_json: unknown;
+  }>(
+    `SELECT status, response_json
+     FROM connector_action_events
+     WHERE tenant_id = $1 AND user_id = $2 AND idempotency_key = $3
+     LIMIT 1`,
+    [input.auth.tenantId, input.auth.userId, input.idempotencyKey],
+  );
+  if (existing.rows[0]?.status === "completed") {
+    return {
+      ok: true,
+      provider: "composio",
+      toolkit,
+      actionSlug: input.actionSlug,
+      connectorAccountId: account.id,
+      idempotencyKey: input.idempotencyKey,
+      output: toObjectRecord(existing.rows[0].response_json),
+      replayed: true,
+    };
+  }
+
+  const eventId = randomUUID();
+  const inserted = await pool.query(
+    `INSERT INTO connector_action_events
+     (id, tenant_id, user_id, provider, connector_account_id, action_name, idempotency_key, status, request_json, response_json)
+     VALUES ($1, $2, $3, 'composio', $4, $5, $6, 'started', $7::jsonb, '{}'::jsonb)
+     ON CONFLICT (tenant_id, user_id, idempotency_key) DO NOTHING`,
+    [
+      eventId,
+      input.auth.tenantId,
+      input.auth.userId,
+      account.id,
+      input.actionSlug,
+      input.idempotencyKey,
+      JSON.stringify({ toolkit, actionSlug: input.actionSlug, payload: input.payload }),
+    ],
+  );
+  if ((inserted.rowCount ?? 0) === 0) {
+    const replay = await pool.query<{ status: string; response_json: unknown }>(
+      `SELECT status, response_json FROM connector_action_events
+       WHERE tenant_id = $1 AND user_id = $2 AND idempotency_key = $3 LIMIT 1`,
+      [input.auth.tenantId, input.auth.userId, input.idempotencyKey],
+    );
+    const row = replay.rows[0];
+    if (row?.status === "completed") {
+      return {
+        ok: true,
+        provider: "composio",
+        toolkit,
+        actionSlug: input.actionSlug,
+        connectorAccountId: account.id,
+        idempotencyKey: input.idempotencyKey,
+        output: toObjectRecord(row.response_json),
+        replayed: true,
+      };
+    }
+    throw new Error(`Connector action is already ${row?.status ?? "in progress"}`);
+  }
+
+  try {
+    const output = await executeComposioActionDirect({
+      auth: input.auth,
+      toolkit,
+      actionSlug: input.actionSlug,
+      accountId: account.externalAccountId,
+      payload: input.payload,
+    });
+    await pool.query(
+      `UPDATE connector_action_events
+       SET status = 'completed', response_json = $2::jsonb, updated_at = NOW()
+       WHERE id = $1`,
+      [eventId, JSON.stringify(output)],
+    );
+    return {
+      ok: true,
+      provider: "composio",
+      toolkit,
+      actionSlug: input.actionSlug,
+      connectorAccountId: account.id,
+      idempotencyKey: input.idempotencyKey,
+      output,
+    };
+  } catch (error) {
+    const output = { error: error instanceof Error ? error.message : String(error) };
+    await pool.query(
+      `UPDATE connector_action_events
+       SET status = 'failed', response_json = $2::jsonb, updated_at = NOW()
+       WHERE id = $1`,
+      [eventId, JSON.stringify(output)],
+    );
+    throw error;
+  }
+}
+
+export async function runComposioToolkitPrompt(input: {
+  auth: AuthContext;
+  toolkit: string;
+  prompt: string;
+}): Promise<{ text: string; accountId: string; externalAccountId: string; toolkit: string }> {
+  const toolkit = normalizeComposioAppKey(input.toolkit);
+  if (!config.anthropicApiKey) throw new Error("ANTHROPIC_API_KEY is required for Composio loop tools");
+  if (!isComposioConfigured()) throw new Error("Composio is not configured");
+  if (!process.env.ANTHROPIC_API_KEY) process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
+
+  const accounts = await listConnectorAccounts(input.auth);
+  const account = accounts.find((row) =>
+    row.status === "connected" && row.appKey?.trim().toLowerCase() === toolkit
+  );
+  if (!account) throw new Error(`Connect ${toolkit} to use this loop tool`);
+
+  const composio = getComposioVercelClient();
+  const session = await composio.create(getComposioEntityId(input.auth), {
+    connectedAccounts: { [toolkit]: account.externalAccountId },
+  });
+  const tools = await session.tools();
+  const { text } = await generateText({
+    model: anthropic(COMPOSIO_NATIVE_MODEL),
+    tools,
+    prompt: [
+      "Use the connected app tools to answer the loop agent task.",
+      "Prefer read/search/list operations. Do not create, update, delete, send, post, schedule, or mutate anything.",
+      "If the requested work would require a write action, explain that it needs a future approval-gated action.",
+      "",
+      `Connected app: ${toolkit}`,
+      `Task:\n${input.prompt}`,
+    ].join("\n"),
+    stopWhen: stepCountIs(8),
+  });
+  return {
+    text: text.trim(),
+    accountId: account.id,
+    externalAccountId: account.externalAccountId,
+    toolkit,
+  };
 }
 
 function isResendApiKey(value: string): boolean {
