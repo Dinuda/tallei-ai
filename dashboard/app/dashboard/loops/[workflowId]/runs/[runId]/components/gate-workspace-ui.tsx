@@ -1,10 +1,10 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
 import { Streamdown } from "streamdown";
 
 import { cn } from "@/lib/utils";
+import { EditorialActionButton } from "./glyph-icons";
 
 const PLACEHOLDER_SPLIT = /(\[(?:paste|tbd|todo|fill|insert)[^\]]*\]|\b(?:tbd|details pending|to be determined|placeholder)\b)/i;
 const PLACEHOLDER_TEST = /^\[(?:paste|tbd|todo|fill|insert)[^\]]*\]$|^(?:tbd|details pending|to be determined|placeholder)$/i;
@@ -14,7 +14,7 @@ function isEvalSystemMessage(text: string): boolean {
 }
 
 export function gateStatusImperative(mode: string): string {
-  if (mode === "missing_input") return "Review the output and provide the missing input";
+  if (mode === "missing_input") return "Paste the missing input below to continue";
   if (mode === "memory_confirmation") return "Select which memories the next agent may use";
   if (mode === "draft_review") return "Review the draft, then approve or request changes";
   if (mode === "pre_send") return "Confirm the final version before sending";
@@ -71,36 +71,6 @@ export function HighlightedDraftText({ text, className }: { text: string; classN
   );
 }
 
-function GateSection({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="border-b border-[#e5e7eb] px-7 py-6 last:border-b-0">
-      <h3 className="text-[13px] font-semibold tracking-wide text-[#374151] uppercase">{title}</h3>
-      {description ? <p className="mt-1 text-[13px] leading-5 text-[#6b7280]">{description}</p> : null}
-      <div className="mt-4">{children}</div>
-    </section>
-  );
-}
-
-function GateIssueCallout({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="flex gap-3 rounded-md border border-[#fcd34d] bg-[#fffbeb] px-4 py-3">
-      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-[#b45309]" />
-      <div>
-        <p className="text-[13px] font-semibold text-[#92400e]">{title}</p>
-        <p className="mt-0.5 text-[13px] leading-5 text-[#78350f]">{body}</p>
-      </div>
-    </div>
-  );
-}
-
 export function AgentProgressPips({
   steps,
   currentStepId,
@@ -134,55 +104,86 @@ export function AgentProgressPips({
   );
 }
 
-export function InputRequiredWorkspace({
+export function MissingInputWorkspace({
   agentOutput,
-  issueTitle,
-  issueBody,
+  agentName,
   fieldLabel,
   fieldPlaceholder,
   value,
   onChange,
+  onSubmit,
+  submitDisabled,
+  busy,
 }: {
   agentOutput: string;
-  issueTitle: string;
-  issueBody: string;
+  agentName: string;
   fieldLabel: string;
   fieldPlaceholder: string;
   value: string;
   onChange: (value: string) => void;
+  onSubmit: () => void;
+  submitDisabled: boolean;
+  busy: boolean;
 }) {
   return (
-    <>
-      {agentOutput ? (
-        <GateSection
-          title="What the agent produced"
-          description="Placeholder or incomplete sections are highlighted."
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <section className="border-b border-[#ebebeb] px-7 py-6">
+        <div
+          className="group -mx-2 rounded-md px-3 py-2 transition-colors hover:bg-[#f7f7f5]"
+          style={{ fontFamily: "var(--font-fustat)" }}
         >
-          <div className="rounded-md border border-[#e5e7eb] bg-[#fafafa] p-5">
-            <HighlightedDraftText text={agentOutput} />
-          </div>
-        </GateSection>
-      ) : null}
-
-      <GateSection title="What needs your attention">
-        <GateIssueCallout title={issueTitle} body={issueBody} />
-      </GateSection>
-
-      <GateSection
-        title="Your input"
-        description={`Fill in ${fieldLabel.toLowerCase()} so the agent can continue.`}
-      >
-        <label className="block">
-          <span className="mb-2 block text-[13px] font-semibold text-[#374151]">{fieldLabel}</span>
+          <p className="mb-1.5 text-[13px] font-medium text-[#9b9a97]">{fieldLabel}</p>
           <textarea
             value={value}
             onChange={(event) => onChange(event.target.value)}
-            className="min-h-36 w-full border border-[#d1d5db] bg-white p-4 text-[14px] leading-relaxed text-[#111827] outline-none focus:border-[#9ca3af] focus:ring-2 focus:ring-[#fef3c7]"
             placeholder={fieldPlaceholder}
+            rows={6}
+            autoFocus
+            className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.65] text-[#37352f] outline-none placeholder:text-[#c4c4c0] focus:ring-0"
           />
-        </label>
-      </GateSection>
-    </>
+        </div>
+        <div className="mt-4 flex items-center gap-3">
+          <EditorialActionButton
+            label="Submit input"
+            glyph="submit"
+            variant="primary"
+            onClick={onSubmit}
+            disabled={busy || submitDisabled}
+            className="px-5 text-[14px]"
+          />
+          <p className="text-[13px] text-[#9b9a97]">Paste the real content, then submit to continue.</p>
+        </div>
+      </section>
+
+      {agentOutput ? (
+        <section className="px-7 py-6">
+          <p className="mb-3 text-[13px] font-medium text-[#9b9a97]">
+            What {agentName} produced
+          </p>
+          <p className="mb-4 text-[13px] leading-5 text-[#6b7280]">
+            Highlighted sections are placeholders or gaps — your input above replaces them.
+          </p>
+          <div className="rounded-md border border-[#ebebeb] bg-[#f7f7f5] px-5 py-4">
+            <HighlightedDraftText text={agentOutput} />
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function GateSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="border-b border-[#e5e7eb] px-7 py-6 last:border-b-0">
+      <h3 className="text-[13px] font-semibold tracking-wide text-[#374151] uppercase">{title}</h3>
+      <div className="mt-4">{children}</div>
+    </section>
   );
 }
 
@@ -194,24 +195,22 @@ export function DraftReviewWorkspace({
   children?: ReactNode;
 }) {
   return (
-    <>
-      <GateSection title="Draft output">
-        {children ?? (
-          agentOutput ? (
-            <div className="rounded-md border border-[#e5e7eb] bg-white p-5">
-              {/\[(?:paste|tbd)/i.test(agentOutput) ? (
-                <HighlightedDraftText text={agentOutput} />
-              ) : (
-                <div className="prose prose-slate max-w-none text-[16px] leading-7">
-                  <Streamdown>{agentOutput}</Streamdown>
-                </div>
-              )}
-            </div>
-          ) : (
-            <p className="py-12 text-center text-sm text-[#9ca3af]">No draft output available yet.</p>
-          )
-        )}
-      </GateSection>
-    </>
+    <GateSection title="Draft output">
+      {children ?? (
+        agentOutput ? (
+          <div className="rounded-md border border-[#e5e7eb] bg-white p-5">
+            {/\[(?:paste|tbd)/i.test(agentOutput) ? (
+              <HighlightedDraftText text={agentOutput} />
+            ) : (
+              <div className="prose prose-slate max-w-none text-[16px] leading-7">
+                <Streamdown>{agentOutput}</Streamdown>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="py-12 text-center text-sm text-[#9ca3af]">No draft output available yet.</p>
+        )
+      )}
+    </GateSection>
   );
 }

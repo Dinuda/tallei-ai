@@ -54,7 +54,7 @@ import { EditorialActionButton } from "./components/glyph-icons";
 import {
   AgentProgressPips,
   DraftReviewWorkspace,
-  InputRequiredWorkspace,
+  MissingInputWorkspace,
   gateStatusImperative,
   readGateAgentOutput,
   resolveInputFieldLabel,
@@ -747,30 +747,10 @@ function gateWorkspaceTitle(gateType: Gate["gate_type"]) {
 function gateWorkspaceSubtitle(gate: Gate, uiMode: Gate["gate_type"]) {
   if (uiMode === "memory_confirmation") return "Choose what the next agent can use.";
   if (uiMode === "missing_input") {
-    if (/placeholder|unfilled template|output contains/i.test(gate.question ?? "")) {
-      return "The pipeline paused because required information is missing. Review what the agent produced, then fill in the gap.";
-    }
-    return gate.question ?? "Provide the required input to continue.";
+    return "Paste the missing input below, then submit to continue the run.";
   }
   if (uiMode === "draft_review") return "Review the draft below. Approve to continue, edit to revise, or reject to stop.";
   return gate.question ?? "Confirm before this run sends or publishes.";
-}
-
-function gateIssueSummary(gate: Gate, blockers: string[]): { title: string; body: string } {
-  const question = gate.question?.trim() ?? "";
-  if (blockers.includes("placeholder_detected")) {
-    return {
-      title: "Placeholder text detected",
-      body: "The agent left template markers or unfilled sections in its output. Provide the real content below, or reject to stop.",
-    };
-  }
-  if (question && !/output contains placeholder|unfilled template/i.test(question)) {
-    return { title: "Input required", body: question };
-  }
-  return {
-    title: "Missing required input",
-    body: "The agent could not continue without information only you can provide.",
-  };
 }
 
 function isInputValidationAgentSnapshot(agent: StepAttempt["agent_snapshot"] | undefined): boolean {
@@ -1200,14 +1180,16 @@ function RunStatusBand({
                 disabled={busy}
                 className="px-4 text-[14px]"
               />
-              <EditorialActionButton
-                label={approveLabel}
-                glyph={approveLabel.startsWith("Submit") ? "submit" : "approve"}
-                variant="primary"
-                onClick={onApprove}
-                disabled={busy || approveDisabled}
-                className="px-5 text-[14px]"
-              />
+              {gateUiMode !== "missing_input" ? (
+                <EditorialActionButton
+                  label={approveLabel}
+                  glyph={approveLabel.startsWith("Submit") ? "submit" : "approve"}
+                  variant="primary"
+                  onClick={onApprove}
+                  disabled={busy || approveDisabled}
+                  className="px-5 text-[14px]"
+                />
+              ) : null}
             </div>
           </motion.div>
         ) : showFailure ? (
@@ -1643,11 +1625,13 @@ export default function StableLoopRunPage() {
     () => new Set(memorySelections[pendingGate?.id ?? ""] ?? memoryGateItems.filter((item) => item.include !== false).map((item) => item.id)),
     [memoryGateItems, memorySelections, pendingGate?.id],
   );
+  const missingInputGateActive = Boolean(pendingGate && gateUiMode === "missing_input");
   const selectedStep = useMemo(() => {
     if (selectedStepId) return orderedSteps.find((step) => step.id === selectedStepId) ?? null;
+    if (missingInputGateActive) return null;
     if (currentStep) return orderedSteps.find((step) => step.id === currentStep.id) ?? currentStep;
     return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_gate" || step.status === "running") ?? null;
-  }, [currentStep, orderedSteps, selectedStepId]);
+  }, [currentStep, missingInputGateActive, orderedSteps, selectedStepId]);
   const selectedStepContext = selectedStepId ? selectedStep : null;
   const latestArtifact = finalArtifacts.at(-1) ?? null;
   const selectedArtifact = useMemo(() => {
@@ -1689,12 +1673,17 @@ export default function StableLoopRunPage() {
   }, [finalArtifacts, pendingGate, selectedArtifact]);
   const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
-  const showGateWorkspace = Boolean(pendingGate && gateUiMode && !selectedStepId);
+  const showMissingInputWorkspace = Boolean(pendingGate && gateUiMode === "missing_input");
+  const showGateWorkspace = Boolean(
+    pendingGate && gateUiMode && gateUiMode !== "missing_input" && !selectedStepId,
+  );
   const centerTitle = inspectingAgentOutput
     ? `${formatWorkerDisplayName(selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id ?? "Agent")} output`
-    : activeArtifact
-      ? `${finalArtifactName} artifact`
-      : `${finalArtifactName} artifact`;
+    : missingInputGateActive && !selectedStepId
+      ? "Agent outputs"
+      : activeArtifact
+        ? `${finalArtifactName} artifact`
+        : `${finalArtifactName} artifact`;
   const centerBody = inspectingAgentOutput
     ? getStepDisplayContent(selectedStep)
     : activeArtifact?.body || getStepDisplayContent(selectedStep);
@@ -1780,15 +1769,6 @@ export default function StableLoopRunPage() {
     if (!pendingGate) return "";
     return readGateAgentOutput(pendingGate.payload_json, getStepDisplayContent(gateStep));
   }, [gateStep, pendingGate]);
-  const gateBlockers = useMemo(
-    () => (pendingGate ? readGateBlockers(pendingGate) : []),
-    [pendingGate],
-  );
-  const gateIssue = useMemo(
-    () => (pendingGate ? gateIssueSummary(pendingGate, gateBlockers) : { title: "", body: "" }),
-    [gateBlockers, pendingGate],
-  );
-
   useEffect(() => {
     if (!pendingGate || gateUiMode !== "memory_confirmation") return;
     setMemorySelections((current) => {
@@ -1954,7 +1934,37 @@ export default function StableLoopRunPage() {
           <section className="flex h-full min-h-0 flex-col space-y-5">
 
             <AnimatePresence mode="wait">
-              {showGateWorkspace && pendingGate && gateUiMode ? (
+              {showMissingInputWorkspace && pendingGate ? (
+                <motion.div
+                  key="missing-input"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <EditorialWorkspaceShell className="flex min-h-[640px] flex-col">
+                    <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-5">
+                      <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
+                        {gateWorkspaceTitle("missing_input")}
+                      </h2>
+                      <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
+                        {gateWorkspaceSubtitle(pendingGate, "missing_input")}
+                      </p>
+                    </div>
+                    <MissingInputWorkspace
+                      agentOutput={gateAgentOutput}
+                      agentName={formatWorkerDisplayName(gateStep?.agent_snapshot?.name ?? gateStep?.agent_id ?? "the agent")}
+                      fieldLabel={resolveInputFieldLabel(run.definition?.inputsRequired, pendingGate.question)}
+                      fieldPlaceholder={resolveInputFieldPlaceholder(run.definition?.inputsRequired)}
+                      value={inputValues[pendingGate.id] ?? ""}
+                      onChange={(value) => setInputValues((current) => ({ ...current, [pendingGate.id]: value }))}
+                      onSubmit={() => submitGate(pendingGate, "input")}
+                      submitDisabled={!(inputValues[pendingGate.id] ?? "").trim()}
+                      busy={Boolean(busy)}
+                    />
+                  </EditorialWorkspaceShell>
+                </motion.div>
+              ) : showGateWorkspace && pendingGate && gateUiMode ? (
                 <motion.div
                   key="gate-review"
                   initial={{ opacity: 0, y: 6 }}
@@ -1962,8 +1972,8 @@ export default function StableLoopRunPage() {
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
                 >
-                  <EditorialWorkspaceShell>
-                    <div className="border-b border-[#e5e7eb] px-7 py-6">
+                  <EditorialWorkspaceShell className="flex min-h-[640px] flex-col">
+                    <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-6">
                       <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
                         {gateWorkspaceTitle(gateUiMode)}
                       </h2>
@@ -1978,7 +1988,7 @@ export default function StableLoopRunPage() {
                       </p>
                     </div>
 
-                    <div id="gate-draft-editor" className="min-h-0 flex-1 overflow-y-auto">
+                    <div id="gate-draft-editor" className="flex min-h-0 flex-1 flex-col overflow-hidden">
                       {gateUiMode === "memory_confirmation" ? (
                         <MemoryEditCanvas
                           gateId={pendingGate.id}
@@ -1986,17 +1996,6 @@ export default function StableLoopRunPage() {
                           selectedIds={selectedMemoryIds}
                           onToggle={toggleMemorySelection}
                           onInspect={setMemoryDetail}
-                        />
-                      ) : null}
-                      {gateUiMode === "missing_input" ? (
-                        <InputRequiredWorkspace
-                          agentOutput={gateAgentOutput}
-                          issueTitle={gateIssue.title}
-                          issueBody={gateIssue.body}
-                          fieldLabel={resolveInputFieldLabel(run.definition?.inputsRequired, pendingGate.question)}
-                          fieldPlaceholder={resolveInputFieldPlaceholder(run.definition?.inputsRequired)}
-                          value={inputValues[pendingGate.id] ?? ""}
-                          onChange={(value) => setInputValues((current) => ({ ...current, [pendingGate.id]: value }))}
                         />
                       ) : null}
                       {(gateUiMode === "draft_review" || gateUiMode === "pre_send") ? (
@@ -2048,20 +2047,6 @@ export default function StableLoopRunPage() {
                 >
                   <EditorialWorkspaceShell className="h-full min-h-0 overflow-hidden">
               <Tabs value={leftTab} onValueChange={(value) => setLeftTab(value as typeof leftTab)} className="flex h-full min-h-0 flex-1 flex-col gap-0">
-                {pendingGate && gateUiMode && selectedStepId ? (
-                  <div className="flex items-center justify-between gap-4 border-b border-[#bfdbfe] bg-[#eff6ff] px-7 py-3">
-                    <p className="text-[13px] font-medium text-[#1e40af]">
-                      Viewing agent output · {gateWorkspaceTitle(gateUiMode).toLowerCase()} still pending
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedStepId(null)}
-                      className="shrink-0 text-[13px] font-semibold text-[#2563eb] hover:text-[#1d4ed8]"
-                    >
-                      Return to approval
-                    </button>
-                  </div>
-                ) : null}
                 <CardHeader className="border-b border-[#e5e7eb] bg-white px-7 py-6">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex min-w-0 items-center gap-3">
