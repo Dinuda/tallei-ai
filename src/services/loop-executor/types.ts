@@ -30,6 +30,7 @@ export const LOOP_ENGINE_VERSION = "loop_engine_v3";
 
 export const loopGateTypeSchema = z.enum([
   "memory_confirmation",
+  "source_confirmation",
   "missing_input",
   "draft_review",
   "pre_send",

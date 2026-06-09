@@ -27,6 +27,7 @@ import {
   type WorkflowCriticResult,
 } from "./contracts.js";
 import { critiqueLoopDesign } from "./critic.js";
+import { normalizeArchitectOutput } from "./normalize-architect.js";
 import { formatMemoriesForArchitect, recallForDesigner } from "./recall.js";
 import { buildToolSpecRegistry, renderOutcomesForArchitect, renderToolsForArchitect, type ToolSpecRegistry } from "../tool-spec/index.js";
 
@@ -99,6 +100,19 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
         inputContract: { description: "Search query derived from the loop goal", schema: { query: "string", recency_days: "number" } },
         outputContract: { description: "Raw search results from Exa API", schema: { text: "string", model: "string", provider: "string", sources: [{ title: "string", url: "string", snippet: "string" }] } },
         doneCriteria: ["At least 5 sources returned", "Each source has title, url, and snippet", "Sources are from credible news sources"],
+        gate: { type: "source_confirmation", question: "Select which sources to include. Add custom URLs if needed." },
+      },
+      {
+        id: "memory_context",
+        name: "Memory Agent",
+        goal: "Recall relevant internal memories for the newsletter topic",
+        task: "Search memories for product updates, decisions, and context related to the approved web sources.",
+        tool: "internal.memory_search",
+        artifactRole: "source_evidence",
+        inputContract: { description: "Topic from approved web sources", schema: { query: "string" } },
+        outputContract: { description: "Validated memories with excerpts", schema: { sources: [{ id: "string", text: "string" }] } },
+        doneCriteria: ["Returns memory excerpts with ids", "Query is focused on the newsletter topic"],
+        gate: { type: "memory_confirmation", question: "Select which memories the writer may use." },
       },
       {
         id: "newsletter_writer",
@@ -135,6 +149,7 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
     "  3. gate — human approval type when the agent pauses:",
     '     missing_input — operator must PASTE text (sprint notes, briefs). Use ONLY for content inputs in inputsRequired.',
     '     memory_confirmation — operator SELECTS which memories to include',
+    '     source_confirmation — operator SELECTS web search sources and may ADD custom URLs/titles/snippets',
     '     draft_review — operator REVIEWS a draft in the canvas; can approve as-is or edit to improve',
     '     pre_send — operator CONFIRMS final send/delivery (recipients come from connectorPolicy.recipientSource)',
     "  4. renderTarget — when output is email/newsletter copy, MUST use canvas (NOT a tool ref):",
@@ -142,8 +157,11 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
     '     "canvas.preview" — read-only rendered email after approval (pair with artifactRole final_preview)',
     "",
     "GATE RULES BY TOOL TYPE:",
-    "  - internal.web_search / internal.memory_search / composio.*.search: NO draft_review gate. memory_search may use memory_confirmation.",
-    "  - internal.llm_only writing email/newsletter/digest: MUST set renderTarget canvas.email, artifactRole draft_body, gate draft_review.",
+    "  - internal.web_search / composio.*.search: MUST use source_confirmation gate (never draft_review).",
+    "  - internal.memory_search: NO draft_review gate; use memory_confirmation when memories are returned.",
+    "  - NEVER add standalone Editorial Review, Approval & QA, Delivery Preparation, or similar LLM agents. Human draft_review on the canvas.email writer IS the approval step.",
+    "  - internal.llm_only writing email/newsletter/digest: MUST set renderTarget canvas.email, artifactRole draft_body, gate draft_review (exactly one writer produces the draft).",
+    "  - pre_send is ONLY for composio.*.action delivery agents, never for internal.llm_only writers.",
     "  - composio.*.action send/write: MUST set artifactRole delivery, gate pre_send. Recipients from connectorPolicy, NOT inputsRequired.",
     "",
     "inputsRequired is ONLY for operator-provided CONTENT needed before drafting (e.g. sprint_notes, product_brief).",
@@ -269,13 +287,13 @@ async function callArchitectLlm(input: {
   }
   
   const parsed = loopArchitectOutputSchema.parse(parsedJson);
-  const design: LoopArchitectOutput = {
+  const design = normalizeArchitectOutput({
     ...parsed,
     schedule: {
       cron: normalizeDesignCron(parsed.schedule.cron, input.prompt),
       timezone: parsed.schedule.timezone?.trim() || "UTC",
     },
-  };
+  }, input.noSlopSpec);
   assertDeliveryRouting(design.delivery);
   return { design, model: response.model };
 }

@@ -16,7 +16,8 @@ function isEvalSystemMessage(text: string): boolean {
 export function gateStatusImperative(mode: string): string {
   if (mode === "missing_input") return "Paste the missing input below to continue";
   if (mode === "memory_confirmation") return "Select which memories the next agent may use";
-  if (mode === "draft_review") return "Review the draft, then approve or request changes";
+  if (mode === "source_confirmation") return "Select sources, add custom URLs, then approve or revise";
+  if (mode === "draft_review") return "Review the draft, then save & approve or request changes";
   if (mode === "pre_send") return "Confirm the final version before sending";
   return "Review and decide how to continue";
 }

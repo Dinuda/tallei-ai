@@ -390,6 +390,18 @@ export async function evaluateAgentGoal(input: {
   if (isShortCircuitTool(toolRef)) {
     const shortCircuitResult = validateShortCircuitOutput(toolRef, input.result);
     if (shortCircuitResult) {
+      if (
+        shortCircuitResult.status === "pass"
+        && input.agent.gate?.type === "source_confirmation"
+        && (toolRef === "internal.web_search" || /^composio\.[a-z0-9_-]+\.search$/i.test(toolRef))
+      ) {
+        return goalEvalResultSchema.parse({
+          status: "needs_input",
+          reason: "Confirm which sources the next agent may use.",
+          blockers: [],
+          gateType: "source_confirmation",
+        });
+      }
       return shortCircuitResult;
     }
   }
@@ -402,7 +414,13 @@ export async function evaluateAgentGoal(input: {
   }
 
   const judged = await llmJudge(input);
-  const runMemory = input.runMemory ?? { inputs: {}, approvedMemories: [], updatedAt: new Date(0).toISOString() };
+  const runMemory = input.runMemory ?? {
+    inputs: {},
+    approvedMemories: [],
+    approvedSources: {},
+    operatorRevisions: {},
+    updatedAt: new Date(0).toISOString(),
+  };
   if (
     !hasRequiredContentInputs(input.definition, runMemory) &&
     !isCanvasDraftAgent(input.agent) &&

@@ -14,6 +14,7 @@ import {
 import {
   cancelLoopRuntimeRun,
   decideLoopRuntimeGate,
+  reviseLoopRuntimeGate,
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
   retryLoopRuntimeStep,
@@ -260,6 +261,17 @@ router.post("/runs/:runId/gates/:gateId/reject", requireScopes(["memory:write"])
     res.json(await decideLoopRuntimeGate({ auth: req.authContext!, runId, gateId, decision: "reject", value }));
   } catch (error) {
     sendError(res, error, "Failed to reject gate");
+  }
+});
+
+router.post("/runs/:runId/gates/:gateId/revise", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const { gateId } = gateIdSchema.parse(req.params);
+    const value = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    res.json(await reviseLoopRuntimeGate({ auth: req.authContext!, runId, gateId, value }));
+  } catch (error) {
+    sendError(res, error, "Failed to revise gate");
   }
 });
 

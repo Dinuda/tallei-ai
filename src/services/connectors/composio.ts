@@ -9,6 +9,11 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { encryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../../infrastructure/db/index.js";
 import type { ConnectorActionRisk } from "../loop-engine/spec-contracts.js";
+import {
+  formatResendFromAddress,
+  resendApiRequest,
+  resolveResendCredentials,
+} from "../notifications/resend-email.js";
 
 export type ConnectorSetupState =
   | "not_required"
@@ -638,24 +643,191 @@ export function selectComposioConnectorAdapter(): ConnectorAdapter {
   return COMPOSIO_ADAPTER;
 }
 
-async function getConnectedComposioAccount(input: {
+type ConnectedConnectorAccount = ConnectorAccountView & { metadata: Record<string, unknown> };
+
+function isPlaceholderConnectedAccountId(accountId: string): boolean {
+  const id = accountId.trim();
+  if (!id) return true;
+  if (/^resend:[a-z0-9]{4}$/i.test(id)) return true;
+  if (id.startsWith("acct_")) return true;
+  return false;
+}
+
+function isNativeApiKeyConnector(metadata: Record<string, unknown>, externalAccountId: string): boolean {
+  if (metadata.authMode === "api_key") return true;
+  return /^resend:[a-z0-9]{4}$/i.test(externalAccountId.trim());
+}
+
+async function getConnectedConnectorAccount(input: {
   auth: AuthContext;
   toolkit: string;
-}): Promise<ConnectorAccountView> {
+}): Promise<ConnectedConnectorAccount> {
   const toolkit = normalizeComposioAppKey(input.toolkit);
-  const accounts = await listConnectorAccounts(input.auth);
-  const account = accounts.find((row) =>
-    row.status === "connected" && row.appKey?.trim().toLowerCase() === toolkit
+  const result = await pool.query<{
+    id: string;
+    provider: string;
+    external_account_id: string;
+    status: ConnectorSetupState;
+    scopes_json: unknown;
+    metadata_json: unknown;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT id, provider, external_account_id, status, scopes_json, metadata_json, created_at, updated_at
+     FROM connector_accounts
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND status = 'connected'
+     ORDER BY updated_at DESC`,
+    [input.auth.tenantId, input.auth.userId],
   );
-  if (!account) throw new Error(`Connect ${toolkit} before executing connector actions`);
-  return account;
+  for (const row of result.rows) {
+    const scopes = Array.isArray(row.scopes_json)
+      ? row.scopes_json.filter((value): value is string => typeof value === "string")
+      : [];
+    const appKey = resolveConnectorAppKey({ provider: row.provider, scopes, metadata: row.metadata_json });
+    if (appKey?.trim().toLowerCase() !== toolkit) continue;
+    return {
+      id: row.id,
+      provider: row.provider,
+      appKey,
+      externalAccountId: row.external_account_id,
+      status: row.status,
+      scopes,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      metadata: toObjectRecord(row.metadata_json),
+    };
+  }
+  throw new Error(`Connect ${toolkit} before executing connector actions`);
+}
+
+async function resolveComposioConnectedAccountId(input: {
+  auth: AuthContext;
+  toolkit: string;
+  accountId: string;
+  metadata: Record<string, unknown>;
+}): Promise<string | undefined> {
+  if (isNativeApiKeyConnector(input.metadata, input.accountId)) return undefined;
+  if (!isPlaceholderConnectedAccountId(input.accountId)) return input.accountId;
+  if (!isComposioConfigured()) return undefined;
+  try {
+    const composio = getComposioVercelClient();
+    const accounts = await composio.connectedAccounts.list({
+      userIds: [getComposioEntityId(input.auth)],
+      toolkitSlugs: [normalizeComposioAppKey(input.toolkit)],
+    });
+    const items = Array.isArray(accounts.items) ? accounts.items : [];
+    const active = items.find((item) =>
+      ["active", "connected", "enabled"].includes(String(item.status ?? "").toLowerCase()),
+    );
+    const id = typeof active?.id === "string" ? active.id.trim() : "";
+    return id || undefined;
+  } catch (error) {
+    console.warn("[connectors] failed to resolve composio connected account:", error);
+    return undefined;
+  }
+}
+
+function normalizeResendRecipients(payload: Record<string, unknown>): string[] {
+  const candidates = [payload.to, payload.recipients, payload.emails, payload.subscriber_emails];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.includes("@")) {
+      return [candidate.trim()];
+    }
+    if (Array.isArray(candidate)) {
+      const emails = candidate
+        .filter((value): value is string => typeof value === "string" && value.includes("@"))
+        .map((value) => value.trim());
+      if (emails.length > 0) return emails;
+    }
+  }
+  return [];
+}
+
+async function executeNativeResendAction(input: {
+  auth: AuthContext;
+  actionSlug: string;
+  payload: Record<string, unknown>;
+}): Promise<Record<string, unknown>> {
+  const creds = await resolveResendCredentials(input.auth);
+  if (!creds) {
+    throw new Error("Resend API key is not configured. Reconnect Resend in dashboard setup.");
+  }
+  const from = formatResendFromAddress(creds);
+  const slug = input.actionSlug.toLowerCase();
+  const subject = typeof input.payload.subject === "string" && input.payload.subject.trim()
+    ? input.payload.subject.trim()
+    : typeof input.payload.title === "string" && input.payload.title.trim()
+      ? input.payload.title.trim()
+      : "Newsletter";
+  const html = typeof input.payload.html === "string" && input.payload.html.trim()
+    ? input.payload.html.trim()
+    : typeof input.payload.content === "string"
+      ? input.payload.content
+      : "";
+  const text = typeof input.payload.text === "string" ? input.payload.text : undefined;
+  if (!html && !text) throw new Error("Resend send requires email body content in the action payload.");
+
+  if (slug.includes("broadcast")) {
+    const audienceId = typeof input.payload.audience_id === "string"
+      ? input.payload.audience_id
+      : typeof input.payload.segment_id === "string"
+        ? input.payload.segment_id
+        : typeof input.payload.list_id === "string"
+          ? input.payload.list_id
+          : "";
+    if (!audienceId) {
+      throw new Error("Resend broadcast requires audience_id, segment_id, or list_id in the action payload.");
+    }
+    const created = await resendApiRequest({
+      creds,
+      path: "/broadcasts",
+      body: {
+        audience_id: audienceId,
+        from,
+        subject,
+        html: html || undefined,
+        text: text || (!html ? subject : undefined),
+      },
+    });
+    if (!created.ok) throw new Error(created.error ?? "Resend broadcast create failed");
+    const broadcastId = typeof created.data?.id === "string" ? created.data.id : "";
+    if (!broadcastId) throw new Error("Resend broadcast create did not return an id");
+    const sent = await resendApiRequest({
+      creds,
+      path: `/broadcasts/${broadcastId}/send`,
+      body: {},
+    });
+    if (!sent.ok) throw new Error(sent.error ?? "Resend broadcast send failed");
+    return { adapter: "resend-native", action: "broadcast", broadcastId, result: sent.data ?? created.data };
+  }
+
+  const to = normalizeResendRecipients(input.payload);
+  if (to.length === 0) {
+    throw new Error("Resend send requires at least one recipient (to/recipients) in the action payload.");
+  }
+  const sent = await resendApiRequest({
+    creds,
+    path: "/emails",
+    body: {
+      from,
+      to,
+      subject,
+      html: html || undefined,
+      text: text || (!html ? subject : undefined),
+      ...(creds.replyTo ? { reply_to: creds.replyTo } : {}),
+    },
+  });
+  if (!sent.ok) throw new Error(sent.error ?? "Resend send failed");
+  return { adapter: "resend-native", action: "email", result: sent.data };
 }
 
 async function executeComposioActionDirect(input: {
   auth: AuthContext;
   toolkit: string;
   actionSlug: string;
-  accountId: string;
+  accountId?: string;
   payload: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
   const composio = getComposioVercelClient() as unknown as {
@@ -663,13 +835,14 @@ async function executeComposioActionDirect(input: {
       execute?: (slug: string, args: Record<string, unknown>) => Promise<unknown>;
     };
   };
+  const executeArgs = {
+    userId: getComposioEntityId(input.auth),
+    arguments: input.payload,
+    ...(input.accountId ? { connectedAccountId: input.accountId } : {}),
+  };
   if (composio.tools?.execute) {
     try {
-      const result = await composio.tools.execute(input.actionSlug, {
-        userId: getComposioEntityId(input.auth),
-        connectedAccountId: input.accountId,
-        arguments: input.payload,
-      });
+      const result = await composio.tools.execute(input.actionSlug, executeArgs);
       return { adapter: "composio-sdk", result: toObjectRecord(result) };
     } catch (error) {
       console.warn(`[connectors] composio sdk execute failed for ${input.actionSlug}; falling back to REST:`, error);
@@ -679,7 +852,7 @@ async function executeComposioActionDirect(input: {
     path: `/api/v3.1/tools/execute/${encodeURIComponent(input.actionSlug)}`,
     method: "POST",
     body: {
-      connected_account_id: input.accountId,
+      ...(input.accountId ? { connected_account_id: input.accountId } : {}),
       user_id: getComposioEntityId(input.auth),
       arguments: input.payload,
     },
@@ -696,7 +869,7 @@ export async function executeApprovedComposioAction(input: {
 }): Promise<ConnectorActionResult> {
   const toolkit = normalizeComposioAppKey(input.toolkit);
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
-  const account = await getConnectedComposioAccount({ auth: input.auth, toolkit });
+  const account = await getConnectedConnectorAccount({ auth: input.auth, toolkit });
 
   const existing = await pool.query<{
     status: "started" | "completed" | "failed" | "skipped";
@@ -760,13 +933,24 @@ export async function executeApprovedComposioAction(input: {
   }
 
   try {
-    const output = await executeComposioActionDirect({
-      auth: input.auth,
-      toolkit,
-      actionSlug: input.actionSlug,
-      accountId: account.externalAccountId,
-      payload: input.payload,
-    });
+    const output = toolkit === "resend" && isNativeApiKeyConnector(account.metadata, account.externalAccountId)
+      ? await executeNativeResendAction({
+        auth: input.auth,
+        actionSlug: input.actionSlug,
+        payload: input.payload,
+      })
+      : await executeComposioActionDirect({
+        auth: input.auth,
+        toolkit,
+        actionSlug: input.actionSlug,
+        accountId: await resolveComposioConnectedAccountId({
+          auth: input.auth,
+          toolkit,
+          accountId: account.externalAccountId,
+          metadata: account.metadata,
+        }),
+        payload: input.payload,
+      });
     await pool.query(
       `UPDATE connector_action_events
        SET status = 'completed', response_json = $2::jsonb, updated_at = NOW()

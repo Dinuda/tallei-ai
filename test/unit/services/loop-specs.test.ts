@@ -66,9 +66,12 @@ function baseDesign(): LoopArchitectOutput {
         goal: "Write a cited digest.",
         task: "Write a digest with executive summary and trends. Every claim must cite a source and do not invent facts.",
         tool: "internal.llm_only",
+        artifactRole: "draft_body",
+        renderTarget: "canvas.email",
         inputContract: { description: "Research sources", schema: { sources: "array" } },
         outputContract: { description: "Final cited digest ready for review", schema: { digest: "string" } },
         doneCriteria: ["Digest includes executive summary and trends", "The final digest is cited and ready for review"],
+        gate: { type: "draft_review", question: "Review this digest in the canvas before continuing." },
       },
     ],
     rationale: [],
@@ -302,4 +305,36 @@ test("critic rejects subscriber delivery provider that is not the approved send 
   const result = critiqueLoopDesign(design, newsletterSpec);
   assert.equal(result.pass, false);
   assert.match(result.requiredFixes.join("\n"), /approved connector write actions/i);
+});
+
+test("critic rejects standalone approval QA agent", () => {
+  const design = baseDesign();
+  design.agents.push({
+    id: "approval_qa",
+    name: "Approval & QA Agent",
+    goal: "Review and approve the synthesis output.",
+    task: "Review upstream draft quality before delivery.",
+    tool: "internal.llm_only",
+    inputContract: { description: "Upstream draft", schema: {} },
+    outputContract: { description: "Approval notes", schema: {} },
+    doneCriteria: ["Draft is reviewed"],
+    gate: { type: "draft_review", question: "Approve?" },
+  });
+
+  const result = critiqueLoopDesign(design, snapshot);
+  assert.equal(result.pass, false);
+  assert.match(result.requiredFixes.join("\n"), /standalone approval\/QA reviewer/i);
+});
+
+test("critic requires source_confirmation on web search agents", () => {
+  const design = baseDesign();
+  design.agents[0] = {
+    ...design.agents[0]!,
+    tool: "internal.web_search",
+    gate: undefined,
+  };
+
+  const result = critiqueLoopDesign(design, snapshot);
+  assert.equal(result.pass, false);
+  assert.match(result.requiredFixes.join("\n"), /source_confirmation/i);
 });

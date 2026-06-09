@@ -371,6 +371,7 @@ export function ChildAgentRow({
   phase,
   selected,
   isCurrent,
+  canRetry: canRetryProp,
   toolRefs,
   onSelect,
   onInfo,
@@ -381,13 +382,14 @@ export function ChildAgentRow({
   phase: StepRowPhase;
   selected: boolean;
   isCurrent: boolean;
+  canRetry?: boolean;
   toolRefs: string[];
   onSelect: () => void;
   onInfo: () => void;
   onHire: () => void;
   onRerun: () => void;
 }) {
-  const canRetry = step.status === "failed" || step.status === "cancelled";
+  const canRetry = canRetryProp ?? (step.status === "failed" || step.status === "cancelled");
   const displayName = formatWorkerDisplayName(step.agent_snapshot.name ?? step.agent_id);
   const icon = resolveChildAgentIcon(step, phase);
   const isRunning = phase === "current_running" || phase === "running";
@@ -443,25 +445,17 @@ export function ChildAgentRow({
         <div className="absolute right-2 top-10 flex shrink-0 items-start gap-1.5">
           <div className="mt-0.5 flex items-center gap-2">
             {canRetry ? (
-              <span
-                role="button"
-                tabIndex={0}
+              <button
+                type="button"
+                title="Retry agent"
                 onClick={(event) => {
                   event.stopPropagation();
                   onRerun();
                 }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onRerun();
-                  }
-                }}
-                className="inline-flex items-center gap-1 border border-[#e5e7eb] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#6b7280] hover:bg-[#fafafa]"
+                className="p-1 text-[#6b7280] transition-colors hover:text-[#111827]"
               >
-                <RefreshCw className="size-3" strokeWidth={2} />
-                Rerun
-              </span>
+                <RefreshCw className="size-3.5" strokeWidth={2} />
+              </button>
             ) : null}
             <StepPhaseTag phase={phase} />
           </div>

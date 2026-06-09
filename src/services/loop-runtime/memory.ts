@@ -1,18 +1,35 @@
 import type { LoopDefinition, LoopGateType, LoopRunAgent } from "../loop-executor/types.js";
+import type { WebSearchSource } from "../loop-engine/contracts.js";
 
 export type ApprovedMemory = {
   id: string;
   excerpt: string;
 };
 
+export type ApprovedWebSource = WebSearchSource;
+
+export type OperatorRevision = {
+  feedback?: string;
+  editedText?: string;
+  at: string;
+};
+
 export type RunMemory = {
   inputs: Record<string, string>;
   approvedMemories: ApprovedMemory[];
+  approvedSources: Record<string, ApprovedWebSource[]>;
+  operatorRevisions: Record<string, OperatorRevision>;
   updatedAt: string;
 };
 
 export function emptyRunMemory(): RunMemory {
-  return { inputs: {}, approvedMemories: [], updatedAt: new Date().toISOString() };
+  return {
+    inputs: {},
+    approvedMemories: [],
+    approvedSources: {},
+    operatorRevisions: {},
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export function isInputValidationAgent(agent: { id: string; name?: string }): boolean {
@@ -97,12 +114,23 @@ export function isMisclassifiedDraftReviewGate(input: {
   return hasRequiredRunInputs(input.definition, input.runMemory);
 }
 
+function readApprovedWebSourceRow(row: unknown): ApprovedWebSource | null {
+  const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
+  const title = typeof item.title === "string" ? item.title.trim() : "";
+  const url = typeof item.url === "string" ? item.url.trim() : "";
+  const snippet = typeof item.snippet === "string" ? item.snippet.trim() : "";
+  if (!title || !url || !snippet) return null;
+  if (item.include === false) return null;
+  return { title, url, snippet };
+}
+
 export function applyGateDecisionToRunMemory(input: {
   gateType: LoopGateType;
   decision: Record<string, unknown>;
   definition: LoopDefinition;
   gateFields?: Array<{ key: string }>;
-}): Partial<Pick<RunMemory, "inputs" | "approvedMemories">> {
+  gateAgentId?: string;
+}): Partial<Pick<RunMemory, "inputs" | "approvedMemories" | "approvedSources" | "operatorRevisions">> {
   if (input.gateType === "missing_input" && typeof input.decision.value === "string") {
     const value = input.decision.value.trim();
     if (!value) return {};
@@ -124,7 +152,46 @@ export function applyGateDecisionToRunMemory(input: {
         .filter((row): row is ApprovedMemory => row !== null),
     };
   }
+  if (input.gateType === "source_confirmation") {
+    const agentId = input.gateAgentId
+      ?? (typeof input.decision.agentId === "string" ? input.decision.agentId : "");
+    if (!agentId) return {};
+    const rows: ApprovedWebSource[] = [];
+    const seen = new Set<string>();
+    const pushRow = (row: unknown) => {
+      const parsed = readApprovedWebSourceRow(row);
+      if (!parsed || seen.has(parsed.url)) return;
+      seen.add(parsed.url);
+      rows.push(parsed);
+    };
+    for (const row of Array.isArray(input.decision.items) ? input.decision.items : []) {
+      pushRow(row);
+    }
+    for (const row of Array.isArray(input.decision.addedSources) ? input.decision.addedSources : []) {
+      pushRow(row);
+    }
+    return { approvedSources: { [agentId]: rows } };
+  }
   return {};
+}
+
+export function buildOperatorRevisionPatch(input: {
+  agentId: string;
+  feedback?: string;
+  editedText?: string;
+}): Partial<Pick<RunMemory, "operatorRevisions">> {
+  const feedback = input.feedback?.trim();
+  const editedText = input.editedText?.trim();
+  if (!feedback && !editedText) return {};
+  return {
+    operatorRevisions: {
+      [input.agentId]: {
+        ...(feedback ? { feedback } : {}),
+        ...(editedText ? { editedText } : {}),
+        at: new Date().toISOString(),
+      },
+    },
+  };
 }
 
 export function buildAgentHandoff(
@@ -137,7 +204,26 @@ export function buildAgentHandoff(
     handoff.approved_memories = memory.approvedMemories;
     handoff.memories = memory.approvedMemories;
   }
+  if (Object.keys(memory.approvedSources).length > 0) {
+    handoff.approved_sources = memory.approvedSources;
+    for (const [agentId, sources] of Object.entries(memory.approvedSources)) {
+      handoff[`approved_sources.${agentId}`] = sources;
+    }
+    const flatSources = Object.values(memory.approvedSources).flat();
+    if (flatSources.length > 0) {
+      handoff.curated_web_sources = flatSources;
+    }
+  }
   if (Object.keys(memory.inputs).length > 0) handoff.operator_input = { inputs: memory.inputs };
+  if (Object.keys(memory.operatorRevisions).length > 0) {
+    handoff.operator_revisions = memory.operatorRevisions;
+    const revision = memory.operatorRevisions[agent.id];
+    if (revision) {
+      handoff.operator_revision = revision;
+      if (revision.feedback) handoff.revision_feedback = revision.feedback;
+      if (revision.editedText) handoff.revision_edited_text = revision.editedText;
+    }
+  }
   delete handoff[agent.id];
   return handoff;
 }

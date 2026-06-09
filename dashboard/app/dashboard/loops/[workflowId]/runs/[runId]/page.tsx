@@ -70,6 +70,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogClose,
@@ -124,10 +125,18 @@ type RunEvent = {
 
 type Gate = {
   id: string;
-  gate_type: "memory_confirmation" | "missing_input" | "draft_review" | "pre_send";
+  gate_type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
   status: string;
   question: string;
-  payload_json: { items?: MemoryGateItem[]; result?: { text?: string } } & Record<string, unknown>;
+  payload_json: { items?: Array<MemoryGateItem | SourceGateItem>; result?: { text?: string } } & Record<string, unknown>;
+};
+
+type SourceGateItem = {
+  id: string;
+  title: string;
+  url: string;
+  snippet: string;
+  include?: boolean;
 };
 
 type MemoryGateItem = {
@@ -313,6 +322,7 @@ function getStepDisplayContent(step: StepAttempt | null | undefined): string {
 
 function gateTypeShortLabel(gateType: Gate["gate_type"]) {
   if (gateType === "memory_confirmation") return "memory review";
+  if (gateType === "source_confirmation") return "source review";
   if (gateType === "missing_input") return "missing input";
   if (gateType === "draft_review") return "draft review";
   return "pre-send check";
@@ -363,6 +373,8 @@ function buildParentAgentNarrative({
   if (parentRunPhase === "paused" && pendingGate && gateUiMode) {
     const gateHint = gateUiMode === "memory_confirmation"
       ? "Select which memories the next agent may use."
+      : gateUiMode === "source_confirmation"
+        ? "Select web sources and add custom URLs before continuing."
       : gateUiMode === "missing_input"
         ? "Provide the missing input in the workspace."
         : gateUiMode === "draft_review"
@@ -403,6 +415,41 @@ type StepRowPhase =
   | "idle";
 
 type ParentRunPhase = "paused" | "running" | "blocked" | "done" | "idle";
+
+function canRetryStepAttempt(step: StepAttempt, runStatus?: string): boolean {
+  if (step.status === "failed" || step.status === "cancelled") return true;
+  return step.status === "waiting_for_gate"
+    && (runStatus === "failed" || runStatus === "blocked" || runStatus === "cancelled");
+}
+
+function resolveRetryTargetStep(
+  latestSteps: StepAttempt[],
+  orderedSteps: StepAttempt[],
+  runStatus: string | undefined,
+  currentStepIndex: number | null | undefined,
+): StepAttempt | null {
+  const terminalRun = runStatus === "failed" || runStatus === "blocked" || runStatus === "cancelled";
+  if (!terminalRun) return null;
+
+  const failedLatest = [...latestSteps]
+    .filter((step) => step.status === "failed" || step.status === "cancelled")
+    .sort((left, right) => right.step_index - left.step_index)[0];
+  if (failedLatest) return failedLatest;
+
+  const stalledGate = [...latestSteps]
+    .filter((step) => step.status === "waiting_for_gate")
+    .sort((left, right) => right.step_index - left.step_index)[0];
+  if (stalledGate) return stalledGate;
+
+  if (typeof currentStepIndex === "number") {
+    const atCurrent = latestSteps.find((step) => step.step_index === currentStepIndex);
+    if (atCurrent && canRetryStepAttempt(atCurrent, runStatus)) return atCurrent;
+  }
+
+  return [...orderedSteps]
+    .filter((step) => canRetryStepAttempt(step, runStatus))
+    .sort((left, right) => right.step_index - left.step_index)[0] ?? null;
+}
 
 function resolveCurrentStep(
   latestSteps: StepAttempt[],
@@ -715,6 +762,34 @@ function buildMemoryGateDecisionItems(items: MemoryGateItem[], selectedIds: Set<
   }));
 }
 
+function readSourceGateItems(gate: Gate | null | undefined): SourceGateItem[] {
+  const rawItems = Array.isArray(gate?.payload_json.items) ? gate.payload_json.items : [];
+  return rawItems
+    .map((row): SourceGateItem | null => {
+      const item: Record<string, unknown> = isPlainObject(row) ? row : {};
+      const id = typeof item.id === "string" ? item.id : "";
+      const title = typeof item.title === "string" ? item.title : "";
+      const url = typeof item.url === "string" ? item.url : "";
+      const snippet = typeof item.snippet === "string" ? item.snippet : "";
+      if (!id || !title || !url || !snippet) return null;
+      return {
+        id,
+        title,
+        url,
+        snippet,
+        include: item.include !== false,
+      };
+    })
+    .filter((item): item is SourceGateItem => item !== null);
+}
+
+function buildSourceGateDecisionItems(items: SourceGateItem[], selectedIds: Set<string>): SourceGateItem[] {
+  return items.map((item) => ({
+    ...item,
+    include: selectedIds.has(item.id),
+  }));
+}
+
 function memoryItemSummary(item: MemoryGateItem) {
   return item.excerpt.replace(/\s+/g, " ").trim();
 }
@@ -739,6 +814,7 @@ function memoryItemMeta(item: MemoryGateItem) {
 
 function gateWorkspaceTitle(gateType: Gate["gate_type"]) {
   if (gateType === "memory_confirmation") return "Select memories";
+  if (gateType === "source_confirmation") return "Select sources";
   if (gateType === "missing_input") return "Input required";
   if (gateType === "draft_review") return "Review the draft";
   return "Approve to send";
@@ -746,10 +822,11 @@ function gateWorkspaceTitle(gateType: Gate["gate_type"]) {
 
 function gateWorkspaceSubtitle(gate: Gate, uiMode: Gate["gate_type"]) {
   if (uiMode === "memory_confirmation") return "Choose what the next agent can use.";
+  if (uiMode === "source_confirmation") return "Pick search results, add custom sources, then approve or revise to re-search.";
   if (uiMode === "missing_input") {
     return "Paste the missing input below, then submit to continue the run.";
   }
-  if (uiMode === "draft_review") return "Review the draft below. Approve to continue, edit to revise, or reject to stop.";
+  if (uiMode === "draft_review") return "Edit in the canvas, then save & approve or revise to re-run the writer.";
   return gate.question ?? "Confirm before this run sends or publishes.";
 }
 
@@ -852,6 +929,7 @@ const failureBandTexture = [
 
 function gateTypeStamp(gateType: Gate["gate_type"]) {
   if (gateType === "memory_confirmation") return { tag: "Approval", name: "Memory" };
+  if (gateType === "source_confirmation") return { tag: "Approval", name: "Sources" };
   if (gateType === "missing_input") return { tag: "Input", name: "Required" };
   if (gateType === "draft_review") return { tag: "Review", name: "Draft" };
   return { tag: "Send", name: "Final check" };
@@ -1023,7 +1101,9 @@ function RunStatusBand({
   busy,
   approveLabel,
   approveDisabled,
+  showRevise,
   onApprove,
+  onRevise,
   onReject,
   onRerun,
   onShowFailureDetails,
@@ -1040,7 +1120,9 @@ function RunStatusBand({
   busy: boolean;
   approveLabel: string;
   approveDisabled: boolean;
+  showRevise: boolean;
   onApprove: () => void;
+  onRevise: () => void;
   onReject: () => void;
   onRerun: () => void;
   onShowFailureDetails: () => void;
@@ -1192,6 +1274,16 @@ function RunStatusBand({
                 disabled={busy}
                 className="px-4 text-[14px]"
               />
+              {showRevise ? (
+                <EditorialActionButton
+                  label="Revise"
+                  glyph="rerun"
+                  variant="secondary"
+                  onClick={onRevise}
+                  disabled={busy}
+                  className="px-4 text-[14px]"
+                />
+              ) : null}
               {gateUiMode !== "missing_input" ? (
                 <EditorialActionButton
                   label={approveLabel}
@@ -1229,14 +1321,15 @@ function RunStatusBand({
               </button>
             </div>
             {failureStep ? (
-              <EditorialActionButton
-                label="Rerun"
-                glyph="rerun"
-                variant="danger"
-                onClick={onRerun}
+              <button
+                type="button"
+                title="Retry agent"
                 disabled={busy}
-                className="px-6 text-[14px]"
-              />
+                onClick={onRerun}
+                className="shrink-0 p-2 text-[#991b1b] transition-colors hover:bg-[#fee2e2] disabled:opacity-40"
+              >
+                <RefreshCw className="size-4" />
+              </button>
             ) : null}
           </motion.div>
         ) : (
@@ -1343,6 +1436,98 @@ function MemoryEditCanvas({
   );
 }
 
+function SourceEditCanvas({
+  gateId,
+  items,
+  addedSources,
+  selectedIds,
+  onToggle,
+  onAddSource,
+}: {
+  gateId: string;
+  items: SourceGateItem[];
+  addedSources: SourceGateItem[];
+  selectedIds: Set<string>;
+  onToggle: (gateId: string, sourceId: string, checked: boolean) => void;
+  onAddSource: (gateId: string, source: SourceGateItem) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [title, setTitle] = useState("");
+  const [snippet, setSnippet] = useState("");
+  const allItems = [...items, ...addedSources];
+
+  function handleAdd() {
+    const trimmedUrl = url.trim();
+    const trimmedTitle = title.trim();
+    const trimmedSnippet = snippet.trim();
+    if (!trimmedUrl || !trimmedTitle || !trimmedSnippet) return;
+    onAddSource(gateId, {
+      id: trimmedUrl,
+      title: trimmedTitle,
+      url: trimmedUrl,
+      snippet: trimmedSnippet,
+      include: true,
+    });
+    setUrl("");
+    setTitle("");
+    setSnippet("");
+  }
+
+  return (
+    <div>
+      {allItems.length === 0 ? (
+        <p className="py-10 text-center text-sm text-[#9ca3af]">No search sources yet. Add a custom source below.</p>
+      ) : null}
+      {allItems.map((item) => {
+        const selected = selectedIds.has(item.id);
+        return (
+          <div
+            key={item.id}
+            className={cn(
+              "flex items-start gap-4 border-b border-[#e5e7eb] px-7 py-4 transition-colors hover:bg-[#fafafa]",
+              selected && "bg-[#f9fafb] ring-1 ring-inset ring-[#111827]/10",
+            )}
+          >
+            <Checkbox
+              checked={selected}
+              onCheckedChange={(checked) => onToggle(gateId, item.id, checked === true)}
+              aria-label={`Include source ${item.title}`}
+              className="mt-1 rounded-[2px]"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-[15px] font-semibold text-[#111827]">{item.title}</p>
+              <p className="mt-1 line-clamp-2 text-[14px] leading-6 text-[#4b5563]">{item.snippet}</p>
+              <a
+                href={item.url}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1.5 block truncate font-mono text-[12px] text-[#2563eb] hover:underline"
+              >
+                {item.url}
+              </a>
+            </div>
+          </div>
+        );
+      })}
+      <div className="space-y-3 border-t border-[#e5e7eb] bg-[#fafafa] px-7 py-5">
+        <p className="text-[13px] font-semibold text-[#374151]">Add source</p>
+        <Input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" className="bg-white" />
+        <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Title" className="bg-white" />
+        <textarea
+          value={snippet}
+          onChange={(event) => setSnippet(event.target.value)}
+          placeholder="Snippet or notes about this source"
+          rows={3}
+          className="w-full resize-none rounded-md border border-[#d1d5db] bg-white px-3 py-2 text-[14px] text-[#111827] outline-none focus:ring-2 focus:ring-[#111827]/10"
+        />
+        <Button type="button" variant="outline" onClick={handleAdd} disabled={!url.trim() || !title.trim() || !snippet.trim()}>
+          Add source
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function extractMemorySearchTracesFromSteps(steps: StepAttempt[]): MemorySearchTraceEntry[] {
   const traces: MemorySearchTraceEntry[] = [];
 
@@ -1444,6 +1629,9 @@ export default function StableLoopRunPage() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [inputValues, setInputValues] = useState<Record<string, string>>({});
   const [memorySelections, setMemorySelections] = useState<Record<string, string[]>>({});
+  const [sourceSelections, setSourceSelections] = useState<Record<string, string[]>>({});
+  const [addedSources, setAddedSources] = useState<Record<string, SourceGateItem[]>>({});
+  const [reviseFeedback, setReviseFeedback] = useState<Record<string, string>>({});
   const [memoryDetail, setMemoryDetail] = useState<MemoryGateItem | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
@@ -1535,16 +1723,10 @@ export default function StableLoopRunPage() {
     [run?.gates],
   );
   const runHasTerminalFailure = run?.status === "failed" || run?.status === "blocked" || run?.status === "cancelled";
-  const failureRetryTarget = useMemo(() => {
-    if (!runHasTerminalFailure) return null;
-    const failedLatest = [...latestSteps]
-      .filter((step) => step.status === "failed" || step.status === "cancelled")
-      .sort((left, right) => right.step_index - left.step_index)[0];
-    if (failedLatest) return failedLatest;
-    return [...orderedSteps]
-      .filter((step) => step.status === "failed" || step.status === "cancelled")
-      .sort((left, right) => right.step_index - left.step_index)[0] ?? null;
-  }, [latestSteps, orderedSteps, runHasTerminalFailure]);
+  const failureRetryTarget = useMemo(
+    () => resolveRetryTargetStep(latestSteps, orderedSteps, run?.status, run?.current_step_index),
+    [latestSteps, orderedSteps, run?.current_step_index, run?.status],
+  );
   const isGateRejected = useMemo(() => {
     const message = `${error ?? ""} ${run?.error_json?.message ?? ""}`.toLowerCase();
     return message.includes("gate rejected") || Boolean(rejectedGate);
@@ -1641,9 +1823,24 @@ export default function StableLoopRunPage() {
     () => gateUiMode === "memory_confirmation" && pendingGate ? readMemoryGateItems(pendingGate) : [],
     [gateUiMode, pendingGate],
   );
+  const sourceGateItems = useMemo(
+    () => gateUiMode === "source_confirmation" && pendingGate ? readSourceGateItems(pendingGate) : [],
+    [gateUiMode, pendingGate],
+  );
+  const sourceGateAdded = useMemo(
+    () => (pendingGate ? addedSources[pendingGate.id] ?? [] : []),
+    [addedSources, pendingGate],
+  );
   const selectedMemoryIds = useMemo(
     () => new Set(memorySelections[pendingGate?.id ?? ""] ?? memoryGateItems.filter((item) => item.include !== false).map((item) => item.id)),
     [memoryGateItems, memorySelections, pendingGate?.id],
+  );
+  const selectedSourceIds = useMemo(
+    () => new Set(sourceSelections[pendingGate?.id ?? ""] ?? [
+      ...sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
+      ...sourceGateAdded.map((item) => item.id),
+    ]),
+    [pendingGate?.id, sourceGateAdded, sourceGateItems, sourceSelections],
   );
   const missingInputGateActive = Boolean(pendingGate && gateUiMode === "missing_input");
   const selectedStep = useMemo(() => {
@@ -1799,6 +1996,16 @@ export default function StableLoopRunPage() {
       };
     });
   }, [gateUiMode, memoryGateItems, pendingGate]);
+  useEffect(() => {
+    if (!pendingGate || gateUiMode !== "source_confirmation") return;
+    setSourceSelections((current) => {
+      if (current[pendingGate.id]) return current;
+      return {
+        ...current,
+        [pendingGate.id]: sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
+      };
+    });
+  }, [gateUiMode, pendingGate, sourceGateItems]);
 
   function toggleMemorySelection(gateId: string, memoryId: string, checked: boolean) {
     setMemorySelections((current) => {
@@ -1810,6 +2017,32 @@ export default function StableLoopRunPage() {
         [gateId]: [...currentIds],
       };
     });
+  }
+
+  function toggleSourceSelection(gateId: string, sourceId: string, checked: boolean) {
+    setSourceSelections((current) => {
+      const currentIds = new Set(current[gateId] ?? [
+        ...sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
+        ...(addedSources[gateId] ?? []).map((item) => item.id),
+      ]);
+      if (checked) currentIds.add(sourceId);
+      else currentIds.delete(sourceId);
+      return {
+        ...current,
+        [gateId]: [...currentIds],
+      };
+    });
+  }
+
+  function addCustomSource(gateId: string, source: SourceGateItem) {
+    setAddedSources((current) => ({
+      ...current,
+      [gateId]: [...(current[gateId] ?? []), source],
+    }));
+    setSourceSelections((current) => ({
+      ...current,
+      [gateId]: [...new Set([...(current[gateId] ?? []), source.id])],
+    }));
   }
 
   async function saveCanvasEmail(artifact: Artifact, value: { design: unknown; html: string; text?: string; subject?: string; preview?: string }) {
@@ -1843,6 +2076,28 @@ export default function StableLoopRunPage() {
             ),
           }
         : {}),
+      ...(gate.gate_type === "source_confirmation"
+        ? {
+            agentId: typeof gate.payload_json.agentId === "string" ? gate.payload_json.agentId : undefined,
+            items: buildSourceGateDecisionItems(
+              readSourceGateItems(gate),
+              new Set(sourceSelections[gate.id] ?? readSourceGateItems(gate).filter((item) => item.include !== false).map((item) => item.id)),
+            ),
+            addedSources: (addedSources[gate.id] ?? []).filter((item) =>
+              (sourceSelections[gate.id] ?? []).includes(item.id),
+            ),
+          }
+        : {}),
+    });
+  }
+
+  function submitRevise(gate: Gate) {
+    setSelectedStepId(null);
+    setSelectedArtifactId(null);
+    setLeftTab("output");
+    setGateTransitionStepId(currentStep?.id ?? gate.id);
+    void post(`/api/workflows/runs/${runId}/gates/${gate.id}/revise`, {
+      feedback: reviseFeedback[gate.id]?.trim() || undefined,
     });
   }
 
@@ -1929,13 +2184,20 @@ export default function StableLoopRunPage() {
               ? "Submit input"
               : gateUiMode === "memory_confirmation" && selectedMemoryIds.size > 0
                 ? `Approve (${selectedMemoryIds.size})`
+              : gateUiMode === "source_confirmation" && selectedSourceIds.size > 0
+                ? `Approve (${selectedSourceIds.size})`
+              : gateUiMode === "draft_review"
+                ? "Save & Approve"
                 : "Approve"
           }
           approveDisabled={
             gateUiMode === "missing_input" && pendingGate
               ? !(inputValues[pendingGate.id] ?? "").trim()
-              : false
+              : gateUiMode === "source_confirmation"
+                ? selectedSourceIds.size === 0
+                : false
           }
+          showRevise={gateUiMode === "draft_review" || gateUiMode === "source_confirmation"}
           onApprove={() => {
             if (!pendingGate || !gateUiMode) return;
             submitGate(
@@ -1943,6 +2205,7 @@ export default function StableLoopRunPage() {
               gateUiMode === "missing_input" ? "input" : "approve",
             );
           }}
+          onRevise={() => pendingGate && submitRevise(pendingGate)}
           onReject={() => pendingGate && submitGate(pendingGate, "reject")}
           onRerun={() => {
             if (!failureRetryTarget) return;
@@ -2019,6 +2282,16 @@ export default function StableLoopRunPage() {
                           onInspect={setMemoryDetail}
                         />
                       ) : null}
+                      {gateUiMode === "source_confirmation" ? (
+                        <SourceEditCanvas
+                          gateId={pendingGate.id}
+                          items={sourceGateItems}
+                          addedSources={sourceGateAdded}
+                          selectedIds={selectedSourceIds}
+                          onToggle={toggleSourceSelection}
+                          onAddSource={addCustomSource}
+                        />
+                      ) : null}
                       {(gateUiMode === "draft_review" || gateUiMode === "pre_send") ? (
                         <DraftReviewWorkspace agentOutput={gateAgentOutput || centerBody}>
                           {activeCanvasArtifact && activeCanvasTemplate ? (
@@ -2040,6 +2313,31 @@ export default function StableLoopRunPage() {
                         <p className="text-[13px] text-[#6b7280]">
                           {memoryGateItems.length} proposed · {selectedMemoryIds.size} selected
                         </p>
+                      </div>
+                    ) : null}
+                    {gateUiMode === "source_confirmation" ? (
+                      <div className="mt-auto space-y-3 border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4">
+                        <p className="text-[13px] text-[#6b7280]">
+                          {sourceGateItems.length + sourceGateAdded.length} proposed · {selectedSourceIds.size} selected
+                        </p>
+                        <textarea
+                          value={reviseFeedback[pendingGate.id] ?? ""}
+                          onChange={(event) => setReviseFeedback((current) => ({ ...current, [pendingGate.id]: event.target.value }))}
+                          placeholder="Optional feedback when revising (re-runs research with your notes)"
+                          rows={2}
+                          className="w-full resize-none rounded-md border border-[#d1d5db] bg-white px-3 py-2 text-[13px] text-[#111827] outline-none focus:ring-2 focus:ring-[#111827]/10"
+                        />
+                      </div>
+                    ) : null}
+                    {gateUiMode === "draft_review" ? (
+                      <div className="mt-auto border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4">
+                        <textarea
+                          value={reviseFeedback[pendingGate.id] ?? ""}
+                          onChange={(event) => setReviseFeedback((current) => ({ ...current, [pendingGate.id]: event.target.value }))}
+                          placeholder="Optional feedback when revising (re-runs the writer)"
+                          rows={2}
+                          className="w-full resize-none rounded-md border border-[#d1d5db] bg-white px-3 py-2 text-[13px] text-[#111827] outline-none focus:ring-2 focus:ring-[#111827]/10"
+                        />
                       </div>
                     ) : null}
                   </EditorialWorkspaceShell>
@@ -2072,6 +2370,17 @@ export default function StableLoopRunPage() {
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex min-w-0 items-center gap-3">
                       <CardTitle className="truncate text-[20px] font-bold tracking-[-0.02em] text-[#111827]">{centerTitle}</CardTitle>
+                      {selectedStep && canRetryStepAttempt(selectedStep, run?.status) ? (
+                        <button
+                          type="button"
+                          title="Retry agent"
+                          disabled={Boolean(busy)}
+                          onClick={() => void post(`/api/workflows/runs/${runId}/steps/${selectedStep.id}/retry`)}
+                          className="shrink-0 p-1.5 text-[#6b7280] transition-colors hover:text-[#111827] disabled:opacity-40"
+                        >
+                          <RefreshCw className="size-4" />
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                   <TabsList variant="line" className="mt-5 h-auto gap-1 rounded-none bg-transparent p-0">
@@ -2127,22 +2436,23 @@ export default function StableLoopRunPage() {
                           const fullText = getStepDisplayContent(attempt);
                           const truncated = preview(fullText, 280);
                           const isExpandable = fullText.length > 280;
+                          const canRetry = canRetryStepAttempt(attempt, run?.status);
                           return (
                             <div key={attempt.id} className="bg-white">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (!isExpandable) return;
-                                  setExpandedAttemptIds((prev) => {
-                                    const next = new Set(prev);
-                                    if (expanded) next.delete(attempt.id);
-                                    else next.add(attempt.id);
-                                    return next;
-                                  });
-                                }}
-                                className="flex w-full items-start justify-between gap-4 p-5 text-left"
-                              >
-                                <div className="min-w-0 flex-1">
+                              <div className="flex w-full items-start justify-between gap-4 p-5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (!isExpandable) return;
+                                    setExpandedAttemptIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (expanded) next.delete(attempt.id);
+                                      else next.add(attempt.id);
+                                      return next;
+                                    });
+                                  }}
+                                  className="min-w-0 flex-1 text-left"
+                                >
                                   <p className="text-sm font-bold uppercase tracking-wide text-slate-500">Agent {attempt.step_index + 1} · Attempt {attempt.attempt}</p>
                                   <h3 className="mt-1 text-lg font-extrabold">{formatWorkerDisplayName(attempt.agent_snapshot?.name ?? attempt.agent_id)}</h3>
                                   <div className={cn("mt-3 text-sm leading-6 text-slate-600", !expanded && "line-clamp-3")}>
@@ -2150,31 +2460,46 @@ export default function StableLoopRunPage() {
                                       ? (expanded ? fullText : truncated)
                                       : attempt.agent_snapshot?.task || "No output yet."}
                                   </div>
-                                </div>
+                                </button>
                                 <div className="flex shrink-0 flex-col items-end gap-2">
                                   <div className="flex items-center gap-2">
-                                    {(attempt.status === "failed" || attempt.status === "cancelled") ? (
-                                      <EditorialActionButton
-                                        label="Rerun"
-                                        glyph="rerun"
-                                        variant="secondary"
+                                    {canRetry ? (
+                                      <button
+                                        type="button"
+                                        title="Retry attempt"
                                         disabled={Boolean(busy)}
                                         onClick={() => void post(`/api/workflows/runs/${runId}/steps/${attempt.id}/retry`)}
-                                        className="h-8 px-3 text-[12px]"
-                                      />
+                                        className="p-1 text-[#6b7280] transition-colors hover:text-[#111827] disabled:opacity-40"
+                                      >
+                                        <RefreshCw className="size-4" />
+                                      </button>
                                     ) : null}
                                     <StatusBadge status={attempt.status} />
                                   </div>
                                   {isExpandable ? (
-                                    <ChevronRight
-                                      className={cn(
-                                        "size-4 text-slate-400 transition-transform",
-                                        expanded && "rotate-90",
-                                      )}
-                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setExpandedAttemptIds((prev) => {
+                                          const next = new Set(prev);
+                                          if (expanded) next.delete(attempt.id);
+                                          else next.add(attempt.id);
+                                          return next;
+                                        });
+                                      }}
+                                      className="p-1 text-slate-400 transition-colors hover:text-slate-600"
+                                      aria-label={expanded ? "Collapse attempt" : "Expand attempt"}
+                                    >
+                                      <ChevronRight
+                                        className={cn(
+                                          "size-4 transition-transform",
+                                          expanded && "rotate-90",
+                                        )}
+                                      />
+                                    </button>
                                   ) : null}
                                 </div>
-                              </button>
+                              </div>
                             </div>
                           );
                         })}
@@ -2307,6 +2632,7 @@ export default function StableLoopRunPage() {
                       phase={phase}
                       selected={selected}
                       isCurrent={isCurrent}
+                      canRetry={canRetryStepAttempt(step, run?.status)}
                       toolRefs={resolveStepToolRefs(step, run?.definition)}
                       onSelect={() => {
                         setSelectedStepId(step.id);

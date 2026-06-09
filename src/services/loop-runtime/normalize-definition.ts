@@ -49,6 +49,18 @@ function draftReviewQuestion(agent: LoopRunAgent): string {
   return "Review this draft before proceeding.";
 }
 
+function isOrphanQaAgent(agent: LoopRunAgent): boolean {
+  const label = `${agent.id} ${agent.name ?? ""} ${agent.goal ?? ""} ${agent.task ?? ""}`.toLowerCase();
+  return /\b(approval|qa|review)\b/i.test(label)
+    && (agent.tools[0]?.ref ?? "") === "internal.llm_only"
+    && !agent.renderTarget;
+}
+
+function isWebSearchAgent(agent: LoopRunAgent): boolean {
+  const tool = agent.tools[0]?.ref ?? "";
+  return tool === "internal.web_search" || /^composio\.[a-z0-9_-]+\.search$/i.test(tool);
+}
+
 /** Fix common architect gate mismatches before runtime validation. */
 export function normalizeLoopDefinitionForRuntime(definition: LoopDefinition): LoopDefinition {
   const parsed = loopDefinitionSchema.parse(definition);
@@ -56,13 +68,16 @@ export function normalizeLoopDefinitionForRuntime(definition: LoopDefinition): L
   const hasOutboundDelivery = parsed.delivery?.target !== "none"
     && (parsed.delivery?.provider?.trim().toLowerCase() ?? "none") !== "none";
 
-  const children = (parsed.agentGraph?.children ?? []).map((agent) => {
+  let children = (parsed.agentGraph?.children ?? []).filter((agent) => !isOrphanQaAgent(agent));
+
+  children = children.map((agent) => {
     const hasApprovedWrite = agentHasApprovedWrite(agent, writeRefs);
 
     if (agent.gate?.type === "pre_send" && !hasApprovedWrite) {
       if (shouldUseDraftReviewGate(agent)) {
         return {
           ...agent,
+          renderTarget: agent.renderTarget ?? "canvas.email",
           gate: {
             type: "draft_review" as const,
             question: draftReviewQuestion(agent),
@@ -73,6 +88,27 @@ export function normalizeLoopDefinitionForRuntime(definition: LoopDefinition): L
         const { gate: _gate, ...withoutGate } = agent;
         return withoutGate;
       }
+    }
+
+    if (isWebSearchAgent(agent) && agent.gate?.type !== "source_confirmation") {
+      return {
+        ...agent,
+        gate: {
+          type: "source_confirmation" as const,
+          question: agent.gate?.question ?? "Select which sources to include. Add custom URLs if needed.",
+        },
+      };
+    }
+
+    if (shouldUseDraftReviewGate(agent) && agent.gate?.type !== "draft_review" && agent.gate?.type !== "pre_send") {
+      return {
+        ...agent,
+        renderTarget: agent.renderTarget ?? "canvas.email",
+        gate: {
+          type: "draft_review" as const,
+          question: draftReviewQuestion(agent),
+        },
+      };
     }
 
     return agent;

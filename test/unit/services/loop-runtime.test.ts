@@ -249,3 +249,51 @@ test("canvas email renderer returns editable template without delivery footer", 
   assert.equal(template.html.includes("RESEND_UNSUBSCRIBE_URL"), false);
   assert.equal(template.design.body.rows.length > 0, true);
 });
+
+test("normalize strips orphan QA agent and ensures writer draft_review gate", () => {
+  const invalid = {
+    ...stableDefinition(),
+    agentGraph: {
+      ...stableDefinition().agentGraph,
+      children: [
+        {
+          id: "writer",
+          name: "Writer Agent",
+          task: "Write newsletter",
+          goal: "Produce newsletter draft",
+          tools: [{ ref: "internal.llm_only" }],
+        },
+        {
+          id: "approval_qa",
+          name: "Approval & QA Agent",
+          task: "Review upstream draft",
+          goal: "Approve newsletter quality",
+          tools: [{ ref: "internal.llm_only" }],
+          gate: { type: "draft_review", question: "Approve?" },
+        },
+      ],
+    },
+  };
+  const normalized = normalizeLoopDefinitionForRuntime(invalid as never);
+  assert.equal(normalized.agentGraph?.children.length, 1);
+  assert.equal(normalized.agentGraph?.children[0]?.gate?.type, "draft_review");
+  assert.equal(normalized.agentGraph?.children[0]?.renderTarget, "canvas.email");
+});
+
+test("normalize adds source_confirmation to web search agents", () => {
+  const definition = {
+    ...stableDefinition(),
+    agentGraph: {
+      ...stableDefinition().agentGraph,
+      children: [{
+        id: "research",
+        name: "Research Agent",
+        task: "Search web",
+        goal: "Find sources",
+        tools: [{ ref: "internal.web_search" }],
+      }],
+    },
+  };
+  const normalized = normalizeLoopDefinitionForRuntime(definition as never);
+  assert.equal(normalized.agentGraph?.children[0]?.gate?.type, "source_confirmation");
+});

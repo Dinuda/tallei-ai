@@ -1,6 +1,7 @@
 export {
   cancelLoopRuntimeRun,
   decideLoopRuntimeGate,
+  reviseLoopRuntimeGate,
   dispatchLoopRuntimeCommands,
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,

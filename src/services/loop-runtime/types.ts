@@ -20,9 +20,23 @@ export const runtimeCommandTypeSchema = z.enum([
   "retry_step",
 ]);
 
+export const approvedWebSourceSchema = z.object({
+  title: z.string().min(1),
+  url: z.string().min(1),
+  snippet: z.string().min(1),
+});
+
+export const operatorRevisionSchema = z.object({
+  feedback: z.string().optional(),
+  editedText: z.string().optional(),
+  at: z.string().min(1),
+});
+
 export const runtimeContextSchema = z.object({
   inputs: z.record(z.string()).default({}),
   approvedMemories: z.array(z.object({ id: z.string(), excerpt: z.string() })).default([]),
+  approvedSources: z.record(z.array(approvedWebSourceSchema)).default({}),
+  operatorRevisions: z.record(operatorRevisionSchema).default({}),
 });
 
 export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definition, ctx) => {

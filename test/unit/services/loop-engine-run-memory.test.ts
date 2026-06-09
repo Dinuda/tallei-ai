@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   applyGateDecisionToRunMemory,
   buildAgentHandoff,
+  buildOperatorRevisionPatch,
   emptyRunMemory,
   hasRequiredRunInputs,
   resolveRequiredInputKeys,
@@ -327,4 +328,88 @@ test("draft placeholder output with required input present opens draft review ga
   assert.equal(result.status, "needs_input");
   assert.equal(result.gateType, "draft_review");
   assert.deepEqual(result.blockers, ["placeholder_detected"]);
+});
+
+test("applyGateDecisionToRunMemory stores approved web sources from source_confirmation gate", () => {
+  const patch = applyGateDecisionToRunMemory({
+    gateType: "source_confirmation",
+    gateAgentId: "web_research",
+    decision: {
+      items: [
+        { title: "Source A", url: "https://a.example", snippet: "Snippet A", include: true },
+        { title: "Source B", url: "https://b.example", snippet: "Snippet B", include: false },
+      ],
+      addedSources: [
+        { title: "Custom", url: "https://custom.example", snippet: "Operator added" },
+      ],
+    },
+    definition: {},
+  });
+
+  assert.deepEqual(patch.approvedSources, {
+    web_research: [
+      { title: "Source A", url: "https://a.example", snippet: "Snippet A" },
+      { title: "Custom", url: "https://custom.example", snippet: "Operator added" },
+    ],
+  });
+});
+
+test("buildAgentHandoff injects approved web sources for downstream agents", () => {
+  const handoff = buildAgentHandoff(
+    {
+      id: "newsletter_writer",
+      name: "Writer",
+      task: "Write newsletter",
+      tools: [{ ref: "internal.llm_only" }],
+    },
+    {
+      ...emptyRunMemory(),
+      approvedSources: {
+        web_research: [{ title: "A", url: "https://a.example", snippet: "Snippet" }],
+      },
+    },
+    {},
+  );
+
+  assert.deepEqual(handoff.curated_web_sources, [{ title: "A", url: "https://a.example", snippet: "Snippet" }]);
+  assert.deepEqual(handoff["approved_sources.web_research"], [{ title: "A", url: "https://a.example", snippet: "Snippet" }]);
+});
+
+test("web_search with sources and source_confirmation gate pauses for operator review", async () => {
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "web_research",
+      name: "Research Agent",
+      task: "Search the web",
+      goal: "Return cited sources",
+      tools: [{ ref: "internal.web_search" }],
+      gate: { type: "source_confirmation", question: "Pick sources" },
+    },
+    result: {
+      text: "Found 1 source.",
+      data: {
+        toolResults: [{
+          ref: "internal.web_search",
+          data: {
+            sources: [{ title: "Example", url: "https://example.com", snippet: "Example snippet" }],
+          },
+        }],
+      },
+    },
+    definition: { goal: "Research topic" },
+    runMemory: emptyRunMemory(),
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.gateType, "source_confirmation");
+});
+
+test("buildOperatorRevisionPatch stores feedback for agent re-run", () => {
+  const patch = buildOperatorRevisionPatch({
+    agentId: "newsletter_writer",
+    feedback: "Make the intro shorter.",
+  });
+  assert.equal(patch.operatorRevisions?.newsletter_writer?.feedback, "Make the intro shorter.");
+  assert.ok(patch.operatorRevisions?.newsletter_writer?.at);
 });

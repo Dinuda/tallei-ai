@@ -12,27 +12,12 @@ import {
   workflowCriticResultSchema,
   type WorkflowCriticResult,
 } from "./contracts.js";
-
-function words(value: string): string[] {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .split(/\s+/)
-    .filter((word) => word.length >= 4 && !["agent", "loop", "with", "from", "that", "this", "when", "then"].includes(word));
-}
-
-function hasMeaningfulOverlap(haystack: string, needle: string): boolean {
-  const normalized = haystack.toLowerCase();
-  const tokens = words(needle);
-  if (tokens.length === 0) return true;
-  const requiredMatches = tokens.length >= 5 ? 2 : 1;
-  let matches = 0;
-  for (const token of tokens) {
-    if (normalized.includes(token)) matches += 1;
-    if (matches >= requiredMatches) return true;
-  }
-  return false;
-}
+import {
+  designText,
+  hasMeaningfulOverlap,
+  isArchitectStandaloneReviewAgent,
+  writesEmailLikeCopy,
+} from "./critic-helpers.js";
 
 function agentDesignText(agent: LoopArchitectOutput["agents"][number]): string {
   return [
@@ -45,16 +30,6 @@ function agentDesignText(agent: LoopArchitectOutput["agents"][number]): string {
     JSON.stringify(agent.outputContract.schema),
     ...(agent.doneCriteria ?? []),
     agent.gate?.question ?? "",
-  ].join("\n");
-}
-
-function designText(design: LoopArchitectOutput): string {
-  return [
-    design.title,
-    design.summary,
-    design.strategyText,
-    ...design.inputsRequired,
-    ...design.agents.map(agentDesignText),
   ].join("\n");
 }
 
@@ -73,8 +48,8 @@ function isShortCircuitToolRef(toolRef: string): boolean {
     || /^composio\.[a-z0-9_-]+\.search$/i.test(toolRef);
 }
 
-function writesEmailLikeCopy(agent: LoopArchitectOutput["agents"][number]): boolean {
-  return /\b(email|newsletter|broadcast)\b/i.test(`${agent.name} ${agent.goal} ${agent.task} ${agent.outputContract.description}`);
+function isWebSearchToolRef(toolRef: string): boolean {
+  return toolRef === "internal.web_search" || /^composio\.[a-z0-9_-]+\.search$/i.test(toolRef);
 }
 
 function critiqueAgainstNoSlopSpec(
@@ -222,8 +197,18 @@ export function critiqueLoopDesign(
       }
     }
 
+    if (isArchitectStandaloneReviewAgent(agent)) {
+      requiredFixes.push(
+        `Agent "${agent.name}" is a standalone approval/QA reviewer. Remove it and put draft_review + canvas.email on the writer agent instead.`,
+      );
+    }
+
+    if (isWebSearchToolRef(agent.tool) && agent.gate?.type !== "source_confirmation") {
+      requiredFixes.push(`Agent "${agent.name}" uses web search and must use gate.type "source_confirmation".`);
+    }
+
     if (isShortCircuitToolRef(agent.tool) && agent.gate?.type === "draft_review") {
-      requiredFixes.push(`Agent "${agent.name}" uses a short-circuit research tool; remove draft_review gate (use memory_confirmation for memory search if needed).`);
+      requiredFixes.push(`Agent "${agent.name}" uses a short-circuit research tool; remove draft_review gate (use source_confirmation or memory_confirmation).`);
     }
 
     if (agent.gate?.type === "pre_send" && !/^composio\.[a-z0-9_-]+\.action\./i.test(agent.tool)) {

@@ -3,9 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
+import { extractWebSearchSources } from "../loop-engine/contracts.js";
 import {
   applyGateDecisionToRunMemory,
   buildAgentHandoff,
+  buildOperatorRevisionPatch,
   isMisclassifiedDraftReviewGate,
   type RunMemory,
 } from "./memory.js";
@@ -40,8 +42,20 @@ function runMemoryFromContext(context: RuntimeContext): RunMemory {
   return {
     inputs: context.inputs,
     approvedMemories: context.approvedMemories,
+    approvedSources: context.approvedSources,
+    operatorRevisions: context.operatorRevisions,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function sourceConfirmationItems(resultData: Record<string, unknown>) {
+  return extractWebSearchSources(resultData).map((source, index) => ({
+    id: source.url || `source_${index + 1}`,
+    title: source.title,
+    url: source.url,
+    snippet: source.snippet,
+    include: true,
+  }));
 }
 
 function compactArtifactBody(body: string, maxChars = 6_000) {
@@ -200,7 +214,7 @@ export async function startManualLoopRun(auth: AuthContext, workflowId: string) 
       `INSERT INTO loop_engine_runs
        (id, tenant_id, user_id, workflow_id, status, definition_snapshot, context_json)
        VALUES ($1, $2, $3, $4, 'queued', $5::jsonb, $6::jsonb)`,
-      [runId, auth.tenantId, auth.userId, workflowId, JSON.stringify(definition), JSON.stringify({ inputs: {}, approvedMemories: [] })],
+      [runId, auth.tenantId, auth.userId, workflowId, JSON.stringify(definition), JSON.stringify({ inputs: {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} })],
     );
     await client.query(
       `INSERT INTO loop_engine_commands
@@ -369,7 +383,64 @@ function gatePayloadForResult(
     stepIndex,
     result: output,
     ...(gateType === "memory_confirmation" ? { items } : {}),
+    ...(gateType === "source_confirmation" ? { items: sourceConfirmationItems(resultData) } : {}),
   };
+}
+
+async function promoteCanvasArtifactToStructuredOutput(
+  db: QueryExecutor,
+  input: {
+    runId: string;
+    canvasArtifactKey: string;
+    structuredArtifactKey: string;
+  },
+) {
+  const canvasRow = await db.query<{
+    tenant_id: string;
+    user_id: string;
+    body: string;
+    data_json: unknown;
+    step_attempt_id: string | null;
+  }>(
+    `SELECT tenant_id, user_id, body, data_json, step_attempt_id
+     FROM loop_engine_artifacts
+     WHERE run_id = $1 AND artifact_key = $2 AND kind = 'canvas_email' AND invalidated_at IS NULL
+     ORDER BY version DESC
+     LIMIT 1`,
+    [input.runId, input.canvasArtifactKey],
+  );
+  const row = canvasRow.rows[0];
+  if (!row) return;
+  const data = asObject(row.data_json);
+  const emailTemplate = asObject(data.emailTemplate);
+  const text = typeof emailTemplate.text === "string" && emailTemplate.text.trim()
+    ? emailTemplate.text.trim()
+    : typeof emailTemplate.html === "string"
+      ? emailTemplate.html
+      : row.body;
+  if (!text.trim()) return;
+  const dataJson = JSON.stringify({
+    text,
+    promotedFromCanvas: input.canvasArtifactKey,
+    emailTemplate,
+  });
+
+  await db.query(
+    `INSERT INTO loop_engine_artifacts
+     (tenant_id, user_id, run_id, step_attempt_id, artifact_key, version, kind, body, data_json)
+     SELECT $1, $2, $3, $4, $5,
+            COALESCE(MAX(version), 0) + 1, 'structured_output', $6, $7::jsonb
+     FROM loop_engine_artifacts WHERE run_id = $3 AND artifact_key = $5`,
+    [
+      row.tenant_id,
+      row.user_id,
+      input.runId,
+      row.step_attempt_id,
+      input.structuredArtifactKey,
+      text,
+      dataJson,
+    ],
+  );
 }
 
 function gateQuestionForEvaluation(input: {
@@ -1142,14 +1213,21 @@ export async function decideLoopRuntimeGate(input: {
     }
     const definition = runtimeDefinitionSchema.parse(gate.definition_snapshot);
     const currentContext = runtimeContextSchema.parse(gate.context_json);
+    const gatePayload = asObject(gate.payload_json);
+    const gateAgentId = typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined;
     const patch = applyGateDecisionToRunMemory({
       gateType: gate.gate_type,
       decision: input.value,
       definition,
+      gateAgentId,
     });
     const nextContext = runtimeContextSchema.parse({
       inputs: { ...currentContext.inputs, ...(patch.inputs ?? {}) },
       approvedMemories: patch.approvedMemories ?? currentContext.approvedMemories,
+      approvedSources: patch.approvedSources
+        ? { ...currentContext.approvedSources, ...patch.approvedSources }
+        : currentContext.approvedSources,
+      operatorRevisions: currentContext.operatorRevisions,
     });
     const status = decision === "input" ? "submitted" : "approved";
     await client.query(
@@ -1158,13 +1236,19 @@ export async function decideLoopRuntimeGate(input: {
       [input.gateId, status, JSON.stringify(input.value)],
     );
     if (decision === "approve") {
-      const gatePayload = asObject(gate.payload_json);
       const canvasArtifactKey = typeof gatePayload.canvasArtifactKey === "string" ? gatePayload.canvasArtifactKey : null;
       if (canvasArtifactKey) {
         await markCanvasArtifactPreview(client, {
           runId: input.runId,
           artifactKey: canvasArtifactKey,
         });
+        if (gate.gate_type === "draft_review") {
+          await promoteCanvasArtifactToStructuredOutput(client, {
+            runId: input.runId,
+            canvasArtifactKey,
+            structuredArtifactKey: canvasArtifactKey.replace(/:canvas\.email$/, ""),
+          });
+        }
       }
     }
     await client.query(
@@ -1186,6 +1270,121 @@ export async function decideLoopRuntimeGate(input: {
   } finally {
     client.release();
   }
+}
+
+export async function reviseLoopRuntimeGate(input: {
+  auth: AuthContext;
+  runId: string;
+  gateId: string;
+  value: Record<string, unknown>;
+}) {
+  const client = await pool.connect();
+  let retryAttemptId: string | null = null;
+  let tenantId = "";
+  let userId = "";
+  let retryAgent: LoopRunAgent | null = null;
+  let retryStepIndex = 0;
+  let retryAttemptNumber = 0;
+  try {
+    await client.query("BEGIN");
+    const gateResult = await client.query<{
+      id: string;
+      status: string;
+      payload_json: unknown;
+      definition_snapshot: unknown;
+      context_json: unknown;
+      tenant_id: string;
+      user_id: string;
+      step_attempt_id: string;
+      step_index: number;
+      attempt: number;
+      agent_snapshot: unknown;
+    }>(
+      `SELECT g.id, g.status, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id,
+              g.step_attempt_id, a.step_index, a.attempt, a.agent_snapshot
+       FROM loop_engine_gates g
+       JOIN loop_engine_runs r ON r.id = g.run_id
+       JOIN loop_engine_step_attempts a ON a.id = g.step_attempt_id
+       WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
+       FOR UPDATE`,
+      [input.gateId, input.runId, input.auth.tenantId, input.auth.userId],
+    );
+    const gate = gateResult.rows[0];
+    if (!gate) throw new Error("Loop gate not found");
+    if (gate.status !== "pending") {
+      await client.query("COMMIT");
+      return { runId: input.runId, gateId: input.gateId, status: gate.status };
+    }
+
+    const gatePayload = asObject(gate.payload_json);
+    const agentId = typeof gatePayload.agentId === "string" ? gatePayload.agentId : "";
+    if (!agentId) throw new Error("Gate payload missing agentId");
+
+    const feedback = typeof input.value.feedback === "string" ? input.value.feedback : undefined;
+    const editedText = typeof input.value.editedText === "string" ? input.value.editedText : undefined;
+    const revisionPatch = buildOperatorRevisionPatch({ agentId, feedback, editedText });
+    const currentContext = runtimeContextSchema.parse(gate.context_json);
+    const nextContext = runtimeContextSchema.parse({
+      ...currentContext,
+      operatorRevisions: {
+        ...currentContext.operatorRevisions,
+        ...(revisionPatch.operatorRevisions ?? {}),
+      },
+    });
+
+    await client.query(
+      `UPDATE loop_engine_gates SET status = 'submitted', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [input.gateId, JSON.stringify({ action: "revise", ...input.value })],
+    );
+    await client.query(
+      `UPDATE loop_engine_runs SET context_json = $2::jsonb, status = 'running', current_step_index = $3, updated_at = NOW()
+       WHERE id = $1`,
+      [input.runId, JSON.stringify(nextContext), gate.step_index],
+    );
+    await client.query(
+      `UPDATE loop_engine_step_attempts
+       SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'waiting_for_gate'`,
+      [gate.step_attempt_id],
+    );
+
+    tenantId = gate.tenant_id;
+    userId = gate.user_id;
+    retryAgent = loopRunAgentSchema.parse(gate.agent_snapshot);
+    retryStepIndex = gate.step_index;
+    retryAttemptNumber = gate.attempt + 1;
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (retryAgent) {
+    retryAttemptId = await createAttempt({
+      tenantId,
+      userId,
+      runId: input.runId,
+      stepIndex: retryStepIndex,
+      agent: retryAgent,
+      attempt: retryAttemptNumber,
+    });
+  }
+
+  if (retryAttemptId) {
+    await enqueueCommand({
+      tenantId,
+      userId,
+      runId: input.runId,
+      stepAttemptId: retryAttemptId,
+      commandType: "execute_step",
+      idempotencyKey: `attempt:${retryAttemptId}:execute`,
+    });
+  }
+
+  return { runId: input.runId, gateId: input.gateId, status: "submitted", action: "revise" };
 }
 
 export async function cancelLoopRuntimeRun(auth: AuthContext, runId: string) {
@@ -1216,16 +1415,38 @@ export async function retryLoopRuntimeStep(auth: AuthContext, runId: string, ste
     step_index: number;
     attempt: number;
     agent_snapshot: unknown;
+    step_status: string;
+    run_status: string;
   }>(
-    `SELECT a.tenant_id, a.user_id, a.step_index, a.attempt, a.agent_snapshot
+    `SELECT a.tenant_id, a.user_id, a.step_index, a.attempt, a.agent_snapshot,
+            a.status AS step_status, r.status AS run_status
      FROM loop_engine_step_attempts a JOIN loop_engine_runs r ON r.id = a.run_id
      WHERE a.id = $1 AND a.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
-       AND a.status IN ('failed', 'cancelled')
      LIMIT 1`,
     [stepAttemptId, runId, auth.tenantId, auth.userId],
   );
   const row = result.rows[0];
-  if (!row) throw new Error("Retryable step attempt not found");
+  const retryable = row && (
+    row.step_status === "failed"
+    || row.step_status === "cancelled"
+    || (row.step_status === "waiting_for_gate" && ["failed", "blocked", "cancelled"].includes(row.run_status))
+  );
+  if (!retryable || !row) throw new Error("Retryable step attempt not found");
+
+  await pool.query(
+    `UPDATE loop_engine_gates
+     SET status = 'rejected', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
+     WHERE step_attempt_id = $1 AND status = 'pending'`,
+    [stepAttemptId, JSON.stringify({ reason: "operator_retry" })],
+  );
+  if (row.step_status === "waiting_for_gate") {
+    await pool.query(
+      `UPDATE loop_engine_step_attempts
+       SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [stepAttemptId],
+    );
+  }
   await pool.query(
     `UPDATE loop_engine_artifacts SET invalidated_at = NOW()
      WHERE run_id = $1 AND step_attempt_id IN (
@@ -1247,7 +1468,8 @@ export async function retryLoopRuntimeStep(auth: AuthContext, runId: string, ste
     attempt: row.attempt + 1,
   });
   await pool.query(
-    `UPDATE loop_engine_runs SET status = 'running', current_step_index = $2, error_json = '{}'::jsonb, updated_at = NOW()
+    `UPDATE loop_engine_runs
+     SET status = 'running', current_step_index = $2, error_json = '{}'::jsonb, finished_at = NULL, updated_at = NOW()
      WHERE id = $1`,
     [runId, row.step_index],
   );
