@@ -51,15 +51,32 @@ import {
   workerSlotLabel,
 } from "./components/agent-panel-ui";
 import { EditorialActionButton } from "./components/glyph-icons";
+import {
+  AgentProgressPips,
+  DraftReviewWorkspace,
+  InputRequiredWorkspace,
+  gateStatusImperative,
+  readGateAgentOutput,
+  resolveInputFieldLabel,
+  resolveInputFieldPlaceholder,
+} from "./components/gate-workspace-ui";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { VisuallyHidden } from "@radix-ui/react-visually-hidden";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArtifactRenderer } from "@/components/renderers";
@@ -81,7 +98,13 @@ type StepAttempt = {
   id: string;
   step_index: number;
   agent_id: string;
-  agent_snapshot: { id?: string; name?: string; task?: string; tools?: Array<{ ref: string }> };
+  agent_snapshot: {
+    id?: string;
+    name?: string;
+    task?: string;
+    tools?: Array<{ ref: string }>;
+    gate?: { type?: Gate["gate_type"]; question?: string };
+  };
   attempt: number;
   status: string;
   created_at: string;
@@ -145,6 +168,7 @@ type RunProjection = {
   current_step_index: number | null;
   definition?: {
     goal?: string;
+    inputsRequired?: string[];
     agentGraph?: {
       parent?: { name?: string; task?: string };
       children?: Array<{ id: string; name?: string; task?: string; tools?: Array<{ ref: string }> }>;
@@ -248,23 +272,43 @@ function EditorialToolbarButton({
   danger?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      disabled={disabled}
-      className={cn(
-        "grid size-9 place-items-center border border-[#d1d5db] bg-white text-[#6b7280] transition-colors hover:bg-[#fafafa] hover:text-[#111827] disabled:opacity-50",
-        danger && "hover:border-[#d9a3a3] hover:text-[#991b1b]",
-      )}
-    >
-      {children}
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={title}
+          onClick={onClick}
+          disabled={disabled}
+          className={cn(
+            "grid size-9 place-items-center border border-[#d1d5db] bg-white text-[#6b7280] transition-colors hover:bg-[#fafafa] hover:text-[#111827] disabled:opacity-50",
+            danger && "hover:border-[#d9a3a3] hover:text-[#991b1b]",
+          )}
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{title}</TooltipContent>
+    </Tooltip>
   );
 }
 
 function getStepText(step: StepAttempt | null | undefined) {
   return step?.output_json?.text?.trim() ?? "";
+}
+
+function getStepDisplayContent(step: StepAttempt | null | undefined): string {
+  const text = getStepText(step);
+  if (text) return text;
+  const error = step?.error_json?.message?.trim();
+  if (error) return error;
+  if (step?.status === "waiting_for_gate") {
+    return "This agent finished its run and is waiting for your approval.";
+  }
+  if (step?.status === "running") return "This agent is still running.";
+  if (step?.status === "queued") return "This agent has not started yet.";
+  const dataPreview = formatJsonPreview(step?.output_json?.data, 2_400);
+  if (dataPreview && dataPreview !== "{}" && dataPreview !== "null") return dataPreview;
+  return "";
 }
 
 function gateTypeShortLabel(gateType: Gate["gate_type"]) {
@@ -280,6 +324,7 @@ function buildParentAgentNarrative({
   currentStep,
   currentStepLabel,
   pendingGate,
+  gateUiMode,
   latestSteps,
   doneSteps,
 }: {
@@ -288,6 +333,7 @@ function buildParentAgentNarrative({
   currentStep: StepAttempt | null;
   currentStepLabel: string;
   pendingGate: Gate | null;
+  gateUiMode: Gate["gate_type"] | null;
   latestSteps: StepAttempt[];
   doneSteps: number;
 }) {
@@ -314,15 +360,15 @@ function buildParentAgentNarrative({
   const upNextWorkerLabel = upNextWorker ? formatWorkerDisplayName(upNextWorker) : null;
 
   let statusLine = "";
-  if (parentRunPhase === "paused" && pendingGate) {
-    const gateHint = pendingGate.gate_type === "memory_confirmation"
+  if (parentRunPhase === "paused" && pendingGate && gateUiMode) {
+    const gateHint = gateUiMode === "memory_confirmation"
       ? "Select which memories the next agent may use."
-      : pendingGate.gate_type === "missing_input"
+      : gateUiMode === "missing_input"
         ? "Provide the missing input in the workspace."
-        : pendingGate.gate_type === "draft_review"
+        : gateUiMode === "draft_review"
           ? "Review the draft in the workspace, then approve or request changes."
           : "Confirm in the workspace before the run continues.";
-    statusLine = `Paused at ${currentStepLabel.toLowerCase()} for ${gateTypeShortLabel(pendingGate.gate_type)}. ${gateHint}${upNextWorkerLabel ? ` After approval, ${upNextWorkerLabel} is next.` : ""}`;
+    statusLine = `Paused at ${currentStepLabel.toLowerCase()} for ${gateTypeShortLabel(gateUiMode)}. ${gateHint}${upNextWorkerLabel ? ` After approval, ${upNextWorkerLabel} is next.` : ""}`;
   } else if (parentRunPhase === "running" && currentStep) {
     statusLine = `Live: ${currentStepLabel.toLowerCase()}. ${doneSteps} of ${latestSteps.length} agents complete${upNextWorkerLabel ? `; next is ${upNextWorkerLabel}` : "; final agent in queue"}.`;
   } else if (parentRunPhase === "blocked") {
@@ -693,16 +739,92 @@ function memoryItemMeta(item: MemoryGateItem) {
 
 function gateWorkspaceTitle(gateType: Gate["gate_type"]) {
   if (gateType === "memory_confirmation") return "Select memories";
-  if (gateType === "missing_input") return "Provide input";
+  if (gateType === "missing_input") return "Input required";
   if (gateType === "draft_review") return "Review the draft";
   return "Approve to send";
 }
 
-function gateWorkspaceSubtitle(gate: Gate) {
-  if (gate.gate_type === "memory_confirmation") return "Choose what the next agent can use.";
-  if (gate.gate_type === "missing_input") return gate.question ?? "Provide the required input to continue.";
-  if (gate.gate_type === "draft_review") return "Review the artifact below and approve or request changes.";
+function gateWorkspaceSubtitle(gate: Gate, uiMode: Gate["gate_type"]) {
+  if (uiMode === "memory_confirmation") return "Choose what the next agent can use.";
+  if (uiMode === "missing_input") {
+    if (/placeholder|unfilled template|output contains/i.test(gate.question ?? "")) {
+      return "The pipeline paused because required information is missing. Review what the agent produced, then fill in the gap.";
+    }
+    return gate.question ?? "Provide the required input to continue.";
+  }
+  if (uiMode === "draft_review") return "Review the draft below. Approve to continue, edit to revise, or reject to stop.";
   return gate.question ?? "Confirm before this run sends or publishes.";
+}
+
+function gateIssueSummary(gate: Gate, blockers: string[]): { title: string; body: string } {
+  const question = gate.question?.trim() ?? "";
+  if (blockers.includes("placeholder_detected")) {
+    return {
+      title: "Placeholder text detected",
+      body: "The agent left template markers or unfilled sections in its output. Provide the real content below, or reject to stop.",
+    };
+  }
+  if (question && !/output contains placeholder|unfilled template/i.test(question)) {
+    return { title: "Input required", body: question };
+  }
+  return {
+    title: "Missing required input",
+    body: "The agent could not continue without information only you can provide.",
+  };
+}
+
+function isInputValidationAgentSnapshot(agent: StepAttempt["agent_snapshot"] | undefined): boolean {
+  const label = `${agent?.id ?? ""} ${agent?.name ?? ""}`.toLowerCase();
+  return label.includes("validator") || label.includes("input_gate") || label.includes("input checker");
+}
+
+function runInputsSatisfied(
+  definition: RunProjection["definition"],
+  context: Record<string, unknown> | undefined,
+): boolean {
+  const keys = definition?.inputsRequired ?? [];
+  if (keys.length === 0) return true;
+  const inputs = context?.inputs && typeof context.inputs === "object" && !Array.isArray(context.inputs)
+    ? context.inputs as Record<string, unknown>
+    : {};
+  return keys.every((key) => typeof inputs[key] === "string" && inputs[key].trim());
+}
+
+function readGateBlockers(gate: Gate): string[] {
+  const result = gate.payload_json?.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+  const goalEval = (result as Record<string, unknown>).goalEval;
+  if (!goalEval || typeof goalEval !== "object" || Array.isArray(goalEval)) return [];
+  const blockers = (goalEval as Record<string, unknown>).blockers;
+  return Array.isArray(blockers) ? blockers.filter((blocker): blocker is string => typeof blocker === "string") : [];
+}
+
+function resolveGateUiContract(input: {
+  gate: Gate;
+  gateStep: StepAttempt | null;
+  run: RunProjection;
+}): Gate["gate_type"] {
+  const { gate, gateStep, run } = input;
+  if (gate.gate_type !== "missing_input") return gate.gate_type;
+
+  const configuredGate = gateStep?.agent_snapshot?.gate?.type;
+  const blockers = readGateBlockers(gate);
+  const inputAgent = isInputValidationAgentSnapshot(gateStep?.agent_snapshot);
+  const inputsReady = runInputsSatisfied(run.definition, run.context);
+
+  if (blockers.includes("placeholder_detected") && !inputAgent) {
+    return configuredGate === "pre_send" ? "pre_send" : "draft_review";
+  }
+  if (/placeholder|unfilled template/i.test(gate.question) && !inputAgent) {
+    return configuredGate === "pre_send" ? "pre_send" : "draft_review";
+  }
+  if (!inputAgent && inputsReady) {
+    return configuredGate === "pre_send" ? "pre_send" : "draft_review";
+  }
+  if (!inputAgent && configuredGate && configuredGate !== "missing_input") {
+    return configuredGate;
+  }
+  return "missing_input";
 }
 
 function getNextWorkerName(
@@ -814,6 +936,58 @@ function EditorialWorkspaceShell({ children, className }: { children: ReactNode;
   );
 }
 
+function LeftPanelLoader() {
+  return (
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#f8fafc] p-4">
+      <div className="absolute inset-0 overflow-hidden">
+        <div
+          className="absolute inset-y-0 left-[-40%] w-[60%] bg-gradient-to-r from-transparent via-white/50 to-transparent"
+          style={{ animation: "left-panel-shimmer 1.8s ease-in-out infinite" }}
+        />
+      </div>
+
+      <div className="relative flex min-h-0 flex-1 flex-col gap-4 overflow-hidden rounded-[14px] border border-[#d1d5db] bg-white p-4 shadow-sm">
+        <div className="flex items-center gap-3 border-b border-[#e5e7eb] pb-3">
+          <div className="size-8 rounded-md bg-[#edf3fb]" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="h-3 w-1/3 rounded-full bg-[#e5e7eb]" />
+            <div className="h-2.5 w-1/2 rounded-full bg-[#eef2ff]" />
+          </div>
+          <div className="h-6 w-14 rounded-full bg-[#eef2ff]" />
+        </div>
+
+        <div className="flex min-h-0 flex-1 gap-3 overflow-hidden">
+          <div className="flex min-h-0 w-[42%] flex-col gap-3 overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+            <div className="h-4 w-1/2 rounded-full bg-[#e5e7eb]" />
+            <div className="h-3 w-full rounded-full bg-[#eef2ff]" />
+            <div className="h-3 w-5/6 rounded-full bg-[#eef2ff]" />
+            <div className="mt-1 flex-1 rounded-[10px] border border-[#e5e7eb] bg-white" />
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden rounded-[12px] border border-[#e5e7eb] bg-[#fafafa] p-3">
+            <div className="h-4 w-2/5 rounded-full bg-[#e5e7eb]" />
+            <div className="h-3 w-4/5 rounded-full bg-[#eef2ff]" />
+            <div className="h-3 w-2/3 rounded-full bg-[#eef2ff]" />
+            <div className="flex-1 rounded-[10px] border border-[#e5e7eb] bg-white" />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 border-t border-[#e5e7eb] pt-3">
+          <div className="h-10 rounded-[10px] bg-[#eef2ff]" />
+          <div className="h-10 rounded-[10px] bg-[#eef2ff]" />
+        </div>
+      </div>
+
+      <style jsx global>{`
+        @keyframes left-panel-shimmer {
+          0% { transform: translateX(-30%); opacity: 0; }
+          20% { opacity: 1; }
+          100% { transform: translateX(260%); opacity: 0; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
 function RunningSlotText({ stages }: { stages: string[] }) {
   const [index, setIndex] = useState(0);
 
@@ -850,6 +1024,7 @@ function RunStatusBand({
   gateResolvedFlash,
   transitioningAfterGate,
   pendingGate,
+  gateUiMode,
   runStatus,
   failureStep,
   failureMessage,
@@ -865,6 +1040,7 @@ function RunStatusBand({
   gateResolvedFlash: boolean;
   transitioningAfterGate: boolean;
   pendingGate: Gate | null;
+  gateUiMode: Gate["gate_type"] | null;
   runStatus: string;
   failureStep: StepAttempt | null;
   failureMessage: string | null;
@@ -1010,27 +1186,27 @@ function RunStatusBand({
             style={{ fontFamily: "var(--font-fustat)" }}
           >
             <div className="min-w-0 flex-1">
-              <GateTypeStamp gateType={pendingGate.gate_type} />
-              <p className="mt-1 truncate text-[14px] font-medium text-[#4a6f96]">Waiting for your decision</p>
+              <GateTypeStamp gateType={gateUiMode ?? pendingGate.gate_type} />
+              <p className="mt-1 truncate text-[14px] font-semibold text-[#1e4070]">
+                {gateUiMode ? gateStatusImperative(gateUiMode) : "Review and decide how to continue"}
+              </p>
             </div>
             <div className="flex shrink-0 items-center gap-3">
-              {(pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send" || pendingGate.gate_type === "memory_confirmation") ? (
-                <EditorialActionButton
-                  label="Request changes"
-                  glyph="reject"
-                  variant="secondary"
-                  onClick={onReject}
-                  disabled={busy}
-                  className="px-5 text-[14px]"
-                />
-              ) : null}
+              <EditorialActionButton
+                label="Reject"
+                glyph="reject"
+                variant="secondary"
+                onClick={onReject}
+                disabled={busy}
+                className="px-4 text-[14px]"
+              />
               <EditorialActionButton
                 label={approveLabel}
                 glyph={approveLabel.startsWith("Submit") ? "submit" : "approve"}
                 variant="primary"
                 onClick={onApprove}
                 disabled={busy || approveDisabled}
-                className="px-6 text-[14px]"
+                className="px-5 text-[14px]"
               />
             </div>
           </motion.div>
@@ -1344,6 +1520,14 @@ export default function StableLoopRunPage() {
     [latestArtifacts],
   );
   const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run]);
+  const gateStep = useMemo(
+    () => latestSteps.find((step) => step.status === "waiting_for_gate") ?? null,
+    [latestSteps],
+  );
+  const gateUiMode = useMemo(
+    () => (run && pendingGate ? resolveGateUiContract({ gate: pendingGate, gateStep, run }) : null),
+    [gateStep, pendingGate, run],
+  );
   const rejectedGate = useMemo(
     () => [...(run?.gates ?? [])].reverse().find((gate) => gate.status === "rejected") ?? null,
     [run?.gates],
@@ -1439,10 +1623,11 @@ export default function StableLoopRunPage() {
       currentStep,
       currentStepLabel,
       pendingGate,
+      gateUiMode,
       latestSteps,
       doneSteps,
     });
-  }, [currentStep, currentStepLabel, doneSteps, latestSteps, parentRunPhase, pendingGate, run]);
+  }, [currentStep, currentStepLabel, doneSteps, gateUiMode, latestSteps, parentRunPhase, pendingGate, run]);
   const activeStageName = useMemo(() => {
     if (currentStep) {
       return formatWorkerDisplayName(currentStep.agent_snapshot?.name ?? `Slot ${currentStep.step_index + 1}`);
@@ -1451,8 +1636,8 @@ export default function StableLoopRunPage() {
     return "Initializing";
   }, [currentStep, pendingGate]);
   const memoryGateItems = useMemo(
-    () => pendingGate?.gate_type === "memory_confirmation" ? readMemoryGateItems(pendingGate) : [],
-    [pendingGate],
+    () => gateUiMode === "memory_confirmation" && pendingGate ? readMemoryGateItems(pendingGate) : [],
+    [gateUiMode, pendingGate],
   );
   const selectedMemoryIds = useMemo(
     () => new Set(memorySelections[pendingGate?.id ?? ""] ?? memoryGateItems.filter((item) => item.include !== false).map((item) => item.id)),
@@ -1504,14 +1689,15 @@ export default function StableLoopRunPage() {
   }, [finalArtifacts, pendingGate, selectedArtifact]);
   const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
+  const showGateWorkspace = Boolean(pendingGate && gateUiMode && !selectedStepId);
   const centerTitle = inspectingAgentOutput
     ? `${formatWorkerDisplayName(selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id ?? "Agent")} output`
     : activeArtifact
       ? `${finalArtifactName} artifact`
       : `${finalArtifactName} artifact`;
   const centerBody = inspectingAgentOutput
-    ? getStepText(selectedStep)
-    : activeArtifact?.body || getStepText(selectedStep);
+    ? getStepDisplayContent(selectedStep)
+    : activeArtifact?.body || getStepDisplayContent(selectedStep);
   const contextEntries = readContextEntries(run?.context);
   const artifactPanelArtifacts = useMemo(() => {
     if (selectedStepContext) {
@@ -1590,9 +1776,21 @@ export default function StableLoopRunPage() {
     () => extractMemorySearchTracesFromSteps(orderedSteps),
     [orderedSteps],
   );
+  const gateAgentOutput = useMemo(() => {
+    if (!pendingGate) return "";
+    return readGateAgentOutput(pendingGate.payload_json, getStepDisplayContent(gateStep));
+  }, [gateStep, pendingGate]);
+  const gateBlockers = useMemo(
+    () => (pendingGate ? readGateBlockers(pendingGate) : []),
+    [pendingGate],
+  );
+  const gateIssue = useMemo(
+    () => (pendingGate ? gateIssueSummary(pendingGate, gateBlockers) : { title: "", body: "" }),
+    [gateBlockers, pendingGate],
+  );
 
   useEffect(() => {
-    if (!pendingGate || pendingGate.gate_type !== "memory_confirmation") return;
+    if (!pendingGate || gateUiMode !== "memory_confirmation") return;
     setMemorySelections((current) => {
       if (current[pendingGate.id]) return current;
       return {
@@ -1600,7 +1798,7 @@ export default function StableLoopRunPage() {
         [pendingGate.id]: memoryGateItems.filter((item) => item.include !== false).map((item) => item.id),
       };
     });
-  }, [memoryGateItems, pendingGate]);
+  }, [gateUiMode, memoryGateItems, pendingGate]);
 
   function toggleMemorySelection(gateId: string, memoryId: string, checked: boolean) {
     setMemorySelections((current) => {
@@ -1670,6 +1868,7 @@ export default function StableLoopRunPage() {
   }
 
   return (
+    <TooltipProvider delayDuration={200}>
     <main className="min-h-screen bg-[#f7f8fb] text-[#121a31]" style={{ fontFamily: "var(--font-fustat)" }}>
       <div className="mx-auto max-w-[1660px] px-7 py-6">
         <header className="mb-7 flex items-start justify-between gap-4">
@@ -1718,6 +1917,7 @@ export default function StableLoopRunPage() {
           gateResolvedFlash={gateResolvedFlash}
           transitioningAfterGate={transitioningAfterGate}
           pendingGate={pendingGate}
+          gateUiMode={gateUiMode}
           runStatus={run.status}
           failureStep={failureRetryTarget}
           failureMessage={failureMessage}
@@ -1725,22 +1925,22 @@ export default function StableLoopRunPage() {
           activeStageName={activeStageName}
           busy={Boolean(busy)}
           approveLabel={
-            pendingGate?.gate_type === "missing_input"
-              ? "Submit"
-              : pendingGate?.gate_type === "memory_confirmation" && selectedMemoryIds.size > 0
+            gateUiMode === "missing_input"
+              ? "Submit input"
+              : gateUiMode === "memory_confirmation" && selectedMemoryIds.size > 0
                 ? `Approve (${selectedMemoryIds.size})`
                 : "Approve"
           }
           approveDisabled={
-            pendingGate?.gate_type === "missing_input"
+            gateUiMode === "missing_input" && pendingGate
               ? !(inputValues[pendingGate.id] ?? "").trim()
               : false
           }
           onApprove={() => {
-            if (!pendingGate) return;
+            if (!pendingGate || !gateUiMode) return;
             submitGate(
               pendingGate,
-              pendingGate.gate_type === "missing_input" ? "input" : "approve",
+              gateUiMode === "missing_input" ? "input" : "approve",
             );
           }}
           onReject={() => pendingGate && submitGate(pendingGate, "reject")}
@@ -1754,7 +1954,7 @@ export default function StableLoopRunPage() {
           <section className="flex h-full min-h-0 flex-col space-y-5">
 
             <AnimatePresence mode="wait">
-              {pendingGate ? (
+              {showGateWorkspace && pendingGate && gateUiMode ? (
                 <motion.div
                   key="gate-review"
                   initial={{ opacity: 0, y: 6 }}
@@ -1765,10 +1965,10 @@ export default function StableLoopRunPage() {
                   <EditorialWorkspaceShell>
                     <div className="border-b border-[#e5e7eb] px-7 py-6">
                       <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
-                        {gateWorkspaceTitle(pendingGate.gate_type)}
+                        {gateWorkspaceTitle(gateUiMode)}
                       </h2>
                       <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
-                        {gateWorkspaceSubtitle(pendingGate)}
+                        {gateWorkspaceSubtitle(pendingGate, gateUiMode)}
                         {nextWorkerName ? (
                           <>
                             {" "}
@@ -1778,8 +1978,8 @@ export default function StableLoopRunPage() {
                       </p>
                     </div>
 
-                    <div className="min-h-0 flex-1 overflow-y-auto">
-                      {pendingGate.gate_type === "memory_confirmation" ? (
+                    <div id="gate-draft-editor" className="min-h-0 flex-1 overflow-y-auto">
+                      {gateUiMode === "memory_confirmation" ? (
                         <MemoryEditCanvas
                           gateId={pendingGate.id}
                           items={memoryGateItems}
@@ -1788,18 +1988,19 @@ export default function StableLoopRunPage() {
                           onInspect={setMemoryDetail}
                         />
                       ) : null}
-                      {pendingGate.gate_type === "missing_input" ? (
-                        <div className="px-7 py-6">
-                          <textarea
-                            value={inputValues[pendingGate.id] ?? ""}
-                            onChange={(event) => setInputValues((current) => ({ ...current, [pendingGate.id]: event.target.value }))}
-                            className="min-h-40 w-full border border-[#d1d5db] bg-white p-4 text-[14px] leading-relaxed text-[#111827] outline-none focus:border-[#9ca3af]"
-                            placeholder={pendingGate.question ?? "Provide the required input"}
-                          />
-                        </div>
+                      {gateUiMode === "missing_input" ? (
+                        <InputRequiredWorkspace
+                          agentOutput={gateAgentOutput}
+                          issueTitle={gateIssue.title}
+                          issueBody={gateIssue.body}
+                          fieldLabel={resolveInputFieldLabel(run.definition?.inputsRequired, pendingGate.question)}
+                          fieldPlaceholder={resolveInputFieldPlaceholder(run.definition?.inputsRequired)}
+                          value={inputValues[pendingGate.id] ?? ""}
+                          onChange={(value) => setInputValues((current) => ({ ...current, [pendingGate.id]: value }))}
+                        />
                       ) : null}
-                      {(pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send") ? (
-                        <div className="px-7 py-6">
+                      {(gateUiMode === "draft_review" || gateUiMode === "pre_send") ? (
+                        <DraftReviewWorkspace agentOutput={gateAgentOutput || centerBody}>
                           {activeCanvasArtifact && activeCanvasTemplate ? (
                             <ArtifactRenderer
                               artifact={activeCanvasArtifact}
@@ -1809,70 +2010,16 @@ export default function StableLoopRunPage() {
                                 await saveCanvasEmail(activeCanvasArtifact, data as Parameters<typeof saveCanvasEmail>[1]);
                               }}
                             />
-                          ) : centerBody ? (
-                            <div className="prose prose-slate max-w-none text-[16px] leading-7">
-                              <Streamdown>{centerBody}</Streamdown>
-                            </div>
-                          ) : (
-                            <p className="py-16 text-center text-sm text-[#9ca3af]">No draft artifact available yet.</p>
-                          )}
-                        </div>
+                          ) : undefined}
+                        </DraftReviewWorkspace>
                       ) : null}
                     </div>
 
-                    {(pendingGate.gate_type === "memory_confirmation" || pendingGate.gate_type === "missing_input") ? (
-                      <div className="mt-auto flex items-center justify-between gap-4 border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4">
+                    {gateUiMode === "memory_confirmation" ? (
+                      <div className="mt-auto border-t border-[#d1d5db] bg-[#fafafa] px-7 py-3">
                         <p className="text-[13px] text-[#6b7280]">
-                          {pendingGate.gate_type === "memory_confirmation"
-                            ? `${memoryGateItems.length} proposed · ${selectedMemoryIds.size} selected`
-                            : "Required before the run can continue"}
+                          {memoryGateItems.length} proposed · {selectedMemoryIds.size} selected
                         </p>
-                        <div className="flex items-center gap-4">
-                          {pendingGate.gate_type === "memory_confirmation" ? (
-                            <EditorialActionButton
-                              label="Request changes"
-                              glyph="reject"
-                              variant="ghost"
-                              onClick={() => submitGate(pendingGate, "reject")}
-                              disabled={Boolean(busy)}
-                              className="text-[14px]"
-                            />
-                          ) : null}
-                          <EditorialActionButton
-                            label={
-                              pendingGate.gate_type === "missing_input"
-                                ? "Submit"
-                                : `Approve${selectedMemoryIds.size > 0 ? ` (${selectedMemoryIds.size})` : ""}`
-                            }
-                            glyph={pendingGate.gate_type === "missing_input" ? "submit" : "approve"}
-                            variant="primary"
-                            onClick={() => submitGate(pendingGate, pendingGate.gate_type === "missing_input" ? "input" : "approve")}
-                            disabled={Boolean(busy) || (pendingGate.gate_type === "missing_input" && !(inputValues[pendingGate.id] ?? "").trim())}
-                            className="px-5 text-[14px]"
-                          />
-                        </div>
-                      </div>
-                    ) : (pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send") ? (
-                      <div className="mt-auto flex items-center justify-between gap-4 border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4 lg:hidden">
-                        <p className="text-[13px] text-[#6b7280]">Review the draft above</p>
-                        <div className="flex items-center gap-4">
-                          <EditorialActionButton
-                            label="Request changes"
-                            glyph="reject"
-                            variant="ghost"
-                            onClick={() => submitGate(pendingGate, "reject")}
-                            disabled={Boolean(busy)}
-                            className="text-[14px]"
-                          />
-                          <EditorialActionButton
-                            label="Approve"
-                            glyph="approve"
-                            variant="primary"
-                            onClick={() => submitGate(pendingGate, "approve")}
-                            disabled={Boolean(busy)}
-                            className="px-5 text-[14px]"
-                          />
-                        </div>
                       </div>
                     ) : null}
                   </EditorialWorkspaceShell>
@@ -1887,32 +2034,7 @@ export default function StableLoopRunPage() {
                   className="h-full"
                 >
                   <EditorialWorkspaceShell className="h-full min-h-0 overflow-hidden">
-                    <div className="flex min-h-full flex-col items-center justify-center px-10 py-16 text-center">
-                      <div className="flex size-20 items-center justify-center rounded-full border border-[#d1d5db] bg-white shadow-sm">
-                        <Loader2 className="size-7 animate-spin text-[#2563eb]" />
-                      </div>
-                      <p className="mt-6 text-[22px] font-bold tracking-[-0.02em] text-[#111827]">
-                        Approval received
-                      </p>
-                      <p className="mt-2 max-w-[28rem] text-[15px] leading-7 text-[#6b7280]">
-                        The process is still running. We’ll show the next reviewed output as soon as the runtime settles.
-                      </p>
-                      <div className="mt-7 flex items-center gap-2">
-                        {[0, 1, 2].map((index) => (
-                          <motion.span
-                            key={index}
-                            className="size-2 rounded-full bg-[#9bb8d9]"
-                            animate={{ opacity: [0.35, 1, 0.35], y: [0, -2, 0] }}
-                            transition={{
-                              duration: 1.2,
-                              repeat: Infinity,
-                              ease: "easeInOut",
-                              delay: index * 0.15,
-                            }}
-                          />
-                        ))}
-                      </div>
-                    </div>
+                    <LeftPanelLoader />
                   </EditorialWorkspaceShell>
                 </motion.div>
               ) : (
@@ -1926,6 +2048,20 @@ export default function StableLoopRunPage() {
                 >
                   <EditorialWorkspaceShell className="h-full min-h-0 overflow-hidden">
               <Tabs value={leftTab} onValueChange={(value) => setLeftTab(value as typeof leftTab)} className="flex h-full min-h-0 flex-1 flex-col gap-0">
+                {pendingGate && gateUiMode && selectedStepId ? (
+                  <div className="flex items-center justify-between gap-4 border-b border-[#bfdbfe] bg-[#eff6ff] px-7 py-3">
+                    <p className="text-[13px] font-medium text-[#1e40af]">
+                      Viewing agent output · {gateWorkspaceTitle(gateUiMode).toLowerCase()} still pending
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStepId(null)}
+                      className="shrink-0 text-[13px] font-semibold text-[#2563eb] hover:text-[#1d4ed8]"
+                    >
+                      Return to approval
+                    </button>
+                  </div>
+                ) : null}
                 <CardHeader className="border-b border-[#e5e7eb] bg-white px-7 py-6">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex min-w-0 items-center gap-3">
@@ -1948,9 +2084,15 @@ export default function StableLoopRunPage() {
                     <TabsContent value="output" className="mt-0 h-full">
                       <div className="flex min-h-full flex-col border border-[#e5e7eb] bg-white p-7">
                         {inspectingAgentOutput ? (
-                          <div className="prose prose-slate max-w-none text-[16px] leading-7">
-                            <Streamdown>{centerBody}</Streamdown>
-                          </div>
+                          centerBody ? (
+                            <div className="prose prose-slate max-w-none text-[16px] leading-7">
+                              <Streamdown>{centerBody}</Streamdown>
+                            </div>
+                          ) : (
+                            <div className="grid min-h-[360px] place-items-center border border-dashed border-[#d1d5db] bg-[#fafafa] p-8 text-center text-sm text-[#6b7280]">
+                              No output from this agent yet.
+                            </div>
+                          )
                         ) : activeCanvasArtifact && activeCanvasTemplate ? (
                           <ArtifactRenderer
                             artifact={activeCanvasArtifact}
@@ -2096,9 +2238,9 @@ export default function StableLoopRunPage() {
               title="Agents"
               icon={Bot}
               meta={(
-                <div className="flex flex-col items-end gap-1.5">
+                <div className="flex flex-col items-end gap-2">
                   <EditorialMetaTag tone={run.status === "succeeded" ? "neutral" : "blue"}>{agentPanelStatusLabel}</EditorialMetaTag>
-                  <EditorialMetaTag>{doneSteps}/{latestSteps.length} agents done</EditorialMetaTag>
+                  <AgentProgressPips steps={latestSteps} currentStepId={currentStep?.id} />
                 </div>
               )}
             >
@@ -2174,7 +2316,26 @@ export default function StableLoopRunPage() {
         </div>
 
         <Dialog open={agentInfoStepId !== null} onOpenChange={(open) => { if (!open) setAgentInfoStepId(null); }}>
-          <DialogContent className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[520px] flex-col overflow-hidden p-0 sm:!max-w-[520px]">
+          <DialogContent showCloseButton={false} className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[520px] flex-col overflow-hidden p-0 sm:!max-w-[520px]">
+            <DialogClose asChild>
+              <button
+                type="button"
+                className="absolute right-3 top-3 z-10 grid size-7 place-items-center text-[#9ca3af] transition-colors hover:text-[#6b7280]"
+                aria-label="Close"
+              >
+                <X className="size-4" />
+              </button>
+            </DialogClose>
+            <VisuallyHidden asChild>
+              <DialogTitle>
+                {agentInfoStepId === "parent" ? parentAgentNarrative.parentName : (
+                  (() => {
+                    const s = orderedSteps.find((st) => st.id === agentInfoStepId);
+                    return s?.agent_snapshot?.name ?? s?.agent_id ?? "Agent info";
+                  })()
+                )}
+              </DialogTitle>
+            </VisuallyHidden>
             {agentInfoStepId === "parent" ? (
               <>
                 <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-6 py-5">
@@ -2245,7 +2406,19 @@ export default function StableLoopRunPage() {
         <Dialog open={Boolean(memoryDetail)} onOpenChange={(open) => {
           if (!open) setMemoryDetail(null);
         }}>
-          <DialogContent className={cn(editorialDialogContentClass, "max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] sm:!max-w-[860px]")}>
+          <DialogContent showCloseButton={false} className={cn(editorialDialogContentClass, "max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] sm:!max-w-[860px]")}>
+            <DialogClose asChild>
+              <button
+                type="button"
+                className="absolute right-3 top-3 z-10 grid size-7 place-items-center text-[#9ca3af] transition-colors hover:text-[#6b7280]"
+                aria-label="Close"
+              >
+                <X className="size-4" />
+              </button>
+            </DialogClose>
+            <VisuallyHidden asChild>
+              <DialogTitle>Memory details</DialogTitle>
+            </VisuallyHidden>
             <EditorialDialogHeader
               title="Memory details"
               description="Review the memory before deciding whether it should be included."
@@ -2291,7 +2464,19 @@ export default function StableLoopRunPage() {
         </Dialog>
 
         <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
-          <DialogContent className={cn(editorialDialogContentClass, "h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] bg-[#f7f8fb] sm:!max-w-[1400px]")}>
+          <DialogContent showCloseButton={false} className={cn(editorialDialogContentClass, "h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] bg-[#f7f8fb] sm:!max-w-[1400px]")}>
+            <DialogClose asChild>
+              <button
+                type="button"
+                className="absolute right-3 top-3 z-10 grid size-7 place-items-center text-[#9ca3af] transition-colors hover:text-[#6b7280]"
+                aria-label="Close"
+              >
+                <X className="size-4" />
+              </button>
+            </DialogClose>
+            <VisuallyHidden asChild>
+              <DialogTitle>Job details</DialogTitle>
+            </VisuallyHidden>
             <EditorialDialogHeader
               title="Job details"
               description="Logs, agent outputs, token usage, and estimated cost for this job."
@@ -2497,31 +2682,8 @@ export default function StableLoopRunPage() {
           </DialogContent>
         </Dialog>
 
-        {pendingGate && (pendingGate.gate_type === "draft_review" || pendingGate.gate_type === "pre_send") ? (
-          <div className="fixed inset-x-0 bottom-0 z-50 border-t border-[#d1d5db] bg-white px-4 py-3 lg:hidden">
-            <div className="flex items-center gap-3">
-              <EditorialActionButton
-                label="Request changes"
-                glyph="reject"
-                variant="ghost"
-                onClick={() => submitGate(pendingGate, "reject")}
-                disabled={Boolean(busy)}
-                size="lg"
-                fullWidth
-              />
-              <EditorialActionButton
-                label="Approve"
-                glyph="approve"
-                variant="primary"
-                onClick={() => submitGate(pendingGate, "approve")}
-                disabled={Boolean(busy)}
-                size="lg"
-                fullWidth
-              />
-            </div>
-          </div>
-        ) : null}
       </div>
     </main>
+    </TooltipProvider>
   );
 }

@@ -1,8 +1,7 @@
 import type { ReactNode } from "react";
+import { PenLine } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-
-import { EditorialActionButton } from "@/components/glyph-action";
 import type { ArtifactRecord } from "./registry";
 
 type EmailTemplateMeta = {
@@ -59,13 +58,16 @@ export function EditorialOpenEditorButton({
   disabled?: boolean;
 }) {
   return (
-    <EditorialActionButton
-      label={label}
-      glyph="edit"
-      variant="primary"
+    <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
-    />
+      className="inline-flex h-10 shrink-0 items-center gap-2 border border-[#92400e] bg-[#fffbeb] px-4 text-[13px] font-semibold text-[#92400e] transition-colors hover:bg-[#fef3c7] disabled:opacity-50"
+      style={{ fontFamily: "var(--font-fustat)" }}
+    >
+      <PenLine className="size-4" aria-hidden />
+      {label}
+    </button>
   );
 }
 

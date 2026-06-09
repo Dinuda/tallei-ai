@@ -263,3 +263,33 @@ test("draft review output with normal pending work language opens draft gate", a
   assert.equal(result.status, "needs_input");
   assert.equal(result.gateType, "draft_review");
 });
+
+test("draft placeholder output with required input present opens draft review gate", async () => {
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "internal_sync_draft_writer",
+      name: "Internal Sync Draft Writer",
+      task: "Write the internal sync email from validated sprint notes.",
+      goal: "Produce a complete internal product sync email.",
+      tools: [{ ref: "internal.llm_only" }],
+      gate: { type: "draft_review", question: "Review and approve this internal sync email?" },
+    },
+    result: {
+      text: "Team,\n\nHere are this week's updates:\n\n[PASTE SPRINT NOTES / TASKS HERE]",
+      data: {},
+    },
+    definition: {
+      inputsRequired: ["sprint_notes"],
+      goal: "Create weekly product sync email.",
+    },
+    runMemory: {
+      ...emptyRunMemory(),
+      inputs: { sprint_notes: "Memory retrieval filtering shipped. Gate continuation hardening in progress." },
+    },
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.gateType, "draft_review");
+  assert.deepEqual(result.blockers, ["placeholder_detected"]);
+});

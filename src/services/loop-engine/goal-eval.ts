@@ -123,11 +123,22 @@ function deterministicGuards(input: {
   }
 
   if (detectPlaceholderText(text)) {
+    if (isInputValidationAgent(input.agent)) {
+      return goalEvalResultSchema.parse({
+        status: "needs_input",
+        reason: "Output contains placeholder or unfilled template text.",
+        blockers: ["placeholder_detected"],
+        gateType: "missing_input",
+      });
+    }
+    const reviewGateType = input.agent.gate?.type === "draft_review" || input.agent.gate?.type === "pre_send"
+      ? input.agent.gate.type
+      : "draft_review";
     return goalEvalResultSchema.parse({
       status: "needs_input",
       reason: "Output contains placeholder or unfilled template text.",
       blockers: ["placeholder_detected"],
-      gateType: input.agent.gate?.type === "missing_input" ? "missing_input" : "missing_input",
+      gateType: reviewGateType,
     });
   }
 

@@ -47,6 +47,33 @@ export function hasRequiredRunInputs(
   return keys.every((key) => Boolean(runMemory.inputs[key]?.trim()));
 }
 
+function readGateEvalBlockers(gatePayload: Record<string, unknown>): string[] {
+  const result = gatePayload.result && typeof gatePayload.result === "object" && !Array.isArray(gatePayload.result)
+    ? gatePayload.result as Record<string, unknown>
+    : {};
+  const goalEval = result.goalEval && typeof result.goalEval === "object" && !Array.isArray(result.goalEval)
+    ? result.goalEval as Record<string, unknown>
+    : {};
+  return Array.isArray(goalEval.blockers)
+    ? goalEval.blockers.filter((blocker): blocker is string => typeof blocker === "string")
+    : [];
+}
+
+/** True when a missing_input gate should advance on approve (draft review), not collect operator paste. */
+export function isMisclassifiedDraftReviewGate(input: {
+  gateType: LoopGateType;
+  gateStatus: string;
+  agent: LoopRunAgent;
+  gatePayload: Record<string, unknown>;
+  definition: LoopDefinition;
+  runMemory: RunMemory;
+}): boolean {
+  if (input.gateType !== "missing_input" || input.gateStatus === "submitted") return false;
+  if (isInputValidationAgent(input.agent)) return false;
+  if (readGateEvalBlockers(input.gatePayload).includes("placeholder_detected")) return true;
+  return hasRequiredRunInputs(input.definition, input.runMemory);
+}
+
 export function applyGateDecisionToRunMemory(input: {
   gateType: LoopGateType;
   decision: Record<string, unknown>;

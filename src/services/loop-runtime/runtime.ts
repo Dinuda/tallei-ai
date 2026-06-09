@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
-import { applyGateDecisionToRunMemory, buildAgentHandoff, type RunMemory } from "./memory.js";
+import {
+  applyGateDecisionToRunMemory,
+  buildAgentHandoff,
+  isMisclassifiedDraftReviewGate,
+  type RunMemory,
+} from "./memory.js";
 import { runLoopAgent } from "../loop-executor/agent-runner.js";
 import { loopRunAgentSchema, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
 import { buildCanvasEmailTemplate, type CanvasEmailTemplate } from "./email-canvas.js";
@@ -660,13 +665,17 @@ async function handleContinueAfterGate(command: CommandRow) {
   if (!gateId) throw new Error("continue_after_gate command has no gate");
   const result = await pool.query<{
     gate_type: LoopGateType;
+    status: string;
+    payload_json: unknown;
     step_attempt_id: string;
     step_index: number;
     attempt: number;
     agent_snapshot: unknown;
     definition_snapshot: unknown;
+    context_json: unknown;
   }>(
-    `SELECT g.gate_type, g.step_attempt_id, a.step_index, a.attempt, a.agent_snapshot, r.definition_snapshot
+    `SELECT g.gate_type, g.status, g.payload_json, g.step_attempt_id, a.step_index, a.attempt,
+            a.agent_snapshot, r.definition_snapshot, r.context_json
      FROM loop_engine_gates g
      JOIN loop_engine_step_attempts a ON a.id = g.step_attempt_id
      JOIN loop_engine_runs r ON r.id = g.run_id
@@ -676,7 +685,17 @@ async function handleContinueAfterGate(command: CommandRow) {
   const row = result.rows[0];
   if (!row) return;
   const definition = runtimeDefinitionSchema.parse(row.definition_snapshot);
-  if (row.gate_type === "missing_input") {
+  const context = runtimeContextSchema.parse(row.context_json);
+  const agent = loopRunAgentSchema.parse(row.agent_snapshot);
+  const treatAsDraftReview = isMisclassifiedDraftReviewGate({
+    gateType: row.gate_type,
+    gateStatus: row.status,
+    agent,
+    gatePayload: asObject(row.payload_json),
+    definition,
+    runMemory: runMemoryFromContext(context),
+  });
+  if (row.gate_type === "missing_input" && !treatAsDraftReview) {
     await pool.query(
       `UPDATE loop_engine_step_attempts SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
        WHERE id = $1 AND status = 'waiting_for_gate'`,
@@ -687,7 +706,7 @@ async function handleContinueAfterGate(command: CommandRow) {
       userId: command.user_id,
       runId: command.run_id,
       stepIndex: row.step_index,
-      agent: loopRunAgentSchema.parse(row.agent_snapshot),
+      agent,
       attempt: row.attempt + 1,
     });
     await pool.query(
