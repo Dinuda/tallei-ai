@@ -3,7 +3,8 @@
  * tool-catalog.ts — Loop tool registry, validation, and agent prompt builders.
  */
 
-import { listComposioToolkitTools, listConnectorAccounts } from "../connectors/composio.js";
+import { connectedAppToolkits, listComposioToolkitTools, listConnectorAccounts } from "../connectors/composio.js";
+import { buildComposioActionContract, buildConnectedSearchContract, getStaticToolContract } from "../tool-spec/tool-contracts.js";
 
 export function normalizeToolRef(ref: string): string {
   const trimmed = ref.trim();
@@ -38,6 +39,7 @@ const CATALOG = [
         riskLevel: "none",
         integrationKey: "internal",
         isActionable: false,
+        contract: getStaticToolContract("internal.llm_only"),
     },
     {
         ref: "internal.memory_search",
@@ -54,6 +56,7 @@ const CATALOG = [
         riskLevel: "none",
         integrationKey: "internal",
         isActionable: true,
+        contract: getStaticToolContract("internal.memory_search"),
     },
     {
         ref: "internal.web_search",
@@ -70,6 +73,7 @@ const CATALOG = [
         riskLevel: "none",
         integrationKey: "internal",
         isActionable: true,
+        contract: getStaticToolContract("internal.web_search"),
     },
     {
         ref: "composio.gmail.search",
@@ -87,6 +91,7 @@ const CATALOG = [
         integrationKey: "gmail",
         isActionable: true,
         composioToolkit: "gmail",
+        contract: buildConnectedSearchContract("gmail"),
     },
     {
         ref: "composio.slack.search",
@@ -104,6 +109,7 @@ const CATALOG = [
         integrationKey: "slack",
         isActionable: true,
         composioToolkit: "slack",
+        contract: buildConnectedSearchContract("slack"),
     },
     {
         ref: "composio.googlecalendar.search",
@@ -121,6 +127,7 @@ const CATALOG = [
         integrationKey: "googlecalendar",
         isActionable: true,
         composioToolkit: "googlecalendar",
+        contract: buildConnectedSearchContract("googlecalendar"),
     },
     {
         ref: "composio.github.search",
@@ -138,6 +145,7 @@ const CATALOG = [
         integrationKey: "github",
         isActionable: true,
         composioToolkit: "github",
+        contract: buildConnectedSearchContract("github"),
     },
     {
         ref: "composio.notion.search",
@@ -155,6 +163,7 @@ const CATALOG = [
         integrationKey: "notion",
         isActionable: true,
         composioToolkit: "notion",
+        contract: buildConnectedSearchContract("notion"),
     },
     {
         ref: "composio.linear.search",
@@ -172,6 +181,7 @@ const CATALOG = [
         integrationKey: "linear",
         isActionable: true,
         composioToolkit: "linear",
+        contract: buildConnectedSearchContract("linear"),
     },
 ];
 const CATALOG_BY_REF = new Map(CATALOG.map((entry) => [entry.ref, entry]));
@@ -195,6 +205,7 @@ function connectedSearchTool(toolkit) {
         isActionable: true,
         composioToolkit: key,
         dynamic: true,
+        contract: buildConnectedSearchContract(key),
     };
 }
 
@@ -226,6 +237,14 @@ function dynamicActionTool(toolkit, action) {
         composioAction: action.actionSlug,
         actionRisk: action.risk,
         dynamic: true,
+        contract: buildComposioActionContract({
+            toolkit,
+            actionSlug: action.actionSlug,
+            name: action.name || action.actionSlug,
+            description: action.description,
+            risk: action.risk,
+            inputSchema: action.inputSchema || { type: "object" },
+        }),
     };
 }
 
@@ -235,7 +254,7 @@ export function listLoopTools() {
 }
 export async function listAvailableLoopToolsForAuth(auth) {
     const accounts = await listConnectorAccounts(auth).catch(() => []);
-    const connected = connectedToolkits(accounts);
+    const connected = new Set(connectedAppToolkits(accounts));
     const staticTools = listLoopTools().filter((tool) => {
         const entry = getLoopTool(tool.ref);
         if (!entry)
@@ -317,17 +336,6 @@ function normalizeIntegrations(definition) {
     }
     return values;
 }
-function connectedToolkits(accounts) {
-    const toolkits = new Set();
-    for (const account of accounts) {
-        if (account.status !== "connected")
-            continue;
-        const appKey = account.appKey?.trim().toLowerCase();
-        if (appKey)
-            toolkits.add(appKey);
-    }
-    return toolkits;
-}
 export async function validateToolAssignments(input) {
     const issues = [];
     const allowedIntegrations = normalizeIntegrations(input.definition);
@@ -335,7 +343,7 @@ export async function validateToolAssignments(input) {
         ? new Set(input.definition.allowedToolRefs.map((ref) => normalizeToolRef(ref)))
         : null;
     const connectors = await listConnectorAccounts(input.auth);
-    const toolkits = connectedToolkits(connectors);
+    const toolkits = new Set(connectedAppToolkits(connectors));
     const strictConnectors = input.strictConnectors ?? false;
     for (const assignment of input.tools) {
         const normalizedRef = normalizeToolRef(assignment.ref);

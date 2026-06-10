@@ -16,6 +16,23 @@ import { executeApprovedComposioAction } from "../connectors/composio.js";
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
 import { loopRunAgentSchema, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
 import { buildCanvasEmailTemplate, type CanvasEmailTemplate } from "./email-canvas.js";
+import {
+  buildArtifactDeliveryPayload,
+  selectLatestArtifactsByKey,
+  selectPreferredArtifact,
+  type ArtifactSelectionRow,
+} from "./artifact-selection.js";
+import { stashContactListAsDocument } from "./contacts-document.js";
+import { parseContactListCsv } from "../loop-executor/csv-parser.js";
+import type { LoopContactRow } from "../loop-executor/types.js";
+import {
+  buildDeliveryRecipientsPatch,
+  injectDeliveryRecipientsIntoPayload,
+  isMissingRecipientError,
+  recipientSourceRequiresOperatorInput,
+  resolveRecipientStatus,
+  type RecipientSourceKind,
+} from "./recipient-resolution.js";
 import { runtimeContextSchema, runtimeDefinitionSchema, type RuntimeContext, type RuntimeDefinition } from "./types.js";
 
 const WORKER_LEASE_MS = 60_000;
@@ -120,15 +137,57 @@ function approvedConnectorAction(definition: RuntimeDefinition, agent: LoopRunAg
 function buildConnectorActionPayload(input: {
   assignmentConfig: Record<string, unknown>;
   priorOutputs: Record<string, unknown>;
-  latestBody: string;
+  deliveryArtifact: Pick<ArtifactSelectionRow, "body" | "data_json"> | null;
   definition: RuntimeDefinition;
+  context: RuntimeContext;
+  actionSlug: string;
 }) {
-  return {
+  const base = {
     ...input.assignmentConfig,
     loopGoal: input.definition.goal,
-    content: input.latestBody,
     priorOutputs: input.priorOutputs,
+    ...buildArtifactDeliveryPayload(input.deliveryArtifact),
   };
+  return injectDeliveryRecipientsIntoPayload({
+    payload: base,
+    context: input.context,
+    actionSlug: input.actionSlug,
+    assignmentConfig: input.assignmentConfig,
+  });
+}
+
+function readRecipientSource(definition: RuntimeDefinition): { kind: RecipientSourceKind; description?: string } {
+  return definition.connectorPolicy?.recipientSource ?? { kind: "none" };
+}
+
+function definitionHasRecipientListAgent(definition: RuntimeDefinition): boolean {
+  return definition.agentGraph?.children.some((child) => child.gate?.type === "recipient_upload") ?? false;
+}
+
+function recipientUploadUiBlocks(recipientSource: { kind: RecipientSourceKind }) {
+  return [{
+    type: "contacts_upload",
+    required: true,
+    mode: recipientSource.kind === "configured" ? "configured" : "uploaded",
+  }];
+}
+
+function preSendUiBlocks(input: {
+  recipientSource: { kind: RecipientSourceKind };
+  recipientStatus: "missing" | "ready";
+  deliveryTarget?: string;
+  hasDedicatedRecipientAgent?: boolean;
+}) {
+  if (input.hasDedicatedRecipientAgent) return [];
+  if (input.recipientStatus === "ready") return [];
+  if (
+    recipientSourceRequiresOperatorInput(input.recipientSource.kind)
+    || input.recipientSource.kind === "configured"
+    || input.deliveryTarget === "subscriber_list"
+  ) {
+    return recipientUploadUiBlocks(input.recipientSource);
+  }
+  return [];
 }
 
 function summarizeConnectorActionPayload(payload: Record<string, unknown>) {
@@ -637,22 +696,22 @@ async function handleExecuteStep(command: CommandRow) {
     body: string;
     data_json: unknown;
     step_index: number;
+    created_at: string;
+    version: number;
   }>(
-    `SELECT DISTINCT ON (artifact_key) artifact_key, kind, body, data_json, step_index
-     FROM (
-       SELECT a.artifact_key, a.kind, a.body, a.data_json, s.step_index, a.version
-       FROM loop_engine_artifacts a
-       JOIN loop_engine_step_attempts s ON s.id = a.step_attempt_id
-       WHERE a.run_id = $1
-         AND a.invalidated_at IS NULL
-         AND a.kind <> 'canvas_email'
-         AND s.step_index < $2
-     ) upstream
-     ORDER BY artifact_key, version DESC`,
+    `SELECT a.artifact_key, a.kind, a.body, a.data_json, s.step_index, a.created_at, a.version
+     FROM loop_engine_artifacts a
+     JOIN loop_engine_step_attempts s ON s.id = a.step_attempt_id
+     WHERE a.run_id = $1
+       AND a.invalidated_at IS NULL
+       AND a.kind <> 'canvas_email'
+       AND s.step_index < $2
+     ORDER BY a.created_at ASC, a.version ASC, a.id ASC`,
     [command.run_id, row.step_index],
   );
+  const latestArtifactRows = selectLatestArtifactsByKey(artifactRows.rows);
   const priorOutputs = Object.fromEntries(
-    artifactRows.rows.map((artifact) => [
+    latestArtifactRows.map((artifact) => [
       artifact.artifact_key,
       {
         artifactId: artifact.artifact_key,
@@ -664,23 +723,76 @@ async function handleExecuteStep(command: CommandRow) {
     ]),
   );
   const agentHandoff = buildAgentHandoff(agent, runMemoryFromContext(context), priorOutputs);
-  const priorComments = artifactRows.rows.map((artifact) => ({
+  const priorComments = latestArtifactRows.map((artifact) => ({
     author: artifact.artifact_key,
     body: compactArtifactBody(artifact.body),
   }));
 
+  if (agent.gate?.type === "recipient_upload") {
+    const recipientSource = readRecipientSource(definition);
+    const recipientStatus = resolveRecipientStatus({
+      recipientSource,
+      context,
+      assignmentConfig: {},
+    });
+    if (recipientStatus === "ready") {
+      await pool.query(
+        `UPDATE loop_engine_step_attempts
+         SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
+        [command.step_attempt_id, JSON.stringify({ text: "Recipient list already saved.", data: { recipientStatus } })],
+      );
+      await queueNextStep(command, definition, row.step_index);
+      return;
+    }
+    await createGate({
+      command,
+      attemptId: command.step_attempt_id,
+      gateType: "recipient_upload",
+      question: agent.gate.question,
+      payload: {
+        agentId: agent.id,
+        contactSource: recipientSource,
+        recipientStatus,
+        recipientCount: context.deliveryRecipients?.recipientCount ?? 0,
+        uiBlocks: recipientUploadUiBlocks(recipientSource),
+      },
+    });
+    await pool.query(
+      `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+      [command.step_attempt_id, JSON.stringify({ text: "Waiting for recipient list.", data: { recipientStatus } })],
+    );
+    return;
+  }
+
   const connectorAction = approvedConnectorAction(definition, agent);
   if (connectorAction) {
-    const latestBody = artifactRows.rows[artifactRows.rows.length - 1]?.body ?? "";
+    const deliveryArtifact = selectPreferredArtifact(latestArtifactRows);
+    const recipientSource = readRecipientSource(definition);
+    const assignmentConfig = asObject(connectorAction.assignment.config);
+    const recipientStatus = resolveRecipientStatus({
+      recipientSource,
+      context,
+      assignmentConfig,
+    });
     const payload = buildConnectorActionPayload({
-      assignmentConfig: asObject(connectorAction.assignment.config),
+      assignmentConfig,
       priorOutputs,
-      latestBody,
+      deliveryArtifact,
       definition,
+      context,
+      actionSlug: connectorAction.actionSlug,
     });
     const specSnapshot = definition.builderMeta?.noSlopSpec ?? null;
     const payloadHash = sha256Json(payload);
     const specHash = sha256Json(specSnapshot);
+    const hasDedicatedRecipientAgent = definitionHasRecipientListAgent(definition);
+    const uiBlocks = preSendUiBlocks({
+      recipientSource,
+      recipientStatus,
+      deliveryTarget: definition.delivery?.target,
+      hasDedicatedRecipientAgent,
+    });
     await createGate({
       command,
       attemptId: command.step_attempt_id,
@@ -693,7 +805,10 @@ async function handleExecuteStep(command: CommandRow) {
         actionSlug: connectorAction.actionSlug,
         toolRef: connectorAction.assignment.ref,
         actionRisk: connectorAction.policy.risk,
-        contactSource: definition.connectorPolicy?.recipientSource ?? { kind: "none" },
+        contactSource: recipientSource,
+        recipientStatus,
+        recipientCount: context.deliveryRecipients?.recipientCount ?? 0,
+        uiBlocks,
         delivery: definition.delivery ?? { provider: "none", target: "none" },
         payload,
         payloadHash,
@@ -876,48 +991,96 @@ async function handleContinueAfterGate(command: CommandRow) {
     }
     const connectorAction = approvedConnectorAction(definition, agent);
     if (!connectorAction) throw new Error("Approved connector action is no longer allowed by the workflow policy");
-    const result = await executeApprovedComposioAction({
-      auth: {
+    const sendPayload = injectDeliveryRecipientsIntoPayload({
+      payload,
+      context,
+      actionSlug: connectorAction.actionSlug,
+      assignmentConfig: asObject(connectorAction.assignment.config),
+    });
+    try {
+      const result = await executeApprovedComposioAction({
+        auth: {
+          tenantId: command.tenant_id,
+          userId: command.user_id,
+          authMode: "internal",
+          plan: "pro",
+        },
+        toolkit: connectorAction.toolkit,
+        actionSlug: connectorAction.actionSlug,
+        payload: sendPayload,
+        idempotencyKey: `run:${command.run_id}:step:${row.step_index}:action:${payloadHash}`,
+      });
+      await persistArtifact({
+        command,
+        attemptId: row.step_attempt_id,
+        artifactKey: agent.outputArtifactId ?? `${agent.id}_connector_action`,
+        kind: "connector_action_result",
+        body: result.ok
+          ? `Connector action completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`
+          : `Connector action failed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
+        data: {
+          result,
+          payloadHash,
+          specHash,
+          toolRef: connectorAction.assignment.ref,
+        },
+      });
+      await pool.query(
+        `UPDATE loop_engine_step_attempts
+         SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status = 'waiting_for_gate'`,
+        [row.step_attempt_id, JSON.stringify({ text: "Connector action completed.", data: { result, payloadHash, specHash } })],
+      );
+      await insertEvent({
         tenantId: command.tenant_id,
         userId: command.user_id,
-        authMode: "internal",
-        plan: "pro",
-      },
-      toolkit: connectorAction.toolkit,
-      actionSlug: connectorAction.actionSlug,
-      payload,
-      idempotencyKey: `run:${command.run_id}:step:${row.step_index}:action:${payloadHash}`,
-    });
-    await persistArtifact({
-      command,
-      attemptId: row.step_attempt_id,
-      artifactKey: agent.outputArtifactId ?? `${agent.id}_connector_action`,
-      kind: "connector_action_result",
-      body: result.ok
-        ? `Connector action completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`
-        : `Connector action failed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
-      data: {
-        result,
-        payloadHash,
-        specHash,
-        toolRef: connectorAction.assignment.ref,
-      },
-    });
-    await pool.query(
-      `UPDATE loop_engine_step_attempts
-       SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status = 'waiting_for_gate'`,
-      [row.step_attempt_id, JSON.stringify({ text: "Connector action completed.", data: { result, payloadHash, specHash } })],
-    );
-    await insertEvent({
-      tenantId: command.tenant_id,
-      userId: command.user_id,
-      runId: command.run_id,
-      stepAttemptId: row.step_attempt_id,
-      eventType: "connector_action_completed",
-      payload: { toolkit: connectorAction.toolkit, actionSlug: connectorAction.actionSlug, payloadHash, replayed: result.replayed ?? false },
-    });
-    await queueNextStep(command, definition, row.step_index);
+        runId: command.run_id,
+        stepAttemptId: row.step_attempt_id,
+        eventType: "connector_action_completed",
+        payload: { toolkit: connectorAction.toolkit, actionSlug: connectorAction.actionSlug, payloadHash, replayed: result.replayed ?? false },
+      });
+      await queueNextStep(command, definition, row.step_index);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isMissingRecipientError(message)) throw error;
+      const recipientSource = readRecipientSource(definition);
+      const recoveryPayload = {
+        ...gatePayload,
+        recipientStatus: "missing",
+        recovery: true,
+        uiBlocks: preSendUiBlocks({
+          recipientSource,
+          recipientStatus: "missing",
+          deliveryTarget: definition.delivery?.target,
+          hasDedicatedRecipientAgent: definitionHasRecipientListAgent(definition),
+        }),
+        lastError: message,
+      };
+      await pool.query(
+        `UPDATE loop_engine_gates
+         SET status = 'pending', decision_json = NULL, completed_at = NULL, payload_json = $2::jsonb, updated_at = NOW()
+         WHERE step_attempt_id = $1 AND gate_type = 'pre_send'`,
+        [row.step_attempt_id, JSON.stringify(recoveryPayload)],
+      );
+      await pool.query(
+        `UPDATE loop_engine_step_attempts
+         SET status = 'waiting_for_gate', error_json = $2::jsonb, finished_at = NULL, updated_at = NOW()
+         WHERE id = $1`,
+        [row.step_attempt_id, JSON.stringify({ message, recoverable: true })],
+      );
+      await pool.query(
+        `UPDATE loop_engine_runs SET status = 'waiting_for_gate', error_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [command.run_id, JSON.stringify({ message, recoverable: true, gateType: "pre_send" })],
+      );
+      await insertEvent({
+        tenantId: command.tenant_id,
+        userId: command.user_id,
+        runId: command.run_id,
+        stepAttemptId: row.step_attempt_id,
+        eventType: "recipient_input_required",
+        payload: { message, gateType: "pre_send" },
+      });
+    }
     return;
   }
   const treatAsDraftReview = isMisclassifiedDraftReviewGate({
@@ -1215,12 +1378,68 @@ export async function decideLoopRuntimeGate(input: {
     const currentContext = runtimeContextSchema.parse(gate.context_json);
     const gatePayload = asObject(gate.payload_json);
     const gateAgentId = typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined;
+    const recipientSource = readRecipientSource(definition);
+    if (decision === "approve" && (gate.gate_type === "pre_send" || gate.gate_type === "recipient_upload")) {
+      const mergedContacts = currentContext.deliveryRecipients?.contacts ?? [];
+      const decisionContacts = Array.isArray(input.value.contacts)
+        ? input.value.contacts as LoopContactRow[]
+        : [];
+      const hasContacts = mergedContacts.length > 0 || decisionContacts.length > 0;
+      const assignmentConfig = asObject(
+        definition.agentGraph?.children.find((child) => child.id === gateAgentId)?.tools?.[0]?.config,
+      );
+      const audienceId = [
+        typeof input.value.audienceId === "string" ? input.value.audienceId : "",
+        typeof currentContext.deliveryRecipients?.audienceId === "string" ? currentContext.deliveryRecipients.audienceId : "",
+        typeof assignmentConfig.audience_id === "string" ? assignmentConfig.audience_id : "",
+        typeof assignmentConfig.audienceId === "string" ? assignmentConfig.audienceId : "",
+        typeof assignmentConfig.segment_id === "string" ? assignmentConfig.segment_id : "",
+        typeof assignmentConfig.list_id === "string" ? assignmentConfig.list_id : "",
+      ].map((value) => value.trim()).find((value) => value.length > 0) ?? "";
+      const recipientStatus = resolveRecipientStatus({
+        recipientSource,
+        context: currentContext,
+        assignmentConfig,
+      });
+      const needsOperatorRecipients = recipientSourceRequiresOperatorInput(recipientSource.kind)
+        || (recipientSource.kind === "configured" && recipientStatus === "missing");
+      if (needsOperatorRecipients && !hasContacts && !audienceId) {
+        throw new Error(
+          gate.gate_type === "recipient_upload"
+            ? "Upload or paste at least one recipient before continuing."
+            : "Upload or paste at least one recipient before approving send.",
+        );
+      }
+    }
     const patch = applyGateDecisionToRunMemory({
       gateType: gate.gate_type,
       decision: input.value,
       definition,
       gateAgentId,
+      recipientSourceKind: recipientSource.kind,
     });
+    let deliveryRecipients = patch.deliveryRecipients
+      ? {
+          ...patch.deliveryRecipients,
+          documentRef: patch.deliveryRecipients.documentRef ?? currentContext.deliveryRecipients?.documentRef,
+          lotRef: patch.deliveryRecipients.lotRef ?? currentContext.deliveryRecipients?.lotRef,
+        }
+      : currentContext.deliveryRecipients;
+    if (deliveryRecipients?.contacts.length && !deliveryRecipients.documentRef) {
+      const docRefs = await stashContactListAsDocument({
+        auth: input.auth,
+        contacts: deliveryRecipients.contacts,
+        titleHint: definition.goal || definition.builderMeta?.noSlopSpec?.title,
+        runId: input.runId,
+      });
+      deliveryRecipients = buildDeliveryRecipientsPatch({
+        contacts: deliveryRecipients.contacts,
+        source: deliveryRecipients.source ?? "uploaded",
+        audienceId: deliveryRecipients.audienceId,
+        documentRef: docRefs.documentRef,
+        lotRef: docRefs.lotRef,
+      });
+    }
     const nextContext = runtimeContextSchema.parse({
       inputs: { ...currentContext.inputs, ...(patch.inputs ?? {}) },
       approvedMemories: patch.approvedMemories ?? currentContext.approvedMemories,
@@ -1228,6 +1447,7 @@ export async function decideLoopRuntimeGate(input: {
         ? { ...currentContext.approvedSources, ...patch.approvedSources }
         : currentContext.approvedSources,
       operatorRevisions: currentContext.operatorRevisions,
+      deliveryRecipients,
     });
     const status = decision === "input" ? "submitted" : "approved";
     await client.query(
@@ -1264,6 +1484,138 @@ export async function decideLoopRuntimeGate(input: {
     );
     await client.query("COMMIT");
     return { runId: input.runId, gateId: input.gateId, status };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function uploadLoopRuntimeGateContacts(input: {
+  auth: AuthContext;
+  runId: string;
+  gateId: string;
+  csvText?: string;
+  contacts?: LoopContactRow[];
+  audienceId?: string;
+}) {
+  const contacts = input.contacts?.length
+    ? input.contacts
+    : input.csvText?.trim()
+      ? parseContactListCsv(input.csvText)
+      : [];
+  if (contacts.length === 0 && !input.audienceId?.trim()) {
+    throw new Error("Provide csvText, contacts, or audienceId.");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const gateResult = await client.query<{
+      gate_type: LoopGateType;
+      status: string;
+      payload_json: unknown;
+      context_json: unknown;
+      definition_snapshot: unknown;
+      workflow_title: string;
+    }>(
+      `SELECT g.gate_type, g.status, g.payload_json, r.context_json, r.definition_snapshot, w.title AS workflow_title
+       FROM loop_engine_gates g
+       JOIN loop_engine_runs r ON r.id = g.run_id
+       JOIN workflows w ON w.id = r.workflow_id
+       WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
+       FOR UPDATE`,
+      [input.gateId, input.runId, input.auth.tenantId, input.auth.userId],
+    );
+    const gate = gateResult.rows[0];
+    if (!gate) throw new Error("Loop gate not found");
+    if (gate.gate_type !== "pre_send" && gate.gate_type !== "recipient_upload") {
+      throw new Error("Contacts can only be uploaded for recipient_upload or pre_send gates.");
+    }
+
+    const definition = runtimeDefinitionSchema.parse(gate.definition_snapshot);
+    const currentContext = runtimeContextSchema.parse(gate.context_json);
+    const recipientSource = readRecipientSource(definition);
+    const sourceKind = recipientSource.kind === "none" ? "uploaded" : recipientSource.kind;
+    const docRefs = contacts.length > 0
+      ? await stashContactListAsDocument({
+          auth: input.auth,
+          contacts,
+          csvText: input.csvText,
+          titleHint: gate.workflow_title || definition.goal,
+          runId: input.runId,
+        })
+      : null;
+    const deliveryRecipients = contacts.length > 0
+      ? buildDeliveryRecipientsPatch({
+          contacts,
+          source: sourceKind === "configured" ? "configured" : sourceKind,
+          audienceId: input.audienceId?.trim() || undefined,
+          documentRef: docRefs?.documentRef,
+          lotRef: docRefs?.lotRef,
+        })
+      : buildDeliveryRecipientsPatch({
+          contacts: currentContext.deliveryRecipients?.contacts ?? [],
+          source: "configured",
+          audienceId: input.audienceId!.trim(),
+        });
+
+    const nextContext = runtimeContextSchema.parse({
+      ...currentContext,
+      deliveryRecipients,
+    });
+    await client.query(
+      `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+      [input.runId, JSON.stringify(nextContext)],
+    );
+
+    const gatePayload = asObject(gate.payload_json);
+    const payload = asObject(gatePayload.payload);
+    const connectorActionSlug = typeof gatePayload.actionSlug === "string" ? gatePayload.actionSlug : "";
+    const sendPayload = injectDeliveryRecipientsIntoPayload({
+      payload,
+      context: nextContext,
+      actionSlug: connectorActionSlug,
+      assignmentConfig: asObject(payload),
+    });
+    const updatedGatePayload = {
+      ...gatePayload,
+      recipientStatus: resolveRecipientStatus({
+        recipientSource,
+        context: nextContext,
+        assignmentConfig: asObject(payload),
+      }),
+      recipientCount: deliveryRecipients.recipientCount,
+      payload: sendPayload,
+      payloadHash: sha256Json(sendPayload),
+      uiBlocks: gate.gate_type === "recipient_upload"
+        ? recipientUploadUiBlocks(recipientSource)
+        : preSendUiBlocks({
+          recipientSource,
+          recipientStatus: resolveRecipientStatus({
+            recipientSource,
+            context: nextContext,
+            assignmentConfig: asObject(payload),
+          }),
+          deliveryTarget: definition.delivery?.target,
+          hasDedicatedRecipientAgent: definitionHasRecipientListAgent(definition),
+        }),
+    };
+    await client.query(
+      `UPDATE loop_engine_gates SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+      [input.gateId, JSON.stringify(updatedGatePayload)],
+    );
+    await client.query("COMMIT");
+    return {
+      runId: input.runId,
+      gateId: input.gateId,
+      recipientCount: deliveryRecipients.recipientCount,
+      preview: deliveryRecipients.contacts.slice(0, 5),
+      audienceId: deliveryRecipients.audienceId ?? null,
+      documentRef: deliveryRecipients.documentRef ?? null,
+      lotRef: deliveryRecipients.lotRef ?? null,
+    };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;

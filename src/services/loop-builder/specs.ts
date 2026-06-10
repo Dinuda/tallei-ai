@@ -1,10 +1,17 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { listDeliveryActionCandidates, selectBestDeliveryAction, type ConnectorDeliveryActionCandidate } from "../connectors/composio.js";
+import {
+  listDeliveryActionCandidates,
+  selectBestDeliveryAction,
+  type ConnectorDeliveryActionCandidate,
+} from "../connectors/composio.js";
 import { normalizeDesignCron } from "../loop-executor/cron.js";
 import { loopBuilderOpenAiChat } from "./openai-chat.js";
+import { scoreConnectorPolicyForDelivery } from "../loop-engine/tool-contract-matcher.js";
 import {
+  defaultRecipientSourceDescription,
   noSlopSpecDeliveryTargetSchema,
+  noSlopSpecDraftSchema,
   noSlopSpecSchema,
   noSlopSpecSnapshotSchema,
   noSlopSpecStatusSchema,
@@ -122,8 +129,32 @@ function renderSpecMarkdown(spec: NoSlopSpec): string {
   return lines.join("\n");
 }
 
+function resolveSubscriberRecipientSource(
+  recipientSource: { kind: string; description?: string },
+  needsSubscriberRecipients: boolean,
+): { kind: "none" | "configured" | "uploaded" | "operator_input"; description?: string } {
+  if (!needsSubscriberRecipients) {
+    return recipientSource as { kind: "none" | "configured" | "uploaded" | "operator_input"; description?: string };
+  }
+  const kind = recipientSource.kind === "none" ? "uploaded" : recipientSource.kind;
+  const description = recipientSource.description?.trim()
+    || defaultRecipientSourceDescription(kind);
+  return { kind: kind as "configured" | "uploaded" | "operator_input", description };
+}
+
 function normalizeGeneratedSpec(input: NoSlopSpec, prompt: string): NoSlopSpec {
-  return noSlopSpecSchema.parse({
+  const target = input.delivery.target ?? "none";
+  const connectorPolicy = input.connectorPolicy ?? undefined;
+  const recipientSource = connectorPolicy?.recipientSource ?? { kind: "none" as const };
+  const needsSubscriberRecipients = target === "subscriber_list";
+  const defaultFailureModes = needsSubscriberRecipients
+    ? ["Pause at pre_send for operator contact upload when no recipients are configured."]
+    : [];
+  const defaultSuccessCriteria = needsSubscriberRecipients
+    ? ["Delivery completes only after operator confirms recipients."]
+    : [];
+
+  return noSlopSpecDraftSchema.parse({
     ...input,
     schedule: {
       ...input.schedule,
@@ -132,9 +163,16 @@ function normalizeGeneratedSpec(input: NoSlopSpec, prompt: string): NoSlopSpec {
     },
     delivery: {
       ...input.delivery,
-      target: input.delivery.target ?? "none",
+      target,
     },
-    connectorPolicy: input.connectorPolicy ?? undefined,
+    successCriteria: input.successCriteria.length > 0 ? input.successCriteria : defaultSuccessCriteria,
+    failureModes: input.failureModes.length > 0 ? input.failureModes : defaultFailureModes,
+    connectorPolicy: connectorPolicy
+      ? {
+          ...connectorPolicy,
+          recipientSource: resolveSubscriberRecipientSource(recipientSource, needsSubscriberRecipients),
+        }
+      : undefined,
   });
 }
 
@@ -158,16 +196,50 @@ function scoreRawWriteAction(action: unknown, target: NoSlopSpec["delivery"]["ta
   const actionSlug = typeof row.actionSlug === "string" ? row.actionSlug : "";
   const description = typeof row.description === "string" ? row.description : "";
   const risk = typeof row.risk === "string" ? row.risk : "";
-  const text = `${toolkit} ${actionSlug} ${description}`.toLowerCase();
-  if (risk !== "send") return 0;
-  if (/\bdraft\b|create[_ -]?draft|email[_ -]?draft/.test(text)) return 0;
-  let score = 10;
-  if (toolkit.toLowerCase() === "resend") score += 100;
-  if (/\b(mailchimp|sendgrid|mailgun|postmark|brevo|beehiiv|convertkit|mailerlite|customerio)\b/.test(toolkit.toLowerCase())) score += 90;
-  if (/\bbroadcast|campaign|audience|segment|newsletter|contact\b/.test(text)) score += 25;
-  if (/\bsend[_ -]?email|email[_ -]?send|send\b/.test(text)) score += 15;
-  if (target === "subscriber_list" && /\b(gmail|outlook)\b/.test(toolkit.toLowerCase())) score -= 25;
-  return Math.max(0, score);
+  if (!toolkit || !actionSlug) return 0;
+  return scoreConnectorPolicyForDelivery({ toolkit, actionSlug, description, risk }, target);
+}
+
+function deliveryCapableWriteActions(rawSpec: unknown, target: NoSlopSpec["delivery"]["target"]): unknown[] {
+  const connectorPolicy = readObject(readObject(rawSpec).connectorPolicy);
+  const existingWriteActions = Array.isArray(connectorPolicy.allowedWriteActions)
+    ? connectorPolicy.allowedWriteActions
+    : [];
+  return existingWriteActions.filter((action) => scoreRawWriteAction(action, target) > 0);
+}
+
+/** Strip contact/draft/non-send write policies and inject a connected delivery candidate when needed. */
+export function prepareLoopSpecJsonForValidation(
+  rawSpec: unknown,
+  candidate: ConnectorDeliveryActionCandidate | null,
+): unknown {
+  const root = readObject(rawSpec);
+  const delivery = readObject(root.delivery);
+  const parsedTarget = noSlopSpecDeliveryTargetSchema.safeParse(delivery.target ?? "none");
+  const target = parsedTarget.success ? parsedTarget.data : "none";
+  if (target === "none") return rawSpec;
+
+  const connectorPolicy = readObject(root.connectorPolicy);
+  const existingWriteActions = Array.isArray(connectorPolicy.allowedWriteActions)
+    ? connectorPolicy.allowedWriteActions
+    : [];
+  const capable = deliveryCapableWriteActions(rawSpec, target);
+  let prepared: Record<string, unknown> = capable.length === existingWriteActions.length
+    ? root
+    : {
+        ...root,
+        connectorPolicy: {
+          ...connectorPolicy,
+          allowedWriteActions: capable,
+        },
+      };
+
+  const existingBest = capable.reduce<number>((max, action) => Math.max(max, scoreRawWriteAction(action, target)), 0);
+  if (candidate && (capable.length === 0 || existingBest < candidate.score)) {
+    prepared = readObject(applyDeliveryCandidateToRawSpec(prepared, candidate));
+  }
+
+  return prepared;
 }
 
 function applyDeliveryCandidateToRawSpec(rawSpec: unknown, candidate: ConnectorDeliveryActionCandidate | null): unknown {
@@ -179,11 +251,9 @@ function applyDeliveryCandidateToRawSpec(rawSpec: unknown, candidate: ConnectorD
   if (target === "none") return rawSpec;
 
   const connectorPolicy = readObject(root.connectorPolicy);
-  const existingWriteActions = Array.isArray(connectorPolicy.allowedWriteActions)
-    ? connectorPolicy.allowedWriteActions
-    : [];
-  const existingBest = existingWriteActions.reduce((max, action) => Math.max(max, scoreRawWriteAction(action, target)), 0);
-  if (existingBest >= candidate.score) return rawSpec;
+  const capable = deliveryCapableWriteActions(rawSpec, target);
+  const existingBest = capable.reduce<number>((max, action) => Math.max(max, scoreRawWriteAction(action, target)), 0);
+  if (capable.length > 0 && existingBest >= candidate.score) return rawSpec;
 
   return {
     ...root,
@@ -194,7 +264,21 @@ function applyDeliveryCandidateToRawSpec(rawSpec: unknown, candidate: ConnectorD
         candidate.toolkit,
       ])],
       allowedWriteActions: [actionPolicyFromCandidate(candidate)],
-      recipientSource: connectorPolicy.recipientSource ?? { kind: target === "subscriber_list" ? "uploaded" : "operator_input" },
+      recipientSource: (() => {
+        const kind = readObject(connectorPolicy.recipientSource).kind;
+        const resolvedKind = typeof kind === "string" && kind !== "none"
+          ? kind
+          : target === "subscriber_list"
+            ? "uploaded"
+            : "operator_input";
+        const existingDescription = typeof readObject(connectorPolicy.recipientSource).description === "string"
+          ? readObject(connectorPolicy.recipientSource).description as string
+          : undefined;
+        return {
+          kind: resolvedKind,
+          description: existingDescription?.trim() || defaultRecipientSourceDescription(resolvedKind),
+        };
+      })(),
       deliveryExpectation: connectorPolicy.deliveryExpectation ?? `Send via ${candidate.toolkit}/${candidate.actionSlug} after per-run approval.`,
     },
   };
@@ -207,11 +291,56 @@ async function bestDeliveryCandidateForRawSpec(auth: AuthContext, rawSpec: unkno
   return selectBestDeliveryAction({ auth, target: parsedTarget.data });
 }
 
-export function mapLoopSpecRowForTest(row: LoopSpecRow): LoopSpecView {
-  const toIso = (value: string | Date | null): string | null => {
-    if (!value) return null;
-    return value instanceof Date ? value.toISOString() : value;
-  };
+function toIsoTimestamp(value: string | Date | null): string | null {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+export async function hydrateLoopSpecJson(
+  auth: AuthContext,
+  rawSpec: unknown,
+  options?: { mode?: "draft" | "approved" },
+): Promise<NoSlopSpec> {
+  const mode = options?.mode ?? "approved";
+  const normalized = normalizeSpecJson(rawSpec);
+  const candidate = await bestDeliveryCandidateForRawSpec(auth, normalized);
+  const prepared = prepareLoopSpecJsonForValidation(normalized, candidate);
+  const parsedTarget = noSlopSpecDeliveryTargetSchema.safeParse(readObject(readObject(prepared).delivery).target ?? "none");
+  if (
+    mode === "approved"
+    && parsedTarget.success
+    && parsedTarget.data !== "none"
+    && deliveryCapableWriteActions(prepared, parsedTarget.data).length === 0
+  ) {
+    throw new Error(
+      "Outbound delivery requires a connected send app (e.g. Resend under Connected Apps). "
+      + "Connect your provider under Connected Apps, then re-draft or refine the spec.",
+    );
+  }
+  const schema = mode === "draft" ? noSlopSpecDraftSchema : noSlopSpecSchema;
+  return schema.parse(prepared);
+}
+
+async function mapSpecRow(
+  auth: AuthContext,
+  row: LoopSpecRow,
+  options?: { persistRepair?: boolean },
+): Promise<LoopSpecView> {
+  const specJson = await hydrateLoopSpecJson(auth, row.spec_json, {
+    mode: row.status === "approved" ? "approved" : "draft",
+  });
+  if (options?.persistRepair && row.status === "approved") {
+    const repaired = JSON.stringify(specJson);
+    const stored = typeof row.spec_json === "string" ? row.spec_json : JSON.stringify(row.spec_json);
+    if (repaired !== stored) {
+      await pool.query(
+        `UPDATE loop_specs
+         SET spec_json = $4::jsonb, updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+        [row.id, auth.tenantId, auth.userId, repaired],
+      );
+    }
+  }
 
   return {
     id: row.id,
@@ -221,15 +350,31 @@ export function mapLoopSpecRowForTest(row: LoopSpecRow): LoopSpecView {
     version: row.version,
     sourcePrompt: row.source_prompt,
     bodyMarkdown: row.body_markdown,
-    specJson: noSlopSpecSchema.parse(row.spec_json),
-    approvedAt: toIso(row.approved_at),
+    specJson,
+    approvedAt: toIsoTimestamp(row.approved_at),
     approvedByUserId: row.approved_by_user_id,
-    createdAt: toIso(row.created_at) ?? new Date(0).toISOString(),
-    updatedAt: toIso(row.updated_at) ?? new Date(0).toISOString(),
+    createdAt: toIsoTimestamp(row.created_at) ?? new Date(0).toISOString(),
+    updatedAt: toIsoTimestamp(row.updated_at) ?? new Date(0).toISOString(),
   };
 }
 
-const mapSpecRow = mapLoopSpecRowForTest;
+/** Synchronous mapper for unit tests with already-valid spec JSON. */
+export function mapLoopSpecRowForTest(row: LoopSpecRow): LoopSpecView {
+  return {
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    status: noSlopSpecStatusSchema.parse(row.status),
+    version: row.version,
+    sourcePrompt: row.source_prompt,
+    bodyMarkdown: row.body_markdown,
+    specJson: noSlopSpecSchema.parse(row.spec_json),
+    approvedAt: toIsoTimestamp(row.approved_at),
+    approvedByUserId: row.approved_by_user_id,
+    createdAt: toIsoTimestamp(row.created_at) ?? new Date(0).toISOString(),
+    updatedAt: toIsoTimestamp(row.updated_at) ?? new Date(0).toISOString(),
+  };
+}
 
 function normalizeSpecJson(input: unknown): unknown {
   if (typeof input !== "string") return input;
@@ -248,9 +393,14 @@ function specSystemPrompt(): string {
     "Return JSON only. Do not return markdown.",
     "The spec is the behavioral source of truth a user approves before agents are generated.",
     "Write precise goals, guardrails, success criteria, and failure modes.",
+    "delivery.target MUST be exactly one of: subscriber_list, team_email, operator, none. Never use connected_app or other invented values — use subscriber_list for newsletter/broadcast via Connected Apps.",
     "Default to delivery.target none unless the user explicitly asks the loop to send, post, publish, create, update, or delete through a connected app.",
-    "If outbound delivery is requested, add connectorPolicy.allowedWriteActions with requiresPreSendApproval true and a non-agent recipientSource. Never let agents invent recipients.",
-    "Use only Connected delivery action candidates for outbound delivery. For subscriber/newsletter delivery, prefer the highest-scored Resend/newsletter/email-service send action. Do not use draft/compose/preview actions as delivery actions.",
+    "Do not require full delivery configuration in the draft spec. Recipients, audience IDs, and final send approval are collected at runtime by specialist agents and pre_send gates — not as upfront user inputs.",
+    "If outbound delivery is requested, describe the intent in delivery.description. connectorPolicy.allowedWriteActions may be omitted in drafts; they are bound from Connected Apps at approve/generate. Never let agents invent recipients.",
+    "For subscriber_list delivery, set recipientSource.kind to uploaded, configured, or operator_input with a short description of how recipients arrive at pre_send.",
+    "Include failureModes: Pause at pre_send for operator contact upload when no recipients are configured.",
+    "Include successCriteria: Delivery completes only after operator confirms recipients.",
+    "When Connected Apps external-effect candidates are listed, choose only actions whose skills/resources/effects match the requested workflow. Do not infer hidden capabilities from provider names.",
     "Use a 5-field cron only when cadence is clear; otherwise describe the schedule and omit cron.",
     "",
     "JSON shape:",
@@ -301,12 +451,12 @@ async function generateSpecJson(input: {
     input.currentSpec ? `Current spec markdown:\n${input.currentSpec.bodyMarkdown}` : null,
     input.feedback ? `Requested refinement:\n${input.feedback}` : null,
     [
-      "Connected delivery action candidates:",
+      "Connected Apps external-effect action candidates:",
       ...[...subscriberCandidates, ...teamCandidates]
         .slice(0, 12)
         .map((candidate) => `- ${candidate.toolRef} (${candidate.reason}, score ${candidate.score})`),
       subscriberCandidates.length === 0 && teamCandidates.length === 0
-        ? "- none discovered; default delivery.target to none until a send-capable connector is connected"
+        ? "- none discovered; default delivery.target to none until a matching external-effect app is connected under Connected Apps"
         : "",
     ].filter(Boolean).join("\n"),
   ].filter(Boolean).join("\n\n");
@@ -330,8 +480,8 @@ async function generateSpecJson(input: {
   }
 
   const candidate = await bestDeliveryCandidateForRawSpec(input.auth, rawSpec);
-  const normalizedRawSpec = applyDeliveryCandidateToRawSpec(rawSpec, candidate);
-  return normalizeGeneratedSpec(noSlopSpecSchema.parse(normalizedRawSpec), input.prompt);
+  const prepared = prepareLoopSpecJsonForValidation(rawSpec, candidate);
+  return normalizeGeneratedSpec(noSlopSpecDraftSchema.parse(prepared), input.prompt);
 }
 
 export async function draftLoopSpec(input: {
@@ -361,7 +511,7 @@ export async function draftLoopSpec(input: {
       JSON.stringify(specJson),
     ],
   );
-  return mapSpecRow(result.rows[0]);
+  return mapSpecRow(input.auth, result.rows[0]);
 }
 
 export async function listLoopSpecs(auth: AuthContext): Promise<LoopSpecView[]> {
@@ -374,7 +524,7 @@ export async function listLoopSpecs(auth: AuthContext): Promise<LoopSpecView[]> 
      LIMIT 100`,
     [auth.tenantId, auth.userId],
   );
-  return result.rows.map(mapSpecRow);
+  return Promise.all(result.rows.map((row) => mapSpecRow(auth, row)));
 }
 
 export async function getLoopSpec(auth: AuthContext, specId: string): Promise<LoopSpecView | null> {
@@ -386,7 +536,7 @@ export async function getLoopSpec(auth: AuthContext, specId: string): Promise<Lo
      LIMIT 1`,
     [specId, auth.tenantId, auth.userId],
   );
-  return result.rows[0] ? mapSpecRow(result.rows[0]) : null;
+  return result.rows[0] ? mapSpecRow(auth, result.rows[0], { persistRepair: true }) : null;
 }
 
 export async function refineLoopSpec(input: {
@@ -420,7 +570,7 @@ export async function refineLoopSpec(input: {
     [input.specId, input.auth.tenantId, input.auth.userId, title, bodyMarkdown, JSON.stringify(specJson)],
   );
   if (!result.rows[0]) throw new Error("Loop spec not found or not editable");
-  return mapSpecRow(result.rows[0]);
+  return mapSpecRow(input.auth, result.rows[0]);
 }
 
 export async function approveLoopSpec(input: {
@@ -435,14 +585,7 @@ export async function approveLoopSpec(input: {
   const bodyMarkdown = input.bodyMarkdown?.trim() || current.bodyMarkdown;
   if (!bodyMarkdown) throw new Error("Spec markdown is required");
   const rawSpec = normalizeSpecJson(input.specJson ?? current.specJson);
-  const candidate = await bestDeliveryCandidateForRawSpec(input.auth, rawSpec);
-  const parsedSpec = noSlopSpecSchema.parse(applyDeliveryCandidateToRawSpec(rawSpec, candidate));
-  if (
-    parsedSpec.delivery.target !== "none"
-    && parsedSpec.connectorPolicy.allowedWriteActions.length === 0
-  ) {
-    throw new Error("Outbound specs require at least one approved connector write action");
-  }
+  const parsedSpec = await hydrateLoopSpecJson(input.auth, rawSpec);
 
   const result = await pool.query<LoopSpecRow>(
     `UPDATE loop_specs
@@ -458,7 +601,7 @@ export async function approveLoopSpec(input: {
     [input.specId, input.auth.tenantId, input.auth.userId, bodyMarkdown, JSON.stringify(parsedSpec)],
   );
   if (!result.rows[0]) throw new Error("Loop spec not found or not approvable");
-  return mapSpecRow(result.rows[0]);
+  return mapSpecRow(input.auth, result.rows[0]);
 }
 
 export async function archiveLoopSpec(auth: AuthContext, specId: string): Promise<void> {

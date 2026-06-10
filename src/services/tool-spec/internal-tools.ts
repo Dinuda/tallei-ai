@@ -1,4 +1,5 @@
 import type { ToolSpec } from "./types.js";
+import { getStaticToolContract } from "./tool-contracts.js";
 
 export const INTERNAL_TOOL_SPECS: ToolSpec[] = [
   {
@@ -15,7 +16,7 @@ export const INTERNAL_TOOL_SPECS: ToolSpec[] = [
       },
       required: ["text"]
     },
-    handoffFormat: "Output text is passed as `handoff.<agent_id>.text` to downstream agents. For email/newsletter agents, also set renderTarget `canvas.email`, artifactRole `draft_body`, and gate `draft_review` so the draft renders in the canvas for human review.",
+    handoffFormat: "Output text is passed as `handoff.<agent_id>.text` to downstream agents. For email/newsletter agents, choose artifactRole, renderTarget, and gate explicitly based on whether the workflow needs structured output, visual editing, operator review, or no human gate.",
     useCases: [
       "Draft an email from research findings",
       "Summarize multiple agent outputs into a cohesive report",
@@ -31,7 +32,8 @@ export const INTERNAL_TOOL_SPECS: ToolSpec[] = [
     ],
     risk: "none",
     requiresConnector: false,
-    requiresPreSendApproval: false
+    requiresPreSendApproval: false,
+    contract: getStaticToolContract("internal.llm_only") ?? undefined,
   },
   {
     ref: "internal.memory_search",
@@ -83,7 +85,8 @@ export const INTERNAL_TOOL_SPECS: ToolSpec[] = [
     ],
     risk: "none",
     requiresConnector: false,
-    requiresPreSendApproval: false
+    requiresPreSendApproval: false,
+    contract: getStaticToolContract("internal.memory_search") ?? undefined,
   },
   {
     ref: "internal.web_search",
@@ -132,7 +135,8 @@ export const INTERNAL_TOOL_SPECS: ToolSpec[] = [
     ],
     risk: "none",
     requiresConnector: false,
-    requiresPreSendApproval: false
+    requiresPreSendApproval: false,
+    contract: getStaticToolContract("internal.web_search") ?? undefined,
   },
 ];
 

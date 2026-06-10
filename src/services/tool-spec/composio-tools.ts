@@ -1,5 +1,6 @@
-import { listComposioToolkitTools } from "../connectors/composio.js";
+import { filterComposioToolkitActions, listComposioToolkitTools } from "../connectors/composio.js";
 import type { ToolSpec, ComposioActionSpec } from "./types.js";
+import { buildComposioActionContract, buildConnectedSearchContract } from "./tool-contracts.js";
 
 const composioToolkitCache = new Map<string, { spec: ToolSpec; cachedAt: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -11,7 +12,7 @@ export async function generateComposioToolkitSpec(toolkit: string): Promise<Tool
   }
 
   try {
-    const actions = await listComposioToolkitTools(toolkit);
+    const actions = filterComposioToolkitActions(await listComposioToolkitTools(toolkit));
     if (actions.length === 0) {
       return null;
     }
@@ -22,15 +23,15 @@ export async function generateComposioToolkitSpec(toolkit: string): Promise<Tool
       description: action.description,
       risk: action.risk,
       inputSchema: action.inputSchema,
+      contract: buildComposioActionContract(action),
     }));
 
-    const readActions = actionSpecs.filter((a) => a.risk === "read");
-    const writeActions = actionSpecs.filter((a) => a.risk === "write");
-    const sendActions = actionSpecs.filter((a) => a.risk === "send");
-    const destructiveActions = actionSpecs.filter((a) => a.risk === "destructive");
+    const readActions = actionSpecs.filter((a) => a.contract?.effect === "read_external");
+    const writeActions = actionSpecs.filter((a) => a.contract?.effect === "write_external");
+    const destructiveActions = actionSpecs.filter((a) => a.contract?.effect === "irreversible_external");
 
     const toolkitLabel = toolkit.charAt(0).toUpperCase() + toolkit.slice(1);
-    const description = `${toolkitLabel} integration via Composio. Provides ${actionSpecs.length} actions across read (${readActions.length}), write (${writeActions.length}), send (${sendActions.length}), and destructive (${destructiveActions.length}) operations.`;
+    const description = `${toolkitLabel} integration via Composio. Provides ${actionSpecs.length} actions across read (${readActions.length}), external write (${writeActions.length}), and irreversible (${destructiveActions.length}) operations.`;
 
     const useCases: string[] = [];
     if (readActions.length > 0) {
@@ -40,10 +41,6 @@ export async function generateComposioToolkitSpec(toolkit: string): Promise<Tool
     if (writeActions.length > 0) {
       useCases.push(`Create or update ${toolkitLabel} items`);
       useCases.push(`Modify ${toolkitLabel} resources with approval`);
-    }
-    if (sendActions.length > 0) {
-      useCases.push(`Send ${toolkitLabel} messages or notifications`);
-      useCases.push(`Publish content to ${toolkitLabel}`);
     }
     if (destructiveActions.length > 0) {
       useCases.push(`Delete or archive ${toolkitLabel} items (requires explicit approval)`);
@@ -79,11 +76,12 @@ export async function generateComposioToolkitSpec(toolkit: string): Promise<Tool
       handoffFormat: `Output is passed as \`handoff.<agent_id>\` to downstream agents. Results vary by action but typically include \`text\` (formatted summary) and \`data\` (structured results). For search actions, \`data.sources\` contains array of results. For send/write actions, \`data\` contains execution status.`,
       useCases,
       limitations,
-      risk: destructiveActions.length > 0 ? "destructive" : sendActions.length > 0 ? "send" : writeActions.length > 0 ? "write" : "read",
+      risk: destructiveActions.length > 0 ? "destructive" : writeActions.length > 0 ? "write" : "read",
       requiresConnector: true,
       requiresPreSendApproval: true,
       toolkit,
       actions: actionSpecs,
+      contract: buildConnectedSearchContract(toolkit),
     };
 
     composioToolkitCache.set(toolkit, { spec, cachedAt: Date.now() });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-import { loopDefinitionSchema, loopRunAgentSchema } from "../loop-executor/types.js";
+import { loopContactRowSchema, loopDefinitionSchema, loopRunAgentSchema } from "../loop-executor/types.js";
+import { connectorActionToolRef, getStaticToolContract } from "../tool-spec/tool-contracts.js";
 
 export const runtimeRunStatusSchema = z.enum([
   "queued",
@@ -32,12 +33,27 @@ export const operatorRevisionSchema = z.object({
   at: z.string().min(1),
 });
 
+export const runtimeDeliveryRecipientsSchema = z.object({
+  uploadedAt: z.string().min(1),
+  contacts: z.array(loopContactRowSchema),
+  recipientCount: z.number().int().nonnegative(),
+  source: z.enum(["uploaded", "configured", "operator_input"]).optional(),
+  audienceId: z.string().min(1).optional(),
+  documentRef: z.string().min(1).optional(),
+  lotRef: z.string().min(1).optional(),
+});
+
 export const runtimeContextSchema = z.object({
   inputs: z.record(z.string()).default({}),
   approvedMemories: z.array(z.object({ id: z.string(), excerpt: z.string() })).default([]),
   approvedSources: z.record(z.array(approvedWebSourceSchema)).default({}),
   operatorRevisions: z.record(operatorRevisionSchema).default({}),
+  deliveryRecipients: runtimeDeliveryRecipientsSchema.optional(),
 });
+
+function approvedConnectorToolRefs(action: { toolkit: string; actionSlug: string }): string[] {
+  return [connectorActionToolRef(action)];
+}
 
 export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definition, ctx) => {
   const engineVersion = definition.engineVersion ?? definition.builderMeta?.engineVersion;
@@ -56,23 +72,9 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
     }
   }
   const approvedWriteActions = definition.connectorPolicy?.allowedWriteActions ?? [];
-  const approvedWriteRefs = new Set(approvedWriteActions.map((action) =>
-    `composio.${action.toolkit.toLowerCase()}.action.${action.actionSlug.toLowerCase()}`
-  ));
-  if (definition.delivery?.target === "subscriber_list") {
-    const provider = definition.delivery.provider.toLowerCase();
-    const selected = approvedWriteActions.find((action) =>
-      `composio.${action.toolkit.toLowerCase()}.action.${action.actionSlug.toLowerCase()}` === provider
-    );
-    const selectedText = selected ? `${selected.toolkit} ${selected.actionSlug} ${selected.description ?? ""}`.toLowerCase() : "";
-    if (!selected || selected.risk !== "send" || /\bdraft\b|create[_ -]?draft|email[_ -]?draft/.test(selectedText)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Subscriber-list delivery requires an approved send-capable connector action",
-      });
-    }
-  }
+  const approvedWriteRefs = new Set(approvedWriteActions.flatMap(approvedConnectorToolRefs));
   for (const agent of definition.agentGraph?.children ?? []) {
+    const agentToolContracts = agent.tools.map((tool) => ({ tool, contract: getStaticToolContract(tool.ref) }));
     for (const tool of agent.tools) {
       if (tool.ref === "canvas.email") {
         ctx.addIssue({
@@ -87,19 +89,24 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
           message: `Outbound tool ${tool.ref} is disabled in the stable runtime`,
         });
       }
-      if (/^composio\.[a-z0-9_-]+\.action\./.test(normalizedRef) && !approvedWriteRefs.has(normalizedRef)) {
+      const contract = getStaticToolContract(tool.ref);
+      if (contract?.approval.required && !approvedWriteRefs.has(normalizedRef)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `Connector action ${tool.ref} is not approved by this workflow's connector policy`,
         });
       }
     }
-    const hasApprovedWrite = agent.tools.some((tool) => approvedWriteRefs.has(tool.ref.toLowerCase()));
-    if (hasApprovedWrite && agent.gate?.type !== "pre_send") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Approved connector actions require a pre_send gate" });
+    const approvalContract = agentToolContracts.find((item) => item.contract?.approval.required)?.contract;
+    const hasApprovedWrite = agentToolContracts.some((item) => approvedWriteRefs.has(item.tool.ref.toLowerCase()));
+    if (approvalContract && !hasApprovedWrite) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require an approved connector policy action" });
     }
-    if (agent.gate?.type === "pre_send" && !hasApprovedWrite) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pre_send gates require an approved connector action" });
+    if (approvalContract && (!agent.gate || (approvalContract.approval.suggestedGate && agent.gate.type !== approvalContract.approval.suggestedGate))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require their contract approval gate" });
+    }
+    if (agent.gate?.type === "pre_send" && !approvalContract) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pre_send gates require a tool contract that needs external approval" });
     }
   }
 });

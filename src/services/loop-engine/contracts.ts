@@ -16,6 +16,7 @@ import {
 } from "../loop-executor/types.js";
 export {
   noSlopSpecAgentSchema,
+  noSlopSpecDraftSchema,
   noSlopSpecSchema,
   noSlopSpecSnapshotSchema,
   noSlopSpecStatusSchema,
@@ -126,8 +127,12 @@ export function assertDeliveryRouting(delivery: z.infer<typeof loopDeliveryRouti
   const target = delivery.target;
   if (target === "none") return;
   if (!deliveryProviderMatchesTarget(provider, target)) {
+    const allowed = DELIVERY_PROVIDER_BY_TARGET[target];
+    const hint = allowed.length > 0
+      ? `one of [${allowed.join(", ")}]`
+      : "an approved composio.<toolkit>.action.<slug> connector ref";
     throw new Error(
-      `Delivery routing error: target "${target}" requires one of [${DELIVERY_PROVIDER_BY_TARGET[target].join(", ")}], got "${provider}"`,
+      `Delivery routing error: target "${target}" requires ${hint}, got "${provider}"`,
     );
   }
 }

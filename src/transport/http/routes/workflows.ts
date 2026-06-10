@@ -20,6 +20,7 @@ import {
   retryLoopRuntimeStep,
   saveCanvasEmailArtifact,
   startManualLoopRun,
+  uploadLoopRuntimeGateContacts,
 } from "../../../services/loop-runtime/index.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
@@ -228,6 +229,35 @@ router.post("/runs/:runId/artifacts/:artifactKey/canvas/email", requireScopes(["
     });
   } catch (error) {
     sendError(res, error, "Failed to save canvas email");
+  }
+});
+
+const gateContactsSchema = z.object({
+  csvText: z.string().optional(),
+  contacts: z.array(z.object({
+    email: z.string().email(),
+    name: z.string().optional(),
+  })).optional(),
+  audienceId: z.string().trim().min(1).optional(),
+}).refine((body) => Boolean(body.csvText?.trim()) || (body.contacts?.length ?? 0) > 0 || Boolean(body.audienceId?.trim()), {
+  message: "Provide csvText, contacts, or audienceId.",
+});
+
+router.post("/runs/:runId/gates/:gateId/contacts", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const { gateId } = gateIdSchema.parse(req.params);
+    const body = gateContactsSchema.parse(req.body ?? {});
+    res.json(await uploadLoopRuntimeGateContacts({
+      auth: req.authContext!,
+      runId,
+      gateId,
+      csvText: body.csvText,
+      contacts: body.contacts,
+      audienceId: body.audienceId,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to upload gate contacts");
   }
 });
 

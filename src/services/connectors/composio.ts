@@ -9,6 +9,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { encryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../../infrastructure/db/index.js";
 import type { ConnectorActionRisk } from "../loop-engine/spec-contracts.js";
+import { buildComposioActionContract, connectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import {
   formatResendFromAddress,
   resendApiRequest,
@@ -59,6 +60,7 @@ export interface ComposioActionView {
   description: string;
   risk: ConnectorActionRisk;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
 }
 
 export interface ConnectorActionResult {
@@ -163,21 +165,51 @@ function classifyComposioAction(value: {
   return "read";
 }
 
-function actionSearchText(action: Pick<ComposioActionView, "toolkit" | "actionSlug" | "name" | "description">): string {
-  return `${action.toolkit} ${action.actionSlug} ${action.name} ${action.description}`.toLowerCase();
+function connectorToolRef(toolkit: string, actionSlug: string): string {
+  return connectorActionToolRef({ toolkit: normalizeComposioAppKey(toolkit), actionSlug });
+}
+
+/** Composio sometimes returns cross-toolkit slugs like `_1password_create_item` under the wrong toolkit. */
+export function isForeignToolkitComposioAction(toolkit: string, actionSlug: string): boolean {
+  const normalizedToolkit = normalizeComposioAppKey(toolkit).toLowerCase();
+  const slug = actionSlug.trim().toLowerCase();
+  if (!slug.startsWith("_")) return false;
+  const embedded = slug.replace(/^_+/, "").match(/^([a-z0-9]+)_/);
+  if (!embedded) return false;
+  return embedded[1] !== normalizedToolkit;
+}
+
+export function filterComposioToolkitActions(actions: ComposioActionView[]): ComposioActionView[] {
+  return actions.filter((action) => !isForeignToolkitComposioAction(action.toolkit, action.actionSlug));
+}
+
+function fallbackDeliveryActionsForToolkit(toolkit: string): ComposioActionView[] {
+  const key = normalizeComposioAppKey(toolkit);
+  if (key === "resend") {
+    return [{
+      toolkit: "resend",
+      actionSlug: "RESEND_SEND_EMAIL",
+      name: "Send Email",
+      description: "Send an email using Resend.",
+      risk: "send",
+      inputSchema: { type: "object" },
+    }];
+  }
+  if (key === "gmail") {
+    return [{
+      toolkit: "gmail",
+      actionSlug: "GMAIL_SEND_EMAIL",
+      name: "Send Email",
+      description: "Send an email using Gmail.",
+      risk: "send",
+      inputSchema: { type: "object" },
+    }];
+  }
+  return [];
 }
 
 export function isDraftOnlyComposioAction(action: Pick<ComposioActionView, "toolkit" | "actionSlug" | "name" | "description">): boolean {
-  return /\bdraft\b|create[_ -]?draft|email[_ -]?draft/.test(actionSearchText(action));
-}
-
-function newsletterProviderScore(toolkit: string): number {
-  const key = normalizeComposioAppKey(toolkit);
-  if (key === "resend") return 100;
-  if (["mailchimp", "mailerlite", "beehiiv", "convertkit", "sendgrid", "mailgun", "postmark", "brevo", "customerio"].includes(key)) return 90;
-  if (["gmail", "outlook"].includes(key)) return 35;
-  if (/\b(mail|email|newsletter|campaign|marketing)\b/.test(key)) return 55;
-  return 0;
+  return buildComposioActionContract({ ...action, risk: "write", inputSchema: { type: "object" } }).skillTags.includes("draft");
 }
 
 export function scoreComposioActionForDelivery(input: {
@@ -185,27 +217,23 @@ export function scoreComposioActionForDelivery(input: {
   target: "subscriber_list" | "team_email" | "operator" | "none";
 }): ConnectorDeliveryActionCandidate | null {
   if (input.target === "none") return null;
-  if (input.action.risk !== "send") return null;
+  if (isForeignToolkitComposioAction(input.action.toolkit, input.action.actionSlug)) return null;
   if (isDraftOnlyComposioAction(input.action)) return null;
-  const text = actionSearchText(input.action);
-  if (/\b(cancel|delete|remove|revoke|disable|unsubscribe|suppress|bounce|webhook|domain|api[_ -]?key)\b/.test(text)) return null;
-  const hasSendSignal = /\b(send|broadcast|campaign|email|message|mail)\b/.test(text);
-  if (!hasSendSignal) return null;
-
-  let score = newsletterProviderScore(input.action.toolkit);
-  if (/\bbroadcast|campaign|audience|segment|newsletter|contact\b/.test(text)) score += 25;
-  if (/\bsend[_ -]?email|email[_ -]?send|send\b/.test(text)) score += 15;
-  if (input.target === "subscriber_list" && ["gmail", "outlook"].includes(normalizeComposioAppKey(input.action.toolkit))) score -= 25;
-  if (input.target !== "subscriber_list" && ["gmail", "outlook"].includes(normalizeComposioAppKey(input.action.toolkit))) score += 20;
-  if (score <= 0) return null;
+  const contract = buildComposioActionContract(input.action);
+  if (!contract.approval.required || contract.effect === "read_external" || contract.effect === "none") return null;
+  if (!contract.skillTags.some((tag) => tag === "send" || tag === "notify")) return null;
+  const score = [
+    contract.source === "reviewed_override" ? 40 : 0,
+    contract.resources.length > 0 ? 10 : 0,
+    contract.renderRecommendations.length > 0 ? 5 : 0,
+    contract.effect === "write_external" ? 20 : 5,
+  ].reduce((sum, value) => sum + value, 0);
 
   return {
     ...input.action,
-    toolRef: `composio.${normalizeComposioAppKey(input.action.toolkit)}.action.${input.action.actionSlug}`,
+    toolRef: connectorToolRef(input.action.toolkit, input.action.actionSlug),
     score,
-    reason: input.target === "subscriber_list"
-      ? "send-capable action ranked for subscriber/newsletter delivery"
-      : "send-capable action ranked for direct email delivery",
+    reason: `Matches generic skills ${contract.skillTags.join(", ")} for resources ${contract.resources.join(", ")}`,
   };
 }
 
@@ -398,6 +426,7 @@ function normalizeComposioAction(toolkit: string, raw: unknown): ComposioActionV
   const meta = toObjectRecord(row.meta);
   const description = String(row.description ?? meta.description ?? "").trim();
   const inputSchema = toObjectRecord(row.inputSchema ?? row.parameters ?? row.schema ?? row.argsSchema);
+  const outputSchema = toObjectRecord(row.outputSchema ?? row.responseSchema ?? row.resultSchema);
   return {
     toolkit,
     actionSlug: slug,
@@ -405,6 +434,7 @@ function normalizeComposioAction(toolkit: string, raw: unknown): ComposioActionV
     description,
     risk: classifyComposioAction({ slug, name, description }),
     inputSchema,
+    ...(Object.keys(outputSchema).length > 0 ? { outputSchema } : {}),
   };
 }
 
@@ -424,7 +454,7 @@ export async function listComposioToolkitTools(toolkitSlug: string): Promise<Com
     const sdkList = composio.tools?.list ?? composio.toolkits?.tools?.list;
     if (sdkList) {
       const response = await sdkList({ toolkit });
-      const items = normalizeItems(toObjectRecord(response).items ?? response);
+      const items = filterComposioToolkitActions(normalizeItems(toObjectRecord(response).items ?? response));
       if (items.length > 0) return items;
     }
   } catch (error) {
@@ -441,7 +471,7 @@ export async function listComposioToolkitTools(toolkitSlug: string): Promise<Com
   for (const path of paths) {
     try {
       const data = await composioRequest<{ items?: unknown[]; tools?: unknown[] }>({ path });
-      const items = normalizeItems(data.items ?? data.tools);
+      const items = filterComposioToolkitActions(normalizeItems(data.items ?? data.tools));
       if (items.length > 0) return items;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -453,29 +483,36 @@ export async function listComposioToolkitTools(toolkitSlug: string): Promise<Com
   return [];
 }
 
-function fallbackDeliveryActionsForToolkit(toolkit: string): ComposioActionView[] {
-  const key = normalizeComposioAppKey(toolkit);
-  if (key === "resend") {
-    return [{
-      toolkit: "resend",
-      actionSlug: "RESEND_SEND_EMAIL",
-      name: "Send Email",
-      description: "Send an email using Resend.",
-      risk: "send",
-      inputSchema: { type: "object" },
-    }];
+/** Toolkit slugs from Connected Apps (`connector_accounts`), not notification Channels. */
+export function connectedAppToolkits(accounts: ConnectorAccountView[]): string[] {
+  return [...new Set(accounts
+    .filter((account) => account.status === "connected")
+    .map((account) => {
+      const key = (account.appKey ?? (account.provider === "composio" ? "" : account.provider) ?? "").trim().toLowerCase();
+      return key ? normalizeComposioAppKey(key) : "";
+    })
+    .filter(Boolean))];
+}
+
+export async function listConnectedAppToolkits(auth: AuthContext): Promise<string[]> {
+  const accounts = await listConnectorAccounts(auth).catch(() => []);
+  return connectedAppToolkits(accounts);
+}
+
+function pushDeliveryCandidates(
+  candidates: ConnectorDeliveryActionCandidate[],
+  actions: ComposioActionView[],
+  target: "subscriber_list" | "team_email" | "operator" | "none",
+): boolean {
+  let added = false;
+  for (const action of actions) {
+    const candidate = scoreComposioActionForDelivery({ action, target });
+    if (candidate) {
+      candidates.push(candidate);
+      added = true;
+    }
   }
-  if (key === "gmail") {
-    return [{
-      toolkit: "gmail",
-      actionSlug: "GMAIL_SEND_EMAIL",
-      name: "Send Email",
-      description: "Send an email using Gmail.",
-      risk: "send",
-      inputSchema: { type: "object" },
-    }];
-  }
-  return [];
+  return added;
 }
 
 export async function listDeliveryActionCandidates(input: {
@@ -484,18 +521,14 @@ export async function listDeliveryActionCandidates(input: {
 }): Promise<ConnectorDeliveryActionCandidate[]> {
   if (input.target === "none") return [];
   const accounts = await listConnectorAccounts(input.auth).catch(() => []);
-  const connectedToolkits = [...new Set(accounts
-    .filter((account) => account.status === "connected")
-    .map((account) => account.appKey?.trim().toLowerCase())
-    .filter((value): value is string => Boolean(value)))];
+  const connectedToolkits = connectedAppToolkits(accounts);
   const candidates: ConnectorDeliveryActionCandidate[] = [];
 
   for (const toolkit of connectedToolkits) {
     const discovered = await listComposioToolkitTools(toolkit).catch(() => []);
-    const actions = discovered.length > 0 ? discovered : fallbackDeliveryActionsForToolkit(toolkit);
-    for (const action of actions) {
-      const candidate = scoreComposioActionForDelivery({ action, target: input.target });
-      if (candidate) candidates.push(candidate);
+    const added = pushDeliveryCandidates(candidates, discovered, input.target);
+    if (!added) {
+      pushDeliveryCandidates(candidates, fallbackDeliveryActionsForToolkit(toolkit), input.target);
     }
   }
 

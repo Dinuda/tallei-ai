@@ -21,12 +21,18 @@ export function hasMeaningfulOverlap(haystack: string, needle: string): boolean 
   return false;
 }
 
+export function isRecipientListAgent(agent: { gate?: { type?: string } }): boolean {
+  return agent.gate?.type === "recipient_upload";
+}
+
 export function writesEmailLikeCopy(agent: {
   name: string;
   goal: string;
   task: string;
   outputContract: { description: string };
+  gate?: { type?: string };
 }): boolean {
+  if (isRecipientListAgent(agent)) return false;
   return /\b(email|newsletter|broadcast|digest)\b/i.test(
     `${agent.name} ${agent.goal} ${agent.task} ${agent.outputContract.description}`,
   );

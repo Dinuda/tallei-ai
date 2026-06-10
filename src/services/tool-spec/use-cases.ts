@@ -4,7 +4,7 @@ export const TOOL_USE_CASES: ToolUseCase[] = [
   {
     name: "Research Newsletter",
     description: "Research recent news on a topic, then draft and send a newsletter email",
-    requiredTools: ["internal.web_search", "internal.llm_only", "composio.resend.action.send_email"],
+    requiredTools: ["internal.web_search", "internal.llm_only", "composio.resend.action.resend_send_email"],
     outcome: "A researched, drafted, and sent newsletter email to subscribers",
     category: "research",
   },
@@ -25,14 +25,14 @@ export const TOOL_USE_CASES: ToolUseCase[] = [
   {
     name: "Calendar Summary",
     description: "Retrieve upcoming calendar events, then draft a summary email",
-    requiredTools: ["composio.googlecalendar.search", "internal.llm_only", "composio.resend.action.send_email"],
+    requiredTools: ["composio.googlecalendar.search", "internal.llm_only", "composio.resend.action.resend_send_email"],
     outcome: "Email summary of upcoming calendar events sent to team",
     category: "automation",
   },
   {
     name: "Notion to Email",
     description: "Search Notion for specific content, then email it to stakeholders",
-    requiredTools: ["composio.notion.search", "internal.llm_only", "composio.resend.action.send_email"],
+    requiredTools: ["composio.notion.search", "internal.llm_only", "composio.resend.action.resend_send_email"],
     outcome: "Notion content summarized and emailed to stakeholders",
     category: "communication",
   },

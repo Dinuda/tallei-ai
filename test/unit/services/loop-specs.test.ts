@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { noSlopSpecSchema, noSlopSpecSnapshotSchema } from "../../../src/services/loop-engine/spec-contracts.js";
+import { noSlopSpecDraftSchema, noSlopSpecSchema, noSlopSpecSnapshotSchema } from "../../../src/services/loop-engine/spec-contracts.js";
 import { critiqueLoopDesign } from "../../../src/services/loop-engine/critic.js";
 import type { LoopArchitectOutput } from "../../../src/services/loop-engine/contracts.js";
-import { approvedSpecSnapshot, mapLoopSpecRowForTest, type LoopSpecView } from "../../../src/services/loop-builder/specs.js";
+import { approvedSpecSnapshot, mapLoopSpecRowForTest, prepareLoopSpecJsonForValidation, type LoopSpecView } from "../../../src/services/loop-builder/specs.js";
 
 const specJson = noSlopSpecSchema.parse({
   purpose: "Create a weekly market research digest.",
@@ -124,6 +124,74 @@ test("no-slop spec outbound delivery requires approved connector write policy", 
   }).success, false);
 });
 
+test("no-slop spec normalizes full or generic Composio action refs to toolkit action policy", () => {
+  const parsedFromRef = noSlopSpecSchema.parse({
+    ...specJson,
+    delivery: { target: "none", description: "Create a 1Password item after approval." },
+    connectorPolicy: {
+      enabledToolkits: ["1password"],
+      allowedReadActions: [],
+      allowedWriteActions: ["composio.1password.action._1password_create_item"],
+      recipientSource: { kind: "none" },
+      deliveryExpectation: "Create only after per-run approval.",
+    },
+  });
+  assert.equal(parsedFromRef.connectorPolicy.allowedWriteActions[0]?.toolkit, "1password");
+  assert.equal(parsedFromRef.connectorPolicy.allowedWriteActions[0]?.actionSlug, "_1password_create_item");
+
+  const parsedFromGenericToolkit = noSlopSpecSchema.parse({
+    ...specJson,
+    delivery: { target: "none", description: "Create a 1Password item after approval." },
+    connectorPolicy: {
+      enabledToolkits: ["1password"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "composio",
+        actionSlug: "_1password_create_item",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "none" },
+      deliveryExpectation: "Create only after per-run approval.",
+    },
+  });
+  assert.equal(parsedFromGenericToolkit.connectorPolicy.allowedWriteActions[0]?.toolkit, "1password");
+  assert.equal(parsedFromGenericToolkit.connectorPolicy.allowedWriteActions[0]?.actionSlug, "_1password_create_item");
+});
+
+test("no-slop spec normalizes connected_app delivery alias to subscriber_list", () => {
+  const parsed = noSlopSpecDraftSchema.parse({
+    ...specJson,
+    delivery: { target: "connected_app", description: "Send newsletter via Connected Apps." },
+    connectorPolicy: {
+      enabledToolkits: [],
+      allowedReadActions: [],
+      allowedWriteActions: [],
+      recipientSource: { kind: "none" },
+      deliveryExpectation: "Send after approval.",
+    },
+  });
+  assert.equal(parsed.delivery.target, "subscriber_list");
+  assert.match(parsed.connectorPolicy.recipientSource.description ?? "", /pre_send/i);
+});
+
+test("draft spec allows subscriber delivery intent without connected write actions yet", () => {
+  const parsed = noSlopSpecDraftSchema.parse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Weekly newsletter via Resend." },
+    connectorPolicy: {
+      enabledToolkits: [],
+      allowedReadActions: [],
+      allowedWriteActions: [],
+      recipientSource: { kind: "none" },
+      deliveryExpectation: "Bound at approve from Connected Apps.",
+    },
+  });
+  assert.equal(parsed.delivery.target, "subscriber_list");
+  assert.equal(parsed.connectorPolicy.allowedWriteActions.length, 0);
+  assert.equal(noSlopSpecSchema.safeParse(parsed).success, false);
+});
+
 test("no-slop spec normalizes connected mailing list delivery alias", () => {
   const parsed = noSlopSpecSchema.parse({
     ...specJson,
@@ -144,6 +212,130 @@ test("no-slop spec normalizes connected mailing list delivery alias", () => {
   assert.equal(parsed.delivery.target, "subscriber_list");
 });
 
+test("no-slop spec upgrades subscriber delivery recipientSource none to uploaded", () => {
+  const parsed = noSlopSpecSchema.parse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send to subscribers." },
+    connectorPolicy: {
+      enabledToolkits: ["resend"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "resend",
+        actionSlug: "RESEND_SEND_EMAIL",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "none" },
+      deliveryExpectation: "Send after approval.",
+    },
+  });
+  assert.equal(parsed.connectorPolicy.recipientSource.kind, "uploaded");
+  assert.match(parsed.connectorPolicy.recipientSource.description ?? "", /pre_send/i);
+});
+
+test("no-slop spec fills default recipientSource description for subscriber delivery", () => {
+  const parsed = noSlopSpecSchema.parse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send to subscribers." },
+    connectorPolicy: {
+      enabledToolkits: ["resend"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "resend",
+        actionSlug: "RESEND_SEND_EMAIL",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "uploaded" },
+      deliveryExpectation: "Send after approval.",
+    },
+  });
+  assert.match(
+    parsed.connectorPolicy.recipientSource.description ?? "",
+    /CSV contact list at pre_send/i,
+  );
+});
+
+test("prepareLoopSpecJsonForValidation injects ranked external-effect candidate when needed", () => {
+  const candidate = {
+    toolkit: "resend",
+    actionSlug: "RESEND_SEND_EMAIL",
+    name: "Send Email",
+    description: "Send email",
+    risk: "send" as const,
+    toolRef: "composio.resend.action.resend_send_email",
+    score: 150,
+    reason: "external write action ranked by contract skills/resources/effect",
+  };
+  const prepared = prepareLoopSpecJsonForValidation({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send to subscribers." },
+    connectorPolicy: {
+      enabledToolkits: ["resend"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "resend",
+        actionSlug: "_2chat_create_contact",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "uploaded" },
+      deliveryExpectation: "Send after approval.",
+    },
+  }, candidate);
+  const parsed = noSlopSpecSchema.parse(prepared);
+  assert.equal(parsed.connectorPolicy.allowedWriteActions.length, 1);
+  assert.equal(parsed.connectorPolicy.allowedWriteActions[0]?.actionSlug, "RESEND_SEND_EMAIL");
+});
+
+test("no-slop spec preserves multiple reviewed external-effect actions", () => {
+  const parsed = noSlopSpecSchema.parse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send to subscribers." },
+    connectorPolicy: {
+      enabledToolkits: ["resend", "gmail"],
+      allowedReadActions: [],
+      allowedWriteActions: [
+        {
+          toolkit: "gmail",
+          actionSlug: "gmail_send_email",
+          risk: "send",
+          requiresPreSendApproval: true,
+        },
+        {
+          toolkit: "resend",
+          actionSlug: "RESEND_SEND_EMAIL",
+          risk: "send",
+          requiresPreSendApproval: true,
+        },
+      ],
+      recipientSource: { kind: "uploaded" },
+      deliveryExpectation: "Send after approval.",
+    },
+  });
+  assert.equal(parsed.connectorPolicy.allowedWriteActions.length, 2);
+});
+
+test("no-slop spec rejects contact-only actions for subscriber delivery", () => {
+  const result = noSlopSpecSchema.safeParse({
+    ...specJson,
+    delivery: { target: "subscriber_list", description: "Send to subscribers." },
+    connectorPolicy: {
+      enabledToolkits: ["resend"],
+      allowedReadActions: [],
+      allowedWriteActions: [{
+        toolkit: "resend",
+        actionSlug: "_2chat_create_contact",
+        risk: "send",
+        requiresPreSendApproval: true,
+      }],
+      recipientSource: { kind: "uploaded" },
+      deliveryExpectation: "Send after approval.",
+    },
+  });
+  assert.equal(result.success, false);
+});
+
 test("no-slop spec rejects draft-only actions for subscriber delivery", () => {
   const result = noSlopSpecSchema.safeParse({
     ...specJson,
@@ -162,7 +354,6 @@ test("no-slop spec rejects draft-only actions for subscriber delivery", () => {
     },
   });
   assert.equal(result.success, false);
-  assert.match(result.success ? "" : result.error.message, /draft-only/i);
 });
 
 test("approved snapshot requires approved spec status", () => {
@@ -226,7 +417,7 @@ test("critic rejects a design missing approved spec criteria", () => {
   assert.match(result.requiredFixes.join("\n"), /Spec (guardrail|success criterion|done criterion) is not reflected/i);
 });
 
-test("critic requires canvas.email and draft_review for newsletter writer agents", () => {
+test("critic allows newsletter writer agents to choose gates and render targets dynamically", () => {
   const design = baseDesign();
   design.agents = [
     {
@@ -253,21 +444,18 @@ test("critic requires canvas.email and draft_review for newsletter writer agents
   ];
 
   const result = critiqueLoopDesign(design, snapshot);
-  assert.equal(result.pass, false);
-  assert.match(result.requiredFixes.join("\n"), /renderTarget "canvas.email"/i);
-  assert.match(result.requiredFixes.join("\n"), /draft_review/i);
+  assert.equal(result.requiredFixes.some((fix) => /renderTarget "canvas.email"/i.test(fix)), false);
+  assert.equal(result.requiredFixes.some((fix) => /draft_review/i.test(fix)), false);
 });
 
-test("critic rejects delivery config in inputsRequired", () => {
+test("critic does not hard-code delivery config input rejection", () => {
   const design = baseDesign();
   design.inputsRequired = ["subscriber_list_id"];
   const result = critiqueLoopDesign(design, snapshot);
-  assert.equal(result.pass, false);
-  assert.match(result.requiredFixes.join("\n"), /subscriber_list_id/i);
-  assert.match(result.requiredFixes.join("\n"), /recipientSource/i);
+  assert.equal(result.requiredFixes.some((fix) => /recipientSource|subscriber_list_id/i.test(fix)), false);
 });
 
-test("critic rejects subscriber delivery provider that is not the approved send action", () => {
+test("critic rejects external-effect provider that is not approved by contract policy", () => {
   const newsletterSpec = noSlopSpecSnapshotSchema.parse({
     ...snapshot,
     specJson: noSlopSpecSchema.parse({
@@ -307,7 +495,7 @@ test("critic rejects subscriber delivery provider that is not the approved send 
   assert.match(result.requiredFixes.join("\n"), /approved connector write actions/i);
 });
 
-test("critic rejects standalone approval QA agent", () => {
+test("critic allows standalone approval QA agents when explicitly designed", () => {
   const design = baseDesign();
   design.agents.push({
     id: "approval_qa",
@@ -322,11 +510,10 @@ test("critic rejects standalone approval QA agent", () => {
   });
 
   const result = critiqueLoopDesign(design, snapshot);
-  assert.equal(result.pass, false);
-  assert.match(result.requiredFixes.join("\n"), /standalone approval\/QA reviewer/i);
+  assert.equal(result.requiredFixes.some((fix) => /standalone approval\/QA reviewer/i.test(fix)), false);
 });
 
-test("critic requires source_confirmation on web search agents", () => {
+test("critic allows web search agents without forced source confirmation", () => {
   const design = baseDesign();
   design.agents[0] = {
     ...design.agents[0]!,
@@ -335,6 +522,19 @@ test("critic requires source_confirmation on web search agents", () => {
   };
 
   const result = critiqueLoopDesign(design, snapshot);
+  assert.equal(result.requiredFixes.some((fix) => /source_confirmation/i.test(fix)), false);
+});
+
+test("critic explains that pre_send belongs only on external-effect tools", () => {
+  const design = baseDesign();
+  design.agents[1] = {
+    ...design.agents[1]!,
+    name: "Pre-send Specialist Agent",
+    tool: "internal.llm_only",
+    gate: { type: "pre_send", question: "Approve send?" },
+  };
+
+  const result = critiqueLoopDesign(design, snapshot);
   assert.equal(result.pass, false);
-  assert.match(result.requiredFixes.join("\n"), /source_confirmation/i);
+  assert.match(result.requiredFixes.join("\n"), /pre_send is only valid on the exact approved external-effect tool/i);
 });

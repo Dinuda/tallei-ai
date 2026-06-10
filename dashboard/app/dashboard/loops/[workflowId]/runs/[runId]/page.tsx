@@ -51,6 +51,7 @@ import {
   workerSlotLabel,
 } from "./components/agent-panel-ui";
 import { EditorialActionButton } from "./components/glyph-icons";
+import { ContactsInputWorkspace, type ContactRow } from "./components/contacts-input";
 import {
   AgentProgressPips,
   DraftReviewWorkspace,
@@ -60,6 +61,13 @@ import {
   resolveInputFieldLabel,
   resolveInputFieldPlaceholder,
 } from "./components/gate-workspace-ui";
+import {
+  isMissingRecipientError,
+  projectRunWorkspace,
+  readContactSourceKind,
+  readRecipientStatus,
+  workspaceRequiresContacts,
+} from "@/lib/loop-run-workspace-projection";
 import {
   Tooltip,
   TooltipContent,
@@ -81,6 +89,10 @@ import { VisuallyHidden } from "@radix-ui/react-visually-hidden";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArtifactRenderer } from "@/components/renderers";
+import {
+  selectLatestArtifactsByKey,
+  selectPreferredArtifact,
+} from "@/lib/loop-artifact-selection";
 import type { CanvasEmailTemplate } from "./components/canvas-email-editor";
 
 type UsageSummary = {
@@ -125,7 +137,7 @@ type RunEvent = {
 
 type Gate = {
   id: string;
-  gate_type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
+  gate_type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "recipient_upload" | "pre_send";
   status: string;
   question: string;
   payload_json: { items?: Array<MemoryGateItem | SourceGateItem>; result?: { text?: string } } & Record<string, unknown>;
@@ -157,6 +169,7 @@ type Artifact = {
   version: number;
   kind: string;
   body: string;
+  created_at: string;
   data_json?: {
     renderTarget?: string;
     emailTemplate?: CanvasEmailTemplate;
@@ -221,6 +234,8 @@ function titleCase(value: string) {
 }
 
 function inferGoalArtifactName(run: RunProjection | null, artifact?: Artifact | null) {
+  const subject = artifact?.data_json?.emailTemplate?.subject?.trim();
+  if (subject) return subject;
   const source = `${run?.definition?.goal ?? ""} ${run?.workflow_title ?? ""} ${artifact?.artifact_key ?? ""} ${artifact?.kind ?? ""}`.toLowerCase();
   if (source.includes("newsletter")) return "Newsletter";
   if (source.includes("report")) return "Report";
@@ -325,6 +340,7 @@ function gateTypeShortLabel(gateType: Gate["gate_type"]) {
   if (gateType === "source_confirmation") return "source review";
   if (gateType === "missing_input") return "missing input";
   if (gateType === "draft_review") return "draft review";
+  if (gateType === "recipient_upload") return "recipient list";
   return "pre-send check";
 }
 
@@ -379,7 +395,11 @@ function buildParentAgentNarrative({
         ? "Provide the missing input in the workspace."
         : gateUiMode === "draft_review"
           ? "Review the draft in the workspace, then approve or request changes."
-          : "Confirm in the workspace before the run continues.";
+          : gateUiMode === "recipient_upload"
+            ? "Add recipients in the workspace, save contacts, then continue."
+            : gateUiMode === "pre_send"
+              ? "Review the final draft, then approve send."
+              : "Confirm in the workspace before the run continues.";
     statusLine = `Paused at ${currentStepLabel.toLowerCase()} for ${gateTypeShortLabel(gateUiMode)}. ${gateHint}${upNextWorkerLabel ? ` After approval, ${upNextWorkerLabel} is next.` : ""}`;
   } else if (parentRunPhase === "running" && currentStep) {
     statusLine = `Live: ${currentStepLabel.toLowerCase()}. ${doneSteps} of ${latestSteps.length} agents complete${upNextWorkerLabel ? `; next is ${upNextWorkerLabel}` : "; final agent in queue"}.`;
@@ -812,11 +832,13 @@ function memoryItemMeta(item: MemoryGateItem) {
   return parts.join(" · ");
 }
 
-function gateWorkspaceTitle(gateType: Gate["gate_type"]) {
+function gateWorkspaceTitle(gateType: Gate["gate_type"], needsContacts?: boolean) {
   if (gateType === "memory_confirmation") return "Select memories";
   if (gateType === "source_confirmation") return "Select sources";
   if (gateType === "missing_input") return "Input required";
   if (gateType === "draft_review") return "Review the draft";
+  if (gateType === "recipient_upload") return "Add recipients";
+  if (needsContacts) return "Recipients & send approval";
   return "Approve to send";
 }
 
@@ -827,7 +849,46 @@ function gateWorkspaceSubtitle(gate: Gate, uiMode: Gate["gate_type"]) {
     return "Paste the missing input below, then submit to continue the run.";
   }
   if (uiMode === "draft_review") return "Edit in the canvas, then save & approve or revise to re-run the writer.";
+  if (uiMode === "recipient_upload") return "Upload or paste recipients, save contacts, then continue to send approval.";
+  if (uiMode === "pre_send") return "Review the final draft, then approve send.";
   return gate.question ?? "Confirm before this run sends or publishes.";
+}
+
+function readSavedRecipientCount(context?: Record<string, unknown>): number {
+  const deliveryRecipients = context?.deliveryRecipients;
+  if (!deliveryRecipients || typeof deliveryRecipients !== "object" || Array.isArray(deliveryRecipients)) return 0;
+  if (typeof (deliveryRecipients as Record<string, unknown>).recipientCount === "number") {
+    return (deliveryRecipients as Record<string, unknown>).recipientCount as number;
+  }
+  const contacts = (deliveryRecipients as Record<string, unknown>).contacts;
+  return Array.isArray(contacts) ? contacts.length : 0;
+}
+
+function resolveContactsUploadGate(gates: Gate[] | undefined, pendingGate: Gate | null): Gate | null {
+  if (pendingGate?.gate_type === "recipient_upload" || pendingGate?.gate_type === "pre_send") return pendingGate;
+  const ordered = [...(gates ?? [])].reverse();
+  const pendingRecipient = ordered.find((gate) => gate.gate_type === "recipient_upload" && gate.status === "pending");
+  if (pendingRecipient) return pendingRecipient;
+  const pendingPreSend = ordered.find((gate) => gate.gate_type === "pre_send" && gate.status === "pending");
+  if (pendingPreSend) return pendingPreSend;
+  return ordered.find((gate) => gate.gate_type === "recipient_upload" || gate.gate_type === "pre_send") ?? null;
+}
+
+function readSavedContacts(context?: Record<string, unknown>): ContactRow[] {
+  const deliveryRecipients = context?.deliveryRecipients;
+  if (!deliveryRecipients || typeof deliveryRecipients !== "object" || Array.isArray(deliveryRecipients)) return [];
+  const contacts = (deliveryRecipients as Record<string, unknown>).contacts;
+  if (!Array.isArray(contacts)) return [];
+  return contacts
+    .map((row) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+      const record = row as Record<string, unknown>;
+      const email = typeof record.email === "string" ? record.email : "";
+      if (!email.includes("@")) return null;
+      const name = typeof record.name === "string" ? record.name : undefined;
+      return name ? { email, name } : { email };
+    })
+    .filter((row): row is ContactRow => row !== null);
 }
 
 function isInputValidationAgentSnapshot(agent: StepAttempt["agent_snapshot"] | undefined): boolean {
@@ -932,6 +993,7 @@ function gateTypeStamp(gateType: Gate["gate_type"]) {
   if (gateType === "source_confirmation") return { tag: "Approval", name: "Sources" };
   if (gateType === "missing_input") return { tag: "Input", name: "Required" };
   if (gateType === "draft_review") return { tag: "Review", name: "Draft" };
+  if (gateType === "recipient_upload") return { tag: "Input", name: "Recipients" };
   return { tag: "Send", name: "Final check" };
 }
 
@@ -998,7 +1060,7 @@ function GateTypeStamp({ gateType }: { gateType: Gate["gate_type"] }) {
 
 function EditorialWorkspaceShell({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div className={cn("flex h-full min-h-0 flex-col border border-[#d1d5db] bg-white", className)}>
+    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden border border-[#d1d5db] bg-white", className)}>
       {children}
     </div>
   );
@@ -1698,18 +1760,17 @@ export default function StableLoopRunPage() {
   }, [orderedSteps]);
   const visibleArtifacts = useMemo(() => run?.artifacts.filter((artifact) => !artifact.invalidated_at) ?? [], [run]);
   const latestArtifacts = useMemo(() => {
-    const byKey = new Map<string, Artifact>();
-    for (const artifact of visibleArtifacts) {
-      const current = byKey.get(artifact.artifact_key);
-      if (!current || artifact.version > current.version) byKey.set(artifact.artifact_key, artifact);
-    }
-    return [...byKey.values()].sort((a, b) => a.artifact_key.localeCompare(b.artifact_key));
+    return selectLatestArtifactsByKey(visibleArtifacts);
   }, [visibleArtifacts]);
   const finalArtifacts = useMemo(
     () => latestArtifacts.filter((artifact) => artifact.kind !== "structured_output"),
     [latestArtifacts],
   );
-  const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run]);
+  const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run?.gates]);
+  const contactsUploadGate = useMemo(
+    () => resolveContactsUploadGate(run?.gates, pendingGate),
+    [pendingGate, run?.gates],
+  );
   const gateStep = useMemo(
     () => latestSteps.find((step) => step.status === "waiting_for_gate") ?? null,
     [latestSteps],
@@ -1737,6 +1798,28 @@ export default function StableLoopRunPage() {
     if (runHasTerminalFailure && run?.error_json?.message) return run.error_json.message;
     return null;
   }, [error, failureRetryTarget, run?.error_json?.message, runHasTerminalFailure]);
+  const savedRecipientCount = useMemo(() => readSavedRecipientCount(run?.context), [run?.context]);
+  const savedContacts = useMemo(() => readSavedContacts(run?.context), [run?.context]);
+  const workspaceBlocks = useMemo(
+    () => projectRunWorkspace({
+      status: run?.status ?? "idle",
+      errorMessage: failureMessage ?? undefined,
+      pendingGate,
+      gateUiMode,
+      context: run?.context,
+    }),
+    [failureMessage, gateUiMode, pendingGate, run?.context, run?.status],
+  );
+  const requiresContactsUpload = workspaceRequiresContacts(workspaceBlocks);
+  const contactSourceKind = useMemo(
+    () => readContactSourceKind(contactsUploadGate?.payload_json ?? pendingGate?.payload_json),
+    [contactsUploadGate?.payload_json, pendingGate?.payload_json],
+  );
+  const recipientStatus = useMemo(
+    () => readRecipientStatus(contactsUploadGate?.payload_json ?? pendingGate?.payload_json, run?.context),
+    [contactsUploadGate?.payload_json, pendingGate?.payload_json, run?.context],
+  );
+  const failureNeedsContacts = isMissingRecipientError(failureMessage ?? undefined);
 
   useEffect(() => {
     if (prevGateId && !pendingGate) {
@@ -1850,7 +1933,6 @@ export default function StableLoopRunPage() {
     return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_gate" || step.status === "running") ?? null;
   }, [currentStep, missingInputGateActive, orderedSteps, selectedStepId]);
   const selectedStepContext = selectedStepId ? selectedStep : null;
-  const latestArtifact = finalArtifacts.at(-1) ?? null;
   const selectedArtifact = useMemo(() => {
     if (!selectedArtifactId) return null;
     return visibleArtifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null;
@@ -1859,6 +1941,7 @@ export default function StableLoopRunPage() {
     if (!selectedArtifact?.step_attempt_id) return null;
     return orderedSteps.find((step) => step.id === selectedArtifact.step_attempt_id) ?? null;
   }, [orderedSteps, selectedArtifact]);
+  const latestArtifact = useMemo(() => selectPreferredArtifact(finalArtifacts), [finalArtifacts]);
   const activeArtifact = selectedArtifact ?? latestArtifact;
   const attemptsForSelectedStep = useMemo(() => {
     const attemptContextStep = selectedStepContext ?? selectedArtifactStep ?? selectedStep;
@@ -1891,6 +1974,12 @@ export default function StableLoopRunPage() {
   const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
   const showMissingInputWorkspace = Boolean(pendingGate && gateUiMode === "missing_input");
+  const showContactsRecoveryWorkspace = Boolean(
+    !pendingGate
+    && failureNeedsContacts
+    && contactsUploadGate
+    && !selectedStepId,
+  );
   const showGateWorkspace = Boolean(
     pendingGate && gateUiMode && gateUiMode !== "missing_input" && !selectedStepId,
   );
@@ -2049,6 +2138,40 @@ export default function StableLoopRunPage() {
     await post(`/api/workflows/runs/${runId}/artifacts/${encodeURIComponent(artifact.artifact_key)}/canvas/email`, value);
   }
 
+  async function saveGateContacts(
+    gate: Gate,
+    input: { csvText?: string; contacts?: ContactRow[]; audienceId?: string },
+  ) {
+    setBusy(`/gates/${gate.id}/contacts`);
+    setError(null);
+    try {
+      const response = await fetch(`/api/workflows/runs/${runId}/gates/${gate.id}/contacts`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string;
+        documentRef?: string | null;
+        lotRef?: string | null;
+        recipientCount?: number;
+      };
+      if (!response.ok) throw new Error(payload.error ?? "Failed to save contacts");
+      if (typeof payload.documentRef === "string" && payload.documentRef.trim()) {
+        const lotSuffix = payload.lotRef ? ` · lot ${payload.lotRef}` : "";
+        toast.success("Contact list saved to memory", {
+          description: `@doc:${payload.documentRef}${lotSuffix}`,
+        });
+      }
+      await load();
+    } catch (commandError) {
+      setError(commandError instanceof Error ? commandError.message : "Failed to save contacts");
+      throw commandError;
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function submitGate(gate: Gate, action: "approve" | "input" | "reject") {
     if (action === "reject") {
       void post(`/api/workflows/runs/${runId}/gates/${gate.id}/reject`, { reason: "Rejected by operator" });
@@ -2088,6 +2211,9 @@ export default function StableLoopRunPage() {
             ),
           }
         : {}),
+      ...(gate.gate_type === "pre_send" && savedContacts.length > 0
+        ? { contacts: savedContacts }
+        : {}),
     });
   }
 
@@ -2124,9 +2250,12 @@ export default function StableLoopRunPage() {
 
   return (
     <TooltipProvider delayDuration={200}>
-    <main className="min-h-screen bg-[#f7f8fb] text-[#121a31]" style={{ fontFamily: "var(--font-fustat)" }}>
-      <div className="mx-auto max-w-[1660px] px-7 py-6">
-        <header className="mb-7 flex items-start justify-between gap-4">
+    <main
+      className="flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden bg-[#f7f8fb] text-[#121a31]"
+      style={{ fontFamily: "var(--font-fustat)" }}
+    >
+      <div className="mx-auto flex min-h-0 w-full max-w-[1660px] flex-1 flex-col px-7 py-5">
+        <header className="mb-4 shrink-0 flex items-start justify-between gap-4">
           <div>
             <nav className="mb-2 flex items-center gap-2 text-[13px] font-medium text-[#9ca3af]">
               <Link href="/dashboard/loops" className="hover:text-[#111827]">Loops</Link>
@@ -2168,6 +2297,7 @@ export default function StableLoopRunPage() {
           </div>
         </header>
 
+        <div className="mb-4 shrink-0">
         <RunStatusBand
           gateResolvedFlash={gateResolvedFlash}
           transitioningAfterGate={transitioningAfterGate}
@@ -2188,14 +2318,24 @@ export default function StableLoopRunPage() {
                 ? `Approve (${selectedSourceIds.size})`
               : gateUiMode === "draft_review"
                 ? "Save & Approve"
-                : "Approve"
+                : gateUiMode === "recipient_upload"
+                  ? savedRecipientCount > 0
+                    ? `Continue (${savedRecipientCount} recipients)`
+                    : "Save contacts to continue"
+                : gateUiMode === "pre_send"
+                  ? savedRecipientCount > 0
+                    ? `Approve & send (${savedRecipientCount})`
+                    : "Approve & send"
+                  : "Approve"
           }
           approveDisabled={
             gateUiMode === "missing_input" && pendingGate
               ? !(inputValues[pendingGate.id] ?? "").trim()
               : gateUiMode === "source_confirmation"
                 ? selectedSourceIds.size === 0
-                : false
+                : (gateUiMode === "recipient_upload" || (gateUiMode === "pre_send" && requiresContactsUpload))
+                  ? savedRecipientCount === 0
+                  : false
           }
           showRevise={gateUiMode === "draft_review" || gateUiMode === "source_confirmation"}
           onApprove={() => {
@@ -2213,20 +2353,48 @@ export default function StableLoopRunPage() {
           }}
           onShowFailureDetails={() => setFailureDialogOpen(true)}
         />
+        </div>
 
-        <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_490px]">
-          <section className="flex h-full min-h-0 flex-col space-y-5">
-
+        <div className="grid min-h-0 flex-1 items-stretch gap-5 overflow-hidden lg:grid-cols-[minmax(0,1fr)_490px]">
+          <section className="flex min-h-0 flex-col overflow-hidden">
+            <div className="flex min-h-0 flex-1 flex-col">
             <AnimatePresence mode="wait">
-              {showMissingInputWorkspace && pendingGate ? (
+              {showContactsRecoveryWorkspace && contactsUploadGate ? (
+                <motion.div
+                  key="contacts-recovery"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="flex h-full min-h-0 flex-1 flex-col"
+                >
+                  <EditorialWorkspaceShell className="flex h-full min-h-0 flex-1 flex-col">
+                    <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-5">
+                      <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
+                        Recipients required
+                      </h2>
+                      <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
+                        Upload contacts to fix the failed send, then retry the delivery agent.
+                      </p>
+                    </div>
+                    <ContactsInputWorkspace
+                      contactSourceKind={contactSourceKind}
+                      recipientCount={savedRecipientCount}
+                      busy={busy === `/gates/${contactsUploadGate.id}/contacts`}
+                      onSave={(input) => saveGateContacts(contactsUploadGate, input)}
+                    />
+                  </EditorialWorkspaceShell>
+                </motion.div>
+              ) : showMissingInputWorkspace && pendingGate ? (
                 <motion.div
                   key="missing-input"
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
+                  className="flex h-full min-h-0 flex-1 flex-col"
                 >
-                  <EditorialWorkspaceShell className="flex min-h-[640px] flex-col">
+                  <EditorialWorkspaceShell className="flex h-full min-h-0 flex-1 flex-col">
                     <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-5">
                       <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
                         {gateWorkspaceTitle("missing_input")}
@@ -2255,11 +2423,15 @@ export default function StableLoopRunPage() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
+                  className="flex h-full min-h-0 flex-1 flex-col"
                 >
-                  <EditorialWorkspaceShell className="flex min-h-[640px] flex-col">
+                  <EditorialWorkspaceShell className="flex h-full min-h-0 flex-1 flex-col">
                     <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-6">
                       <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
-                        {gateWorkspaceTitle(gateUiMode)}
+                        {gateWorkspaceTitle(
+                          gateUiMode,
+                          (gateUiMode === "pre_send" && requiresContactsUpload) || gateUiMode === "recipient_upload",
+                        )}
                       </h2>
                       <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
                         {gateWorkspaceSubtitle(pendingGate, gateUiMode)}
@@ -2272,7 +2444,15 @@ export default function StableLoopRunPage() {
                       </p>
                     </div>
 
-                    <div id="gate-draft-editor" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                    <div id="gate-draft-editor" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+                      {(gateUiMode === "recipient_upload" || (gateUiMode === "pre_send" && requiresContactsUpload)) && contactsUploadGate ? (
+                        <ContactsInputWorkspace
+                          contactSourceKind={contactSourceKind}
+                          recipientCount={savedRecipientCount}
+                          busy={busy === `/gates/${contactsUploadGate.id}/contacts`}
+                          onSave={(input) => saveGateContacts(contactsUploadGate, input)}
+                        />
+                      ) : null}
                       {gateUiMode === "memory_confirmation" ? (
                         <MemoryEditCanvas
                           gateId={pendingGate.id}
@@ -2292,7 +2472,7 @@ export default function StableLoopRunPage() {
                           onAddSource={addCustomSource}
                         />
                       ) : null}
-                      {(gateUiMode === "draft_review" || gateUiMode === "pre_send") ? (
+                      {(gateUiMode === "draft_review" || (gateUiMode === "pre_send" && !requiresContactsUpload)) ? (
                         <DraftReviewWorkspace agentOutput={gateAgentOutput || centerBody}>
                           {activeCanvasArtifact && activeCanvasTemplate ? (
                             <ArtifactRenderer
@@ -2551,9 +2731,10 @@ export default function StableLoopRunPage() {
                   </motion.div>
               )}
             </AnimatePresence>
+            </div>
           </section>
 
-          <aside className="space-y-5 overflow-hidden" style={{ fontFamily: "var(--font-fustat)" }}>
+          <aside className="min-h-0 space-y-5 overflow-y-auto" style={{ fontFamily: "var(--font-fustat)" }}>
             <EditorialSidebarPanel title="Final result" icon={Puzzle}>
               {finalArtifacts.map((artifact) => (
                 <button

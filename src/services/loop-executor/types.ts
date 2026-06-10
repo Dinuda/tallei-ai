@@ -33,6 +33,7 @@ export const loopGateTypeSchema = z.enum([
   "source_confirmation",
   "missing_input",
   "draft_review",
+  "recipient_upload",
   "pre_send",
 ]);
 
@@ -55,7 +56,7 @@ export type LoopAgentContract = z.infer<typeof loopAgentContractSchema>;
 function normalizeDeliveryTarget(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const normalized = value.trim().toLowerCase().replace(/\s+/g, "_");
-  // Composio action refs masquerading as delivery targets (e.g. "composio.resend.action.resend_send_email")
+  // Connector action refs masquerading as delivery targets.
   if (normalized.includes("composio.") && normalized.includes(".action.")) {
     if (normalized.includes("email") || normalized.includes("mail") || normalized.includes("send")) {
       return "subscriber_list";

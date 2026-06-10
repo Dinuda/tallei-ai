@@ -10,6 +10,7 @@ export {
   startLoopRuntimeWorker,
   startManualLoopRun,
   stopLoopRuntimeWorker,
+  uploadLoopRuntimeGateContacts,
 } from "./runtime.js";
 export { runtimeContextSchema, runtimeDefinitionSchema, runtimeRunStatusSchema } from "./types.js";
 export {

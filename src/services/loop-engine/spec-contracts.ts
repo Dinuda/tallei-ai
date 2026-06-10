@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { isApprovedExternalEffectPolicy } from "./tool-contract-matcher.js";
+
 const SUBSCRIBER_ALIAS_KEYWORDS = [
   "mailing_list",
   "subscriber",
@@ -13,12 +15,29 @@ const SUBSCRIBER_ALIAS_KEYWORDS = [
 function normalizeDeliveryTarget(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const normalized = value.trim().toLowerCase().replace(/\s+/g, "_");
-  // Composio action refs masquerading as delivery targets (e.g. "composio.resend.action.resend_send_email")
+  // Connector action refs masquerading as delivery targets.
   if (normalized.includes("composio.") && normalized.includes(".action.")) {
     if (normalized.includes("email") || normalized.includes("mail") || normalized.includes("send")) {
       return "subscriber_list";
     }
     return "none";
+  }
+  if (
+    normalized === "connected_app"
+    || normalized === "connected_apps"
+    || normalized === "connected_application"
+    || normalized === "app_delivery"
+    || normalized === "newsletter"
+    || normalized === "broadcast"
+  ) {
+    return "subscriber_list";
+  }
+  if (
+    normalized === "team_inbox"
+    || normalized === "internal_email"
+    || normalized === "internal_team"
+  ) {
+    return "team_email";
   }
   if (SUBSCRIBER_ALIAS_KEYWORDS.some((kw) => normalized.includes(kw))) {
     return "subscriber_list";
@@ -70,6 +89,12 @@ function normalizeConnectorActionRef(value: unknown): unknown {
     const toolkit = typeof obj.toolkit === "string" ? obj.toolkit.trim() : "";
     const actionSlug = typeof obj.actionSlug === "string" ? obj.actionSlug.trim() : "";
     const risk = typeof obj.risk === "string" ? obj.risk.trim() : "";
+    if (actionSlug.includes(".action.")) {
+      return normalizeConnectorActionRef(actionSlug);
+    }
+    if (toolkit.includes(".action.") && !actionSlug) {
+      return normalizeConnectorActionRef(toolkit);
+    }
     // If both are empty, try to extract from a "ref" or "action" field
     if (!toolkit && !actionSlug) {
       const ref = typeof obj.ref === "string" ? obj.ref.trim() : typeof obj.action === "string" ? obj.action.trim() : "";
@@ -77,9 +102,12 @@ function normalizeConnectorActionRef(value: unknown): unknown {
         return normalizeConnectorActionRef(ref);
       }
     }
+    const inferredToolkit = toolkit.toLowerCase() === "composio"
+      ? actionSlug.replace(/^_+/, "").split("_")[0]?.trim()
+      : undefined;
     // Return normalized object (will fail validation if still missing, but with clear path)
     return {
-      toolkit: toolkit || undefined,
+      toolkit: inferredToolkit || toolkit || undefined,
       actionSlug: actionSlug || undefined,
       risk: risk || undefined,
       description: typeof obj.description === "string" ? obj.description.trim() : obj.description,
@@ -126,6 +154,53 @@ export const connectorRecipientSourceSchema = z.object({
   description: z.string().min(1).trim().optional(),
 });
 
+export function defaultRecipientSourceDescription(kind: string): string | undefined {
+  switch (kind) {
+    case "uploaded":
+      return "Operator uploads a CSV contact list at pre_send approval.";
+    case "operator_input":
+      return "Operator pastes email addresses at pre_send approval.";
+    case "configured":
+      return "Operator provides an audience or segment ID at pre_send approval.";
+    default:
+      return undefined;
+  }
+}
+
+function readSpecRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function normalizeSubscriberRecipientSourceInSpec(value: unknown): unknown {
+  const root = readSpecRecord(value);
+  const delivery = readSpecRecord(root.delivery);
+  const target = normalizeDeliveryTarget(delivery.target ?? "none");
+  if (target !== "subscriber_list") return value;
+
+  const connectorPolicy = readSpecRecord(root.connectorPolicy);
+  const recipientSource = readSpecRecord(connectorPolicy.recipientSource);
+  const kind = normalizeRecipientSourceKind(recipientSource.kind ?? "none");
+  const resolvedKind = kind === "none" ? "uploaded" : kind;
+  const existingDescription = typeof recipientSource.description === "string"
+    ? recipientSource.description.trim()
+    : "";
+  const description = existingDescription || defaultRecipientSourceDescription(String(resolvedKind));
+  if (!description) return value;
+  if (kind === resolvedKind && existingDescription) return value;
+
+  return {
+    ...root,
+    connectorPolicy: {
+      ...connectorPolicy,
+      recipientSource: {
+        ...recipientSource,
+        kind: resolvedKind,
+        description,
+      },
+    },
+  };
+}
+
 export const approvedInternalToolsSchema = z.object({
   readToolRefs: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default(["internal.web_search", "internal.memory_search"]),
   writeToolRefs: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default(["internal.llm_only"]),
@@ -160,16 +235,7 @@ export const connectorPolicySchema = z.object({
   }
 });
 
-function connectorActionRefText(action: { toolkit: string; actionSlug: string; description?: string }): string {
-  return `${action.toolkit} ${action.actionSlug} ${action.description ?? ""}`.toLowerCase();
-}
-
-function isDraftOnlyConnectorAction(action: { toolkit: string; actionSlug: string; description?: string }): boolean {
-  const text = connectorActionRefText(action);
-  return /\bdraft\b|create[_-]?draft|email[_-]?draft/.test(text);
-}
-
-export const noSlopSpecSchema = z.object({
+const baseNoSlopSpecSchema = z.object({
   purpose: z.string().min(1).trim(),
   agents: z.array(noSlopSpecAgentSchema).min(1),
   guardrails: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
@@ -193,42 +259,81 @@ export const noSlopSpecSchema = z.object({
     recipientSource: { kind: "none" },
     deliveryExpectation: "No outbound delivery.",
   }),
-}).superRefine((spec, ctx) => {
-  if (spec.delivery.target !== "none") {
-    if (spec.connectorPolicy.allowedWriteActions.length === 0) {
+});
+
+type NoSlopSpecShape = z.infer<typeof baseNoSlopSpecSchema>;
+
+function refineOutboundDeliveryPolicy(
+  spec: NoSlopSpecShape,
+  ctx: z.RefinementCtx,
+  options: { requireWriteActions: boolean },
+): void {
+  if (spec.delivery.target === "none") return;
+
+  if (options.requireWriteActions && spec.connectorPolicy.allowedWriteActions.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["connectorPolicy", "allowedWriteActions"],
+      message: "Outbound delivery requires at least one explicitly approved connector write action.",
+    });
+  }
+  if (spec.connectorPolicy.allowedWriteActions.some((action) => !action.requiresPreSendApproval)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["connectorPolicy", "allowedWriteActions"],
+      message: "Outbound delivery requires per-run pre-send approval.",
+    });
+  }
+  if (spec.delivery.target === "subscriber_list") {
+    const recipientKind = spec.connectorPolicy.recipientSource.kind;
+    if (recipientKind === "none") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["connectorPolicy", "allowedWriteActions"],
-        message: "Outbound delivery requires at least one explicitly approved connector write action.",
+        path: ["connectorPolicy", "recipientSource", "kind"],
+        message: "Subscriber-list delivery requires recipientSource.kind uploaded, configured, or operator_input.",
       });
     }
-    if (spec.connectorPolicy.allowedWriteActions.some((action) => !action.requiresPreSendApproval)) {
+    if (!spec.connectorPolicy.recipientSource.description?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["connectorPolicy", "allowedWriteActions"],
-        message: "Outbound delivery requires per-run pre-send approval.",
+        path: ["connectorPolicy", "recipientSource", "description"],
+        message: "Subscriber-list delivery requires recipientSource.description explaining how recipients are provided.",
       });
     }
-    if (spec.delivery.target === "subscriber_list") {
-      for (const action of spec.connectorPolicy.allowedWriteActions) {
-        if (action.risk !== "send") {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["connectorPolicy", "allowedWriteActions", action.actionSlug],
-            message: "Subscriber-list delivery requires a send-capable connector action.",
-          });
-        }
-        if (isDraftOnlyConnectorAction(action)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["connectorPolicy", "allowedWriteActions", action.actionSlug],
-            message: "Subscriber-list delivery cannot use draft-only connector actions.",
-          });
-        }
+    for (const action of spec.connectorPolicy.allowedWriteActions) {
+      if (!isApprovedExternalEffectPolicy(action)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["connectorPolicy", "allowedWriteActions", action.actionSlug],
+          message: "Outbound delivery requires an approved external-effect connector action.",
+        });
       }
     }
   }
+}
+
+const approvedNoSlopSpecSchema = baseNoSlopSpecSchema.superRefine((spec, ctx) => {
+  refineOutboundDeliveryPolicy(spec, ctx, { requireWriteActions: true });
 });
+
+/** Draft specs may omit connector write actions; they are resolved at approve/generate from Connected Apps. */
+const draftNoSlopSpecSchema = baseNoSlopSpecSchema.superRefine((spec, ctx) => {
+  refineOutboundDeliveryPolicy(spec, ctx, { requireWriteActions: false });
+});
+
+function preprocessNoSlopSpec(value: unknown): unknown {
+  return normalizeSubscriberRecipientSourceInSpec(value);
+}
+
+export const noSlopSpecDraftSchema = z.preprocess(
+  preprocessNoSlopSpec,
+  draftNoSlopSpecSchema,
+);
+
+export const noSlopSpecSchema = z.preprocess(
+  preprocessNoSlopSpec,
+  approvedNoSlopSpecSchema,
+);
 
 export const noSlopSpecStatusSchema = z.enum(["draft", "approved", "archived"]);
 
@@ -238,7 +343,7 @@ export const noSlopSpecSnapshotSchema = z.object({
   version: z.number().int().min(1),
   title: z.string().min(1),
   bodyMarkdown: z.string().min(1),
-  specJson: noSlopSpecSchema,
+  specJson: noSlopSpecDraftSchema,
   approvedAt: z.string().min(1),
 });
 

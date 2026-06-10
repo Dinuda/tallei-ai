@@ -18,7 +18,8 @@ export function gateStatusImperative(mode: string): string {
   if (mode === "memory_confirmation") return "Select which memories the next agent may use";
   if (mode === "source_confirmation") return "Select sources, add custom URLs, then approve or revise";
   if (mode === "draft_review") return "Review the draft, then save & approve or request changes";
-  if (mode === "pre_send") return "Confirm the final version before sending";
+  if (mode === "recipient_upload") return "Add recipients for this send, then continue";
+  if (mode === "pre_send") return "Review the final draft, then approve send";
   return "Review and decide how to continue";
 }
 
@@ -127,8 +128,8 @@ export function MissingInputWorkspace({
   busy: boolean;
 }) {
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <section className="border-b border-[#ebebeb] px-7 py-6">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <section className="flex min-h-0 flex-1 flex-col border-b border-[#ebebeb] px-7 py-6">
         <div
           className="group -mx-2 rounded-md px-3 py-2 transition-colors hover:bg-[#f7f7f5]"
           style={{ fontFamily: "var(--font-fustat)" }}
@@ -143,16 +144,16 @@ export function MissingInputWorkspace({
             className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.65] text-[#37352f] outline-none placeholder:text-[#c4c4c0] focus:ring-0"
           />
         </div>
-        <div className="mt-4 flex items-center gap-3">
+        <div className="mt-4 flex items-center justify-between gap-4">
+          <p className="min-w-0 text-[13px] text-[#9b9a97]">Paste the real content, then submit to continue.</p>
           <EditorialActionButton
             label="Submit input"
             glyph="submit"
             variant="primary"
             onClick={onSubmit}
             disabled={busy || submitDisabled}
-            className="px-5 text-[14px]"
+            className="shrink-0 px-5 text-[14px]"
           />
-          <p className="text-[13px] text-[#9b9a97]">Paste the real content, then submit to continue.</p>
         </div>
       </section>
 

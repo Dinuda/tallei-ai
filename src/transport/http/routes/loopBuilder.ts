@@ -139,7 +139,12 @@ router.post("/specs/:specId/approve", requireScopes(["memory:write"]), async (re
       return;
     }
     const message = error instanceof Error ? error.message : "Failed to approve loop spec";
-    res.status(/not found/i.test(message) ? 404 : 500).json({ error: message });
+    const status = /not found/i.test(message)
+      ? 404
+      : /outbound delivery requires/i.test(message)
+        ? 400
+        : 500;
+    res.status(status).json({ error: message });
   }
 });
 
@@ -180,8 +185,10 @@ router.post("/specs/:specId/generate", requireScopes(["memory:read"]), async (re
       res.status(400).json({ error: "Validation failed", details: error.errors });
       return;
     }
+    const message = error instanceof Error ? error.message : "Failed to generate loop from spec";
+    const status = /outbound delivery requires/i.test(message) ? 400 : 500;
     console.error("Error generating loop from spec:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to generate loop from spec" });
+    res.status(status).json({ error: message });
   }
 });
 

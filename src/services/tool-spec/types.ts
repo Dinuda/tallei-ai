@@ -1,9 +1,55 @@
 import type { ConnectorActionRisk } from "../loop-engine/spec-contracts.js";
 
+export type ToolProvider = "internal" | "composio";
+export type ToolSkillTag =
+  | "search"
+  | "retrieve"
+  | "draft"
+  | "summarize"
+  | "transform"
+  | "send"
+  | "create"
+  | "update"
+  | "delete"
+  | "schedule"
+  | "notify"
+  | "analyze";
+export type ToolEffect = "none" | "read_external" | "write_external" | "irreversible_external";
+export type ToolExecutionMode = "short_circuit" | "llm_assisted" | "approval_executed";
+export type ToolContractSource = "static" | "composio_sdk" | "llm_contract" | "reviewed_override";
+export type ToolRenderTarget = "canvas.email" | "canvas.preview";
+
+export interface ToolRenderRecommendation {
+  target: ToolRenderTarget;
+  reason: string;
+  strength: "weak" | "medium" | "strong";
+}
+
+export interface ToolContract {
+  toolRef: string;
+  provider: ToolProvider;
+  name: string;
+  description: string;
+  skillTags: ToolSkillTag[];
+  effect: ToolEffect;
+  resources: string[];
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  executionMode: ToolExecutionMode;
+  approval: {
+    required: boolean;
+    suggestedGate?: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "recipient_upload" | "pre_send";
+    reason?: string;
+  };
+  renderRecommendations: ToolRenderRecommendation[];
+  constraints: Record<string, unknown>;
+  source: ToolContractSource;
+}
+
 export interface ToolSpec {
   ref: string;
   label: string;
-  provider: "internal" | "composio";
+  provider: ToolProvider;
   description: string;
   shortCircuits: boolean;
   outputDescription: string;
@@ -16,6 +62,7 @@ export interface ToolSpec {
   requiresPreSendApproval: boolean;
   toolkit?: string;
   actions?: ComposioActionSpec[];
+  contract?: ToolContract;
 }
 
 export interface ComposioActionSpec {
@@ -24,6 +71,7 @@ export interface ComposioActionSpec {
   description: string;
   risk: ConnectorActionRisk;
   inputSchema?: Record<string, unknown>;
+  contract?: ToolContract;
 }
 
 export interface ToolUseCase {
@@ -37,6 +85,7 @@ export interface ToolUseCase {
 export interface ToolSpecRegistry {
   internalTools: ToolSpec[];
   composioToolkits: ToolSpec[];
+  toolContracts: ToolContract[];
   useCases: ToolUseCase[];
   generatedAt: string;
 }

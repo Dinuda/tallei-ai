@@ -51,6 +51,7 @@ type BuilderProposal = {
     builderMeta?: {
       model?: string;
       noSlopSpec?: { id: string; title: string; version: number; approvedAt: string };
+      designDiagnostics?: Record<string, unknown>;
     };
   };
   suggestedChannels: string[];
@@ -61,6 +62,7 @@ type BuilderProposal = {
   designedBy?: string;
   model?: string;
   noSlopSpec?: { id: string; title: string; version: number; approvedAt: string };
+  trace?: { stages?: Array<Record<string, unknown>> };
 };
 
 const BUILDER_POLL_INTERVAL_MS = 2000;
@@ -119,11 +121,16 @@ export default function NewLoopBuilderPage() {
   const [connectorTools, setConnectorTools] = useState<Record<string, ConnectorTool[]>>({});
 
   const agents = useMemo(() => proposal?.definition.agentGraph?.children ?? [], [proposal]);
+  const designDiagnostics = proposal?.definition.builderMeta?.designDiagnostics ?? null;
+  const architectTrace = proposal?.trace ?? designDiagnostics?.trace ?? null;
   const approved = spec?.status === "approved";
   const connectedKeys = useMemo(() => {
-    return connectors
-      .filter((connector) => connector.status === "connected" && connector.appKey)
-      .map((connector) => connector.appKey!) ;
+    return [...new Set(
+      connectors
+        .filter((connector) => connector.status === "connected")
+        .map((connector) => (connector.appKey ?? connector.provider ?? "").trim().toLowerCase())
+        .filter(Boolean),
+    )];
   }, [connectors]);
   const connectorPolicy = spec?.specJson?.connectorPolicy;
 
@@ -447,6 +454,24 @@ export default function NewLoopBuilderPage() {
                   {JSON.stringify(proposal.definition, null, 2)}
                 </pre>
               </div>
+
+              {designDiagnostics ? (
+                <div className="mt-5">
+                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Agent generation output</div>
+                  <pre className="mt-2 max-h-[420px] overflow-auto rounded-md border border-[var(--border-light)] bg-slate-950 p-3 text-xs leading-5 text-slate-100">
+                    {JSON.stringify(designDiagnostics, null, 2)}
+                  </pre>
+                </div>
+              ) : null}
+
+              {architectTrace ? (
+                <div className="mt-5">
+                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Generation trace</div>
+                  <pre className="mt-2 max-h-[320px] overflow-auto rounded-md border border-[var(--border-light)] bg-slate-950 p-3 text-xs leading-5 text-slate-100">
+                    {JSON.stringify(architectTrace, null, 2)}
+                  </pre>
+                </div>
+              ) : null}
             </Card>
           ) : null}
         </section>

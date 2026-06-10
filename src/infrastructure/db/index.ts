@@ -1311,7 +1311,7 @@ export async function initDb() {
         run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
         step_attempt_id UUID NOT NULL REFERENCES loop_engine_step_attempts(id) ON DELETE CASCADE,
         gate_type TEXT NOT NULL
-          CHECK (gate_type IN ('memory_confirmation', 'source_confirmation', 'missing_input', 'draft_review', 'pre_send')),
+          CHECK (gate_type IN ('memory_confirmation', 'source_confirmation', 'missing_input', 'draft_review', 'recipient_upload', 'pre_send')),
         status TEXT NOT NULL DEFAULT 'pending'
           CHECK (status IN ('pending', 'approved', 'submitted', 'rejected')),
         question TEXT NOT NULL,
@@ -2505,7 +2505,7 @@ export async function initDb() {
     await client.query(`
       ALTER TABLE loop_engine_gates
       ADD CONSTRAINT loop_engine_gates_gate_type_check
-      CHECK (gate_type IN ('memory_confirmation', 'source_confirmation', 'missing_input', 'draft_review', 'pre_send'));
+      CHECK (gate_type IN ('memory_confirmation', 'source_confirmation', 'missing_input', 'draft_review', 'recipient_upload', 'pre_send'));
     `);
 
     console.log("Database schema initialized successfully.");

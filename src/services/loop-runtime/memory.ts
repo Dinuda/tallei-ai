@@ -1,4 +1,10 @@
-import type { LoopDefinition, LoopGateType, LoopRunAgent } from "../loop-executor/types.js";
+import type { LoopContactRow, LoopDefinition, LoopGateType, LoopRunAgent } from "../loop-executor/types.js";
+import {
+  buildDeliveryRecipientsPatch,
+  contactsFromDecision,
+  type DeliveryRecipients,
+  type RecipientSourceKind,
+} from "./recipient-resolution.js";
 import type { WebSearchSource } from "../loop-engine/contracts.js";
 
 export type ApprovedMemory = {
@@ -124,13 +130,18 @@ function readApprovedWebSourceRow(row: unknown): ApprovedWebSource | null {
   return { title, url, snippet };
 }
 
+export type GateMemoryPatch = Partial<Pick<RunMemory, "inputs" | "approvedMemories" | "approvedSources" | "operatorRevisions">> & {
+  deliveryRecipients?: DeliveryRecipients;
+};
+
 export function applyGateDecisionToRunMemory(input: {
   gateType: LoopGateType;
   decision: Record<string, unknown>;
   definition: LoopDefinition;
   gateFields?: Array<{ key: string }>;
   gateAgentId?: string;
-}): Partial<Pick<RunMemory, "inputs" | "approvedMemories" | "approvedSources" | "operatorRevisions">> {
+  recipientSourceKind?: RecipientSourceKind;
+}): GateMemoryPatch {
   if (input.gateType === "missing_input" && typeof input.decision.value === "string") {
     const value = input.decision.value.trim();
     if (!value) return {};
@@ -171,6 +182,17 @@ export function applyGateDecisionToRunMemory(input: {
       pushRow(row);
     }
     return { approvedSources: { [agentId]: rows } };
+  }
+  if (input.gateType === "pre_send" || input.gateType === "recipient_upload") {
+    const contacts = contactsFromDecision(input.decision);
+    if (contacts.length === 0) return {};
+    const audienceId = typeof input.decision.audienceId === "string" ? input.decision.audienceId.trim() : undefined;
+    const source = input.recipientSourceKind && input.recipientSourceKind !== "none"
+      ? input.recipientSourceKind
+      : "uploaded";
+    return {
+      deliveryRecipients: buildDeliveryRecipientsPatch({ contacts, source, audienceId }),
+    };
   }
   return {};
 }

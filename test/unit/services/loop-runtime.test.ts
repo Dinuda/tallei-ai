@@ -83,7 +83,7 @@ test("stable runtime rejects legacy definitions and outbound delivery", () => {
   }).success, false);
 });
 
-test("normalize remaps writer pre_send gate to draft_review before runtime validation", () => {
+test("normalize does not remap writer pre_send gate before runtime validation", () => {
   const invalid = {
     ...stableDefinition(),
     agentGraph: {
@@ -98,8 +98,8 @@ test("normalize remaps writer pre_send gate to draft_review before runtime valid
   };
   assert.equal(runtimeDefinitionSchema.safeParse(invalid).success, false);
   const normalized = normalizeLoopDefinitionForRuntime(invalid as never);
-  assert.equal(normalized.agentGraph?.children[0]?.gate?.type, "draft_review");
-  assert.equal(runtimeDefinitionSchema.safeParse(normalized).success, true);
+  assert.equal(normalized.agentGraph?.children[0]?.gate?.type, "pre_send");
+  assert.equal(runtimeDefinitionSchema.safeParse(normalized).success, false);
 });
 
 test("stable runtime accepts approved connector action only with pre-send gate", () => {
@@ -166,7 +166,7 @@ test("stable runtime accepts approved connector action only with pre-send gate",
   }).success, false);
 });
 
-test("stable runtime rejects subscriber delivery with draft-only connector action", () => {
+test("stable runtime accepts approved generic external write action with approval gate", () => {
   const connectorPolicy = {
     enabledToolkits: ["create_email_draft"],
     allowedReadActions: [],
@@ -197,7 +197,7 @@ test("stable runtime rejects subscriber delivery with draft-only connector actio
       }],
     },
   };
-  assert.equal(runtimeDefinitionSchema.safeParse(definition).success, false);
+  assert.equal(runtimeDefinitionSchema.safeParse(definition).success, true);
 });
 
 test("dynamic composio action refs resolve through the tool catalog", () => {
@@ -250,8 +250,8 @@ test("canvas email renderer returns editable template without delivery footer", 
   assert.equal(template.design.body.rows.length > 0, true);
 });
 
-test("normalize strips orphan QA agent and ensures writer draft_review gate", () => {
-  const invalid = {
+test("normalize preserves explicit review agents and does not add writer gates", () => {
+  const definition = {
     ...stableDefinition(),
     agentGraph: {
       ...stableDefinition().agentGraph,
@@ -274,13 +274,45 @@ test("normalize strips orphan QA agent and ensures writer draft_review gate", ()
       ],
     },
   };
-  const normalized = normalizeLoopDefinitionForRuntime(invalid as never);
-  assert.equal(normalized.agentGraph?.children.length, 1);
-  assert.equal(normalized.agentGraph?.children[0]?.gate?.type, "draft_review");
-  assert.equal(normalized.agentGraph?.children[0]?.renderTarget, "canvas.email");
+  const normalized = normalizeLoopDefinitionForRuntime(definition as never);
+  assert.equal(normalized.agentGraph?.children.length, 2);
+  assert.equal(normalized.agentGraph?.children[0]?.gate, undefined);
+  assert.equal(normalized.agentGraph?.children[0]?.renderTarget, undefined);
+  assert.equal(normalized.agentGraph?.children[1]?.gate?.type, "draft_review");
 });
 
-test("normalize adds source_confirmation to web search agents", () => {
+test("injectDeliveryRecipientsIntoPayload adds email recipients for send actions", async () => {
+  const { injectDeliveryRecipientsIntoPayload } = await import("../../../src/services/loop-runtime/recipient-resolution.js");
+  const payload = injectDeliveryRecipientsIntoPayload({
+    payload: { subject: "Hello", content: "Body" },
+    context: {
+      inputs: {},
+      approvedMemories: [],
+      approvedSources: {},
+      operatorRevisions: {},
+      deliveryRecipients: {
+        uploadedAt: "2026-06-09T00:00:00.000Z",
+        contacts: [{ email: "alice@example.com" }, { email: "bob@example.com" }],
+        recipientCount: 2,
+        source: "uploaded",
+      },
+    },
+    actionSlug: "RESEND_SEND_EMAIL",
+  });
+  assert.deepEqual(payload.to, ["alice@example.com", "bob@example.com"]);
+  assert.deepEqual(payload.recipients, ["alice@example.com", "bob@example.com"]);
+});
+
+test("resolveRecipientStatus is ready when configured audience id exists", async () => {
+  const { resolveRecipientStatus } = await import("../../../src/services/loop-runtime/recipient-resolution.js");
+  assert.equal(resolveRecipientStatus({
+    recipientSource: { kind: "configured" },
+    context: { inputs: {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} },
+    assignmentConfig: { audience_id: "aud_123" },
+  }), "ready");
+});
+
+test("normalize preserves web search agents without forced source confirmation", () => {
   const definition = {
     ...stableDefinition(),
     agentGraph: {
@@ -295,5 +327,5 @@ test("normalize adds source_confirmation to web search agents", () => {
     },
   };
   const normalized = normalizeLoopDefinitionForRuntime(definition as never);
-  assert.equal(normalized.agentGraph?.children[0]?.gate?.type, "source_confirmation");
+  assert.equal(normalized.agentGraph?.children[0]?.gate, undefined);
 });
