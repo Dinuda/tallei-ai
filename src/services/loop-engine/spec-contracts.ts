@@ -57,6 +57,27 @@ function filterEmptyStrings(arr: unknown): unknown {
   return arr.filter((s) => typeof s === "string" && s.trim().length > 0).map((s) => s.trim());
 }
 
+/** LLMs often emit "" for optional fields; Zod optional() accepts undefined, not empty strings. */
+function emptyStringToUndefined(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeSchedule(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const schedule = value as Record<string, unknown>;
+  const description = typeof schedule.description === "string" ? schedule.description.trim() : schedule.description;
+  const cron = emptyStringToUndefined(schedule.cron);
+  const timezone = emptyStringToUndefined(schedule.timezone);
+  const normalized: Record<string, unknown> = { ...schedule, description };
+  if (cron !== undefined) normalized.cron = cron;
+  else delete normalized.cron;
+  if (timezone !== undefined) normalized.timezone = timezone;
+  else delete normalized.timezone;
+  return normalized;
+}
+
 export const noSlopSpecAgentSchema = z.object({
   name: z.string().min(1).trim(),
   goal: z.string().min(1).trim(),
@@ -121,7 +142,7 @@ const baseConnectorActionPolicySchema = z.object({
   toolkit: z.string().min(1).trim(),
   actionSlug: z.string().min(1).trim(),
   risk: connectorActionRiskSchema,
-  description: z.string().min(1).trim().optional(),
+  description: z.preprocess(emptyStringToUndefined, z.string().min(1).trim().optional()),
   requiresPreSendApproval: z.boolean().default(true),
 });
 
@@ -151,7 +172,7 @@ function normalizeRecipientSourceKind(value: unknown): unknown {
 
 export const connectorRecipientSourceSchema = z.object({
   kind: z.preprocess(normalizeRecipientSourceKind, z.enum(["none", "configured", "uploaded", "operator_input"])).default("none"),
-  description: z.string().min(1).trim().optional(),
+  description: z.preprocess(emptyStringToUndefined, z.string().min(1).trim().optional()),
 });
 
 export function defaultRecipientSourceDescription(kind: string): string | undefined {
@@ -241,14 +262,14 @@ const baseNoSlopSpecSchema = z.object({
   guardrails: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   successCriteria: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   failureModes: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
-  schedule: z.object({
+  schedule: z.preprocess(normalizeSchedule, z.object({
     description: z.string().min(1).trim(),
     cron: z.string().min(1).trim().optional(),
     timezone: z.string().min(1).trim().optional(),
-  }),
+  })),
   delivery: z.object({
     target: noSlopSpecDeliveryTargetSchema.default("none"),
-    description: z.string().min(1).trim().default("Dashboard only"),
+    description: z.preprocess(emptyStringToUndefined, z.string().min(1).trim().default("Dashboard only")),
   }),
   connectorPolicy: connectorPolicySchema.default({
     enabledToolkits: [],
@@ -322,7 +343,7 @@ const draftNoSlopSpecSchema = baseNoSlopSpecSchema.superRefine((spec, ctx) => {
 });
 
 function preprocessNoSlopSpec(value: unknown): unknown {
-  return normalizeSubscriberRecipientSourceInSpec(value);
+  return normalizeSchedule(normalizeSubscriberRecipientSourceInSpec(value));
 }
 
 export const noSlopSpecDraftSchema = z.preprocess(

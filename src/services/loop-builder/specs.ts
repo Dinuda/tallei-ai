@@ -1,5 +1,6 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import { ZodError } from "zod";
 import {
   listDeliveryActionCandidates,
   selectBestDeliveryAction,
@@ -401,7 +402,10 @@ function specSystemPrompt(): string {
     "Include failureModes: Pause at pre_send for operator contact upload when no recipients are configured.",
     "Include successCriteria: Delivery completes only after operator confirms recipients.",
     "When Connected Apps external-effect candidates are listed, choose only actions whose skills/resources/effects match the requested workflow. Do not infer hidden capabilities from provider names.",
-    "Use a 5-field cron only when cadence is clear; otherwise describe the schedule and omit cron.",
+    "Use a 5-field cron only when cadence is clear; otherwise describe the schedule in schedule.description and omit schedule.cron entirely.",
+    "schedule.timezone must be a valid IANA timezone such as UTC when provided; omit schedule.timezone if unknown (defaults to UTC).",
+    "STRICT JSON: never use empty strings for optional fields. Omit optional keys entirely instead of setting them to \"\".",
+    "Required string fields (purpose, schedule.description, agent.name, agent.goal) must be non-empty.",
     "",
     "JSON shape:",
     JSON.stringify({
@@ -436,6 +440,19 @@ function specSystemPrompt(): string {
   ].join("\n");
 }
 
+const SPEC_GENERATION_MAX_RETRIES = 2;
+
+function formatSpecValidationIssues(error: ZodError): string[] {
+  return error.issues.map((issue) => {
+    const path = issue.path.length > 0 ? issue.path.join(".") : "root";
+    return `${path}: ${issue.message}`;
+  });
+}
+
+function parsePreparedSpecJson(prepared: unknown, prompt: string): NoSlopSpec {
+  return normalizeGeneratedSpec(noSlopSpecDraftSchema.parse(prepared), prompt);
+}
+
 async function generateSpecJson(input: {
   auth: AuthContext;
   prompt: string;
@@ -446,42 +463,63 @@ async function generateSpecJson(input: {
     listDeliveryActionCandidates({ auth: input.auth, target: "subscriber_list" }).catch(() => []),
     listDeliveryActionCandidates({ auth: input.auth, target: "team_email" }).catch(() => []),
   ]);
-  const sections = [
-    `User loop request:\n${input.prompt}`,
-    input.currentSpec ? `Current spec markdown:\n${input.currentSpec.bodyMarkdown}` : null,
-    input.feedback ? `Requested refinement:\n${input.feedback}` : null,
-    [
-      "Connected Apps external-effect action candidates:",
-      ...[...subscriberCandidates, ...teamCandidates]
-        .slice(0, 12)
-        .map((candidate) => `- ${candidate.toolRef} (${candidate.reason}, score ${candidate.score})`),
-      subscriberCandidates.length === 0 && teamCandidates.length === 0
-        ? "- none discovered; default delivery.target to none until a matching external-effect app is connected under Connected Apps"
-        : "",
-    ].filter(Boolean).join("\n"),
-  ].filter(Boolean).join("\n\n");
+  const candidateBlock = [
+    "Connected Apps external-effect action candidates:",
+    ...[...subscriberCandidates, ...teamCandidates]
+      .slice(0, 12)
+      .map((candidate) => `- ${candidate.toolRef} (${candidate.reason}, score ${candidate.score})`),
+    subscriberCandidates.length === 0 && teamCandidates.length === 0
+      ? "- none discovered; default delivery.target to none until a matching external-effect app is connected under Connected Apps"
+      : "",
+  ].filter(Boolean).join("\n");
 
-  const response = await loopBuilderOpenAiChat({
-    responseFormat: "json_object",
-    temperature: 0.2,
-    maxTokens: 2500,
-    reasoningEffort: "minimal",
-    messages: [
-      { role: "system", content: specSystemPrompt() },
-      { role: "user", content: sections },
-    ],
-  });
+  let validationFixes: string[] = [];
+  let lastError: unknown = null;
 
-  let rawSpec: unknown;
-  try {
-    rawSpec = JSON.parse(response.text);
-  } catch (parseError) {
-    throw new Error(`Failed to parse spec LLM response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}\n\nResponse text (first 500 chars):\n${response.text.slice(0, 500)}`);
+  for (let attempt = 0; attempt <= SPEC_GENERATION_MAX_RETRIES; attempt += 1) {
+    const sections = [
+      `User loop request:\n${input.prompt}`,
+      input.currentSpec ? `Current spec markdown:\n${input.currentSpec.bodyMarkdown}` : null,
+      input.feedback ? `Requested refinement:\n${input.feedback}` : null,
+      candidateBlock,
+      validationFixes.length > 0
+        ? `Required fixes from schema validation (address all):\n${validationFixes.map((fix) => `- ${fix}`).join("\n")}`
+        : null,
+    ].filter(Boolean).join("\n\n");
+
+    try {
+      const response = await loopBuilderOpenAiChat({
+        responseFormat: "json_object",
+        temperature: 0.2,
+        maxTokens: 2500,
+        reasoningEffort: "minimal",
+        messages: [
+          { role: "system", content: specSystemPrompt() },
+          { role: "user", content: sections },
+        ],
+      });
+
+      let rawSpec: unknown;
+      try {
+        rawSpec = JSON.parse(response.text);
+      } catch (parseError) {
+        throw new Error(`Failed to parse spec LLM response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}\n\nResponse text (first 500 chars):\n${response.text.slice(0, 500)}`);
+      }
+
+      const candidate = await bestDeliveryCandidateForRawSpec(input.auth, rawSpec);
+      const prepared = prepareLoopSpecJsonForValidation(rawSpec, candidate);
+      return parsePreparedSpecJson(prepared, input.prompt);
+    } catch (error) {
+      lastError = error;
+      if (error instanceof ZodError && attempt < SPEC_GENERATION_MAX_RETRIES) {
+        validationFixes = formatSpecValidationIssues(error);
+        continue;
+      }
+      throw error;
+    }
   }
 
-  const candidate = await bestDeliveryCandidateForRawSpec(input.auth, rawSpec);
-  const prepared = prepareLoopSpecJsonForValidation(rawSpec, candidate);
-  return normalizeGeneratedSpec(noSlopSpecDraftSchema.parse(prepared), input.prompt);
+  throw lastError instanceof Error ? lastError : new Error("Spec generation failed");
 }
 
 export async function draftLoopSpec(input: {

@@ -112,23 +112,28 @@ export function resolveStepToolRefs(step: StepLike, definition?: RunDefinition |
   return ["internal.llm_only"];
 }
 
-export function resolveChildAgentIcon(step: StepLike, phase?: StepRowPhase): AgentIconSpec {
+export function resolveChildAgentIcon(step: StepLike, phase?: StepRowPhase, toolRefs?: string[]): AgentIconSpec {
   const source = `${step.agent_snapshot.name ?? ""} ${step.agent_snapshot.task ?? ""}`.toLowerCase();
+  const tools = toolRefs ?? resolveStepToolRefs(step, null);
+  const hasMemoryTool = tools.some(t => t.includes("memory"));
+  const hasSearchTool = tools.some(t => t.includes("search") || t.includes("web") || t.includes("browser"));
+  const hasWriteTool = tools.some(t => t.includes("write") || t.includes("draft") || t.includes("compose") || t.includes("email"));
+  const hasValidateTool = tools.some(t => t.includes("validat") || t.includes("check") || t.includes("verify"));
 
   if (step.status === "failed" || step.status === "cancelled" || phase === "failed") {
     return { Icon: XCircle, boxClass: "border-[#fca5a5] bg-[#fef2f2] text-[#b91c1c]" };
   }
-  // if (step.status === "waiting_for_gate") {
-  //   return { Icon: DoorClosed, boxClass: "border-[#f59e0b] bg-[#fffbeb] text-[#b45309]" };
-  // }
-  if (source.includes("memory") || source.includes("search") || source.includes("recall")) {
+  if (hasMemoryTool || source.includes("memory") || source.includes("search") || source.includes("recall")) {
     return { Icon: Search, boxClass: iconBoxForPhase(phase, "search") };
   }
-  if (source.includes("input") || source.includes("validat") || source.includes("checker")) {
+  if (hasValidateTool || source.includes("input") || source.includes("validat") || source.includes("checker")) {
     return { Icon: FileCheck, boxClass: iconBoxForPhase(phase, "default") };
   }
-  if (source.includes("draft") || source.includes("write") || source.includes("content")) {
+  if (hasWriteTool || source.includes("draft") || source.includes("write") || source.includes("content")) {
     return { Icon: PenLine, boxClass: iconBoxForPhase(phase, "default") };
+  }
+  if (hasSearchTool) {
+    return { Icon: Search, boxClass: iconBoxForPhase(phase, "search") };
   }
   if (step.status === "succeeded" || phase === "done") {
     return { Icon: CheckCircle2, boxClass: "border-[#86c8a8] bg-[#edf8f2] text-[#166534]" };
@@ -391,7 +396,7 @@ export function ChildAgentRow({
 }) {
   const canRetry = canRetryProp ?? (step.status === "failed" || step.status === "cancelled");
   const displayName = formatWorkerDisplayName(step.agent_snapshot.name ?? step.agent_id);
-  const icon = resolveChildAgentIcon(step, phase);
+  const icon = resolveChildAgentIcon(step, phase, toolRefs);
   const isRunning = phase === "current_running" || phase === "running";
 
   return (

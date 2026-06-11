@@ -2905,7 +2905,7 @@ export default function StableLoopRunPage() {
                   <>
                     <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-6 py-5">
                       <div className="flex items-center gap-3">
-                        <AgentIconBox {...resolveChildAgentIcon(step)} />
+                        <AgentIconBox {...resolveChildAgentIcon(step, undefined, toolRefs)} />
                         <div>
                           <p className="font-mono text-[9px] font-semibold tracking-[0.12em] text-[#9ca3af] uppercase">
                             Agent · slot {step.step_index + 1}

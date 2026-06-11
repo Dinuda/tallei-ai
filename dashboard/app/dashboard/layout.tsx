@@ -92,6 +92,14 @@ const ICONS = {
       <path d="M1.8 7.7H4.7L6.1 4.2L8.2 10.3L10 7.1H13.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  integrations: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M3 4.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0Z" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M9 10.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0Z" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M6 4.5h1.5a1 1 0 0 1 1 1v4a1 1 0 0 0 1 1H9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M4.5 6v3A1.5 1.5 0 0 0 6 10.5h.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
   loops: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M2.5 5a5 5 0 0 1 8-1.5M11 4v2.5H8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
@@ -132,6 +140,7 @@ const NAV: NavSection[] = [
       { id: "cleanup", label: "Memory Cleanup", href: "/dashboard/memory-cleanup", icon: ICONS.cleanup },
       { id: "live-loops", label: "Live Loops", href: "/dashboard/loops/developer", icon: <Code2 size={15} aria-hidden /> },
       { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
+      { id: "integrations", label: "Integrations", href: "/dashboard/developer/integrations", icon: ICONS.integrations },
     ],
   },
 ];

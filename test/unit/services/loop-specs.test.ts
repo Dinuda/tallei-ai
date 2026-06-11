@@ -85,6 +85,20 @@ test("no-slop spec schema requires purpose and at least one agent", () => {
   assert.equal(noSlopSpecSchema.safeParse({ ...specJson, agents: [] }).success, false);
 });
 
+test("no-slop spec treats empty optional schedule fields as omitted", () => {
+  const parsed = noSlopSpecDraftSchema.parse({
+    ...specJson,
+    schedule: {
+      description: "Weekly on Monday morning",
+      cron: "",
+      timezone: "",
+    },
+  });
+  assert.equal(parsed.schedule.description, "Weekly on Monday morning");
+  assert.equal(parsed.schedule.cron, undefined);
+  assert.equal(parsed.schedule.timezone, undefined);
+});
+
 test("no-slop spec outbound delivery requires approved connector write policy", () => {
   assert.equal(noSlopSpecSchema.safeParse({
     ...specJson,

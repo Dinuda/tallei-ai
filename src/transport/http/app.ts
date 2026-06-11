@@ -13,6 +13,7 @@ import chatgptRouter from "./routes/chatgpt.js";
 import integrationsRouter from "./routes/integrations.js";
 import integrationUpdatesRouter from "./routes/integrationUpdates.js";
 import billingRouter from "./routes/billing.js";
+import developerIntegrationsRouter from "./routes/developerIntegrations.js";
 import agentToolsRouter from "./routes/agentTools.js";
 import connectorsRouter from "./routes/connectors.js";
 import channelsRouter from "./routes/channels.js";
@@ -116,6 +117,7 @@ export function createApp(deps: AppFactoryDeps): Express {
   // app.use("/api/claude-onboarding", claudeOnboardingRouter);
   // app.use("/api/browser-use", browserUseRouter);
   app.use("/api/billing", billingRouter);
+app.use("/api/developer", developerIntegrationsRouter);
   app.use("/api/mcp/events", mcpEventsRouter);
   app.use("/api/mcp", mcpCodeRouter);
   app.use("/internal/agent-tools", agentToolsRouter);
