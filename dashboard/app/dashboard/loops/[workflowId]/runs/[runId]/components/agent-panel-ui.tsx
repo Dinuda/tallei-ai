@@ -75,9 +75,6 @@ export function formatWorkerDisplayName(name: string) {
   return `${trimmed} Agent`;
 }
 
-/** @deprecated Use formatWorkerDisplayName */
-export const formatAgentDisplayName = formatWorkerDisplayName;
-
 export function formatSupervisorDisplayName(name: string) {
   const trimmed = name.trim();
   if (!trimmed || /^parent\s*agent$/i.test(trimmed)) return "Tallei Agent";

@@ -11,7 +11,7 @@ import {
 } from "../../../src/services/loop-runtime/memory.js";
 import { detectPlaceholderText } from "../../../src/services/loop-engine/contracts.js";
 import { evaluateAgentGoal } from "../../../src/services/loop-engine/goal-eval.js";
-import { buildAgentUserPrompt } from "../../../src/services/loop-executor/tool-catalog.js";
+import { buildAgentSystemPrompt, buildAgentUserPrompt } from "../../../src/services/loop-executor/tool-catalog.js";
 
 test("applyGateDecisionToRunMemory stores sprint_notes from missing_input gate", () => {
   const patch = applyGateDecisionToRunMemory({
@@ -43,6 +43,18 @@ test("resolveRequiredInputKeys falls back to agent graph provided inputs", () =>
     },
   });
   assert.deepEqual(keys, ["sprint_notes"]);
+});
+
+test("resolveRequiredInputKeys returns empty when nothing is declared", () => {
+  assert.deepEqual(resolveRequiredInputKeys({}), []);
+});
+
+test("agentCollectsRunStartInput is true only for validator or missing_input agents", async () => {
+  const { agentCollectsRunStartInput } = await import("../../../src/services/loop-runtime/memory.js");
+  assert.equal(agentCollectsRunStartInput({ id: "research", name: "Research Agent" }), false);
+  assert.equal(agentCollectsRunStartInput({ id: "input_validator", name: "Input Validator" }), true);
+  assert.equal(agentCollectsRunStartInput({ id: "writer", name: "Writer", gate: { type: "missing_input" } }), true);
+  assert.equal(agentCollectsRunStartInput({ id: "research", name: "Research Agent", gate: { type: "source_confirmation" } }), false);
 });
 
 test("hasRequiredRunInputs is true after operator paste", () => {
@@ -141,6 +153,29 @@ test("agent prompt pins structured handoff inputs ahead of bulky prior context",
   assert.ok(prompt.indexOf("Sprint Goal: Improve memory persistence") < prompt.indexOf("[PASTE SPRINT NOTES / TASKS HERE]"));
 });
 
+test("newsletter writer system prompt forbids boilerplate and draft scaffolding", () => {
+  const prompt = buildAgentSystemPrompt({
+    goal: "Weekly newsletter",
+    agentName: "Newsletter Writer",
+    agentTask: "Draft the weekly newsletter.",
+    renderTarget: "canvas.email",
+    outputContract: {
+      description: "One final-use email",
+      schema: { format: "email_markdown" },
+    },
+    doneCriteria: ["Contains no raw HTML"],
+  } as never);
+
+  assert.match(prompt, /final-use email/i);
+  assert.match(prompt, /send-plan notes/i);
+  assert.match(prompt, /signature scaffolding/i);
+  assert.match(prompt, /placeholder guidance/i);
+  assert.match(prompt, /MANDATORY OUTPUT REPRESENTATION.*email_markdown/i);
+  assert.match(prompt, /Do not return JSON/i);
+  assert.match(prompt, /HTML-friendly versions/i);
+  assert.match(prompt, /code fences/i);
+});
+
 test("input validator placeholder output opens missing input gate instead of failing", async () => {
   const result = await evaluateAgentGoal({
     agent: {
@@ -204,6 +239,78 @@ test("input checker output that verifies notes are present passes instead of ask
       goal: "Create weekly product sync email.",
     },
     runMemory: emptyRunMemory(),
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "pass");
+});
+
+test("final email artifacts with boilerplate are sent back for revision", async () => {
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "writer",
+      name: "Newsletter Writer",
+      task: "Write the final newsletter email.",
+      goal: "Produce the weekly newsletter.",
+      tools: [{ ref: "internal.llm_only" }],
+      renderTarget: "canvas.preview",
+      gate: { type: "draft_review", question: "Review the final preview." },
+    },
+    result: {
+      text: [
+        "Here's a ready-to-send internal sync email draft you can use. It's written in a casual, founder-to-team voice.",
+        "",
+        "Weekly sync: memory persistence, multi-tenant isolation, and next steps",
+        "",
+        "Sending plan and required confirmations",
+        "",
+        "Recipients: I'll use the uploaded contacts CSV or the configured audience_id you provide.",
+        "",
+        "If you want, I can draft the email with your exact sender name and tailor the sign-off once you drop in your name and the recipient list.",
+      ].join("\n"),
+      data: {},
+    },
+    definition: {
+      goal: "Create a weekly newsletter email.",
+    },
+    runMemory: emptyRunMemory(),
+    skipLlmJudge: true,
+  });
+
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.gateType, "draft_review");
+  assert.deepEqual(result.blockers, ["boilerplate_detected"]);
+});
+
+test("input validator ignores future recipient requirement after sprint notes are present", async () => {
+  const result = await evaluateAgentGoal({
+    agent: {
+      id: "input_validator",
+      name: "Input Validator Agent",
+      task: "Check that sprint_notes are present and readable.",
+      goal: "Confirm sprint_notes are provided.",
+      tools: [{ ref: "internal.llm_only" }],
+      gate: { type: "missing_input", question: "Please provide the sprint notes." },
+    },
+    result: {
+      text: [
+        "Validation result: sprint_notes exists: yes and is complete.",
+        "Next step: provide the team email addresses before sending.",
+      ].join("\n"),
+      data: {},
+    },
+    definition: {
+      inputsRequired: ["sprint_notes", "recipients"],
+      inputRequirements: [
+        { key: "sprint_notes", surface: "input.markdown", when: "run_start", required: true },
+        { key: "recipients", surface: "input.contacts_csv", when: "before_send", required: true },
+      ],
+      goal: "Create and send weekly product sync email.",
+    },
+    runMemory: {
+      ...emptyRunMemory(),
+      inputs: { sprint_notes: "Completed: persistence API. In progress: workspace isolation. Next: ship it." },
+    },
     skipLlmJudge: true,
   });
 

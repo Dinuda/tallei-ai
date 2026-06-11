@@ -35,9 +35,6 @@ export function resolveInputFieldLabel(
 
 export function resolveInputFieldPlaceholder(inputsRequired: string[] | undefined): string {
   const key = inputsRequired?.[0];
-  if (key === "sprint_notes") {
-    return "Paste sprint notes — shipped this week, in progress, blockers, next week…";
-  }
   if (key) return `Paste or type ${key.replace(/_/g, " ")}…`;
   return "Paste or type the information the agent needs to continue…";
 }

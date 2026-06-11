@@ -136,7 +136,7 @@ export async function sendMemoryCleanupAdminEmail(input: {
   loopMiner?: { runId: string; status: string; summary: LoopMinerSummary };
 }): Promise<MemoryCleanupAdminEmailResult> {
   if (!config.adminEmail) {
-    return { sent: false, skipped: true, to: null, error: "TALLEI_ADMIN_EMAIL is not configured" };
+    return { sent: false, skipped: true, to: null, error: "TALLEI_ADMIN__EMAIL is not configured" };
   }
   const usage = input.run.summary.usage;
   const models = usage?.models

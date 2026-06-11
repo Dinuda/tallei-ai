@@ -27,6 +27,18 @@ router.get("/integrations", requireScopes(["memory:read"]), async (req: AuthRequ
           { target: "canvas.email", description: "Editable email workspace — operator can visually edit the email before approval or sending." },
           { target: "canvas.preview", description: "Read-only rendered email preview — useful when visual review is helpful but editing is not needed." },
         ],
+        inputSurfaces: [
+          { surface: "input.text", description: "Single-line operator text input." },
+          { surface: "input.markdown", description: "Multi-line markdown or notes paste (e.g. sprint notes)." },
+          { surface: "input.contacts_csv", description: "Recipient list upload or paste." },
+          { surface: "input.audience_id", description: "Configured audience or list ID." },
+          { surface: "review.sources", description: "Web search source approval with custom URL add." },
+          { surface: "review.memories", description: "Memory item selection for downstream agents." },
+          { surface: "review.draft", description: "Markdown draft review before continuing." },
+          { surface: "review.email", description: "Canvas email draft review (uses renderTarget)." },
+          { surface: "review.preview", description: "Read-only rendered final preview (uses canvas.preview)." },
+          { surface: "confirm.send", description: "Final pre-send confirmation." },
+        ],
         approvalFlows: {
           gateTypes: [
             { type: "memory_confirmation", description: "Operator selects which memories to include in the next step." },

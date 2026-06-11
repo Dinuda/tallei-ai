@@ -128,7 +128,7 @@ export default function NewLoopBuilderPage() {
     return [...new Set(
       connectors
         .filter((connector) => connector.status === "connected")
-        .map((connector) => (connector.appKey ?? connector.provider ?? "").trim().toLowerCase())
+        .map((connector) => (connector.appKey ?? "").trim().toLowerCase())
         .filter(Boolean),
     )];
   }, [connectors]);

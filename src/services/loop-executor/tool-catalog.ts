@@ -422,7 +422,7 @@ function handoffAsContext(handoff) {
     const entries = Object.entries(handoff);
     if (entries.length === 0)
         return "No structured handoff was provided.";
-    const priorityKeys = ["operator_input", "sprint_notes", "approved_memories", "memories"];
+    const priorityKeys = ["user_profile", "user_profile_memories", "operator_input", "sprint_notes", "approved_memories", "memories"];
     const priority = [];
     const rest = [];
     for (const entry of entries) {
@@ -433,7 +433,11 @@ function handoffAsContext(handoff) {
     }
     return [...priority, ...rest]
         .map(([key, value]) => {
-            const maxChars = key === "sprint_notes" || key === "operator_input" ? 6000 : 3000;
+            const maxChars = key === "sprint_notes" || key === "operator_input"
+                ? 6000
+                : key === "user_profile" || key === "user_profile_memories"
+                    ? 4000
+                    : 3000;
             return `### ${key}\n${stringifyHandoffValue(value, maxChars)}`;
         })
         .join("\n\n")
@@ -443,25 +447,34 @@ function firstCommentByAuthor(comments, authorPattern) {
     return comments.find((comment) => authorPattern.test(comment.author))?.body ?? "";
 }
 export function buildAgentSystemPrompt(ctx) {
-    const isNewsletterWriter = /newsletter/i.test(`${ctx.goal} ${ctx.agentName} ${ctx.agentTask}`)
-        && /\b(write|writer|draft|email|newsletter)\b/i.test(`${ctx.agentName} ${ctx.agentTask}`);
+    const isNewsletterWriter = ctx.renderTarget === "canvas.email" || ctx.renderTarget === "canvas.preview"
+        || (/newsletter|email/i.test(`${ctx.goal} ${ctx.agentName} ${ctx.agentTask}`)
+            && /\b(write|writer|draft|email|newsletter)\b/i.test(`${ctx.agentName} ${ctx.agentTask}`));
     const base = [
         `You are ${ctx.agentName}, a specialist agent in a recurring multi-agent loop.`,
         "Complete your assigned task using prior comments as context.",
         "Use only facts that are explicitly present in tool outputs, prior comments, or the loop goal. Do not invent product updates, links, metrics, offers, customer wins, memory IDs, or roadmap claims.",
+        "When user_profile is present in the handoff, match its tone, writing style, sign-off, and identity constraints exactly.",
         "If upstream research contains placeholders, examples, or says evidence is missing, treat those items as unavailable. Omit them or clearly say the evidence is missing; never rewrite placeholders as facts.",
         "Do not claim external actions occurred unless a tool explicitly confirms it.",
-        "If producing subscriber-facing or customer-facing copy, return only that copy; omit workflow scaffolding, draft labels, approval instructions, next steps, and handoff notes.",
+        "If producing subscriber-facing or customer-facing copy, return only that copy; omit workflow scaffolding, draft labels, approval instructions, send-plan notes, placeholder guidance, signature scaffolding, and handoff notes.",
         "Return one final answer, not multiple variants, unless your task explicitly asks for options.",
         "Do not impersonate a real person, newsletter, publication, or third-party brand unless the loop goal explicitly says that is the authorized sender.",
         "If you lack information, say so clearly.",
+        `MANDATORY OUTPUT CONTRACT: ${ctx.outputContract?.description ?? "Return only the completed task output."}`,
+        ...(isNewsletterWriter
+            ? ["MANDATORY OUTPUT REPRESENTATION: raw email_markdown text only. Do not return JSON or wrap the email in a `text`, `body`, or `content` object."]
+            : [`MANDATORY OUTPUT SCHEMA: ${JSON.stringify(ctx.outputContract?.schema ?? { text: "string" })}`]),
+        `DONE CRITERIA: ${(ctx.doneCriteria ?? []).join("; ") || "Complete the assigned task."}`,
+        "Your response must satisfy the output contract exactly. Do not add fields, sections, variants, or commentary not requested by it.",
     ];
     if (isNewsletterWriter) {
         base.push(
-            "Newsletter writer contract: return exactly one publish-ready email draft.",
-            "Line 1 must be `Subject: <one subject>` and line 2 may be `Preview: <one preview>`.",
-            "Do not include subject-line options, alternate tones, one-paragraph versions, social snippets, implementation notes, or source-planning notes.",
-            "Do not include personalization placeholders beyond approved mail-merge syntax already present in the template."
+            "Email writer contract: return exactly one email in canonical email_markdown format.",
+            "Line 1 must be `Subject: <one subject>`, line 2 may be `Preview: <one preview>`, followed by one blank line and the Markdown body.",
+            "Do not include subject-line options, alternate tones, one-paragraph versions, social snippets, implementation notes, source-planning notes, or any commentary about the draft itself.",
+            "Do not include ready-to-send language, placeholder notes, recipient instructions, send-plan sections, or personalization placeholders beyond approved mail-merge syntax already present in the template.",
+            "Raw HTML, HTML comments, code fences, HTML-friendly versions, plain-text alternate versions, and multiple representations are forbidden."
         );
     }
     return base.join(" ");

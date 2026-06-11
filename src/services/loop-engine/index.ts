@@ -16,4 +16,10 @@ export {
 export { designLoopFromIntent, channelsFromDesign, loopBuilderTraceSchema } from "./architect.js";
 export type { DesignLoopInput, LoopBuilderTrace } from "./architect.js";
 export { recallForDesigner } from "./recall.js";
+export {
+  loadWorkflowUserProfile,
+  formatWorkflowUserProfile,
+  workflowUserProfileSchema,
+  type WorkflowUserProfile,
+} from "./workflow-user-profile.js";
 export { evaluateAgentGoal } from "./goal-eval.js";

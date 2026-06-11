@@ -8,9 +8,7 @@ import { loopExecutorOpenAiChat } from "../loop-executor/openai-chat.js";
 import {
   contentInputKeys,
   hasRequiredContentInputs,
-  hasRequiredRunInputs,
   isInputValidationAgent,
-  resolveRequiredInputKeys,
   type RunMemory,
 } from "../loop-runtime/memory.js";
 import {
@@ -20,6 +18,7 @@ import {
   goalEvalResultSchema,
   type GoalEvalResult,
 } from "./contracts.js";
+import { containsEmailBoilerplate } from "./email-output.js";
 
 function asksOperatorForInput(text: string): boolean {
   return /\b(please (provide|paste|send|share)|is missing|not provided|don't have|do not have|can't draft|cannot draft|can't generate|cannot generate|lacks?|missing)\b/i.test(text)
@@ -34,6 +33,14 @@ function isCanvasDraftAgent(agent: LoopRunAgent): boolean {
   return agent.renderTarget === "canvas.email"
     || agent.renderTarget === "canvas.preview"
     || agent.gate?.type === "draft_review";
+}
+
+function isEmailArtifactAgent(agent: LoopRunAgent): boolean {
+  return isCanvasDraftAgent(agent) || agent.gate?.type === "pre_send";
+}
+
+function emailArtifactGateType(agent: LoopRunAgent): "draft_review" | "pre_send" {
+  return agent.gate?.type === "pre_send" ? "pre_send" : "draft_review";
 }
 
 function looksLikeReviewableDraft(text: string): boolean {
@@ -157,25 +164,21 @@ function deterministicGuards(input: {
   runMemory?: RunMemory;
 }): GoalEvalResult | null {
   const text = input.result.text?.trim() ?? "";
-  const inputsSatisfied = input.runMemory
-    ? hasRequiredRunInputs(input.definition, input.runMemory)
-    : false;
   const contentInputsSatisfied = input.runMemory
     ? hasRequiredContentInputs(input.definition, input.runMemory)
     : true;
   const goalText = input.definition.goal ?? "";
-  const requiredKeys = resolveRequiredInputKeys(input.definition);
   const contentKeys = contentInputKeys(input.definition);
   const canvasDraftAgent = isCanvasDraftAgent(input.agent);
 
   if (
     isInputValidationAgent(input.agent) &&
-    (inputsSatisfied || confirmsRequiredInputPresent(text, requiredKeys))
+    (contentInputsSatisfied || confirmsRequiredInputPresent(text, contentKeys))
   ) {
     return goalEvalResultSchema.parse({
       status: "pass",
-      reason: inputsSatisfied
-        ? "Required operator inputs are present in run memory."
+      reason: contentInputsSatisfied
+        ? "Required run-start content inputs are present in run memory."
         : "Input checker verified the required input is present.",
     });
   }
@@ -198,8 +201,13 @@ function deterministicGuards(input: {
     });
   }
 
-  for (const required of (canvasDraftAgent ? contentKeys : requiredKeys)) {
-    if (inputsSatisfied && input.runMemory?.inputs[required]?.trim()) continue;
+  const keysToCheck = canvasDraftAgent
+    ? contentKeys
+    : isInputValidationAgent(input.agent)
+      ? contentKeys
+      : [];
+  for (const required of keysToCheck) {
+    if (contentInputsSatisfied && input.runMemory?.inputs[required]?.trim()) continue;
     const requiredNorm = required.toLowerCase();
     const normalizedText = text.toLowerCase();
     const goalNeedsInput = goalText.toLowerCase().includes(`[paste ${requiredNorm}`)
@@ -235,6 +243,15 @@ function deterministicGuards(input: {
       reason: "Output contains placeholder or unfilled template text.",
       blockers: ["placeholder_detected"],
       gateType: reviewGateType,
+    });
+  }
+
+  if (isEmailArtifactAgent(input.agent) && containsEmailBoilerplate(text)) {
+    return goalEvalResultSchema.parse({
+      status: "needs_input",
+      reason: "Output contains boilerplate or draft-scaffolding text.",
+      blockers: ["boilerplate_detected"],
+      gateType: emailArtifactGateType(input.agent),
     });
   }
 
@@ -280,7 +297,7 @@ function deterministicGuards(input: {
     }
   }
 
-  if (!contentInputsSatisfied && asksOperatorForInput(text) && !canvasDraftAgent) {
+  if (!contentInputsSatisfied && asksOperatorForInput(text) && !canvasDraftAgent && isInputValidationAgent(input.agent)) {
     const requiredKey = contentKeys[0] ?? input.definition.inputsRequired?.[0] ?? "required_input";
     return goalEvalResultSchema.parse({
       status: "needs_input",

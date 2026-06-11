@@ -43,12 +43,15 @@ export const runtimeDeliveryRecipientsSchema = z.object({
   lotRef: z.string().min(1).optional(),
 });
 
+import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
+
 export const runtimeContextSchema = z.object({
   inputs: z.record(z.string()).default({}),
   approvedMemories: z.array(z.object({ id: z.string(), excerpt: z.string() })).default([]),
   approvedSources: z.record(z.array(approvedWebSourceSchema)).default({}),
   operatorRevisions: z.record(operatorRevisionSchema).default({}),
   deliveryRecipients: runtimeDeliveryRecipientsSchema.optional(),
+  userProfile: workflowUserProfileSchema.optional(),
 });
 
 function approvedConnectorToolRefs(action: { toolkit: string; actionSlug: string }): string[] {
@@ -63,8 +66,8 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
   if (!definition.agentGraph?.children.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "A v3 run requires at least one child agent" });
   }
-  if (definition.plan || definition.presetId) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Legacy plans and presets are not supported" });
+  if (definition.plan) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Legacy plans are not supported" });
   }
   if (definition.delivery && (definition.delivery.target !== "none" || definition.delivery.provider !== "none")) {
     if (!definition.connectorPolicy || definition.connectorPolicy.allowedWriteActions.length === 0) {

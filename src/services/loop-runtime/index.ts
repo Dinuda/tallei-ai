@@ -6,14 +6,17 @@ export {
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
   retryLoopRuntimeStep,
+  saveAgentOutput,
   saveCanvasEmailArtifact,
   startLoopRuntimeWorker,
   startManualLoopRun,
   stopLoopRuntimeWorker,
+  submitLoopRuntimeGate,
   uploadLoopRuntimeGateContacts,
 } from "./runtime.js";
 export { runtimeContextSchema, runtimeDefinitionSchema, runtimeRunStatusSchema } from "./types.js";
 export {
+  agentCollectsRunStartInput,
   applyGateDecisionToRunMemory,
   buildAgentHandoff,
   emptyRunMemory,

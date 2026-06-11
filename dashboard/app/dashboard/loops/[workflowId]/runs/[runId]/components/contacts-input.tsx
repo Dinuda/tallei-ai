@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
 import { EditorialActionButton } from "./glyph-icons";
-import type { ContactSourceKind } from "@/lib/loop-run-workspace-projection";
+import type { ContactSourceKind } from "@/lib/operator-view-types";
 
 export type ContactRow = {
   email: string;

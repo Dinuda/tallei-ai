@@ -5,6 +5,7 @@ import { pool } from "../../infrastructure/db/index.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
 import { extractWebSearchSources } from "../loop-engine/contracts.js";
 import {
+  agentCollectsRunStartInput,
   applyGateDecisionToRunMemory,
   buildAgentHandoff,
   buildOperatorRevisionPatch,
@@ -12,9 +13,10 @@ import {
   type RunMemory,
 } from "./memory.js";
 import { runLoopAgent } from "../loop-executor/agent-runner.js";
+import { loadWorkflowUserProfile } from "../loop-engine/workflow-user-profile.js";
 import { executeApprovedComposioAction } from "../connectors/composio.js";
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
-import { loopRunAgentSchema, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
+import { loopRunAgentSchema, type LoopContactRow, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
 import { buildCanvasEmailTemplate, type CanvasEmailTemplate } from "./email-canvas.js";
 import {
   buildArtifactDeliveryPayload,
@@ -24,7 +26,6 @@ import {
 } from "./artifact-selection.js";
 import { stashContactListAsDocument } from "./contacts-document.js";
 import { parseContactListCsv } from "../loop-executor/csv-parser.js";
-import type { LoopContactRow } from "../loop-executor/types.js";
 import {
   buildDeliveryRecipientsPatch,
   injectDeliveryRecipientsIntoPayload,
@@ -34,6 +35,28 @@ import {
   type RecipientSourceKind,
 } from "./recipient-resolution.js";
 import { runtimeContextSchema, runtimeDefinitionSchema, type RuntimeContext, type RuntimeDefinition } from "./types.js";
+import {
+  evaluateExecutionBlockingAt,
+  applyGateSurfaceSubmission,
+  collectRequirements,
+  isRequirementSatisfied,
+} from "./input-satisfaction.js";
+import {
+  buildApprovalCheckpoint,
+  buildRequirementCheckpoint,
+  classifyOperatorCheckpoint,
+  checkpointPayload,
+  checkpointQuestion,
+  readOperatorCheckpoint,
+  resolveOperatorCheckpointContinuation,
+} from "./operator-checkpoint.js";
+import { projectOperatorView } from "./operator-view.js";
+import {
+  gateSurfaceSubmissionSchema,
+  isInputSurface,
+  type InputRequirementWhen,
+  type SurfaceSubmissionValue,
+} from "../loop-engine/input-surfaces.js";
 
 const WORKER_LEASE_MS = 60_000;
 const RETRY_DELAYS_MS = [2_000, 10_000, 30_000] as const;
@@ -162,6 +185,69 @@ function readRecipientSource(definition: RuntimeDefinition): { kind: RecipientSo
 
 function definitionHasRecipientListAgent(definition: RuntimeDefinition): boolean {
   return definition.agentGraph?.children.some((child) => child.gate?.type === "recipient_upload") ?? false;
+}
+
+function isConnectorActionPreSendGate(gatePayload: Record<string, unknown>): boolean {
+  return gatePayload.kind === "connector_action";
+}
+
+function refreshRecipientCheckpointSurfaces(
+  gatePayload: Record<string, unknown>,
+  recipientStatus: "missing" | "ready",
+): Record<string, unknown> {
+  const checkpoint = readOperatorCheckpoint(gatePayload);
+  if (!checkpoint) return gatePayload;
+  const surfaces = checkpoint.surfaces.map((surface) => (
+    surface.surface === "input.contacts_csv" || surface.surface === "input.audience_id"
+      ? { ...surface, satisfied: recipientStatus === "ready" }
+      : surface
+  ));
+  return {
+    ...gatePayload,
+    checkpoint: {
+      ...checkpoint,
+      surfaces,
+    },
+    surfaces,
+  };
+}
+
+function refreshConnectorPreSendGatePayload(input: {
+  gatePayload: Record<string, unknown>;
+  definition: RuntimeDefinition;
+  context: RuntimeContext;
+  gateType: LoopGateType;
+}): Record<string, unknown> {
+  const payload = asObject(input.gatePayload.payload);
+  const connectorActionSlug = typeof input.gatePayload.actionSlug === "string" ? input.gatePayload.actionSlug : "";
+  const recipientSource = readRecipientSource(input.definition);
+  const assignmentConfig = asObject(payload);
+  const recipientStatus = resolveRecipientStatus({
+    recipientSource,
+    context: input.context,
+    assignmentConfig,
+  });
+  const sendPayload = injectDeliveryRecipientsIntoPayload({
+    payload,
+    context: input.context,
+    actionSlug: connectorActionSlug,
+    assignmentConfig,
+  });
+  return refreshRecipientCheckpointSurfaces({
+    ...input.gatePayload,
+    recipientStatus,
+    recipientCount: input.context.deliveryRecipients?.recipientCount ?? 0,
+    payload: sendPayload,
+    payloadHash: sha256Json(sendPayload),
+    uiBlocks: input.gateType === "recipient_upload"
+      ? recipientUploadUiBlocks(recipientSource)
+      : preSendUiBlocks({
+        recipientSource,
+        recipientStatus,
+        deliveryTarget: input.definition.delivery?.target,
+        hasDedicatedRecipientAgent: definitionHasRecipientListAgent(input.definition),
+      }),
+  }, recipientStatus);
 }
 
 function recipientUploadUiBlocks(recipientSource: { kind: RecipientSourceKind }) {
@@ -411,6 +497,56 @@ async function createGate(input: {
   });
 }
 
+async function openRequirementCheckpoint(input: {
+  command: CommandRow;
+  attemptId: string;
+  stepIndex: number;
+  agent: LoopRunAgent;
+  definition: RuntimeDefinition;
+  context: RuntimeContext;
+  when: InputRequirementWhen;
+}): Promise<boolean> {
+  const unsatisfied = evaluateExecutionBlockingAt(input.definition, input.context, input.when);
+  if (unsatisfied.length === 0) return false;
+
+  const requirements = unsatisfied.map((row) => row.requirement);
+  const recipientSource = readRecipientSource(input.definition);
+  const checkpoint = buildRequirementCheckpoint({
+    requirements,
+    blocking: { agentId: input.agent.id, stepIndex: input.stepIndex },
+    propsForKey: (key) => (key === "recipients" || key === "audience_id"
+      ? { contactSource: recipientSource }
+      : undefined),
+  });
+  const gateType: LoopGateType = input.when === "before_send"
+    && requirements.some((req) => req.surface === "input.contacts_csv" || req.surface === "input.audience_id")
+    ? "recipient_upload"
+    : input.when === "before_send"
+      ? "pre_send"
+      : "missing_input";
+
+  await createGate({
+    command: input.command,
+    attemptId: input.attemptId,
+    gateType,
+    question: checkpointQuestion(checkpoint),
+    payload: checkpointPayload({
+      checkpoint,
+      agentId: input.agent.id,
+      stepIndex: input.stepIndex,
+      extra: {
+        when: input.when,
+        uiBlocks: gateType === "recipient_upload" ? recipientUploadUiBlocks(recipientSource) : undefined,
+      },
+    }),
+  });
+  await pool.query(
+    `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+    [input.attemptId, JSON.stringify({ text: checkpointQuestion(checkpoint), data: { when: input.when, checkpoint } })],
+  );
+  return true;
+}
+
 function gatePayloadForResult(
   gateType: LoopGateType,
   agentId: string,
@@ -580,7 +716,7 @@ async function persistCanvasEmailArtifact(input: {
   artifactKey: string;
   markdown: string;
 }) {
-  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown });
+  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown, finalUse: false });
   await persistArtifact({
     command: input.command,
     attemptId: input.attemptId,
@@ -601,12 +737,12 @@ async function persistCanvasPreviewArtifact(input: {
   artifactKey: string;
   markdown: string;
 }) {
-  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown });
+  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown, finalUse: true });
   await persistArtifact({
     command: input.command,
     attemptId: input.attemptId,
     artifactKey: input.artifactKey,
-    kind: "canvas_email",
+    kind: "canvas_preview",
     body: emailTemplate.html,
     data: {
       renderTarget: "canvas.preview",
@@ -655,6 +791,40 @@ async function queueNextStep(command: CommandRow, definition: RuntimeDefinition,
   });
 }
 
+async function resolveRunUserProfile(input: {
+  tenantId: string;
+  userId: string;
+  definition: RuntimeDefinition;
+  context: RuntimeContext;
+  runId: string;
+}): Promise<RuntimeContext> {
+  const cached = input.context.userProfile ?? input.definition.builderMeta?.workflowUserProfile ?? null;
+  if (cached) {
+    if (!input.context.userProfile) {
+      const nextContext = runtimeContextSchema.parse({ ...input.context, userProfile: cached });
+      await pool.query(
+        `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [input.runId, JSON.stringify(nextContext)],
+      );
+      return nextContext;
+    }
+    return input.context;
+  }
+  const loaded = await loadWorkflowUserProfile({
+    tenantId: input.tenantId,
+    userId: input.userId,
+    authMode: "internal",
+    plan: "pro",
+  }).catch(() => null);
+  if (!loaded) return input.context;
+  const nextContext = runtimeContextSchema.parse({ ...input.context, userProfile: loaded });
+  await pool.query(
+    `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+    [input.runId, JSON.stringify(nextContext)],
+  );
+  return nextContext;
+}
+
 async function handleExecuteStep(command: CommandRow) {
   if (!command.step_attempt_id) throw new Error("execute_step command has no attempt");
   const result = await pool.query<{
@@ -679,7 +849,14 @@ async function handleExecuteStep(command: CommandRow) {
   const row = result.rows[0];
   if (!row || row.run_status === "cancelled" || row.attempt_status !== "queued") return;
   const definition = runtimeDefinitionSchema.parse(row.definition_snapshot);
-  const context = runtimeContextSchema.parse(row.context_json);
+  let context = runtimeContextSchema.parse(row.context_json);
+  context = await resolveRunUserProfile({
+    tenantId: command.tenant_id,
+    userId: command.user_id,
+    definition,
+    context,
+    runId: command.run_id,
+  });
   const agent = loopRunAgentSchema.parse(row.agent_snapshot);
 
   await pool.query(
@@ -704,7 +881,7 @@ async function handleExecuteStep(command: CommandRow) {
      JOIN loop_engine_step_attempts s ON s.id = a.step_attempt_id
      WHERE a.run_id = $1
        AND a.invalidated_at IS NULL
-       AND a.kind <> 'canvas_email'
+       AND a.kind NOT IN ('canvas_email', 'canvas_preview')
        AND s.step_index < $2
      ORDER BY a.created_at ASC, a.version ASC, a.id ASC`,
     [command.run_id, row.step_index],
@@ -722,13 +899,65 @@ async function handleExecuteStep(command: CommandRow) {
       },
     ]),
   );
-  const agentHandoff = buildAgentHandoff(agent, runMemoryFromContext(context), priorOutputs);
+  const agentHandoff = buildAgentHandoff(agent, runMemoryFromContext(context), priorOutputs, {
+    userProfile: context.userProfile ?? definition.builderMeta?.workflowUserProfile ?? null,
+  });
   const priorComments = latestArtifactRows.map((artifact) => ({
     author: artifact.artifact_key,
     body: compactArtifactBody(artifact.body),
   }));
 
+  if (agentCollectsRunStartInput(agent)) {
+    const runStartRequirements = collectRequirements(definition)
+      .filter((requirement) => requirement.when === "run_start" && isInputSurface(requirement.surface));
+    const missingRunStartRequirements = evaluateExecutionBlockingAt(definition, context, "run_start");
+    if (runStartRequirements.length > 0 && missingRunStartRequirements.length === 0) {
+      await pool.query(
+        `UPDATE loop_engine_step_attempts
+         SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(),
+             lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
+         WHERE id = $1`,
+        [command.step_attempt_id, JSON.stringify({
+          text: "Required run-start inputs are already available.",
+          data: { inputKeys: runStartRequirements.map((requirement) => requirement.key) },
+        })],
+      );
+      await insertEvent({
+        tenantId: command.tenant_id,
+        userId: command.user_id,
+        runId: command.run_id,
+        stepAttemptId: command.step_attempt_id,
+        eventType: "step_succeeded",
+        payload: { agentId: agent.id, stepIndex: row.step_index, inputCollectorSkipped: true },
+      });
+      await queueNextStep(command, definition, row.step_index);
+      return;
+    }
+    if (await openRequirementCheckpoint({
+      command,
+      attemptId: command.step_attempt_id,
+      stepIndex: row.step_index,
+      agent,
+      definition,
+      context,
+      when: "run_start",
+    })) {
+      return;
+    }
+  }
+
   if (agent.gate?.type === "recipient_upload") {
+    if (await openRequirementCheckpoint({
+      command,
+      attemptId: command.step_attempt_id,
+      stepIndex: row.step_index,
+      agent,
+      definition,
+      context,
+      when: "before_send",
+    })) {
+      return;
+    }
     const recipientSource = readRecipientSource(definition);
     const recipientStatus = resolveRecipientStatus({
       recipientSource,
@@ -745,23 +974,6 @@ async function handleExecuteStep(command: CommandRow) {
       await queueNextStep(command, definition, row.step_index);
       return;
     }
-    await createGate({
-      command,
-      attemptId: command.step_attempt_id,
-      gateType: "recipient_upload",
-      question: agent.gate.question,
-      payload: {
-        agentId: agent.id,
-        contactSource: recipientSource,
-        recipientStatus,
-        recipientCount: context.deliveryRecipients?.recipientCount ?? 0,
-        uiBlocks: recipientUploadUiBlocks(recipientSource),
-      },
-    });
-    await pool.query(
-      `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-      [command.step_attempt_id, JSON.stringify({ text: "Waiting for recipient list.", data: { recipientStatus } })],
-    );
     return;
   }
 
@@ -787,6 +999,17 @@ async function handleExecuteStep(command: CommandRow) {
     const payloadHash = sha256Json(payload);
     const specHash = sha256Json(specSnapshot);
     const hasDedicatedRecipientAgent = definitionHasRecipientListAgent(definition);
+    if (await openRequirementCheckpoint({
+      command,
+      attemptId: command.step_attempt_id,
+      stepIndex: row.step_index,
+      agent,
+      definition,
+      context,
+      when: "before_send",
+    })) {
+      return;
+    }
     const uiBlocks = preSendUiBlocks({
       recipientSource,
       recipientStatus,
@@ -815,6 +1038,7 @@ async function handleExecuteStep(command: CommandRow) {
         specHash,
         noSlopSpecId: specSnapshot?.id ?? null,
         summary: summarizeConnectorActionPayload(payload),
+        grillMeChecklist: specSnapshot?.specJson?.guardrails ?? [],
       },
     });
     await pool.query(
@@ -898,7 +1122,7 @@ async function handleExecuteStep(command: CommandRow) {
   });
   const canvasArtifactKey = (() => {
     if (agent.renderTarget === "canvas.email") return `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.email`;
-    if (agent.renderTarget === "canvas.preview") return `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.email`;
+    if (agent.renderTarget === "canvas.preview") return `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.preview`;
     return null;
   })();
   if (agent.renderTarget === "canvas.email") {
@@ -918,16 +1142,35 @@ async function handleExecuteStep(command: CommandRow) {
   }
 
   if (goalEval.status === "needs_input") {
-    const gateType = goalEval.gateType ?? agent.gate?.type ?? "missing_input";
+    const requestedGateType = goalEval.gateType ?? agent.gate?.type ?? "missing_input";
+    const hasWebSources = sourceConfirmationItems(agentResult.data).length > 0;
+    const gateType: LoopGateType = hasWebSources && requestedGateType === "draft_review"
+      ? "source_confirmation"
+      : requestedGateType;
+    const basePayload = {
+      ...gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
+      ...(canvasArtifactKey ? { renderTarget: agent.renderTarget, canvasArtifactKey } : {}),
+    };
+    const checkpoint = buildApprovalCheckpoint({
+      gateType,
+      surface: hasWebSources ? "review.sources" : agent.operatorSurface,
+      blocking: { agentId: agent.id, stepIndex: row.step_index },
+      props: {
+        ...(agent.renderTarget ? { renderTarget: agent.renderTarget } : {}),
+        ...(canvasArtifactKey ? { canvasArtifactKey } : {}),
+      },
+    });
     await createGate({
       command,
       attemptId: command.step_attempt_id,
       gateType,
       question: gateQuestionForEvaluation({ agent, gateType, reason: goalEval.reason }),
-      payload: {
-        ...gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
-        ...(canvasArtifactKey ? { renderTarget: agent.renderTarget, canvasArtifactKey } : {}),
-      },
+      payload: checkpointPayload({
+        checkpoint,
+        agentId: agent.id,
+        stepIndex: row.step_index,
+        extra: basePayload,
+      }),
     });
     return;
   }
@@ -977,9 +1220,9 @@ async function handleContinueAfterGate(command: CommandRow) {
   const definition = runtimeDefinitionSchema.parse(row.definition_snapshot);
   const context = runtimeContextSchema.parse(row.context_json);
   const agent = loopRunAgentSchema.parse(row.agent_snapshot);
-  if (row.gate_type === "pre_send") {
+  const gatePayload = asObject(row.payload_json);
+  if (row.gate_type === "pre_send" && isConnectorActionPreSendGate(gatePayload)) {
     if (row.status !== "approved") return;
-    const gatePayload = asObject(row.payload_json);
     const payload = asObject(gatePayload.payload);
     const payloadHash = typeof gatePayload.payloadHash === "string" ? gatePayload.payloadHash : "";
     const specHash = typeof gatePayload.specHash === "string" ? gatePayload.specHash : "";
@@ -1087,11 +1330,21 @@ async function handleContinueAfterGate(command: CommandRow) {
     gateType: row.gate_type,
     gateStatus: row.status,
     agent,
-    gatePayload: asObject(row.payload_json),
+    gatePayload,
     definition,
     runMemory: runMemoryFromContext(context),
   });
-  if (row.gate_type === "missing_input" && !treatAsDraftReview) {
+  const checkpointKind = classifyOperatorCheckpoint(gatePayload);
+  const isLegacyRequirementGate = checkpointKind === "unknown" && (
+    (row.gate_type === "missing_input" && !treatAsDraftReview)
+    || (row.gate_type === "pre_send" && !isConnectorActionPreSendGate(gatePayload))
+  );
+  const continuation = resolveOperatorCheckpointContinuation({
+    payload: gatePayload,
+    legacyRequirementGate: isLegacyRequirementGate,
+    runStartInputCollector: agentCollectsRunStartInput(agent),
+  });
+  if (continuation === "retry_step") {
     await pool.query(
       `UPDATE loop_engine_step_attempts SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
        WHERE id = $1 AND status = 'waiting_for_gate'`,
@@ -1293,6 +1546,16 @@ export async function getLoopRuntimeProjection(auth: AuthContext, runId: string)
     pool.query(`SELECT * FROM loop_engine_artifacts WHERE run_id = $1 ORDER BY created_at`, [runId]),
     pool.query(`SELECT * FROM loop_engine_events WHERE run_id = $1 ORDER BY created_at, id`, [runId]),
   ]);
+  const errorMessage = run.error_json && typeof run.error_json === "object" && !Array.isArray(run.error_json)
+    ? (run.error_json as Record<string, unknown>).message
+    : undefined;
+  const operatorView = projectOperatorView({
+    status: run.status,
+    errorMessage: typeof errorMessage === "string" ? errorMessage : undefined,
+    context: run.context_json as Record<string, unknown>,
+    gates: gates.rows,
+    steps: steps.rows,
+  });
   return {
     ...run,
     definition: run.definition_snapshot,
@@ -1301,6 +1564,7 @@ export async function getLoopRuntimeProjection(auth: AuthContext, runId: string)
     gates: gates.rows,
     artifacts: artifacts.rows,
     events: events.rows,
+    operatorView,
   };
 }
 
@@ -1492,6 +1756,199 @@ export async function decideLoopRuntimeGate(input: {
   }
 }
 
+export async function submitLoopRuntimeGate(input: {
+  auth: AuthContext;
+  runId: string;
+  gateId: string;
+  values: Record<string, SurfaceSubmissionValue>;
+}) {
+  const parsedValues = gateSurfaceSubmissionSchema.parse(input.values);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const gateResult = await client.query<{
+      id: string;
+      status: string;
+      gate_type: LoopGateType;
+      payload_json: unknown;
+      definition_snapshot: unknown;
+      context_json: unknown;
+      tenant_id: string;
+      user_id: string;
+      step_attempt_id: string;
+    }>(
+      `SELECT g.id, g.status, g.gate_type, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id, g.step_attempt_id
+       FROM loop_engine_gates g JOIN loop_engine_runs r ON r.id = g.run_id
+       WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
+       FOR UPDATE`,
+      [input.gateId, input.runId, input.auth.tenantId, input.auth.userId],
+    );
+    const gate = gateResult.rows[0];
+    if (!gate) throw new Error("Loop gate not found");
+    if (gate.status !== "pending") {
+      await client.query("COMMIT");
+      return { runId: input.runId, gateId: input.gateId, status: gate.status, satisfied: false };
+    }
+
+    const definition = runtimeDefinitionSchema.parse(gate.definition_snapshot);
+    const currentContext = runtimeContextSchema.parse(gate.context_json);
+    const gatePayload = asObject(gate.payload_json);
+    if (gate.gate_type === "pre_send" && isConnectorActionPreSendGate(gatePayload)) {
+      let nextContext = applyGateSurfaceSubmission({
+        definition,
+        context: currentContext,
+        values: parsedValues,
+      });
+      const deliveryRecipients = nextContext.deliveryRecipients;
+      if (deliveryRecipients?.contacts.length && !deliveryRecipients.documentRef) {
+        const docRefs = await stashContactListAsDocument({
+          auth: input.auth,
+          contacts: deliveryRecipients.contacts,
+          titleHint: definition.goal || definition.builderMeta?.noSlopSpec?.title,
+          runId: input.runId,
+        });
+        nextContext = runtimeContextSchema.parse({
+          ...nextContext,
+          deliveryRecipients: buildDeliveryRecipientsPatch({
+            contacts: deliveryRecipients.contacts,
+            source: deliveryRecipients.source ?? "uploaded",
+            audienceId: deliveryRecipients.audienceId,
+            documentRef: docRefs.documentRef,
+            lotRef: docRefs.lotRef,
+          }),
+        });
+      }
+      await client.query(
+        `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [input.runId, JSON.stringify(nextContext)],
+      );
+      const updatedGatePayload = refreshConnectorPreSendGatePayload({
+        gatePayload,
+        definition,
+        context: nextContext,
+        gateType: gate.gate_type,
+      });
+      await client.query(
+        `UPDATE loop_engine_gates SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [input.gateId, JSON.stringify(updatedGatePayload)],
+      );
+      await client.query("COMMIT");
+      const recipientStatus = typeof updatedGatePayload.recipientStatus === "string"
+        ? updatedGatePayload.recipientStatus
+        : "missing";
+      return {
+        runId: input.runId,
+        gateId: input.gateId,
+        status: "pending",
+        satisfied: recipientStatus === "ready",
+      };
+    }
+
+    const checkpoint = readOperatorCheckpoint(gatePayload);
+    const whenRaw = gatePayload.when;
+    const when: InputRequirementWhen = whenRaw === "before_send" || whenRaw === "before_step"
+      ? whenRaw
+      : "run_start";
+
+    let nextContext = applyGateSurfaceSubmission({
+      definition,
+      context: currentContext,
+      values: parsedValues,
+    });
+
+    const deliveryRecipients = nextContext.deliveryRecipients;
+    if (deliveryRecipients?.contacts.length && !deliveryRecipients.documentRef) {
+      const docRefs = await stashContactListAsDocument({
+        auth: input.auth,
+        contacts: deliveryRecipients.contacts,
+        titleHint: definition.goal || definition.builderMeta?.noSlopSpec?.title,
+        runId: input.runId,
+      });
+      nextContext = runtimeContextSchema.parse({
+        ...nextContext,
+        deliveryRecipients: buildDeliveryRecipientsPatch({
+          contacts: deliveryRecipients.contacts,
+          source: deliveryRecipients.source ?? "uploaded",
+          audienceId: deliveryRecipients.audienceId,
+          documentRef: docRefs.documentRef,
+          lotRef: docRefs.lotRef,
+        }),
+      });
+    }
+
+    await client.query(
+      `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+      [input.runId, JSON.stringify(nextContext)],
+    );
+
+    const remaining = evaluateExecutionBlockingAt(definition, nextContext, when);
+    if (remaining.length > 0) {
+      const requirements = remaining.map((row) => row.requirement);
+      const recipientSource = readRecipientSource(definition);
+      const updatedCheckpoint = buildRequirementCheckpoint({
+        requirements,
+        blocking: checkpoint?.blocking ?? {
+          agentId: typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined,
+        },
+        propsForKey: (key) => (key === "recipients" || key === "audience_id"
+          ? { contactSource: recipientSource }
+          : undefined),
+        satisfiedKeys: new Set(
+          collectRequirements(definition)
+            .filter((req) => req.when === when)
+            .filter((req) => isRequirementSatisfied(req, nextContext, definition).satisfied)
+            .map((req) => req.key),
+        ),
+      });
+      const updatedPayload = checkpointPayload({
+        checkpoint: updatedCheckpoint,
+        agentId: typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined,
+        stepIndex: typeof gatePayload.stepIndex === "number" ? gatePayload.stepIndex : undefined,
+        extra: {
+          when,
+          ...(gatePayload.uiBlocks ? { uiBlocks: gatePayload.uiBlocks } : {}),
+        },
+      });
+      await client.query(
+        `UPDATE loop_engine_gates SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [input.gateId, JSON.stringify(updatedPayload)],
+      );
+      await client.query("COMMIT");
+      return {
+        runId: input.runId,
+        gateId: input.gateId,
+        status: "pending",
+        satisfied: false,
+        pendingKeys: remaining.map((row) => row.requirement.key),
+      };
+    }
+
+    await client.query(
+      `UPDATE loop_engine_gates SET status = 'submitted', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [input.gateId, JSON.stringify({ values: parsedValues })],
+    );
+    await client.query(
+      `UPDATE loop_engine_runs SET status = 'running', updated_at = NOW() WHERE id = $1`,
+      [input.runId],
+    );
+    await client.query(
+      `INSERT INTO loop_engine_commands
+       (tenant_id, user_id, run_id, command_type, idempotency_key, payload_json)
+       VALUES ($1, $2, $3, 'continue_after_gate', $4, $5::jsonb)
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [gate.tenant_id, gate.user_id, input.runId, `gate:${input.gateId}:continue`, JSON.stringify({ gateId: input.gateId })],
+    );
+    await client.query("COMMIT");
+    return { runId: input.runId, gateId: input.gateId, status: "submitted", satisfied: true };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function uploadLoopRuntimeGateContacts(input: {
   auth: AuthContext;
   runId: string;
@@ -1571,37 +2028,12 @@ export async function uploadLoopRuntimeGateContacts(input: {
     );
 
     const gatePayload = asObject(gate.payload_json);
-    const payload = asObject(gatePayload.payload);
-    const connectorActionSlug = typeof gatePayload.actionSlug === "string" ? gatePayload.actionSlug : "";
-    const sendPayload = injectDeliveryRecipientsIntoPayload({
-      payload,
+    const updatedGatePayload = refreshConnectorPreSendGatePayload({
+      gatePayload,
+      definition,
       context: nextContext,
-      actionSlug: connectorActionSlug,
-      assignmentConfig: asObject(payload),
+      gateType: gate.gate_type,
     });
-    const updatedGatePayload = {
-      ...gatePayload,
-      recipientStatus: resolveRecipientStatus({
-        recipientSource,
-        context: nextContext,
-        assignmentConfig: asObject(payload),
-      }),
-      recipientCount: deliveryRecipients.recipientCount,
-      payload: sendPayload,
-      payloadHash: sha256Json(sendPayload),
-      uiBlocks: gate.gate_type === "recipient_upload"
-        ? recipientUploadUiBlocks(recipientSource)
-        : preSendUiBlocks({
-          recipientSource,
-          recipientStatus: resolveRecipientStatus({
-            recipientSource,
-            context: nextContext,
-            assignmentConfig: asObject(payload),
-          }),
-          deliveryTarget: definition.delivery?.target,
-          hasDedicatedRecipientAgent: definitionHasRecipientListAgent(definition),
-        }),
-    };
     await client.query(
       `UPDATE loop_engine_gates SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
       [input.gateId, JSON.stringify(updatedGatePayload)],
@@ -1840,7 +2272,9 @@ export async function saveCanvasEmailArtifact(input: {
   auth: AuthContext;
   runId: string;
   artifactKey: string;
-  emailTemplate: Pick<CanvasEmailTemplate, "design" | "html" | "text" | "subject" | "preview">;
+  emailTemplate: Pick<CanvasEmailTemplate, "design" | "html" | "text" | "subject" | "preview"> & {
+    finalUse?: boolean;
+  };
 }) {
   const existing = await pool.query<{
     tenant_id: string;
@@ -1869,6 +2303,7 @@ export async function saveCanvasEmailArtifact(input: {
     preview: input.emailTemplate.preview ?? input.emailTemplate.subject ?? "Email draft",
     updatedAt: new Date().toISOString(),
     source: "dashboard",
+    finalUse: input.emailTemplate.finalUse ?? false,
   };
   await pool.query(
     `INSERT INTO loop_engine_artifacts
@@ -1896,6 +2331,65 @@ export async function saveCanvasEmailArtifact(input: {
     stepAttemptId: row.step_attempt_id,
     eventType: "canvas_email_saved",
     payload: { artifactKey: input.artifactKey },
+  });
+  return getLoopRuntimeProjection(input.auth, input.runId);
+}
+
+export async function saveAgentOutput(input: {
+  auth: AuthContext;
+  runId: string;
+  stepId: string;
+  text: string;
+}) {
+  const existing = await pool.query<{
+    tenant_id: string;
+    user_id: string;
+    output_json: unknown;
+    agent_id: string;
+  }>(
+    `SELECT a.tenant_id, a.user_id, a.output_json, a.agent_id
+     FROM loop_engine_step_attempts a
+     JOIN loop_engine_runs r ON r.id = a.run_id
+     WHERE a.id = $1 AND a.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4`,
+    [input.stepId, input.runId, input.auth.tenantId, input.auth.userId],
+  );
+  const row = existing.rows[0];
+  if (!row) throw new Error("Agent output not found");
+
+  const output = { ...asObject(row.output_json), text: input.text, operatorEdited: true };
+  await pool.query(
+    `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+    [input.stepId, JSON.stringify(output)],
+  );
+  await pool.query(
+    `UPDATE loop_engine_gates
+     SET payload_json = jsonb_set(payload_json, '{result,text}', to_jsonb($2::text), true), updated_at = NOW()
+     WHERE run_id = $1 AND step_attempt_id = $3 AND status = 'pending'`,
+    [input.runId, input.text, input.stepId],
+  );
+  await pool.query(
+    `INSERT INTO loop_engine_artifacts
+     (tenant_id, user_id, run_id, step_attempt_id, artifact_key, version, kind, body, data_json)
+     SELECT $1, $2, $3, $4, $5,
+            COALESCE(MAX(version), 0) + 1, 'structured_output', $6, $7::jsonb
+     FROM loop_engine_artifacts WHERE run_id = $3 AND artifact_key = $5`,
+    [
+      row.tenant_id,
+      row.user_id,
+      input.runId,
+      input.stepId,
+      `${row.agent_id}:operator_edit`,
+      input.text,
+      JSON.stringify({ text: input.text, operatorEdited: true }),
+    ],
+  );
+  await insertEvent({
+    tenantId: row.tenant_id,
+    userId: row.user_id,
+    runId: input.runId,
+    stepAttemptId: input.stepId,
+    eventType: "agent_output_saved",
+    payload: { agentId: row.agent_id },
   });
   return getLoopRuntimeProjection(input.auth, input.runId);
 }

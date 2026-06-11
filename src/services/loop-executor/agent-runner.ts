@@ -17,6 +17,7 @@ import { completeText } from "./agent-runner-internals.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
 import { extractMemorySources, extractWebSearchSources, formatMemorySearchText } from "../loop-engine/contracts.js";
+import { unwrapEmailMarkdownEnvelope } from "../loop-engine/email-output.js";
 
 import "../loop-runtime/tool-registrations.js";
 
@@ -106,6 +107,9 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     priorComments: input.priorComments.map((c) => ({ author: c.author, body: c.body })),
     agentHandoff: input.agentHandoff,
     draftPolicy: input.draftPolicy,
+    outputContract: input.agent.outputContract,
+    doneCriteria: input.agent.doneCriteria,
+    renderTarget: input.agent.renderTarget,
   };
   const system = buildAgentSystemPrompt(bindCtx);
   let user = buildAgentUserPrompt(bindCtx);
@@ -174,8 +178,11 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
   }
 
   const llmResult = await completeText({ system, user, maxTokens: 1800 });
+  const text = input.agent.renderTarget === "canvas.email" || input.agent.renderTarget === "canvas.preview"
+    ? unwrapEmailMarkdownEnvelope(llmResult.text)
+    : llmResult.text;
   return {
-    text: llmResult.text,
+    text,
     data: {
       model: llmResult.model,
       mode: hasOnlyLlmTools(input.assignedTools) ? "llm_only" : "tool_assisted",
@@ -184,7 +191,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
       toolsUsed,
       usage: llmResult.usage,
       llmInput: { system, user },
-      llmOutput: llmResult.text,
+      llmOutput: text,
     },
     draft,
   };

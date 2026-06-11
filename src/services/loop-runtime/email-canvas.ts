@@ -1,3 +1,9 @@
+import {
+  sanitizeEmailMarkdown,
+  sanitizeEmailText,
+  unwrapEmailMarkdownEnvelope,
+} from "../loop-engine/email-output.js";
+
 type UnlayerContent = {
   id: string;
   type: "heading" | "text" | "divider";
@@ -32,6 +38,7 @@ export type CanvasEmailTemplate = {
   preview: string;
   updatedAt: string;
   source: "runtime" | "dashboard";
+  finalUse: boolean;
 };
 
 function escapeHtml(value: string): string {
@@ -56,7 +63,7 @@ function readPrefixedLine(line: string, key: "subject" | "preview"): string | nu
 }
 
 function parseEmailMarkdown(markdown: string, fallbackSubject?: string | null) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const lines = unwrapEmailMarkdownEnvelope(markdown).replace(/\r\n/g, "\n").split("\n");
   let subject = fallbackSubject?.trim() || "";
   let preview = "";
   const bodyLines: string[] = [];
@@ -84,6 +91,11 @@ function parseEmailMarkdown(markdown: string, fallbackSubject?: string | null) {
     preview = body.split(/\n\n/)[0]?.replace(/^#{1,6}\s+/, "").slice(0, 180) || subject;
   }
   return { subject, preview, body };
+}
+
+function deriveSubjectFromBody(body: string): string {
+  const firstContent = body.split("\n").find((line) => line.trim())?.trim() ?? "Email draft";
+  return firstContent.replace(/^#{1,6}\s+/, "").replace(/^\*\*|\*\*$/g, "").slice(0, 140);
 }
 
 function makeRow(id: string, contents: UnlayerContent[], padding = "0px"): UnlayerRow {
@@ -208,20 +220,28 @@ export function buildCanvasEmailTemplate(input: {
   markdown: string;
   subject?: string | null;
   source?: CanvasEmailTemplate["source"];
+  finalUse?: boolean;
 }): CanvasEmailTemplate {
   const parsed = parseEmailMarkdown(input.markdown, input.subject);
+  const body = sanitizeEmailMarkdown(parsed.body);
+  let subject = sanitizeEmailText(parsed.subject);
+  let preview = sanitizeEmailText(parsed.preview);
+  if (!subject) subject = deriveSubjectFromBody(body);
+  if (!preview) {
+    preview = body.split(/\n\n/)[0]?.replace(/^#{1,6}\s+/, "").slice(0, 180) || subject;
+  }
   const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }).toUpperCase();
   const rows = [
     makeRow("preheader", [
-      textContent("text-preheader", `<p style="line-height:140%;">${escapeHtml(parsed.preview)}</p>`, {
+      textContent("text-preheader", `<p style="line-height:140%;">${escapeHtml(preview)}</p>`, {
         fontSize: "13px",
         color: "#6b7280",
         align: "center",
       }),
     ], "8px 0px"),
     makeRow("date", [textContent("text-date", `<p style="line-height:140%;">${today}</p>`, { fontSize: "12px", color: "#9ca3af" })]),
-    makeRow("headline", [headingContent("heading-headline", escapeHtml(parsed.subject), "h1")]),
-    ...markdownRows(parsed.body),
+    makeRow("headline", [headingContent("heading-headline", escapeHtml(subject), "h1")]),
+    ...markdownRows(body),
   ];
   const design: CanvasEmailDesign = {
     counters: {
@@ -243,12 +263,13 @@ export function buildCanvasEmailTemplate(input: {
   };
   return {
     design,
-    html: renderCanvasEmailHtml(design, parsed.subject, parsed.preview),
-    text: [parsed.subject, "", parsed.body].join("\n"),
-    subject: parsed.subject,
-    preview: parsed.preview,
+    html: renderCanvasEmailHtml(design, subject, preview),
+    text: [subject, "", body].join("\n"),
+    subject,
+    preview,
     updatedAt: new Date().toISOString(),
     source: input.source ?? "runtime",
+    finalUse: input.finalUse ?? false,
   };
 }
 

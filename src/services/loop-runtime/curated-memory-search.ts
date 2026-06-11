@@ -22,8 +22,6 @@ const VECTOR_RESULTS_PER_QUERY = 14;
 const BM25_RESULTS_PER_QUERY = 16;
 const ENTITY_RESULTS_PER_QUERY = 12;
 const RRF_K = 60;
-const MIN_ACCEPT_SCORE = 0.18;
-const MIN_ACCEPT_SIMILARITY = 0.22;
 const DEDUP_SIMILARITY_THRESHOLD = 0.86;
 
 const STOP_WORDS = new Set([
@@ -149,8 +147,6 @@ export interface CuratedMemorySearchTrace {
     lexicalMatchCount: number;
     entityMatchCount: number;
     mergedCandidateCount: number;
-    acceptedScoreFloor: number;
-    acceptedSimilarityFloor: number;
   };
   candidates: Array<{
     id: string;
@@ -807,7 +803,6 @@ function acceptedSources(input: {
   temporalPolicy: BlogCyclePolicy;
 }): CuratedMemorySearchSource[] {
   return input.candidates
-    .filter((candidate) => candidate.score >= MIN_ACCEPT_SCORE && candidate.similarity >= MIN_ACCEPT_SIMILARITY)
     .flatMap((candidate) => {
       const syntheticMemory: DecryptedMemory = {
         id: candidate.id,
@@ -1039,8 +1034,6 @@ export async function runCuratedMemorySearch(
         lexicalMatchCount: ranked.lexicalMatchCount,
         entityMatchCount: ranked.entityMatchCount,
         mergedCandidateCount: ranked.candidates.length,
-        acceptedScoreFloor: MIN_ACCEPT_SCORE,
-        acceptedSimilarityFloor: MIN_ACCEPT_SIMILARITY,
       },
       candidates: ranked.candidates.map((candidate) => {
         const accepted = acceptedById.get(candidate.id) ?? null;

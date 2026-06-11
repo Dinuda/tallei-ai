@@ -20,6 +20,8 @@ import {
   type NoSlopSpecSnapshot,
   type NoSlopSpecStatus,
 } from "../loop-engine/spec-contracts.js";
+import { inferInputRequirementsForSpec } from "./intent-templates.js";
+import { sanitizeInputRequirementsForDelivery } from "../loop-engine/input-surfaces.js";
 
 export type LoopSpecView = {
   id: string;
@@ -168,6 +170,12 @@ function normalizeGeneratedSpec(input: NoSlopSpec, prompt: string): NoSlopSpec {
     },
     successCriteria: input.successCriteria.length > 0 ? input.successCriteria : defaultSuccessCriteria,
     failureModes: input.failureModes.length > 0 ? input.failureModes : defaultFailureModes,
+    inputRequirements: sanitizeInputRequirementsForDelivery(
+      input.inputRequirements?.length
+        ? input.inputRequirements
+        : inferInputRequirementsForSpec(input, prompt),
+      target,
+    ),
     connectorPolicy: connectorPolicy
       ? {
           ...connectorPolicy,
@@ -401,6 +409,12 @@ function specSystemPrompt(): string {
     "For subscriber_list delivery, set recipientSource.kind to uploaded, configured, or operator_input with a short description of how recipients arrive at pre_send.",
     "Include failureModes: Pause at pre_send for operator contact upload when no recipients are configured.",
     "Include successCriteria: Delivery completes only after operator confirms recipients.",
+    "Declare inputRequirements for runtime checkpoints only — never block build-time generation.",
+    "inputRequirements[].surface MUST be one of: input.text, input.markdown, input.contacts_csv, input.audience_id, input.file, review.draft, review.email, confirm.send. Never invent types like input.boolean.",
+    "Use canonical keys only: sprint_notes (run_start, team_email ONLY), recipients (before_send upload), audience_id (before_send configured), confirm_send (before_send approval). Never use recipients_upload or pre_send_confirm.",
+    "Internal sync / team email ONLY: { key: sprint_notes, surface: input.markdown, when: run_start }.",
+    "Newsletter / research / subscriber_list workflows: NO run_start content inputs — agents gather content via web_search and memory_search. Runtime inputs are before_send only (audience_id, recipients, confirm_send).",
+    "Subscriber send: recipients or audience_id with when: before_send aligned to recipientSource.kind.",
     "When Connected Apps external-effect candidates are listed, choose only actions whose skills/resources/effects match the requested workflow. Do not infer hidden capabilities from provider names.",
     "Use a 5-field cron only when cadence is clear; otherwise describe the schedule in schedule.description and omit schedule.cron entirely.",
     "schedule.timezone must be a valid IANA timezone such as UTC when provided; omit schedule.timezone if unknown (defaults to UTC).",
@@ -436,6 +450,7 @@ function specSystemPrompt(): string {
         recipientSource: { kind: "none" },
         deliveryExpectation: "No outbound delivery.",
       },
+      inputRequirements: [],
     }, null, 2),
   ].join("\n");
 }

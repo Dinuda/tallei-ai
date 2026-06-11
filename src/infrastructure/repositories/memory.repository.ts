@@ -314,6 +314,32 @@ export class MemoryRepository {
     });
   }
 
+  /** Durable profile memories: preferences, permanent tier, pinned, cleanup_bucket permanent. */
+  async listWorkflowProfileMemories(auth: AuthContext, limit = 32): Promise<MemoryRecordRow[]> {
+    const result = await pool.query<MemoryRecordRow>(
+      `SELECT *
+       FROM memory_records
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND superseded_by IS NULL
+         AND (
+           tier = 'permanent'
+           OR is_pinned = TRUE
+           OR memory_type = 'preference'
+           OR summary_json->>'cleanup_bucket' = 'permanent'
+         )
+       ORDER BY
+         CASE WHEN memory_type = 'preference' THEN 0 WHEN is_pinned THEN 1 ELSE 2 END,
+         reference_count DESC,
+         importance DESC,
+         created_at DESC
+       LIMIT $3`,
+      [auth.tenantId, auth.userId, limit],
+    );
+    return result.rows;
+  }
+
   async markSupersededPreferences(auth: AuthContext, input: {
     supersededById: string;
     preferenceKey?: string | null;

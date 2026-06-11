@@ -4,7 +4,12 @@
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { recallMemories } from "../memory.js";
-import { DESIGNER_MEMORY_MIN_SCORE, DESIGNER_MEMORY_TOP_K } from "./contracts.js";
+import { DESIGNER_MEMORY_TOP_K } from "./contracts.js";
+import {
+  loadWorkflowUserProfile,
+  profileMemoryIds,
+  type WorkflowUserProfile,
+} from "./workflow-user-profile.js";
 
 export interface ScoredMemory {
   id: string;
@@ -39,30 +44,38 @@ export async function recallForDesigner(
   auth: AuthContext,
   options?: {
     recall?: typeof recallMemories;
-    minScore?: number;
     topK?: number;
+    profile?: WorkflowUserProfile | null;
   },
 ): Promise<ScoredMemory[]> {
   const recall = options?.recall ?? recallMemories;
-  const minScore = options?.minScore ?? DESIGNER_MEMORY_MIN_SCORE;
   const topK = options?.topK ?? DESIGNER_MEMORY_TOP_K;
+  const profile = options?.profile ?? await loadWorkflowUserProfile(auth).catch(() => null);
+  const profileIds = profileMemoryIds(profile);
   const queries = buildFacetQueries(prompt);
 
   const resultSets = await Promise.all(
     queries.map((query) => recall(query, auth, 10).catch(() => ({ memories: [] }))),
   );
 
-  const merged = dedupeById(
-    resultSets.flatMap((result) => (result.memories ?? []).map((memory) => ({
+  const mandatoryProfileMemories: ScoredMemory[] = (profile?.memories ?? []).map((memory) => ({
+    id: memory.id,
+    text: memory.text,
+    score: 1,
+    metadata: { mandatory: true, profile: true, category: memory.category, memoryType: memory.memoryType },
+  }));
+
+  const merged = dedupeById([
+    ...mandatoryProfileMemories,
+    ...resultSets.flatMap((result) => (result.memories ?? []).map((memory) => ({
       id: memory.id,
       text: memory.text,
       score: memory.score ?? 0,
       metadata: memory.metadata,
-    }))),
-  )
-    .filter((memory) => memory.score >= minScore)
+    }))).filter((memory) => !profileIds.has(memory.id)),
+  ])
     .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+    .slice(0, topK + mandatoryProfileMemories.length);
 
   return merged;
 }

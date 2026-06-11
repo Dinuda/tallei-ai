@@ -43,6 +43,16 @@ export function isInputValidationAgent(agent: { id: string; name?: string }): bo
   return label.includes("validator") || label.includes("input_gate") || label.includes("input checker");
 }
 
+/** True when this agent step owns run_start operator input collection (not research/draft agents). */
+export function agentCollectsRunStartInput(agent: {
+  id: string;
+  name?: string;
+  gate?: { type: string } | null;
+}): boolean {
+  if (isInputValidationAgent(agent)) return true;
+  return agent.gate?.type === "missing_input";
+}
+
 const DELIVERY_CONFIG_INPUT_PATTERN = /subscriber|audience|recipient|mailing.?list|contact.?list|list.?id|send.?to|broadcast.?list/i;
 
 export function isDeliveryConfigInputKey(key: string): boolean {
@@ -64,7 +74,7 @@ export function resolveRequiredInputKeys(
   }
   if (fromGraph.length > 0) return [...new Set(fromGraph)];
   if (gateFields?.length) return gateFields.map((field) => field.key);
-  return ["sprint_notes"];
+  return [];
 }
 
 export function contentInputKeys(
@@ -116,7 +126,9 @@ export function isMisclassifiedDraftReviewGate(input: {
 }): boolean {
   if (input.gateType !== "missing_input" || input.gateStatus === "submitted") return false;
   if (isInputValidationAgent(input.agent)) return false;
-  if (readGateEvalBlockers(input.gatePayload).includes("placeholder_detected")) return true;
+  if (readGateEvalBlockers(input.gatePayload).includes("placeholder_detected")) {
+    return hasRequiredContentInputs(input.definition, input.runMemory);
+  }
   return hasRequiredRunInputs(input.definition, input.runMemory);
 }
 
@@ -220,8 +232,20 @@ export function buildAgentHandoff(
   agent: LoopRunAgent,
   memory: RunMemory,
   priorOutputs: Record<string, unknown>,
+  options?: {
+    userProfile?: {
+      profileText: string;
+      memories?: Array<{ id: string; text: string }>;
+    } | null;
+  },
 ): Record<string, unknown> {
   const handoff: Record<string, unknown> = { ...priorOutputs, ...memory.inputs };
+  if (options?.userProfile?.profileText) {
+    handoff.user_profile = options.userProfile.profileText;
+    if (options.userProfile.memories?.length) {
+      handoff.user_profile_memories = options.userProfile.memories;
+    }
+  }
   if (memory.approvedMemories.length > 0) {
     handoff.approved_memories = memory.approvedMemories;
     handoff.memories = memory.approvedMemories;

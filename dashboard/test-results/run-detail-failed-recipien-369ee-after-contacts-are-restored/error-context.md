@@ -1,0 +1,230 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - link "Skip to main content" [ref=e3] [cursor=pointer]:
+      - /url: "#main-content"
+    - banner [ref=e4]:
+      - generic [ref=e5]:
+        - link "Tallei" [ref=e7] [cursor=pointer]:
+          - /url: /dashboard
+          - img "Tallei" [ref=e8] [cursor=pointer]
+        - generic [ref=e9]:
+          - generic [ref=e10]:
+            - img [ref=e11]
+            - generic [ref=e14]: 14 day free trial
+          - link "Upgrade" [ref=e15] [cursor=pointer]:
+            - /url: /dashboard/billing
+          - button "Toggle profile menu" [ref=e17]:
+            - generic [ref=e19]: FA
+    - complementary "Navigation" [ref=e20]:
+      - navigation [ref=e21]:
+        - generic [ref=e22]:
+          - link "Memories" [ref=e23] [cursor=pointer]:
+            - /url: /dashboard
+            - generic [ref=e24] [cursor=pointer]:
+              - img [ref=e25] [cursor=pointer]
+              - generic [ref=e28] [cursor=pointer]: Memories
+          - link "Collab" [ref=e29] [cursor=pointer]:
+            - /url: /dashboard/tasks
+            - generic [ref=e30] [cursor=pointer]:
+              - img [ref=e31] [cursor=pointer]
+              - generic [ref=e35] [cursor=pointer]: Collab
+          - link "Documents" [ref=e36] [cursor=pointer]:
+            - /url: /dashboard/documents
+            - generic [ref=e37] [cursor=pointer]:
+              - img [ref=e38] [cursor=pointer]
+              - generic [ref=e41] [cursor=pointer]: Documents
+          - link "Loops" [ref=e42] [cursor=pointer]:
+            - /url: /dashboard/loops
+            - generic [ref=e44] [cursor=pointer]:
+              - img [ref=e45] [cursor=pointer]
+              - generic [ref=e48] [cursor=pointer]: Loops
+          - link "Channels" [ref=e49] [cursor=pointer]:
+            - /url: /dashboard/channels
+            - generic [ref=e50] [cursor=pointer]:
+              - img [ref=e51] [cursor=pointer]
+              - generic [ref=e53] [cursor=pointer]: Channels
+          - link "AI Assistants" [ref=e54] [cursor=pointer]:
+            - /url: /dashboard/setup
+            - generic [ref=e55] [cursor=pointer]:
+              - img [ref=e56] [cursor=pointer]
+              - generic [ref=e59] [cursor=pointer]: AI Assistants
+          - link "Connected Apps" [ref=e60] [cursor=pointer]:
+            - /url: /dashboard/integrations
+            - generic [ref=e61] [cursor=pointer]:
+              - img [ref=e62] [cursor=pointer]
+              - generic [ref=e65] [cursor=pointer]: Connected Apps
+          - link "Billing" [ref=e66] [cursor=pointer]:
+            - /url: /dashboard/billing
+            - generic [ref=e67] [cursor=pointer]:
+              - img [ref=e68] [cursor=pointer]
+              - generic [ref=e71] [cursor=pointer]: Billing
+        - generic [ref=e72]:
+          - paragraph [ref=e73]: DEVELOPER
+          - link "Memory Cleanup" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard/memory-cleanup
+            - generic [ref=e75] [cursor=pointer]:
+              - img [ref=e76] [cursor=pointer]
+              - generic [ref=e79] [cursor=pointer]: Memory Cleanup
+          - link "Live Loops" [ref=e80] [cursor=pointer]:
+            - /url: /dashboard/loops/developer
+            - generic [ref=e81] [cursor=pointer]:
+              - img [ref=e82] [cursor=pointer]
+              - generic [ref=e86] [cursor=pointer]: Live Loops
+          - link "Activity" [ref=e87] [cursor=pointer]:
+            - /url: /dashboard/mcp-events
+            - generic [ref=e88] [cursor=pointer]:
+              - img [ref=e89] [cursor=pointer]
+              - generic [ref=e91] [cursor=pointer]: Activity
+          - link "Integrations" [ref=e92] [cursor=pointer]:
+            - /url: /dashboard/developer/integrations
+            - generic [ref=e93] [cursor=pointer]:
+              - img [ref=e94] [cursor=pointer]
+              - generic [ref=e99] [cursor=pointer]: Integrations
+    - main [ref=e100]:
+      - generic [ref=e101]:
+        - region "Integration updates" [ref=e102]:
+          - generic [ref=e103]:
+            - generic [ref=e104]:
+              - paragraph [ref=e105]: Update your setup to enjoy the best experience
+              - paragraph [ref=e106]: "Latest versions: ChatGPT Actions spec updated v2026-04-29.5, Claude instructions updated v2026-04-30.3."
+            - generic [ref=e107]:
+              - button "Copy Claude update" [ref=e108]:
+                - img [ref=e109]
+                - text: Copy Claude update
+              - link "Open ChatGPT guide" [ref=e112] [cursor=pointer]:
+                - /url: /dashboard/setup
+                - img [ref=e113] [cursor=pointer]
+                - text: Open ChatGPT guide
+              - button "Dismiss integration update banner" [ref=e117]:
+                - img [ref=e118]
+                - text: Hide
+        - main [ref=e121]:
+          - generic [ref=e122]:
+            - generic [ref=e123]:
+              - generic [ref=e124]:
+                - navigation [ref=e125]:
+                  - link "Loops" [ref=e126] [cursor=pointer]:
+                    - /url: /dashboard/loops
+                  - img [ref=e127]
+                  - link "Failed recipient recovery" [ref=e129] [cursor=pointer]:
+                    - /url: /dashboard/loops/3bbb1759-85d9-4b78-8609-9a1e09fef8c6
+                  - img [ref=e130]
+                  - generic [ref=e132]: "Job #4149d6"
+                - generic [ref=e133]:
+                  - heading "Failed recipient recovery" [level=1] [ref=e134]
+                  - generic [ref=e135]: failed
+              - generic [ref=e136]:
+                - button "Info" [ref=e137]:
+                  - img [ref=e138]
+                - button "Job details" [ref=e140]:
+                  - img [ref=e141]
+                - button "Refresh" [ref=e144]:
+                  - img [ref=e145]
+                - button "Panels" [ref=e150]:
+                  - img [ref=e151]
+                - button "More" [ref=e153]:
+                  - img [ref=e154]
+            - generic [ref=e160]:
+              - generic [ref=e161]:
+                - generic [ref=e162]:
+                  - generic [ref=e163]: Rejected
+                  - generic [ref=e164]: /
+                  - generic [ref=e165]: Gate
+                - 'button "MEMORY_MASTER_KEY is required. Generate one with: openssl rand -hex 32" [ref=e166] [cursor=pointer]'
+              - button "Retry agent" [ref=e167]:
+                - img [ref=e168]
+            - generic [ref=e173]:
+              - generic [ref=e177]:
+                - generic [ref=e178]:
+                  - heading "Recipients required" [level=2] [ref=e179]
+                  - paragraph [ref=e180]: Upload contacts to fix the failed send, then retry the delivery agent.
+                - generic [ref=e183]:
+                  - generic [ref=e185]:
+                    - paragraph [ref=e186]: Recipient list
+                    - generic [ref=e187]:
+                      - tablist [ref=e188]:
+                        - tab "Upload CSV" [ref=e189]
+                        - tab "Paste emails" [selected] [ref=e190]
+                        - tab "Audience ID" [disabled]
+                      - tabpanel "Paste emails" [ref=e191]:
+                        - textbox "one@example.com name@company.com, Jane Doe" [active] [ref=e192]: alex@example.com casey@example.com
+                        - paragraph [ref=e193]: 2 valid emails detected
+                    - paragraph [ref=e194]: "MEMORY_MASTER_KEY is required. Generate one with: openssl rand -hex 32"
+                  - generic [ref=e196]:
+                    - paragraph [ref=e197]: Upload a CSV or paste emails, then save before approving send.
+                    - button "Save contacts" [ref=e199]:
+                      - generic [ref=e200]: "|>"
+                      - text: Save contacts
+              - complementary [ref=e201]:
+                - generic [ref=e202]:
+                  - heading "Final result" [level=2] [ref=e204]:
+                    - img [ref=e205]
+                    - text: Final result
+                  - paragraph [ref=e207]: No final result artifact yet.
+                - generic [ref=e208]:
+                  - generic [ref=e209]:
+                    - heading "Agents" [level=2] [ref=e210]:
+                      - img [ref=e211]
+                      - text: Agents
+                    - generic [ref=e214]:
+                      - generic [ref=e215]: Needs attention
+                      - generic [ref=e218]: 0/1
+                  - 'button "Orchestrator Tallei Orchestrator Blocked Queue: Send Agent. Job blocked at agent 1 · send agent. Fix the failed agent or rejected gate, then rerun to resume the queue." [ref=e219]':
+                    - img [ref=e221]
+                    - generic [ref=e225]:
+                      - generic [ref=e226]:
+                        - generic [ref=e227]:
+                          - paragraph [ref=e228]: Orchestrator
+                          - paragraph [ref=e229]: Tallei Orchestrator
+                        - generic [ref=e230]: Blocked
+                      - paragraph [ref=e231]: "Queue: Send Agent."
+                      - paragraph [ref=e232]: Job blocked at agent 1 · send agent. Fix the failed agent or rejected gate, then rerun to resume the queue.
+                    - button "Hire this orchestrator" [ref=e233]:
+                      - img [ref=e234]
+                    - button [ref=e237]:
+                      - img [ref=e238]
+                  - generic [ref=e240]:
+                    - generic [ref=e241]:
+                      - paragraph [ref=e242]: Agents
+                      - paragraph [ref=e243]: "1"
+                    - button "Send Agent RUN 1 resend send email Failed" [ref=e244]:
+                      - img [ref=e246]
+                      - generic [ref=e250]:
+                        - generic [ref=e251]:
+                          - paragraph [ref=e253]: Send Agent
+                          - generic [ref=e254]:
+                            - generic [ref=e255]:
+                              - generic [ref=e256]: RUN
+                              - generic [ref=e257]: "1"
+                            - generic [ref=e258]: resend send email
+                        - button "Hire Send Agent" [ref=e259]:
+                          - img [ref=e260]
+                        - generic [ref=e263]:
+                          - generic [ref=e264]:
+                            - button "Retry agent" [ref=e265]:
+                              - img [ref=e266]
+                            - generic [ref=e271]: Failed
+                          - button [ref=e272]:
+                            - img [ref=e273]
+                - generic [ref=e275]:
+                  - heading "From memory" [level=2] [ref=e277]:
+                    - img [ref=e278]
+                    - text: From memory
+                  - paragraph [ref=e286]: No approved memory or submitted input yet.
+    - region "Notifications alt+T"
+  - generic [ref=e291] [cursor=pointer]:
+    - button "Open Next.js Dev Tools" [ref=e292] [cursor=pointer]:
+      - img [ref=e293] [cursor=pointer]
+    - generic [ref=e296] [cursor=pointer]:
+      - button "Open issues overlay" [ref=e297] [cursor=pointer]:
+        - generic [ref=e298] [cursor=pointer]:
+          - generic [ref=e299] [cursor=pointer]: "0"
+          - generic [ref=e300] [cursor=pointer]: "1"
+        - generic [ref=e301] [cursor=pointer]: Issue
+      - button "Collapse issues badge" [ref=e302] [cursor=pointer]:
+        - img [ref=e303] [cursor=pointer]
+  - alert [ref=e305]
+```

@@ -7,6 +7,8 @@
 
 import { z } from "zod";
 import { connectorPolicySchema } from "../loop-engine/spec-contracts.js";
+import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
+import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
 
 import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 
@@ -109,6 +111,14 @@ export const loopRunAgentSchema = z.object({
   gate: loopAgentGateSchema.optional(),
   outputArtifactId: z.string().min(1).optional(),
   renderTarget: loopRenderTargetSchema.optional(),
+  operatorSurface: z.enum([
+    "review.sources",
+    "review.memories",
+    "review.email",
+    "review.preview",
+    "review.draft",
+    "confirm.send",
+  ]).optional(),
 });
 
 export type LoopRunAgent = z.infer<typeof loopRunAgentSchema>;
@@ -259,6 +269,14 @@ export const loopAgentGraphChildSchema = z.object({
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
   renderTarget: loopRenderTargetSchema.optional(),
+  operatorSurface: z.enum([
+    "review.sources",
+    "review.memories",
+    "review.email",
+    "review.preview",
+    "review.draft",
+    "confirm.send",
+  ]).optional(),
 });
 
 export type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;
@@ -283,7 +301,6 @@ export type LoopAgentGraph = z.infer<typeof loopAgentGraphSchema>;
 
 /**
  * Persisted loop definition (`workflows.metadata_json.loopDefinition`).
- * `presetId` is a legacy explicit shortcut only; bespoke loops should use deliveryType/agentGraph.
  */
 export const loopDefinitionSchema = z.object({
   definitionVersion: z.literal(LOOP_DEFINITION_VERSION),
@@ -308,12 +325,11 @@ export const loopDefinitionSchema = z.object({
   /** LLM-chosen delivery routing for the agentic engine (replaces regex classification). */
   delivery: loopDeliveryRoutingSchema.optional(),
   connectorPolicy: connectorPolicySchema.optional(),
+  inputRequirements: z.array(inputRequirementSchema).default([]).optional(),
   inputsRequired: z.array(z.string().min(1)).default([]).optional(),
   engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
   agentGraph: loopAgentGraphSchema.optional(),
   plan: loopPlanSchema.optional(),
-  /** Legacy built-in preset key. Null/blank from LLM or client payloads is normalized to omitted. */
-  presetId: optionalNonEmptyStringSchema,
   builderMeta: z.object({
     designedBy: z.enum(["ceo_llm", "loop_architect"]).default("ceo_llm"),
     engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
@@ -327,6 +343,7 @@ export const loopDefinitionSchema = z.object({
       generatedAt: z.string().min(1),
     }).optional(),
     designDiagnostics: z.record(z.unknown()).optional(),
+    workflowUserProfile: workflowUserProfileSchema.optional(),
   }).optional(),
 });
 

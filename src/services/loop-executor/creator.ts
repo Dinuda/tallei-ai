@@ -77,6 +77,7 @@ export function buildLoopDefinition(input: {
   delivery?: LoopDeliveryRouting;
   connectorPolicy?: LoopDefinition["connectorPolicy"];
   inputsRequired?: string[];
+  inputRequirements?: LoopDefinition["inputRequirements"];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
   builderMeta?: LoopDefinition["builderMeta"];
 }): LoopDefinition {
@@ -115,6 +116,7 @@ export function buildLoopDefinition(input: {
     ...(input.delivery ? { delivery: input.delivery } : {}),
     ...(input.connectorPolicy ? { connectorPolicy: input.connectorPolicy } : {}),
     ...(input.inputsRequired?.length ? { inputsRequired: input.inputsRequired } : {}),
+    ...(input.inputRequirements?.length ? { inputRequirements: input.inputRequirements } : {}),
     ...(input.engineVersion ? { engineVersion: input.engineVersion } : {}),
     agentGraph,
     ...(input.builderMeta ? { builderMeta: input.builderMeta } : {}),
@@ -132,6 +134,7 @@ export function buildLoopDefinitionFromCeoDesign(input: {
   delivery?: LoopDeliveryRouting;
   connectorPolicy?: LoopDefinition["connectorPolicy"];
   inputsRequired?: string[];
+  inputRequirements?: LoopDefinition["inputRequirements"];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
 }): LoopDefinition {
   const allowedToolRefs = uniqueStrings(
@@ -147,6 +150,7 @@ export function buildLoopDefinitionFromCeoDesign(input: {
     delivery: input.delivery,
     connectorPolicy: input.connectorPolicy,
     inputsRequired: input.inputsRequired,
+    inputRequirements: input.inputRequirements,
     engineVersion: input.engineVersion,
     builderMeta: input.design.builderMeta,
   });

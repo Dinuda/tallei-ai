@@ -18,10 +18,13 @@ import {
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
   retryLoopRuntimeStep,
+  saveAgentOutput,
   saveCanvasEmailArtifact,
   startManualLoopRun,
+  submitLoopRuntimeGate,
   uploadLoopRuntimeGateContacts,
 } from "../../../services/loop-runtime/index.js";
+import { gateSurfaceSubmissionSchema } from "../../../services/loop-engine/input-surfaces.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -57,7 +60,9 @@ const canvasEmailSaveSchema = z.object({
   text: z.string().max(1_000_000).optional(),
   subject: z.string().max(500).optional(),
   preview: z.string().max(1_000).optional(),
+  finalUse: z.boolean().optional(),
 });
+const agentOutputSaveSchema = z.object({ text: z.string().min(1).max(5_000_000) });
 
 function sendError(res: Response, error: unknown, fallback: string) {
   if (error instanceof z.ZodError) {
@@ -208,6 +213,17 @@ router.post("/runs/:runId/steps/:stepId/retry", requireScopes(["memory:write"]),
   }
 });
 
+router.post("/runs/:runId/steps/:stepId/output", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const { stepId } = stepIdSchema.parse(req.params);
+    const { text } = agentOutputSaveSchema.parse(req.body ?? {});
+    res.status(201).json({ run: await saveAgentOutput({ auth: req.authContext!, runId, stepId, text }) });
+  } catch (error) {
+    sendError(res, error, "Failed to save agent output");
+  }
+});
+
 router.post("/runs/:runId/artifacts/:artifactKey/canvas/email", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse(req.params);
@@ -224,6 +240,7 @@ router.post("/runs/:runId/artifacts/:artifactKey/canvas/email", requireScopes(["
           text: body.text ?? "",
           subject: body.subject ?? "Email draft",
           preview: body.preview ?? body.subject ?? "Email draft",
+          finalUse: body.finalUse ?? false,
         },
       }),
     });
@@ -258,6 +275,26 @@ router.post("/runs/:runId/gates/:gateId/contacts", requireScopes(["memory:write"
     }));
   } catch (error) {
     sendError(res, error, "Failed to upload gate contacts");
+  }
+});
+
+router.post("/runs/:runId/gates/:gateId/submit", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const { gateId } = gateIdSchema.parse(req.params);
+    const values = gateSurfaceSubmissionSchema.parse(
+      req.body && typeof req.body === "object" && !Array.isArray(req.body) && req.body.values && typeof req.body.values === "object"
+        ? req.body.values
+        : req.body ?? {},
+    );
+    res.json(await submitLoopRuntimeGate({
+      auth: req.authContext!,
+      runId,
+      gateId,
+      values,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to submit gate surfaces");
   }
 });
 

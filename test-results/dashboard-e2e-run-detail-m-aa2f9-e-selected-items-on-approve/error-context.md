@@ -1,0 +1,250 @@
+# Page snapshot
+
+```yaml
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - link "Skip to main content" [ref=e3] [cursor=pointer]:
+      - /url: "#main-content"
+    - banner [ref=e4]:
+      - generic [ref=e5]:
+        - link "Tallei" [ref=e7] [cursor=pointer]:
+          - /url: /dashboard
+          - img "Tallei" [ref=e8] [cursor=pointer]
+        - generic [ref=e9]:
+          - generic [ref=e10]:
+            - img [ref=e11]
+            - generic [ref=e14]: 14 day free trial
+          - link "Upgrade" [ref=e15] [cursor=pointer]:
+            - /url: /dashboard/billing
+          - button "Toggle profile menu" [ref=e17]:
+            - generic [ref=e19]: ME
+    - complementary "Navigation" [ref=e20]:
+      - navigation [ref=e21]:
+        - generic [ref=e22]:
+          - link "Memories" [ref=e23] [cursor=pointer]:
+            - /url: /dashboard
+            - generic [ref=e24] [cursor=pointer]:
+              - img [ref=e25] [cursor=pointer]
+              - generic [ref=e28] [cursor=pointer]: Memories
+          - link "Collab" [ref=e29] [cursor=pointer]:
+            - /url: /dashboard/tasks
+            - generic [ref=e30] [cursor=pointer]:
+              - img [ref=e31] [cursor=pointer]
+              - generic [ref=e35] [cursor=pointer]: Collab
+          - link "Documents" [ref=e36] [cursor=pointer]:
+            - /url: /dashboard/documents
+            - generic [ref=e37] [cursor=pointer]:
+              - img [ref=e38] [cursor=pointer]
+              - generic [ref=e41] [cursor=pointer]: Documents
+          - link "Loops" [ref=e42] [cursor=pointer]:
+            - /url: /dashboard/loops
+            - generic [ref=e44] [cursor=pointer]:
+              - img [ref=e45] [cursor=pointer]
+              - generic [ref=e48] [cursor=pointer]: Loops
+          - link "Channels" [ref=e49] [cursor=pointer]:
+            - /url: /dashboard/channels
+            - generic [ref=e50] [cursor=pointer]:
+              - img [ref=e51] [cursor=pointer]
+              - generic [ref=e53] [cursor=pointer]: Channels
+          - link "AI Assistants" [ref=e54] [cursor=pointer]:
+            - /url: /dashboard/setup
+            - generic [ref=e55] [cursor=pointer]:
+              - img [ref=e56] [cursor=pointer]
+              - generic [ref=e59] [cursor=pointer]: AI Assistants
+          - link "Connected Apps" [ref=e60] [cursor=pointer]:
+            - /url: /dashboard/integrations
+            - generic [ref=e61] [cursor=pointer]:
+              - img [ref=e62] [cursor=pointer]
+              - generic [ref=e65] [cursor=pointer]: Connected Apps
+          - link "Billing" [ref=e66] [cursor=pointer]:
+            - /url: /dashboard/billing
+            - generic [ref=e67] [cursor=pointer]:
+              - img [ref=e68] [cursor=pointer]
+              - generic [ref=e71] [cursor=pointer]: Billing
+        - generic [ref=e72]:
+          - paragraph [ref=e73]: DEVELOPER
+          - link "Memory Cleanup" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard/memory-cleanup
+            - generic [ref=e75] [cursor=pointer]:
+              - img [ref=e76] [cursor=pointer]
+              - generic [ref=e79] [cursor=pointer]: Memory Cleanup
+          - link "Live Loops" [ref=e80] [cursor=pointer]:
+            - /url: /dashboard/loops/developer
+            - generic [ref=e81] [cursor=pointer]:
+              - img [ref=e82] [cursor=pointer]
+              - generic [ref=e86] [cursor=pointer]: Live Loops
+          - link "Activity" [ref=e87] [cursor=pointer]:
+            - /url: /dashboard/mcp-events
+            - generic [ref=e88] [cursor=pointer]:
+              - img [ref=e89] [cursor=pointer]
+              - generic [ref=e91] [cursor=pointer]: Activity
+          - link "Integrations" [ref=e92] [cursor=pointer]:
+            - /url: /dashboard/developer/integrations
+            - generic [ref=e93] [cursor=pointer]:
+              - img [ref=e94] [cursor=pointer]
+              - generic [ref=e99] [cursor=pointer]: Integrations
+    - main [ref=e100]:
+      - generic [ref=e101]:
+        - region "Integration updates" [ref=e102]:
+          - generic [ref=e103]:
+            - generic [ref=e104]:
+              - paragraph [ref=e105]: Update your setup to enjoy the best experience
+              - paragraph [ref=e106]: "Latest versions: ChatGPT Actions spec updated v2026-04-29.5, Claude instructions updated v2026-04-30.3."
+            - generic [ref=e107]:
+              - button "Copy Claude update" [ref=e108]:
+                - img [ref=e109]
+                - text: Copy Claude update
+              - link "Open ChatGPT guide" [ref=e112] [cursor=pointer]:
+                - /url: /dashboard/setup
+                - img [ref=e113] [cursor=pointer]
+                - text: Open ChatGPT guide
+              - button "Dismiss integration update banner" [ref=e117]:
+                - img [ref=e118]
+                - text: Hide
+        - main [ref=e121]:
+          - generic [ref=e122]:
+            - generic [ref=e123]:
+              - generic [ref=e124]:
+                - navigation [ref=e125]:
+                  - link "Loops" [ref=e126] [cursor=pointer]:
+                    - /url: /dashboard/loops
+                  - img [ref=e127]
+                  - link "Memory confirmation" [ref=e129] [cursor=pointer]:
+                    - /url: /dashboard/loops/d4f43804-20ef-4e62-b9ac-b5751cb1f74f
+                  - img [ref=e130]
+                  - generic [ref=e132]: "Job #055c8e"
+                - generic [ref=e133]:
+                  - heading "Memory confirmation" [level=1] [ref=e134]
+                  - generic [ref=e135]: Paused · Needs Approval
+              - generic [ref=e136]:
+                - button "Info" [ref=e137]:
+                  - img [ref=e138]
+                - button "Job details" [ref=e140]:
+                  - img [ref=e141]
+                - button "Refresh" [ref=e144]:
+                  - img [ref=e145]
+                - button "Panels" [ref=e150]:
+                  - img [ref=e151]
+                - button "Cancel" [ref=e153]:
+                  - img [ref=e154]
+                - button "More" [ref=e157]:
+                  - img [ref=e158]
+            - generic [ref=e164]:
+              - generic [ref=e165]:
+                - generic [ref=e166]:
+                  - generic [ref=e167]: Approval
+                  - generic [ref=e168]: /
+                  - generic [ref=e169]: Memory
+                - paragraph [ref=e170]: Select which memories the next agent may use
+              - generic [ref=e171]:
+                - button "Reject" [ref=e172]:
+                  - generic [ref=e173]: <\
+                  - text: Reject
+                - button "Revise" [ref=e174]:
+                  - generic [ref=e175]: ↻
+                  - text: Revise
+                - button "Approve (2)" [ref=e176]:
+                  - generic [ref=e177]: />
+                  - text: Approve (2)
+            - generic [ref=e178]:
+              - generic [ref=e182]:
+                - generic [ref=e183]:
+                  - heading "Memories" [level=2] [ref=e184]
+                  - paragraph [ref=e185]: Choose what the next agent can use.
+                - generic [ref=e187]:
+                  - generic [ref=e188]:
+                    - generic [ref=e189]:
+                      - checkbox "Include memory Sprint notes say the release moved to Friday." [checked] [ref=e190]:
+                        - generic:
+                          - img
+                      - generic [ref=e191]:
+                        - paragraph [ref=e192]: Sprint notes say the release moved to Friday.
+                        - paragraph [ref=e193]: Sprint notes say the release moved to Friday.
+                        - paragraph [ref=e194]: mem_1 · Supporting
+                      - button "View →" [ref=e195]
+                    - generic [ref=e196]:
+                      - checkbox "Include memory Customer requested a shorter summary." [checked] [ref=e197]:
+                        - generic:
+                          - img
+                      - generic [ref=e198]:
+                        - paragraph [ref=e199]: Customer requested a shorter summary.
+                        - paragraph [ref=e200]: Customer requested a shorter summary.
+                        - paragraph [ref=e201]: mem_2 · Context
+                      - button "View →" [ref=e202]
+                    - generic [ref=e203]:
+                      - checkbox "Include memory Old placeholder memory that should be excluded." [ref=e204]
+                      - generic [ref=e205]:
+                        - paragraph [ref=e206]: Old placeholder memory that should be excluded.
+                        - paragraph [ref=e207]: Old placeholder memory that should be excluded.
+                        - paragraph [ref=e208]: mem_3 · Noise
+                      - button "View →" [ref=e209]
+                  - paragraph [ref=e211]: 3 proposed · 2 selected
+              - complementary [ref=e212]:
+                - generic [ref=e213]:
+                  - heading "Final result" [level=2] [ref=e215]:
+                    - img [ref=e216]
+                    - text: Final result
+                  - paragraph [ref=e218]: Blocked until approval completes.
+                - generic [ref=e219]:
+                  - generic [ref=e220]:
+                    - heading "Agents" [level=2] [ref=e221]:
+                      - img [ref=e222]
+                      - text: Agents
+                    - generic [ref=e225]:
+                      - generic [ref=e226]: Agent 1 · Memory Searcher Agent
+                      - generic [ref=e229]: 0/1
+                  - 'button "Orchestrator Tallei Orchestrator Paused · Needs approval Queue: Memory Searcher Agent. Paused at agent 1 · memory searcher agent for memory. Select which memories the next agent may use. After approval, Memory Searcher Agent is next." [ref=e230]':
+                    - img [ref=e232]
+                    - generic [ref=e236]:
+                      - generic [ref=e237]:
+                        - generic [ref=e238]:
+                          - paragraph [ref=e239]: Orchestrator
+                          - paragraph [ref=e240]: Tallei Orchestrator
+                        - generic [ref=e241]: Paused · Needs approval
+                      - paragraph [ref=e242]: "Queue: Memory Searcher Agent."
+                      - paragraph [ref=e243]: Paused at agent 1 · memory searcher agent for memory. Select which memories the next agent may use. After approval, Memory Searcher Agent is next.
+                    - button "Hire this orchestrator" [ref=e244]:
+                      - img [ref=e245]
+                    - button [ref=e248]:
+                      - img [ref=e249]
+                  - generic [ref=e251]:
+                    - generic [ref=e252]:
+                      - paragraph [ref=e253]: Agents
+                      - paragraph [ref=e254]: "1"
+                    - button "Memory Searcher Agent RUN 1 Memory Paused · Needs approval" [ref=e255]:
+                      - img [ref=e257]
+                      - generic [ref=e260]:
+                        - generic [ref=e261]:
+                          - paragraph [ref=e263]: Memory Searcher Agent
+                          - generic [ref=e264]:
+                            - generic [ref=e265]:
+                              - generic [ref=e266]: RUN
+                              - generic [ref=e267]: "1"
+                            - generic "Memory" [ref=e268]:
+                              - img [ref=e270]
+                              - generic [ref=e278]: Memory
+                        - button "Hire Memory Searcher Agent" [ref=e279]:
+                          - img [ref=e280]
+                        - generic [ref=e283]:
+                          - generic [ref=e285]: Paused · Needs approval
+                          - button [ref=e286]:
+                            - img [ref=e287]
+                - generic [ref=e289]:
+                  - heading "From memory" [level=2] [ref=e291]:
+                    - img [ref=e292]
+                    - text: From memory
+                  - paragraph [ref=e300]: Pending your selection above.
+    - region "Notifications alt+T"
+  - generic [ref=e305] [cursor=pointer]:
+    - button "Open Next.js Dev Tools" [ref=e306] [cursor=pointer]:
+      - img [ref=e307] [cursor=pointer]
+    - generic [ref=e310] [cursor=pointer]:
+      - button "Open issues overlay" [ref=e311] [cursor=pointer]:
+        - generic [ref=e312] [cursor=pointer]:
+          - generic [ref=e313] [cursor=pointer]: "0"
+          - generic [ref=e314] [cursor=pointer]: "1"
+        - generic [ref=e315] [cursor=pointer]: Issue
+      - button "Collapse issues badge" [ref=e316] [cursor=pointer]:
+        - img [ref=e317] [cursor=pointer]
+  - alert [ref=e319]
+```

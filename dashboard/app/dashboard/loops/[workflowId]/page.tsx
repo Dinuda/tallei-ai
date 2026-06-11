@@ -3,10 +3,17 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, ArrowRight, Loader2, Play, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Info, Loader2, Play, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { VisuallyHidden } from "@radix-ui/react-visually-hidden";
 
 type LoopRun = {
   id: string;
@@ -43,6 +50,10 @@ function prettyStatus(status: string): string {
   return status.replace(/_/g, " ");
 }
 
+function formatJsonFull(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
 export default function LoopWorkflowPage() {
   const router = useRouter();
   const params = useParams<{ workflowId: string }>();
@@ -53,6 +64,7 @@ export default function LoopWorkflowPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"run" | "delete" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const loadWorkflow = useCallback(async () => {
     setLoading(true);
@@ -156,6 +168,17 @@ export default function LoopWorkflowPage() {
           <Button
             type="button"
             variant="outline"
+            size="icon"
+            className="h-9 w-9"
+            onClick={() => setDetailsOpen(true)}
+            aria-label="View loop JSON"
+            title="View loop JSON"
+          >
+            <Info size={14} />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
             className="h-9 gap-1.5 text-red-700 hover:bg-red-50 hover:text-red-800"
             onClick={() => void deleteLoop()}
             disabled={busy !== null}
@@ -251,6 +274,36 @@ export default function LoopWorkflowPage() {
           </Card>
         </aside>
       </div>
+
+      <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+        <DialogContent className="h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none bg-[#f7f8fb]">
+          <DialogClose asChild>
+            <button
+              type="button"
+              className="absolute right-3 top-3 z-10 grid size-7 place-items-center text-[#9ca3af] transition-colors hover:text-[#6b7280]"
+              aria-label="Close"
+            >
+              <span className="text-lg leading-none">×</span>
+            </button>
+          </DialogClose>
+          <VisuallyHidden asChild>
+            <DialogTitle>Loop JSON</DialogTitle>
+          </VisuallyHidden>
+          <div className="flex h-full min-h-0 flex-col p-6">
+            <div className="mb-4">
+              <h2 className="text-xl font-bold tracking-tight text-[#111827]">Loop JSON</h2>
+              <p className="mt-1 text-sm text-[#6b7280]">
+                Full workflow payload, including definition and all runs.
+              </p>
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden border border-[#e5e7eb] bg-white">
+              <pre className="h-full overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-[11px] leading-5 text-[#374151]">
+                {formatJsonFull({ workflow, runs })}
+              </pre>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { isApprovedExternalEffectPolicy } from "./tool-contract-matcher.js";
+import { inputRequirementSchema, normalizeSpecInputRequirements } from "./input-surfaces.js";
 
 const SUBSCRIBER_ALIAS_KEYWORDS = [
   "mailing_list",
@@ -280,6 +281,7 @@ const baseNoSlopSpecSchema = z.object({
     recipientSource: { kind: "none" },
     deliveryExpectation: "No outbound delivery.",
   }),
+  inputRequirements: z.array(inputRequirementSchema).default([]),
 });
 
 type NoSlopSpecShape = z.infer<typeof baseNoSlopSpecSchema>;
@@ -343,7 +345,9 @@ const draftNoSlopSpecSchema = baseNoSlopSpecSchema.superRefine((spec, ctx) => {
 });
 
 function preprocessNoSlopSpec(value: unknown): unknown {
-  return normalizeSchedule(normalizeSubscriberRecipientSourceInSpec(value));
+  return normalizeSpecInputRequirements(
+    normalizeSchedule(normalizeSubscriberRecipientSourceInSpec(value)),
+  );
 }
 
 export const noSlopSpecDraftSchema = z.preprocess(

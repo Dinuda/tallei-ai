@@ -14,6 +14,7 @@ import {
   type LoopDefinition,
   type LoopDeliveryTarget,
 } from "../loop-executor/types.js";
+import { inputRequirementSchema } from "./input-surfaces.js";
 export {
   noSlopSpecAgentSchema,
   noSlopSpecDraftSchema,
@@ -29,7 +30,6 @@ export {
 export const ENGINE_MAX_AGENTS = 8;
 export const ENGINE_MAX_CRITIC_RETRIES = 2;
 export const ENGINE_MAX_AGENT_RETRIES = 2;
-export const DESIGNER_MEMORY_MIN_SCORE = 0.35;
 export const DESIGNER_MEMORY_TOP_K = 8;
 
 /** Valid delivery provider for each target. */
@@ -63,6 +63,14 @@ export const loopArchitectAgentSchema = z.object({
     question: z.string().min(1),
   }).optional(),
   renderTarget: loopRenderTargetSchema.optional(),
+  operatorSurface: z.enum([
+    "review.sources",
+    "review.memories",
+    "review.email",
+    "review.preview",
+    "review.draft",
+    "confirm.send",
+  ]).optional(),
   artifactRole: z.enum([
     "source_evidence",
     "draft_body",
@@ -71,11 +79,45 @@ export const loopArchitectAgentSchema = z.object({
   ]).optional(),
 });
 
-export const loopArchitectOutputSchema = z.object({
+function coerceArchitectInputKey(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    if (typeof row.key === "string" && row.key.trim()) return row.key.trim();
+  }
+  return null;
+}
+
+/** Coerce common architect LLM shape mistakes before strict schema validation. */
+export function preprocessArchitectOutput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const root = value as Record<string, unknown>;
+  const next: Record<string, unknown> = { ...root };
+
+  if (Array.isArray(root.inputsRequired)) {
+    next.inputsRequired = root.inputsRequired
+      .map(coerceArchitectInputKey)
+      .filter((key): key is string => Boolean(key));
+  }
+
+  if (Array.isArray(root.rationale)) {
+    next.rationale = root.rationale.filter((line): line is string => typeof line === "string" && line.trim().length > 0);
+  }
+
+  if (Array.isArray(root.suggestedChannels)) {
+    next.suggestedChannels = root.suggestedChannels
+      .filter((channel): channel is string => typeof channel === "string" && channel.trim().length > 0);
+  }
+
+  return next;
+}
+
+const loopArchitectOutputBaseSchema = z.object({
   title: z.string().min(1),
   summary: z.string().min(1),
   strategyText: z.string().min(1),
   inputsRequired: z.array(z.string().min(1)).default([]),
+  inputRequirements: z.array(inputRequirementSchema).default([]),
   delivery: loopDeliveryRoutingSchema,
   schedule: z.object({
     cron: z.string().min(1),
@@ -85,6 +127,11 @@ export const loopArchitectOutputSchema = z.object({
   rationale: z.array(z.string().min(1)).default([]),
   suggestedChannels: z.array(z.string().min(1)).default(["primary"]),
 });
+
+export const loopArchitectOutputSchema = z.preprocess(
+  preprocessArchitectOutput,
+  loopArchitectOutputBaseSchema,
+);
 
 export type LoopArchitectOutput = z.infer<typeof loopArchitectOutputSchema>;
 export type LoopArchitectAgent = z.infer<typeof loopArchitectAgentSchema>;
@@ -174,12 +221,15 @@ export function architectOutputToAgentGraph(output: LoopArchitectOutput): z.infe
       outputContract: agent.outputContract,
       ...(agent.gate ? { gate: agent.gate } : {}),
       outputArtifactId: slugArtifactId(agent.id),
-      outputArtifactKind: agent.artifactRole === "draft_body"
-        || agent.artifactRole === "final_preview"
-        || agent.renderTarget
-        ? "canvas_email"
-        : "structured_output",
+      outputArtifactKind: agent.renderTarget === "canvas.preview"
+        ? "canvas_preview"
+        : agent.artifactRole === "draft_body"
+          || agent.artifactRole === "final_preview"
+          || agent.renderTarget === "canvas.email"
+          ? "canvas_email"
+          : "structured_output",
       ...(agent.renderTarget ? { renderTarget: agent.renderTarget } : {}),
+      ...(agent.operatorSurface ? { operatorSurface: agent.operatorSurface } : {}),
     })),
   });
 }

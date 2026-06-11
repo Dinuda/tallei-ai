@@ -4,7 +4,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { createLoopWorkflow } from "../loop-executor/creator.js";
 import { loopDefinitionSchema, loopStageApprovalChannelInputSchema } from "../loop-executor/types.js";
 import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
-import { channelsFromDesign, designLoopFromIntent, loopBuilderTraceSchema } from "./ceo-designer.js";
+import { channelsFromDesign, designLoopFromIntent, loopBuilderTraceSchema } from "../loop-engine/architect.js";
 import { approvedSpecSnapshot, getLoopSpec } from "./specs.js";
 
 /** Optional UI hint passed to the LLM — does not bypass the builder. */

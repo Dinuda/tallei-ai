@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { noSlopSpecSchema } from "../../../src/services/loop-engine/spec-contracts.js";
 import type { LoopArchitectOutput } from "../../../src/services/loop-engine/contracts.js";
+import { loopArchitectOutputSchema } from "../../../src/services/loop-engine/contracts.js";
 import { critiqueLoopDesign } from "../../../src/services/loop-engine/critic.js";
 import { normalizeArchitectOutput } from "../../../src/services/loop-engine/normalize-architect.js";
 
@@ -73,6 +74,21 @@ test("normalize preserves architect-selected gates, roles, and render targets", 
   assert.equal(writer?.artifactRole, undefined);
   assert.equal(normalized.agents.some((agent) => /delivery preparation/i.test(agent.name)), true);
   assert.equal(normalized.agents.find((agent) => agent.tool === "internal.web_search")?.gate, undefined);
+});
+
+test("architect schema coerces object inputsRequired entries to string keys", () => {
+  const parsed = loopArchitectOutputSchema.parse({
+    ...newsletterDesign(),
+    inputsRequired: [
+      { key: "audience_id", surface: "input.audience_id", when: "before_send" },
+      "confirm_send",
+    ],
+    inputRequirements: [
+      { key: "audience_id", surface: "input.audience_id", when: "before_send", required: true },
+      { key: "confirm_send", surface: "confirm.send", when: "before_send", required: true },
+    ],
+  });
+  assert.deepEqual(parsed.inputsRequired, ["audience_id", "confirm_send"]);
 });
 
 test("normalize does not inject missing spec guardrails into strategy or writer criteria", () => {

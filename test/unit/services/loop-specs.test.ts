@@ -68,9 +68,10 @@ function baseDesign(): LoopArchitectOutput {
         tool: "internal.llm_only",
         artifactRole: "draft_body",
         renderTarget: "canvas.email",
+        operatorSurface: "review.email",
         inputContract: { description: "Research sources", schema: { sources: "array" } },
-        outputContract: { description: "Final cited digest ready for review", schema: { digest: "string" } },
-        doneCriteria: ["Digest includes executive summary and trends", "The final digest is cited and ready for review"],
+        outputContract: { description: "Final cited digest in canonical email markdown", schema: { format: "email_markdown" } },
+        doneCriteria: ["Digest includes executive summary and trends", "The final digest is cited and ready for review", "Contains no raw HTML"],
         gate: { type: "draft_review", question: "Review this digest in the canvas before continuing." },
       },
     ],
@@ -460,6 +461,23 @@ test("critic allows newsletter writer agents to choose gates and render targets 
   const result = critiqueLoopDesign(design, snapshot);
   assert.equal(result.requiredFixes.some((fix) => /renderTarget "canvas.email"/i.test(fix)), false);
   assert.equal(result.requiredFixes.some((fix) => /draft_review/i.test(fix)), false);
+});
+
+test("critic rejects canvas email contracts that permit HTML or omit canonical format", () => {
+  const design = baseDesign();
+  design.agents[0] = {
+    ...design.agents[0],
+    tool: "internal.llm_only",
+    renderTarget: "canvas.email",
+    outputContract: { description: "Email plus HTML-friendly alternate version", schema: { text: "string", html: "string" } },
+    doneCriteria: ["Includes a complete email"],
+  };
+
+  const result = critiqueLoopDesign(design, snapshot);
+  assert.equal(result.pass, false);
+  assert.match(result.requiredFixes.join("\n"), /email_markdown/i);
+  assert.match(result.requiredFixes.join("\n"), /must not request HTML or alternate representations/i);
+  assert.equal(result.requiredFixes.some((fix) => /doneCriteria.*raw HTML/i.test(fix)), false);
 });
 
 test("critic does not hard-code delivery config input rejection", () => {

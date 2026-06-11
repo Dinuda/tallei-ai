@@ -29,9 +29,17 @@ import {
 import { critiqueLoopDesign } from "./critic.js";
 import { normalizeArchitectOutput } from "./normalize-architect.js";
 import { formatMemoriesForArchitect, recallForDesigner } from "./recall.js";
+import {
+  formatWorkflowUserProfile,
+  loadWorkflowUserProfile,
+} from "./workflow-user-profile.js";
 import { buildToolSpecRegistry, filterToolSpecRegistryForSpec, renderOutcomesForArchitect, renderToolsForArchitect, type ToolSpecRegistry } from "../tool-spec/index.js";
 import { connectorActionToolRef } from "../tool-spec/tool-contracts.js";
-import { repairArchitectDesignForSpec } from "./repair-architect.js";
+import { repairArchitectDesignForSpecWithInputs } from "./repair-architect.js";
+import {
+  canonicalizeInputRequirementsList,
+  extractInputRequirementContext,
+} from "./input-surfaces.js";
 
 export type DesignerTestOverrides = {
   chat?: typeof loopBuilderOpenAiChat;
@@ -85,10 +93,11 @@ function formatPreferences(preferences: Array<{ id: string; text: string; catego
 
 function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
   const outputExample = JSON.stringify({
-    title: "Weekly product sync",
-    summary: "Reviewed internal brief summarizing product progress for the engineering team.",
-    strategyText: "Research memories, synthesize facts, write a reviewed artifact.",
-    inputsRequired: ["sprint_notes"],
+    title: "Weekly AI newsletter",
+    summary: "Research this week's AI news, draft a cited newsletter, and pause for review.",
+    strategyText: "Web research, optional memory context, synthesize draft — no operator paste at run_start.",
+    inputsRequired: [],
+    inputRequirements: [],
     delivery: { provider: "none", target: "none" },
     schedule: { cron: "0 9 * * 1", timezone: "UTC" },
     agents: [
@@ -103,6 +112,7 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
         outputContract: { description: "Raw search results from Exa API", schema: { text: "string", model: "string", provider: "string", sources: [{ title: "string", url: "string", snippet: "string" }] } },
         doneCriteria: ["At least 5 sources returned", "Each source has title, url, and snippet", "Sources are from credible news sources"],
         gate: { type: "source_confirmation", question: "Select which sources to include. Add custom URLs if needed." },
+        operatorSurface: "review.sources",
       },
       {
         id: "memory_context",
@@ -115,19 +125,21 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
         outputContract: { description: "Validated memories with excerpts", schema: { sources: [{ id: "string", text: "string" }] } },
         doneCriteria: ["Returns memory excerpts with ids", "Query is focused on the newsletter topic"],
         gate: { type: "memory_confirmation", question: "Select which memories the writer may use." },
+        operatorSurface: "review.memories",
       },
       {
         id: "newsletter_writer",
         name: "Writer Agent",
-        goal: "Produce one complete newsletter draft ready for human review",
-        task: "Synthesize research sources into a newsletter with Subject, Preview, and body sections. Cite sources inline.",
+        goal: "Produce one final-use newsletter email for human review",
+        task: "Synthesize research sources into a newsletter with Subject, Preview, and body sections. Cite sources inline and omit all workflow scaffolding, placeholder notes, and send-plan text.",
         tool: "internal.llm_only",
         artifactRole: "draft_body",
         inputContract: { description: "Research handoff from prior agent", schema: { handoff: { web_research: { sources: "array" } } } },
-        outputContract: { description: "Newsletter email copy", schema: { text: "string", subject: "string", preview: "string", body: "string" } },
-        doneCriteria: ["Includes a Subject line", "Includes a Preview line", "Includes one complete newsletter body", "No delivery or sending claims"],
-        gate: { type: "draft_review", question: "Review this newsletter draft. Approve to continue, or edit to improve it." },
+        outputContract: { description: "One final-use email in canonical email_markdown format", schema: { format: "email_markdown", grammar: "Subject line, optional Preview line, blank line, Markdown body" } },
+        doneCriteria: ["Includes exactly one Subject line", "Includes at most one Preview line", "Includes one complete Markdown email body", "Contains no delivery, sending, boilerplate, or placeholder claims"],
+        gate: { type: "draft_review", question: "Review this newsletter email. Approve to continue, or edit to improve it." },
         renderTarget: "canvas.email",
+        operatorSurface: "review.email",
       },
     ],
     rationale: ["Minimal roster tailored to producing a reviewed artifact"],
@@ -139,7 +151,7 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
     "Use role names people understand immediately: child roles should be named as Agents, and the parent coordinator should be an Orchestrator.",
     "When a no-slop spec is provided, it is the behavioral source of truth. Satisfy it directly and do not override it with guesses from the raw prompt.",
     "Do NOT mention template IDs or preset names.",
-    "Every child agent must have exactly ONE tool, a clear goal (success condition), task, inputContract, outputContract, and 1-8 doneCriteria.",
+    "Every child agent must have exactly ONE tool, exactly ONE task, a clear goal (success condition), inputContract, outputContract, and 1-8 doneCriteria.",
     "=== ARTIFACT ROLES, OUTPUT FORMAT & APPROVAL GATES ===",
     "For EVERY agent, decide:",
     "  1. artifactRole — how this agent contributes to the final loop outcome:",
@@ -149,7 +161,7 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
     '     "delivery" — executes an approved external-effect tool when the reviewed workflow calls for one',
     "  2. outputContract — exact shape the agent produces (match tool outputSchema for short-circuit tools)",
     "  3. gate — human approval type when the agent pauses:",
-    '     missing_input — operator must PASTE text (sprint notes, briefs). Use ONLY for content inputs in inputsRequired.',
+    '     missing_input — operator must PASTE text (sprint notes, briefs). Use ONLY on a dedicated Input Validator agent for run_start inputRequirements.',
     '     memory_confirmation — operator SELECTS which memories to include',
     '     source_confirmation — operator SELECTS web search sources and may ADD custom URLs/titles/snippets',
     '     draft_review — operator REVIEWS a draft in the canvas; can approve as-is or edit to improve',
@@ -157,19 +169,42 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
     "  4. renderTarget — optional specialized renderer/editor for the output (NOT a tool ref):",
     '     "canvas.email" — editable email workspace when the operator should edit the email visually',
     '     "canvas.preview" — read-only rendered email preview when visual review is useful',
+    "  5. operatorSurface — the semantic editor used during review:",
+    '     "review.sources" — editable source checklist; use for source arrays, never a raw text editor',
+    '     "review.memories" — editable memory checklist; use for memory arrays',
+    '     "review.email" — email canvas editor',
+    '     "review.preview" — read-only rendered final preview',
+    '     "review.draft" — prose/markdown editor for unstructured writing',
+    '     "confirm.send" — final send confirmation',
+    "",
+    "SINGLE-RESPONSIBILITY RULES:",
+    "  - One agent = one tool = one task. Do not combine distinct duties (research + write, summarize + draft) in one agent.",
+    "  - If an agent needs to do multiple things, split it into multiple agents and delegate through the roster.",
+    "  - Example: 'Research Agent' searches, 'Summarization Agent' synthesizes, 'Writer Agent' drafts — never one agent doing all three.",
+    "  - Example: 'Pre-send Specialist Agent' only collects recipients and generates preview; 'Delivery Agent' only sends. Never combine.",
     "",
     "GATE RULES BY TOOL TYPE:",
     "  - Choose gates only when human judgment/input is needed for that agent's output.",
     "  - NEVER put pre_send on internal.llm_only, internal.web_search, internal.memory_search, or composio.<toolkit>.search.",
     "  - NEVER create a separate Pre-send Specialist Agent with internal.llm_only. If text review is needed, use draft_review; if external execution is needed, put pre_send on the exact approved external-effect action agent.",
-    "  - Search agents may run without a gate, or use source_confirmation when the operator should curate sources before downstream work.",
+    "  - Search agents (internal.web_search, internal.memory_search) may run without a gate, or use source_confirmation / memory_confirmation when the operator should curate results. NEVER use missing_input on search agents.",
+    '  - Match structured outputs to semantic editors: source arrays → review.sources, memory arrays → review.memories, editable email_markdown → canvas.email + review.email, read-only final email → canvas.preview + review.preview, unstructured prose → review.draft.',
+    "  - Never expose structured source or memory output as a raw textarea when a checklist surface can edit the underlying items.",
     "  - Memory agents may run without a gate, or use memory_confirmation when the operator should curate memories.",
-    "  - Review/QA agents are valid when they produce useful review output; do not duplicate human approval unless the workflow needs both.",
+    "  - When inputRequirements declare run_start content inputs, add an Input Validator agent as the FIRST roster step with internal.llm_only and missing_input gate. Its sole job is collecting/confirming operator inputs — not research or drafting.",
     "  - internal.llm_only writing email/newsletter/digest may use plain structured output, markdown, canvas.email, or canvas.preview depending on the workflow.",
+    "  - For email/newsletter output, the body must be final-use copy only: no boilerplate intro, no send-plan notes, no placeholder guidance, no signature scaffolding, and no commentary about the draft.",
     "  - External-effect tools must use the approval gate declared by their tool contract.",
     "  - Render recommendations in tool contracts are advisory. Choose renderTarget from workflow output/review needs, or omit it.",
     "",
-    "inputsRequired is ONLY for operator-provided CONTENT needed before drafting (e.g. sprint_notes, product_brief).",
+    "inputsRequired / run_start inputRequirements are ONLY for operator-pasted CONTENT when the spec explicitly requires it (internal team_email sync → sprint_notes).",
+    "inputsRequired MUST be a string array of keys only (e.g. [\"sprint_notes\"]). Put structured objects in inputRequirements, never inside inputsRequired.",
+    "Research/newsletter/subscriber_list workflows do NOT use sprint_notes or run_start paste — content comes from web_search and memory_search.",
+    "inputRequirements declares structured runtime checkpoints: key, surface, when (run_start | before_send). Copy spec inputRequirements exactly; do not add run_start keys the spec omits.",
+    "before_send recipient upload: { key: recipients, surface: input.contacts_csv }. Send approval: { key: confirm_send, surface: confirm.send }.",
+    "Do NOT invent keys like pre_send_confirm, sync_to_team, or sprint_notes for newsletters — use confirm_send at before_send only.",
+    "When the spec requires run_start inputs (team sync only), prepend an Input Validator agent — do NOT attach missing_input to Research or Writer agents.",
+    "Apply the mandatory user profile for tone, writing style, sign-off, and identity in agent goals and output contracts.",
     "NEVER put delivery configuration in inputsRequired (subscriber_list_id, audience_id, recipient_email, mailing_list).",
     "External action configuration comes from connectorPolicy and tool assignment config, not invented inputs.",
     "",
@@ -197,6 +232,8 @@ function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
     "  - inputContract.schema should describe what the agent expects from upstream agents",
     "  - outputContract.schema should describe the synthesized output (e.g., newsletter draft, summary)",
     "  - doneCriteria should validate the synthesized content quality",
+    '  - Any agent with renderTarget "canvas.email" MUST use outputContract.schema.format = "email_markdown". Its only representation is: Subject line, optional Preview line, blank line, Markdown body.',
+    '  - Email canvas agents MUST declare outputContract.schema.format = "email_markdown"; format restrictions belong in the output contract, not magic doneCriteria wording.',
     "",
     "AGENT HANDOFF FORMAT:",
     "  - Each agent's output is passed to downstream agents as `handoff.<agent_id>`",
@@ -222,6 +259,7 @@ function buildArchitectUserPrompt(input: {
   prompt: string;
   feedback?: string;
   memories: string;
+  userProfile?: string;
   preferences: string;
   priorProposal?: DesignLoopInput["priorProposal"];
   criticFixes?: string[];
@@ -232,6 +270,9 @@ function buildArchitectUserPrompt(input: {
 }): string {
   const sections = [
     `User intent:\n${input.prompt}`,
+    input.userProfile
+      ? `User profile (mandatory — tone, voice, writing style, identity, sign-off):\n${input.userProfile}`
+      : null,
     input.noSlopSpec
       ? [
           "Approved no-slop spec (behavioral source of truth):",
@@ -239,10 +280,20 @@ function buildArchitectUserPrompt(input: {
           "",
           "Normalized no-slop spec JSON:",
           JSON.stringify(input.noSlopSpec.specJson, null, 2),
+          "",
+          "Canonical inputRequirements (copy these keys/surfaces exactly — do not rename):",
+          JSON.stringify(
+            canonicalizeInputRequirementsList(
+              input.noSlopSpec.specJson.inputRequirements ?? [],
+              extractInputRequirementContext(input.noSlopSpec.specJson as unknown as Record<string, unknown>),
+            ),
+            null,
+            2,
+          ),
         ].join("\n")
       : null,
     input.feedback ? `Feedback:\n${input.feedback}` : null,
-    `Memories (with ids and scores):\n${input.memories}`,
+    `Prompt-specific recalled memories (with ids and scores):\n${input.memories}`,
     `Preferences:\n${input.preferences}`,
     `Tool catalog:\n${input.toolCatalog}`,
     "",
@@ -262,6 +313,7 @@ async function callArchitectLlm(input: {
   prompt: string;
   feedback?: string;
   memories: string;
+  userProfile?: string;
   preferences: string;
   priorProposal?: DesignLoopInput["priorProposal"];
   criticFixes?: string[];
@@ -291,13 +343,13 @@ async function callArchitectLlm(input: {
   }
   
   const parsed = loopArchitectOutputSchema.parse(parsedJson);
-  const design = repairArchitectDesignForSpec(normalizeArchitectOutput({
+  const design = repairArchitectDesignForSpecWithInputs(normalizeArchitectOutput({
     ...parsed,
     schedule: {
       cron: normalizeDesignCron(parsed.schedule.cron, input.prompt),
       timezone: parsed.schedule.timezone?.trim() || "UTC",
     },
-  }, input.noSlopSpec), input.noSlopSpec);
+  }, input.noSlopSpec), input.noSlopSpec, input.prompt);
   assertDeliveryRouting(design.delivery);
   return { design, model: response.model };
 }
@@ -319,17 +371,21 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
   const recall = input.testOverrides?.recallForDesigner ?? recallForDesigner;
   const listPrefs = input.testOverrides?.listPreferences ?? listPreferences;
 
-  const [memories, preferences] = await Promise.all([
-    recall(prompt, input.auth).catch(() => []),
+  const [userProfile, preferences] = await Promise.all([
+    loadWorkflowUserProfile(input.auth).catch(() => null),
     listPrefs(input.auth).catch(() => []),
   ]);
+  const memories = await recall(input.prompt, input.auth, { profile: userProfile }).catch(() => []);
   const selectedPreferences = preferences.slice(0, 8).map((p) => ({
     id: p.id,
     text: p.text,
     category: p.category ?? null,
   }));
 
-  const memoryBlock = formatMemoriesForArchitect(memories);
+  const memoryBlock = formatMemoriesForArchitect(
+    memories.filter((memory) => !memory.metadata?.profile),
+  );
+  const userProfileBlock = userProfile ? formatWorkflowUserProfile(userProfile) : "";
   const preferenceBlock = formatPreferences(selectedPreferences);
   const toolCatalog = await formatToolCatalog(input.auth, input.noSlopSpec);
 
@@ -348,6 +404,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
       memoryCount: memories.length,
       memoryIds: memories.map((m) => m.id),
       preferenceCount: selectedPreferences.length,
+      userProfileMemoryIds: userProfile?.memoryIds ?? [],
     },
   });
 
@@ -363,6 +420,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
       prompt,
       feedback: input.feedback,
       memories: memoryBlock,
+      userProfile: userProfileBlock,
       preferences: preferenceBlock,
       priorProposal: input.priorProposal,
       criticFixes: attempt > 0 ? criticFixes : undefined,
@@ -436,11 +494,13 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
           generatedAt: new Date().toISOString(),
         },
         designDiagnostics: { critic, trace, delivery: design.delivery, inputsRequired: design.inputsRequired },
+        ...(userProfile ? { workflowUserProfile: userProfile } : {}),
       },
     },
     delivery: design.delivery,
     connectorPolicy: input.noSlopSpec?.specJson.connectorPolicy,
     inputsRequired: design.inputsRequired,
+    inputRequirements: design.inputRequirements,
     engineVersion: LOOP_ENGINE_VERSION,
   });
 

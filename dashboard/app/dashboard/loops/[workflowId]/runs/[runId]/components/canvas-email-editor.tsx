@@ -31,6 +31,7 @@ export type CanvasEmailTemplate = {
   preview?: string;
   updatedAt?: string;
   source?: string;
+  finalUse?: boolean;
 };
 
 export function CanvasEmailEditor({

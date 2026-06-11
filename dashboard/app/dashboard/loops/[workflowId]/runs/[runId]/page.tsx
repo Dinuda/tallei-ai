@@ -8,17 +8,14 @@ import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 import {
   Bot,
-  Check,
   ChevronRight,
   Code,
   Columns2,
-  Database,
   FileText,
   Info,
   Loader2,
   MoreHorizontal,
   RefreshCw,
-  Target,
   X,
   Brain,
   Puzzle,
@@ -51,23 +48,26 @@ import {
   workerSlotLabel,
 } from "./components/agent-panel-ui";
 import { EditorialActionButton } from "./components/glyph-icons";
-import { ContactsInputWorkspace, type ContactRow } from "./components/contacts-input";
+import type { ContactRow } from "./components/contacts-input";
 import {
   AgentProgressPips,
-  DraftReviewWorkspace,
-  MissingInputWorkspace,
-  gateStatusImperative,
   readGateAgentOutput,
-  resolveInputFieldLabel,
-  resolveInputFieldPlaceholder,
 } from "./components/gate-workspace-ui";
 import {
-  isMissingRecipientError,
-  projectRunWorkspace,
-  readContactSourceKind,
-  readRecipientStatus,
-  workspaceRequiresContacts,
-} from "@/lib/loop-run-workspace-projection";
+  OperatorWorkspace,
+  OperatorViewStamp,
+  operatorApproveDisabled,
+  operatorApproveLabel,
+  operatorBandImperative,
+  operatorShowPrimaryAction,
+  operatorShowRevise,
+} from "./components/operator-workspace";
+import type { OperatorView } from "@/lib/operator-view-types";
+import {
+  buildSurfaceSubmission,
+  primaryInputSurface,
+  readCheckpointSurfaces,
+} from "@/lib/input-surfaces/registry";
 import {
   Tooltip,
   TooltipContent,
@@ -75,10 +75,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
+import { CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogClose,
@@ -89,6 +86,7 @@ import { VisuallyHidden } from "@radix-ui/react-visually-hidden";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArtifactRenderer } from "@/components/renderers";
+import { EditableAgentOutput } from "./components/editable-agent-output";
 import {
   selectLatestArtifactsByKey,
   selectPreferredArtifact,
@@ -201,6 +199,7 @@ type RunProjection = {
   gates: Gate[];
   artifacts: Artifact[];
   events: RunEvent[];
+  operatorView?: OperatorView;
 };
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "blocked"]);
@@ -335,22 +334,13 @@ function getStepDisplayContent(step: StepAttempt | null | undefined): string {
   return "";
 }
 
-function gateTypeShortLabel(gateType: Gate["gate_type"]) {
-  if (gateType === "memory_confirmation") return "memory review";
-  if (gateType === "source_confirmation") return "source review";
-  if (gateType === "missing_input") return "missing input";
-  if (gateType === "draft_review") return "draft review";
-  if (gateType === "recipient_upload") return "recipient list";
-  return "pre-send check";
-}
-
 function buildParentAgentNarrative({
   run,
   parentRunPhase,
   currentStep,
   currentStepLabel,
   pendingGate,
-  gateUiMode,
+  operatorView,
   latestSteps,
   doneSteps,
 }: {
@@ -359,7 +349,7 @@ function buildParentAgentNarrative({
   currentStep: StepAttempt | null;
   currentStepLabel: string;
   pendingGate: Gate | null;
-  gateUiMode: Gate["gate_type"] | null;
+  operatorView: OperatorView | null;
   latestSteps: StepAttempt[];
   doneSteps: number;
 }) {
@@ -386,21 +376,24 @@ function buildParentAgentNarrative({
   const upNextWorkerLabel = upNextWorker ? formatWorkerDisplayName(upNextWorker) : null;
 
   let statusLine = "";
-  if (parentRunPhase === "paused" && pendingGate && gateUiMode) {
-    const gateHint = gateUiMode === "memory_confirmation"
+  if (parentRunPhase === "paused" && pendingGate && operatorView) {
+    const primary = operatorView.blocks.find((block) => block.required && !block.satisfied)?.surface
+      ?? operatorView.blocks[0]?.surface;
+    const gateHint = primary === "review.memories"
       ? "Select which memories the next agent may use."
-      : gateUiMode === "source_confirmation"
+      : primary === "review.sources"
         ? "Select web sources and add custom URLs before continuing."
-      : gateUiMode === "missing_input"
-        ? "Provide the missing input in the workspace."
-        : gateUiMode === "draft_review"
-          ? "Review the draft in the workspace, then approve or request changes."
-          : gateUiMode === "recipient_upload"
-            ? "Add recipients in the workspace, save contacts, then continue."
-            : gateUiMode === "pre_send"
-              ? "Review the final draft, then approve send."
-              : "Confirm in the workspace before the run continues.";
-    statusLine = `Paused at ${currentStepLabel.toLowerCase()} for ${gateTypeShortLabel(gateUiMode)}. ${gateHint}${upNextWorkerLabel ? ` After approval, ${upNextWorkerLabel} is next.` : ""}`;
+        : primary === "input.markdown" || primary === "input.text"
+          ? "Provide the missing input in the workspace."
+          : primary === "review.draft" || primary === "review.email"
+            ? "Review the draft in the workspace, then approve or request changes."
+            : primary === "input.contacts_csv" || primary === "input.audience_id"
+              ? "Add recipients in the workspace, save contacts, then continue."
+              : primary === "confirm.send"
+                ? "Review the final draft, then approve send."
+                : "Confirm in the workspace before the run continues.";
+    const gateLabel = operatorView.workspace.stamp.name.toLowerCase();
+    statusLine = `Paused at ${currentStepLabel.toLowerCase()} for ${gateLabel}. ${gateHint}${upNextWorkerLabel ? ` After approval, ${upNextWorkerLabel} is next.` : ""}`;
   } else if (parentRunPhase === "running" && currentStep) {
     statusLine = `Live: ${currentStepLabel.toLowerCase()}. ${doneSteps} of ${latestSteps.length} agents complete${upNextWorkerLabel ? `; next is ${upNextWorkerLabel}` : "; final agent in queue"}.`;
   } else if (parentRunPhase === "blocked") {
@@ -810,58 +803,24 @@ function buildSourceGateDecisionItems(items: SourceGateItem[], selectedIds: Set<
   }));
 }
 
-function memoryItemSummary(item: MemoryGateItem) {
-  return item.excerpt.replace(/\s+/g, " ").trim();
-}
-
-function memoryItemTitle(item: MemoryGateItem) {
-  const meta = item.metadata;
-  if (meta && typeof meta.title === "string" && meta.title.trim()) return meta.title.trim();
-  if (meta && typeof meta.key === "string" && meta.key.trim()) return titleCase(meta.key.trim());
-  const summary = memoryItemSummary(item);
-  const words = summary.split(" ").slice(0, 8).join(" ");
-  return words.length < summary.length ? `${words}…` : words;
-}
-
-function memoryItemMeta(item: MemoryGateItem) {
-  const shortId = item.id.length > 8 ? `${item.id.slice(0, 8)}…` : item.id;
-  const parts = [shortId];
-  if (item.evidenceRole) parts.push(label(item.evidenceRole));
-  if (typeof item.confidence === "number") parts.push(`${Math.round(item.confidence * 100)}% match`);
-  else if (typeof item.score === "number") parts.push(`score ${item.score.toFixed(2)}`);
-  return parts.join(" · ");
-}
-
-function gateWorkspaceTitle(gateType: Gate["gate_type"], needsContacts?: boolean) {
-  if (gateType === "memory_confirmation") return "Select memories";
-  if (gateType === "source_confirmation") return "Select sources";
-  if (gateType === "missing_input") return "Input required";
-  if (gateType === "draft_review") return "Review the draft";
-  if (gateType === "recipient_upload") return "Add recipients";
-  if (needsContacts) return "Recipients & send approval";
-  return "Approve to send";
-}
-
-function gateWorkspaceSubtitle(gate: Gate, uiMode: Gate["gate_type"]) {
-  if (uiMode === "memory_confirmation") return "Choose what the next agent can use.";
-  if (uiMode === "source_confirmation") return "Pick search results, add custom sources, then approve or revise to re-search.";
-  if (uiMode === "missing_input") {
-    return "Paste the missing input below, then submit to continue the run.";
-  }
-  if (uiMode === "draft_review") return "Edit in the canvas, then save & approve or revise to re-run the writer.";
-  if (uiMode === "recipient_upload") return "Upload or paste recipients, save contacts, then continue to send approval.";
-  if (uiMode === "pre_send") return "Review the final draft, then approve send.";
-  return gate.question ?? "Confirm before this run sends or publishes.";
-}
-
 function readSavedRecipientCount(context?: Record<string, unknown>): number {
   const deliveryRecipients = context?.deliveryRecipients;
   if (!deliveryRecipients || typeof deliveryRecipients !== "object" || Array.isArray(deliveryRecipients)) return 0;
   if (typeof (deliveryRecipients as Record<string, unknown>).recipientCount === "number") {
-    return (deliveryRecipients as Record<string, unknown>).recipientCount as number;
+    const count = (deliveryRecipients as Record<string, unknown>).recipientCount as number;
+    if (count > 0) return count;
   }
   const contacts = (deliveryRecipients as Record<string, unknown>).contacts;
-  return Array.isArray(contacts) ? contacts.length : 0;
+  if (Array.isArray(contacts) && contacts.length > 0) return contacts.length;
+  const audienceId = (deliveryRecipients as Record<string, unknown>).audienceId;
+  return typeof audienceId === "string" && audienceId.trim() ? 1 : 0;
+}
+
+function readSavedAudienceId(context?: Record<string, unknown>): string {
+  const deliveryRecipients = context?.deliveryRecipients;
+  if (!deliveryRecipients || typeof deliveryRecipients !== "object" || Array.isArray(deliveryRecipients)) return "";
+  const audienceId = (deliveryRecipients as Record<string, unknown>).audienceId;
+  return typeof audienceId === "string" ? audienceId.trim() : "";
 }
 
 function resolveContactsUploadGate(gates: Gate[] | undefined, pendingGate: Gate | null): Gate | null {
@@ -889,70 +848,6 @@ function readSavedContacts(context?: Record<string, unknown>): ContactRow[] {
       return name ? { email, name } : { email };
     })
     .filter((row): row is ContactRow => row !== null);
-}
-
-function isInputValidationAgentSnapshot(agent: StepAttempt["agent_snapshot"] | undefined): boolean {
-  const label = `${agent?.id ?? ""} ${agent?.name ?? ""}`.toLowerCase();
-  return label.includes("validator") || label.includes("input_gate") || label.includes("input checker");
-}
-
-const DELIVERY_CONFIG_INPUT_PATTERN = /subscriber|audience|recipient|mailing.?list|contact.?list|list.?id|send.?to|broadcast.?list/i;
-
-function isDeliveryConfigInputKey(key: string): boolean {
-  return DELIVERY_CONFIG_INPUT_PATTERN.test(key.trim());
-}
-
-function contentInputsRequired(definition: RunProjection["definition"]): string[] {
-  return (definition?.inputsRequired ?? []).filter((key) => !isDeliveryConfigInputKey(key));
-}
-
-function runInputsSatisfied(
-  definition: RunProjection["definition"],
-  context: Record<string, unknown> | undefined,
-): boolean {
-  const keys = contentInputsRequired(definition);
-  if (keys.length === 0) return true;
-  const inputs = context?.inputs && typeof context.inputs === "object" && !Array.isArray(context.inputs)
-    ? context.inputs as Record<string, unknown>
-    : {};
-  return keys.every((key) => typeof inputs[key] === "string" && inputs[key].trim());
-}
-
-function readGateBlockers(gate: Gate): string[] {
-  const result = gate.payload_json?.result;
-  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
-  const goalEval = (result as Record<string, unknown>).goalEval;
-  if (!goalEval || typeof goalEval !== "object" || Array.isArray(goalEval)) return [];
-  const blockers = (goalEval as Record<string, unknown>).blockers;
-  return Array.isArray(blockers) ? blockers.filter((blocker): blocker is string => typeof blocker === "string") : [];
-}
-
-function resolveGateUiContract(input: {
-  gate: Gate;
-  gateStep: StepAttempt | null;
-  run: RunProjection;
-}): Gate["gate_type"] {
-  const { gate, gateStep, run } = input;
-  if (gate.gate_type !== "missing_input") return gate.gate_type;
-
-  const configuredGate = gateStep?.agent_snapshot?.gate?.type;
-  const blockers = readGateBlockers(gate);
-  const inputAgent = isInputValidationAgentSnapshot(gateStep?.agent_snapshot);
-  const inputsReady = runInputsSatisfied(run.definition, run.context);
-
-  if (blockers.includes("placeholder_detected") && !inputAgent) {
-    return configuredGate === "pre_send" ? "pre_send" : "draft_review";
-  }
-  if (/placeholder|unfilled template/i.test(gate.question) && !inputAgent) {
-    return configuredGate === "pre_send" ? "pre_send" : "draft_review";
-  }
-  if (!inputAgent && inputsReady) {
-    return configuredGate === "pre_send" ? "pre_send" : "draft_review";
-  }
-  if (!inputAgent && configuredGate && configuredGate !== "missing_input") {
-    return configuredGate;
-  }
-  return "missing_input";
 }
 
 function getNextWorkerName(
@@ -987,15 +882,6 @@ const failureBandTexture = [
   "repeating-linear-gradient(90deg, transparent, transparent 11px, rgba(220,38,38,0.02) 11px, rgba(220,38,38,0.02) 12px)",
   "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(248,113,113,0.08), transparent 55%)",
 ].join(", ");
-
-function gateTypeStamp(gateType: Gate["gate_type"]) {
-  if (gateType === "memory_confirmation") return { tag: "Approval", name: "Memory" };
-  if (gateType === "source_confirmation") return { tag: "Approval", name: "Sources" };
-  if (gateType === "missing_input") return { tag: "Input", name: "Required" };
-  if (gateType === "draft_review") return { tag: "Review", name: "Draft" };
-  if (gateType === "recipient_upload") return { tag: "Input", name: "Recipients" };
-  return { tag: "Send", name: "Final check" };
-}
 
 function RejectionTypeStamp({ subject = "Gate" }: { subject?: string }) {
   return (
@@ -1032,27 +918,6 @@ function FailureTypeStamp({ agentName }: { agentName: string }) {
         style={{ fontFamily: "var(--font-title)" }}
       >
         {agentName}
-      </span>
-    </div>
-  );
-}
-
-function GateTypeStamp({ gateType }: { gateType: Gate["gate_type"] }) {
-  const stamp = gateTypeStamp(gateType);
-  return (
-    <div className="flex min-w-0 items-center gap-2.5">
-      <span
-        className="shrink-0 border border-[#9bb8d9] bg-white/70 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-[#2d5a87] uppercase"
-        style={{ fontFamily: "var(--font-title)" }}
-      >
-        {stamp.tag}
-      </span>
-      <span className="shrink-0 text-[15px] text-[#9bb8d9]">/</span>
-      <span
-        className="truncate text-[17px] font-semibold tracking-[-0.02em] text-[#1e4070]"
-        style={{ fontFamily: "var(--font-title)" }}
-      >
-        {stamp.name}
       </span>
     </div>
   );
@@ -1154,7 +1019,7 @@ function RunStatusBand({
   gateResolvedFlash,
   transitioningAfterGate,
   pendingGate,
-  gateUiMode,
+  operatorView,
   runStatus,
   failureStep,
   failureMessage,
@@ -1173,7 +1038,7 @@ function RunStatusBand({
   gateResolvedFlash: boolean;
   transitioningAfterGate: boolean;
   pendingGate: Gate | null;
-  gateUiMode: Gate["gate_type"] | null;
+  operatorView: OperatorView | null;
   runStatus: string;
   failureStep: StepAttempt | null;
   failureMessage: string | null;
@@ -1311,7 +1176,7 @@ function RunStatusBand({
               <span className="text-[13px] font-medium">Processing</span>
             </div>
           </motion.div>
-        ) : pendingGate ? (
+        ) : pendingGate && operatorView ? (
           <motion.div
             key="gate"
             initial={{ opacity: 0 }}
@@ -1322,9 +1187,9 @@ function RunStatusBand({
             style={{ fontFamily: "var(--font-fustat)" }}
           >
             <div className="min-w-0 flex-1">
-              <GateTypeStamp gateType={gateUiMode ?? pendingGate.gate_type} />
+              <OperatorViewStamp stamp={operatorView.workspace.stamp} />
               <p className="mt-1 truncate text-[14px] font-semibold text-[#1e4070]">
-                {gateUiMode ? gateStatusImperative(gateUiMode) : "Review and decide how to continue"}
+                {operatorBandImperative(operatorView)}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-3">
@@ -1346,7 +1211,7 @@ function RunStatusBand({
                   className="px-4 text-[14px]"
                 />
               ) : null}
-              {gateUiMode !== "missing_input" ? (
+              {operatorShowPrimaryAction(operatorView) ? (
                 <EditorialActionButton
                   label={approveLabel}
                   glyph={approveLabel.startsWith("Submit") ? "submit" : "approve"}
@@ -1417,176 +1282,6 @@ function RunStatusBand({
         )}
       </AnimatePresence>
     </motion.div>
-  );
-}
-
-function StepStatusBadge({ status, needsAttention }: { status: string; needsAttention?: boolean }) {
-  if (needsAttention) {
-    return <EditorialMetaTag tone="blue">Needs you</EditorialMetaTag>;
-  }
-  if (status === "succeeded" || status === "approved" || status === "submitted") {
-    return <EditorialMetaTag tone="neutral">Succeeded</EditorialMetaTag>;
-  }
-  if (status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected") {
-    return <EditorialMetaTag tone="red">Failed</EditorialMetaTag>;
-  }
-  if (status === "waiting_for_gate" || status === "pending") {
-    return <EditorialMetaTag tone="amber">Waiting</EditorialMetaTag>;
-  }
-  if (status === "running") {
-    return <EditorialMetaTag tone="blue">Running</EditorialMetaTag>;
-  }
-  return <EditorialMetaTag>{label(status)}</EditorialMetaTag>;
-}
-
-function MemoryEditCanvas({
-  gateId,
-  items,
-  selectedIds,
-  onToggle,
-  onInspect,
-}: {
-  gateId: string;
-  items: MemoryGateItem[];
-  selectedIds: Set<string>;
-  onToggle: (gateId: string, memoryId: string, checked: boolean) => void;
-  onInspect: (item: MemoryGateItem) => void;
-}) {
-  if (items.length === 0) {
-    return (
-      <p className="py-16 text-center text-sm text-[#9ca3af]">No validated memories to review.</p>
-    );
-  }
-
-  return (
-    <div>
-      {items.map((item) => {
-        const selected = selectedIds.has(item.id);
-        const title = memoryItemTitle(item);
-        const summary = memoryItemSummary(item);
-        const meta = memoryItemMeta(item);
-        return (
-          <div
-            key={item.id}
-            className={cn(
-              "flex items-start gap-4 border-b border-[#e5e7eb] px-7 py-4 transition-colors hover:bg-[#fafafa]",
-              selected && "bg-[#f9fafb] ring-1 ring-inset ring-[#111827]/10",
-            )}
-          >
-            <Checkbox
-              checked={selected}
-              onCheckedChange={(checked) => onToggle(gateId, item.id, checked === true)}
-              aria-label={`Include memory ${title}`}
-              className="mt-1 rounded-[2px]"
-            />
-            <div className="min-w-0 flex-1">
-              <p className="text-[15px] font-semibold text-[#111827]">{title}</p>
-              <p className="mt-1 line-clamp-2 text-[14px] leading-6 text-[#4b5563]">{summary}</p>
-              <p className="mt-1.5 font-mono text-[12px] text-[#9ca3af]">{meta}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => onInspect(item)}
-              className="shrink-0 pt-0.5 text-[13px] text-[#6b7280] underline-offset-2 hover:text-[#111827] hover:underline"
-            >
-              View →
-            </button>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function SourceEditCanvas({
-  gateId,
-  items,
-  addedSources,
-  selectedIds,
-  onToggle,
-  onAddSource,
-}: {
-  gateId: string;
-  items: SourceGateItem[];
-  addedSources: SourceGateItem[];
-  selectedIds: Set<string>;
-  onToggle: (gateId: string, sourceId: string, checked: boolean) => void;
-  onAddSource: (gateId: string, source: SourceGateItem) => void;
-}) {
-  const [url, setUrl] = useState("");
-  const [title, setTitle] = useState("");
-  const [snippet, setSnippet] = useState("");
-  const allItems = [...items, ...addedSources];
-
-  function handleAdd() {
-    const trimmedUrl = url.trim();
-    const trimmedTitle = title.trim();
-    const trimmedSnippet = snippet.trim();
-    if (!trimmedUrl || !trimmedTitle || !trimmedSnippet) return;
-    onAddSource(gateId, {
-      id: trimmedUrl,
-      title: trimmedTitle,
-      url: trimmedUrl,
-      snippet: trimmedSnippet,
-      include: true,
-    });
-    setUrl("");
-    setTitle("");
-    setSnippet("");
-  }
-
-  return (
-    <div>
-      {allItems.length === 0 ? (
-        <p className="py-10 text-center text-sm text-[#9ca3af]">No search sources yet. Add a custom source below.</p>
-      ) : null}
-      {allItems.map((item) => {
-        const selected = selectedIds.has(item.id);
-        return (
-          <div
-            key={item.id}
-            className={cn(
-              "flex items-start gap-4 border-b border-[#e5e7eb] px-7 py-4 transition-colors hover:bg-[#fafafa]",
-              selected && "bg-[#f9fafb] ring-1 ring-inset ring-[#111827]/10",
-            )}
-          >
-            <Checkbox
-              checked={selected}
-              onCheckedChange={(checked) => onToggle(gateId, item.id, checked === true)}
-              aria-label={`Include source ${item.title}`}
-              className="mt-1 rounded-[2px]"
-            />
-            <div className="min-w-0 flex-1">
-              <p className="text-[15px] font-semibold text-[#111827]">{item.title}</p>
-              <p className="mt-1 line-clamp-2 text-[14px] leading-6 text-[#4b5563]">{item.snippet}</p>
-              <a
-                href={item.url}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-1.5 block truncate font-mono text-[12px] text-[#2563eb] hover:underline"
-              >
-                {item.url}
-              </a>
-            </div>
-          </div>
-        );
-      })}
-      <div className="space-y-3 border-t border-[#e5e7eb] bg-[#fafafa] px-7 py-5">
-        <p className="text-[13px] font-semibold text-[#374151]">Add source</p>
-        <Input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" className="bg-white" />
-        <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Title" className="bg-white" />
-        <textarea
-          value={snippet}
-          onChange={(event) => setSnippet(event.target.value)}
-          placeholder="Snippet or notes about this source"
-          rows={3}
-          className="w-full resize-none rounded-md border border-[#d1d5db] bg-white px-3 py-2 text-[14px] text-[#111827] outline-none focus:ring-2 focus:ring-[#111827]/10"
-        />
-        <Button type="button" variant="outline" onClick={handleAdd} disabled={!url.trim() || !title.trim() || !snippet.trim()}>
-          Add source
-        </Button>
-      </div>
-    </div>
   );
 }
 
@@ -1767,6 +1462,7 @@ export default function StableLoopRunPage() {
     [latestArtifacts],
   );
   const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run?.gates]);
+  const operatorView = run?.operatorView ?? null;
   const contactsUploadGate = useMemo(
     () => resolveContactsUploadGate(run?.gates, pendingGate),
     [pendingGate, run?.gates],
@@ -1774,10 +1470,6 @@ export default function StableLoopRunPage() {
   const gateStep = useMemo(
     () => latestSteps.find((step) => step.status === "waiting_for_gate") ?? null,
     [latestSteps],
-  );
-  const gateUiMode = useMemo(
-    () => (run && pendingGate ? resolveGateUiContract({ gate: pendingGate, gateStep, run }) : null),
-    [gateStep, pendingGate, run],
   );
   const rejectedGate = useMemo(
     () => [...(run?.gates ?? [])].reverse().find((gate) => gate.status === "rejected") ?? null,
@@ -1800,26 +1492,16 @@ export default function StableLoopRunPage() {
   }, [error, failureRetryTarget, run?.error_json?.message, runHasTerminalFailure]);
   const savedRecipientCount = useMemo(() => readSavedRecipientCount(run?.context), [run?.context]);
   const savedContacts = useMemo(() => readSavedContacts(run?.context), [run?.context]);
-  const workspaceBlocks = useMemo(
-    () => projectRunWorkspace({
-      status: run?.status ?? "idle",
-      errorMessage: failureMessage ?? undefined,
-      pendingGate,
-      gateUiMode,
-      context: run?.context,
-    }),
-    [failureMessage, gateUiMode, pendingGate, run?.context, run?.status],
-  );
-  const requiresContactsUpload = workspaceRequiresContacts(workspaceBlocks);
-  const contactSourceKind = useMemo(
-    () => readContactSourceKind(contactsUploadGate?.payload_json ?? pendingGate?.payload_json),
-    [contactsUploadGate?.payload_json, pendingGate?.payload_json],
-  );
-  const recipientStatus = useMemo(
-    () => readRecipientStatus(contactsUploadGate?.payload_json ?? pendingGate?.payload_json, run?.context),
-    [contactsUploadGate?.payload_json, pendingGate?.payload_json, run?.context],
-  );
-  const failureNeedsContacts = isMissingRecipientError(failureMessage ?? undefined);
+  const savedAudienceId = useMemo(() => readSavedAudienceId(run?.context), [run?.context]);
+  const contactSourceKind = useMemo(() => {
+    const block = operatorView?.blocks.find((row) => row.surface === "input.contacts_csv" || row.surface === "input.audience_id");
+    const contactSource = block?.props?.contactSource ?? contactsUploadGate?.payload_json?.contactSource ?? pendingGate?.payload_json?.contactSource;
+    if (contactSource && typeof contactSource === "object" && !Array.isArray(contactSource)) {
+      const kind = (contactSource as Record<string, unknown>).kind;
+      if (kind === "configured" || kind === "uploaded" || kind === "operator_input" || kind === "none") return kind;
+    }
+    return block?.surface === "input.audience_id" ? "configured" : "uploaded";
+  }, [contactsUploadGate?.payload_json, operatorView?.blocks, pendingGate?.payload_json]);
 
   useEffect(() => {
     if (prevGateId && !pendingGate) {
@@ -1862,13 +1544,6 @@ export default function StableLoopRunPage() {
     }
   }, [gateTransitionStepId, pendingGate, run]);
   const doneSteps = latestSteps.filter((step) => step.status === "succeeded").length;
-  const nextWorkerName = useMemo(
-    () => {
-      const raw = pendingGate ? getNextWorkerName(run, latestSteps) : null;
-      return raw ? formatWorkerDisplayName(raw) : null;
-    },
-    [latestSteps, pendingGate, run],
-  );
   const parentRunPhase = useMemo(
     () => resolveParentRunPhase(run?.status ?? "idle", pendingGate, Boolean(failureRetryTarget) && !transitioningAfterGate),
     [failureRetryTarget, pendingGate, run?.status, transitioningAfterGate],
@@ -1890,11 +1565,11 @@ export default function StableLoopRunPage() {
       currentStep,
       currentStepLabel,
       pendingGate,
-      gateUiMode,
+      operatorView,
       latestSteps,
       doneSteps,
     });
-  }, [currentStep, currentStepLabel, doneSteps, gateUiMode, latestSteps, parentRunPhase, pendingGate, run]);
+  }, [currentStep, currentStepLabel, doneSteps, latestSteps, operatorView, parentRunPhase, pendingGate, run]);
   const activeStageName = useMemo(() => {
     if (currentStep) {
       return formatWorkerDisplayName(currentStep.agent_snapshot?.name ?? `Slot ${currentStep.step_index + 1}`);
@@ -1903,12 +1578,12 @@ export default function StableLoopRunPage() {
     return "Initializing";
   }, [currentStep, pendingGate]);
   const memoryGateItems = useMemo(
-    () => gateUiMode === "memory_confirmation" && pendingGate ? readMemoryGateItems(pendingGate) : [],
-    [gateUiMode, pendingGate],
+    () => pendingGate ? readMemoryGateItems(pendingGate) : [],
+    [pendingGate],
   );
   const sourceGateItems = useMemo(
-    () => gateUiMode === "source_confirmation" && pendingGate ? readSourceGateItems(pendingGate) : [],
-    [gateUiMode, pendingGate],
+    () => pendingGate ? readSourceGateItems(pendingGate) : [],
+    [pendingGate],
   );
   const sourceGateAdded = useMemo(
     () => (pendingGate ? addedSources[pendingGate.id] ?? [] : []),
@@ -1925,13 +1600,13 @@ export default function StableLoopRunPage() {
     ]),
     [pendingGate?.id, sourceGateAdded, sourceGateItems, sourceSelections],
   );
-  const missingInputGateActive = Boolean(pendingGate && gateUiMode === "missing_input");
+  const inputSurfaceActive = Boolean(operatorView?.actions.includes("submit"));
   const selectedStep = useMemo(() => {
     if (selectedStepId) return orderedSteps.find((step) => step.id === selectedStepId) ?? null;
-    if (missingInputGateActive) return null;
+    if (inputSurfaceActive && operatorView?.gateId) return null;
     if (currentStep) return orderedSteps.find((step) => step.id === currentStep.id) ?? currentStep;
     return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_gate" || step.status === "running") ?? null;
-  }, [currentStep, missingInputGateActive, orderedSteps, selectedStepId]);
+  }, [currentStep, inputSurfaceActive, operatorView?.gateId, orderedSteps, selectedStepId]);
   const selectedStepContext = selectedStepId ? selectedStep : null;
   const selectedArtifact = useMemo(() => {
     if (!selectedArtifactId) return null;
@@ -1973,25 +1648,19 @@ export default function StableLoopRunPage() {
   }, [finalArtifacts, pendingGate, selectedArtifact]);
   const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
-  const showMissingInputWorkspace = Boolean(pendingGate && gateUiMode === "missing_input");
-  const showContactsRecoveryWorkspace = Boolean(
-    !pendingGate
-    && failureNeedsContacts
-    && contactsUploadGate
-    && !selectedStepId,
-  );
-  const showGateWorkspace = Boolean(
-    pendingGate && gateUiMode && gateUiMode !== "missing_input" && !selectedStepId,
+  const showOperatorWorkspace = Boolean(
+    operatorView?.blocks.length
+    && (operatorView.gateId || operatorView.blocks.some((block) => block.required && !block.satisfied)),
   );
   const centerTitle = inspectingAgentOutput
     ? `${formatWorkerDisplayName(selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id ?? "Agent")} output`
-    : missingInputGateActive && !selectedStepId
+    : inputSurfaceActive && !selectedStepId
       ? "Agent outputs"
       : activeArtifact
         ? `${finalArtifactName} artifact`
         : `${finalArtifactName} artifact`;
   const centerBody = inspectingAgentOutput
-    ? getStepDisplayContent(selectedStep)
+    ? getStepText(selectedStep)
     : activeArtifact?.body || getStepDisplayContent(selectedStep);
   const contextEntries = readContextEntries(run?.context);
   const artifactPanelArtifacts = useMemo(() => {
@@ -2076,7 +1745,8 @@ export default function StableLoopRunPage() {
     return readGateAgentOutput(pendingGate.payload_json, getStepDisplayContent(gateStep));
   }, [gateStep, pendingGate]);
   useEffect(() => {
-    if (!pendingGate || gateUiMode !== "memory_confirmation") return;
+    const hasMemorySurface = operatorView?.blocks.some((block) => block.surface === "review.memories");
+    if (!pendingGate || !hasMemorySurface) return;
     setMemorySelections((current) => {
       if (current[pendingGate.id]) return current;
       return {
@@ -2084,9 +1754,10 @@ export default function StableLoopRunPage() {
         [pendingGate.id]: memoryGateItems.filter((item) => item.include !== false).map((item) => item.id),
       };
     });
-  }, [gateUiMode, memoryGateItems, pendingGate]);
+  }, [memoryGateItems, operatorView?.blocks, pendingGate]);
   useEffect(() => {
-    if (!pendingGate || gateUiMode !== "source_confirmation") return;
+    const hasSourceSurface = operatorView?.blocks.some((block) => block.surface === "review.sources");
+    if (!pendingGate || !hasSourceSurface) return;
     setSourceSelections((current) => {
       if (current[pendingGate.id]) return current;
       return {
@@ -2094,7 +1765,7 @@ export default function StableLoopRunPage() {
         [pendingGate.id]: sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
       };
     });
-  }, [gateUiMode, pendingGate, sourceGateItems]);
+  }, [operatorView?.blocks, pendingGate, sourceGateItems]);
 
   function toggleMemorySelection(gateId: string, memoryId: string, checked: boolean) {
     setMemorySelections((current) => {
@@ -2136,6 +1807,10 @@ export default function StableLoopRunPage() {
 
   async function saveCanvasEmail(artifact: Artifact, value: { design: unknown; html: string; text?: string; subject?: string; preview?: string }) {
     await post(`/api/workflows/runs/${runId}/artifacts/${encodeURIComponent(artifact.artifact_key)}/canvas/email`, value);
+  }
+
+  async function saveAgentResult(stepId: string, text: string) {
+    await post(`/api/workflows/runs/${runId}/steps/${stepId}/output`, { text });
   }
 
   async function saveGateContacts(
@@ -2182,6 +1857,43 @@ export default function StableLoopRunPage() {
       setSelectedArtifactId(null);
       setLeftTab("output");
       setGateTransitionStepId(currentStep?.id ?? gate.id);
+      const projectedInputBlocks = operatorView?.gateId === gate.id
+        ? operatorView.blocks.filter((block) => block.surface.startsWith("input."))
+        : [];
+      const projectedBlock = projectedInputBlocks.find((block) => block.required && !block.satisfied)
+        ?? projectedInputBlocks[0]
+        ?? null;
+      const projectedSurface = projectedBlock
+        ? {
+            key: projectedBlock.id,
+            surface: projectedBlock.surface,
+            required: projectedBlock.required,
+            satisfied: projectedBlock.satisfied,
+            label: projectedBlock.label,
+            description: projectedBlock.description,
+            props: projectedBlock.props,
+          }
+        : null;
+      const checkpointSurfaces = readCheckpointSurfaces(gate.payload_json);
+      const surface = projectedSurface
+        ?? primaryInputSurface(gate.payload_json)
+        ?? checkpointSurfaces.find((row) => row.surface === "input.contacts_csv" || row.surface === "input.audience_id")
+        ?? checkpointSurfaces.find((row) => row.surface === "input.text" || row.surface === "input.markdown");
+      if (surface) {
+        const recipientSurface = surface.surface === "input.contacts_csv" || surface.surface === "input.audience_id";
+        const satisfiedInputSurface = surface.satisfied && surface.surface.startsWith("input.");
+        void post(`/api/workflows/runs/${runId}/gates/${gate.id}/submit`, {
+          values: satisfiedInputSurface || (recipientSurface && savedRecipientCount > 0)
+            ? {}
+            : buildSurfaceSubmission({
+                surface,
+                text: inputValues[gate.id] ?? "",
+                contacts: surface.surface === "input.contacts_csv" ? savedContacts : undefined,
+                audienceId: surface.surface === "input.audience_id" ? savedAudienceId : undefined,
+              }),
+        });
+        return;
+      }
       void post(`/api/workflows/runs/${runId}/gates/${gate.id}/input`, { value: inputValues[gate.id] ?? "" });
       return;
     }
@@ -2189,9 +1901,11 @@ export default function StableLoopRunPage() {
     setSelectedArtifactId(null);
     setLeftTab("output");
     setGateTransitionStepId(currentStep?.id ?? gate.id);
+    const primarySurface = operatorView?.blocks.find((block) => block.required && !block.satisfied)?.surface
+      ?? operatorView?.blocks[0]?.surface;
     void post(`/api/workflows/runs/${runId}/gates/${gate.id}/approve`, {
       channel: "dashboard",
-      ...(gate.gate_type === "memory_confirmation"
+      ...(primarySurface === "review.memories"
         ? {
             items: buildMemoryGateDecisionItems(
               readMemoryGateItems(gate),
@@ -2199,7 +1913,7 @@ export default function StableLoopRunPage() {
             ),
           }
         : {}),
-      ...(gate.gate_type === "source_confirmation"
+      ...(primarySurface === "review.sources"
         ? {
             agentId: typeof gate.payload_json.agentId === "string" ? gate.payload_json.agentId : undefined,
             items: buildSourceGateDecisionItems(
@@ -2211,7 +1925,7 @@ export default function StableLoopRunPage() {
             ),
           }
         : {}),
-      ...(gate.gate_type === "pre_send" && savedContacts.length > 0
+      ...(primarySurface === "confirm.send" && savedContacts.length > 0
         ? { contacts: savedContacts }
         : {}),
     });
@@ -2302,47 +2016,29 @@ export default function StableLoopRunPage() {
           gateResolvedFlash={gateResolvedFlash}
           transitioningAfterGate={transitioningAfterGate}
           pendingGate={pendingGate}
-          gateUiMode={gateUiMode}
+          operatorView={operatorView}
           runStatus={run.status}
           failureStep={failureRetryTarget}
           failureMessage={failureMessage}
           isGateRejected={isGateRejected}
           activeStageName={activeStageName}
           busy={Boolean(busy)}
-          approveLabel={
-            gateUiMode === "missing_input"
-              ? "Submit input"
-              : gateUiMode === "memory_confirmation" && selectedMemoryIds.size > 0
-                ? `Approve (${selectedMemoryIds.size})`
-              : gateUiMode === "source_confirmation" && selectedSourceIds.size > 0
-                ? `Approve (${selectedSourceIds.size})`
-              : gateUiMode === "draft_review"
-                ? "Save & Approve"
-                : gateUiMode === "recipient_upload"
-                  ? savedRecipientCount > 0
-                    ? `Continue (${savedRecipientCount} recipients)`
-                    : "Save contacts to continue"
-                : gateUiMode === "pre_send"
-                  ? savedRecipientCount > 0
-                    ? `Approve & send (${savedRecipientCount})`
-                    : "Approve & send"
-                  : "Approve"
-          }
-          approveDisabled={
-            gateUiMode === "missing_input" && pendingGate
-              ? !(inputValues[pendingGate.id] ?? "").trim()
-              : gateUiMode === "source_confirmation"
-                ? selectedSourceIds.size === 0
-                : (gateUiMode === "recipient_upload" || (gateUiMode === "pre_send" && requiresContactsUpload))
-                  ? savedRecipientCount === 0
-                  : false
-          }
-          showRevise={gateUiMode === "draft_review" || gateUiMode === "source_confirmation"}
+          approveLabel={operatorView ? operatorApproveLabel(operatorView, {
+            selectedMemories: selectedMemoryIds.size,
+            selectedSources: selectedSourceIds.size,
+            recipientCount: savedRecipientCount,
+          }) : "Approve"}
+          approveDisabled={operatorView ? operatorApproveDisabled(operatorView, {
+            inputValue: pendingGate ? (inputValues[pendingGate.id] ?? "") : "",
+            selectedSources: selectedSourceIds.size,
+            recipientCount: savedRecipientCount,
+          }) : false}
+          showRevise={operatorView ? operatorShowRevise(operatorView) : false}
           onApprove={() => {
-            if (!pendingGate || !gateUiMode) return;
+            if (!pendingGate || !operatorView) return;
             submitGate(
               pendingGate,
-              gateUiMode === "missing_input" ? "input" : "approve",
+              operatorView.actions.includes("submit") ? "input" : "approve",
             );
           }}
           onRevise={() => pendingGate && submitRevise(pendingGate)}
@@ -2359,168 +2055,57 @@ export default function StableLoopRunPage() {
           <section className="flex min-h-0 flex-col overflow-hidden">
             <div className="flex min-h-0 flex-1 flex-col">
             <AnimatePresence mode="wait">
-              {showContactsRecoveryWorkspace && contactsUploadGate ? (
+              {showOperatorWorkspace && operatorView ? (
                 <motion.div
-                  key="contacts-recovery"
+                  key="operator-workspace"
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
                   className="flex h-full min-h-0 flex-1 flex-col"
                 >
-                  <EditorialWorkspaceShell className="flex h-full min-h-0 flex-1 flex-col">
-                    <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-5">
-                      <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
-                        Recipients required
-                      </h2>
-                      <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
-                        Upload contacts to fix the failed send, then retry the delivery agent.
-                      </p>
-                    </div>
-                    <ContactsInputWorkspace
-                      contactSourceKind={contactSourceKind}
-                      recipientCount={savedRecipientCount}
-                      busy={busy === `/gates/${contactsUploadGate.id}/contacts`}
-                      onSave={(input) => saveGateContacts(contactsUploadGate, input)}
-                    />
-                  </EditorialWorkspaceShell>
-                </motion.div>
-              ) : showMissingInputWorkspace && pendingGate ? (
-                <motion.div
-                  key="missing-input"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2 }}
-                  className="flex h-full min-h-0 flex-1 flex-col"
-                >
-                  <EditorialWorkspaceShell className="flex h-full min-h-0 flex-1 flex-col">
-                    <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-5">
-                      <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
-                        {gateWorkspaceTitle("missing_input")}
-                      </h2>
-                      <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
-                        {gateWorkspaceSubtitle(pendingGate, "missing_input")}
-                      </p>
-                    </div>
-                    <MissingInputWorkspace
-                      agentOutput={gateAgentOutput}
-                      agentName={formatWorkerDisplayName(gateStep?.agent_snapshot?.name ?? gateStep?.agent_id ?? "the agent")}
-                      fieldLabel={resolveInputFieldLabel(contentInputsRequired(run.definition), pendingGate.question)}
-                      fieldPlaceholder={resolveInputFieldPlaceholder(contentInputsRequired(run.definition))}
-                      value={inputValues[pendingGate.id] ?? ""}
-                      onChange={(value) => setInputValues((current) => ({ ...current, [pendingGate.id]: value }))}
-                      onSubmit={() => submitGate(pendingGate, "input")}
-                      submitDisabled={!(inputValues[pendingGate.id] ?? "").trim()}
-                      busy={Boolean(busy)}
-                    />
-                  </EditorialWorkspaceShell>
-                </motion.div>
-              ) : showGateWorkspace && pendingGate && gateUiMode ? (
-                <motion.div
-                  key="gate-review"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2 }}
-                  className="flex h-full min-h-0 flex-1 flex-col"
-                >
-                  <EditorialWorkspaceShell className="flex h-full min-h-0 flex-1 flex-col">
-                    <div className="shrink-0 border-b border-[#e5e7eb] px-7 py-6">
-                      <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#111827]">
-                        {gateWorkspaceTitle(
-                          gateUiMode,
-                          (gateUiMode === "pre_send" && requiresContactsUpload) || gateUiMode === "recipient_upload",
-                        )}
-                      </h2>
-                      <p className="mt-1.5 text-[14px] leading-6 text-[#6b7280]">
-                        {gateWorkspaceSubtitle(pendingGate, gateUiMode)}
-                        {nextWorkerName ? (
-                          <>
-                            {" "}
-                            <span className="font-medium text-[#374151]">Then → {nextWorkerName}</span>
-                          </>
-                        ) : null}
-                      </p>
-                    </div>
-
-                    <div id="gate-draft-editor" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-                      {(gateUiMode === "recipient_upload" || (gateUiMode === "pre_send" && requiresContactsUpload)) && contactsUploadGate ? (
-                        <ContactsInputWorkspace
-                          contactSourceKind={contactSourceKind}
-                          recipientCount={savedRecipientCount}
-                          busy={busy === `/gates/${contactsUploadGate.id}/contacts`}
-                          onSave={(input) => saveGateContacts(contactsUploadGate, input)}
-                        />
-                      ) : null}
-                      {gateUiMode === "memory_confirmation" ? (
-                        <MemoryEditCanvas
-                          gateId={pendingGate.id}
-                          items={memoryGateItems}
-                          selectedIds={selectedMemoryIds}
-                          onToggle={toggleMemorySelection}
-                          onInspect={setMemoryDetail}
-                        />
-                      ) : null}
-                      {gateUiMode === "source_confirmation" ? (
-                        <SourceEditCanvas
-                          gateId={pendingGate.id}
-                          items={sourceGateItems}
-                          addedSources={sourceGateAdded}
-                          selectedIds={selectedSourceIds}
-                          onToggle={toggleSourceSelection}
-                          onAddSource={addCustomSource}
-                        />
-                      ) : null}
-                      {(gateUiMode === "draft_review" || (gateUiMode === "pre_send" && !requiresContactsUpload)) ? (
-                        <DraftReviewWorkspace agentOutput={gateAgentOutput || centerBody}>
-                          {activeCanvasArtifact && activeCanvasTemplate ? (
-                            <ArtifactRenderer
-                              artifact={activeCanvasArtifact}
-                              runId={runId}
-                              saving={busy?.includes("/canvas/email") ?? false}
-                              onSave={async (data) => {
-                                await saveCanvasEmail(activeCanvasArtifact, data as Parameters<typeof saveCanvasEmail>[1]);
-                              }}
-                            />
-                          ) : undefined}
-                        </DraftReviewWorkspace>
-                      ) : null}
-                    </div>
-
-                    {gateUiMode === "memory_confirmation" ? (
-                      <div className="mt-auto border-t border-[#d1d5db] bg-[#fafafa] px-7 py-3">
-                        <p className="text-[13px] text-[#6b7280]">
-                          {memoryGateItems.length} proposed · {selectedMemoryIds.size} selected
-                        </p>
-                      </div>
-                    ) : null}
-                    {gateUiMode === "source_confirmation" ? (
-                      <div className="mt-auto space-y-3 border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4">
-                        <p className="text-[13px] text-[#6b7280]">
-                          {sourceGateItems.length + sourceGateAdded.length} proposed · {selectedSourceIds.size} selected
-                        </p>
-                        <textarea
-                          value={reviseFeedback[pendingGate.id] ?? ""}
-                          onChange={(event) => setReviseFeedback((current) => ({ ...current, [pendingGate.id]: event.target.value }))}
-                          placeholder="Optional feedback when revising (re-runs research with your notes)"
-                          rows={2}
-                          className="w-full resize-none rounded-md border border-[#d1d5db] bg-white px-3 py-2 text-[13px] text-[#111827] outline-none focus:ring-2 focus:ring-[#111827]/10"
-                        />
-                      </div>
-                    ) : null}
-                    {gateUiMode === "draft_review" ? (
-                      <div className="mt-auto border-t border-[#d1d5db] bg-[#fafafa] px-7 py-4">
-                        <textarea
-                          value={reviseFeedback[pendingGate.id] ?? ""}
-                          onChange={(event) => setReviseFeedback((current) => ({ ...current, [pendingGate.id]: event.target.value }))}
-                          placeholder="Optional feedback when revising (re-runs the writer)"
-                          rows={2}
-                          className="w-full resize-none rounded-md border border-[#d1d5db] bg-white px-3 py-2 text-[13px] text-[#111827] outline-none focus:ring-2 focus:ring-[#111827]/10"
-                        />
-                      </div>
-                    ) : null}
-                  </EditorialWorkspaceShell>
+                  <OperatorWorkspace
+                    operatorView={operatorView}
+                    runId={runId}
+                    gateId={operatorView.gateId ?? pendingGate?.id ?? contactsUploadGate?.id ?? null}
+                    agentName={formatWorkerDisplayName(gateStep?.agent_snapshot?.name ?? gateStep?.agent_id ?? "the agent")}
+                    agentOutput={gateAgentOutput}
+                    centerBody={centerBody}
+                    activeCanvasArtifact={activeCanvasArtifact}
+                    inputValue={pendingGate ? (inputValues[pendingGate.id] ?? "") : ""}
+                    onInputChange={(value) => {
+                      if (!pendingGate) return;
+                      setInputValues((current) => ({ ...current, [pendingGate.id]: value }));
+                    }}
+                    onSubmitInput={() => pendingGate && submitGate(pendingGate, "input")}
+                    busy={Boolean(busy)}
+                    contactSourceKind={contactSourceKind}
+                    recipientCount={savedRecipientCount}
+                    onSaveContacts={async (input) => {
+                      const gate = pendingGate ?? contactsUploadGate;
+                      if (!gate) return;
+                      await saveGateContacts(gate, input);
+                    }}
+                    memoryItems={memoryGateItems}
+                    sourceItems={sourceGateItems}
+                    addedSources={sourceGateAdded}
+                    selectedMemoryIds={selectedMemoryIds}
+                    selectedSourceIds={selectedSourceIds}
+                    onToggleMemory={toggleMemorySelection}
+                    onToggleSource={toggleSourceSelection}
+                    onInspectMemory={setMemoryDetail}
+                    onAddSource={addCustomSource}
+                    reviseFeedback={pendingGate ? (reviseFeedback[pendingGate.id] ?? "") : ""}
+                    onReviseFeedbackChange={(value) => {
+                      if (!pendingGate) return;
+                      setReviseFeedback((current) => ({ ...current, [pendingGate.id]: value }));
+                    }}
+                    onSaveCanvasEmail={async (artifact, value) => saveCanvasEmail(artifact as Artifact, value)}
+                    onSaveAgentOutput={async (text) => {
+                      if (!gateStep) return;
+                      await saveAgentResult(gateStep.id, text);
+                    }}
+                  />
                 </motion.div>
               ) : transitioningAfterGate ? (
                 <motion.div
@@ -2579,15 +2164,27 @@ export default function StableLoopRunPage() {
                     <TabsContent value="output" className="mt-0 h-full">
                       <div className="flex min-h-full flex-col border border-[#e5e7eb] bg-white p-7">
                         {inspectingAgentOutput ? (
-                          centerBody ? (
-                            <div className="prose prose-slate max-w-none text-[16px] leading-7">
-                              <Streamdown>{centerBody}</Streamdown>
-                            </div>
-                          ) : (
-                            <div className="grid min-h-[360px] place-items-center border border-dashed border-[#d1d5db] bg-[#fafafa] p-8 text-center text-sm text-[#6b7280]">
-                              No output from this agent yet.
-                            </div>
-                          )
+                          <div className="space-y-4">
+                            {selectedStep?.status === "running" ? (
+                              <p className="text-[13px] text-[#6b7280]">
+                                This agent is still running. You can edit and save the current result now.
+                              </p>
+                            ) : null}
+                            {selectedStep?.status === "waiting_for_gate" || selectedStep?.status === "waiting_for_approval" ? (
+                              <p className="text-[13px] text-[#6b7280]">
+                                This agent is waiting for approval. You can edit the result before approving.
+                              </p>
+                            ) : null}
+                            <EditableAgentOutput
+                              text={centerBody}
+                              saving={Boolean(busy)}
+                              forceEditing={selectedStep?.status === "running" || selectedStep?.status === "waiting_for_gate" || selectedStep?.status === "waiting_for_approval"}
+                              onSave={async (text) => {
+                                if (!selectedStep) return;
+                                await saveAgentResult(selectedStep.id, text);
+                              }}
+                            />
+                          </div>
                         ) : activeCanvasArtifact && activeCanvasTemplate ? (
                           <ArtifactRenderer
                             artifact={activeCanvasArtifact}
