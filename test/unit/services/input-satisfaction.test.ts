@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { detectPlaceholderText } from "../../../src/services/loop-engine/contracts.js";
-import { normalizeInputSurface } from "../../../src/services/loop-engine/input-surfaces.js";
+import { normalizeInputSurface, specRequiresRunStartContent } from "../../../src/services/loop-engine/input-surfaces.js";
 import { noSlopSpecDraftSchema } from "../../../src/services/loop-engine/spec-contracts.js";
 import {
   applyGateSurfaceSubmission,
@@ -13,8 +13,7 @@ import {
 } from "../../../src/services/loop-runtime/input-satisfaction.js";
 import { runtimeContextSchema } from "../../../src/services/loop-runtime/types.js";
 import { buildLoopDefinition } from "../../../src/services/loop-executor/creator.js";
-import { isMisclassifiedDraftReviewGate } from "../../../src/services/loop-runtime/memory.js";
-import { emptyRunMemory } from "../../../src/services/loop-runtime/memory.js";
+import { emptyRunMemory, isMisclassifiedDraftReviewGate } from "../../../src/services/loop-runtime/memory.js";
 
 function syncEmailDefinition() {
   return buildLoopDefinition({
@@ -111,7 +110,7 @@ test("blank stale submission is ignored when context already satisfies the input
   assert.equal(evaluateAt(definition, nextContext, "run_start").length, 0);
 });
 
-test("collectRequirements merges explicit and delivery-derived requirements", () => {
+test("collectRequirements does not derive inputs from delivery metadata", () => {
   const definition = buildLoopDefinition({
     task: "Send newsletter",
     cron: "0 9 * * 1",
@@ -139,7 +138,7 @@ test("collectRequirements merges explicit and delivery-derived requirements", ()
     },
   });
   const requirements = collectRequirements(definition);
-  assert.ok(requirements.some((req) => req.key === "recipients" && req.when === "before_send"));
+  assert.deepEqual(requirements, []);
 });
 
 test("confirm_send does not block execution once recipient input is ready", () => {
@@ -216,13 +215,18 @@ test("misclassified draft_review does not advance when content inputs are still 
   }), true);
 });
 
-test("normalizeInputSurface coerces LLM-invented input.boolean", () => {
-  assert.equal(normalizeInputSurface("input.boolean", "include_metrics"), "input.text");
-  assert.equal(normalizeInputSurface("input.boolean", "confirm_send"), "confirm.send");
+test("normalizeInputSurface rejects undeclared surface aliases", () => {
+  assert.throws(() => normalizeInputSurface("input.boolean", "include_metrics"), /Unknown input surface/);
+  assert.equal(normalizeInputSurface("confirm.send", "confirm_send"), "confirm.send");
 });
 
-test("noSlopSpecDraftSchema accepts input.boolean after normalization", () => {
-  const parsed = noSlopSpecDraftSchema.parse({
+test("input names do not imply recipient-specific surfaces or timing", () => {
+  assert.throws(() => normalizeInputSurface("input.custom", "subscriber_list_id"), /Unknown input surface/);
+  assert.throws(() => normalizeInputSurface("input.custom", "recipient_email"), /Unknown input surface/);
+});
+
+test("noSlopSpecDraftSchema rejects undeclared input surfaces", () => {
+  const parsed = noSlopSpecDraftSchema.safeParse({
     purpose: "Weekly sync email",
     agents: [{ name: "Draft Agent", goal: "Draft email", guardrails: [], doneWhen: [], failureModes: [] }],
     guardrails: [],
@@ -244,5 +248,16 @@ test("noSlopSpecDraftSchema accepts input.boolean after normalization", () => {
       { key: "include_metrics", surface: "input.boolean", when: "run_start", required: false },
     ],
   });
-  assert.equal(parsed.inputRequirements[1]?.surface, "input.text");
+  assert.equal(parsed.success, false);
+});
+
+test("team email requires run_start content only when explicitly declared", () => {
+  assert.equal(specRequiresRunStartContent({
+    delivery: { target: "team_email" },
+    inputRequirements: [{ key: "confirm_send", surface: "confirm.send", when: "before_send", required: true }],
+  }), false);
+  assert.equal(specRequiresRunStartContent({
+    delivery: { target: "team_email" },
+    inputRequirements: [{ key: "sprint_notes", surface: "input.markdown", when: "run_start", required: true }],
+  }), true);
 });

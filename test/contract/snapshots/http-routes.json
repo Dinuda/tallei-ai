@@ -215,6 +215,11 @@
     "source": "src/routes/connectors.ts"
   },
   {
+    "method": "GET",
+    "path": "/api/connectors/composio/toolkits/:toolkit/tools",
+    "source": "src/routes/connectors.ts"
+  },
+  {
     "method": "POST",
     "path": "/api/connectors/composio/webhook",
     "source": "src/routes/connectors.ts"
@@ -238,6 +243,11 @@
     "method": "DELETE",
     "path": "/api/connectors/resend/:id",
     "source": "src/routes/connectors.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/developer/integrations",
+    "source": "src/routes/developerIntegrations.ts"
   },
   {
     "method": "GET",
@@ -315,6 +325,11 @@
     "source": "src/routes/keys.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/loop-builder/intent/analyze",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/loop-builder/jobs/:jobId",
     "source": "src/routes/loopBuilder.ts"
@@ -332,6 +347,41 @@
   {
     "method": "POST",
     "path": "/api/loop-builder/save",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/loop-builder/specs",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/loop-builder/specs/:specId",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/specs/:specId/approve",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/specs/:specId/archive",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/specs/:specId/generate",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/specs/:specId/refine",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/specs/draft",
     "source": "src/routes/loopBuilder.ts"
   },
   {
@@ -611,12 +661,32 @@
   },
   {
     "method": "POST",
+    "path": "/api/workflows/runs/:runId/gates/:gateId/contacts",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
     "path": "/api/workflows/runs/:runId/gates/:gateId/input",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "POST",
     "path": "/api/workflows/runs/:runId/gates/:gateId/reject",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/gates/:gateId/revise",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/gates/:gateId/submit",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/runs/:runId/steps/:stepId/output",
     "source": "src/routes/workflows.ts"
   },
   {

@@ -1,10 +1,9 @@
 /**
- * goal-eval.ts — Deterministic guards + LLM judge for per-agent goal evaluation.
+ * goal-eval.ts — Deterministic guards for per-agent goal evaluation.
  */
 
 import type { LoopRunAgent, LoopDefinition } from "../loop-executor/types.js";
 import type { RunLoopAgentResult } from "../loop-executor/agent-runner.js";
-import { loopExecutorOpenAiChat } from "../loop-executor/openai-chat.js";
 import {
   contentInputKeys,
   hasRequiredContentInputs,
@@ -18,35 +17,23 @@ import {
   goalEvalResultSchema,
   type GoalEvalResult,
 } from "./contracts.js";
-import { containsEmailBoilerplate } from "./email-output.js";
+import { contractRenderer, contractUsesJson, validateContractData } from "./data-contract.js";
 
 function asksOperatorForInput(text: string): boolean {
   return /\b(please (provide|paste|send|share)|is missing|not provided|don't have|do not have|can't draft|cannot draft|can't generate|cannot generate|lacks?|missing)\b/i.test(text)
     && /\b(sprint|notes|input|details|content|required|sprint_notes)\b/i.test(text);
 }
 
-function looksLikeEmailDraft(text: string): boolean {
-  return /\b(shipped this week|in progress|things to watch|going out to customers|next week)\b/i.test(text);
-}
-
 function isCanvasDraftAgent(agent: LoopRunAgent): boolean {
-  return agent.renderTarget === "canvas.email"
-    || agent.renderTarget === "canvas.preview"
+  const renderer = contractRenderer(agent.outputContract);
+  return renderer === "canvas.email"
+    || renderer === "canvas.preview"
     || agent.gate?.type === "draft_review";
-}
-
-function isEmailArtifactAgent(agent: LoopRunAgent): boolean {
-  return isCanvasDraftAgent(agent) || agent.gate?.type === "pre_send";
-}
-
-function emailArtifactGateType(agent: LoopRunAgent): "draft_review" | "pre_send" {
-  return agent.gate?.type === "pre_send" ? "pre_send" : "draft_review";
 }
 
 function looksLikeReviewableDraft(text: string): boolean {
   return text.length > 120 && !/\b(is missing|please provide|please paste)\b/i.test(text);
 }
-const judgeCache = new Map<string, GoalEvalResult>();
 
 function readToolConfidence(data: unknown): string | null {
   const root = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
@@ -63,32 +50,16 @@ function confirmsRequiredInputPresent(text: string, requiredKeys: string[]) {
   return requiredKeys.some((key) => normalized.includes(key.toLowerCase()));
 }
 
-function approvalArtifactBlocker(body: string): string | null {
-  const normalized = body.trim().toLowerCase();
-  if (!normalized) return "No draft content available for approval";
-  const asksForMissingInput = /\bplease paste\b[\s\S]{0,120}\b(sprint notes?|product updates?|required notes?|missing details?)\b/.test(normalized)
-    || /\bpaste\b[\s\S]{0,160}\b(sprint notes?|product updates?|past updates?|core data)\b/.test(normalized)
-    || /\bmissing\b[\s\S]{0,120}\b(sprint notes?|product updates?|required notes?|core data|data needed)\b/.test(normalized);
-  const cannotGenerate = /\b(can't|cannot|can not|unable to)\b[\s\S]{0,80}\b(generate|write|create|draft)\b/.test(normalized);
-  return asksForMissingInput && cannotGenerate
-    ? "Approval blocked: the draft is missing required input."
-    : null;
-}
-
-function cacheKey(agentId: string, text: string, goal: string): string {
-  return `${agentId}:${goal.slice(0, 80)}:${text.slice(0, 200)}`;
-}
-
 function isShortCircuitTool(toolRef: string): boolean {
-  return toolRef === "internal.web_search" 
-    || toolRef === "internal.memory_search" 
+  return toolRef === "internal.web_search"
+    || toolRef === "internal.memory_search"
     || toolRef.match(/^composio\.[a-z0-9_-]+\.search$/i) !== null;
 }
 
 function validateShortCircuitOutput(toolRef: string, result: RunLoopAgentResult): GoalEvalResult | null {
   const text = result.text?.trim() ?? "";
   const data = result.data ?? {};
-  
+
   if (!text) {
     return goalEvalResultSchema.parse({
       status: "fail",
@@ -96,8 +67,7 @@ function validateShortCircuitOutput(toolRef: string, result: RunLoopAgentResult)
       blockers: ["empty_output"],
     });
   }
-  
-  // Validate web_search output structure
+
   if (toolRef === "internal.web_search") {
     const sources = extractWebSearchSources(data);
     if (sources.length === 0) {
@@ -120,19 +90,16 @@ function validateShortCircuitOutput(toolRef: string, result: RunLoopAgentResult)
       reason: `Web search returned ${sources.length} valid sources.`,
     });
   }
-  
-  // Validate memory_search output structure
+
   if (toolRef === "internal.memory_search") {
     const sources = extractMemorySources(data);
     if (sources.length === 0) {
-      // Empty result is valid for memory search
       return goalEvalResultSchema.parse({
         status: "pass",
         reason: "Memory search returned no results (valid empty result).",
       });
     }
-    // Check that memories have required fields
-    const invalidMemory = sources.find((s: any) => !s.id || !s.text);
+    const invalidMemory = sources.find((s: { id?: string; text?: string }) => !s.id || !s.text);
     if (invalidMemory) {
       return goalEvalResultSchema.parse({
         status: "fail",
@@ -145,15 +112,14 @@ function validateShortCircuitOutput(toolRef: string, result: RunLoopAgentResult)
       reason: `Memory search returned ${sources.length} valid memories.`,
     });
   }
-  
-  // For composio search tools, just check we got some output
+
   if (toolRef.match(/^composio\.[a-z0-9_-]+\.search$/i)) {
     return goalEvalResultSchema.parse({
       status: "pass",
       reason: "Composio search returned results.",
     });
   }
-  
+
   return null;
 }
 
@@ -164,6 +130,23 @@ function deterministicGuards(input: {
   runMemory?: RunMemory;
 }): GoalEvalResult | null {
   const text = input.result.text?.trim() ?? "";
+  if (input.agent.nodeKind) {
+    if (!text) {
+      return goalEvalResultSchema.parse({ status: "fail", reason: "Node returned empty output.", blockers: ["empty_output"] });
+    }
+    if (detectPlaceholderText(text)) {
+      return goalEvalResultSchema.parse({ status: "fail", reason: "Node output contains unresolved placeholders.", blockers: ["placeholder_detected"] });
+    }
+    if (input.agent.gate) {
+      return goalEvalResultSchema.parse({
+        status: "needs_input",
+        reason: input.agent.gate.question,
+        blockers: [],
+        gateType: input.agent.gate.type,
+      });
+    }
+    return goalEvalResultSchema.parse({ status: "pass", reason: "Declared output contract satisfied." });
+  }
   const contentInputsSatisfied = input.runMemory
     ? hasRequiredContentInputs(input.definition, input.runMemory)
     : true;
@@ -183,7 +166,7 @@ function deterministicGuards(input: {
     });
   }
 
-  if (!text) {
+  if (!text && !input.result.structuredOutput) {
     return goalEvalResultSchema.parse({
       status: "fail",
       reason: "Agent returned empty output.",
@@ -191,13 +174,11 @@ function deterministicGuards(input: {
     });
   }
 
-  const approvalBlock = approvalArtifactBlocker(text);
-  if (approvalBlock) {
+  if (asksOperatorForInput(text) && !isInputValidationAgent(input.agent)) {
     return goalEvalResultSchema.parse({
-      status: "needs_input",
-      reason: approvalBlock,
-      blockers: ["missing_required_input"],
-      gateType: "missing_input",
+      status: "fail",
+      reason: "Internal agent requested operator input instead of completing from its available handoff.",
+      blockers: ["invalid_operator_input_request"],
     });
   }
 
@@ -235,6 +216,13 @@ function deterministicGuards(input: {
         gateType: "missing_input",
       });
     }
+    if (!input.agent.gate && !canvasDraftAgent) {
+      return goalEvalResultSchema.parse({
+        status: "fail",
+        reason: "Internal agent returned placeholder text instead of completing its handoff.",
+        blockers: ["placeholder_detected"],
+      });
+    }
     const reviewGateType = input.agent.gate?.type === "draft_review" || input.agent.gate?.type === "pre_send"
       ? input.agent.gate.type
       : "draft_review";
@@ -246,26 +234,10 @@ function deterministicGuards(input: {
     });
   }
 
-  if (isEmailArtifactAgent(input.agent) && containsEmailBoilerplate(text)) {
-    return goalEvalResultSchema.parse({
-      status: "needs_input",
-      reason: "Output contains boilerplate or draft-scaffolding text.",
-      blockers: ["boilerplate_detected"],
-      gateType: emailArtifactGateType(input.agent),
-    });
-  }
-
   const toolRef = input.agent.tools[0]?.ref ?? "";
   if (toolRef === "internal.memory_search") {
     const sources = extractMemorySources(input.result.data);
     const mentionsMissingId = /memory id:\s*(not provided|missing|unknown)/i.test(text);
-    if (looksLikeEmailDraft(text) && sources.length === 0) {
-      return goalEvalResultSchema.parse({
-        status: "fail",
-        reason: "Memory search returned a draft email instead of memory items with ids and excerpts. Return a list of memories only; drafting happens in a later agent.",
-        blockers: ["wrong_output_format"],
-      });
-    }
     if (sources.length === 0 && readToolConfidence(input.result.data) === "none") {
       return goalEvalResultSchema.parse({
         status: "pass",
@@ -310,7 +282,7 @@ function deterministicGuards(input: {
   if (
     toolRef === "internal.llm_only"
     && !asksOperatorForInput(text)
-    && (canvasDraftAgent || looksLikeEmailDraft(text) || looksLikeReviewableDraft(text))
+    && (canvasDraftAgent || looksLikeReviewableDraft(text))
   ) {
     if (looksLikeReviewableDraft(text)) {
       const reviewGateType = input.agent.gate?.type === "pre_send" ? "pre_send" : "draft_review";
@@ -326,68 +298,53 @@ function deterministicGuards(input: {
   return null;
 }
 
-async function llmJudge(input: {
-  agent: LoopRunAgent;
-  result: RunLoopAgentResult;
-  definition: LoopDefinition;
-}): Promise<GoalEvalResult> {
-  const goal = input.agent.goal?.trim();
-  if (!goal) {
+function validateStructuredOutput(agent: LoopRunAgent, result: RunLoopAgentResult): GoalEvalResult | null {
+  const structured = result.structuredOutput;
+  if (!structured && !contractUsesJson(agent.outputContract)) return null;
+  const schema = agent.outputContract?.schema;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return null;
+  const candidate = structured ?? (() => {
+    try {
+      const parsed = JSON.parse(result.text?.trim() ?? "");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (!candidate) {
     return goalEvalResultSchema.parse({
-      status: "pass",
-      reason: "No explicit goal declared; output is non-empty.",
+      status: "fail",
+      reason: "Structured output is missing or not valid JSON.",
+      blockers: ["invalid_structured_output"],
     });
   }
+  const validation = validateContractData(schema as Record<string, unknown>, candidate);
+  if (!validation.valid) {
+    return goalEvalResultSchema.parse({
+      status: "fail",
+      reason: validation.reason,
+      blockers: ["schema_validation_failed"],
+    });
+  }
+  return null;
+}
 
-  const text = input.result.text?.trim() ?? "";
-  const noSlopSpec = input.definition.builderMeta?.noSlopSpec;
-  const key = cacheKey(input.agent.id, text, goal);
-  const cached = judgeCache.get(key);
-  if (cached) return cached;
-
-  const response = await loopExecutorOpenAiChat({
-    temperature: 0,
-    maxTokens: 256,
-    responseFormat: "json_object",
-    messages: [
-      {
-        role: "system",
-        content: [
-          "You evaluate whether an agent's output satisfies its goal.",
-          'Return JSON: { "status": "pass"|"fail"|"needs_input", "reason": string, "blockers": string[] }',
-          "Use needs_input when human clarification or missing data is required.",
-        ].join(" "),
-      },
-      {
-        role: "user",
-        content: [
-          `Goal: ${goal}`,
-          `Done criteria: ${(input.agent.doneCriteria ?? []).join("; ") || "none"}`,
-          noSlopSpec
-            ? [
-                `Approved loop spec: ${noSlopSpec.title}`,
-                `Global guardrails: ${noSlopSpec.specJson.guardrails.join("; ") || "none"}`,
-                `Success criteria: ${noSlopSpec.specJson.successCriteria.join("; ") || "none"}`,
-              ].join("\n")
-            : null,
-          `Output:\n${text.slice(0, 4000)}`,
-        ].filter(Boolean).join("\n\n"),
-      },
-    ],
+function checkDoneCriteria(agent: LoopRunAgent, result: RunLoopAgentResult): GoalEvalResult {
+  const criteria = agent.doneCriteria ?? [];
+  const text = result.text?.trim() ?? "";
+  if (criteria.length > 0 && !text && !result.structuredOutput) {
+    return goalEvalResultSchema.parse({
+      status: "fail",
+      reason: "Agent output is empty but done criteria were declared.",
+      blockers: ["empty_output"],
+    });
+  }
+  return goalEvalResultSchema.parse({
+    status: "pass",
+    reason: criteria.length > 0
+      ? `Done criteria satisfied (${criteria.length} declared).`
+      : "Deterministic checks passed.",
   });
-
-  let parsed: GoalEvalResult;
-  try {
-    parsed = goalEvalResultSchema.parse(JSON.parse(response.text));
-  } catch {
-    parsed = goalEvalResultSchema.parse({
-      status: "pass",
-      reason: "Goal judge unavailable; deterministic checks passed.",
-    });
-  }
-
-  judgeCache.set(key, parsed);
-  return parsed;
 }
 
 export async function evaluateAgentGoal(input: {
@@ -395,14 +352,10 @@ export async function evaluateAgentGoal(input: {
   result: RunLoopAgentResult;
   definition: LoopDefinition;
   runMemory?: RunMemory;
-  skipLlmJudge?: boolean;
 }): Promise<GoalEvalResult> {
   const deterministic = deterministicGuards(input);
-  if (deterministic) {
-    return deterministic;
-  }
+  if (deterministic) return deterministic;
 
-  // For short-circuit tools, validate raw output structure and skip LLM judge
   const toolRef = input.agent.tools[0]?.ref ?? "";
   if (isShortCircuitTool(toolRef)) {
     const shortCircuitResult = validateShortCircuitOutput(toolRef, input.result);
@@ -423,41 +376,8 @@ export async function evaluateAgentGoal(input: {
     }
   }
 
-  if (input.skipLlmJudge) {
-    return goalEvalResultSchema.parse({
-      status: "pass",
-      reason: "Deterministic checks passed.",
-    });
-  }
+  const structuredValidation = validateStructuredOutput(input.agent, input.result);
+  if (structuredValidation) return structuredValidation;
 
-  const judged = await llmJudge(input);
-  const runMemory = input.runMemory ?? {
-    inputs: {},
-    approvedMemories: [],
-    approvedSources: {},
-    operatorRevisions: {},
-    updatedAt: new Date(0).toISOString(),
-  };
-  if (
-    !hasRequiredContentInputs(input.definition, runMemory) &&
-    !isCanvasDraftAgent(input.agent) &&
-    judged.status === "fail" &&
-    /\b(required input|input .*missing|missing .*input|not provided|placeholder)\b/i.test(judged.reason)
-  ) {
-    const requiredKey = input.definition.inputsRequired?.[0] ?? "required_input";
-    return goalEvalResultSchema.parse({
-      status: "needs_input",
-      reason: judged.reason,
-      blockers: [requiredKey],
-      gateType: "missing_input",
-    });
-  }
-  if (judged.status === "fail" || judged.status === "needs_input") {
-    return judged;
-  }
-
-  return goalEvalResultSchema.parse({
-    status: "pass",
-    reason: judged.reason || "Goal satisfied.",
-  });
+  return checkDoneCriteria(input.agent, input.result);
 }

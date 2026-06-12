@@ -38,8 +38,6 @@ export type OperatorView = {
   };
 };
 
-const RECIPIENT_ERROR_PATTERN = /requires at least one recipient|upload or paste at least one recipient|recipient before approving send|requires audience_id|segment_id|list_id/i;
-
 type GateRow = {
   id: string;
   gate_type: string;
@@ -93,9 +91,7 @@ function readContextInputValue(surface: OperatorCheckpointSurface, context?: Rec
   const inputs = context?.inputs && typeof context.inputs === "object" && !Array.isArray(context.inputs)
     ? context.inputs as Record<string, unknown>
     : {};
-  if (surface.surface === "input.contacts_csv" || surface.surface === "input.audience_id") {
-    return readRecipientStatus(undefined, context) === "ready" ? { ready: true } : undefined;
-  }
+  if (surface.surface === "input.contacts_csv" || surface.surface === "input.audience_id") return inputs[surface.key];
   if (surface.surface === "input.file") {
     const deliveryRecipients = context?.deliveryRecipients;
     const documentRef = deliveryRecipients && typeof deliveryRecipients === "object" && !Array.isArray(deliveryRecipients)
@@ -113,9 +109,6 @@ function refreshSurfaceSatisfactionFromContext(
   if (surface.satisfied || !isInputSurface(surface.surface)) return surface;
   const value = readContextInputValue(surface, context);
   if (value === undefined || value === null || value === "") return surface;
-  if (surface.surface === "input.contacts_csv" || surface.surface === "input.audience_id") {
-    return { ...surface, satisfied: true };
-  }
   const validation = validateSurfaceValue(surface.surface, value, { key: surface.key, required: surface.required });
   return validation.ok ? { ...surface, satisfied: true } : surface;
 }
@@ -206,11 +199,9 @@ function synthesizeBlocksFromGate(gate: GateRow): OperatorBlock[] {
     id: surface === "review.sources" ? "approved_sources"
       : surface === "review.memories" ? "approved_memories"
         : surface === "confirm.send" ? "confirm_send"
-          : gate.gate_type === "recipient_upload" ? "recipients"
+          : surface === "input.contacts_csv" || surface === "input.audience_id" ? "recipients"
             : "required_input",
-    surface: gate.gate_type === "pre_send" && readRecipientStatus(payload, undefined) === "missing"
-      ? "input.contacts_csv"
-      : gate.gate_type === "draft_review" && payload.renderTarget === "canvas.email"
+    surface: gate.gate_type === "draft_review" && payload.renderTarget === "canvas.email"
         ? "review.email"
         : surface,
     required: true,
@@ -233,30 +224,6 @@ function synthesizeBlocksFromGate(gate: GateRow): OperatorBlock[] {
   return [block];
 }
 
-export function readRecipientStatus(
-  gatePayload?: Record<string, unknown>,
-  context?: Record<string, unknown>,
-): "missing" | "ready" {
-  const payloadStatus = gatePayload?.recipientStatus;
-  if (payloadStatus === "ready" || payloadStatus === "missing") return payloadStatus;
-  const deliveryRecipients = context?.deliveryRecipients;
-  if (deliveryRecipients && typeof deliveryRecipients === "object" && !Array.isArray(deliveryRecipients)) {
-    const count = typeof (deliveryRecipients as Record<string, unknown>).recipientCount === "number"
-      ? (deliveryRecipients as Record<string, unknown>).recipientCount as number
-      : Array.isArray((deliveryRecipients as Record<string, unknown>).contacts)
-        ? ((deliveryRecipients as Record<string, unknown>).contacts as unknown[]).length
-        : 0;
-    if (count > 0) return "ready";
-    const audienceId = (deliveryRecipients as Record<string, unknown>).audienceId;
-    if (typeof audienceId === "string" && audienceId.trim()) return "ready";
-  }
-  return "missing";
-}
-
-export function isMissingRecipientError(message?: string): boolean {
-  return Boolean(message && RECIPIENT_ERROR_PATTERN.test(message));
-}
-
 function resolveNextAgentName(input: ProjectOperatorViewInput, gateStepIndex?: number): string | undefined {
   if (typeof gateStepIndex !== "number" || !input.steps?.length) return undefined;
   const next = input.steps.find((step) => step.step_index === gateStepIndex + 1);
@@ -276,28 +243,7 @@ export function projectOperatorView(input: ProjectOperatorViewInput): OperatorVi
     actions: [],
   };
 
-  if (!pendingGate) {
-    if (input.status === "failed" && isMissingRecipientError(input.errorMessage)) {
-      const recipientsReady = readRecipientStatus(undefined, input.context) === "ready";
-      return {
-        gateId: null,
-        workspace: {
-          title: "Recipients required",
-          subtitle: "Upload contacts to fix the failed send, then retry the delivery agent.",
-          stamp: { tag: "Input", name: "Recipients" },
-        },
-        blocks: [{
-          id: "recipients",
-          surface: "input.contacts_csv",
-          required: true,
-          satisfied: recipientsReady,
-          label: "Recipients",
-        }],
-        actions: ["submit"],
-      };
-    }
-    return idleView;
-  }
+  if (!pendingGate) return idleView;
 
   const payload = asObject(pendingGate.payload_json);
   const checkpointSurfaces = readCheckpointSurfaces(payload)
@@ -329,9 +275,16 @@ export function projectOperatorView(input: ProjectOperatorViewInput): OperatorVi
   }
 
   const primarySurface = blocks[0]?.surface ?? defaultSurfaceForGateType(pendingGate.gate_type);
-  const stamp = surfaceStamp(primarySurface);
-  const title = surfaceTitle(primarySurface, blocks[0]?.label);
-  const subtitle = surfaceSubtitle(primarySurface, pendingGate.question ?? blocks[0]?.description);
+  const connectorSetup = blocks[0]?.props?.connectorSetup;
+  const connectorRow = connectorSetup && typeof connectorSetup === "object" && !Array.isArray(connectorSetup)
+    ? connectorSetup as Record<string, unknown>
+    : null;
+  const connectorToolkit = typeof connectorRow?.toolkit === "string" ? connectorRow.toolkit : null;
+  const stamp = connectorToolkit ? { tag: "Setup", name: "Connector" } : surfaceStamp(primarySurface);
+  const title = connectorToolkit ? `Connect ${connectorToolkit}` : surfaceTitle(primarySurface, blocks[0]?.label);
+  const subtitle = connectorToolkit
+    ? `Connect and verify ${connectorToolkit}, then continue the paused connector action.`
+    : surfaceSubtitle(primarySurface, pendingGate.question ?? blocks[0]?.description);
   const gateStepIndex = typeof payload.stepIndex === "number" ? payload.stepIndex : undefined;
 
   return {

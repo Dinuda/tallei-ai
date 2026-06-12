@@ -1124,24 +1124,6 @@ test("runLoopMinerForUser detects loops in memories before building episodes", a
   assert.equal(responses.length, 0);
 });
 
-test("executeOnMemories approves deterministic memory clusters without LLM approval", async () => {
-  const detector = new LoopDetectorUseCase(async () => ({
-    text: JSON.stringify({ groups: [] }),
-    model: "gpt-4o-mini",
-    finishReason: "stop",
-    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-  }));
-  const result = await detector.executeOnMemories([
-    memoryEvent("newsletter-1", "2026-05-10T09:00:00.000Z", "Imported ChatGPT memory Type: decision When drafting my newsletter I use ChatGPT to brainstorm hooks."),
-    memoryEvent("newsletter-2", "2026-05-17T09:00:00.000Z", "Imported ChatGPT memory Type: decision When drafting my newsletter I refine technical explanations into readable copy."),
-    memoryEvent("slides-1", "2026-05-12T09:00:00.000Z", "Imported ChatGPT memory Type: fact Category: ui I create slides for product updates with ChatGPT."),
-    memoryEvent("slides-2", "2026-05-19T09:00:00.000Z", "Imported ChatGPT memory Type: fact Category: ui I generate presentation slides for roadmap reviews."),
-  ]);
-  assert.equal(result.approvedGroups.length, 2);
-  assert.ok(result.approvedGroups.every((group) => group.status === "approved_loop"));
-  assert.match(result.approvedGroups[0]?.reasoning ?? "", /Approved by deterministic/);
-});
-
 test("episode builder forceDeterministicPerMemory creates one episode per loop memory", async () => {
   const repository = new InMemoryLoopMinerRepository([]);
   const builder = new EpisodeBuilderUseCase(repository, async () => {

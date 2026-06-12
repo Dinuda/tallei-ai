@@ -4,6 +4,8 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
 import { extractWebSearchSources } from "../loop-engine/contracts.js";
+import { contractMediaType, contractRenderer, contractVisibility } from "../loop-engine/data-contract.js";
+import { renderArtifact } from "./artifact-renderers.js";
 import {
   agentCollectsRunStartInput,
   applyGateDecisionToRunMemory,
@@ -13,33 +15,43 @@ import {
   type RunMemory,
 } from "./memory.js";
 import { runLoopAgent } from "../loop-executor/agent-runner.js";
-import { loadWorkflowUserProfile } from "../loop-engine/workflow-user-profile.js";
-import { executeApprovedComposioAction } from "../connectors/composio.js";
+import {
+  loadWorkflowUserProfile,
+  sanitizeWorkflowUserProfile,
+} from "../loop-engine/workflow-user-profile.js";
+import {
+  connectedAppToolkits,
+  executeApprovedComposioAction,
+  listConnectorAccounts,
+  markConnectorActionEventFailed,
+} from "../connectors/composio.js";
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
 import { loopRunAgentSchema, type LoopContactRow, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
-import { buildCanvasEmailTemplate, type CanvasEmailTemplate } from "./email-canvas.js";
+import type { CanvasEmailTemplate } from "./email-canvas.js";
 import {
-  buildArtifactDeliveryPayload,
   selectLatestArtifactsByKey,
-  selectPreferredArtifact,
-  type ArtifactSelectionRow,
 } from "./artifact-selection.js";
-import { stashContactListAsDocument } from "./contacts-document.js";
-import { parseContactListCsv } from "../loop-executor/csv-parser.js";
 import {
   buildDeliveryRecipientsPatch,
-  injectDeliveryRecipientsIntoPayload,
-  isMissingRecipientError,
-  recipientSourceRequiresOperatorInput,
-  resolveRecipientStatus,
-  type RecipientSourceKind,
-} from "./recipient-resolution.js";
+  stashContactListAsDocument,
+} from "./contacts-context.js";
+import { parseContactListCsv } from "../loop-executor/csv-parser.js";
+import {
+  ConnectorActionPayloadError,
+  resolveConnectorActionContract,
+  sanitizeConnectorDetails,
+  validateConnectorActionOutput,
+} from "./connector-action-payload.js";
+import { validateConnectorReadiness } from "../tool-spec/action-readiness.js";
+import { resolveAgentHandoffBindings } from "./typed-handoff.js";
 import { runtimeContextSchema, runtimeDefinitionSchema, type RuntimeContext, type RuntimeDefinition } from "./types.js";
 import {
   evaluateExecutionBlockingAt,
   applyGateSurfaceSubmission,
   collectRequirements,
   isRequirementSatisfied,
+  readRequirementValue,
+  resolvedRuntimeInputs,
 } from "./input-satisfaction.js";
 import {
   buildApprovalCheckpoint,
@@ -52,6 +64,8 @@ import {
 } from "./operator-checkpoint.js";
 import { projectOperatorView } from "./operator-view.js";
 import {
+  defaultSurfaceForGateType,
+  surfaceFromRenderer,
   gateSurfaceSubmissionSchema,
   isInputSurface,
   type InputRequirementWhen,
@@ -148,145 +162,194 @@ function approvedConnectorAction(definition: RuntimeDefinition, agent: LoopRunAg
   if (!assignment) return null;
   const parsed = parseComposioActionRef(assignment.ref);
   if (!parsed) return null;
-  const policy = definition.connectorPolicy?.allowedWriteActions.find((action) =>
+  const writePolicy = definition.connectorPolicy?.allowedWriteActions.find((action) =>
     action.toolkit.toLowerCase() === parsed.toolkit
     && action.actionSlug.toLowerCase() === parsed.actionSlug
     && action.requiresPreSendApproval
   );
-  if (!policy) return null;
-  return { assignment, toolkit: policy.toolkit, actionSlug: policy.actionSlug, policy };
+  if (writePolicy) return { assignment, toolkit: writePolicy.toolkit, actionSlug: writePolicy.actionSlug, policy: writePolicy, requiresApproval: true };
+  const readPolicy = definition.connectorPolicy?.allowedReadActions.find((action) =>
+    action.toolkit.toLowerCase() === parsed.toolkit
+    && action.actionSlug.toLowerCase() === parsed.actionSlug
+  );
+  if (!readPolicy) return null;
+  return { assignment, toolkit: readPolicy.toolkit, actionSlug: readPolicy.actionSlug, policy: readPolicy, requiresApproval: false };
 }
 
-function buildConnectorActionPayload(input: {
+async function prepareConnectorActionPayload(input: {
+  agent: LoopRunAgent;
   assignmentConfig: Record<string, unknown>;
   priorOutputs: Record<string, unknown>;
-  deliveryArtifact: Pick<ArtifactSelectionRow, "body" | "data_json"> | null;
   definition: RuntimeDefinition;
   context: RuntimeContext;
+  toolRef: string;
+}) {
+  const contract = await resolveConnectorActionContract({
+    definition: input.definition,
+    toolRef: input.toolRef,
+  });
+  if (input.definition.builderMeta?.typedConnectorHandoffs !== "v2") {
+    throw new Error("This connector workflow predates typed connector handoffs. Refine or re-draft the workflow before running it.");
+  }
+  const handoff = resolveAgentHandoffBindings({
+    agent: input.agent,
+    priorOutputs: input.priorOutputs,
+    operatorInputs: resolvedRuntimeInputs(input.definition, input.context),
+    stableConfig: input.assignmentConfig,
+  });
+  const invalidProvenance = handoff.resolvedBindings.filter((binding) => !binding.provenanceValid);
+  const unresolvedRequired = handoff.resolvedBindings.filter((binding) => binding.binding.required && !binding.resolved);
+  if (invalidProvenance.length > 0 || unresolvedRequired.length > 0) {
+    throw new ConnectorActionPayloadError(
+      `Typed handoff provenance does not satisfy ${contract.toolRef}`,
+      {
+        contract,
+        validationErrors: [
+          ...invalidProvenance.map((item) => ({ path: item.binding.targetPath, keyword: "provenance", message: "Binding provenance is invalid." })),
+          ...unresolvedRequired.map((item) => ({ path: item.binding.targetPath, keyword: "required_source", message: "Required binding source is unavailable." })),
+        ],
+        attempts: 0,
+      },
+    );
+  }
+  if (contract.readiness.unresolvedRequirements.length > 0) {
+    throw new ConnectorActionPayloadError(
+      `Connector readiness contract is unresolved for ${contract.toolRef}`,
+      {
+        contract,
+        validationErrors: contract.readiness.unresolvedRequirements.map((message) => ({
+          path: "/",
+          keyword: "unresolved_requirement",
+          message,
+        })),
+        attempts: 0,
+      },
+    );
+  }
+  const validation = validateConnectorReadiness(contract.readiness, handoff.value);
+  if (!validation.valid) {
+    throw new ConnectorActionPayloadError(
+      `Typed handoff does not satisfy ${contract.toolRef}`,
+      { contract, validationErrors: validation.errors, attempts: 0 },
+    );
+  }
+  const compiled = {
+    payload: handoff.value,
+    validation,
+    attempts: 0,
+    model: "typed_handoff",
+    handoffResolution: handoff.resolvedBindings,
+  };
+  return {
+    contract,
+    ...compiled,
+    payload: compiled.payload,
+  };
+}
+
+function connectorStepOutput(input: {
+  message: string;
+  result?: unknown;
+  prepared?: Record<string, unknown>;
+  payloadHash?: string;
+  specHash?: string;
+}) {
+  return {
+    text: input.message,
+    data: sanitizeConnectorDetails({
+      ...(input.prepared ?? {}),
+      ...(input.result ? { result: input.result } : {}),
+      ...(input.payloadHash ? { payloadHash: input.payloadHash } : {}),
+      ...(input.specHash ? { specHash: input.specHash } : {}),
+    }),
+  };
+}
+
+async function failConnectorActionStep(input: {
+  command: CommandRow;
+  attemptId: string;
+  message: string;
+  details: Record<string, unknown>;
+  toolkit: string;
   actionSlug: string;
 }) {
-  const base = {
-    ...input.assignmentConfig,
-    loopGoal: input.definition.goal,
-    priorOutputs: input.priorOutputs,
-    ...buildArtifactDeliveryPayload(input.deliveryArtifact),
-  };
-  return injectDeliveryRecipientsIntoPayload({
-    payload: base,
-    context: input.context,
-    actionSlug: input.actionSlug,
-    assignmentConfig: input.assignmentConfig,
+  const safeDetails = asObject(sanitizeConnectorDetails(input.details));
+  await pool.query(
+    `UPDATE loop_engine_step_attempts
+     SET status = 'failed', output_json = $2::jsonb, error_json = $3::jsonb, finished_at = NOW(), updated_at = NOW()
+     WHERE id = $1`,
+    [
+      input.attemptId,
+      JSON.stringify(connectorStepOutput({ message: input.message, prepared: safeDetails })),
+      JSON.stringify({ message: input.message, connector: safeDetails }),
+    ],
+  );
+  await pool.query(
+    `UPDATE loop_engine_runs SET status = 'failed', error_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
+     WHERE id = $1 AND status <> 'cancelled'`,
+    [input.command.run_id, JSON.stringify({ message: input.message, connector: safeDetails })],
+  );
+  await insertEvent({
+    tenantId: input.command.tenant_id,
+    userId: input.command.user_id,
+    runId: input.command.run_id,
+    stepAttemptId: input.attemptId,
+    eventType: "connector_action_failed",
+    payload: { toolkit: input.toolkit, actionSlug: input.actionSlug, message: input.message },
   });
 }
 
-function readRecipientSource(definition: RuntimeDefinition): { kind: RecipientSourceKind; description?: string } {
-  return definition.connectorPolicy?.recipientSource ?? { kind: "none" };
+function connectorPayloadPreparationDetails(prepared: Awaited<ReturnType<typeof prepareConnectorActionPayload>>) {
+  return {
+    toolRef: prepared.contract.toolRef,
+    toolkit: prepared.contract.toolkit,
+    actionSlug: prepared.contract.actionSlug,
+    toolkitVersion: prepared.contract.toolkitVersion,
+    contractSource: prepared.contract.source,
+    inputSchema: prepared.contract.inputSchema,
+    outputSchema: prepared.contract.outputSchema,
+    payload: sanitizeConnectorDetails(prepared.payload),
+    payloadCompilation: {
+      attempts: prepared.attempts,
+      model: prepared.model,
+      validation: prepared.validation,
+      ...("handoffResolution" in prepared ? { handoffResolution: prepared.handoffResolution } : {}),
+    },
+  };
 }
 
-function definitionHasRecipientListAgent(definition: RuntimeDefinition): boolean {
-  return definition.agentGraph?.children.some((child) => child.gate?.type === "recipient_upload") ?? false;
+function outputValidationForResult(
+  contract: { outputSchema: Record<string, unknown> },
+  result: { output?: Record<string, unknown>; actionOutputData?: unknown },
+) {
+  const properties = asObject(contract.outputSchema.properties);
+  const validatesConnectorEnvelope = "ok" in properties && "output" in properties;
+  return validateConnectorActionOutput(
+    contract,
+    validatesConnectorEnvelope ? result : result.actionOutputData ?? result.output ?? {},
+  );
+}
+
+function connectorActionFailureMessage(error: unknown): string {
+  if (error instanceof ConnectorActionPayloadError) {
+    const fields = error.details.validationErrors.map((item) => item.path).filter(Boolean);
+    return fields.length > 0
+      ? `${error.message}. Missing or invalid action inputs: ${[...new Set(fields)].join(", ")}`
+      : error.message;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isConnectorActionPreSendGate(gatePayload: Record<string, unknown>): boolean {
   return gatePayload.kind === "connector_action";
 }
 
-function refreshRecipientCheckpointSurfaces(
-  gatePayload: Record<string, unknown>,
-  recipientStatus: "missing" | "ready",
-): Record<string, unknown> {
-  const checkpoint = readOperatorCheckpoint(gatePayload);
-  if (!checkpoint) return gatePayload;
-  const surfaces = checkpoint.surfaces.map((surface) => (
-    surface.surface === "input.contacts_csv" || surface.surface === "input.audience_id"
-      ? { ...surface, satisfied: recipientStatus === "ready" }
-      : surface
-  ));
-  return {
-    ...gatePayload,
-    checkpoint: {
-      ...checkpoint,
-      surfaces,
-    },
-    surfaces,
-  };
-}
-
-function refreshConnectorPreSendGatePayload(input: {
-  gatePayload: Record<string, unknown>;
-  definition: RuntimeDefinition;
-  context: RuntimeContext;
-  gateType: LoopGateType;
-}): Record<string, unknown> {
-  const payload = asObject(input.gatePayload.payload);
-  const connectorActionSlug = typeof input.gatePayload.actionSlug === "string" ? input.gatePayload.actionSlug : "";
-  const recipientSource = readRecipientSource(input.definition);
-  const assignmentConfig = asObject(payload);
-  const recipientStatus = resolveRecipientStatus({
-    recipientSource,
-    context: input.context,
-    assignmentConfig,
-  });
-  const sendPayload = injectDeliveryRecipientsIntoPayload({
-    payload,
-    context: input.context,
-    actionSlug: connectorActionSlug,
-    assignmentConfig,
-  });
-  return refreshRecipientCheckpointSurfaces({
-    ...input.gatePayload,
-    recipientStatus,
-    recipientCount: input.context.deliveryRecipients?.recipientCount ?? 0,
-    payload: sendPayload,
-    payloadHash: sha256Json(sendPayload),
-    uiBlocks: input.gateType === "recipient_upload"
-      ? recipientUploadUiBlocks(recipientSource)
-      : preSendUiBlocks({
-        recipientSource,
-        recipientStatus,
-        deliveryTarget: input.definition.delivery?.target,
-        hasDedicatedRecipientAgent: definitionHasRecipientListAgent(input.definition),
-      }),
-  }, recipientStatus);
-}
-
-function recipientUploadUiBlocks(recipientSource: { kind: RecipientSourceKind }) {
-  return [{
-    type: "contacts_upload",
-    required: true,
-    mode: recipientSource.kind === "configured" ? "configured" : "uploaded",
-  }];
-}
-
-function preSendUiBlocks(input: {
-  recipientSource: { kind: RecipientSourceKind };
-  recipientStatus: "missing" | "ready";
-  deliveryTarget?: string;
-  hasDedicatedRecipientAgent?: boolean;
-}) {
-  if (input.hasDedicatedRecipientAgent) return [];
-  if (input.recipientStatus === "ready") return [];
-  if (
-    recipientSourceRequiresOperatorInput(input.recipientSource.kind)
-    || input.recipientSource.kind === "configured"
-    || input.deliveryTarget === "subscriber_list"
-  ) {
-    return recipientUploadUiBlocks(input.recipientSource);
-  }
-  return [];
-}
-
 function summarizeConnectorActionPayload(payload: Record<string, unknown>) {
-  const subject = typeof payload.subject === "string"
-    ? payload.subject
-    : typeof payload.title === "string"
-      ? payload.title
-      : "";
-  const content = typeof payload.content === "string" ? payload.content : "";
+  const sanitized = sanitizeConnectorDetails(payload);
+  const serialized = JSON.stringify(sanitized);
   return {
-    subject,
-    preview: content.slice(0, 1200),
-    recipientCount: Array.isArray(payload.recipients) ? payload.recipients.length : undefined,
+    fields: Object.keys(payload),
+    preview: serialized.length > 1_200 ? `${serialized.slice(0, 1_200)}[truncated]` : serialized,
   };
 }
 
@@ -510,18 +573,11 @@ async function openRequirementCheckpoint(input: {
   if (unsatisfied.length === 0) return false;
 
   const requirements = unsatisfied.map((row) => row.requirement);
-  const recipientSource = readRecipientSource(input.definition);
   const checkpoint = buildRequirementCheckpoint({
     requirements,
     blocking: { agentId: input.agent.id, stepIndex: input.stepIndex },
-    propsForKey: (key) => (key === "recipients" || key === "audience_id"
-      ? { contactSource: recipientSource }
-      : undefined),
   });
   const gateType: LoopGateType = input.when === "before_send"
-    && requirements.some((req) => req.surface === "input.contacts_csv" || req.surface === "input.audience_id")
-    ? "recipient_upload"
-    : input.when === "before_send"
       ? "pre_send"
       : "missing_input";
 
@@ -534,15 +590,134 @@ async function openRequirementCheckpoint(input: {
       checkpoint,
       agentId: input.agent.id,
       stepIndex: input.stepIndex,
-      extra: {
-        when: input.when,
-        uiBlocks: gateType === "recipient_upload" ? recipientUploadUiBlocks(recipientSource) : undefined,
-      },
+      extra: { when: input.when },
     }),
   });
   await pool.query(
     `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
     [input.attemptId, JSON.stringify({ text: checkpointQuestion(checkpoint), data: { when: input.when, checkpoint } })],
+  );
+  return true;
+}
+
+async function openConnectorActionInputCheckpoint(input: {
+  command: CommandRow;
+  attemptId: string;
+  stepIndex: number;
+  agent: LoopRunAgent;
+  error: ConnectorActionPayloadError;
+}) {
+  const description = connectorActionFailureMessage(input.error);
+  const checkpoint = buildRequirementCheckpoint({
+    requirements: [{
+      key: "connector_action_inputs",
+      surface: "input.text",
+      required: true,
+      when: "before_step",
+      label: "Connector action inputs",
+      description: `${description}. Provide the missing values or a JSON object using fields from the action schema.`,
+    }],
+    blocking: { agentId: input.agent.id, stepIndex: input.stepIndex },
+    propsForKey: () => ({
+      actionContract: sanitizeConnectorDetails(input.error.details.contract),
+      validationErrors: input.error.details.validationErrors,
+    }),
+  });
+  await createGate({
+    command: input.command,
+    attemptId: input.attemptId,
+    gateType: "missing_input",
+    question: checkpointQuestion(checkpoint),
+    payload: checkpointPayload({
+      checkpoint,
+      agentId: input.agent.id,
+      stepIndex: input.stepIndex,
+      extra: {
+        when: "before_step",
+        kind: "connector_action_inputs",
+        contract: sanitizeConnectorDetails(input.error.details.contract),
+        validationErrors: input.error.details.validationErrors,
+      },
+    }),
+  });
+  await pool.query(
+    `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+    [input.attemptId, JSON.stringify(connectorStepOutput({
+      message: description,
+      prepared: {
+        contract: sanitizeConnectorDetails(input.error.details.contract),
+        validationErrors: input.error.details.validationErrors,
+        payloadCompilation: { attempts: input.error.details.attempts, valid: false },
+      },
+    }))],
+  );
+}
+
+async function openConnectorConnectionCheckpoint(input: {
+  command: CommandRow;
+  attemptId: string;
+  stepIndex: number;
+  agent: LoopRunAgent;
+  toolkit: string;
+  actionSlug: string;
+  toolRef: string;
+}): Promise<boolean> {
+  const auth = {
+    tenantId: input.command.tenant_id,
+    userId: input.command.user_id,
+    authMode: "internal" as const,
+    plan: "pro" as const,
+  };
+  const connected = new Set(connectedAppToolkits(await listConnectorAccounts(auth).catch(() => [])));
+  if (connected.has(input.toolkit.toLowerCase())) return false;
+
+  const checkpoint = buildRequirementCheckpoint({
+    requirements: [{
+      key: `connect_${input.toolkit.toLowerCase()}`,
+      surface: "input.text",
+      required: true,
+      when: "before_step",
+      label: `Connect ${input.toolkit}`,
+      description: `Connect ${input.toolkit}, verify the connection, then continue this connector action.`,
+    }],
+    blocking: { agentId: input.agent.id, stepIndex: input.stepIndex },
+    satisfiedKeys: new Set([`connect_${input.toolkit.toLowerCase()}`]),
+    propsForKey: () => ({
+      connectorSetup: {
+        provider: "composio",
+        toolkit: input.toolkit,
+        actionSlug: input.actionSlug,
+        toolRef: input.toolRef,
+      },
+    }),
+  });
+  await createGate({
+    command: input.command,
+    attemptId: input.attemptId,
+    gateType: "missing_input",
+    question: `Connect ${input.toolkit} to continue ${input.actionSlug}.`,
+    payload: checkpointPayload({
+      checkpoint,
+      agentId: input.agent.id,
+      stepIndex: input.stepIndex,
+      extra: {
+        when: "before_step",
+        kind: "connector_connection",
+        connectorSetup: {
+          provider: "composio",
+          toolkit: input.toolkit,
+          actionSlug: input.actionSlug,
+          toolRef: input.toolRef,
+        },
+      },
+    }),
+  });
+  await pool.query(
+    `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+    [input.attemptId, JSON.stringify({
+      text: `Waiting for ${input.toolkit} connection.`,
+      data: { toolkit: input.toolkit, actionSlug: input.actionSlug, toolRef: input.toolRef },
+    })],
   );
   return true;
 }
@@ -710,52 +885,6 @@ async function markCanvasArtifactPreview(
   }
 }
 
-async function persistCanvasEmailArtifact(input: {
-  command: CommandRow;
-  attemptId: string;
-  artifactKey: string;
-  markdown: string;
-}) {
-  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown, finalUse: false });
-  await persistArtifact({
-    command: input.command,
-    attemptId: input.attemptId,
-    artifactKey: input.artifactKey,
-    kind: "canvas_email",
-    body: emailTemplate.html,
-    data: {
-      renderTarget: "canvas.email",
-      emailTemplate,
-    },
-  });
-  return emailTemplate;
-}
-
-async function persistCanvasPreviewArtifact(input: {
-  command: CommandRow;
-  attemptId: string;
-  artifactKey: string;
-  markdown: string;
-}) {
-  const emailTemplate = buildCanvasEmailTemplate({ markdown: input.markdown, finalUse: true });
-  await persistArtifact({
-    command: input.command,
-    attemptId: input.attemptId,
-    artifactKey: input.artifactKey,
-    kind: "canvas_preview",
-    body: emailTemplate.html,
-    data: {
-      renderTarget: "canvas.preview",
-      emailTemplate,
-    },
-  });
-  await markCanvasArtifactPreview(pool, {
-    runId: input.command.run_id,
-    artifactKey: input.artifactKey,
-  });
-  return emailTemplate;
-}
-
 async function queueNextStep(command: CommandRow, definition: RuntimeDefinition, currentStep: number) {
   const nextIndex = currentStep + 1;
   const nextAgent = definition.agentGraph!.children[nextIndex];
@@ -798,9 +927,10 @@ async function resolveRunUserProfile(input: {
   context: RuntimeContext;
   runId: string;
 }): Promise<RuntimeContext> {
-  const cached = input.context.userProfile ?? input.definition.builderMeta?.workflowUserProfile ?? null;
+  const rawCached = input.context.userProfile ?? input.definition.builderMeta?.workflowUserProfile ?? null;
+  const cached = rawCached ? sanitizeWorkflowUserProfile(rawCached) : null;
   if (cached) {
-    if (!input.context.userProfile) {
+    if (!input.context.userProfile || cached.profileText !== input.context.userProfile.profileText) {
       const nextContext = runtimeContextSchema.parse({ ...input.context, userProfile: cached });
       await pool.query(
         `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
@@ -810,14 +940,25 @@ async function resolveRunUserProfile(input: {
     }
     return input.context;
   }
+  const contextWithoutStaleProfile = input.context.userProfile
+    ? runtimeContextSchema.parse({ ...input.context, userProfile: undefined })
+    : input.context;
   const loaded = await loadWorkflowUserProfile({
     tenantId: input.tenantId,
     userId: input.userId,
     authMode: "internal",
     plan: "pro",
   }).catch(() => null);
-  if (!loaded) return input.context;
-  const nextContext = runtimeContextSchema.parse({ ...input.context, userProfile: loaded });
+  if (!loaded) {
+    if (contextWithoutStaleProfile !== input.context) {
+      await pool.query(
+        `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [input.runId, JSON.stringify(contextWithoutStaleProfile)],
+      );
+    }
+    return contextWithoutStaleProfile;
+  }
+  const nextContext = runtimeContextSchema.parse({ ...contextWithoutStaleProfile, userProfile: loaded });
   await pool.query(
     `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
     [input.runId, JSON.stringify(nextContext)],
@@ -946,7 +1087,7 @@ async function handleExecuteStep(command: CommandRow) {
     }
   }
 
-  if (agent.gate?.type === "recipient_upload") {
+  if (agent.tools.some((tool) => tool.ref === "internal.operator_input")) {
     if (await openRequirementCheckpoint({
       command,
       attemptId: command.step_attempt_id,
@@ -955,51 +1096,46 @@ async function handleExecuteStep(command: CommandRow) {
       definition,
       context,
       when: "before_send",
-    })) {
-      return;
-    }
-    const recipientSource = readRecipientSource(definition);
-    const recipientStatus = resolveRecipientStatus({
-      recipientSource,
-      context,
-      assignmentConfig: {},
+    })) return;
+    const requirements = collectRequirements(definition)
+      .filter((requirement) => requirement.when === "before_send" && isInputSurface(requirement.surface));
+    const structuredOutput = Object.fromEntries(requirements.map((requirement) => [
+      requirement.key,
+      readRequirementValue(requirement, context),
+    ]));
+    await pool.query(
+      `UPDATE loop_engine_step_attempts
+       SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [command.step_attempt_id, JSON.stringify({ text: "Operator inputs collected.", data: { structuredOutput } })],
+    );
+    await persistArtifact({
+      command,
+      attemptId: command.step_attempt_id,
+      artifactKey: agent.outputArtifactId ?? `${agent.id}_output`,
+      kind: "structured_output",
+      body: JSON.stringify(structuredOutput),
+      data: { structuredOutput },
     });
-    if (recipientStatus === "ready") {
-      await pool.query(
-        `UPDATE loop_engine_step_attempts
-         SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
-         WHERE id = $1`,
-        [command.step_attempt_id, JSON.stringify({ text: "Recipient list already saved.", data: { recipientStatus } })],
-      );
-      await queueNextStep(command, definition, row.step_index);
-      return;
-    }
+    await queueNextStep(command, definition, row.step_index);
     return;
   }
 
   const connectorAction = approvedConnectorAction(definition, agent);
   if (connectorAction) {
-    const deliveryArtifact = selectPreferredArtifact(latestArtifactRows);
-    const recipientSource = readRecipientSource(definition);
-    const assignmentConfig = asObject(connectorAction.assignment.config);
-    const recipientStatus = resolveRecipientStatus({
-      recipientSource,
-      context,
-      assignmentConfig,
-    });
-    const payload = buildConnectorActionPayload({
-      assignmentConfig,
-      priorOutputs,
-      deliveryArtifact,
-      definition,
-      context,
+    if (await openConnectorConnectionCheckpoint({
+      command,
+      attemptId: command.step_attempt_id,
+      stepIndex: row.step_index,
+      agent,
+      toolkit: connectorAction.toolkit,
       actionSlug: connectorAction.actionSlug,
-    });
-    const specSnapshot = definition.builderMeta?.noSlopSpec ?? null;
-    const payloadHash = sha256Json(payload);
-    const specHash = sha256Json(specSnapshot);
-    const hasDedicatedRecipientAgent = definitionHasRecipientListAgent(definition);
-    if (await openRequirementCheckpoint({
+      toolRef: connectorAction.assignment.ref,
+    })) {
+      return;
+    }
+    const assignmentConfig = asObject(connectorAction.assignment.config);
+    if (connectorAction.requiresApproval && await openRequirementCheckpoint({
       command,
       attemptId: command.step_attempt_id,
       stepIndex: row.step_index,
@@ -1010,12 +1146,108 @@ async function handleExecuteStep(command: CommandRow) {
     })) {
       return;
     }
-    const uiBlocks = preSendUiBlocks({
-      recipientSource,
-      recipientStatus,
-      deliveryTarget: definition.delivery?.target,
-      hasDedicatedRecipientAgent,
-    });
+    let prepared: Awaited<ReturnType<typeof prepareConnectorActionPayload>>;
+    try {
+      prepared = await prepareConnectorActionPayload({
+        agent,
+        assignmentConfig,
+        priorOutputs,
+        definition,
+        context,
+        toolRef: connectorAction.assignment.ref,
+      });
+    } catch (error) {
+      if (!(error instanceof ConnectorActionPayloadError)) throw error;
+      await openConnectorActionInputCheckpoint({
+        command,
+        attemptId: command.step_attempt_id,
+        stepIndex: row.step_index,
+        agent,
+        error,
+      });
+      return;
+    }
+    const payload = prepared.payload;
+    const preparationDetails = connectorPayloadPreparationDetails(prepared);
+    if (!connectorAction.requiresApproval) {
+      const payloadHash = sha256Json(payload);
+      const idempotencyKey = `run:${command.run_id}:step:${row.step_index}:read:${payloadHash}`;
+      const result = await executeApprovedComposioAction({
+        auth: {
+          tenantId: command.tenant_id,
+          userId: command.user_id,
+          authMode: "internal",
+          plan: "pro",
+        },
+        toolkit: connectorAction.toolkit,
+        actionSlug: connectorAction.actionSlug,
+        payload,
+        toolkitVersion: prepared.contract.toolkitVersion,
+        idempotencyKey,
+      });
+      if (!result.ok) {
+        await failConnectorActionStep({
+          command,
+          attemptId: command.step_attempt_id,
+          message: result.error ?? `Connector action failed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
+          details: { result, ...preparationDetails, payloadHash },
+          toolkit: connectorAction.toolkit,
+          actionSlug: connectorAction.actionSlug,
+        });
+        return;
+      }
+      const outputValidation = outputValidationForResult(prepared.contract, result);
+      if (!outputValidation.valid) {
+        const message = `Connector output failed schema validation: ${outputValidation.errors.map((item) => `${item.path} ${item.message}`).join("; ")}`;
+        await markConnectorActionEventFailed({
+          auth: { tenantId: command.tenant_id, userId: command.user_id, authMode: "internal", plan: "pro" },
+          idempotencyKey,
+          error: message,
+          details: { outputValidation, rawResponse: result.rawResponse ?? result.output },
+        });
+        await failConnectorActionStep({
+          command,
+          attemptId: command.step_attempt_id,
+          message,
+          details: { result, outputValidation, ...preparationDetails, payloadHash },
+          toolkit: connectorAction.toolkit,
+          actionSlug: connectorAction.actionSlug,
+        });
+        return;
+      }
+      await persistArtifact({
+        command,
+        attemptId: command.step_attempt_id,
+        artifactKey: agent.outputArtifactId ?? `${agent.id}_connector_read`,
+        kind: "connector_action_result",
+        body: `Connector read completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
+        data: asObject(sanitizeConnectorDetails({ result, outputValidation, ...preparationDetails })),
+      });
+      await pool.query(
+        `UPDATE loop_engine_step_attempts
+         SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
+        [command.step_attempt_id, JSON.stringify(connectorStepOutput({
+          message: `Connector read completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
+          result: { ...result, outputValidation },
+          prepared: preparationDetails,
+          payloadHash,
+        }))],
+      );
+      await insertEvent({
+        tenantId: command.tenant_id,
+        userId: command.user_id,
+        runId: command.run_id,
+        stepAttemptId: command.step_attempt_id,
+        eventType: "connector_action_completed",
+        payload: { toolkit: connectorAction.toolkit, actionSlug: connectorAction.actionSlug, readOnly: true },
+      });
+      await queueNextStep(command, definition, row.step_index);
+      return;
+    }
+    const specSnapshot = definition.builderMeta?.noSlopSpec ?? null;
+    const payloadHash = sha256Json(payload);
+    const specHash = sha256Json(specSnapshot);
     await createGate({
       command,
       attemptId: command.step_attempt_id,
@@ -1028,22 +1260,25 @@ async function handleExecuteStep(command: CommandRow) {
         actionSlug: connectorAction.actionSlug,
         toolRef: connectorAction.assignment.ref,
         actionRisk: connectorAction.policy.risk,
-        contactSource: recipientSource,
-        recipientStatus,
-        recipientCount: context.deliveryRecipients?.recipientCount ?? 0,
-        uiBlocks,
-        delivery: definition.delivery ?? { provider: "none", target: "none" },
+        delivery: definition.delivery ?? { provider: "none" },
         payload,
         payloadHash,
         specHash,
         noSlopSpecId: specSnapshot?.id ?? null,
         summary: summarizeConnectorActionPayload(payload),
         grillMeChecklist: specSnapshot?.specJson?.guardrails ?? [],
+        contract: prepared.contract,
+        payloadCompilation: preparationDetails.payloadCompilation,
       },
     });
     await pool.query(
       `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-      [command.step_attempt_id, JSON.stringify({ text: "Waiting for pre-send approval.", data: { payloadHash, specHash } })],
+      [command.step_attempt_id, JSON.stringify(connectorStepOutput({
+        message: "Waiting for pre-send approval.",
+        prepared: preparationDetails,
+        payloadHash,
+        specHash,
+      }))],
     );
     return;
   }
@@ -1073,6 +1308,9 @@ async function handleExecuteStep(command: CommandRow) {
     runMemory: runMemoryFromContext(context),
   });
   const output = { text: agentResult.text, data: agentResult.data, goalEval };
+  if (agentResult.structuredOutput) {
+    output.data = { ...output.data, structuredOutput: agentResult.structuredOutput };
+  }
 
   if (goalEval.status === "fail") {
     await pool.query(
@@ -1118,27 +1356,36 @@ async function handleExecuteStep(command: CommandRow) {
     artifactKey: agent.outputArtifactId ?? `${agent.id}_output`,
     kind: "structured_output",
     body: agentResult.text,
-    data: output,
+    data: {
+      ...output,
+      artifactEnvelope: {
+        contract: agent.outputContract,
+        visibility: contractVisibility(agent.outputContract),
+        renderer: contractRenderer(agent.outputContract),
+        value: agentResult.structuredOutput ?? agentResult.text,
+      },
+    },
   });
-  const canvasArtifactKey = (() => {
-    if (agent.renderTarget === "canvas.email") return `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.email`;
-    if (agent.renderTarget === "canvas.preview") return `${agent.outputArtifactId ?? `${agent.id}_output`}:canvas.preview`;
-    return null;
-  })();
-  if (agent.renderTarget === "canvas.email") {
-    await persistCanvasEmailArtifact({
+  const declaredRenderer = contractRenderer(agent.outputContract);
+  const canvasArtifactKey = declaredRenderer
+    ? `${agent.outputArtifactId ?? `${agent.id}_output`}:renderer:${declaredRenderer}`
+    : null;
+  if (declaredRenderer && canvasArtifactKey) {
+    const renderedValue = agentResult.structuredOutput
+      ? JSON.stringify(agentResult.structuredOutput)
+      : agentResult.text;
+    const rendered = renderArtifact(declaredRenderer, contractMediaType(agent.outputContract), renderedValue);
+    await persistArtifact({
       command,
       attemptId: command.step_attempt_id,
-      artifactKey: canvasArtifactKey!,
-      markdown: agentResult.text,
+      artifactKey: canvasArtifactKey,
+      kind: rendered.kind,
+      body: rendered.body,
+      data: { renderer: declaredRenderer, ...rendered.data },
     });
-  } else if (agent.renderTarget === "canvas.preview") {
-    await persistCanvasPreviewArtifact({
-      command,
-      attemptId: command.step_attempt_id,
-      artifactKey: canvasArtifactKey!,
-      markdown: agentResult.text,
-    });
+    if (rendered.marksPreview) {
+      await markCanvasArtifactPreview(pool, { runId: command.run_id, artifactKey: canvasArtifactKey });
+    }
   }
 
   if (goalEval.status === "needs_input") {
@@ -1149,14 +1396,16 @@ async function handleExecuteStep(command: CommandRow) {
       : requestedGateType;
     const basePayload = {
       ...gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
-      ...(canvasArtifactKey ? { renderTarget: agent.renderTarget, canvasArtifactKey } : {}),
+      ...(canvasArtifactKey ? { renderTarget: declaredRenderer, canvasArtifactKey } : {}),
     };
     const checkpoint = buildApprovalCheckpoint({
       gateType,
-      surface: hasWebSources ? "review.sources" : agent.operatorSurface,
+      surface: hasWebSources
+        ? "review.sources"
+        : (surfaceFromRenderer(contractRenderer(agent.outputContract)) ?? defaultSurfaceForGateType(gateType)),
       blocking: { agentId: agent.id, stepIndex: row.step_index },
       props: {
-        ...(agent.renderTarget ? { renderTarget: agent.renderTarget } : {}),
+        ...(declaredRenderer ? { renderTarget: declaredRenderer } : {}),
         ...(canvasArtifactKey ? { canvasArtifactKey } : {}),
       },
     });
@@ -1234,12 +1483,8 @@ async function handleContinueAfterGate(command: CommandRow) {
     }
     const connectorAction = approvedConnectorAction(definition, agent);
     if (!connectorAction) throw new Error("Approved connector action is no longer allowed by the workflow policy");
-    const sendPayload = injectDeliveryRecipientsIntoPayload({
-      payload,
-      context,
-      actionSlug: connectorAction.actionSlug,
-      assignmentConfig: asObject(connectorAction.assignment.config),
-    });
+    const contract = asObject(gatePayload.contract);
+    const idempotencyKey = `run:${command.run_id}:step:${row.step_index}:action:${payloadHash}`;
     try {
       const result = await executeApprovedComposioAction({
         auth: {
@@ -1250,9 +1495,62 @@ async function handleContinueAfterGate(command: CommandRow) {
         },
         toolkit: connectorAction.toolkit,
         actionSlug: connectorAction.actionSlug,
-        payload: sendPayload,
-        idempotencyKey: `run:${command.run_id}:step:${row.step_index}:action:${payloadHash}`,
+        payload,
+        toolkitVersion: typeof contract.toolkitVersion === "string" ? contract.toolkitVersion : undefined,
+        idempotencyKey,
       });
+      if (!result.ok) {
+        await failConnectorActionStep({
+          command,
+          attemptId: row.step_attempt_id,
+          message: result.error ?? `Connector action failed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
+          details: {
+            toolRef: connectorAction.assignment.ref,
+            toolkitVersion: contract.toolkitVersion,
+            payload,
+            payloadCompilation: gatePayload.payloadCompilation,
+            result,
+            payloadHash,
+            specHash,
+          },
+          toolkit: connectorAction.toolkit,
+          actionSlug: connectorAction.actionSlug,
+        });
+        return;
+      }
+      const outputValidation = outputValidationForResult({
+        outputSchema: asObject(contract.outputSchema),
+      }, result);
+      if (!outputValidation.valid) {
+        const message = `Connector output failed schema validation: ${outputValidation.errors.map((item) => `${item.path} ${item.message}`).join("; ")}`;
+        await markConnectorActionEventFailed({
+          auth: { tenantId: command.tenant_id, userId: command.user_id, authMode: "internal", plan: "pro" },
+          idempotencyKey,
+          error: message,
+          details: { outputValidation, rawResponse: result.rawResponse ?? result.output },
+        });
+        await failConnectorActionStep({
+          command,
+          attemptId: row.step_attempt_id,
+          message,
+          details: { result, outputValidation, payload, payloadCompilation: gatePayload.payloadCompilation, payloadHash, specHash },
+          toolkit: connectorAction.toolkit,
+          actionSlug: connectorAction.actionSlug,
+        });
+        return;
+      }
+      const details = asObject(sanitizeConnectorDetails({
+        toolRef: connectorAction.assignment.ref,
+        toolkit: connectorAction.toolkit,
+        actionSlug: connectorAction.actionSlug,
+        toolkitVersion: contract.toolkitVersion,
+        payload,
+        payloadCompilation: gatePayload.payloadCompilation,
+        result,
+        outputValidation,
+        payloadHash,
+        specHash,
+      }));
       await persistArtifact({
         command,
         attemptId: row.step_attempt_id,
@@ -1261,18 +1559,18 @@ async function handleContinueAfterGate(command: CommandRow) {
         body: result.ok
           ? `Connector action completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`
           : `Connector action failed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
-        data: {
-          result,
-          payloadHash,
-          specHash,
-          toolRef: connectorAction.assignment.ref,
-        },
+        data: details,
       });
       await pool.query(
         `UPDATE loop_engine_step_attempts
          SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
          WHERE id = $1 AND status = 'waiting_for_gate'`,
-        [row.step_attempt_id, JSON.stringify({ text: "Connector action completed.", data: { result, payloadHash, specHash } })],
+        [row.step_attempt_id, JSON.stringify(connectorStepOutput({
+          message: `Connector action completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
+          prepared: asObject(details),
+          payloadHash,
+          specHash,
+        }))],
       );
       await insertEvent({
         tenantId: command.tenant_id,
@@ -1284,44 +1582,20 @@ async function handleContinueAfterGate(command: CommandRow) {
       });
       await queueNextStep(command, definition, row.step_index);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!isMissingRecipientError(message)) throw error;
-      const recipientSource = readRecipientSource(definition);
-      const recoveryPayload = {
-        ...gatePayload,
-        recipientStatus: "missing",
-        recovery: true,
-        uiBlocks: preSendUiBlocks({
-          recipientSource,
-          recipientStatus: "missing",
-          deliveryTarget: definition.delivery?.target,
-          hasDedicatedRecipientAgent: definitionHasRecipientListAgent(definition),
-        }),
-        lastError: message,
-      };
-      await pool.query(
-        `UPDATE loop_engine_gates
-         SET status = 'pending', decision_json = NULL, completed_at = NULL, payload_json = $2::jsonb, updated_at = NOW()
-         WHERE step_attempt_id = $1 AND gate_type = 'pre_send'`,
-        [row.step_attempt_id, JSON.stringify(recoveryPayload)],
-      );
-      await pool.query(
-        `UPDATE loop_engine_step_attempts
-         SET status = 'waiting_for_gate', error_json = $2::jsonb, finished_at = NULL, updated_at = NOW()
-         WHERE id = $1`,
-        [row.step_attempt_id, JSON.stringify({ message, recoverable: true })],
-      );
-      await pool.query(
-        `UPDATE loop_engine_runs SET status = 'waiting_for_gate', error_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-        [command.run_id, JSON.stringify({ message, recoverable: true, gateType: "pre_send" })],
-      );
-      await insertEvent({
-        tenantId: command.tenant_id,
-        userId: command.user_id,
-        runId: command.run_id,
-        stepAttemptId: row.step_attempt_id,
-        eventType: "recipient_input_required",
-        payload: { message, gateType: "pre_send" },
+      const message = connectorActionFailureMessage(error);
+      await failConnectorActionStep({
+        command,
+        attemptId: row.step_attempt_id,
+        message,
+        details: {
+          toolRef: connectorAction.assignment.ref,
+          payload,
+          payloadCompilation: gatePayload.payloadCompilation,
+          payloadHash,
+          specHash,
+        },
+        toolkit: connectorAction.toolkit,
+        actionSlug: connectorAction.actionSlug,
       });
     }
     return;
@@ -1642,45 +1916,11 @@ export async function decideLoopRuntimeGate(input: {
     const currentContext = runtimeContextSchema.parse(gate.context_json);
     const gatePayload = asObject(gate.payload_json);
     const gateAgentId = typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined;
-    const recipientSource = readRecipientSource(definition);
-    if (decision === "approve" && (gate.gate_type === "pre_send" || gate.gate_type === "recipient_upload")) {
-      const mergedContacts = currentContext.deliveryRecipients?.contacts ?? [];
-      const decisionContacts = Array.isArray(input.value.contacts)
-        ? input.value.contacts as LoopContactRow[]
-        : [];
-      const hasContacts = mergedContacts.length > 0 || decisionContacts.length > 0;
-      const assignmentConfig = asObject(
-        definition.agentGraph?.children.find((child) => child.id === gateAgentId)?.tools?.[0]?.config,
-      );
-      const audienceId = [
-        typeof input.value.audienceId === "string" ? input.value.audienceId : "",
-        typeof currentContext.deliveryRecipients?.audienceId === "string" ? currentContext.deliveryRecipients.audienceId : "",
-        typeof assignmentConfig.audience_id === "string" ? assignmentConfig.audience_id : "",
-        typeof assignmentConfig.audienceId === "string" ? assignmentConfig.audienceId : "",
-        typeof assignmentConfig.segment_id === "string" ? assignmentConfig.segment_id : "",
-        typeof assignmentConfig.list_id === "string" ? assignmentConfig.list_id : "",
-      ].map((value) => value.trim()).find((value) => value.length > 0) ?? "";
-      const recipientStatus = resolveRecipientStatus({
-        recipientSource,
-        context: currentContext,
-        assignmentConfig,
-      });
-      const needsOperatorRecipients = recipientSourceRequiresOperatorInput(recipientSource.kind)
-        || (recipientSource.kind === "configured" && recipientStatus === "missing");
-      if (needsOperatorRecipients && !hasContacts && !audienceId) {
-        throw new Error(
-          gate.gate_type === "recipient_upload"
-            ? "Upload or paste at least one recipient before continuing."
-            : "Upload or paste at least one recipient before approving send.",
-        );
-      }
-    }
     const patch = applyGateDecisionToRunMemory({
       gateType: gate.gate_type,
       decision: input.value,
       definition,
       gateAgentId,
-      recipientSourceKind: recipientSource.kind,
     });
     let deliveryRecipients = patch.deliveryRecipients
       ? {
@@ -1822,25 +2062,16 @@ export async function submitLoopRuntimeGate(input: {
         `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
         [input.runId, JSON.stringify(nextContext)],
       );
-      const updatedGatePayload = refreshConnectorPreSendGatePayload({
-        gatePayload,
-        definition,
-        context: nextContext,
-        gateType: gate.gate_type,
-      });
-      await client.query(
-        `UPDATE loop_engine_gates SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-        [input.gateId, JSON.stringify(updatedGatePayload)],
-      );
       await client.query("COMMIT");
-      const recipientStatus = typeof updatedGatePayload.recipientStatus === "string"
-        ? updatedGatePayload.recipientStatus
-        : "missing";
+      const recipientCount = nextContext.deliveryRecipients?.recipientCount
+        ?? nextContext.deliveryRecipients?.contacts.length
+        ?? 0;
+      const satisfied = recipientCount > 0 || Boolean(nextContext.deliveryRecipients?.audienceId?.trim());
       return {
         runId: input.runId,
         gateId: input.gateId,
         status: "pending",
-        satisfied: recipientStatus === "ready",
+        satisfied,
       };
     }
 
@@ -1884,15 +2115,11 @@ export async function submitLoopRuntimeGate(input: {
     const remaining = evaluateExecutionBlockingAt(definition, nextContext, when);
     if (remaining.length > 0) {
       const requirements = remaining.map((row) => row.requirement);
-      const recipientSource = readRecipientSource(definition);
       const updatedCheckpoint = buildRequirementCheckpoint({
         requirements,
         blocking: checkpoint?.blocking ?? {
           agentId: typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined,
         },
-        propsForKey: (key) => (key === "recipients" || key === "audience_id"
-          ? { contactSource: recipientSource }
-          : undefined),
         satisfiedKeys: new Set(
           collectRequirements(definition)
             .filter((req) => req.when === when)
@@ -1987,14 +2214,12 @@ export async function uploadLoopRuntimeGateContacts(input: {
     );
     const gate = gateResult.rows[0];
     if (!gate) throw new Error("Loop gate not found");
-    if (gate.gate_type !== "pre_send" && gate.gate_type !== "recipient_upload") {
-      throw new Error("Contacts can only be uploaded for recipient_upload or pre_send gates.");
+    if (gate.gate_type !== "pre_send") {
+      throw new Error("Contacts can only be uploaded for pre_send gates.");
     }
 
     const definition = runtimeDefinitionSchema.parse(gate.definition_snapshot);
     const currentContext = runtimeContextSchema.parse(gate.context_json);
-    const recipientSource = readRecipientSource(definition);
-    const sourceKind = recipientSource.kind === "none" ? "uploaded" : recipientSource.kind;
     const docRefs = contacts.length > 0
       ? await stashContactListAsDocument({
           auth: input.auth,
@@ -2007,7 +2232,7 @@ export async function uploadLoopRuntimeGateContacts(input: {
     const deliveryRecipients = contacts.length > 0
       ? buildDeliveryRecipientsPatch({
           contacts,
-          source: sourceKind === "configured" ? "configured" : sourceKind,
+          source: "uploaded",
           audienceId: input.audienceId?.trim() || undefined,
           documentRef: docRefs?.documentRef,
           lotRef: docRefs?.lotRef,
@@ -2025,18 +2250,6 @@ export async function uploadLoopRuntimeGateContacts(input: {
     await client.query(
       `UPDATE loop_engine_runs SET context_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
       [input.runId, JSON.stringify(nextContext)],
-    );
-
-    const gatePayload = asObject(gate.payload_json);
-    const updatedGatePayload = refreshConnectorPreSendGatePayload({
-      gatePayload,
-      definition,
-      context: nextContext,
-      gateType: gate.gate_type,
-    });
-    await client.query(
-      `UPDATE loop_engine_gates SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-      [input.gateId, JSON.stringify(updatedGatePayload)],
     );
     await client.query("COMMIT");
     return {

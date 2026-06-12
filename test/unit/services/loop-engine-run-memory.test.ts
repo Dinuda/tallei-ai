@@ -49,14 +49,6 @@ test("resolveRequiredInputKeys returns empty when nothing is declared", () => {
   assert.deepEqual(resolveRequiredInputKeys({}), []);
 });
 
-test("agentCollectsRunStartInput is true only for validator or missing_input agents", async () => {
-  const { agentCollectsRunStartInput } = await import("../../../src/services/loop-runtime/memory.js");
-  assert.equal(agentCollectsRunStartInput({ id: "research", name: "Research Agent" }), false);
-  assert.equal(agentCollectsRunStartInput({ id: "input_validator", name: "Input Validator" }), true);
-  assert.equal(agentCollectsRunStartInput({ id: "writer", name: "Writer", gate: { type: "missing_input" } }), true);
-  assert.equal(agentCollectsRunStartInput({ id: "research", name: "Research Agent", gate: { type: "source_confirmation" } }), false);
-});
-
 test("hasRequiredRunInputs is true after operator paste", () => {
   assert.equal(hasRequiredRunInputs(
     { inputsRequired: ["sprint_notes"] },
@@ -104,8 +96,8 @@ test("buildAgentHandoff injects run memory and prior agent artifacts for draft w
   );
 
   assert.equal(handoff.sprint_notes, "Shipped recall fix this week.");
-  assert.deepEqual(handoff.memories, [{ id: "mem-1", excerpt: "Recall fix shipped." }]);
-  assert.deepEqual(handoff.approved_memories, [{ id: "mem-1", excerpt: "Recall fix shipped." }]);
+  assert.equal(handoff.approved_memories, undefined);
+  assert.equal(handoff.memories, undefined);
   assert.ok(handoff.memory_search);
   assert.equal(handoff.draft_writer, undefined);
 });
@@ -153,168 +145,43 @@ test("agent prompt pins structured handoff inputs ahead of bulky prior context",
   assert.ok(prompt.indexOf("Sprint Goal: Improve memory persistence") < prompt.indexOf("[PASTE SPRINT NOTES / TASKS HERE]"));
 });
 
-test("newsletter writer system prompt forbids boilerplate and draft scaffolding", () => {
+test("JSON newsletter agent receives JSON instructions instead of raw email instructions", () => {
   const prompt = buildAgentSystemPrompt({
     goal: "Weekly newsletter",
-    agentName: "Newsletter Writer",
+    agentName: "Newsletter Drafting Agent",
     agentTask: "Draft the weekly newsletter.",
-    renderTarget: "canvas.email",
     outputContract: {
-      description: "One final-use email",
-      schema: { format: "email_markdown" },
+      description: "Newsletter object",
+      schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      representation: "json",
     },
-    doneCriteria: ["Contains no raw HTML"],
+    doneCriteria: ["Newsletter is complete"],
   } as never);
 
-  assert.match(prompt, /final-use email/i);
-  assert.match(prompt, /send-plan notes/i);
-  assert.match(prompt, /signature scaffolding/i);
-  assert.match(prompt, /placeholder guidance/i);
-  assert.match(prompt, /MANDATORY OUTPUT REPRESENTATION.*email_markdown/i);
-  assert.match(prompt, /Do not return JSON/i);
-  assert.match(prompt, /HTML-friendly versions/i);
-  assert.match(prompt, /code fences/i);
+  assert.match(prompt, /MANDATORY OUTPUT SCHEMA/);
+  assert.doesNotMatch(prompt, /raw email_markdown text only/i);
+  assert.doesNotMatch(prompt, /Do not return JSON/i);
 });
 
-test("input validator placeholder output opens missing input gate instead of failing", async () => {
+test("internal synthesis agents cannot open an operator input checkpoint", async () => {
   const result = await evaluateAgentGoal({
     agent: {
-      id: "input_validator",
-      name: "Inputs Validator",
-      task: "Check that sprint_notes are present and readable.",
-      goal: "Confirm sprint_notes are provided.",
+      id: "research_synthesizer",
+      name: "Research Synthesizer Agent",
+      task: "Synthesize the available research.",
+      goal: "Produce a concise brief.",
       tools: [{ ref: "internal.llm_only" }],
-      gate: { type: "missing_input", question: "Paste sprint notes to continue." },
     },
     result: {
-      text: [
-        "Short checklist:",
-        "- sprint_notes present: No. The input is a placeholder [PASTE SPRINT NOTES / TASKS HERE] instead of actual content.",
-        "- Readability assessable: Not assessable yet; need real sprint notes.",
-        "- Next steps to proceed: Paste the actual sprint notes.",
-      ].join("\n"),
+      text: "I cannot draft this brief. Please provide the required input and more research details.",
       data: {},
     },
-    definition: {
-      inputsRequired: ["sprint_notes"],
-      goal: "Create weekly product sync email from [PASTE SPRINT NOTES / TASKS HERE].",
-    },
+    definition: { goal: "Produce a research brief." },
     runMemory: emptyRunMemory(),
-    skipLlmJudge: true,
   });
 
-  assert.equal(result.status, "needs_input");
-  assert.equal(result.gateType, "missing_input");
-  assert.deepEqual(result.blockers, ["sprint_notes"]);
-});
-
-test("input checker output that verifies notes are present passes instead of asking again", async () => {
-  const result = await evaluateAgentGoal({
-    agent: {
-      id: "input_checker",
-      name: "Input Checker",
-      task: "Check that sprint_notes are present and readable.",
-      goal: "Confirm sprint_notes are provided.",
-      tools: [{ ref: "internal.llm_only" }],
-      gate: { type: "missing_input", question: "Please provide the sprint notes." },
-    },
-    result: {
-      text: [
-        "Verification result:",
-        "",
-        "sprint_notes input provided: yes",
-        "",
-        "Fields present in the input:",
-        "Sprint Goal",
-        "Completed",
-        "In Progress",
-        "Blockers",
-        "",
-        "Missing fields: none detected",
-      ].join("\n"),
-      data: {},
-    },
-    definition: {
-      inputsRequired: ["sprint_notes"],
-      goal: "Create weekly product sync email.",
-    },
-    runMemory: emptyRunMemory(),
-    skipLlmJudge: true,
-  });
-
-  assert.equal(result.status, "pass");
-});
-
-test("final email artifacts with boilerplate are sent back for revision", async () => {
-  const result = await evaluateAgentGoal({
-    agent: {
-      id: "writer",
-      name: "Newsletter Writer",
-      task: "Write the final newsletter email.",
-      goal: "Produce the weekly newsletter.",
-      tools: [{ ref: "internal.llm_only" }],
-      renderTarget: "canvas.preview",
-      gate: { type: "draft_review", question: "Review the final preview." },
-    },
-    result: {
-      text: [
-        "Here's a ready-to-send internal sync email draft you can use. It's written in a casual, founder-to-team voice.",
-        "",
-        "Weekly sync: memory persistence, multi-tenant isolation, and next steps",
-        "",
-        "Sending plan and required confirmations",
-        "",
-        "Recipients: I'll use the uploaded contacts CSV or the configured audience_id you provide.",
-        "",
-        "If you want, I can draft the email with your exact sender name and tailor the sign-off once you drop in your name and the recipient list.",
-      ].join("\n"),
-      data: {},
-    },
-    definition: {
-      goal: "Create a weekly newsletter email.",
-    },
-    runMemory: emptyRunMemory(),
-    skipLlmJudge: true,
-  });
-
-  assert.equal(result.status, "needs_input");
-  assert.equal(result.gateType, "draft_review");
-  assert.deepEqual(result.blockers, ["boilerplate_detected"]);
-});
-
-test("input validator ignores future recipient requirement after sprint notes are present", async () => {
-  const result = await evaluateAgentGoal({
-    agent: {
-      id: "input_validator",
-      name: "Input Validator Agent",
-      task: "Check that sprint_notes are present and readable.",
-      goal: "Confirm sprint_notes are provided.",
-      tools: [{ ref: "internal.llm_only" }],
-      gate: { type: "missing_input", question: "Please provide the sprint notes." },
-    },
-    result: {
-      text: [
-        "Validation result: sprint_notes exists: yes and is complete.",
-        "Next step: provide the team email addresses before sending.",
-      ].join("\n"),
-      data: {},
-    },
-    definition: {
-      inputsRequired: ["sprint_notes", "recipients"],
-      inputRequirements: [
-        { key: "sprint_notes", surface: "input.markdown", when: "run_start", required: true },
-        { key: "recipients", surface: "input.contacts_csv", when: "before_send", required: true },
-      ],
-      goal: "Create and send weekly product sync email.",
-    },
-    runMemory: {
-      ...emptyRunMemory(),
-      inputs: { sprint_notes: "Completed: persistence API. In progress: workspace isolation. Next: ship it." },
-    },
-    skipLlmJudge: true,
-  });
-
-  assert.equal(result.status, "pass");
+  assert.equal(result.status, "fail");
+  assert.deepEqual(result.blockers, ["invalid_operator_input_request"]);
 });
 
 test("draft review output with normal pending work language opens draft gate", async () => {
@@ -365,7 +232,6 @@ test("draft review output with normal pending work language opens draft gate", a
       ...emptyRunMemory(),
       inputs: { sprint_notes: "Memory retrieval filtering shipped. Gate continuation hardening in progress." },
     },
-    skipLlmJudge: true,
   });
 
   assert.equal(result.status, "needs_input");
@@ -400,7 +266,6 @@ test("newsletter writer with missing delivery config opens draft review not miss
       goal: "Write and send a weekly AI industry newsletter.",
     },
     runMemory: emptyRunMemory(),
-    skipLlmJudge: true,
   });
 
   assert.equal(result.status, "needs_input");
@@ -429,7 +294,6 @@ test("draft placeholder output with required input present opens draft review ga
       ...emptyRunMemory(),
       inputs: { sprint_notes: "Memory retrieval filtering shipped. Gate continuation hardening in progress." },
     },
-    skipLlmJudge: true,
   });
 
   assert.equal(result.status, "needs_input");
@@ -461,7 +325,7 @@ test("applyGateDecisionToRunMemory stores approved web sources from source_confi
   });
 });
 
-test("buildAgentHandoff injects approved web sources for downstream agents", () => {
+test("buildAgentHandoff does not inject approved web sources as magic handoff keys", () => {
   const handoff = buildAgentHandoff(
     {
       id: "newsletter_writer",
@@ -478,8 +342,8 @@ test("buildAgentHandoff injects approved web sources for downstream agents", () 
     {},
   );
 
-  assert.deepEqual(handoff.curated_web_sources, [{ title: "A", url: "https://a.example", snippet: "Snippet" }]);
-  assert.deepEqual(handoff["approved_sources.web_research"], [{ title: "A", url: "https://a.example", snippet: "Snippet" }]);
+  assert.equal(handoff.curated_web_sources, undefined);
+  assert.equal(handoff["approved_sources.web_research"], undefined);
 });
 
 test("web_search with sources and source_confirmation gate pauses for operator review", async () => {
@@ -505,7 +369,6 @@ test("web_search with sources and source_confirmation gate pauses for operator r
     },
     definition: { goal: "Research topic" },
     runMemory: emptyRunMemory(),
-    skipLlmJudge: true,
   });
 
   assert.equal(result.status, "needs_input");

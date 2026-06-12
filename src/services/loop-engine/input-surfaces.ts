@@ -18,39 +18,21 @@ export type InputSurface = z.infer<typeof inputSurfaceSchema>;
 
 const INPUT_SURFACE_VALUES = inputSurfaceSchema.options;
 
-/** Coerce LLM-invented surface strings to a supported InputSurface. */
-export function normalizeInputSurface(value: unknown, key = ""): InputSurface {
+/** Parse an explicitly declared input surface without semantic guessing. */
+export function normalizeInputSurface(value: unknown, _key = ""): InputSurface {
   if (typeof value === "string") {
     const trimmed = value.trim().toLowerCase();
     if ((INPUT_SURFACE_VALUES as readonly string[]).includes(trimmed)) {
       return trimmed as InputSurface;
     }
-    if (/boolean|bool|checkbox|toggle|switch|yes_no|yesno/.test(trimmed)) {
-      if (/confirm|approve|send|acknowledge|consent/i.test(key)) return "confirm.send";
-      return "input.text";
-    }
-    if (/markdown|rich.?text|long.?text|notes|document/.test(trimmed)) return "input.markdown";
-    if (/csv|contact|recipient|subscriber|email.?list|mailing/.test(trimmed)) return "input.contacts_csv";
-    if (/audience|list.?id|segment/.test(trimmed)) return "input.audience_id";
-    if (/file|upload|attachment/.test(trimmed)) return "input.file";
-    if (/source|web.?search|url/i.test(trimmed)) return "review.sources";
-    if (/memor/i.test(trimmed)) return "review.memories";
-    if (/final.?preview|read.?only.?preview|review\.preview/.test(trimmed)) return "review.preview";
-    if (/review|draft|preview/.test(trimmed)) return "review.draft";
-    if (/email.?review|canvas/.test(trimmed)) return "review.email";
-    if (/confirm|approve|send/.test(trimmed)) return "confirm.send";
-    if (/text|string|input|textarea|freeform/.test(trimmed)) return "input.text";
   }
-  return defaultSurfaceForKey(key);
+  throw new Error(`Unknown input surface: ${String(value)}`);
 }
 
 function normalizeInputRequirementWhen(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const trimmed = value.trim().toLowerCase();
-  if (trimmed === "run_start" || trimmed === "before_send" || trimmed === "before_step") return trimmed;
-  if (/send|pre.?send|delivery|recipient/.test(trimmed)) return "before_send";
-  if (/step|agent|mid.?run/.test(trimmed)) return "before_step";
-  return "run_start";
+  return trimmed;
 }
 
 function preprocessInputRequirement(value: unknown): unknown {
@@ -60,7 +42,7 @@ function preprocessInputRequirement(value: unknown): unknown {
   return {
     ...row,
     key,
-    surface: normalizeInputSurface(row.surface, key),
+    surface: typeof row.surface === "string" ? row.surface.trim().toLowerCase() : row.surface,
     when: normalizeInputRequirementWhen(row.when),
   };
 }
@@ -88,10 +70,6 @@ export const inputRequirementSchema = z.preprocess(
 
 export type InputRequirement = z.infer<typeof inputRequirementSchema>;
 
-function isDeliveryConfigInputKey(key: string): boolean {
-  return /subscriber|audience|recipient|mailing.?list|contact.?list|list.?id|send.?to|broadcast.?list/i.test(key.trim());
-}
-
 export type InputRequirementContext = {
   recipientKind: string;
   deliveryTarget: string;
@@ -109,34 +87,21 @@ export function extractInputRequirementContext(root: Record<string, unknown>): I
     : {};
   return {
     recipientKind: typeof recipientSource.kind === "string" ? recipientSource.kind : "none",
-    deliveryTarget: typeof delivery.target === "string" ? delivery.target : "none",
+    deliveryTarget: typeof delivery.provider === "string"
+      ? delivery.provider
+      : typeof delivery.target === "string"
+        ? delivery.target
+        : "none",
   };
-}
-
-function parseInputRequirementRow(row: unknown): InputRequirement | null {
-  const preprocessed = preprocessInputRequirement(row);
-  const parsed = inputRequirementSchema.safeParse(preprocessed);
-  return parsed.success ? parsed.data : null;
 }
 
 export function normalizeSpecInputRequirements(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const root = value as Record<string, unknown>;
   if (!Array.isArray(root.inputRequirements)) return value;
-  const context = extractInputRequirementContext(root);
-  const requirements = root.inputRequirements
-    .map((row) => parseInputRequirementRow(row))
-    .filter((row): row is InputRequirement => Boolean(row));
-  const delivery = root.delivery && typeof root.delivery === "object" && !Array.isArray(root.delivery)
-    ? root.delivery as Record<string, unknown>
-    : {};
-  const target = typeof delivery.target === "string" ? delivery.target : "none";
   return {
     ...root,
-    inputRequirements: sanitizeInputRequirementsForDelivery(
-      canonicalizeInputRequirementsList(requirements, context),
-      target,
-    ),
+    inputRequirements: root.inputRequirements.map(preprocessInputRequirement),
   };
 }
 
@@ -166,11 +131,7 @@ export function defaultLabelForKey(key: string): string {
 }
 
 export function defaultSurfaceForKey(key: string): InputSurface {
-  if (/recipient|contact|subscriber|audience|mailing/i.test(key)) return "input.contacts_csv";
-  if (/audience_id|list_id|segment_id/i.test(key)) return "input.audience_id";
-  if (/file|document|attachment|csv/i.test(key)) return "input.file";
-  if (/confirm|approve|pre.?send/i.test(key)) return "confirm.send";
-  if (/notes|brief|content|body|sync|sprint/i.test(key)) return "input.markdown";
+  void key;
   return "input.text";
 }
 
@@ -183,6 +144,14 @@ export function isReviewInputSurface(surface: InputSurface): boolean {
     || surface === "confirm.send";
 }
 
+/** Map output contract renderer id to operator review surface. */
+export function surfaceFromRenderer(renderer: string | null | undefined): InputSurface | undefined {
+  if (!renderer) return undefined;
+  if (renderer === "canvas.email") return "review.email";
+  if (renderer === "canvas.preview") return "review.preview";
+  return undefined;
+}
+
 /** Map legacy agent gate.type to the canonical operator surface (UI contract). */
 export function defaultSurfaceForGateType(gateType: string): InputSurface {
   switch (gateType) {
@@ -190,7 +159,6 @@ export function defaultSurfaceForGateType(gateType: string): InputSurface {
     case "source_confirmation": return "review.sources";
     case "draft_review": return "review.draft";
     case "pre_send": return "confirm.send";
-    case "recipient_upload": return "input.contacts_csv";
     case "missing_input":
     default:
       return "input.markdown";
@@ -210,71 +178,14 @@ export function isInputSurface(surface: InputSurface): boolean {
   return surface.startsWith("input.");
 }
 
-export function isRecipientInputKey(key: string): boolean {
-  return /recipient|recipients.?upload|contact.?upload|contacts.?upload|contact.?list|subscriber|audience|mailing.?list|list.?id|segment.?id|send.?to|broadcast.?list/i.test(key.trim());
-}
-
 export function isConfirmInputKey(key: string): boolean {
-  return /confirm|approve|pre.?send|send.?approval/i.test(key.trim());
+  return key.trim().toLowerCase() === "confirm_send";
 }
 
 export function canonicalizeInputRequirement(
   req: InputRequirement,
-  context: { recipientKind: string; deliveryTarget: string },
+  _context: { recipientKind: string; deliveryTarget: string },
 ): InputRequirement {
-  const key = req.key.trim();
-  const lowerKey = key.toLowerCase();
-
-  if (isConfirmInputKey(lowerKey) || req.surface === "confirm.send") {
-    return {
-      ...req,
-      key: "confirm_send",
-      surface: "confirm.send",
-      when: "before_send",
-      label: req.label ?? "Confirm send",
-    };
-  }
-
-  if (isReviewInputSurface(req.surface)) {
-    return {
-      ...req,
-      when: req.when === "run_start" ? "before_send" : req.when,
-    };
-  }
-
-  if (req.when === "before_send") {
-    if (/sync_to_team|team_sync|team_update/i.test(lowerKey) && !isRecipientInputKey(lowerKey)) {
-      return {
-        ...req,
-        key: "sprint_notes",
-        surface: "input.markdown",
-        when: "run_start",
-        label: req.label ?? "Team sync notes",
-      };
-    }
-
-    if (isRecipientInputKey(lowerKey) || lowerKey === "recipients" || lowerKey === "audience_id") {
-      if (context.recipientKind === "configured") {
-        return {
-          ...req,
-          key: "audience_id",
-          surface: "input.audience_id",
-          when: "before_send",
-          label: req.label ?? "Audience or list ID",
-        };
-      }
-      if (context.recipientKind === "uploaded" || context.recipientKind === "operator_input") {
-        return {
-          ...req,
-          key: "recipients",
-          surface: "input.contacts_csv",
-          when: "before_send",
-          label: req.label ?? "Recipients",
-        };
-      }
-    }
-  }
-
   return req;
 }
 
@@ -298,10 +209,6 @@ export function canonicalizeInputRequirementsList(
 /** Stable slot for comparing spec vs design requirements after key aliasing. */
 export function requirementSlotKey(req: InputRequirement): string {
   if (req.surface === "confirm.send" || isConfirmInputKey(req.key)) return "slot:confirm_send";
-  if (req.surface === "input.audience_id" || req.key === "audience_id") return "slot:audience_id";
-  if (req.surface === "input.contacts_csv" || (isRecipientInputKey(req.key) && req.when === "before_send")) {
-    return "slot:recipients";
-  }
   if (req.surface === "review.email") return "slot:review_email";
   if (req.surface === "review.preview") return "slot:review_preview";
   if (req.surface === "review.draft") return "slot:review_draft";
@@ -320,31 +227,16 @@ export function requirementsFromLegacyKeys(keys: string[]): InputRequirement[] {
     surface: defaultSurfaceForKey(key),
     label: defaultLabelForKey(key),
     required: true,
-    when: isDeliveryConfigInputKey(key) ? "before_send" as const : "run_start" as const,
+    when: "run_start" as const,
   }));
 }
 
 /** True when the approved spec explicitly requires operator-pasted content before agents run. */
 export function specRequiresRunStartContent(spec: {
-  delivery?: { target?: string };
+  delivery?: { provider?: string; target?: string };
   inputRequirements?: InputRequirement[];
 }): boolean {
-  const target = spec.delivery?.target ?? "none";
-  // Newsletters/subscriber sends gather content via research — never operator paste at run_start.
-  if (target === "subscriber_list") return false;
-  if (target === "team_email") return true;
   return (spec.inputRequirements ?? []).some((req) => req.when === "run_start" && req.required);
-}
-
-/** Drop run_start paste requirements that do not apply to self-sourcing delivery targets. */
-export function sanitizeInputRequirementsForDelivery(
-  requirements: InputRequirement[],
-  deliveryTarget: string,
-): InputRequirement[] {
-  if (deliveryTarget === "subscriber_list") {
-    return requirements.filter((req) => req.when !== "run_start");
-  }
-  return requirements;
 }
 
 /** Merge explicit requirements with legacy keys without duplicating keys. */

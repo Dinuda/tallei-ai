@@ -46,6 +46,54 @@ test("run_start checkpoint projects input.markdown only", () => {
   assert.equal(view.workspace.title, "Sprint Notes");
 });
 
+test("connector checkpoint projects a connector setup workspace and remains continuable", () => {
+  const view = projectOperatorView({
+    status: "waiting_for_gate",
+    gates: [{
+      id: "gate-connector",
+      gate_type: "missing_input",
+      status: "pending",
+      question: "Connect gmail.",
+      payload_json: {
+        kind: "connector_connection",
+        checkpoint: {
+          reason: "missing_requirements",
+          surfaces: [{
+            key: "connect_gmail",
+            surface: "input.text",
+            required: true,
+            satisfied: true,
+            props: {
+              connectorSetup: {
+                provider: "composio",
+                toolkit: "gmail",
+                actionSlug: "GMAIL_SEND_EMAIL",
+              },
+            },
+          }],
+        },
+        surfaces: [{
+          key: "connect_gmail",
+          surface: "input.text",
+          required: true,
+          satisfied: true,
+          props: {
+            connectorSetup: {
+              provider: "composio",
+              toolkit: "gmail",
+              actionSlug: "GMAIL_SEND_EMAIL",
+            },
+          },
+        }],
+      },
+    }],
+  });
+  assert.equal(view.workspace.title, "Connect gmail");
+  assert.equal(view.workspace.stamp.name, "Connector");
+  assert.equal(view.blocks[0]?.props?.connectorSetup !== undefined, true);
+  assert.deepEqual(view.actions, ["submit"]);
+});
+
 test("source confirmation projects review.sources with approval actions", () => {
   const view = projectOperatorView({
     status: "waiting_for_gate",
@@ -159,15 +207,15 @@ test("run_start and source review never mix without explicit checkpoint", () => 
   assert.equal(view.blocks.some((block) => block.surface === "input.markdown"), false);
 });
 
-test("failed run missing recipients projects contacts surface without gate", () => {
+test("failed connector text does not invent an input surface without a checkpoint", () => {
   const view = projectOperatorView({
     status: "failed",
     errorMessage: "Delivery requires at least one recipient",
     gates: [],
   });
   assert.equal(view.gateId, null);
-  assert.equal(view.blocks[0]?.surface, "input.contacts_csv");
-  assert.deepEqual(view.actions, ["submit"]);
+  assert.deepEqual(view.blocks, []);
+  assert.deepEqual(view.actions, []);
 });
 
 test("saved recipient checkpoint stays satisfied instead of re-synthesizing upload block", () => {
@@ -181,7 +229,7 @@ test("saved recipient checkpoint stays satisfied instead of re-synthesizing uplo
     },
     gates: [{
       id: "gate-recipients",
-      gate_type: "recipient_upload",
+      gate_type: "pre_send",
       status: "pending",
       question: "Add recipients.",
       payload_json: {

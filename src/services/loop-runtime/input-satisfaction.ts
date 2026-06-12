@@ -13,12 +13,7 @@ import {
 } from "../loop-engine/input-surfaces.js";
 import { parseContactListCsv } from "../loop-executor/csv-parser.js";
 import type { LoopContactRow, LoopDefinition } from "../loop-executor/types.js";
-import {
-  buildDeliveryRecipientsPatch,
-  recipientSourceRequiresOperatorInput,
-  resolveRecipientStatus,
-  type RecipientSourceKind,
-} from "./recipient-resolution.js";
+import { buildDeliveryRecipientsPatch } from "./contacts-context.js";
 import { runtimeContextSchema } from "./types.js";
 
 type RuntimeContextShape = z.infer<typeof runtimeContextSchema>;
@@ -31,53 +26,11 @@ export type RequirementEvaluation = {
 
 export type ValidationResult = { ok: true } | { ok: false; message: string };
 
-function readRecipientSource(definition: LoopDefinition): { kind: RecipientSourceKind; description?: string } {
-  const recipientSource = definition.connectorPolicy?.recipientSource;
-  return {
-    kind: (recipientSource?.kind ?? "none") as RecipientSourceKind,
-    description: recipientSource?.description,
-  };
-}
-
-function deliveryRequirements(definition: LoopDefinition): InputRequirement[] {
-  const target = definition.delivery?.target ?? "none";
-  if (target === "none") return [];
-  const recipientSource = readRecipientSource(definition);
-  if (recipientSource.kind === "none") return [];
-  if (recipientSource.kind === "configured") {
-    return [{
-      key: "audience_id",
-      surface: "input.audience_id",
-      label: "Audience or list ID",
-      description: recipientSource.description ?? "Provide the configured audience or list ID before sending.",
-      required: true,
-      when: "before_send",
-    }];
-  }
-  if (recipientSourceRequiresOperatorInput(recipientSource.kind) || target === "subscriber_list" || target === "team_email") {
-    return [{
-      key: "recipients",
-      surface: "input.contacts_csv",
-      label: "Recipients",
-      description: recipientSource.description ?? "Upload or paste recipients before sending.",
-      required: true,
-      when: "before_send",
-    }];
-  }
-  return [];
-}
-
 export function collectRequirements(definition: LoopDefinition): InputRequirement[] {
-  const explicit = normalizeInputRequirements({
+  return normalizeInputRequirements({
     inputRequirements: definition.inputRequirements,
     inputsRequired: definition.inputsRequired,
   });
-  const delivery = deliveryRequirements(definition);
-  const keys = new Set(explicit.map((req) => req.key));
-  return [
-    ...explicit,
-    ...delivery.filter((req) => !keys.has(req.key)),
-  ];
 }
 
 export function readRequirementValue(
@@ -108,6 +61,16 @@ export function readRequirementValue(
     default:
       return context.inputs[requirement.key];
   }
+}
+
+export function resolvedRuntimeInputs(
+  definition: LoopDefinition,
+  context: RuntimeContextShape,
+): Record<string, unknown> {
+  return Object.fromEntries(collectRequirements(definition).flatMap((requirement) => {
+    const value = readRequirementValue(requirement, context);
+    return value === undefined ? [] : [[requirement.key, value]];
+  }));
 }
 
 export function validateSurfaceValue(
@@ -170,22 +133,8 @@ export function validateSurfaceValue(
 export function isRequirementSatisfied(
   requirement: InputRequirement,
   context: RuntimeContextShape,
-  definition: LoopDefinition,
+  _definition: LoopDefinition,
 ): RequirementEvaluation {
-  if (requirement.when === "before_send") {
-    const recipientSource = readRecipientSource(definition);
-    const recipientStatus = resolveRecipientStatus({
-      recipientSource,
-      context,
-      assignmentConfig: {},
-    });
-    if (requirement.surface === "input.contacts_csv" && recipientStatus === "ready") {
-      return { requirement, satisfied: true };
-    }
-    if (requirement.surface === "input.audience_id" && recipientStatus === "ready") {
-      return { requirement, satisfied: true };
-    }
-  }
   const value = readRequirementValue(requirement, context);
   if (value === undefined || value === null || value === "") {
     return { requirement, satisfied: !requirement.required, message: `${requirement.key} is missing.` };
@@ -251,7 +200,7 @@ export function applySurfaceSubmission(input: {
         source: "uploaded",
         audienceId: value.audienceId,
       }),
-      inputs: { [key]: `${contacts.length} recipients` },
+      inputs: { [key]: `${contacts.length} contacts` },
     };
   }
   if (requirement.surface === "input.audience_id") {

@@ -1,6 +1,6 @@
 import { filterComposioToolkitActions, listComposioToolkitTools } from "../connectors/composio.js";
 import type { ToolSpec, ComposioActionSpec } from "./types.js";
-import { buildComposioActionContract, buildConnectedSearchContract } from "./tool-contracts.js";
+import { buildComposioActionContract, buildConnectedSearchContract, hasExactComposioActionSchemas } from "./tool-contracts.js";
 
 const composioToolkitCache = new Map<string, { spec: ToolSpec; cachedAt: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -17,7 +17,7 @@ export async function generateComposioToolkitSpec(toolkit: string): Promise<Tool
       return null;
     }
 
-    const actionSpecs: ComposioActionSpec[] = actions.map((action) => ({
+    const actionSpecs: ComposioActionSpec[] = actions.filter(hasExactComposioActionSchemas).map((action) => ({
       slug: action.actionSlug,
       name: action.name,
       description: action.description,
@@ -62,17 +62,7 @@ export async function generateComposioToolkitSpec(toolkit: string): Promise<Tool
       description,
       shortCircuits: false,
       outputDescription: `Composio action results from ${toolkitLabel} API`,
-      outputSchema: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "Formatted text summary of action results" },
-          data: {
-            type: "object",
-            description: "Structured action results (varies by action)"
-          }
-        },
-        required: ["text"]
-      },
+      outputSchema: { oneOf: actionSpecs.map((action) => action.contract!.outputSchema) },
       handoffFormat: `Output is passed as \`handoff.<agent_id>\` to downstream agents. Results vary by action but typically include \`text\` (formatted summary) and \`data\` (structured results). For search actions, \`data.sources\` contains array of results. For send/write actions, \`data\` contains execution status.`,
       useCases,
       limitations,

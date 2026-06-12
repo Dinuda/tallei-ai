@@ -1,4 +1,4 @@
-import type { ToolContract, ToolSpec, ToolSpecRegistry, ToolUseCase } from "./types.js";
+import type { ToolContract, ToolSpecRegistry, ToolUseCase } from "./types.js";
 
 export function renderToolSpecMarkdown(registry: ToolSpecRegistry, phase: "outcomes" | "tools"): string {
   if (phase === "outcomes") {
@@ -178,7 +178,7 @@ function renderToolsPhase(registry: ToolSpecRegistry): string {
   lines.push("## Tool Assignment Rules");
   lines.push("");
   lines.push("1. Every agent must have exactly ONE tool ref");
-  lines.push("2. Only assign tools listed in the approved no-slop spec's connectorPolicy");
+  lines.push("2. Assign only exact tool refs listed in this reference; discovered actions are materialized into workflow policy");
   lines.push("3. Internal tools: `internal.llm_only`, `internal.memory_search`, `internal.web_search`");
   lines.push("4. Connected app search: `composio.<toolkit>.search` (read-only, short-circuits)");
   lines.push("5. Choose tools by matching required skills, resources, effects, schemas, approval, and render recommendations");

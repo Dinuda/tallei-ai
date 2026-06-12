@@ -6,11 +6,10 @@
  */
 
 import { z } from "zod";
-import { connectorPolicySchema } from "../loop-engine/spec-contracts.js";
+import { connectorPolicySchema, noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
 import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
-
-import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
+import { dataContractSchema } from "../loop-engine/data-contract.js";
 
 /** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
 export function normalizeOptionalString(value: unknown): unknown {
@@ -35,7 +34,6 @@ export const loopGateTypeSchema = z.enum([
   "source_confirmation",
   "missing_input",
   "draft_review",
-  "recipient_upload",
   "pre_send",
 ]);
 
@@ -48,42 +46,41 @@ export const loopAgentGateSchema = z.object({
 
 export type LoopAgentGate = z.infer<typeof loopAgentGateSchema>;
 
-export const loopAgentContractSchema = z.object({
-  description: z.string().min(1),
-  schema: z.record(z.unknown()).default({}),
-});
+export const loopAgentContractSchema = dataContractSchema;
 
 export type LoopAgentContract = z.infer<typeof loopAgentContractSchema>;
 
-function normalizeDeliveryTarget(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, "_");
-  // Connector action refs masquerading as delivery targets.
-  if (normalized.includes("composio.") && normalized.includes(".action.")) {
-    if (normalized.includes("email") || normalized.includes("mail") || normalized.includes("send")) {
-      return "subscriber_list";
-    }
-    return "none";
-  }
-  if (["mailing_list", "subscriber", "email_list", "contact_list", "contacts_list", "audience", "resend"].some((kw) => normalized.includes(kw))) {
-    return "subscriber_list";
-  }
-  return normalized;
+export const agentHandoffBindingSchema = z.object({
+  source: z.object({
+    kind: z.enum(["agent_output", "operator_input", "stable_config", "artifact"]),
+    agentId: z.string().min(1).optional(),
+    key: z.string().min(1).optional(),
+    path: z.string().min(1).default("/"),
+  }),
+  targetPath: z.string().min(1),
+  required: z.boolean().default(true),
+  valuePolicy: z.enum(["derivable", "passthrough"]).optional(),
+  provenance: z.enum(["agent_output", "operator_input", "stable_config", "artifact", "connector_output"]).optional(),
+  transformation: z.enum(["direct", "merge", "transform"]).default("direct").optional(),
+});
+
+export type AgentHandoffBinding = z.infer<typeof agentHandoffBindingSchema>;
+
+function normalizeDeliveryProvider(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const row = value as Record<string, unknown>;
+  const provider = typeof row.provider === "string" ? row.provider.trim() : "";
+  if (provider) return { provider };
+  const legacyTarget = typeof row.target === "string" ? row.target.trim().toLowerCase() : "none";
+  return { provider: legacyTarget === "none" ? "none" : "none" };
 }
 
-export const loopDeliveryTargetSchema = z.preprocess(normalizeDeliveryTarget, z.enum([
-  "subscriber_list",
-  "team_email",
-  "operator",
-  "none",
-]));
-
-export type LoopDeliveryTarget = z.infer<typeof loopDeliveryTargetSchema>;
-
-export const loopDeliveryRoutingSchema = z.object({
-  provider: z.string().min(1),
-  target: loopDeliveryTargetSchema,
-});
+export const loopDeliveryRoutingSchema = z.preprocess(
+  normalizeDeliveryProvider,
+  z.object({
+    provider: z.string().min(1),
+  }),
+);
 
 export type LoopDeliveryRouting = z.infer<typeof loopDeliveryRoutingSchema>;
 
@@ -95,11 +92,9 @@ export const loopToolAssignmentSchema = z.object({
 
 export type LoopToolAssignment = z.infer<typeof loopToolAssignmentSchema>;
 
-export const loopRenderTargetSchema = z.enum(["canvas.email", "canvas.preview"]);
-export type LoopRenderTarget = z.infer<typeof loopRenderTargetSchema>;
-
 /** One specialist agent in a run roster or task row. */
 export const loopRunAgentSchema = z.object({
+  nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
   id: z.string().min(1),
   name: z.string().min(1),
   task: z.string().min(1),
@@ -108,17 +103,9 @@ export const loopRunAgentSchema = z.object({
   doneCriteria: z.array(z.string().min(1)).default([]).optional(),
   inputContract: loopAgentContractSchema.optional(),
   outputContract: loopAgentContractSchema.optional(),
+  handoffBindings: z.array(agentHandoffBindingSchema).default([]),
   gate: loopAgentGateSchema.optional(),
   outputArtifactId: z.string().min(1).optional(),
-  renderTarget: loopRenderTargetSchema.optional(),
-  operatorSurface: z.enum([
-    "review.sources",
-    "review.memories",
-    "review.email",
-    "review.preview",
-    "review.draft",
-    "confirm.send",
-  ]).optional(),
 });
 
 export type LoopRunAgent = z.infer<typeof loopRunAgentSchema>;
@@ -259,24 +246,17 @@ export type LoopPlan = z.infer<typeof loopPlanSchema>;
 export const loopAgentGraphChildSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
+  nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
   task: z.string().min(1),
   goal: z.string().min(1).optional(),
   tools: z.array(loopToolAssignmentSchema).default([]),
   doneCriteria: z.array(z.string().min(1)).default([]).optional(),
   inputContract: loopAgentContractSchema.optional(),
   outputContract: loopAgentContractSchema.optional(),
+  handoffBindings: z.array(agentHandoffBindingSchema).default([]),
   gate: loopAgentGateSchema.optional(),
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
-  renderTarget: loopRenderTargetSchema.optional(),
-  operatorSurface: z.enum([
-    "review.sources",
-    "review.memories",
-    "review.email",
-    "review.preview",
-    "review.draft",
-    "confirm.send",
-  ]).optional(),
 });
 
 export type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;
@@ -343,6 +323,11 @@ export const loopDefinitionSchema = z.object({
       generatedAt: z.string().min(1),
     }).optional(),
     designDiagnostics: z.record(z.unknown()).optional(),
+    discoveredToolContracts: z.array(z.record(z.unknown())).optional(),
+    planningIRVersion: z.literal("v1").optional(),
+    planningIR: z.record(z.unknown()).optional(),
+    typedConnectorHandoffs: z.enum(["v1", "v2"]).optional(),
+    contractDrivenGraph: z.literal("v1").optional(),
     workflowUserProfile: workflowUserProfileSchema.optional(),
   }).optional(),
 });

@@ -14,10 +14,13 @@ import {
 } from "./tool-catalog.js";
 import { getToolHandler, type ToolHandlerContext } from "./tool-handlers.js";
 import { completeText } from "./agent-runner-internals.js";
+import { loopExecutorOpenAiChat } from "./openai-chat.js";
+import { validateConnectorReadiness, containsUnresolvedTemplate } from "../tool-spec/action-readiness.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
 import { extractMemorySources, extractWebSearchSources, formatMemorySearchText } from "../loop-engine/contracts.js";
-import { unwrapEmailMarkdownEnvelope } from "../loop-engine/email-output.js";
+import { isInputValidationAgent } from "../loop-runtime/memory.js";
+import { contractUsesJson } from "../loop-engine/data-contract.js";
 
 import "../loop-runtime/tool-registrations.js";
 
@@ -41,7 +44,39 @@ export type RunLoopAgentResult = {
   text: string;
   data: Record<string, unknown>;
   draft?: unknown;
+  structuredOutput?: Record<string, unknown>;
 };
+
+function usesTextOutput(agent: LoopRunAgent): boolean {
+  return !contractUsesJson(agent.outputContract);
+}
+
+function asksForOperatorContent(text: string): boolean {
+  return /\b(please (provide|paste|send|share)|need you to (provide|paste|send|share)|(cannot|can't) (continue|complete|draft|generate) (without|until)|required input (is )?missing)\b/i.test(text);
+}
+
+async function repairInternalInputRequest(input: { text: string; user: string }) {
+  const response = await loopExecutorOpenAiChat({
+    temperature: 0,
+    maxTokens: 1800,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You are a minimal output fixer for an internal workflow step.",
+          "Rewrite the output so it completes the assigned task from available source context instead of asking the operator for input.",
+          "Preserve supported facts and useful content. Omit unavailable material. Do not invent anything.",
+          "Return only the repaired output, with no explanation.",
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: [`Invalid output: ${input.text}`, "Source context:", input.user.slice(0, 20_000)].join("\n\n"),
+      },
+    ],
+  });
+  return { text: response.text.trim(), model: response.model, usage: response.usage };
+}
 
 function buildHandlerCtx(input: RunLoopAgentInput, assignment: LoopToolAssignment): ToolHandlerContext {
   return {
@@ -109,7 +144,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     draftPolicy: input.draftPolicy,
     outputContract: input.agent.outputContract,
     doneCriteria: input.agent.doneCriteria,
-    renderTarget: input.agent.renderTarget,
+    nodeKind: input.agent.nodeKind ?? "agent",
   };
   const system = buildAgentSystemPrompt(bindCtx);
   let user = buildAgentUserPrompt(bindCtx);
@@ -177,10 +212,88 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
     }
   }
 
+  if (!usesTextOutput(input.agent)) {
+    const outputContract = input.agent.outputContract!;
+    let candidate: Record<string, unknown> = {};
+    let validation = { valid: false, errors: [] as Array<{ path: string; message: string; keyword: string }> };
+    let model = "";
+    let usage: unknown;
+    const configuredReadiness = input.assignedTools[0]?.config?.readiness;
+    const semanticAssertions = configuredReadiness && typeof configuredReadiness === "object" && !Array.isArray(configuredReadiness)
+      && Array.isArray((configuredReadiness as { semanticAssertions?: unknown }).semanticAssertions)
+      ? (configuredReadiness as { semanticAssertions: Array<{ kind: "at_least_one" | "non_placeholder"; paths: string[]; message: string }> }).semanticAssertions
+      : [{
+          kind: "non_placeholder" as const,
+          paths: ["/"],
+          message: "Structured output must not contain unresolved templates.",
+        }];
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const response = await loopExecutorOpenAiChat({
+        responseFormat: "json_object",
+        temperature: 0,
+        maxTokens: 4096,
+        messages: [
+          {
+            role: "system",
+            content: [
+              system,
+              "Return only one JSON object matching the mandatory output schema.",
+              "Never emit unresolved templates, invented identifiers, recipients, files, or credentials.",
+            ].join(" "),
+          },
+          {
+            role: "user",
+            content: [
+              user,
+              "",
+              `Exact output schema: ${JSON.stringify(outputContract.schema)}`,
+              `Stable connector configuration: ${JSON.stringify(input.assignedTools[0]?.config?.stableConfig ?? {})}`,
+              attempt > 1 ? `Previous invalid output: ${JSON.stringify(candidate)}` : "",
+              attempt > 1 ? `Validation errors: ${JSON.stringify(validation.errors)}` : "",
+            ].filter(Boolean).join("\n"),
+          },
+        ],
+      });
+      model = response.model;
+      usage = response.usage;
+      try {
+        const parsed = JSON.parse(response.text);
+        candidate = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch {
+        candidate = {};
+      }
+      validation = validateConnectorReadiness({
+        effectiveInputSchema: outputContract.schema,
+        semanticAssertions,
+      }, candidate);
+      if (validation.valid && !containsUnresolvedTemplate(candidate)) {
+        return {
+          text: JSON.stringify(candidate, null, 2),
+          structuredOutput: candidate,
+          data: {
+            model,
+            mode: "structured_json",
+            attempts: attempt,
+            validation,
+            toolRefs: input.assignedTools.map((tool) => tool.ref),
+            usage,
+          },
+        };
+      }
+    }
+    throw new Error(`Structured output failed validation: ${validation.errors.map((error) => `${error.path} ${error.message}`).join("; ")}`);
+  }
+
   const llmResult = await completeText({ system, user, maxTokens: 1800 });
-  const text = input.agent.renderTarget === "canvas.email" || input.agent.renderTarget === "canvas.preview"
-    ? unwrapEmailMarkdownEnvelope(llmResult.text)
-    : llmResult.text;
+  let text = llmResult.text;
+  let fixer: { model: string; usage: unknown } | null = null;
+  if (!isInputValidationAgent(input.agent) && asksForOperatorContent(text)) {
+    const repaired = await repairInternalInputRequest({ text, user });
+    if (repaired.text) {
+      text = repaired.text;
+      fixer = { model: repaired.model, usage: repaired.usage };
+    }
+  }
   return {
     text,
     data: {
@@ -192,6 +305,7 @@ export async function runLoopAgent(input: RunLoopAgentInput): Promise<RunLoopAge
       usage: llmResult.usage,
       llmInput: { system, user },
       llmOutput: text,
+      ...(fixer ? { fixerApplied: true, fixer } : {}),
     },
     draft,
   };

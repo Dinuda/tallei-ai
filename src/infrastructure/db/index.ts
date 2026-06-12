@@ -1014,6 +1014,47 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS learned_tool_specs (
+        tool_ref TEXT PRIMARY KEY,
+        toolkit TEXT NOT NULL,
+        action_slug TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        input_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
+        output_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
+        contract_json JSONB NOT NULL,
+        readiness_contract JSONB,
+        contract_source_hash TEXT,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        first_discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_learned_tool_specs_usage
+        ON learned_tool_specs(usage_count DESC, last_discovered_at DESC);
+
+      CREATE TABLE IF NOT EXISTS learned_tool_use_cases (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        fingerprint TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        category TEXT NOT NULL CHECK (category IN ('research', 'communication', 'automation', 'data')),
+        required_tools TEXT[] NOT NULL DEFAULT '{}',
+        handoff_patterns JSONB NOT NULL DEFAULT '[]'::jsonb,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        first_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, fingerprint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_learned_tool_use_cases_scope
+        ON learned_tool_use_cases(tenant_id, usage_count DESC, last_used_at DESC);
+      ALTER TABLE learned_tool_specs ADD COLUMN IF NOT EXISTS readiness_contract JSONB;
+      ALTER TABLE learned_tool_specs ADD COLUMN IF NOT EXISTS contract_source_hash TEXT;
+      ALTER TABLE learned_tool_use_cases ADD COLUMN IF NOT EXISTS handoff_patterns JSONB NOT NULL DEFAULT '[]'::jsonb;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS workflow_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1229,6 +1270,9 @@ export async function initDb() {
         ON loop_specs(tenant_id, user_id, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_loop_specs_scope_status
         ON loop_specs(tenant_id, user_id, status, updated_at DESC);
+
+      ALTER TABLE loop_specs
+        ADD COLUMN IF NOT EXISTS intent_context_json JSONB;
 
       CREATE TABLE IF NOT EXISTS loop_engine_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

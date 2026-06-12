@@ -18,7 +18,6 @@ export function gateStatusImperative(mode: string): string {
   if (mode === "memory_confirmation") return "Select which memories the next agent may use";
   if (mode === "source_confirmation") return "Select sources, add custom URLs, then approve or revise";
   if (mode === "draft_review") return "Review the draft, then save & approve or request changes";
-  if (mode === "recipient_upload") return "Add recipients for this send, then continue";
   if (mode === "pre_send") return "Review the final draft, then approve send";
   return "Review and decide how to continue";
 }

@@ -59,7 +59,7 @@ registerToolHandler("internal.web_search", async (ctx: ToolHandlerContext) => {
 async function runConnectedAppSearch(ctx: ToolHandlerContext) {
   const entry = getLoopTool(ctx.assignment.ref);
   const dynamicToolkit = ctx.assignment.ref.match(/^composio\.([a-z0-9_-]+)\.search$/i)?.[1];
-  const toolkit = entry?.composioToolkit ?? entry?.toolkit ?? dynamicToolkit;
+  const toolkit = entry?.toolkit ?? dynamicToolkit;
   if (!toolkit) throw new Error(`Tool ${ctx.assignment.ref} is not mapped to a Composio toolkit`);
   const configuredQuery = typeof ctx.assignment.config?.query === "string"
     ? ctx.assignment.config.query.trim()
@@ -85,17 +85,6 @@ async function runConnectedAppSearch(ctx: ToolHandlerContext) {
     },
     shortCircuit: true,
   };
-}
-
-for (const ref of [
-  "composio.gmail.search",
-  "composio.slack.search",
-  "composio.googlecalendar.search",
-  "composio.github.search",
-  "composio.notion.search",
-  "composio.linear.search",
-]) {
-  registerToolHandler(ref, runConnectedAppSearch);
 }
 
 registerToolHandler("composio.*.search", runConnectedAppSearch);

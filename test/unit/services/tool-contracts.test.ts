@@ -16,7 +16,7 @@ test("internal tools expose stable contracts and render recommendations", () => 
   assert.equal(contract.renderRecommendations.some((rec) => rec.target === "canvas.email"), true);
 });
 
-test("Composio send action builds reviewed generic external-effect contract", () => {
+test("Composio action contracts preserve SDK schemas and declared risk without use-case overrides", () => {
   const contract = buildComposioActionContract({
     toolkit: "resend",
     actionSlug: "RESEND_SEND_EMAIL",
@@ -24,13 +24,14 @@ test("Composio send action builds reviewed generic external-effect contract", ()
     description: "Send an email using Resend.",
     risk: "send",
     inputSchema: { type: "object" },
+    outputSchema: { type: "object", properties: { id: { type: "string" } } },
   });
   assert.equal(contract.toolRef, "composio.resend.action.resend_send_email");
   assert.equal(contract.effect, "write_external");
   assert.equal(contract.approval.required, true);
-  assert.equal(contract.source, "reviewed_override");
-  assert.equal(contract.resources.includes("email"), true);
-  assert.equal(contract.renderRecommendations.some((rec) => rec.target === "canvas.email"), true);
+  assert.equal(contract.source, "composio_sdk");
+  assert.deepEqual(contract.resources, ["resend"]);
+  assert.deepEqual(contract.renderRecommendations, []);
 });
 
 test("ambiguous Composio actions remain approval-gated generic write tools", () => {
@@ -41,13 +42,23 @@ test("ambiguous Composio actions remain approval-gated generic write tools", () 
     description: "Perform an operation.",
     risk: "write",
     inputSchema: { type: "object" },
+    outputSchema: { type: "object", properties: { ok: { type: "boolean" } } },
   });
   assert.equal(contract.effect, "write_external");
   assert.equal(contract.approval.required, true);
   assert.equal(contract.source, "composio_sdk");
 });
 
-test("render compatibility is advisory and schema/resource based", () => {
+test("Composio action contracts require exact input and output schemas", () => {
+  assert.throws(() => buildComposioActionContract({
+    toolkit: "example",
+    actionSlug: "EXAMPLE_DO_THING",
+    risk: "write",
+    inputSchema: { type: "object" },
+  }), /without exact input and output schemas/);
+});
+
+test("dynamic connector contracts do not infer render behavior from names or descriptions", () => {
   const contract = buildComposioActionContract({
     toolkit: "docs",
     actionSlug: "DOCS_CREATE_PAGE",
@@ -55,8 +66,9 @@ test("render compatibility is advisory and schema/resource based", () => {
     description: "Create a document page.",
     risk: "write",
     inputSchema: { type: "object" },
+    outputSchema: { type: "object", properties: { pageId: { type: "string" } } },
   });
-  assert.equal(isRenderTargetCompatible(contract, "canvas.preview"), true);
+  assert.equal(isRenderTargetCompatible(contract, "canvas.preview"), false);
 
   const opaque = buildComposioActionContract({
     toolkit: "example",

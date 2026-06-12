@@ -1,5 +1,5 @@
 /**
- * architect.ts — Preset-free loop design via LLM architect + enforcing critic.
+ * Model-owned planning with contract-only deterministic compilation.
  */
 
 import { z } from "zod";
@@ -7,39 +7,37 @@ import { z } from "zod";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { listPreferences } from "../memory.js";
 import { buildLoopDefinitionFromCeoDesign } from "../loop-executor/creator.js";
-import { normalizeDesignCron } from "../loop-executor/cron.js";
-import { getEffectiveLoopConstraints, listAvailableLoopToolsForAuth, validateAgentRoster } from "../loop-executor/tool-catalog.js";
+import { getEffectiveLoopConstraints, validateAgentRoster } from "../loop-executor/tool-catalog.js";
 import {
   LOOP_ENGINE_VERSION,
+  loopAgentGraphSchema,
   loopStageApprovalChannelInputSchema,
   type LoopDefinition,
   type LoopStageApprovalChannel,
 } from "../loop-executor/types.js";
 import { loopBuilderOpenAiChat, loopBuilderOpenAiModel } from "../loop-builder/openai-chat.js";
 import {
-  ENGINE_MAX_CRITIC_RETRIES,
-  architectOutputToAgentGraph,
-  assertDeliveryRouting,
-  deliveryTypeFromRouting,
-  loopArchitectOutputSchema,
-  type NoSlopSpecSnapshot,
   type LoopArchitectOutput,
+  type NoSlopSpecSnapshot,
   type WorkflowCriticResult,
 } from "./contracts.js";
-import { critiqueLoopDesign } from "./critic.js";
-import { normalizeArchitectOutput } from "./normalize-architect.js";
+import { normalizeContractSchema } from "./data-contract.js";
+import {
+  compileLoopPlanningIR,
+  loopPlanningIRJsonSchema,
+  loopPlanningIRSchema,
+  type LoopPlanningIR,
+  type PlanningCompilationIssue,
+} from "./planning-ir.js";
 import { formatMemoriesForArchitect, recallForDesigner } from "./recall.js";
+import { formatWorkflowUserProfile, loadWorkflowUserProfile } from "./workflow-user-profile.js";
 import {
-  formatWorkflowUserProfile,
-  loadWorkflowUserProfile,
-} from "./workflow-user-profile.js";
-import { buildToolSpecRegistry, filterToolSpecRegistryForSpec, renderOutcomesForArchitect, renderToolsForArchitect, type ToolSpecRegistry } from "../tool-spec/index.js";
-import { connectorActionToolRef } from "../tool-spec/tool-contracts.js";
-import { repairArchitectDesignForSpecWithInputs } from "./repair-architect.js";
-import {
-  canonicalizeInputRequirementsList,
-  extractInputRequirementContext,
-} from "./input-surfaces.js";
+  buildToolSpecRegistry,
+  discoverToolsForQueries,
+  mergeRequiredToolContracts,
+} from "../tool-spec/index.js";
+import type { ToolContract } from "../tool-spec/types.js";
+import { estimateLoopBuilderCostUsd, reportLoopBuilderProgress } from "../loop-builder/progress.js";
 
 export type DesignerTestOverrides = {
   chat?: typeof loopBuilderOpenAiChat;
@@ -68,294 +66,597 @@ export type DesignLoopInput = {
   priorProposal?: {
     title: string;
     summary: string;
-    definition: { agentGraph?: { children: Array<{ id: string; name: string; tools: Array<{ ref: string }> }> } };
+    definition: { builderMeta?: { planningIR?: unknown } };
     rationale: string[];
   };
   testOverrides?: DesignerTestOverrides;
 };
 
-async function formatToolCatalog(auth: AuthContext, noSlopSpec?: NoSlopSpecSnapshot): Promise<string> {
-  const baseTools = await listAvailableLoopToolsForAuth(auth);
-  const writeTools = (noSlopSpec?.specJson.connectorPolicy.allowedWriteActions ?? []).map((action) => ({
-    ref: connectorActionToolRef(action),
-    description: `${action.description ?? action.actionSlug} (approved ${action.risk} connector action; must use pre_send gate)`,
-    riskLevel: action.risk === "write" ? "medium" : "high",
+const toolSearchPlanSchema = z.object({
+  queries: z.array(z.string().min(1)).max(4).default([]),
+  reasoning: z.string().min(1),
+});
+
+const DEFAULT_MAX_PLANNING_CORRECTIONS = 2;
+const DEFAULT_PLANNING_ATTEMPT_TIMEOUT_MS = 90_000;
+const DEFAULT_PLANNING_MAX_COMPLETION_TOKENS = 8_000;
+
+export type PlanningAttemptResult = {
+  attempt: number;
+  kind: "initial" | "correction";
+  durationMs: number;
+  issueFingerprint: string;
+  issueCountBefore: number;
+  issueCountAfter: number;
+  resolvedIssues: PlanningCompilationIssue[];
+  introducedIssues: PlanningCompilationIssue[];
+  repeatedIssues: PlanningCompilationIssue[];
+  promptTokens: number;
+  completionTokens: number;
+  estimatedCostUsd: number;
+  stopReason?: "compiled" | "structural_failure" | "attempt_failed" | "repeated_issues" | "worsened" | "correction_limit";
+};
+
+function readBoundedInteger(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
+export function planningProgressConfig() {
+  return {
+    maxCorrectionAttempts: readBoundedInteger(
+      "TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS",
+      DEFAULT_MAX_PLANNING_CORRECTIONS,
+      0,
+      2,
+    ),
+    attemptTimeoutMs: readBoundedInteger(
+      "TALLEI_LOOP_BUILDER__PLANNING_ATTEMPT_TIMEOUT_MS",
+      DEFAULT_PLANNING_ATTEMPT_TIMEOUT_MS,
+      5_000,
+      180_000,
+    ),
+    maxCompletionTokens: readBoundedInteger(
+      "TALLEI_LOOP_BUILDER__PLANNING_MAX_COMPLETION_TOKENS",
+      DEFAULT_PLANNING_MAX_COMPLETION_TOKENS,
+      2_000,
+      12_000,
+    ),
+  };
+}
+
+function issueIdentity(issue: PlanningCompilationIssue): string {
+  return `${issue.code}:${issue.path ?? ""}`;
+}
+
+export function planningIssueFingerprint(issues: PlanningCompilationIssue[]): string {
+  return [...new Set(issues.map(issueIdentity))].sort().join("|");
+}
+
+function comparePlanningIssues(
+  previous: PlanningCompilationIssue[],
+  current: PlanningCompilationIssue[],
+): Pick<PlanningAttemptResult, "resolvedIssues" | "introducedIssues" | "repeatedIssues"> {
+  const previousIds = new Set(previous.map(issueIdentity));
+  const currentIds = new Set(current.map(issueIdentity));
+  return {
+    resolvedIssues: previous.filter((issue) => !currentIds.has(issueIdentity(issue))),
+    introducedIssues: current.filter((issue) => !previousIds.has(issueIdentity(issue))),
+    repeatedIssues: current.filter((issue) => previousIds.has(issueIdentity(issue))),
+  };
+}
+
+export function planningAttemptStopReason(input: {
+  previousIssues: PlanningCompilationIssue[];
+  currentIssues: PlanningCompilationIssue[];
+  correction: boolean;
+  lastAttempt: boolean;
+}): PlanningAttemptResult["stopReason"] | undefined {
+  if (input.currentIssues.length === 0) return "compiled";
+  if (
+    input.correction
+    && planningIssueFingerprint(input.previousIssues) === planningIssueFingerprint(input.currentIssues)
+  ) {
+    return "repeated_issues";
+  }
+  const comparison = comparePlanningIssues(input.previousIssues, input.currentIssues);
+  if (
+    input.correction
+    && input.currentIssues.length > input.previousIssues.length
+    && comparison.resolvedIssues.length === 0
+  ) {
+    return "worsened";
+  }
+  return input.lastAttempt ? "correction_limit" : undefined;
+}
+
+export function shouldRetryPlanningTransportFailure(input: {
+  structuralFailure: boolean;
+  attempt: number;
+  maxPlanningAttempts: number;
+  transportFailures: number;
+}): boolean {
+  return !input.structuralFailure
+    && input.attempt < input.maxPlanningAttempts - 1
+    && input.transportFailures < 1;
+}
+
+export function isRecoverablePlannerWireFailure(error: unknown): boolean {
+  return error instanceof InvalidPlanningIRProposalError
+    && error.issues.length > 0
+    && error.issues.every((issue) =>
+      issue.code === "invalid_encoded_json" || issue.code === "invalid_encoded_json_object");
+}
+
+class InvalidPlanningIRProposalError extends Error {
+  constructor(
+    message: string,
+    readonly proposal?: Record<string, unknown>,
+    readonly issues: PlanningCompilationIssue[] = [],
+  ) {
+    super(message);
+    this.name = "InvalidPlanningIRProposalError";
+  }
+}
+
+function formatPlanningValidationIssues(error: z.ZodError): PlanningCompilationIssue[] {
+  return error.issues.map((issue) => ({
+    code: "invalid_planning_ir",
+    path: issue.path.length > 0 ? issue.path.join(".") : undefined,
+    message: `${issue.path.length > 0 ? `${issue.path.join(".")}: ` : ""}${issue.message}`,
   }));
-  return [...baseTools, ...writeTools]
-    .map((tool) => `- ${tool.ref}: ${tool.description} (risk: ${tool.riskLevel})`)
-    .join("\n");
 }
 
-function formatPreferences(preferences: Array<{ id: string; text: string; category?: string | null }>): string {
-  if (preferences.length === 0) return "No saved preferences.";
-  return preferences.map((p, i) => `${i + 1}. [${p.id}] ${p.text}`).join("\n");
+function parseObject(text: string): Record<string, unknown> {
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Planner returned a non-object JSON value.");
+  }
+  return parsed as Record<string, unknown>;
 }
 
-function buildArchitectSystemPrompt(outcomesMarkdown: string): string {
-  const outputExample = JSON.stringify({
-    title: "Weekly AI newsletter",
-    summary: "Research this week's AI news, draft a cited newsletter, and pause for review.",
-    strategyText: "Web research, optional memory context, synthesize draft — no operator paste at run_start.",
-    inputsRequired: [],
-    inputRequirements: [],
-    delivery: { provider: "none", target: "none" },
-    schedule: { cron: "0 9 * * 1", timezone: "UTC" },
-    agents: [
-      {
-        id: "web_research",
-        name: "Research Agent",
-        goal: "Find recent news articles on the requested topic with source URLs and snippets",
-        task: "Search the web for the most relevant and recent articles. Return raw results with URLs, titles, and snippets.",
-        tool: "internal.web_search",
-        artifactRole: "source_evidence",
-        inputContract: { description: "Search query derived from the loop goal", schema: { query: "string", recency_days: "number" } },
-        outputContract: { description: "Raw search results from Exa API", schema: { text: "string", model: "string", provider: "string", sources: [{ title: "string", url: "string", snippet: "string" }] } },
-        doneCriteria: ["At least 5 sources returned", "Each source has title, url, and snippet", "Sources are from credible news sources"],
-        gate: { type: "source_confirmation", question: "Select which sources to include. Add custom URLs if needed." },
-        operatorSurface: "review.sources",
-      },
-      {
-        id: "memory_context",
-        name: "Memory Agent",
-        goal: "Recall relevant internal memories for the newsletter topic",
-        task: "Search memories for product updates, decisions, and context related to the approved web sources.",
-        tool: "internal.memory_search",
-        artifactRole: "source_evidence",
-        inputContract: { description: "Topic from approved web sources", schema: { query: "string" } },
-        outputContract: { description: "Validated memories with excerpts", schema: { sources: [{ id: "string", text: "string" }] } },
-        doneCriteria: ["Returns memory excerpts with ids", "Query is focused on the newsletter topic"],
-        gate: { type: "memory_confirmation", question: "Select which memories the writer may use." },
-        operatorSurface: "review.memories",
-      },
-      {
-        id: "newsletter_writer",
-        name: "Writer Agent",
-        goal: "Produce one final-use newsletter email for human review",
-        task: "Synthesize research sources into a newsletter with Subject, Preview, and body sections. Cite sources inline and omit all workflow scaffolding, placeholder notes, and send-plan text.",
-        tool: "internal.llm_only",
-        artifactRole: "draft_body",
-        inputContract: { description: "Research handoff from prior agent", schema: { handoff: { web_research: { sources: "array" } } } },
-        outputContract: { description: "One final-use email in canonical email_markdown format", schema: { format: "email_markdown", grammar: "Subject line, optional Preview line, blank line, Markdown body" } },
-        doneCriteria: ["Includes exactly one Subject line", "Includes at most one Preview line", "Includes one complete Markdown email body", "Contains no delivery, sending, boilerplate, or placeholder claims"],
-        gate: { type: "draft_review", question: "Review this newsletter email. Approve to continue, or edit to improve it." },
-        renderTarget: "canvas.email",
-        operatorSurface: "review.email",
-      },
-    ],
-    rationale: ["Minimal roster tailored to producing a reviewed artifact"],
-    suggestedChannels: ["primary"],
-  }, null, 2);
+function normalizePlannerContract(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const row = { ...(value as Record<string, unknown>) };
+  if (row.schema && typeof row.schema === "object" && !Array.isArray(row.schema)) {
+    row.schema = normalizeContractSchema(row.schema as Record<string, unknown>);
+  }
+  return row;
+}
 
+const JSON_ENCODED_PLANNER_FIELDS = new Set([
+  "schema",
+  "valueSchema",
+  "stableValue",
+  "stableConfig",
+  "toolConfig",
+]);
+const JSON_OBJECT_PLANNER_FIELDS = new Set(["schema", "valueSchema", "stableConfig", "toolConfig"]);
+const EMPTY_ARRAY_PLANNER_FIELDS = new Set([
+  "decisions",
+  "requiredValues",
+  "semanticAgents",
+  "selectedActions",
+  "unresolvedIssues",
+  "rationale",
+  "inputBindings",
+  "semanticAssertions",
+  "fieldPolicies",
+  "bindings",
+]);
+const OPTIONAL_PLANNER_FIELDS = new Set([
+  "nodeId",
+  "key",
+  "stableValue",
+  "toolConfig",
+  "reviewGate",
+  "relatedRef",
+  "mediaType",
+  "visibility",
+  "renderer",
+]);
+
+export function decodePlannerWireValue(
+  value: unknown,
+  field?: string,
+  path = "",
+  issues: PlanningCompilationIssue[] = [],
+): { value: unknown; issues: PlanningCompilationIssue[] } {
+  if (field && JSON_ENCODED_PLANNER_FIELDS.has(field) && typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (
+        JSON_OBJECT_PLANNER_FIELDS.has(field)
+        && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      ) {
+        issues.push({
+          code: "invalid_encoded_json_object",
+          path,
+          message: `${path}: must contain a JSON-encoded object.`,
+        });
+      }
+      return { value: parsed, issues };
+    } catch (error) {
+      issues.push({
+        code: "invalid_encoded_json",
+        path,
+        message: `${path}: contains invalid JSON text (${error instanceof Error ? error.message : String(error)}).`,
+      });
+      return { value, issues };
+    }
+  }
+  if (Array.isArray(value)) {
+    return {
+      value: value.map((entry, index) => decodePlannerWireValue(entry, undefined, `${path}.${index}`, issues).value),
+      issues,
+    };
+  }
+  if (!value || typeof value !== "object") return { value, issues };
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (entry === null && OPTIONAL_PLANNER_FIELDS.has(key)) continue;
+    if (entry === null && EMPTY_ARRAY_PLANNER_FIELDS.has(key)) {
+      result[key] = [];
+      continue;
+    }
+    if (entry === null && (key === "schema" || key === "stableConfig")) {
+      result[key] = {};
+      continue;
+    }
+    if (entry === null && key === "path") {
+      result[key] = "/";
+      continue;
+    }
+    if (entry === null && key === "required") {
+      result[key] = true;
+      continue;
+    }
+    if (entry === null && key === "representation") {
+      result[key] = "text";
+      continue;
+    }
+    if (entry === null && key === "suggestedChannels") {
+      result[key] = ["primary"];
+      continue;
+    }
+    result[key] = decodePlannerWireValue(entry, key, path ? `${path}.${key}` : key, issues).value;
+  }
+  return { value: result, issues };
+}
+
+function normalizePlanningIR(value: unknown): unknown {
+  const decoded = decodePlannerWireValue(value);
+  if (decoded.issues.length > 0) {
+    throw new InvalidPlanningIRProposalError(
+      decoded.issues.map((issue) => issue.message).join("; "),
+      value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined,
+      decoded.issues,
+    );
+  }
+  const normalizedWire = decoded.value;
+  if (!normalizedWire || typeof normalizedWire !== "object" || Array.isArray(normalizedWire)) return normalizedWire;
+  const root = { ...(normalizedWire as Record<string, unknown>) };
+  if (Array.isArray(root.semanticAgents)) {
+    root.semanticAgents = root.semanticAgents.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+      const agent = { ...(raw as Record<string, unknown>) };
+      agent.outputContract = normalizePlannerContract(agent.outputContract);
+      if (agent.inputContract && typeof agent.inputContract === "object" && !Array.isArray(agent.inputContract)) {
+        const contract = { ...(agent.inputContract as Record<string, unknown>) };
+        if (contract.schema && typeof contract.schema === "object" && !Array.isArray(contract.schema)) {
+          contract.schema = normalizeContractSchema(contract.schema as Record<string, unknown>);
+        }
+        agent.inputContract = contract;
+      }
+      return agent;
+    });
+  }
+  return root;
+}
+
+function plannerContracts(contracts: ToolContract[]) {
+  return contracts.map((contract) => ({
+    toolRef: contract.toolRef,
+    name: contract.name,
+    description: contract.description,
+    inputSchema: contract.inputSchema,
+    outputSchema: contract.outputSchema,
+    declaredRisk: contract.constraints.risk ?? null,
+    toolkitVersion: contract.constraints.toolkitVersion ?? null,
+    connected: contract.constraints.connected ?? null,
+  }));
+}
+
+export function contractsForPlannerCorrection(input: {
+  previousIR: LoopPlanningIR;
+  internalContracts: ToolContract[];
+  connectorContracts: ToolContract[];
+}): ToolContract[] {
+  const referencedConnectorRefs = new Set(input.previousIR.selectedActions.map((action) => action.toolRef.toLowerCase()));
   return [
-    "You are a loop architect for Tallei. Generate executable recurring agent loops from reviewed human specs and API/tool contracts.",
-    "Use role names people understand immediately: child roles should be named as Agents, and the parent coordinator should be an Orchestrator.",
-    "When a no-slop spec is provided, it is the behavioral source of truth. Satisfy it directly and do not override it with guesses from the raw prompt.",
-    "Do NOT mention template IDs or preset names.",
-    "Every child agent must have exactly ONE tool, exactly ONE task, a clear goal (success condition), inputContract, outputContract, and 1-8 doneCriteria.",
-    "=== ARTIFACT ROLES, OUTPUT FORMAT & APPROVAL GATES ===",
-    "For EVERY agent, decide:",
-    "  1. artifactRole — how this agent contributes to the final loop outcome:",
-    '     "source_evidence" — raw research/memory (handoff only, not the final artifact)',
-    '     "draft_body" — produces a draft artifact',
-    '     "final_preview" — produces a final preview artifact',
-    '     "delivery" — executes an approved external-effect tool when the reviewed workflow calls for one',
-    "  2. outputContract — exact shape the agent produces (match tool outputSchema for short-circuit tools)",
-    "  3. gate — human approval type when the agent pauses:",
-    '     missing_input — operator must PASTE text (sprint notes, briefs). Use ONLY on a dedicated Input Validator agent for run_start inputRequirements.',
-    '     memory_confirmation — operator SELECTS which memories to include',
-    '     source_confirmation — operator SELECTS web search sources and may ADD custom URLs/titles/snippets',
-    '     draft_review — operator REVIEWS a draft in the canvas; can approve as-is or edit to improve',
-    '     pre_send — operator CONFIRMS an external side effect when the selected tool contract requires approval',
-    "  4. renderTarget — optional specialized renderer/editor for the output (NOT a tool ref):",
-    '     "canvas.email" — editable email workspace when the operator should edit the email visually',
-    '     "canvas.preview" — read-only rendered email preview when visual review is useful',
-    "  5. operatorSurface — the semantic editor used during review:",
-    '     "review.sources" — editable source checklist; use for source arrays, never a raw text editor',
-    '     "review.memories" — editable memory checklist; use for memory arrays',
-    '     "review.email" — email canvas editor',
-    '     "review.preview" — read-only rendered final preview',
-    '     "review.draft" — prose/markdown editor for unstructured writing',
-    '     "confirm.send" — final send confirmation',
-    "",
-    "SINGLE-RESPONSIBILITY RULES:",
-    "  - One agent = one tool = one task. Do not combine distinct duties (research + write, summarize + draft) in one agent.",
-    "  - If an agent needs to do multiple things, split it into multiple agents and delegate through the roster.",
-    "  - Example: 'Research Agent' searches, 'Summarization Agent' synthesizes, 'Writer Agent' drafts — never one agent doing all three.",
-    "  - Example: 'Pre-send Specialist Agent' only collects recipients and generates preview; 'Delivery Agent' only sends. Never combine.",
-    "",
-    "GATE RULES BY TOOL TYPE:",
-    "  - Choose gates only when human judgment/input is needed for that agent's output.",
-    "  - NEVER put pre_send on internal.llm_only, internal.web_search, internal.memory_search, or composio.<toolkit>.search.",
-    "  - NEVER create a separate Pre-send Specialist Agent with internal.llm_only. If text review is needed, use draft_review; if external execution is needed, put pre_send on the exact approved external-effect action agent.",
-    "  - Search agents (internal.web_search, internal.memory_search) may run without a gate, or use source_confirmation / memory_confirmation when the operator should curate results. NEVER use missing_input on search agents.",
-    '  - Match structured outputs to semantic editors: source arrays → review.sources, memory arrays → review.memories, editable email_markdown → canvas.email + review.email, read-only final email → canvas.preview + review.preview, unstructured prose → review.draft.',
-    "  - Never expose structured source or memory output as a raw textarea when a checklist surface can edit the underlying items.",
-    "  - Memory agents may run without a gate, or use memory_confirmation when the operator should curate memories.",
-    "  - When inputRequirements declare run_start content inputs, add an Input Validator agent as the FIRST roster step with internal.llm_only and missing_input gate. Its sole job is collecting/confirming operator inputs — not research or drafting.",
-    "  - internal.llm_only writing email/newsletter/digest may use plain structured output, markdown, canvas.email, or canvas.preview depending on the workflow.",
-    "  - For email/newsletter output, the body must be final-use copy only: no boilerplate intro, no send-plan notes, no placeholder guidance, no signature scaffolding, and no commentary about the draft.",
-    "  - External-effect tools must use the approval gate declared by their tool contract.",
-    "  - Render recommendations in tool contracts are advisory. Choose renderTarget from workflow output/review needs, or omit it.",
-    "",
-    "inputsRequired / run_start inputRequirements are ONLY for operator-pasted CONTENT when the spec explicitly requires it (internal team_email sync → sprint_notes).",
-    "inputsRequired MUST be a string array of keys only (e.g. [\"sprint_notes\"]). Put structured objects in inputRequirements, never inside inputsRequired.",
-    "Research/newsletter/subscriber_list workflows do NOT use sprint_notes or run_start paste — content comes from web_search and memory_search.",
-    "inputRequirements declares structured runtime checkpoints: key, surface, when (run_start | before_send). Copy spec inputRequirements exactly; do not add run_start keys the spec omits.",
-    "before_send recipient upload: { key: recipients, surface: input.contacts_csv }. Send approval: { key: confirm_send, surface: confirm.send }.",
-    "Do NOT invent keys like pre_send_confirm, sync_to_team, or sprint_notes for newsletters — use confirm_send at before_send only.",
-    "When the spec requires run_start inputs (team sync only), prepend an Input Validator agent — do NOT attach missing_input to Research or Writer agents.",
-    "Apply the mandatory user profile for tone, writing style, sign-off, and identity in agent goals and output contracts.",
-    "NEVER put delivery configuration in inputsRequired (subscriber_list_id, audience_id, recipient_email, mailing_list).",
-    "External action configuration comes from connectorPolicy and tool assignment config, not invented inputs.",
-    "",
-    'Default to delivery: { "provider": "none", "target": "none" } unless the approved no-slop spec includes connectorPolicy.allowedWriteActions.',
-    "If the approved spec allows an external effect, delivery.provider must be the exact approved connector action tool ref and the agent must use the contract approval gate.",
-    "Choose external tools by matching skillTags, resources, effect, schemas, approval, and renderRecommendations from the tool contract.",
-    "Keep rosters minimal (2-6 agents). End with the artifact type and gate pattern that best fits the approved spec unless it explicitly authorizes a gated connector send action.",
-    "Copy tool refs exactly from the catalog.",
-    "For internal.memory_search configs, write a focused query for the requested output. Do not ask for broad memory categories unless the user explicitly needs them.",
-    "",
-    "=== TOOL OUTPUT CONTRACTS & AGENT HANDOFF ===",
-    "CRITICAL: When designing agents, you MUST use the exact tool output schemas provided in the TOOL REFERENCE section.",
-    "For each agent, generate inputContract and outputContract based on the tool's actual output schema:",
-    "  - inputContract.schema must match what the agent expects to receive (from prior agent handoff or tool output)",
-    "  - outputContract.schema must match the tool's outputSchema (for short-circuit tools) or the LLM-generated output (for llm_only tools)",
-    "",
-    "For SHORT-CIRCUIT tools (executionMode short_circuit):",
-    "  - The agent output IS the raw tool result (no LLM synthesis)",
-    "  - doneCriteria must validate the RAW tool output format, not expect synthesized content",
-    "  - Example: For web_search, doneCriteria should check 'sources array has N items', 'each source has title, url, snippet' — NOT '4-6 ranked stories with summaries'",
-    "  - The next agent in the flow receives this raw output via handoff and must synthesize it",
-    "",
-    "For LLM_SYNTHESIS tools (executionMode llm_assisted):",
-    "  - The agent receives prior agent outputs via handoff and synthesizes them",
-    "  - inputContract.schema should describe what the agent expects from upstream agents",
-    "  - outputContract.schema should describe the synthesized output (e.g., newsletter draft, summary)",
-    "  - doneCriteria should validate the synthesized content quality",
-    '  - Any agent with renderTarget "canvas.email" MUST use outputContract.schema.format = "email_markdown". Its only representation is: Subject line, optional Preview line, blank line, Markdown body.',
-    '  - Email canvas agents MUST declare outputContract.schema.format = "email_markdown"; format restrictions belong in the output contract, not magic doneCriteria wording.',
-    "",
-    "AGENT HANDOFF FORMAT:",
-    "  - Each agent's output is passed to downstream agents as `handoff.<agent_id>`",
-    "  - Downstream agents receive the full output object (text, data, sources, etc.)",
-    "  - Design inputContract/outputContract to explicitly document what is passed between agents",
-    "  - Example: If Research Agent uses web_search, Draft Agent's inputContract should reference `handoff.web_research.sources` array",
-    "",
-    "=== AVAILABLE CAPABILITIES ===",
-    outcomesMarkdown,
-    "",
-    "=== SCHEDULE ===",
-    "schedule.cron MUST be a standard 5-field cron: minute hour day-of-month month day-of-week.",
-    "Examples: daily -> 0 9 * * * | weekly Monday -> 0 9 * * 1 | weekly Friday -> 0 9 * * 5 | monthly -> 0 9 1 * *",
-    "Never use 6 fields, seconds, or day names like MON. Use numeric day-of-week (0=Sunday, 1=Monday).",
-    "If cadence is unclear, default to 0 9 * * 1 (Monday 09:00 UTC).",
-    "",
-    "Return JSON matching this shape:",
-    outputExample,
-  ].join("\n");
+    ...input.internalContracts,
+    ...input.connectorContracts.filter((contract) => referencedConnectorRefs.has(contract.toolRef.toLowerCase())),
+  ];
 }
 
-function buildArchitectUserPrompt(input: {
+async function generateToolSearchPlan(input: {
   prompt: string;
-  feedback?: string;
-  memories: string;
-  userProfile?: string;
-  preferences: string;
-  priorProposal?: DesignLoopInput["priorProposal"];
-  criticFixes?: string[];
-  noSlopSpec?: NoSlopSpecSnapshot;
-  toolCatalog: string;
-  outcomesMarkdown: string;
-  toolsMarkdown: string;
-}): string {
-  const sections = [
-    `User intent:\n${input.prompt}`,
-    input.userProfile
-      ? `User profile (mandatory — tone, voice, writing style, identity, sign-off):\n${input.userProfile}`
-      : null,
-    input.noSlopSpec
-      ? [
-          "Approved no-slop spec (behavioral source of truth):",
-          input.noSlopSpec.bodyMarkdown,
-          "",
-          "Normalized no-slop spec JSON:",
-          JSON.stringify(input.noSlopSpec.specJson, null, 2),
-          "",
-          "Canonical inputRequirements (copy these keys/surfaces exactly — do not rename):",
-          JSON.stringify(
-            canonicalizeInputRequirementsList(
-              input.noSlopSpec.specJson.inputRequirements ?? [],
-              extractInputRequirementContext(input.noSlopSpec.specJson as unknown as Record<string, unknown>),
-            ),
-            null,
-            2,
-          ),
-        ].join("\n")
-      : null,
-    input.feedback ? `Feedback:\n${input.feedback}` : null,
-    `Prompt-specific recalled memories (with ids and scores):\n${input.memories}`,
-    `Preferences:\n${input.preferences}`,
-    `Tool catalog:\n${input.toolCatalog}`,
-    "",
-    "=== TOOL REFERENCE (for agent assignment) ===",
-    input.toolsMarkdown,
-    input.priorProposal
-      ? `Prior proposal (revise, do not copy blindly):\n${JSON.stringify(input.priorProposal, null, 2)}`
-      : null,
-    input.criticFixes?.length
-      ? `Required fixes from critic (address all):\n${input.criticFixes.map((f) => `- ${f}`).join("\n")}`
-      : null,
-  ].filter(Boolean);
-  return sections.join("\n\n");
-}
-
-async function callArchitectLlm(input: {
-  prompt: string;
-  feedback?: string;
-  memories: string;
-  userProfile?: string;
-  preferences: string;
-  priorProposal?: DesignLoopInput["priorProposal"];
-  criticFixes?: string[];
-  noSlopSpec?: NoSlopSpecSnapshot;
-  toolCatalog: string;
-  outcomesMarkdown: string;
-  toolsMarkdown: string;
-  chat?: typeof loopBuilderOpenAiChat;
-}): Promise<{ design: LoopArchitectOutput; model: string }> {
-  const chat = input.chat ?? loopBuilderOpenAiChat;
-  const response = await chat({
+  intentContext?: NoSlopSpecSnapshot["intentContext"];
+  chat: typeof loopBuilderOpenAiChat;
+}) {
+  const response = await input.chat({
     responseFormat: "json_object",
-    temperature: 0.3,
-    maxTokens: 4096,
-    reasoningEffort: "minimal",
+    temperature: 0,
+    maxTokens: 800,
+    reasoningEffort: "medium",
     messages: [
-      { role: "system", content: buildArchitectSystemPrompt(input.outcomesMarkdown) },
-      { role: "user", content: buildArchitectUserPrompt(input) },
+      {
+        role: "system",
+        content: [
+          "Identify whether exact external connector actions may be needed for this workflow.",
+          "Return JSON with queries and reasoning.",
+          "Queries are concise capability searches for a connector tool catalogue, not action slugs.",
+          "Return no queries when internal reasoning/search tools are sufficient.",
+          "Do not choose actions yet.",
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          request: input.prompt,
+          resolvedIntent: input.intentContext?.resolvedIntent ?? null,
+          output: { queries: ["string, maximum four"], reasoning: "string" },
+        }),
+      },
     ],
   });
-  
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(response.text);
-  } catch (parseError) {
-    throw new Error(`Failed to parse architect LLM response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}\n\nResponse text (first 500 chars):\n${response.text.slice(0, 500)}`);
-  }
-  
-  const parsed = loopArchitectOutputSchema.parse(parsedJson);
-  const design = repairArchitectDesignForSpecWithInputs(normalizeArchitectOutput({
-    ...parsed,
-    schedule: {
-      cron: normalizeDesignCron(parsed.schedule.cron, input.prompt),
-      timezone: parsed.schedule.timezone?.trim() || "UTC",
+  return { plan: toolSearchPlanSchema.parse(parseObject(response.text)), model: response.model };
+}
+
+function buildPlannerPrompt(input: {
+  prompt: string;
+  noSlopSpec?: NoSlopSpecSnapshot;
+  profile: string;
+  memories: string;
+  preferences: string[];
+  internalContracts: ToolContract[];
+  connectorContracts: ToolContract[];
+  priorPlanningIR?: LoopPlanningIR;
+}): string {
+  return JSON.stringify({
+    request: input.prompt,
+    reviewedSpec: input.noSlopSpec?.specJson ?? null,
+    resolvedIntent: input.noSlopSpec?.intentContext ?? null,
+    profile: input.profile,
+    recalledContext: input.memories,
+    preferences: input.preferences,
+    internalTools: plannerContracts(input.internalContracts),
+    discoveredConnectorActions: plannerContracts(input.connectorContracts),
+    priorPlanningIR: input.priorPlanningIR ?? null,
+    planningSemantics: {
+      resolvedRequiredValue: "The lifecycle and source are known. A runtime_input is resolved even though its actual value will only be supplied during a run.",
+      unresolvedRequiredValue: "The planner cannot identify a safe lifecycle or source. This blocks approval.",
+      derivable: "Content a semantic or connector node may generate, summarize, transform, or calculate.",
+      passthrough: "Opaque non-generative data that must retain an externally supplied identity, such as recipients, IDs, file handles, or credentials.",
+      connectorConnection: "Connector authorization is platform-managed runtime state. Never declare authorization, OAuth, access tokens, or connection state as requiredValues or action bindings.",
+      connectorAvailability: "A disconnected selected connector is still a valid plan. Runtime opens a connection checkpoint before executing it.",
+      runtimeInput: "Declare the runtime source and lifecycle as resolved; do not require the actual runtime value during planning.",
+      finalSemanticOutput: "A final operator-visible semantic artifact may be terminal. Any other semantic output must have an explicit consumer.",
+      internalToolUse: "Use an available exact internal tool directly when it performs the requested work. Do not require operator-provided substitutes for an available internal tool.",
     },
-  }, input.noSlopSpec), input.noSlopSpec, input.prompt);
-  assertDeliveryRouting(design.delivery);
-  return { design, model: response.model };
+    platformInputSurfaces: [
+      "input.text",
+      "input.markdown",
+      "input.contacts_csv",
+      "input.audience_id",
+      "input.file",
+      "review.draft",
+      "review.email",
+      "review.preview",
+      "review.sources",
+      "review.memories",
+      "confirm.send",
+    ],
+  });
+}
+
+function buildPlannerCorrectionPrompt(input: {
+  previousIR: LoopPlanningIR | Record<string, unknown>;
+  compilationIssues: PlanningCompilationIssue[];
+  contracts: ToolContract[];
+}): string {
+  return JSON.stringify({
+    previousPlanningIR: input.previousIR,
+    compilationIssues: input.compilationIssues,
+    referencedContracts: plannerContracts(input.contracts),
+  });
+}
+
+function planningSystemPrompt(): string {
+  return [
+    "You are the semantic workflow planner. Return only a LoopPlanningIR JSON object.",
+    "You own semantic decisions. Deterministic code will only validate and materialize exactly what you declare.",
+    "Use version v1. Design only meaningful semantic agents. Never create coordinators, formatters, input collectors, checkpoints, or connector-action agents inside semanticAgents.",
+    "Select connector actions only from discoveredConnectorActions and place them in selectedActions.",
+    "When discoveredConnectorActions is empty, do not invent a connector tool ref, runtime connector action, or delivery semantic agent.",
+    "A missing connector contract may be declared as an unresolved action issue, but semanticAgents must still use only exact internalTools.",
+    "For every selected action, inspect its exact input schema and declare every required field source with an explicit binding.",
+    "Never invent recipients, IDs, files, credentials, account values, or other passthrough values.",
+    "Declare such values in requiredValues with an explicit lifecycle and bind them through required_value.",
+    "Passthrough means opaque externally supplied identity data only. Generated research, stories, summaries, drafts, bodies, subjects, and other semantic content are derivable, not passthrough.",
+    "A runtime_input with a known operator_input source is status resolved even though the operator has not supplied its actual value yet.",
+    "Never model connector authorization, OAuth, credentials, access tokens, or connection state as a required value or action binding. The runtime handles connector connection checkpoints.",
+    "Disconnected connector actions may be selected and compiled normally.",
+    "Use available internal tools for their declared capabilities. Do not require operator content when an available internal tool can produce the source data.",
+    "For each action field, provide an explicit semantic annotation and evidence based on the exact contract.",
+    "Record prose-only cross-field requirements as explicit semanticAssertions with contract evidence; do not leave them implicit.",
+    "Unknown or low-confidence action risk must require approval.",
+    "Semantic agents must have one meaningful responsibility and each output must have a declared downstream consumer.",
+    "Use inputBindings to declare semantic agent dependencies. Do not rely on names or prose to imply handoffs.",
+    "Use canonical JSON Schema for all structured contracts.",
+    "Use unresolvedIssues rather than guessing when a decision, action, value source, or binding cannot be established.",
+    "A runtime input may remain without an actual value, but its lifecycle and source decision must be resolved.",
+    "For an approved reviewed spec, resolve safe operational omissions as explicit visible model-reasoning decisions and evidence. Do not silently default them.",
+    "Do not emit implementation-detail clarification questions here; intent clarification happens before planning.",
+  ].join(" ");
+}
+
+function correctionSystemPrompt(): string {
+  return [
+    "Return only the complete corrected LoopPlanningIR JSON object.",
+    "Fix every supplied compiler issue without changing unrelated semantic decisions.",
+    "Use only the supplied referenced contracts.",
+    "Every JSON-encoded field must contain syntactically valid JSON text. Keep schemas concise and close every object and array.",
+    "Every semanticAgents toolRef must exactly match a supplied internal contract.",
+    "Never represent a connector action, missing connector, delivery coordinator, or runtime-provided tool as a semantic agent.",
+    "Remove bindings whose target paths are absent from the receiving agent input contract, or explicitly shape that input contract when the binding is semantically required.",
+    "Do not invent sources, actions, bindings, identifiers, recipients, files, or credentials.",
+  ].join(" ");
+}
+
+async function callPlanner(input: {
+  prompt: string;
+  noSlopSpec?: NoSlopSpecSnapshot;
+  profile: string;
+  memories: string;
+  preferences: string[];
+  internalContracts: ToolContract[];
+  connectorContracts: ToolContract[];
+  previousIR?: LoopPlanningIR;
+  previousInvalidProposal?: Record<string, unknown>;
+  priorPlanningIR?: LoopPlanningIR;
+  compilationIssues?: PlanningCompilationIssue[];
+  chat: typeof loopBuilderOpenAiChat;
+  timeoutMs: number;
+  maxCompletionTokens: number;
+}): Promise<{
+  planningIR: LoopPlanningIR;
+  model: string;
+  durationMs: number;
+  promptTokens: number;
+  completionTokens: number;
+  estimatedCostUsd: number;
+}> {
+  const startedAt = Date.now();
+  const correction = Boolean((input.previousIR || input.previousInvalidProposal) && input.compilationIssues?.length);
+  const referencedContracts = input.previousIR
+    ? contractsForPlannerCorrection({
+        previousIR: input.previousIR,
+        internalContracts: input.internalContracts,
+        connectorContracts: input.connectorContracts,
+      })
+    : input.previousInvalidProposal
+      ? [...input.internalContracts, ...input.connectorContracts]
+      : [];
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+  let response: Awaited<ReturnType<typeof input.chat>>;
+  try {
+    response = await input.chat({
+      responseFormat: {
+        type: "json_schema",
+        name: "loop_planning_ir",
+        schema: loopPlanningIRJsonSchema,
+      },
+      temperature: 0.1,
+      maxTokens: input.maxCompletionTokens,
+      exactMaxTokens: true,
+      retryEmptyResponses: false,
+      reasoningEffort: "minimal",
+      signal: controller.signal,
+      messages: correction
+        ? [
+            { role: "system", content: correctionSystemPrompt() },
+            {
+              role: "user",
+              content: buildPlannerCorrectionPrompt({
+                previousIR: input.previousIR ?? input.previousInvalidProposal!,
+                compilationIssues: input.compilationIssues!,
+                contracts: referencedContracts,
+              }),
+            },
+          ]
+        : [
+            { role: "system", content: planningSystemPrompt() },
+            { role: "user", content: buildPlannerPrompt(input) },
+          ],
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Planner request exceeded the ${input.timeoutMs}ms attempt timeout.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+  let proposal: Record<string, unknown>;
+  try {
+    proposal = parseObject(response.text);
+  } catch (error) {
+    throw new InvalidPlanningIRProposalError(error instanceof Error ? error.message : String(error));
+  }
+  const candidate = proposal.planningIR && typeof proposal.planningIR === "object" && !Array.isArray(proposal.planningIR)
+    ? proposal.planningIR
+    : proposal;
+  const parsed = loopPlanningIRSchema.safeParse(normalizePlanningIR(candidate));
+  if (!parsed.success) {
+    const issues = formatPlanningValidationIssues(parsed.error);
+    throw new InvalidPlanningIRProposalError(
+      issues.map((issue) => issue.message).join("; "),
+      proposal,
+      issues,
+    );
+  }
+  const promptTokens = response.usage.promptTokens ?? 0;
+  const completionTokens = response.usage.completionTokens ?? 0;
+  return {
+    planningIR: parsed.data,
+    model: response.model,
+    durationMs: Date.now() - startedAt,
+    promptTokens,
+    completionTokens,
+    estimatedCostUsd: estimateLoopBuilderCostUsd(response.model, promptTokens, completionTokens),
+  };
+}
+
+function compatibleDesign(ir: LoopPlanningIR, graph: ReturnType<typeof loopAgentGraphSchema.parse>): LoopArchitectOutput {
+  const writeAction = ir.selectedActions.find((action) =>
+    action.annotation.approvalRequired || action.annotation.effect !== "read_external");
+  return {
+    title: ir.title,
+    summary: ir.summary,
+    strategyText: ir.strategy,
+    inputsRequired: ir.requiredValues.filter((value) => value.lifecycle === "runtime_input").map((value) => value.key),
+    inputRequirements: [],
+    delivery: { provider: writeAction?.toolRef ?? "none" },
+    schedule: ir.schedule,
+    agents: graph.children.map((node) => ({
+      nodeKind: node.nodeKind,
+      id: node.id,
+      name: node.name,
+      goal: node.goal ?? node.task,
+      task: node.task,
+      tool: node.tools[0]?.ref ?? "internal.llm_only",
+      ...(node.tools[0]?.config ? { toolConfig: node.tools[0].config } : {}),
+      inputContract: node.inputContract ?? { description: "Declared input", schema: {} },
+      outputContract: node.outputContract ?? {
+        description: "Declared output",
+        schema: {},
+        representation: "text",
+        mediaType: "text/plain",
+        visibility: "internal",
+      },
+      handoffBindings: node.handoffBindings,
+      doneCriteria: node.doneCriteria ?? ["Declared goal is complete"],
+      ...(node.gate ? { gate: node.gate } : {}),
+    })),
+    rationale: ir.rationale,
+    suggestedChannels: ir.suggestedChannels,
+  };
 }
 
 export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
-  design: LoopArchitectOutput & { agentGraph: ReturnType<typeof architectOutputToAgentGraph> };
+  design: LoopArchitectOutput & { agentGraph: ReturnType<typeof loopAgentGraphSchema.parse> };
   definition: LoopDefinition;
   memories: Array<{ id: string; text: string; score: number }>;
   preferences: Array<{ id: string; text: string; category?: string | null }>;
@@ -367,145 +668,362 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
 }> {
   const prompt = input.prompt.trim().replace(/\s+/g, " ");
   if (!prompt) throw new Error("Prompt is required");
-
+  const chat = input.testOverrides?.chat ?? loopBuilderOpenAiChat;
   const recall = input.testOverrides?.recallForDesigner ?? recallForDesigner;
   const listPrefs = input.testOverrides?.listPreferences ?? listPreferences;
 
-  const [userProfile, preferences] = await Promise.all([
+  const [profile, preferences, baseRegistry] = await Promise.all([
     loadWorkflowUserProfile(input.auth).catch(() => null),
     listPrefs(input.auth).catch(() => []),
+    buildToolSpecRegistry(input.auth, { includeConnectedToolkits: false }),
   ]);
-  const memories = await recall(input.prompt, input.auth, { profile: userProfile }).catch(() => []);
-  const selectedPreferences = preferences.slice(0, 8).map((p) => ({
-    id: p.id,
-    text: p.text,
-    category: p.category ?? null,
+  const memories = await recall(prompt, input.auth, { profile }).catch(() => []);
+  const selectedPreferences = preferences.slice(0, 8).map((item) => ({
+    id: item.id,
+    text: item.text,
+    category: item.category ?? null,
   }));
-
-  const memoryBlock = formatMemoriesForArchitect(
-    memories.filter((memory) => !memory.metadata?.profile),
+  const search = await generateToolSearchPlan({
+    prompt,
+    intentContext: input.noSlopSpec?.intentContext,
+    chat,
+  });
+  const requiredActions = input.noSlopSpec
+    ? [...input.noSlopSpec.specJson.connectorPolicy.allowedReadActions, ...input.noSlopSpec.specJson.connectorPolicy.allowedWriteActions]
+    : [];
+  reportLoopBuilderProgress({
+    stage: "tool_discovery",
+    message: `Searching connector catalogue with ${search.plan.queries.length} planned ${search.plan.queries.length === 1 ? "query" : "queries"}`,
+    status: "running",
+    details: { queries: search.plan.queries, reasoning: search.plan.reasoning, requiredActions },
+  });
+  const discovered = await mergeRequiredToolContracts(
+    await discoverToolsForQueries(input.auth, search.plan.queries, 12),
+    requiredActions,
   );
-  const userProfileBlock = userProfile ? formatWorkflowUserProfile(userProfile) : "";
-  const preferenceBlock = formatPreferences(selectedPreferences);
-  const toolCatalog = await formatToolCatalog(input.auth, input.noSlopSpec);
-
-  const toolSpecRegistry = filterToolSpecRegistryForSpec(
-    await buildToolSpecRegistry(input.auth),
-    input.noSlopSpec,
-  );
-  const outcomesMarkdown = renderOutcomesForArchitect(toolSpecRegistry);
-  const toolsMarkdown = renderToolsForArchitect(toolSpecRegistry);
-
-  const evidenceTrace = loopBuilderTraceStageSchema.parse({
-    stage: "evidence_curation",
-    model: "semantic_recall",
-    input: { prompt },
-    output: {
-      memoryCount: memories.length,
-      memoryIds: memories.map((m) => m.id),
-      preferenceCount: selectedPreferences.length,
-      userProfileMemoryIds: userProfile?.memoryIds ?? [],
+  const connectorContracts = discovered.map((entry) => ({
+    ...entry.contract,
+    constraints: { ...entry.contract.constraints, connected: entry.connected },
+  }));
+  const internalContracts = baseRegistry.toolContracts.filter((contract) => contract.provider === "internal");
+  reportLoopBuilderProgress({
+    stage: "tool_discovery",
+    message: `Loaded ${connectorContracts.length} connector contracts and ${internalContracts.length} internal contracts`,
+    status: "completed",
+    details: {
+      connectorContracts: discovered.map((entry) => ({
+        toolRef: entry.contract.toolRef,
+        name: entry.contract.name,
+        source: entry.source,
+        connected: entry.connected,
+        risk: entry.contract.constraints.risk ?? null,
+        toolkitVersion: entry.contract.constraints.toolkitVersion ?? null,
+        requiredInputPaths: Array.isArray(entry.contract.inputSchema.required) ? entry.contract.inputSchema.required : [],
+      })),
+      internalContracts: internalContracts.map((contract) => ({ toolRef: contract.toolRef, name: contract.name })),
     },
   });
 
-  let design: LoopArchitectOutput | null = null;
-  let critic: WorkflowCriticResult | null = null;
-  let architectTrace: z.infer<typeof loopBuilderTraceStageSchema> | null = null;
-  let criticTrace: z.infer<typeof loopBuilderTraceStageSchema> | null = null;
+  let planningIR: LoopPlanningIR | undefined;
+  let compiled: ReturnType<typeof compileLoopPlanningIR> | undefined;
   let model = loopBuilderOpenAiModel();
-  let criticFixes: string[] = [];
+  const plannerStages: Array<z.infer<typeof loopBuilderTraceStageSchema>> = [];
+  let compilationIssues: PlanningCompilationIssue[] | undefined;
+  let bestCompilationIssues: PlanningCompilationIssue[] | undefined;
+  let lastAttemptFailedBeforePlanning = false;
+  let previousInvalidProposal: Record<string, unknown> | undefined;
+  let wireCorrectionAttempts = 0;
+  const plannerConfig = planningProgressConfig();
+  const maxPlanningAttempts = 1 + plannerConfig.maxCorrectionAttempts;
+  const priorPlanningIRResult = loopPlanningIRSchema.safeParse(input.priorProposal?.definition.builderMeta?.planningIR);
+  const priorPlanningIR = priorPlanningIRResult.success ? priorPlanningIRResult.data : undefined;
 
-  for (let attempt = 0; attempt <= ENGINE_MAX_CRITIC_RETRIES; attempt += 1) {
-    const result = await callArchitectLlm({
-      prompt,
-      feedback: input.feedback,
-      memories: memoryBlock,
-      userProfile: userProfileBlock,
-      preferences: preferenceBlock,
-      priorProposal: input.priorProposal,
-      criticFixes: attempt > 0 ? criticFixes : undefined,
-      noSlopSpec: input.noSlopSpec,
-      toolCatalog,
-      outcomesMarkdown,
-      toolsMarkdown,
-      chat: input.testOverrides?.chat,
-    });
-    design = result.design;
-    model = result.model;
-    critic = critiqueLoopDesign(design, input.noSlopSpec);
-
-    architectTrace = loopBuilderTraceStageSchema.parse({
-      stage: "loop_architect",
-      model,
-      input: { attempt, prompt, criticFixes: attempt > 0 ? criticFixes : [] },
-      output: {
-        agentCount: design.agents.length,
-        delivery: design.delivery,
-        inputsRequired: design.inputsRequired,
-        noSlopSpecId: input.noSlopSpec?.id,
+  let transportFailures = 0;
+  for (let attempt = 0; attempt < maxPlanningAttempts; attempt += 1) {
+    const attemptStartedAt = Date.now();
+    const kind = planningIR || previousInvalidProposal ? "correction" as const : "initial" as const;
+    const issuesBefore = compilationIssues ?? [];
+    reportLoopBuilderProgress({
+      stage: "planning",
+      message: kind === "initial"
+        ? "Creating initial executable plan"
+        : `Correcting ${issuesBefore.length} contract ${issuesBefore.length === 1 ? "issue" : "issues"}`,
+      status: "running",
+      details: {
+        attempt: attempt + 1,
+        kind,
+        maxAttempts: maxPlanningAttempts,
+        timeoutMs: plannerConfig.attemptTimeoutMs,
+        maxCompletionTokens: plannerConfig.maxCompletionTokens,
+        previousPlan: planningIR ? {
+          title: planningIR.title,
+          semanticAgents: planningIR.semanticAgents.map((agent) => ({ id: agent.id, responsibility: agent.responsibility, toolRef: agent.toolRef })),
+          selectedActions: planningIR.selectedActions.map((action) => ({ id: action.id, toolRef: action.toolRef, bindingCount: action.bindings.length })),
+          unresolvedIssues: planningIR.unresolvedIssues,
+        } : null,
+        issuesToFix: compilationIssues ?? [],
       },
     });
-
-    criticTrace = loopBuilderTraceStageSchema.parse({
-      stage: "workflow_critic",
-      model: "deterministic",
-      input: { attempt },
-      output: critic,
-    });
-
-    if (critic.pass) break;
-    criticFixes = critic.requiredFixes;
-    if (attempt === ENGINE_MAX_CRITIC_RETRIES) {
-      throw new Error(`Loop architect failed critic after ${ENGINE_MAX_CRITIC_RETRIES} retries: ${criticFixes.join("; ")}`);
+    let result: Awaited<ReturnType<typeof callPlanner>>;
+    try {
+      result = await callPlanner({
+        prompt,
+        noSlopSpec: input.noSlopSpec,
+        profile: profile ? formatWorkflowUserProfile(profile) : "",
+        memories: formatMemoriesForArchitect(memories.filter((memory) => !memory.metadata?.profile)),
+        preferences: selectedPreferences.map((item) => item.text),
+        internalContracts,
+        connectorContracts,
+        previousIR: kind === "correction" ? planningIR : undefined,
+        previousInvalidProposal: kind === "correction" ? previousInvalidProposal : undefined,
+        priorPlanningIR: kind === "initial" ? priorPlanningIR : undefined,
+        compilationIssues,
+        chat,
+        timeoutMs: plannerConfig.attemptTimeoutMs,
+        maxCompletionTokens: plannerConfig.maxCompletionTokens,
+      });
+    } catch (error) {
+      const structuralFailure = error instanceof InvalidPlanningIRProposalError;
+      const recoverableWireFailure = isRecoverablePlannerWireFailure(error);
+      const canRetryWire = recoverableWireFailure && attempt < maxPlanningAttempts - 1 && wireCorrectionAttempts < 1;
+      if (canRetryWire) {
+        wireCorrectionAttempts += 1;
+        previousInvalidProposal = error instanceof InvalidPlanningIRProposalError ? error.proposal : undefined;
+      }
+      const canRetryTransport = shouldRetryPlanningTransportFailure({
+        structuralFailure,
+        attempt,
+        maxPlanningAttempts,
+        transportFailures,
+      });
+      if (canRetryTransport) transportFailures += 1;
+      lastAttemptFailedBeforePlanning = !structuralFailure;
+      const failureReason = structuralFailure ? "structural_failure" as const : "attempt_failed" as const;
+      compilationIssues = error instanceof InvalidPlanningIRProposalError && error.issues.length > 0
+        ? error.issues
+        : [{
+            code: "planner_request_failed",
+            message: error instanceof Error ? error.message : String(error),
+          }];
+      reportLoopBuilderProgress({
+        stage: "planning_validation",
+        message: canRetryWire
+          ? "Planner returned invalid encoded contract JSON; correcting once"
+          : structuralFailure
+          ? "Stopped: planner returned structurally invalid output"
+          : canRetryTransport
+            ? "Planner request failed before producing a plan; retrying once"
+            : "Stopped: planner request failed before producing a valid plan",
+        status: canRetryTransport || canRetryWire ? "running" : "failed",
+        details: {
+          issues: compilationIssues,
+          proposal: error instanceof InvalidPlanningIRProposalError ? error.proposal : undefined,
+          stopReason: canRetryTransport || canRetryWire ? null : failureReason,
+          retriesRemaining: canRetryTransport || canRetryWire ? 1 : 0,
+          durationMs: Date.now() - attemptStartedAt,
+        },
+      });
+      plannerStages.push(loopBuilderTraceStageSchema.parse({
+        stage: "model_planner",
+        model,
+        input: { attempt, searchQueries: search.plan.queries },
+        output: { compilationIssues, stopReason: canRetryTransport || canRetryWire ? null : failureReason },
+      }));
+      if (canRetryTransport || canRetryWire) continue;
+      break;
     }
+    lastAttemptFailedBeforePlanning = false;
+    previousInvalidProposal = undefined;
+    planningIR = result.planningIR;
+    model = result.model;
+    planningIR.schedule = {
+      cron: planningIR.schedule.cron.trim(),
+      timezone: planningIR.schedule.timezone.trim(),
+    };
+    compiled = compileLoopPlanningIR({ planningIR, contracts: [...internalContracts, ...connectorContracts] });
+    const issuesAfter = compiled.ok ? [] : compiled.issues;
+    const issueComparison = comparePlanningIssues(issuesBefore, issuesAfter);
+    const stopReason = planningAttemptStopReason({
+      previousIssues: issuesBefore,
+      currentIssues: issuesAfter,
+      correction: kind === "correction",
+      lastAttempt: attempt === maxPlanningAttempts - 1,
+    });
+    const attemptResult: PlanningAttemptResult = {
+      attempt: attempt + 1,
+      kind,
+      durationMs: result.durationMs,
+      issueFingerprint: planningIssueFingerprint(issuesAfter),
+      issueCountBefore: issuesBefore.length,
+      issueCountAfter: issuesAfter.length,
+      ...issueComparison,
+      promptTokens: result.promptTokens,
+      completionTokens: result.completionTokens,
+      estimatedCostUsd: result.estimatedCostUsd,
+      ...(stopReason ? { stopReason } : {}),
+    };
+    if (compiled.ok || !bestCompilationIssues || issuesAfter.length < bestCompilationIssues.length) {
+      bestCompilationIssues = issuesAfter;
+    }
+    reportLoopBuilderProgress({
+      stage: "planning_result",
+      message: `Planner proposed ${planningIR.semanticAgents.length} semantic agents and ${planningIR.selectedActions.length} connector actions`,
+      status: compiled.ok ? "completed" : "running",
+      details: {
+        title: planningIR.title,
+        strategy: planningIR.strategy,
+        schedule: planningIR.schedule,
+        decisions: planningIR.decisions,
+        requiredValues: planningIR.requiredValues.map((value) => ({
+          key: value.key,
+          lifecycle: value.lifecycle,
+          timing: value.timing,
+          status: value.status,
+          allowedSourceKinds: value.allowedSourceKinds,
+        })),
+        semanticAgents: planningIR.semanticAgents.map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          responsibility: agent.responsibility,
+          toolRef: agent.toolRef,
+          inputBindings: agent.inputBindings,
+          outputContract: agent.outputContract,
+        })),
+        selectedActions: planningIR.selectedActions.map((action) => ({
+          id: action.id,
+          name: action.name,
+          toolRef: action.toolRef,
+          annotation: action.annotation,
+          bindings: action.bindings,
+        })),
+        unresolvedIssues: planningIR.unresolvedIssues,
+        attemptResult,
+      },
+    });
+    plannerStages.push(loopBuilderTraceStageSchema.parse({
+      stage: "model_planner",
+      model,
+      input: { attempt, searchQueries: search.plan.queries, compilationIssues: compilationIssues ?? [] },
+      output: { planningIR, compilation: compiled, attemptResult },
+    }));
+    if (compiled.ok) break;
+    compilationIssues = compiled.issues;
+    reportLoopBuilderProgress({
+      stage: "contract_validation",
+      message: stopReason === "repeated_issues"
+        ? `Stopped: planner repeated the same ${compiled.issues.length} ${compiled.issues.length === 1 ? "issue" : "issues"}`
+        : stopReason === "worsened"
+          ? `Stopped: correction introduced more issues without resolving existing issues`
+          : stopReason === "correction_limit"
+            ? `Stopped: planner reached the ${plannerConfig.maxCorrectionAttempts}-correction limit`
+            : `Contract validation found ${compiled.issues.length} ${compiled.issues.length === 1 ? "issue" : "issues"}; preparing targeted correction`,
+      status: stopReason ? "failed" : "running",
+      details: { issues: compiled.issues, attemptResult, stopReason: stopReason ?? null },
+    });
+    if (stopReason) break;
+  }
+  if (!planningIR || !compiled?.ok) {
+    const issues = bestCompilationIssues?.length
+      ? bestCompilationIssues.map((issue) => issue.message).join("; ")
+      : compilationIssues?.map((issue) => issue.message).join("; ") || "Planner returned no valid IR.";
+    if (!planningIR && lastAttemptFailedBeforePlanning) {
+      throw new Error(`Loop planner request failed: ${issues}`);
+    }
+    throw new Error(`Loop planning IR failed structural compilation: ${issues}`);
   }
 
-  if (!design || !critic || !architectTrace || !criticTrace) {
-    throw new Error("Loop architect produced no design");
-  }
-
-  const agentGraph = architectOutputToAgentGraph(design);
-  const deliveryType = deliveryTypeFromRouting(design.delivery);
-  const suggestedChannels: LoopStageApprovalChannel[] = [];
-  for (const ch of design.suggestedChannels) {
-    const parsed = loopStageApprovalChannelInputSchema.safeParse(ch);
-    if (parsed.success) suggestedChannels.push(parsed.data);
-  }
-
-  const trace = loopBuilderTraceSchema.parse({
-    stages: [evidenceTrace, architectTrace, criticTrace],
+  const graph = compiled.compiled.graph;
+  reportLoopBuilderProgress({
+    stage: "contract_validation",
+    message: `Compiled ${compiled.compiled.graph.children.length} executable nodes with explicit bindings`,
+    status: "completed",
+    details: {
+      graph: compiled.compiled.graph.children.map((node) => ({
+        id: node.id,
+        name: node.name,
+        nodeKind: node.nodeKind,
+        tools: node.tools,
+        handoffBindings: node.handoffBindings,
+        gate: node.gate ?? null,
+      })),
+      inputRequirements: compiled.compiled.inputRequirements,
+      connectorPolicy: compiled.compiled.connectorPolicy,
+    },
   });
-
+  const design = compatibleDesign(planningIR, graph);
+  design.inputRequirements = compiled.compiled.inputRequirements;
+  const delivery = design.delivery;
+  const selectedAnnotations = new Map(planningIR.selectedActions.map((action) => [
+    action.toolRef.toLowerCase(),
+    action.annotation,
+  ]));
+  const plannedConnectorContracts = connectorContracts.map((contract) => {
+    const annotation = selectedAnnotations.get(contract.toolRef.toLowerCase());
+    if (!annotation) return contract;
+    return {
+      ...contract,
+      semanticAnnotation: annotation as unknown as Record<string, unknown>,
+      readiness: {
+        ...(contract.readiness ?? {
+          toolRef: contract.toolRef,
+          originalInputSchema: contract.inputSchema,
+          effectiveInputSchema: contract.inputSchema,
+          semanticAssertions: [],
+          unresolvedRequirements: [],
+          sourceHash: "",
+          generatedAt: new Date().toISOString(),
+        }),
+        semanticAssertions: [
+          ...(contract.readiness?.semanticAssertions ?? []),
+          ...annotation.semanticAssertions.map((assertion) => ({
+            kind: assertion.kind,
+            paths: assertion.paths,
+            message: assertion.message,
+          })),
+        ],
+        fieldPolicies: Object.fromEntries(annotation.fieldPolicies.map((policy) => [
+          policy.path,
+          { valuePolicy: policy.valuePolicy, required: policy.required },
+        ])),
+        generatedBy: "model_annotation" as const,
+      },
+    };
+  });
   const definition = buildLoopDefinitionFromCeoDesign({
     goal: prompt,
     design: {
-      agentGraph,
-      schedule: design.schedule,
-      deliveryType,
+      agentGraph: graph,
+      schedule: planningIR.schedule,
+      deliveryType: delivery.provider === "none" ? undefined : "external_action",
       builderMeta: {
         designedBy: "loop_architect",
         engineVersion: LOOP_ENGINE_VERSION,
         model,
         preApproved: true,
         ...(input.noSlopSpec ? { noSlopSpec: input.noSlopSpec } : {}),
-        agentSpecGeneration: {
-          mode: "hybrid",
-          model,
-          generatedAt: new Date().toISOString(),
+        agentSpecGeneration: { mode: "hybrid", model, generatedAt: new Date().toISOString() },
+        designDiagnostics: {
+          planningIR,
+          searchPlan: search.plan,
+          ...(input.noSlopSpec?.intentContext ? { intentContext: input.noSlopSpec.intentContext } : {}),
         },
-        designDiagnostics: { critic, trace, delivery: design.delivery, inputsRequired: design.inputsRequired },
-        ...(userProfile ? { workflowUserProfile: userProfile } : {}),
+        planningIRVersion: "v1",
+        planningIR: planningIR as unknown as Record<string, unknown>,
+        discoveredToolContracts: plannedConnectorContracts as unknown as Array<Record<string, unknown>>,
+        typedConnectorHandoffs: "v2",
+        contractDrivenGraph: "v1",
+        ...(profile ? { workflowUserProfile: profile } : {}),
       },
     },
-    delivery: design.delivery,
-    connectorPolicy: input.noSlopSpec?.specJson.connectorPolicy,
-    inputsRequired: design.inputsRequired,
-    inputRequirements: design.inputRequirements,
+    delivery,
+    connectorPolicy: compiled.compiled.connectorPolicy,
+    inputsRequired: compiled.compiled.inputRequirements.map((requirement) => requirement.key),
+    inputRequirements: compiled.compiled.inputRequirements,
     engineVersion: LOOP_ENGINE_VERSION,
   });
 
   const rosterValidation = await validateAgentRoster({
-    agents: agentGraph.children.map((child) => ({
+    agents: graph.children.map((child) => ({
       id: child.id,
       name: child.name,
       task: child.task,
@@ -520,22 +1038,37 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     strictConnectors: false,
   });
   if (!rosterValidation.ok) {
-    const message = (rosterValidation.issues ?? []).map((issue) => issue.message).join("; ");
-    throw new Error(`Architect designed invalid roster: ${message}`);
+    throw new Error(`Compiled planning IR produced invalid roster: ${(rosterValidation.issues ?? []).map((issue) => issue.message).join("; ")}`);
   }
 
-  const suggestedToolRefs = [...new Set(agentGraph.children.flatMap((c) => c.tools.map((t) => t.ref)))];
-
+  const suggestedChannels = planningIR.suggestedChannels.flatMap((channel) => {
+    const parsed = loopStageApprovalChannelInputSchema.safeParse(channel);
+    return parsed.success ? [parsed.data] : [];
+  });
+  const trace = loopBuilderTraceSchema.parse({
+    stages: [
+      loopBuilderTraceStageSchema.parse({
+        stage: "tool_search_plan",
+        model: search.model,
+        input: { prompt },
+        output: search.plan,
+      }),
+      ...plannerStages,
+    ],
+  });
+  const critic: WorkflowCriticResult = {
+    pass: true,
+    riskLevel: compiled.compiled.connectorPolicy.allowedWriteActions.length > 0 ? "medium" : "low",
+    issues: [],
+    requiredFixes: [],
+  };
   return {
-    design: {
-      ...design,
-      agentGraph,
-    },
+    design: { ...design, agentGraph: graph },
     definition,
-    memories: memories.map((m) => ({ id: m.id, text: m.text, score: m.score })),
+    memories: memories.map((memory) => ({ id: memory.id, text: memory.text, score: memory.score })),
     preferences: selectedPreferences,
     model,
-    suggestedToolRefs,
+    suggestedToolRefs: [...new Set(graph.children.flatMap((child) => child.tools.map((tool) => tool.ref)))],
     suggestedChannels,
     trace,
     critic,

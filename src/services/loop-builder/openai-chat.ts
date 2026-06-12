@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 
 import { openAiTemperatureParam } from "../llm/openai-chat-params.js";
+import { estimateLoopBuilderCostUsd, reportLoopBuilderProgress } from "./progress.js";
 
 type LoopBuilderReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -124,17 +125,27 @@ function formatLoopBuilderEmptyResponseError(input: {
   return `Loop builder LLM returned empty response (${details}).`;
 }
 
+export type LoopBuilderJsonSchemaFormat = {
+  type: "json_schema";
+  name: string;
+  schema: Record<string, unknown>;
+};
+
 export async function loopBuilderOpenAiChat(input: {
   messages: OpenAI.Chat.ChatCompletionMessageParam[];
   temperature?: number;
   maxTokens?: number;
-  responseFormat?: "json_object";
+  exactMaxTokens?: boolean;
+  retryEmptyResponses?: boolean;
+  responseFormat?: "json_object" | LoopBuilderJsonSchemaFormat;
   reasoningEffort?: LoopBuilderReasoningEffort | null;
   signal?: AbortSignal;
 }): Promise<LoopBuilderOpenAiChatResult> {
   const model = loopBuilderOpenAiModel();
   const useCompletionTokensParam = isGpt5Model(model);
-  const baseMaxCompletionTokens = completionTokenBudget(model, input.maxTokens);
+  const baseMaxCompletionTokens = input.exactMaxTokens
+    ? input.maxTokens ?? 4096
+    : completionTokenBudget(model, input.maxTokens);
   const configuredReasoningEffort = input.reasoningEffort === undefined
     ? loopBuilderOpenAiReasoningEffort()
     : input.reasoningEffort;
@@ -148,7 +159,18 @@ export async function loopBuilderOpenAiChat(input: {
         model,
         messages: input.messages,
         ...openAiTemperatureParam(model, input.temperature),
-        response_format: input.responseFormat === "json_object" ? { type: "json_object" } : undefined,
+        response_format: input.responseFormat === "json_object"
+          ? { type: "json_object" as const }
+          : input.responseFormat && typeof input.responseFormat === "object"
+            ? {
+                type: "json_schema" as const,
+                json_schema: {
+                  name: input.responseFormat.name,
+                  strict: true,
+                  schema: input.responseFormat.schema,
+                },
+              }
+            : undefined,
         ...(isLoopBuilderReasoningModel(model) && attempt.reasoningEffort
           ? { reasoning_effort: attempt.reasoningEffort }
           : {}),
@@ -175,7 +197,7 @@ export async function loopBuilderOpenAiChat(input: {
   const attempts: Array<{ reasoningEffort: LoopBuilderReasoningEffort | null; maxCompletionTokens: number }> = [
     { reasoningEffort: configuredReasoningEffort, maxCompletionTokens: baseMaxCompletionTokens },
   ];
-  if (isLoopBuilderReasoningModel(model)) {
+  if (isLoopBuilderReasoningModel(model) && input.retryEmptyResponses !== false) {
     if (configuredReasoningEffort && configuredReasoningEffort !== "minimal") {
       attempts.push({ reasoningEffort: "minimal", maxCompletionTokens: baseMaxCompletionTokens });
     }
@@ -189,7 +211,28 @@ export async function loopBuilderOpenAiChat(input: {
   for (const attempt of attempts) {
     const result = await callOnce(attempt);
     lastResult = result;
-    if (result.text) return result;
+    if (result.text) {
+      const promptTokens = result.usage.promptTokens ?? 0;
+      const completionTokens = result.usage.completionTokens ?? 0;
+      reportLoopBuilderProgress({
+        stage: "llm_call",
+        message: `Completed ${result.model} planning call`,
+        status: "completed",
+        model: result.model,
+        promptTokens,
+        completionTokens,
+        totalTokens: result.usage.totalTokens ?? promptTokens + completionTokens,
+        estimatedCostUsd: estimateLoopBuilderCostUsd(result.model, promptTokens, completionTokens),
+        details: {
+          finishReason: result.finishReason,
+          reasoningEffort: attempt.reasoningEffort,
+          maxCompletionTokens: attempt.maxCompletionTokens,
+          usage: result.usage,
+          responseCharacters: result.text.length,
+        },
+      });
+      return result;
+    }
     if (result.refusal) {
       throw new Error(formatLoopBuilderEmptyResponseError({
         model: result.model,

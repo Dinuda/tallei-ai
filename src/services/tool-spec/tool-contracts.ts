@@ -3,10 +3,9 @@ import type {
   ToolContract,
   ToolEffect,
   ToolExecutionMode,
-  ToolRenderRecommendation,
   ToolRenderTarget,
-  ToolSkillTag,
 } from "./types.js";
+import { buildConnectorActionReadinessContract } from "./action-readiness.js";
 
 type ActionLike = {
   toolkit: string;
@@ -16,33 +15,7 @@ type ActionLike = {
   risk?: ConnectorActionRisk | string;
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
-};
-
-const GENERIC_ACTION_OUTPUT_SCHEMA = {
-  type: "object",
-  properties: {
-    ok: { type: "boolean" },
-    output: { type: "object" },
-  },
-};
-
-const REVIEWED_ACTION_OVERRIDES: Record<string, Partial<ToolContract>> = {
-  "composio.resend.action.resend_send_email": {
-    skillTags: ["send", "notify"],
-    effect: "write_external",
-    resources: ["email", "message"],
-    approval: {
-      required: true,
-      suggestedGate: "pre_send",
-      reason: "Sends email to external recipients.",
-    },
-    renderRecommendations: [{
-      target: "canvas.email",
-      reason: "Useful when the workflow produces editable email copy before the send action.",
-      strength: "medium",
-    }],
-    source: "reviewed_override",
-  },
+  toolkitVersion?: string;
 };
 
 export function normalizeToolRef(ref: string): string {
@@ -51,6 +24,15 @@ export function normalizeToolRef(ref: string): string {
 
 export function connectorActionToolRef(action: { toolkit: string; actionSlug: string }): string {
   return `composio.${action.toolkit.trim().toLowerCase()}.action.${action.actionSlug.trim().toLowerCase()}`;
+}
+
+export function hasExactComposioActionSchemas(action: Pick<ActionLike, "inputSchema" | "outputSchema">): boolean {
+  return Boolean(
+    action.inputSchema
+    && Object.keys(action.inputSchema).length > 0
+    && action.outputSchema
+    && Object.keys(action.outputSchema).length > 0,
+  );
 }
 
 export function parseConnectorActionToolRef(ref: string): { toolkit: string; actionSlug: string } | null {
@@ -63,132 +45,36 @@ export function parseConnectedSearchToolRef(ref: string): { toolkit: string } | 
   return match ? { toolkit: match[1]! } : null;
 }
 
-function uniq<T>(values: T[]): T[] {
-  return [...new Set(values)];
-}
-
-function actionText(action: ActionLike): string {
-  return [
-    action.toolkit,
-    action.actionSlug,
-    action.name ?? "",
-    action.description ?? "",
-  ].join(" ").toLowerCase().replace(/_/g, " ");
-}
-
-function inferSkillTags(action: ActionLike): ToolSkillTag[] {
-  const text = actionText(action);
-  const tags: ToolSkillTag[] = [];
-  if (/\b(search|list|find|get|read|fetch|retrieve|lookup)\b/.test(text)) tags.push("search", "retrieve");
-  if (/\b(draft|compose|generate|write)\b/.test(text)) tags.push("draft");
-  if (/\b(summary|summarize|digest|analy[sz]e|report)\b/.test(text)) tags.push("summarize", "analyze");
-  if (/\b(transform|convert|format|parse)\b/.test(text)) tags.push("transform");
-  if (/\b(send|reply|forward|broadcast|publish|post|message|notify|email)\b/.test(text)) tags.push("send", "notify");
-  if (/\b(create|add|insert|import|upsert)\b/.test(text)) tags.push("create");
-  if (/\b(update|edit|patch|modify|set|assign|move|close|open)\b/.test(text)) tags.push("update");
-  if (/\b(delete|remove|destroy|revoke|disable|archive|trash|purge)\b/.test(text)) tags.push("delete");
-  if (/\b(schedule|calendar|event|meeting|appointment)\b/.test(text)) tags.push("schedule");
-  if (tags.length === 0) tags.push(action.risk === "read" ? "retrieve" : "update");
-  return uniq(tags);
-}
-
-function inferResources(action: ActionLike): string[] {
-  const text = actionText(action);
-  const resources: string[] = [];
-  if (/\b(email|mail|inbox|newsletter)\b/.test(text)) resources.push("email");
-  if (/\b(message|sms|chat|slack|notification|notify|post)\b/.test(text)) resources.push("message");
-  if (/\b(contact|subscriber|recipient|audience|lead|customer)\b/.test(text)) resources.push("contact");
-  if (/\b(calendar|event|meeting|appointment)\b/.test(text)) resources.push("calendar_event");
-  if (/\b(document|doc|page|notion|file|sheet|spreadsheet)\b/.test(text)) resources.push("document");
-  if (/\b(issue|ticket|task|linear|github|pull request|pr)\b/.test(text)) resources.push("issue");
-  if (/\b(channel|workspace|team)\b/.test(text)) resources.push("channel");
-  if (/\b(webhook|domain|api key|apikey)\b/.test(text)) resources.push("integration_config");
-  return uniq(resources.length > 0 ? resources : [action.toolkit.toLowerCase()]);
-}
-
-function inferEffect(action: ActionLike): ToolEffect {
+function effectFromDeclaredRisk(action: ActionLike): ToolEffect {
   const risk = String(action.risk ?? "").toLowerCase();
   if (risk === "destructive") return "irreversible_external";
   if (risk === "read") return "read_external";
-  if (risk === "write" || risk === "send") return "write_external";
-  const tags = inferSkillTags(action);
-  if (tags.includes("delete")) return "irreversible_external";
-  if (tags.some((tag) => ["send", "create", "update", "schedule", "notify"].includes(tag))) return "write_external";
-  return "read_external";
+  return "write_external";
 }
 
-function inferExecutionMode(effect: ToolEffect): ToolExecutionMode {
+function executionModeForEffect(effect: ToolEffect): ToolExecutionMode {
   if (effect === "none") return "llm_assisted";
   if (effect === "read_external") return "short_circuit";
   return "approval_executed";
 }
 
-function inferRenderRecommendations(input: {
-  resources: string[];
-  skillTags: ToolSkillTag[];
-  effect: ToolEffect;
-  outputSchema: Record<string, unknown>;
-}): ToolRenderRecommendation[] {
-  const schemaText = JSON.stringify(input.outputSchema).toLowerCase();
-  const recommendations: ToolRenderRecommendation[] = [];
-  if (
-    input.resources.includes("email")
-    && (input.skillTags.includes("draft") || schemaText.includes("subject") || schemaText.includes("html") || schemaText.includes("body"))
-  ) {
-    recommendations.push({
-      target: "canvas.email",
-      reason: "Output appears to be editable email content.",
-      strength: "medium",
-    });
-  }
-  if (
-    input.resources.some((resource) => ["email", "document", "message"].includes(resource))
-    && input.effect !== "irreversible_external"
-  ) {
-    recommendations.push({
-      target: "canvas.preview",
-      reason: "Output may benefit from visual review before downstream use.",
-      strength: "weak",
-    });
-  }
-  return recommendations;
-}
-
-function applyReviewedOverride(base: ToolContract): ToolContract {
-  const override = REVIEWED_ACTION_OVERRIDES[base.toolRef];
-  if (!override) return base;
-  return {
-    ...base,
-    ...override,
-    approval: {
-      ...base.approval,
-      ...(override.approval ?? {}),
-    },
-    constraints: {
-      ...base.constraints,
-      ...(override.constraints ?? {}),
-      reviewedOverride: true,
-    },
-    renderRecommendations: override.renderRecommendations ?? base.renderRecommendations,
-  };
-}
-
 export function buildComposioActionContract(action: ActionLike): ToolContract {
+  if (!hasExactComposioActionSchemas(action)) {
+    throw new Error(`Cannot build Composio action contract without exact input and output schemas: ${connectorActionToolRef(action)}`);
+  }
   const toolRef = connectorActionToolRef(action);
-  const inputSchema = action.inputSchema ?? { type: "object" };
-  const outputSchema = action.outputSchema ?? GENERIC_ACTION_OUTPUT_SCHEMA;
-  const effect = inferEffect(action);
-  const skillTags = inferSkillTags(action);
-  const resources = inferResources(action);
-  const executionMode = inferExecutionMode(effect);
-  const base: ToolContract = {
+  const inputSchema = action.inputSchema!;
+  const outputSchema = action.outputSchema!;
+  const effect = effectFromDeclaredRisk(action);
+  const executionMode = executionModeForEffect(effect);
+  return {
     toolRef,
     provider: "composio",
     name: action.name?.trim() || action.actionSlug,
     description: action.description?.trim() || `Composio action ${action.actionSlug}`,
-    skillTags,
+    skillTags: [],
     effect,
-    resources,
+    resources: [action.toolkit.toLowerCase()],
     inputSchema,
     outputSchema,
     executionMode,
@@ -198,15 +84,16 @@ export function buildComposioActionContract(action: ActionLike): ToolContract {
         ? { suggestedGate: "pre_send" as const, reason: "External side-effect requires operator approval." }
         : {}),
     },
-    renderRecommendations: inferRenderRecommendations({ resources, skillTags, effect, outputSchema }),
+    renderRecommendations: [],
     constraints: {
       toolkit: action.toolkit,
       actionSlug: action.actionSlug,
       risk: action.risk ?? "write",
+      ...(action.toolkitVersion ? { toolkitVersion: action.toolkitVersion } : {}),
     },
     source: "composio_sdk",
+    readiness: buildConnectorActionReadinessContract({ toolRef, inputSchema }),
   };
-  return applyReviewedOverride(base);
 }
 
 export function buildConnectedSearchContract(toolkit: string): ToolContract {
@@ -229,24 +116,44 @@ export function buildConnectedSearchContract(toolkit: string): ToolContract {
   };
 }
 
-export function buildPolicyActionContract(action: {
-  toolkit: string;
-  actionSlug: string;
-  risk: ConnectorActionRisk | string;
-  description?: string;
-}): ToolContract {
-  return buildComposioActionContract({
-    toolkit: action.toolkit,
-    actionSlug: action.actionSlug,
-    name: action.actionSlug,
-    description: action.description,
-    risk: action.risk,
-    inputSchema: { type: "object" },
-  });
-}
-
 export function getStaticToolContract(ref: string): ToolContract | null {
   const normalized = normalizeToolRef(ref);
+  if (normalized === "internal.json_transform") {
+    return {
+      toolRef: normalized,
+      provider: "internal",
+      name: "JSON Transform",
+      description: "Transform typed handoff sources into JSON matching an exact output schema.",
+      skillTags: ["transform"],
+      effect: "none",
+      resources: ["document"],
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      executionMode: "llm_assisted",
+      approval: { required: false },
+      renderRecommendations: [],
+      constraints: { structuredJson: true },
+      source: "static",
+    };
+  }
+  if (normalized === "internal.operator_input") {
+    return {
+      toolRef: normalized,
+      provider: "internal",
+      name: "Operator Input",
+      description: "Collect structured operator input without language-model synthesis.",
+      skillTags: ["retrieve"],
+      effect: "none",
+      resources: ["document"],
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      executionMode: "short_circuit",
+      approval: { required: false, suggestedGate: "missing_input" },
+      renderRecommendations: [],
+      constraints: { operatorInput: true },
+      source: "static",
+    };
+  }
   if (normalized === "internal.llm_only") {
     return {
       toolRef: "internal.llm_only",
@@ -306,14 +213,6 @@ export function getStaticToolContract(ref: string): ToolContract | null {
   }
   const search = parseConnectedSearchToolRef(normalized);
   if (search) return buildConnectedSearchContract(search.toolkit);
-  const action = parseConnectorActionToolRef(normalized);
-  if (action) {
-    return buildPolicyActionContract({
-      toolkit: action.toolkit,
-      actionSlug: action.actionSlug,
-      risk: "write",
-    });
-  }
   return null;
 }
 

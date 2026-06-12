@@ -10,11 +10,12 @@ import {
   loopAgentGraphSchema,
   loopDeliveryRoutingSchema,
   loopGateTypeSchema,
-  loopRenderTargetSchema,
   type LoopDefinition,
-  type LoopDeliveryTarget,
 } from "../loop-executor/types.js";
 import { inputRequirementSchema } from "./input-surfaces.js";
+import { dataContractSchema, normalizeContractSchema } from "./data-contract.js";
+import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
+
 export {
   noSlopSpecAgentSchema,
   noSlopSpecDraftSchema,
@@ -27,33 +28,37 @@ export {
   type NoSlopSpecStatus,
 } from "./spec-contracts.js";
 
-export const ENGINE_MAX_AGENTS = 8;
+export const ENGINE_MAX_AGENTS = 12;
 export const ENGINE_MAX_CRITIC_RETRIES = 2;
 export const ENGINE_MAX_AGENT_RETRIES = 2;
 export const DESIGNER_MEMORY_TOP_K = 8;
 
-/** Valid delivery provider for each target. */
-export const DELIVERY_PROVIDER_BY_TARGET: Record<LoopDeliveryTarget, string[]> = {
-  subscriber_list: [],
-  team_email: [],
-  operator: [],
-  none: [],
-};
-
 export const loopArchitectAgentSchema = z.object({
+  nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
   id: z.string().min(1),
   name: z.string().min(1),
   goal: z.string().min(1),
   task: z.string().min(1),
   tool: z.string().min(1),
+  toolConfig: z.record(z.unknown()).optional(),
   inputContract: z.object({
     description: z.string().min(1),
     schema: z.record(z.unknown()).default({}),
   }),
-  outputContract: z.object({
-    description: z.string().min(1),
-    schema: z.record(z.unknown()).default({}),
-  }),
+  outputContract: dataContractSchema,
+  handoffBindings: z.array(z.object({
+    source: z.object({
+      kind: z.enum(["agent_output", "operator_input", "stable_config", "artifact"]),
+      agentId: z.string().min(1).optional(),
+      key: z.string().min(1).optional(),
+      path: z.string().min(1).default("/"),
+    }),
+    targetPath: z.string().min(1),
+    required: z.boolean().default(true),
+    valuePolicy: z.enum(["derivable", "passthrough"]).optional(),
+    provenance: z.enum(["agent_output", "operator_input", "stable_config", "artifact", "connector_output"]).optional(),
+    transformation: z.enum(["direct", "merge", "transform"]).default("direct").optional(),
+  })).default([]),
   doneCriteria: z.preprocess(
     (v) => Array.isArray(v) ? v.slice(0, 8) : v,
     z.array(z.string().min(1)).min(1),
@@ -62,15 +67,6 @@ export const loopArchitectAgentSchema = z.object({
     type: loopGateTypeSchema,
     question: z.string().min(1),
   }).optional(),
-  renderTarget: loopRenderTargetSchema.optional(),
-  operatorSurface: z.enum([
-    "review.sources",
-    "review.memories",
-    "review.email",
-    "review.preview",
-    "review.draft",
-    "confirm.send",
-  ]).optional(),
   artifactRole: z.enum([
     "source_evidence",
     "draft_body",
@@ -86,6 +82,139 @@ function coerceArchitectInputKey(value: unknown): string | null {
     if (typeof row.key === "string" && row.key.trim()) return row.key.trim();
   }
   return null;
+}
+
+function parseArchitectJsonField(value: unknown, fallback: Record<string, unknown> = {}): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeArchitectDataContract(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const contract = { ...(value as Record<string, unknown>) };
+  contract.schema = normalizeContractSchema(parseArchitectJsonField(contract.schema));
+  const representation = typeof contract.representation === "string" ? contract.representation : "text";
+  const mediaType = typeof contract.mediaType === "string" ? contract.mediaType : undefined;
+  if (representation !== "json" && mediaType === "application/json") {
+    contract.mediaType = "text/plain";
+  }
+  if (representation === "json" && mediaType !== "application/json") {
+    contract.mediaType = "application/json";
+  }
+  if (contract.mediaType === null) delete contract.mediaType;
+  if (contract.visibility === null) delete contract.visibility;
+  if (contract.renderer === null) delete contract.renderer;
+  return contract;
+}
+
+function normalizeArchitectInputContract(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const contract = { ...(value as Record<string, unknown>) };
+  contract.schema = normalizeContractSchema(parseArchitectJsonField(contract.schema));
+  return contract;
+}
+
+function trimOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeHandoffBindingSource(source: Record<string, unknown>): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {
+    kind: source.kind,
+    path: trimOptionalString(source.path) ?? "/",
+  };
+  const agentId = trimOptionalString(source.agentId);
+  const key = trimOptionalString(source.key);
+  if (agentId) normalized.agentId = agentId;
+  if (key) normalized.key = key;
+  return normalized;
+}
+
+function normalizeHandoffBinding(binding: unknown): Record<string, unknown> | null {
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return null;
+  const row = { ...(binding as Record<string, unknown>) };
+  if (!row.source || typeof row.source !== "object" || Array.isArray(row.source)) return null;
+
+  const source = normalizeHandoffBindingSource(row.source as Record<string, unknown>);
+  const targetPath = trimOptionalString(row.targetPath);
+  if (!targetPath) return null;
+
+  const kind = source.kind;
+  if (kind === "agent_output" && typeof source.agentId !== "string") return null;
+  if (kind === "operator_input" && typeof source.key !== "string") return null;
+  if (kind === "artifact" && typeof source.key !== "string") return null;
+
+  const normalized: Record<string, unknown> = {
+    source,
+    targetPath,
+    required: typeof row.required === "boolean" ? row.required : true,
+  };
+  const valuePolicy = trimOptionalString(row.valuePolicy);
+  const provenance = trimOptionalString(row.provenance);
+  const transformation = trimOptionalString(row.transformation);
+  if (valuePolicy === "derivable" || valuePolicy === "passthrough") normalized.valuePolicy = valuePolicy;
+  if (
+    provenance === "agent_output"
+    || provenance === "operator_input"
+    || provenance === "stable_config"
+    || provenance === "artifact"
+    || provenance === "connector_output"
+  ) {
+    normalized.provenance = provenance;
+  }
+  if (transformation === "direct" || transformation === "merge" || transformation === "transform") {
+    normalized.transformation = transformation;
+  }
+  return normalized;
+}
+
+function normalizeArchitectAgent(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const agent = { ...(value as Record<string, unknown>) };
+  if (agent.gate === null || agent.gate === undefined) {
+    delete agent.gate;
+  } else if (agent.gate && typeof agent.gate === "object" && !Array.isArray(agent.gate)) {
+    const gate = agent.gate as Record<string, unknown>;
+    const gateType = typeof gate.type === "string" ? gate.type.trim().toLowerCase() : "";
+    if (!gateType || gateType === "none") {
+      delete agent.gate;
+    }
+  }
+  if (agent.toolConfig === null) {
+    delete agent.toolConfig;
+  } else if (typeof agent.toolConfig === "string") {
+    const parsed = parseArchitectJsonField(agent.toolConfig);
+    agent.toolConfig = Object.keys(parsed).length > 0 ? parsed : undefined;
+    if (!agent.toolConfig) delete agent.toolConfig;
+  }
+  if (agent.nodeKind === null) delete agent.nodeKind;
+  if (agent.artifactRole === null) delete agent.artifactRole;
+  if (agent.inputContract) {
+    agent.inputContract = normalizeArchitectInputContract(agent.inputContract);
+  }
+  if (agent.outputContract) {
+    agent.outputContract = normalizeArchitectDataContract(agent.outputContract);
+  }
+  if (Array.isArray(agent.handoffBindings)) {
+    agent.handoffBindings = agent.handoffBindings
+      .map((binding) => normalizeHandoffBinding(binding))
+      .filter((binding): binding is Record<string, unknown> => binding !== null);
+  }
+  return agent;
 }
 
 /** Coerce common architect LLM shape mistakes before strict schema validation. */
@@ -107,6 +236,31 @@ export function preprocessArchitectOutput(value: unknown): unknown {
   if (Array.isArray(root.suggestedChannels)) {
     next.suggestedChannels = root.suggestedChannels
       .filter((channel): channel is string => typeof channel === "string" && channel.trim().length > 0);
+  }
+
+  if (root.delivery && typeof root.delivery === "object" && !Array.isArray(root.delivery)) {
+    const delivery = { ...(root.delivery as Record<string, unknown>) };
+    const provider = typeof delivery.provider === "string" ? delivery.provider.trim() : "";
+    if (provider) {
+      next.delivery = { provider };
+    } else {
+      const legacyTarget = typeof delivery.target === "string" ? delivery.target.trim().toLowerCase() : "none";
+      next.delivery = { provider: legacyTarget === "none" ? "none" : "none" };
+    }
+  }
+
+  if (Array.isArray(root.inputRequirements)) {
+    next.inputRequirements = root.inputRequirements.map((requirement) => {
+      if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return requirement;
+      const row = { ...(requirement as Record<string, unknown>) };
+      if (row.label === null) delete row.label;
+      if (row.description === null) delete row.description;
+      return row;
+    });
+  }
+
+  if (Array.isArray(root.agents)) {
+    next.agents = root.agents.map(normalizeArchitectAgent);
   }
 
   return next;
@@ -162,25 +316,12 @@ export function isEngineV3Definition(definition: LoopDefinition): boolean {
     || definition.builderMeta?.engineVersion === LOOP_ENGINE_VERSION;
 }
 
-export function deliveryProviderMatchesTarget(provider: string, target: LoopDeliveryTarget): boolean {
-  const allowed = DELIVERY_PROVIDER_BY_TARGET[target];
-  if (target === "none") return provider.trim().toLowerCase() === "none";
-  if (/^composio\.[a-z0-9_-]+\.action\./.test(provider.trim().toLowerCase())) return true;
-  return allowed.includes(provider.trim().toLowerCase());
-}
-
 export function assertDeliveryRouting(delivery: z.infer<typeof loopDeliveryRoutingSchema>): void {
-  const provider = delivery.provider.trim().toLowerCase();
-  const target = delivery.target;
-  if (target === "none") return;
-  if (!deliveryProviderMatchesTarget(provider, target)) {
-    const allowed = DELIVERY_PROVIDER_BY_TARGET[target];
-    const hint = allowed.length > 0
-      ? `one of [${allowed.join(", ")}]`
-      : "an approved composio.<toolkit>.action.<slug> connector ref";
-    throw new Error(
-      `Delivery routing error: target "${target}" requires ${hint}, got "${provider}"`,
-    );
+  const provider = delivery.provider.trim();
+  if (!provider) throw new Error("Delivery routing error: provider is required");
+  if (provider.toLowerCase() === "none") return;
+  if (!/^composio\.[a-z0-9_-]+\.action\./.test(provider.toLowerCase())) {
+    throw new Error(`Delivery routing error: provider must be "none" or a composio action ref, got "${provider}"`);
   }
 }
 
@@ -213,31 +354,33 @@ export function architectOutputToAgentGraph(output: LoopArchitectOutput): z.infe
     children: output.agents.map((agent) => loopAgentGraphChildSchema.parse({
       id: agent.id,
       name: agent.name,
+      nodeKind: agent.nodeKind ?? (agent.tool === "internal.operator_input"
+        ? "operator_input"
+        : agent.tool === "internal.json_transform"
+          ? "transform"
+          : parseConnectorActionToolRef(agent.tool)
+            ? "action"
+            : "agent"),
       task: agent.task,
       goal: agent.goal,
-      tools: [{ ref: agent.tool }],
+      tools: [{ ref: agent.tool, ...(agent.toolConfig ? { config: agent.toolConfig } : {}) }],
       doneCriteria: agent.doneCriteria,
       inputContract: agent.inputContract,
       outputContract: agent.outputContract,
+      handoffBindings: agent.handoffBindings,
       ...(agent.gate ? { gate: agent.gate } : {}),
       outputArtifactId: slugArtifactId(agent.id),
-      outputArtifactKind: agent.renderTarget === "canvas.preview"
+      outputArtifactKind: agent.outputContract.renderer === "canvas.preview"
         ? "canvas_preview"
-        : agent.artifactRole === "draft_body"
-          || agent.artifactRole === "final_preview"
-          || agent.renderTarget === "canvas.email"
+        : agent.outputContract.renderer === "canvas.email"
           ? "canvas_email"
           : "structured_output",
-      ...(agent.renderTarget ? { renderTarget: agent.renderTarget } : {}),
-      ...(agent.operatorSurface ? { operatorSurface: agent.operatorSurface } : {}),
     })),
   });
 }
 
 export function deliveryTypeFromRouting(delivery: z.infer<typeof loopDeliveryRoutingSchema>): string | undefined {
-  if (delivery.target === "subscriber_list") return "newsletter";
-  if (delivery.target === "team_email" || delivery.target === "operator") return "plain";
-  return undefined;
+  return delivery.provider.toLowerCase() === "none" ? undefined : "external_action";
 }
 
 export function detectPlaceholderText(text: string): boolean {

@@ -25,6 +25,40 @@ function mergeToolRefCaps(
 }
 const CATALOG = [
     {
+        ref: "internal.json_transform",
+        label: "JSON transform",
+        description: "Compile typed handoff data into an exact JSON contract.",
+        provider: "internal",
+        toolkit: null,
+        requiresConnector: false,
+        requiresApproval: false,
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "structured_output",
+        riskLevel: "none",
+        integrationKey: "internal",
+        isActionable: false,
+        contract: getStaticToolContract("internal.json_transform"),
+    },
+    {
+        ref: "internal.operator_input",
+        label: "Operator input",
+        description: "Collect structured operator input for downstream typed handoffs.",
+        provider: "internal",
+        toolkit: null,
+        requiresConnector: false,
+        requiresApproval: false,
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        requiredArtifactKinds: [],
+        producesArtifactKind: "structured_output",
+        riskLevel: "none",
+        integrationKey: "internal",
+        isActionable: false,
+        contract: getStaticToolContract("internal.operator_input"),
+    },
+    {
         ref: "internal.llm_only",
         label: "LLM only",
         description: "Pure language-model completion with no external tools.",
@@ -75,114 +109,6 @@ const CATALOG = [
         isActionable: true,
         contract: getStaticToolContract("internal.web_search"),
     },
-    {
-        ref: "composio.gmail.search",
-        label: "Gmail search",
-        description: "Search and summarize connected Gmail messages. Read-only; does not send email.",
-        provider: "composio",
-        toolkit: "gmail",
-        requiresConnector: true,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-        requiredArtifactKinds: [],
-        producesArtifactKind: "app_context",
-        riskLevel: "low",
-        integrationKey: "gmail",
-        isActionable: true,
-        composioToolkit: "gmail",
-        contract: buildConnectedSearchContract("gmail"),
-    },
-    {
-        ref: "composio.slack.search",
-        label: "Slack search",
-        description: "Search and summarize connected Slack messages or channels. Read-only; does not post.",
-        provider: "composio",
-        toolkit: "slack",
-        requiresConnector: true,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-        requiredArtifactKinds: [],
-        producesArtifactKind: "app_context",
-        riskLevel: "low",
-        integrationKey: "slack",
-        isActionable: true,
-        composioToolkit: "slack",
-        contract: buildConnectedSearchContract("slack"),
-    },
-    {
-        ref: "composio.googlecalendar.search",
-        label: "Google Calendar search",
-        description: "Search and summarize connected Google Calendar events. Read-only; does not create events.",
-        provider: "composio",
-        toolkit: "googlecalendar",
-        requiresConnector: true,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-        requiredArtifactKinds: [],
-        producesArtifactKind: "app_context",
-        riskLevel: "low",
-        integrationKey: "googlecalendar",
-        isActionable: true,
-        composioToolkit: "googlecalendar",
-        contract: buildConnectedSearchContract("googlecalendar"),
-    },
-    {
-        ref: "composio.github.search",
-        label: "GitHub search",
-        description: "Search and summarize connected GitHub repositories, issues, pull requests, or commits. Read-only.",
-        provider: "composio",
-        toolkit: "github",
-        requiresConnector: true,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-        requiredArtifactKinds: [],
-        producesArtifactKind: "app_context",
-        riskLevel: "low",
-        integrationKey: "github",
-        isActionable: true,
-        composioToolkit: "github",
-        contract: buildConnectedSearchContract("github"),
-    },
-    {
-        ref: "composio.notion.search",
-        label: "Notion search",
-        description: "Search and summarize connected Notion pages or databases. Read-only; does not create pages.",
-        provider: "composio",
-        toolkit: "notion",
-        requiresConnector: true,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-        requiredArtifactKinds: [],
-        producesArtifactKind: "app_context",
-        riskLevel: "low",
-        integrationKey: "notion",
-        isActionable: true,
-        composioToolkit: "notion",
-        contract: buildConnectedSearchContract("notion"),
-    },
-    {
-        ref: "composio.linear.search",
-        label: "Linear search",
-        description: "Search and summarize connected Linear issues, projects, or cycles. Read-only.",
-        provider: "composio",
-        toolkit: "linear",
-        requiresConnector: true,
-        requiresApproval: false,
-        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-        outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-        requiredArtifactKinds: [],
-        producesArtifactKind: "app_context",
-        riskLevel: "low",
-        integrationKey: "linear",
-        isActionable: true,
-        composioToolkit: "linear",
-        contract: buildConnectedSearchContract("linear"),
-    },
 ];
 const CATALOG_BY_REF = new Map(CATALOG.map((entry) => [entry.ref, entry]));
 
@@ -216,8 +142,67 @@ function parseComposioActionRef(ref) {
     return { toolkit: match[1], actionSlug: match[2] };
 }
 
+export function getLoopToolIntegrationKey(ref) {
+    const normalized = normalizeToolRef(ref);
+    const staticTool = CATALOG_BY_REF.get(normalized);
+    if (staticTool)
+        return staticTool.integrationKey;
+    const searchMatch = normalized.match(/^composio\.([a-z0-9_-]+)\.search$/);
+    if (searchMatch)
+        return searchMatch[1];
+    return parseComposioActionRef(normalized)?.toolkit ?? null;
+}
+
+function dynamicActionToolFromContract(ref, contract) {
+    const normalizedRef = normalizeToolRef(ref);
+    const action = parseComposioActionRef(normalizedRef);
+    if (!action || !contract || typeof contract !== "object" || Array.isArray(contract))
+        return null;
+    if (normalizeToolRef(String(contract.toolRef ?? "")) !== normalizedRef || contract.provider !== "composio")
+        return null;
+    const contractToolkit = normalizeToolRef(String(contract.constraints?.toolkit ?? ""));
+    const contractActionSlug = normalizeToolRef(String(contract.constraints?.actionSlug ?? ""));
+    if ((contractToolkit && contractToolkit !== action.toolkit)
+        || (contractActionSlug && contractActionSlug !== action.actionSlug))
+        return null;
+    const inputSchema = contract.inputSchema;
+    const outputSchema = contract.outputSchema;
+    if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema) || Object.keys(inputSchema).length === 0)
+        return null;
+    if (!outputSchema || typeof outputSchema !== "object" || Array.isArray(outputSchema) || Object.keys(outputSchema).length === 0)
+        return null;
+    const risk = String(contract.constraints?.risk ?? "").toLowerCase()
+        || (contract.effect === "read_external" ? "read" : contract.effect === "irreversible_external" ? "destructive" : "write");
+    const riskLevel = risk === "read" ? "low" : risk === "destructive" ? "high" : "medium";
+    return {
+        ref: normalizedRef,
+        label: String(contract.name ?? action.actionSlug),
+        description: String(contract.description ?? `${risk} Composio action for ${action.toolkit}`),
+        provider: "composio",
+        toolkit: action.toolkit,
+        requiresConnector: true,
+        requiresApproval: Boolean(contract.approval?.required),
+        inputSchema,
+        outputSchema,
+        requiredArtifactKinds: [],
+        producesArtifactKind: risk === "read" ? "app_context" : "connector_action_result",
+        riskLevel,
+        integrationKey: action.toolkit,
+        isActionable: true,
+        composioToolkit: action.toolkit,
+        composioAction: action.actionSlug,
+        actionRisk: risk,
+        dynamic: true,
+        contract,
+    };
+}
+
 function dynamicActionTool(toolkit, action) {
     const riskLevel = action.risk === "read" ? "low" : action.risk === "write" ? "medium" : "high";
+    const hasExactInputSchema = action.inputSchema && Object.keys(action.inputSchema).length > 0;
+    const hasExactOutputSchema = action.outputSchema && Object.keys(action.outputSchema).length > 0;
+    if (!hasExactInputSchema || !hasExactOutputSchema)
+        return null;
     return {
         ref: `composio.${toolkit}.action.${normalizeToolRef(action.actionSlug)}`,
         label: action.name || action.actionSlug,
@@ -226,8 +211,8 @@ function dynamicActionTool(toolkit, action) {
         toolkit,
         requiresConnector: true,
         requiresApproval: action.risk !== "read",
-        inputSchema: action.inputSchema || { type: "object" },
-        outputSchema: { type: "object" },
+        inputSchema: action.inputSchema,
+        outputSchema: action.outputSchema,
         requiredArtifactKinds: [],
         producesArtifactKind: action.risk === "read" ? "app_context" : "connector_action_result",
         riskLevel,
@@ -243,7 +228,8 @@ function dynamicActionTool(toolkit, action) {
             name: action.name || action.actionSlug,
             description: action.description,
             risk: action.risk,
-            inputSchema: action.inputSchema || { type: "object" },
+            inputSchema: action.inputSchema,
+            outputSchema: action.outputSchema,
         }),
     };
 }
@@ -279,9 +265,15 @@ export function getEffectiveLoopConstraints(definition) {
             definition.agentGraph.children.flatMap((child) => child.tools.map((tool) => tool.ref)),
         );
     }
+    for (const ref of allowedToolRefs ?? []) {
+        const integrationKey = getLoopToolIntegrationKey(ref);
+        if (integrationKey)
+            allowedIntegrations.add(integrationKey);
+    }
     return {
         allowedIntegrations: [...allowedIntegrations],
         allowedToolRefs,
+        discoveredToolContracts: definition.builderMeta?.discoveredToolContracts ?? definition.discoveredToolContracts ?? [],
     };
 }
 export function listAllowedLoopTools(definition) {
@@ -311,14 +303,7 @@ export function getLoopTool(ref) {
         return connectedSearchTool(searchMatch[1]);
     const action = parseComposioActionRef(normalized);
     if (action) {
-        return dynamicActionTool(action.toolkit, {
-            toolkit: action.toolkit,
-            actionSlug: action.actionSlug,
-            name: action.actionSlug,
-            description: `Approved Composio action ${action.actionSlug}`,
-            risk: "write",
-            inputSchema: { type: "object" },
-        });
+        return null;
     }
     return null;
 }
@@ -327,7 +312,9 @@ export function isKnownLoopToolRef(ref) {
 }
 export async function listAvailableConnectorActionTools(input) {
     const actions = await listComposioToolkitTools(input.toolkit);
-    return actions.map((action) => dynamicActionTool(normalizeToolRef(input.toolkit), action));
+    return actions
+        .map((action) => dynamicActionTool(normalizeToolRef(input.toolkit), action))
+        .filter(Boolean);
 }
 function normalizeIntegrations(definition) {
     const values = new Set(["internal"]);
@@ -342,12 +329,17 @@ export async function validateToolAssignments(input) {
     const allowedToolRefs = input.definition.allowedToolRefs
         ? new Set(input.definition.allowedToolRefs.map((ref) => normalizeToolRef(ref)))
         : null;
-    const connectors = await listConnectorAccounts(input.auth);
-    const toolkits = new Set(connectedAppToolkits(connectors));
     const strictConnectors = input.strictConnectors ?? false;
+    const connectors = strictConnectors ? await listConnectorAccounts(input.auth) : [];
+    const toolkits = new Set(connectedAppToolkits(connectors));
+    const discoveredContracts = new Map((input.definition.discoveredToolContracts ?? [])
+        .filter((contract) => contract && typeof contract === "object" && !Array.isArray(contract))
+        .map((contract) => [normalizeToolRef(String(contract.toolRef ?? "")), contract])
+        .filter(([ref]) => Boolean(ref)));
     for (const assignment of input.tools) {
         const normalizedRef = normalizeToolRef(assignment.ref);
-        const entry = getLoopTool(normalizedRef);
+        const entry = getLoopTool(normalizedRef)
+            ?? dynamicActionToolFromContract(normalizedRef, discoveredContracts.get(normalizedRef));
         if (!entry) {
             issues.push({
                 ref: assignment.ref,
@@ -447,9 +439,9 @@ function firstCommentByAuthor(comments, authorPattern) {
     return comments.find((comment) => authorPattern.test(comment.author))?.body ?? "";
 }
 export function buildAgentSystemPrompt(ctx) {
-    const isNewsletterWriter = ctx.renderTarget === "canvas.email" || ctx.renderTarget === "canvas.preview"
-        || (/newsletter|email/i.test(`${ctx.goal} ${ctx.agentName} ${ctx.agentTask}`)
-            && /\b(write|writer|draft|email|newsletter)\b/i.test(`${ctx.agentName} ${ctx.agentTask}`));
+    const mediaType = ctx.outputContract?.mediaType ?? (ctx.outputContract?.representation === "json" ? "application/json" : "text/plain");
+    const isJsonOutput = mediaType === "application/json";
+    const isInputCollector = ctx.nodeKind === "operator_input";
     const base = [
         `You are ${ctx.agentName}, a specialist agent in a recurring multi-agent loop.`,
         "Complete your assigned task using prior comments as context.",
@@ -457,26 +449,18 @@ export function buildAgentSystemPrompt(ctx) {
         "When user_profile is present in the handoff, match its tone, writing style, sign-off, and identity constraints exactly.",
         "If upstream research contains placeholders, examples, or says evidence is missing, treat those items as unavailable. Omit them or clearly say the evidence is missing; never rewrite placeholders as facts.",
         "Do not claim external actions occurred unless a tool explicitly confirms it.",
-        "If producing subscriber-facing or customer-facing copy, return only that copy; omit workflow scaffolding, draft labels, approval instructions, send-plan notes, placeholder guidance, signature scaffolding, and handoff notes.",
+        "If producing an operator-visible artifact, return only the artifact content; omit workflow scaffolding, approval instructions, placeholder guidance, and handoff notes.",
         "Return one final answer, not multiple variants, unless your task explicitly asks for options.",
-        "Do not impersonate a real person, newsletter, publication, or third-party brand unless the loop goal explicitly says that is the authorized sender.",
-        "If you lack information, say so clearly.",
+        "Do not impersonate a real person or third-party brand unless the loop goal explicitly authorizes it.",
+        ...(isInputCollector
+            ? ["If required operator input is unavailable, ask for only the declared input fields."]
+            : ["Do not ask the operator for more input. Complete the task from the handoff, omitting unavailable material without inventing replacements."]),
         `MANDATORY OUTPUT CONTRACT: ${ctx.outputContract?.description ?? "Return only the completed task output."}`,
-        ...(isNewsletterWriter
-            ? ["MANDATORY OUTPUT REPRESENTATION: raw email_markdown text only. Do not return JSON or wrap the email in a `text`, `body`, or `content` object."]
-            : [`MANDATORY OUTPUT SCHEMA: ${JSON.stringify(ctx.outputContract?.schema ?? { text: "string" })}`]),
+        `MANDATORY OUTPUT MEDIA TYPE: ${mediaType}`,
+        ...(isJsonOutput ? [`MANDATORY OUTPUT SCHEMA: ${JSON.stringify(ctx.outputContract?.schema ?? {})}`] : []),
         `DONE CRITERIA: ${(ctx.doneCriteria ?? []).join("; ") || "Complete the assigned task."}`,
         "Your response must satisfy the output contract exactly. Do not add fields, sections, variants, or commentary not requested by it.",
     ];
-    if (isNewsletterWriter) {
-        base.push(
-            "Email writer contract: return exactly one email in canonical email_markdown format.",
-            "Line 1 must be `Subject: <one subject>`, line 2 may be `Preview: <one preview>`, followed by one blank line and the Markdown body.",
-            "Do not include subject-line options, alternate tones, one-paragraph versions, social snippets, implementation notes, source-planning notes, or any commentary about the draft itself.",
-            "Do not include ready-to-send language, placeholder notes, recipient instructions, send-plan sections, or personalization placeholders beyond approved mail-merge syntax already present in the template.",
-            "Raw HTML, HTML comments, code fences, HTML-friendly versions, plain-text alternate versions, and multiple representations are forbidden."
-        );
-    }
     return base.join(" ");
 }
 export function buildAgentUserPrompt(ctx) {

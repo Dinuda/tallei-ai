@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { authMiddleware, requireScopes, type AuthRequest } from "../middleware/auth.middleware.js";
-import { buildToolSpecRegistry } from "../../../services/tool-spec/index.js";
+import { buildToolSpecRegistry, listLearnedToolSpecs, listLearnedUseCases } from "../../../services/tool-spec/index.js";
 import { listAvailableLoopToolsForAuth } from "../../../services/loop-executor/tool-catalog.js";
 
 const router = Router();
@@ -8,9 +8,11 @@ router.use(authMiddleware);
 
 router.get("/integrations", requireScopes(["memory:read"]), async (req: AuthRequest, res) => {
   try {
-    const [registry, toolCatalog] = await Promise.all([
+    const [registry, toolCatalog, learnedToolSpecs, learnedUseCases] = await Promise.all([
       buildToolSpecRegistry(req.authContext!),
       listAvailableLoopToolsForAuth(req.authContext!),
+      listLearnedToolSpecs(),
+      listLearnedUseCases(req.authContext!),
     ]);
 
     res.json({
@@ -22,6 +24,10 @@ router.get("/integrations", requireScopes(["memory:read"]), async (req: AuthRequ
         generatedAt: registry.generatedAt,
       },
       toolCatalog,
+      learnedCatalog: {
+        toolSpecs: learnedToolSpecs,
+        useCases: learnedUseCases,
+      },
       platform: {
         renderTargets: [
           { target: "canvas.email", description: "Editable email workspace — operator can visually edit the email before approval or sending." },
@@ -45,7 +51,6 @@ router.get("/integrations", requireScopes(["memory:read"]), async (req: AuthRequ
             { type: "source_confirmation", description: "Operator selects web search sources and can add custom URLs/titles/snippets." },
             { type: "missing_input", description: "Operator must paste text content (e.g. sprint notes, product briefs)." },
             { type: "draft_review", description: "Operator reviews the draft in canvas; can approve as-is or edit to improve." },
-            { type: "recipient_upload", description: "Operator uploads a recipient list before delivery." },
             { type: "pre_send", description: "Operator confirms an external side-effect before it executes." },
           ],
           approvalModes: [

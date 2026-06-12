@@ -38,12 +38,14 @@ export interface ToolContract {
   executionMode: ToolExecutionMode;
   approval: {
     required: boolean;
-    suggestedGate?: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "recipient_upload" | "pre_send";
+    suggestedGate?: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
     reason?: string;
   };
   renderRecommendations: ToolRenderRecommendation[];
   constraints: Record<string, unknown>;
   source: ToolContractSource;
+  readiness?: import("./action-readiness.js").ConnectorActionReadinessContract;
+  semanticAnnotation?: Record<string, unknown>;
 }
 
 export interface ToolSpec {

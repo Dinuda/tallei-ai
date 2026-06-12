@@ -145,7 +145,6 @@ test("web search returns sources at top level for goal eval and handoff", async 
       definition: {
         goal: "Write a weekly AI industry newsletter.",
       } as never,
-      skipLlmJudge: true,
     });
 
     assert.equal(goalEval.status, "pass");
@@ -178,7 +177,6 @@ test("validated-empty memory search does not trigger confirmation gate", async (
     definition: {
       goal: "Write and send a weekly product sync email.",
     } as never,
-    skipLlmJudge: true,
   });
 
   assert.equal(result.status, "pass");

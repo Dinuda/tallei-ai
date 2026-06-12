@@ -1,10 +1,9 @@
-import type { LoopContactRow, LoopDefinition, LoopGateType, LoopRunAgent } from "../loop-executor/types.js";
+import type { LoopDefinition, LoopGateType, LoopRunAgent } from "../loop-executor/types.js";
 import {
   buildDeliveryRecipientsPatch,
   contactsFromDecision,
   type DeliveryRecipients,
-  type RecipientSourceKind,
-} from "./recipient-resolution.js";
+} from "./contacts-context.js";
 import type { WebSearchSource } from "../loop-engine/contracts.js";
 
 export type ApprovedMemory = {
@@ -39,18 +38,18 @@ export function emptyRunMemory(): RunMemory {
 }
 
 export function isInputValidationAgent(agent: { id: string; name?: string }): boolean {
-  const label = `${agent.id} ${agent.name ?? ""}`.toLowerCase();
-  return label.includes("validator") || label.includes("input_gate") || label.includes("input checker");
+  return "nodeKind" in agent && agent.nodeKind === "operator_input";
 }
 
 /** True when this agent step owns run_start operator input collection (not research/draft agents). */
 export function agentCollectsRunStartInput(agent: {
   id: string;
   name?: string;
+  nodeKind?: string;
+  tools?: Array<{ ref: string }>;
   gate?: { type: string } | null;
 }): boolean {
-  if (isInputValidationAgent(agent)) return true;
-  return agent.gate?.type === "missing_input";
+  return agent.nodeKind === "operator_input" || agent.tools?.some((tool) => tool.ref === "internal.operator_input") === true;
 }
 
 const DELIVERY_CONFIG_INPUT_PATTERN = /subscriber|audience|recipient|mailing.?list|contact.?list|list.?id|send.?to|broadcast.?list/i;
@@ -152,7 +151,6 @@ export function applyGateDecisionToRunMemory(input: {
   definition: LoopDefinition;
   gateFields?: Array<{ key: string }>;
   gateAgentId?: string;
-  recipientSourceKind?: RecipientSourceKind;
 }): GateMemoryPatch {
   if (input.gateType === "missing_input" && typeof input.decision.value === "string") {
     const value = input.decision.value.trim();
@@ -195,15 +193,12 @@ export function applyGateDecisionToRunMemory(input: {
     }
     return { approvedSources: { [agentId]: rows } };
   }
-  if (input.gateType === "pre_send" || input.gateType === "recipient_upload") {
+  if (input.gateType === "pre_send") {
     const contacts = contactsFromDecision(input.decision);
     if (contacts.length === 0) return {};
     const audienceId = typeof input.decision.audienceId === "string" ? input.decision.audienceId.trim() : undefined;
-    const source = input.recipientSourceKind && input.recipientSourceKind !== "none"
-      ? input.recipientSourceKind
-      : "uploaded";
     return {
-      deliveryRecipients: buildDeliveryRecipientsPatch({ contacts, source, audienceId }),
+      deliveryRecipients: buildDeliveryRecipientsPatch({ contacts, source: "uploaded", audienceId }),
     };
   }
   return {};
@@ -246,29 +241,8 @@ export function buildAgentHandoff(
       handoff.user_profile_memories = options.userProfile.memories;
     }
   }
-  if (memory.approvedMemories.length > 0) {
-    handoff.approved_memories = memory.approvedMemories;
-    handoff.memories = memory.approvedMemories;
-  }
-  if (Object.keys(memory.approvedSources).length > 0) {
-    handoff.approved_sources = memory.approvedSources;
-    for (const [agentId, sources] of Object.entries(memory.approvedSources)) {
-      handoff[`approved_sources.${agentId}`] = sources;
-    }
-    const flatSources = Object.values(memory.approvedSources).flat();
-    if (flatSources.length > 0) {
-      handoff.curated_web_sources = flatSources;
-    }
-  }
-  if (Object.keys(memory.inputs).length > 0) handoff.operator_input = { inputs: memory.inputs };
   if (Object.keys(memory.operatorRevisions).length > 0) {
     handoff.operator_revisions = memory.operatorRevisions;
-    const revision = memory.operatorRevisions[agent.id];
-    if (revision) {
-      handoff.operator_revision = revision;
-      if (revision.feedback) handoff.revision_feedback = revision.feedback;
-      if (revision.editedText) handoff.revision_edited_text = revision.editedText;
-    }
   }
   delete handoff[agent.id];
   return handoff;

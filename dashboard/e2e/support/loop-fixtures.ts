@@ -130,7 +130,7 @@ function makeDefinition(input: {
     task: string;
     goal?: string;
     toolRef: string;
-    gate?: { type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "recipient_upload" | "pre_send"; question: string };
+    gate?: { type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send"; question: string };
     renderTarget?: "canvas.email" | "canvas.preview";
     outputArtifactId?: string;
   };
@@ -337,7 +337,7 @@ async function insertGate(input: {
   runId: string;
   stepId: string;
   gateId: string;
-  gateType: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "recipient_upload" | "pre_send";
+  gateType: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
   status: "pending" | "approved" | "submitted" | "rejected";
   question: string;
   payload: Record<string, unknown>;
@@ -743,10 +743,16 @@ async function seedRecipientUploadFixture(auth: AuthFixture, savedContacts: bool
       goal: "Save recipients before continuing.",
       toolRef: "internal.llm_only",
       gate: {
-        type: "recipient_upload",
+        type: "pre_send",
         question: "Upload or paste recipients before sending.",
       },
     },
+    inputRequirements: [{
+      key: "recipients",
+      surface: "input.contacts_csv",
+      when: "before_send",
+      required: true,
+    }],
   });
   const surface = checkpointSurface({
     key: "recipients",
@@ -790,7 +796,7 @@ async function seedRecipientUploadFixture(auth: AuthFixture, savedContacts: bool
       name: "Recipient Gate",
       task: "Collect recipients and continue.",
       toolRef: "internal.llm_only",
-      gate: { type: "recipient_upload", question: "Upload or paste recipients before sending." },
+      gate: { type: "pre_send", question: "Upload or paste recipients before sending." },
     }),
     status: "waiting_for_gate",
     outputText: "Recipient list required.",
@@ -800,7 +806,7 @@ async function seedRecipientUploadFixture(auth: AuthFixture, savedContacts: bool
     runId,
     stepId,
     gateId,
-    gateType: "recipient_upload",
+    gateType: "pre_send",
     status: "pending",
     question: "Upload or paste recipients before sending.",
     payload: checkpointPayload({

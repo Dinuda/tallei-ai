@@ -4,9 +4,11 @@ import { z } from "zod";
 import {
   enqueueLoopBuilderProposeJob,
   enqueueLoopBuilderRefineJob,
+  enqueueIntentAnalysisJob,
   enqueueSpecDraftJob,
   enqueueSpecRefineJob,
   getLoopBuilderJob,
+  resolveIntentContextFromJob,
 } from "../../../services/loop-builder/jobs.js";
 import {
   approveLoopSpec,
@@ -19,6 +21,7 @@ import {
   saveLoopBuilderProposal,
   loopBuilderProposalSchema,
 } from "../../../services/loop-builder/intent-resolver.js";
+import { loopIntentAnswerSchema } from "../../../services/loop-engine/intent-context.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -35,6 +38,9 @@ const specIdSchema = z.object({ specId: z.string().uuid() });
 
 const specDraftSchema = z.object({
   prompt: z.string().trim().min(1).max(10_000),
+  intentAnalysisJobId: z.string().uuid().optional(),
+  answers: z.array(loopIntentAnswerSchema).max(3).optional(),
+  skippedQuestionIds: z.array(z.string().min(1)).max(3).optional(),
 });
 
 const specRefineSchema = z.object({
@@ -55,6 +61,23 @@ const saveSchema = z.object({
 
 router.use(authMiddleware);
 
+router.post("/intent/analyze", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = z.object({ prompt: z.string().trim().min(1).max(10_000) }).parse(req.body ?? {});
+    res.status(202).json(enqueueIntentAnalysisJob({
+      auth: req.authContext!,
+      prompt: body.prompt,
+    }));
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error analyzing loop intent:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to analyze loop intent" });
+  }
+});
+
 router.get("/specs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const specs = await listLoopSpecs(req.authContext!);
@@ -68,9 +91,18 @@ router.get("/specs", requireScopes(["memory:read"]), async (req: AuthRequest, re
 router.post("/specs/draft", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = specDraftSchema.parse(req.body ?? {});
+    const intentContext = body.intentAnalysisJobId
+      ? resolveIntentContextFromJob({
+          auth: req.authContext!,
+          jobId: body.intentAnalysisJobId,
+          answers: body.answers,
+          skippedQuestionIds: body.skippedQuestionIds,
+        })
+      : undefined;
     const job = enqueueSpecDraftJob({
       auth: req.authContext!,
       prompt: body.prompt,
+      intentContext,
     });
     res.status(202).json(job);
   } catch (error) {
@@ -79,7 +111,13 @@ router.post("/specs/draft", requireScopes(["memory:read"]), async (req: AuthRequ
       return;
     }
     console.error("Error drafting loop spec:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to draft loop spec" });
+    const message = error instanceof Error ? error.message : "Failed to draft loop spec";
+    const status = /completed intent analysis job not found/i.test(message)
+      ? 409
+      : /unknown (?:intent question|skipped intent question|choice for intent question)/i.test(message)
+        ? 400
+        : 500;
+    res.status(status).json({ error: message });
   }
 });
 
@@ -176,7 +214,7 @@ router.post("/specs/:specId/generate", requireScopes(["memory:read"]), async (re
     }
     const job = enqueueLoopBuilderProposeJob({
       auth: req.authContext!,
-      prompt: spec.sourcePrompt || spec.specJson.purpose,
+      prompt: spec.intentContext?.resolvedIntent ?? spec.sourcePrompt ?? spec.specJson.purpose,
       specId,
     });
     res.status(202).json(job);

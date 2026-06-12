@@ -135,7 +135,7 @@ type RunEvent = {
 
 type Gate = {
   id: string;
-  gate_type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "recipient_upload" | "pre_send";
+  gate_type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
   status: string;
   question: string;
   payload_json: { items?: Array<MemoryGateItem | SourceGateItem>; result?: { text?: string } } & Record<string, unknown>;
@@ -171,6 +171,10 @@ type Artifact = {
   data_json?: {
     renderTarget?: string;
     emailTemplate?: CanvasEmailTemplate;
+    artifactEnvelope?: {
+      visibility?: "internal" | "operator";
+      renderer?: string | null;
+    };
   };
   invalidated_at: string | null;
 };
@@ -824,13 +828,13 @@ function readSavedAudienceId(context?: Record<string, unknown>): string {
 }
 
 function resolveContactsUploadGate(gates: Gate[] | undefined, pendingGate: Gate | null): Gate | null {
-  if (pendingGate?.gate_type === "recipient_upload" || pendingGate?.gate_type === "pre_send") return pendingGate;
+  if (pendingGate?.gate_type === "pre_send") return pendingGate;
   const ordered = [...(gates ?? [])].reverse();
-  const pendingRecipient = ordered.find((gate) => gate.gate_type === "recipient_upload" && gate.status === "pending");
+  const pendingRecipient = ordered.find((gate) => gate.gate_type === "pre_send" && gate.status === "pending");
   if (pendingRecipient) return pendingRecipient;
   const pendingPreSend = ordered.find((gate) => gate.gate_type === "pre_send" && gate.status === "pending");
   if (pendingPreSend) return pendingPreSend;
-  return ordered.find((gate) => gate.gate_type === "recipient_upload" || gate.gate_type === "pre_send") ?? null;
+  return ordered.find((gate) => gate.gate_type === "pre_send") ?? null;
 }
 
 function readSavedContacts(context?: Record<string, unknown>): ContactRow[] {
@@ -1424,6 +1428,40 @@ export default function StableLoopRunPage() {
   }, [load]);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connector_return") !== "1") return;
+    const raw = window.sessionStorage.getItem("tallei:pending-connector-auth");
+    const pending = raw ? JSON.parse(raw) as { authSessionId?: string; scopes?: string[] } : null;
+    async function verifyConnection() {
+      try {
+        if (pending?.authSessionId) {
+          const response = await fetch(`/api/connectors/auth-sessions/${pending.authSessionId}/continue`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ scopes: pending.scopes ?? [] }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(payload.error ?? "Failed to verify connector");
+          if (payload.status !== "connected") {
+            throw new Error("The connector is not active yet. Complete the connection, then verify again.");
+          }
+        }
+      } catch (verifyError) {
+        toast.error("Connector verification failed", {
+          description: verifyError instanceof Error ? verifyError.message : "Failed to verify connector",
+        });
+      } finally {
+        window.sessionStorage.removeItem("tallei:pending-connector-auth");
+        params.delete("connector_return");
+        params.delete("app");
+        window.history.replaceState(null, "", `${window.location.pathname}${params.toString() ? `?${params}` : ""}`);
+        await load();
+      }
+    }
+    void verifyConnection();
+  }, [load]);
+
+  useEffect(() => {
     if (!run || terminalStatuses.has(run.status)) return;
     const timer = window.setInterval(() => void load(), 3_000);
     return () => window.clearInterval(timer);
@@ -1458,7 +1496,8 @@ export default function StableLoopRunPage() {
     return selectLatestArtifactsByKey(visibleArtifacts);
   }, [visibleArtifacts]);
   const finalArtifacts = useMemo(
-    () => latestArtifacts.filter((artifact) => artifact.kind !== "structured_output"),
+    () => latestArtifacts.filter((artifact) => artifact.data_json?.artifactEnvelope?.visibility === "operator"
+      || (artifact.kind !== "structured_output" && !artifact.data_json?.artifactEnvelope)),
     [latestArtifacts],
   );
   const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run?.gates]);
@@ -1660,7 +1699,7 @@ export default function StableLoopRunPage() {
         ? `${finalArtifactName} artifact`
         : `${finalArtifactName} artifact`;
   const centerBody = inspectingAgentOutput
-    ? getStepText(selectedStep)
+    ? getStepDisplayContent(selectedStep)
     : activeArtifact?.body || getStepDisplayContent(selectedStep);
   const contextEntries = readContextEntries(run?.context);
   const artifactPanelArtifacts = useMemo(() => {
@@ -1725,11 +1764,11 @@ export default function StableLoopRunPage() {
       title: workerSlotLabel(step.step_index, step.agent_snapshot?.name ?? step.agent_id),
       status: step.status,
       body: preview(
-        getStepText(step) ||
-          step.error_json?.message ||
-          formatJsonPreview(step.output_json?.data, 520) ||
+        step.error_json?.message ||
+          formatJsonPreview(step.output_json?.data, 2_400) ||
+          getStepText(step) ||
           "No step output yet.",
-        520,
+        2_400,
       ),
     }));
     return [...events, ...steps]
@@ -2667,7 +2706,7 @@ export default function StableLoopRunPage() {
                                 title={`Agent ${step.step_index + 1} · Attempt ${step.attempt}`}
                                 subtitle={`${formatWorkerDisplayName(step.agent_snapshot?.name ?? step.agent_id)} · ${formatDateTime(step.finished_at ?? step.started_at ?? step.created_at)}`}
                                 meta={<StatusBadge status={step.status} />}
-                                body={preview(getStepText(step) || step.error_json?.message || formatJsonPreview(step.output_json?.data), 480)}
+                                body={preview(step.error_json?.message || formatJsonPreview(step.output_json?.data, 4_000) || getStepText(step), 4_000)}
                               />
                             )) : (
                               <EditorialEmpty>No step outputs yet.</EditorialEmpty>

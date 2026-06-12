@@ -14,7 +14,10 @@ import {
 } from "./types.js";
 import { normalizeLoopDefinitionForRuntime } from "../loop-runtime/normalize-definition.js";
 import { runtimeDefinitionSchema } from "../loop-runtime/types.js";
-import { getLoopTool } from "./tool-catalog.js";
+import { getLoopToolIntegrationKey } from "./tool-catalog.js";
+import { recordLearnedWorkflow } from "../tool-spec/learned-catalog.js";
+import type { ToolContract, ToolUseCase } from "../tool-spec/types.js";
+import { loopPlanningIRSchema } from "../loop-engine/planning-ir.js";
 
 function normalizeText(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -88,7 +91,7 @@ export function buildLoopDefinition(input: {
     : buildParentAgentGraph(goal);
   const graphIntegrationKeys = uniqueStrings(
     agentGraph.children.flatMap((child) =>
-      child.tools.map((tool) => getLoopTool(tool.ref)?.integrationKey)
+      child.tools.map((tool) => getLoopToolIntegrationKey(tool.ref))
     ),
   );
   const allowedIntegrations = normalizeIntegrationList([...(input.integrations ?? []), ...graphIntegrationKeys]);
@@ -225,6 +228,64 @@ export async function createLoopWorkflow(input: {
       nextRunAt,
     ]
   );
+
+  const planningIR = definition.builderMeta?.planningIR
+    ? loopPlanningIRSchema.safeParse(definition.builderMeta.planningIR)
+    : null;
+  const annotations = new Map((planningIR?.success ? planningIR.data.selectedActions : [])
+    .map((action) => [action.toolRef.toLowerCase(), action.annotation]));
+  const learnedContracts = ((definition.builderMeta?.discoveredToolContracts ?? [])
+    .filter((value) => Boolean(value && typeof value === "object" && typeof value.toolRef === "string"))) as unknown as ToolContract[];
+  const reviewedContracts = learnedContracts.map((contract) => {
+    const annotation = annotations.get(contract.toolRef.toLowerCase());
+    if (!annotation) return contract;
+    return {
+      ...contract,
+      semanticAnnotation: annotation as unknown as Record<string, unknown>,
+      readiness: {
+        ...(contract.readiness ?? {
+          toolRef: contract.toolRef,
+          originalInputSchema: contract.inputSchema,
+          effectiveInputSchema: contract.inputSchema,
+          semanticAssertions: [],
+          unresolvedRequirements: [],
+          sourceHash: "",
+          generatedAt: new Date().toISOString(),
+        }),
+        fieldPolicies: Object.fromEntries(annotation.fieldPolicies.map((policy) => [
+          policy.path,
+          {
+            valuePolicy: policy.valuePolicy,
+            required: policy.required,
+          },
+        ])),
+        generatedBy: "model_annotation" as const,
+      },
+    };
+  });
+  if (reviewedContracts.length > 0) {
+    const category: ToolUseCase["category"] = "data";
+    await recordLearnedWorkflow({
+      auth: input.auth,
+      title,
+      summary: definition.goal,
+      outcome: definition.goal,
+      category,
+      contracts: reviewedContracts,
+      requiredTools: definition.allowedToolRefs ?? definition.agentGraph?.children.flatMap((child) => child.tools.map((tool) => tool.ref)) ?? [],
+      handoffPatterns: (definition.agentGraph?.children ?? [])
+        .filter((child) => child.handoffBindings.length > 0)
+        .map((child) => ({
+          toolRefs: child.tools.map((tool) => tool.ref),
+          bindings: child.handoffBindings.map((binding) => ({
+            sourceKind: binding.source.kind,
+            sourcePath: binding.source.path,
+            targetPath: binding.targetPath,
+            required: binding.required,
+          })),
+        })),
+    }).catch((error) => console.warn("[tool-spec] failed to record learned workflow:", error));
+  }
 
   const created = await getLoopWorkflow(input.auth, workflowId);
   if (!created) throw new Error("Failed to create loop workflow");

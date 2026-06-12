@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { ArtifactRenderer } from "@/components/renderers";
 import type { OperatorBlock, OperatorView } from "@/lib/operator-view-types";
@@ -92,11 +92,79 @@ function blockAgentOutput(block: OperatorBlock, fallback?: string): string {
   return fallback ?? "";
 }
 
+function ConnectorSetupWorkspace({ block, runId, busy }: { block: OperatorBlock; runId: string; busy: boolean }) {
+  const [error, setError] = useState<string | null>(null);
+  const setup = block.props?.connectorSetup;
+  const row = setup && typeof setup === "object" && !Array.isArray(setup)
+    ? setup as Record<string, unknown>
+    : {};
+  const toolkit = typeof row.toolkit === "string" ? row.toolkit : "connected app";
+  const actionSlug = typeof row.actionSlug === "string" ? row.actionSlug : "";
+
+  async function connect() {
+    setError(null);
+    try {
+      const redirectUrl = new URL(window.location.href);
+      redirectUrl.searchParams.set("connector_return", "1");
+      redirectUrl.searchParams.set("app", toolkit);
+      const response = await fetch("/api/connectors/composio/auth-sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          app_key: toolkit,
+          required_scopes: [toolkit],
+          redirect_uri: redirectUrl.toString(),
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? `Failed to connect ${toolkit}`);
+      if (typeof payload.auth_session_id !== "string" || typeof payload.setup_url !== "string") {
+        throw new Error("Connector setup response is incomplete");
+      }
+      window.sessionStorage.setItem("tallei:pending-connector-auth", JSON.stringify({
+        appKey: toolkit,
+        authSessionId: payload.auth_session_id,
+        scopes: [toolkit],
+        runId,
+        startedAt: Date.now(),
+      }));
+      window.location.assign(payload.setup_url);
+    } catch (connectError) {
+      setError(connectError instanceof Error ? connectError.message : `Failed to connect ${toolkit}`);
+    }
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col justify-center px-7 py-10">
+      <p className="text-[12px] font-semibold tracking-[0.12em] text-[#2d5a87] uppercase">Connector agent</p>
+      <h3 className="mt-3 text-[24px] font-bold tracking-[-0.03em] text-[#111827]">Connect {toolkit}</h3>
+      <p className="mt-3 max-w-xl text-[15px] leading-7 text-[#4b5563]">
+        This workflow is drafted and ready. Connect {toolkit} so the connector agent can execute
+        {actionSlug ? ` ${actionSlug}` : " the selected action"}, then use Continue to verify the connection and resume.
+      </p>
+      <div className="mt-7">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void connect()}
+          className="border border-[#1e4070] bg-[#1e4070] px-5 py-3 text-[14px] font-semibold text-white hover:bg-[#17355e] disabled:opacity-50"
+        >
+          Connect {toolkit}
+        </button>
+        {error ? <p className="mt-3 text-[13px] text-[#991b1b]">{error}</p> : null}
+      </div>
+    </div>
+  );
+}
+
 function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNode {
   const gateId = ctx.gateId ?? "";
   const surface = block.surface;
 
   if (surface === "input.text" || surface === "input.markdown" || surface === "input.file") {
+    if (block.props?.connectorSetup) {
+      return <ConnectorSetupWorkspace block={block} runId={ctx.runId} busy={ctx.busy} />;
+    }
     if (block.satisfied) {
       return (
         <div className="flex min-h-0 flex-1 flex-col justify-center px-7 py-10">
@@ -301,6 +369,7 @@ export function OperatorViewStamp({ stamp }: { stamp: { tag: string; name: strin
 }
 
 export function operatorBandImperative(view: OperatorView): string {
+  if (view.blocks.some((block) => block.props?.connectorSetup)) return "Connect the required app, then verify and continue";
   const primary = view.blocks.find((block) => block.required && !block.satisfied)?.surface
     ?? view.blocks[0]?.surface;
   const allInputsSatisfied = view.blocks.length > 0
@@ -320,6 +389,7 @@ export function operatorApproveLabel(
   view: OperatorView,
   counts: { selectedMemories: number; selectedSources: number; recipientCount: number },
 ): string {
+  if (view.blocks.some((block) => block.props?.connectorSetup)) return "Verify & Continue";
   const primary = view.blocks.find((block) => block.required && !block.satisfied)?.surface ?? view.blocks[0]?.surface;
   const allInputsSatisfied = view.blocks.length > 0
     && view.blocks.every((block) => !block.required || block.satisfied || !block.surface.startsWith("input."));

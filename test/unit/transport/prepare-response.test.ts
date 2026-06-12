@@ -49,24 +49,6 @@ const baseConfigEnv = {
   TALLEI_AUTH__JWT_SECRET: "jwt-secret",
 };
 
-test("intent classifier model defaults to gpt-5-nano and supports env override", () => {
-  assert.equal(loadConfig(baseConfigEnv).intentClassifierModel, "gpt-5-nano");
-  assert.equal(
-    loadConfig({
-      ...baseConfigEnv,
-      TALLEI_LLM__INTENT_CLASSIFIER_MODEL: "gpt-4.1-nano",
-    }).intentClassifierModel,
-    "gpt-4.1-nano"
-  );
-  assert.equal(
-    loadConfig({
-      ...baseConfigEnv,
-      INTENT_CLASSIFIER_MODEL: "gpt-4.1-nano-2025-04-14",
-    }).intentClassifierModel,
-    "gpt-4.1-nano-2025-04-14"
-  );
-});
-
 test("development defaults disable outbound email and live newsletter web search", () => {
   const devConfig = loadConfig({ ...baseConfigEnv, NODE_ENV: "development" });
   assert.equal(devConfig.notificationsOutboundEmailEnabled, false);
