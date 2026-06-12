@@ -436,6 +436,15 @@ export async function listComposioToolkitTools(toolkitSlug: string): Promise<Com
   return [];
 }
 
+export function normalizeComposioToolSearchResponse(response: unknown): unknown[] {
+  if (Array.isArray(response)) return response;
+  const row = toObjectRecord(response);
+  for (const candidate of [row.items, row.tools, row.data, toObjectRecord(row.data).items]) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
+}
+
 export async function searchComposioTools(query: string, limit = 12): Promise<ComposioToolSearchResult[]> {
   if (!isComposioConfigured()) return [];
   const normalizedQuery = query.trim().replace(/\s+/g, " ");
@@ -443,14 +452,24 @@ export async function searchComposioTools(query: string, limit = 12): Promise<Co
   const cappedLimit = Math.max(1, Math.min(limit, 50));
   try {
     const composio = getComposioVercelClient() as unknown as {
-      tools?: { getRawComposioTools?: (args: Record<string, unknown>) => Promise<unknown> };
+      tools?: {
+        list?: (args: Record<string, unknown>) => Promise<unknown>;
+        getRawComposioTools?: (args: Record<string, unknown>) => Promise<unknown>;
+      };
     };
-    if (!composio.tools?.getRawComposioTools) return [];
-    const response = await composio.tools.getRawComposioTools({
-      search: normalizedQuery,
-      limit: cappedLimit,
-    });
-    const items = Array.isArray(response) ? response : [];
+    const response = composio.tools?.list
+      ? await composio.tools.list({
+          query: normalizedQuery,
+          limit: cappedLimit,
+          include_deprecated: false,
+        })
+      : composio.tools?.getRawComposioTools
+        ? await composio.tools.getRawComposioTools({
+            search: normalizedQuery,
+            limit: cappedLimit,
+          })
+        : null;
+    const items = normalizeComposioToolSearchResponse(response);
     const results: ComposioToolSearchResult[] = [];
     for (const item of items) {
       const row = toObjectRecord(item);

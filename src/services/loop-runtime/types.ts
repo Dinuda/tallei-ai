@@ -76,7 +76,13 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
   }
   const hasConnectorActions = (definition.agentGraph?.children ?? []).some((agent) =>
     agent.tools.some((tool) => /^composio\.[a-z0-9_-]+\.action\./.test(tool.ref.toLowerCase())));
-  if (hasConnectorActions && (definition.builderMeta?.planningIRVersion !== "v1" || !definition.builderMeta.planningIR)) {
+  if (
+    hasConnectorActions
+    && (
+      !["v1", "v2"].includes(definition.builderMeta?.planningIRVersion ?? "")
+      || !definition.builderMeta?.planningIR
+    )
+  ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "Connector workflow requires a model-planned, contract-validated planning IR. Refine or re-draft this workflow.",

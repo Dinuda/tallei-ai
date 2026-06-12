@@ -33,7 +33,15 @@ export {
 } from "./tool-contracts.js";
 export { TOOL_USE_CASES, getUseCasesByCategory, getUseCasesByTool } from "./use-cases.js";
 export { renderToolSpecMarkdown, renderUseCasesMarkdown } from "./render-markdown.js";
-export { discoverToolsForIntent, discoverToolsForQueries, mergeRequiredToolContracts, type DiscoveredToolContract } from "./discovery.js";
+export {
+  discoverToolsForIntent,
+  discoverToolsForQueries,
+  discoveryQueriesForRequiredActions,
+  inferRequiredConnectorActions,
+  mergeRequiredToolContracts,
+  type DiscoveredToolContract,
+  type InferredConnectorAction,
+} from "./discovery.js";
 export { listLearnedToolSpecs, listLearnedUseCases, recordLearnedWorkflow, searchLearnedToolSpecs } from "./learned-catalog.js";
 
 export async function buildToolSpecRegistry(

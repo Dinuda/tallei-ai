@@ -137,6 +137,7 @@ export async function loopBuilderOpenAiChat(input: {
   maxTokens?: number;
   exactMaxTokens?: boolean;
   retryEmptyResponses?: boolean;
+  emptyResponseRetryMaxTokens?: number;
   responseFormat?: "json_object" | LoopBuilderJsonSchemaFormat;
   reasoningEffort?: LoopBuilderReasoningEffort | null;
   signal?: AbortSignal;
@@ -202,13 +203,15 @@ export async function loopBuilderOpenAiChat(input: {
       attempts.push({ reasoningEffort: "minimal", maxCompletionTokens: baseMaxCompletionTokens });
     }
     attempts.push({
-      reasoningEffort: null,
-      maxCompletionTokens: Math.max(baseMaxCompletionTokens * 2, readLoopBuilderMinCompletionTokens()),
+      reasoningEffort: input.emptyResponseRetryMaxTokens ? configuredReasoningEffort : null,
+      maxCompletionTokens: input.emptyResponseRetryMaxTokens
+        ? Math.max(baseMaxCompletionTokens, input.emptyResponseRetryMaxTokens)
+        : Math.max(baseMaxCompletionTokens * 2, readLoopBuilderMinCompletionTokens()),
     });
   }
 
   let lastResult: LoopBuilderOpenAiChatResult | null = null;
-  for (const attempt of attempts) {
+  for (const [attemptIndex, attempt] of attempts.entries()) {
     const result = await callOnce(attempt);
     lastResult = result;
     if (result.text) {
@@ -242,6 +245,30 @@ export async function loopBuilderOpenAiChat(input: {
         maxCompletionTokens: attempt.maxCompletionTokens,
         reasoningEffort: attempt.reasoningEffort,
       }));
+    }
+    const nextAttempt = attempts[attemptIndex + 1];
+    if (nextAttempt) {
+      const promptTokens = result.usage.promptTokens ?? 0;
+      const completionTokens = result.usage.completionTokens ?? 0;
+      reportLoopBuilderProgress({
+        stage: "llm_call",
+        message: result.finishReason === "length"
+          ? `Retrying ${result.model} after exhausting the serialization budget`
+          : `Retrying ${result.model} after an empty response`,
+        status: "running",
+        model: result.model,
+        promptTokens,
+        completionTokens,
+        totalTokens: result.usage.totalTokens ?? promptTokens + completionTokens,
+        estimatedCostUsd: estimateLoopBuilderCostUsd(result.model, promptTokens, completionTokens),
+        details: {
+          finishReason: result.finishReason,
+          reasoningEffort: attempt.reasoningEffort,
+          exhaustedMaxCompletionTokens: attempt.maxCompletionTokens,
+          retryMaxCompletionTokens: nextAttempt.maxCompletionTokens,
+          responseCharacters: result.text.length,
+        },
+      });
     }
   }
 

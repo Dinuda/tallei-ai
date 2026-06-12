@@ -233,7 +233,7 @@ export async function createLoopWorkflow(input: {
     ? loopPlanningIRSchema.safeParse(definition.builderMeta.planningIR)
     : null;
   const annotations = new Map((planningIR?.success ? planningIR.data.selectedActions : [])
-    .map((action) => [action.toolRef.toLowerCase(), action.annotation]));
+    .map((action) => [action.contractRef.toLowerCase(), action.annotation]));
   const learnedContracts = ((definition.builderMeta?.discoveredToolContracts ?? [])
     .filter((value) => Boolean(value && typeof value === "object" && typeof value.toolRef === "string"))) as unknown as ToolContract[];
   const reviewedContracts = learnedContracts.map((contract) => {
@@ -248,17 +248,12 @@ export async function createLoopWorkflow(input: {
           originalInputSchema: contract.inputSchema,
           effectiveInputSchema: contract.inputSchema,
           semanticAssertions: [],
+          fieldPolicies: {},
           unresolvedRequirements: [],
           sourceHash: "",
+          generatedBy: "sdk_contract" as const,
           generatedAt: new Date().toISOString(),
         }),
-        fieldPolicies: Object.fromEntries(annotation.fieldPolicies.map((policy) => [
-          policy.path,
-          {
-            valuePolicy: policy.valuePolicy,
-            required: policy.required,
-          },
-        ])),
         generatedBy: "model_annotation" as const,
       },
     };

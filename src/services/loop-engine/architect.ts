@@ -21,10 +21,9 @@ import {
   type NoSlopSpecSnapshot,
   type WorkflowCriticResult,
 } from "./contracts.js";
-import { normalizeContractSchema } from "./data-contract.js";
 import {
   compileLoopPlanningIR,
-  loopPlanningIRJsonSchema,
+  loopPlanningIRJsonSchemaForContracts,
   loopPlanningIRSchema,
   type LoopPlanningIR,
   type PlanningCompilationIssue,
@@ -34,6 +33,8 @@ import { formatWorkflowUserProfile, loadWorkflowUserProfile } from "./workflow-u
 import {
   buildToolSpecRegistry,
   discoverToolsForQueries,
+  discoveryQueriesForRequiredActions,
+  inferRequiredConnectorActions,
   mergeRequiredToolContracts,
 } from "../tool-spec/index.js";
 import type { ToolContract } from "../tool-spec/types.js";
@@ -74,12 +75,25 @@ export type DesignLoopInput = {
 
 const toolSearchPlanSchema = z.object({
   queries: z.array(z.string().min(1)).max(4).default([]),
-  reasoning: z.string().min(1),
 });
+const toolSearchPlanJsonSchema = {
+  type: "object",
+  properties: {
+    queries: {
+      type: "array",
+      items: { type: "string" },
+      maxItems: 4,
+    },
+  },
+  required: ["queries"],
+  additionalProperties: false,
+} as const;
 
-const DEFAULT_MAX_PLANNING_CORRECTIONS = 2;
-const DEFAULT_PLANNING_ATTEMPT_TIMEOUT_MS = 90_000;
+const DEFAULT_MAX_PLANNING_CORRECTIONS = 1;
+const DEFAULT_PLANNING_ATTEMPT_TIMEOUT_MS = 180_000;
 const DEFAULT_PLANNING_MAX_COMPLETION_TOKENS = 8_000;
+const DEFAULT_PLANNING_EMPTY_RESPONSE_RETRY_TOKENS = 12_000;
+const DEFAULT_PLANNING_MAX_PROMPT_BYTES = 120_000;
 
 export type PlanningAttemptResult = {
   attempt: number;
@@ -93,6 +107,8 @@ export type PlanningAttemptResult = {
   repeatedIssues: PlanningCompilationIssue[];
   promptTokens: number;
   completionTokens: number;
+  promptBytes: number;
+  promptBreakdown: Record<string, number>;
   estimatedCostUsd: number;
   stopReason?: "compiled" | "structural_failure" | "attempt_failed" | "repeated_issues" | "worsened" | "correction_limit";
 };
@@ -108,19 +124,31 @@ export function planningProgressConfig() {
       "TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS",
       DEFAULT_MAX_PLANNING_CORRECTIONS,
       0,
-      2,
+      1,
     ),
     attemptTimeoutMs: readBoundedInteger(
       "TALLEI_LOOP_BUILDER__PLANNING_ATTEMPT_TIMEOUT_MS",
       DEFAULT_PLANNING_ATTEMPT_TIMEOUT_MS,
       5_000,
-      180_000,
+      300_000,
     ),
     maxCompletionTokens: readBoundedInteger(
       "TALLEI_LOOP_BUILDER__PLANNING_MAX_COMPLETION_TOKENS",
       DEFAULT_PLANNING_MAX_COMPLETION_TOKENS,
-      2_000,
+      1_000,
       12_000,
+    ),
+    emptyResponseRetryMaxTokens: readBoundedInteger(
+      "TALLEI_LOOP_BUILDER__PLANNING_EMPTY_RESPONSE_RETRY_TOKENS",
+      DEFAULT_PLANNING_EMPTY_RESPONSE_RETRY_TOKENS,
+      4_000,
+      16_000,
+    ),
+    maxPromptBytes: readBoundedInteger(
+      "TALLEI_LOOP_BUILDER__PLANNING_MAX_PROMPT_BYTES",
+      DEFAULT_PLANNING_MAX_PROMPT_BYTES,
+      20_000,
+      500_000,
     ),
   };
 }
@@ -181,13 +209,6 @@ export function shouldRetryPlanningTransportFailure(input: {
     && input.transportFailures < 1;
 }
 
-export function isRecoverablePlannerWireFailure(error: unknown): boolean {
-  return error instanceof InvalidPlanningIRProposalError
-    && error.issues.length > 0
-    && error.issues.every((issue) =>
-      issue.code === "invalid_encoded_json" || issue.code === "invalid_encoded_json_object");
-}
-
 class InvalidPlanningIRProposalError extends Error {
   constructor(
     message: string,
@@ -215,164 +236,54 @@ function parseObject(text: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function normalizePlannerContract(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const row = { ...(value as Record<string, unknown>) };
-  if (row.schema && typeof row.schema === "object" && !Array.isArray(row.schema)) {
-    row.schema = normalizeContractSchema(row.schema as Record<string, unknown>);
-  }
-  return row;
-}
-
-const JSON_ENCODED_PLANNER_FIELDS = new Set([
-  "schema",
-  "valueSchema",
-  "stableValue",
-  "stableConfig",
-  "toolConfig",
-]);
-const JSON_OBJECT_PLANNER_FIELDS = new Set(["schema", "valueSchema", "stableConfig", "toolConfig"]);
-const EMPTY_ARRAY_PLANNER_FIELDS = new Set([
-  "decisions",
-  "requiredValues",
-  "semanticAgents",
-  "selectedActions",
-  "unresolvedIssues",
-  "rationale",
-  "inputBindings",
-  "semanticAssertions",
-  "fieldPolicies",
-  "bindings",
-]);
-const OPTIONAL_PLANNER_FIELDS = new Set([
-  "nodeId",
-  "key",
-  "stableValue",
-  "toolConfig",
-  "reviewGate",
-  "relatedRef",
-  "mediaType",
-  "visibility",
-  "renderer",
-]);
-
-export function decodePlannerWireValue(
-  value: unknown,
-  field?: string,
-  path = "",
-  issues: PlanningCompilationIssue[] = [],
-): { value: unknown; issues: PlanningCompilationIssue[] } {
-  if (field && JSON_ENCODED_PLANNER_FIELDS.has(field) && typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      if (
-        JSON_OBJECT_PLANNER_FIELDS.has(field)
-        && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      ) {
-        issues.push({
-          code: "invalid_encoded_json_object",
-          path,
-          message: `${path}: must contain a JSON-encoded object.`,
-        });
-      }
-      return { value: parsed, issues };
-    } catch (error) {
-      issues.push({
-        code: "invalid_encoded_json",
-        path,
-        message: `${path}: contains invalid JSON text (${error instanceof Error ? error.message : String(error)}).`,
-      });
-      return { value, issues };
-    }
-  }
-  if (Array.isArray(value)) {
-    return {
-      value: value.map((entry, index) => decodePlannerWireValue(entry, undefined, `${path}.${index}`, issues).value),
-      issues,
+function schemaFields(schema: Record<string, unknown>, base = "", parentRequired = true): Array<{
+  path: string;
+  type: string;
+  required: boolean;
+  description: string | null;
+}> {
+  const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+    ? schema.properties as Record<string, unknown>
+    : {};
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((value): value is string => typeof value === "string") : []);
+  return Object.entries(properties).flatMap(([key, raw]) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const field = raw as Record<string, unknown>;
+    const path = `${base}/${key}`;
+    const type = typeof field.type === "string" ? field.type : "unknown";
+    const row = {
+      path,
+      type,
+      required: parentRequired && required.has(key),
+      description: typeof field.description === "string" ? field.description : null,
     };
-  }
-  if (!value || typeof value !== "object") return { value, issues };
-  const result: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (entry === null && OPTIONAL_PLANNER_FIELDS.has(key)) continue;
-    if (entry === null && EMPTY_ARRAY_PLANNER_FIELDS.has(key)) {
-      result[key] = [];
-      continue;
-    }
-    if (entry === null && (key === "schema" || key === "stableConfig")) {
-      result[key] = {};
-      continue;
-    }
-    if (entry === null && key === "path") {
-      result[key] = "/";
-      continue;
-    }
-    if (entry === null && key === "required") {
-      result[key] = true;
-      continue;
-    }
-    if (entry === null && key === "representation") {
-      result[key] = "text";
-      continue;
-    }
-    if (entry === null && key === "suggestedChannels") {
-      result[key] = ["primary"];
-      continue;
-    }
-    result[key] = decodePlannerWireValue(entry, key, path ? `${path}.${key}` : key, issues).value;
-  }
-  return { value: result, issues };
+    const nested = type === "object" ? schemaFields(field, path, row.required) : [];
+    return nested.length > 0 ? [row, ...nested] : [row];
+  });
 }
 
-function normalizePlanningIR(value: unknown): unknown {
-  const decoded = decodePlannerWireValue(value);
-  if (decoded.issues.length > 0) {
-    throw new InvalidPlanningIRProposalError(
-      decoded.issues.map((issue) => issue.message).join("; "),
-      value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined,
-      decoded.issues,
-    );
-  }
-  const normalizedWire = decoded.value;
-  if (!normalizedWire || typeof normalizedWire !== "object" || Array.isArray(normalizedWire)) return normalizedWire;
-  const root = { ...(normalizedWire as Record<string, unknown>) };
-  if (Array.isArray(root.semanticAgents)) {
-    root.semanticAgents = root.semanticAgents.map((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
-      const agent = { ...(raw as Record<string, unknown>) };
-      agent.outputContract = normalizePlannerContract(agent.outputContract);
-      if (agent.inputContract && typeof agent.inputContract === "object" && !Array.isArray(agent.inputContract)) {
-        const contract = { ...(agent.inputContract as Record<string, unknown>) };
-        if (contract.schema && typeof contract.schema === "object" && !Array.isArray(contract.schema)) {
-          contract.schema = normalizeContractSchema(contract.schema as Record<string, unknown>);
-        }
-        agent.inputContract = contract;
-      }
-      return agent;
-    });
-  }
-  return root;
-}
-
-function plannerContracts(contracts: ToolContract[]) {
+export function compactPlannerContracts(contracts: ToolContract[]) {
   return contracts.map((contract) => ({
-    toolRef: contract.toolRef,
+    contractRef: contract.toolRef,
     name: contract.name,
     description: contract.description,
-    inputSchema: contract.inputSchema,
-    outputSchema: contract.outputSchema,
+    provider: contract.provider,
+    inputFields: schemaFields(contract.inputSchema).slice(0, 40),
+    outputFields: schemaFields(contract.outputSchema).slice(0, 40),
     declaredRisk: contract.constraints.risk ?? null,
     toolkitVersion: contract.constraints.toolkitVersion ?? null,
     connected: contract.constraints.connected ?? null,
   }));
 }
 
+export type CompactToolContractView = ReturnType<typeof compactPlannerContracts>[number];
+
 export function contractsForPlannerCorrection(input: {
   previousIR: LoopPlanningIR;
   internalContracts: ToolContract[];
   connectorContracts: ToolContract[];
 }): ToolContract[] {
-  const referencedConnectorRefs = new Set(input.previousIR.selectedActions.map((action) => action.toolRef.toLowerCase()));
+  const referencedConnectorRefs = new Set(input.previousIR.selectedActions.map((action) => action.contractRef.toLowerCase()));
   return [
     ...input.internalContracts,
     ...input.connectorContracts.filter((contract) => referencedConnectorRefs.has(contract.toolRef.toLowerCase())),
@@ -382,20 +293,32 @@ export function contractsForPlannerCorrection(input: {
 async function generateToolSearchPlan(input: {
   prompt: string;
   intentContext?: NoSlopSpecSnapshot["intentContext"];
+  previousQueries?: string[];
   chat: typeof loopBuilderOpenAiChat;
 }) {
   const response = await input.chat({
-    responseFormat: "json_object",
+    responseFormat: {
+      type: "json_schema",
+      name: "tool_search_plan",
+      schema: toolSearchPlanJsonSchema,
+    },
     temperature: 0,
     maxTokens: 800,
-    reasoningEffort: "medium",
+    exactMaxTokens: true,
+    retryEmptyResponses: false,
+    reasoningEffort: "minimal",
     messages: [
       {
         role: "system",
         content: [
           "Identify whether exact external connector actions may be needed for this workflow.",
-          "Return JSON with queries and reasoning.",
-          "Queries are concise capability searches for a connector tool catalogue, not action slugs.",
+          "Return only the bounded connector catalogue search queries.",
+          "Each query must be a concise 2-5 word capability search for a connector tool catalogue, not an action slug.",
+          "When the request names an app or provider, include that exact app or provider name in the relevant query.",
+          "Use separate queries for materially different connector capabilities.",
+          input.previousQueries?.length
+            ? "The previous queries returned no exact contracts. Reformulate them into shorter provider-and-capability searches."
+            : "",
           "Return no queries when internal reasoning/search tools are sufficient.",
           "Do not choose actions yet.",
         ].join(" "),
@@ -405,7 +328,7 @@ async function generateToolSearchPlan(input: {
         content: JSON.stringify({
           request: input.prompt,
           resolvedIntent: input.intentContext?.resolvedIntent ?? null,
-          output: { queries: ["string, maximum four"], reasoning: "string" },
+          previousQueriesWithNoResults: input.previousQueries ?? [],
         }),
       },
     ],
@@ -430,8 +353,8 @@ function buildPlannerPrompt(input: {
     profile: input.profile,
     recalledContext: input.memories,
     preferences: input.preferences,
-    internalTools: plannerContracts(input.internalContracts),
-    discoveredConnectorActions: plannerContracts(input.connectorContracts),
+    internalTools: compactPlannerContracts(input.internalContracts),
+    discoveredConnectorActions: compactPlannerContracts(input.connectorContracts),
     priorPlanningIR: input.priorPlanningIR ?? null,
     planningSemantics: {
       resolvedRequiredValue: "The lifecycle and source are known. A runtime_input is resolved even though its actual value will only be supplied during a run.",
@@ -468,47 +391,53 @@ function buildPlannerCorrectionPrompt(input: {
   return JSON.stringify({
     previousPlanningIR: input.previousIR,
     compilationIssues: input.compilationIssues,
-    referencedContracts: plannerContracts(input.contracts),
+    referencedContracts: compactPlannerContracts(input.contracts),
   });
 }
 
 function planningSystemPrompt(): string {
   return [
-    "You are the semantic workflow planner. Return only a LoopPlanningIR JSON object.",
+    "You are the semantic workflow planner. Return only a compact LoopPlanningIR v2 JSON object.",
     "You own semantic decisions. Deterministic code will only validate and materialize exactly what you declare.",
-    "Use version v1. Design only meaningful semantic agents. Never create coordinators, formatters, input collectors, checkpoints, or connector-action agents inside semanticAgents.",
+    "Use version v2. Design only meaningful semantic agents. Never create coordinators, formatters, input collectors, checkpoints, or connector-action agents inside semanticAgents.",
     "Select connector actions only from discoveredConnectorActions and place them in selectedActions.",
     "When discoveredConnectorActions is empty, do not invent a connector tool ref, runtime connector action, or delivery semantic agent.",
     "A missing connector contract may be declared as an unresolved action issue, but semanticAgents must still use only exact internalTools.",
-    "For every selected action, inspect its exact input schema and declare every required field source with an explicit binding.",
+    "Do not require an external research connector when an available internal search tool satisfies the research work.",
+    "Select actions by exact contractRef. For every selected action, inspect the compact field contract and declare every required field source with an explicit binding.",
     "Never invent recipients, IDs, files, credentials, account values, or other passthrough values.",
     "Declare such values in requiredValues with an explicit lifecycle and bind them through required_value.",
     "Passthrough means opaque externally supplied identity data only. Generated research, stories, summaries, drafts, bodies, subjects, and other semantic content are derivable, not passthrough.",
-    "A runtime_input with a known operator_input source is status resolved even though the operator has not supplied its actual value yet.",
+    "A runtime_input with a known operator_input source MUST use status resolved even though the operator has not supplied its actual value yet. Never use status unresolved for a declared runtime_input.",
     "Never model connector authorization, OAuth, credentials, access tokens, or connection state as a required value or action binding. The runtime handles connector connection checkpoints.",
     "Disconnected connector actions may be selected and compiled normally.",
     "Use available internal tools for their declared capabilities. Do not require operator content when an available internal tool can produce the source data.",
-    "For each action field, provide an explicit semantic annotation and evidence based on the exact contract.",
-    "Record prose-only cross-field requirements as explicit semanticAssertions with contract evidence; do not leave them implicit.",
+    "For each bound action field, provide an explicit semantic annotation based on the contract.",
+    "Match selectedActions.annotation.effect to each contract declaredRisk. Use read_external only when declaredRisk is read.",
     "Unknown or low-confidence action risk must require approval.",
     "Semantic agents must have one meaningful responsibility and each output must have a declared downstream consumer.",
     "Use inputBindings to declare semantic agent dependencies. Do not rely on names or prose to imply handoffs.",
-    "Use canonical JSON Schema for all structured contracts.",
+    "Declare compact output artifacts with named JSON-pointer fields and primitive JSON types. Never author JSON Schema.",
+    "Text artifacts declare no fields and expose the implicit /text field. Use a json artifact when downstream steps need named structured fields.",
     "Use unresolvedIssues rather than guessing when a decision, action, value source, or binding cannot be established.",
     "A runtime input may remain without an actual value, but its lifecycle and source decision must be resolved.",
-    "For an approved reviewed spec, resolve safe operational omissions as explicit visible model-reasoning decisions and evidence. Do not silently default them.",
+    "For an approved reviewed spec, resolve safe operational omissions as explicit visible model decisions. Do not silently default them.",
     "Do not emit implementation-detail clarification questions here; intent clarification happens before planning.",
   ].join(" ");
 }
 
 function correctionSystemPrompt(): string {
   return [
-    "Return only the complete corrected LoopPlanningIR JSON object.",
+    "Return only the complete corrected compact LoopPlanningIR v2 JSON object.",
     "Fix every supplied compiler issue without changing unrelated semantic decisions.",
     "Use only the supplied referenced contracts.",
-    "Every JSON-encoded field must contain syntactically valid JSON text. Keep schemas concise and close every object and array.",
     "Every semanticAgents toolRef must exactly match a supplied internal contract.",
+    "Every selected action contractRef must exactly match a supplied connector contract.",
     "Never represent a connector action, missing connector, delivery coordinator, or runtime-provided tool as a semantic agent.",
+    "If a connector contract is unavailable, remove every semantic agent that pretends to perform that connector action and retain only genuine semantic work.",
+    "Every non-terminal semantic agent output must bind to a downstream consumer. Mark the final operator-visible draft as visibility operator, or wire its artifact fields into a selected action.",
+    "Runtime inputs with lifecycle runtime_input and sourceKind operator_input must use status resolved.",
+    "Match action annotation effect to contract declaredRisk. Integer action fields require integer artifact fields or stable_config scalars.",
     "Remove bindings whose target paths are absent from the receiving agent input contract, or explicitly shape that input contract when the binding is semantically required.",
     "Do not invent sources, actions, bindings, identifiers, recipients, files, or credentials.",
   ].join(" ");
@@ -523,45 +452,64 @@ async function callPlanner(input: {
   internalContracts: ToolContract[];
   connectorContracts: ToolContract[];
   previousIR?: LoopPlanningIR;
-  previousInvalidProposal?: Record<string, unknown>;
   priorPlanningIR?: LoopPlanningIR;
   compilationIssues?: PlanningCompilationIssue[];
   chat: typeof loopBuilderOpenAiChat;
   timeoutMs: number;
   maxCompletionTokens: number;
+  emptyResponseRetryMaxTokens: number;
+  maxPromptBytes: number;
 }): Promise<{
   planningIR: LoopPlanningIR;
   model: string;
   durationMs: number;
   promptTokens: number;
   completionTokens: number;
+  promptBytes: number;
+  promptBreakdown: Record<string, number>;
   estimatedCostUsd: number;
 }> {
   const startedAt = Date.now();
-  const correction = Boolean((input.previousIR || input.previousInvalidProposal) && input.compilationIssues?.length);
+  const correction = Boolean(input.previousIR && input.compilationIssues?.length);
   const referencedContracts = input.previousIR
     ? contractsForPlannerCorrection({
         previousIR: input.previousIR,
         internalContracts: input.internalContracts,
         connectorContracts: input.connectorContracts,
       })
-    : input.previousInvalidProposal
-      ? [...input.internalContracts, ...input.connectorContracts]
-      : [];
+    : [];
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+  const plannerUserPrompt = correction
+    ? buildPlannerCorrectionPrompt({
+        previousIR: input.previousIR!,
+        compilationIssues: input.compilationIssues!,
+        contracts: referencedContracts,
+      })
+    : buildPlannerPrompt(input);
+  const promptBreakdown = Object.fromEntries(Object.entries(parseObject(plannerUserPrompt))
+    .map(([key, value]) => [key, Buffer.byteLength(JSON.stringify(value))]));
+  const promptBytes = Buffer.byteLength(plannerUserPrompt);
+  if (promptBytes > input.maxPromptBytes) {
+    throw new Error(`Planner prompt exceeded the ${input.maxPromptBytes}-byte input budget (${promptBytes} bytes).`);
+  }
   let response: Awaited<ReturnType<typeof input.chat>>;
+  const scopedPlanningSchema = loopPlanningIRJsonSchemaForContracts({
+    internalToolRefs: input.internalContracts.map((contract) => contract.toolRef),
+    connectorContractRefs: input.connectorContracts.map((contract) => contract.toolRef),
+  });
   try {
     response = await input.chat({
       responseFormat: {
         type: "json_schema",
         name: "loop_planning_ir",
-        schema: loopPlanningIRJsonSchema,
+        schema: scopedPlanningSchema,
       },
       temperature: 0.1,
       maxTokens: input.maxCompletionTokens,
       exactMaxTokens: true,
-      retryEmptyResponses: false,
+      retryEmptyResponses: true,
+      emptyResponseRetryMaxTokens: input.emptyResponseRetryMaxTokens,
       reasoningEffort: "minimal",
       signal: controller.signal,
       messages: correction
@@ -569,16 +517,12 @@ async function callPlanner(input: {
             { role: "system", content: correctionSystemPrompt() },
             {
               role: "user",
-              content: buildPlannerCorrectionPrompt({
-                previousIR: input.previousIR ?? input.previousInvalidProposal!,
-                compilationIssues: input.compilationIssues!,
-                contracts: referencedContracts,
-              }),
+              content: plannerUserPrompt,
             },
           ]
         : [
             { role: "system", content: planningSystemPrompt() },
-            { role: "user", content: buildPlannerPrompt(input) },
+            { role: "user", content: plannerUserPrompt },
           ],
     });
   } catch (error) {
@@ -598,7 +542,7 @@ async function callPlanner(input: {
   const candidate = proposal.planningIR && typeof proposal.planningIR === "object" && !Array.isArray(proposal.planningIR)
     ? proposal.planningIR
     : proposal;
-  const parsed = loopPlanningIRSchema.safeParse(normalizePlanningIR(candidate));
+  const parsed = loopPlanningIRSchema.safeParse(candidate);
   if (!parsed.success) {
     const issues = formatPlanningValidationIssues(parsed.error);
     throw new InvalidPlanningIRProposalError(
@@ -615,6 +559,8 @@ async function callPlanner(input: {
     durationMs: Date.now() - startedAt,
     promptTokens,
     completionTokens,
+    promptBytes,
+    promptBreakdown,
     estimatedCostUsd: estimateLoopBuilderCostUsd(response.model, promptTokens, completionTokens),
   };
 }
@@ -628,7 +574,7 @@ function compatibleDesign(ir: LoopPlanningIR, graph: ReturnType<typeof loopAgent
     strategyText: ir.strategy,
     inputsRequired: ir.requiredValues.filter((value) => value.lifecycle === "runtime_input").map((value) => value.key),
     inputRequirements: [],
-    delivery: { provider: writeAction?.toolRef ?? "none" },
+    delivery: { provider: writeAction?.contractRef ?? "none" },
     schedule: ir.schedule,
     agents: graph.children.map((node) => ({
       nodeKind: node.nodeKind,
@@ -650,8 +596,8 @@ function compatibleDesign(ir: LoopPlanningIR, graph: ReturnType<typeof loopAgent
       doneCriteria: node.doneCriteria ?? ["Declared goal is complete"],
       ...(node.gate ? { gate: node.gate } : {}),
     })),
-    rationale: ir.rationale,
-    suggestedChannels: ir.suggestedChannels,
+    rationale: [ir.strategy],
+    suggestedChannels: ["primary"],
   };
 }
 
@@ -688,17 +634,49 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     intentContext: input.noSlopSpec?.intentContext,
     chat,
   });
-  const requiredActions = input.noSlopSpec
+  const specPolicyActions = input.noSlopSpec
     ? [...input.noSlopSpec.specJson.connectorPolicy.allowedReadActions, ...input.noSlopSpec.specJson.connectorPolicy.allowedWriteActions]
     : [];
+  const inferredActions = inferRequiredConnectorActions({
+    prompt,
+    deliveryProvider: input.noSlopSpec?.specJson.delivery.provider,
+    deliveryDescription: input.noSlopSpec?.specJson.delivery.description,
+    intentText: input.noSlopSpec?.intentContext?.resolvedIntent,
+  });
+  const requiredActions = [...specPolicyActions, ...inferredActions];
+  let discoveryQueries = discoveryQueriesForRequiredActions(
+    [...new Set(search.plan.queries.map((query) => query.trim()).filter(Boolean))],
+    inferredActions,
+  );
   reportLoopBuilderProgress({
     stage: "tool_discovery",
-    message: `Searching connector catalogue with ${search.plan.queries.length} planned ${search.plan.queries.length === 1 ? "query" : "queries"}`,
+    message: `Searching connector catalogue with ${discoveryQueries.length} bounded ${discoveryQueries.length === 1 ? "query" : "queries"}`,
     status: "running",
-    details: { queries: search.plan.queries, reasoning: search.plan.reasoning, requiredActions },
+    details: {
+      modelQueries: search.plan.queries,
+      effectiveQueries: discoveryQueries,
+      requiredActions,
+    },
   });
+  let discoveredBySearch = await discoverToolsForQueries(input.auth, discoveryQueries, 12);
+  if (discoveredBySearch.length === 0 && discoveryQueries.length > 0) {
+    reportLoopBuilderProgress({
+      stage: "tool_discovery",
+      message: "No exact connector contracts found; reformulating catalogue queries once",
+      status: "running",
+      details: { queriesWithNoResults: discoveryQueries },
+    });
+    const retrySearch = await generateToolSearchPlan({
+      prompt,
+      intentContext: input.noSlopSpec?.intentContext,
+      previousQueries: discoveryQueries,
+      chat,
+    });
+    discoveryQueries = [...new Set(retrySearch.plan.queries.map((query) => query.trim()).filter(Boolean))].slice(0, 4);
+    discoveredBySearch = await discoverToolsForQueries(input.auth, discoveryQueries, 12);
+  }
   const discovered = await mergeRequiredToolContracts(
-    await discoverToolsForQueries(input.auth, search.plan.queries, 12),
+    discoveredBySearch,
     requiredActions,
   );
   const connectorContracts = discovered.map((entry) => ({
@@ -720,6 +698,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         toolkitVersion: entry.contract.constraints.toolkitVersion ?? null,
         requiredInputPaths: Array.isArray(entry.contract.inputSchema.required) ? entry.contract.inputSchema.required : [],
       })),
+      effectiveQueries: discoveryQueries,
       internalContracts: internalContracts.map((contract) => ({ toolRef: contract.toolRef, name: contract.name })),
     },
   });
@@ -731,8 +710,6 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
   let compilationIssues: PlanningCompilationIssue[] | undefined;
   let bestCompilationIssues: PlanningCompilationIssue[] | undefined;
   let lastAttemptFailedBeforePlanning = false;
-  let previousInvalidProposal: Record<string, unknown> | undefined;
-  let wireCorrectionAttempts = 0;
   const plannerConfig = planningProgressConfig();
   const maxPlanningAttempts = 1 + plannerConfig.maxCorrectionAttempts;
   const priorPlanningIRResult = loopPlanningIRSchema.safeParse(input.priorProposal?.definition.builderMeta?.planningIR);
@@ -741,7 +718,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
   let transportFailures = 0;
   for (let attempt = 0; attempt < maxPlanningAttempts; attempt += 1) {
     const attemptStartedAt = Date.now();
-    const kind = planningIR || previousInvalidProposal ? "correction" as const : "initial" as const;
+    const kind = planningIR ? "correction" as const : "initial" as const;
     const issuesBefore = compilationIssues ?? [];
     reportLoopBuilderProgress({
       stage: "planning",
@@ -755,10 +732,16 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         maxAttempts: maxPlanningAttempts,
         timeoutMs: plannerConfig.attemptTimeoutMs,
         maxCompletionTokens: plannerConfig.maxCompletionTokens,
+        emptyResponseRetryMaxTokens: plannerConfig.emptyResponseRetryMaxTokens,
+        maxPromptBytes: plannerConfig.maxPromptBytes,
+        strictSchemaBytes: Buffer.byteLength(JSON.stringify(loopPlanningIRJsonSchemaForContracts({
+          internalToolRefs: internalContracts.map((contract) => contract.toolRef),
+          connectorContractRefs: connectorContracts.map((contract) => contract.toolRef),
+        }))),
         previousPlan: planningIR ? {
           title: planningIR.title,
           semanticAgents: planningIR.semanticAgents.map((agent) => ({ id: agent.id, responsibility: agent.responsibility, toolRef: agent.toolRef })),
-          selectedActions: planningIR.selectedActions.map((action) => ({ id: action.id, toolRef: action.toolRef, bindingCount: action.bindings.length })),
+          selectedActions: planningIR.selectedActions.map((action) => ({ id: action.id, contractRef: action.contractRef, bindingCount: action.bindings.length })),
           unresolvedIssues: planningIR.unresolvedIssues,
         } : null,
         issuesToFix: compilationIssues ?? [],
@@ -775,21 +758,16 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         internalContracts,
         connectorContracts,
         previousIR: kind === "correction" ? planningIR : undefined,
-        previousInvalidProposal: kind === "correction" ? previousInvalidProposal : undefined,
         priorPlanningIR: kind === "initial" ? priorPlanningIR : undefined,
         compilationIssues,
         chat,
         timeoutMs: plannerConfig.attemptTimeoutMs,
         maxCompletionTokens: plannerConfig.maxCompletionTokens,
+        emptyResponseRetryMaxTokens: plannerConfig.emptyResponseRetryMaxTokens,
+        maxPromptBytes: plannerConfig.maxPromptBytes,
       });
     } catch (error) {
       const structuralFailure = error instanceof InvalidPlanningIRProposalError;
-      const recoverableWireFailure = isRecoverablePlannerWireFailure(error);
-      const canRetryWire = recoverableWireFailure && attempt < maxPlanningAttempts - 1 && wireCorrectionAttempts < 1;
-      if (canRetryWire) {
-        wireCorrectionAttempts += 1;
-        previousInvalidProposal = error instanceof InvalidPlanningIRProposalError ? error.proposal : undefined;
-      }
       const canRetryTransport = shouldRetryPlanningTransportFailure({
         structuralFailure,
         attempt,
@@ -807,19 +785,17 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
           }];
       reportLoopBuilderProgress({
         stage: "planning_validation",
-        message: canRetryWire
-          ? "Planner returned invalid encoded contract JSON; correcting once"
-          : structuralFailure
+        message: structuralFailure
           ? "Stopped: planner returned structurally invalid output"
           : canRetryTransport
             ? "Planner request failed before producing a plan; retrying once"
             : "Stopped: planner request failed before producing a valid plan",
-        status: canRetryTransport || canRetryWire ? "running" : "failed",
+        status: canRetryTransport ? "running" : "failed",
         details: {
           issues: compilationIssues,
           proposal: error instanceof InvalidPlanningIRProposalError ? error.proposal : undefined,
-          stopReason: canRetryTransport || canRetryWire ? null : failureReason,
-          retriesRemaining: canRetryTransport || canRetryWire ? 1 : 0,
+          stopReason: canRetryTransport ? null : failureReason,
+          retriesRemaining: canRetryTransport ? 1 : 0,
           durationMs: Date.now() - attemptStartedAt,
         },
       });
@@ -827,13 +803,12 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         stage: "model_planner",
         model,
         input: { attempt, searchQueries: search.plan.queries },
-        output: { compilationIssues, stopReason: canRetryTransport || canRetryWire ? null : failureReason },
+        output: { compilationIssues, stopReason: canRetryTransport ? null : failureReason },
       }));
-      if (canRetryTransport || canRetryWire) continue;
+      if (canRetryTransport) continue;
       break;
     }
     lastAttemptFailedBeforePlanning = false;
-    previousInvalidProposal = undefined;
     planningIR = result.planningIR;
     model = result.model;
     planningIR.schedule = {
@@ -859,6 +834,8 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
       ...issueComparison,
       promptTokens: result.promptTokens,
       completionTokens: result.completionTokens,
+      promptBytes: result.promptBytes,
+      promptBreakdown: result.promptBreakdown,
       estimatedCostUsd: result.estimatedCostUsd,
       ...(stopReason ? { stopReason } : {}),
     };
@@ -873,13 +850,12 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         title: planningIR.title,
         strategy: planningIR.strategy,
         schedule: planningIR.schedule,
-        decisions: planningIR.decisions,
         requiredValues: planningIR.requiredValues.map((value) => ({
           key: value.key,
           lifecycle: value.lifecycle,
           timing: value.timing,
           status: value.status,
-          allowedSourceKinds: value.allowedSourceKinds,
+          sourceKind: value.sourceKind,
         })),
         semanticAgents: planningIR.semanticAgents.map((agent) => ({
           id: agent.id,
@@ -887,12 +863,11 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
           responsibility: agent.responsibility,
           toolRef: agent.toolRef,
           inputBindings: agent.inputBindings,
-          outputContract: agent.outputContract,
+          outputArtifact: agent.outputArtifact,
         })),
         selectedActions: planningIR.selectedActions.map((action) => ({
           id: action.id,
-          name: action.name,
-          toolRef: action.toolRef,
+          contractRef: action.contractRef,
           annotation: action.annotation,
           bindings: action.bindings,
         })),
@@ -954,7 +929,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
   design.inputRequirements = compiled.compiled.inputRequirements;
   const delivery = design.delivery;
   const selectedAnnotations = new Map(planningIR.selectedActions.map((action) => [
-    action.toolRef.toLowerCase(),
+    action.contractRef.toLowerCase(),
     action.annotation,
   ]));
   const plannedConnectorContracts = connectorContracts.map((contract) => {
@@ -969,22 +944,12 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
           originalInputSchema: contract.inputSchema,
           effectiveInputSchema: contract.inputSchema,
           semanticAssertions: [],
+          fieldPolicies: {},
           unresolvedRequirements: [],
           sourceHash: "",
+          generatedBy: "sdk_contract" as const,
           generatedAt: new Date().toISOString(),
         }),
-        semanticAssertions: [
-          ...(contract.readiness?.semanticAssertions ?? []),
-          ...annotation.semanticAssertions.map((assertion) => ({
-            kind: assertion.kind,
-            paths: assertion.paths,
-            message: assertion.message,
-          })),
-        ],
-        fieldPolicies: Object.fromEntries(annotation.fieldPolicies.map((policy) => [
-          policy.path,
-          { valuePolicy: policy.valuePolicy, required: policy.required },
-        ])),
         generatedBy: "model_annotation" as const,
       },
     };
@@ -1007,7 +972,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
           searchPlan: search.plan,
           ...(input.noSlopSpec?.intentContext ? { intentContext: input.noSlopSpec.intentContext } : {}),
         },
-        planningIRVersion: "v1",
+        planningIRVersion: "v2",
         planningIR: planningIR as unknown as Record<string, unknown>,
         discoveredToolContracts: plannedConnectorContracts as unknown as Array<Record<string, unknown>>,
         typedConnectorHandoffs: "v2",
@@ -1041,7 +1006,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     throw new Error(`Compiled planning IR produced invalid roster: ${(rosterValidation.issues ?? []).map((issue) => issue.message).join("; ")}`);
   }
 
-  const suggestedChannels = planningIR.suggestedChannels.flatMap((channel) => {
+  const suggestedChannels = ["primary"].flatMap((channel) => {
     const parsed = loopStageApprovalChannelInputSchema.safeParse(channel);
     return parsed.success ? [parsed.data] : [];
   });

@@ -324,7 +324,7 @@ export const loopDefinitionSchema = z.object({
     }).optional(),
     designDiagnostics: z.record(z.unknown()).optional(),
     discoveredToolContracts: z.array(z.record(z.unknown())).optional(),
-    planningIRVersion: z.literal("v1").optional(),
+    planningIRVersion: z.enum(["v1", "v2"]).optional(),
     planningIR: z.record(z.unknown()).optional(),
     typedConnectorHandoffs: z.enum(["v1", "v2"]).optional(),
     contractDrivenGraph: z.literal("v1").optional(),

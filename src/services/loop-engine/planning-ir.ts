@@ -1,8 +1,7 @@
 import { z } from "zod";
-import { ignoreOverride, zodToJsonSchema } from "zod-to-json-schema";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 import { inputSurfaceSchema, type InputRequirement } from "./input-surfaces.js";
-import { dataContractSchema } from "./data-contract.js";
 import {
   loopAgentGraphSchema,
   type AgentHandoffBinding,
@@ -11,18 +10,14 @@ import {
 import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import type { ToolContract } from "../tool-spec/types.js";
 
-const evidenceSchema = z.object({
-  source: z.enum(["user_prompt", "intent_context", "tool_contract", "saved_context", "model_reasoning"]),
-  reference: z.string().min(1),
-  explanation: z.string().min(1),
-});
-
-export const planningDecisionSchema = z.object({
-  id: z.string().min(1),
-  kind: z.enum(["outcome", "schedule", "delivery", "approval", "input_lifecycle", "action_selection"]),
-  decision: z.string().min(1),
-  evidence: z.array(evidenceSchema).min(1),
-});
+const jsonValueTypeSchema = z.enum(["string", "number", "integer", "boolean", "object", "array"]);
+const sourceKindSchema = z.enum([
+  "agent_output",
+  "operator_input",
+  "stable_config",
+  "artifact",
+  "connector_output",
+]);
 
 export const plannedRequiredValueSchema = z.object({
   key: z.string().min(1),
@@ -31,91 +26,64 @@ export const plannedRequiredValueSchema = z.object({
   lifecycle: z.enum(["workflow_config", "runtime_input", "derived"]),
   timing: z.enum(["run_start", "before_step", "before_action"]),
   sensitivity: z.enum(["public", "private", "secret"]),
-  valueSchema: z.record(z.unknown()),
+  valueType: jsonValueTypeSchema,
   surface: inputSurfaceSchema,
-  allowedSourceKinds: z.array(z.enum([
-    "agent_output",
-    "operator_input",
-    "stable_config",
-    "artifact",
-    "connector_output",
-  ])).min(1),
+  sourceKind: sourceKindSchema,
   status: z.enum(["resolved", "unresolved"]),
-  stableValue: z.unknown().optional(),
-  evidence: z.array(evidenceSchema).min(1),
+  stableScalar: z.union([z.string(), z.number(), z.boolean()]).nullable().default(null),
 });
 
-const plannedBindingSourceSchema = z.object({
-  kind: z.enum(["agent_output", "required_value", "stable_config", "artifact", "connector_output"]),
-  nodeId: z.string().min(1).optional(),
-  key: z.string().min(1).optional(),
-  path: z.string().min(1).default("/"),
-});
+const plannedBindingSourceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("agent_output"), nodeId: z.string().min(1), path: z.string().min(1) }),
+  z.object({ kind: z.literal("connector_output"), nodeId: z.string().min(1), path: z.string().min(1) }),
+  z.object({ kind: z.literal("required_value"), key: z.string().min(1), path: z.string().min(1) }),
+  z.object({ kind: z.literal("artifact"), key: z.string().min(1), path: z.string().min(1) }),
+]);
 
 export const explicitActionInputBindingSchema = z.object({
   source: plannedBindingSourceSchema,
   targetPath: z.string().min(1),
-  required: z.boolean().default(true),
+  required: z.boolean(),
   valuePolicy: z.enum(["derivable", "passthrough"]),
   provenance: z.enum(["agent_output", "operator_input", "stable_config", "artifact", "connector_output"]),
+});
+
+export const plannedArtifactFieldSchema = z.object({
+  path: z.string().startsWith("/"),
+  type: jsonValueTypeSchema,
+  required: z.boolean(),
+});
+
+export const plannedArtifactSchema = z.object({
+  id: z.string().min(1),
+  description: z.string().min(1),
+  representation: z.enum(["text", "json"]),
+  visibility: z.enum(["internal", "operator"]),
+  fields: z.array(plannedArtifactFieldSchema).max(32),
 });
 
 const semanticAgentSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   responsibility: z.string().min(1),
-  goal: z.string().min(1),
   task: z.string().min(1),
   toolRef: z.string().min(1),
-  toolConfig: z.record(z.unknown()).optional(),
-  inputContract: z.object({
-    description: z.string().min(1),
-    schema: z.record(z.unknown()).default({}),
-  }),
-  inputBindings: z.array(explicitActionInputBindingSchema).default([]),
-  outputContract: dataContractSchema,
-  doneCriteria: z.array(z.string().min(1)).min(1).max(8),
-  reviewGate: z.object({
-    type: z.enum(["memory_confirmation", "source_confirmation", "draft_review"]),
-    question: z.string().min(1),
-  }).optional(),
+  inputBindings: z.array(explicitActionInputBindingSchema),
+  outputArtifact: plannedArtifactSchema,
 });
 
 export const actionSemanticAnnotationSchema = z.object({
   effect: z.enum(["read_external", "write_external", "irreversible_external", "uncertain"]),
   confidence: z.enum(["low", "medium", "high"]),
   approvalRequired: z.boolean(),
-  evidence: z.array(evidenceSchema).min(1),
-  semanticAssertions: z.array(z.object({
-    kind: z.enum(["at_least_one", "non_placeholder"]),
-    paths: z.array(z.string().min(1)).min(1),
-    message: z.string().min(1),
-    evidence: z.array(evidenceSchema).min(1),
-  })).default([]),
-  fieldPolicies: z.array(z.object({
-    path: z.string().min(1),
-    valuePolicy: z.enum(["derivable", "passthrough"]),
-    required: z.boolean(),
-    allowedSourceKinds: z.array(z.enum([
-      "agent_output",
-      "operator_input",
-      "stable_config",
-      "artifact",
-      "connector_output",
-    ])).min(1),
-    evidence: z.array(evidenceSchema).min(1),
-  })).default([]),
 });
 
 export const selectedConnectorActionSchema = z.object({
   id: z.string().min(1),
-  name: z.string().min(1),
-  toolRef: z.string().min(1),
+  contractRef: z.string().min(1),
   purpose: z.string().min(1),
-  stableConfig: z.record(z.unknown()).default({}),
   annotation: actionSemanticAnnotationSchema,
-  bindings: z.array(explicitActionInputBindingSchema).default([]),
-  doneCriteria: z.array(z.string().min(1)).min(1).max(8),
+  bindings: z.array(explicitActionInputBindingSchema),
 });
 
 export const unresolvedPlanningIssueSchema = z.object({
@@ -123,11 +91,11 @@ export const unresolvedPlanningIssueSchema = z.object({
   kind: z.enum(["decision", "required_value", "action", "binding", "contract"]),
   message: z.string().min(1),
   blocksApproval: z.boolean(),
-  relatedRef: z.string().min(1).optional(),
+  relatedRef: z.string().min(1).nullable().default(null),
 });
 
 export const loopPlanningIRSchema = z.object({
-  version: z.literal("v1"),
+  version: z.literal("v2"),
   title: z.string().min(1),
   summary: z.string().min(1),
   strategy: z.string().min(1),
@@ -135,61 +103,87 @@ export const loopPlanningIRSchema = z.object({
     cron: z.string().min(1),
     timezone: z.string().min(1),
   }),
-  decisions: z.array(planningDecisionSchema).default([]),
-  requiredValues: z.array(plannedRequiredValueSchema).default([]),
-  semanticAgents: z.array(semanticAgentSchema).max(12).default([]),
-  selectedActions: z.array(selectedConnectorActionSchema).default([]),
-  unresolvedIssues: z.array(unresolvedPlanningIssueSchema).default([]),
-  rationale: z.array(z.string().min(1)).default([]),
-  suggestedChannels: z.array(z.string().min(1)).default(["primary"]),
+  requiredValues: z.array(plannedRequiredValueSchema),
+  semanticAgents: z.array(semanticAgentSchema).max(12),
+  selectedActions: z.array(selectedConnectorActionSchema),
+  unresolvedIssues: z.array(unresolvedPlanningIssueSchema),
 });
 
 function makePlannerJsonSchemaStrict(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(makePlannerJsonSchemaStrict);
   if (!value || typeof value !== "object") return value;
   const row = value as Record<string, unknown>;
-  if (
-    (row.$ref === "#/definitions/OpenAiAnyType")
-    || (row.type === "object" && row.additionalProperties && typeof row.additionalProperties === "object")
-  ) {
-    return {
-      type: "string",
-      description: "JSON-encoded value. Return valid JSON text for this field.",
-    };
-  }
   const result = Object.fromEntries(Object.entries(row).map(([key, entry]) => [
     key,
     makePlannerJsonSchemaStrict(entry),
   ]));
   delete result.default;
   delete result.$schema;
-  if (result.definitions && typeof result.definitions === "object" && !Array.isArray(result.definitions)) {
-    delete (result.definitions as Record<string, unknown>).OpenAiAnyType;
-  }
   return result;
 }
 
 export const loopPlanningIRJsonSchema = makePlannerJsonSchemaStrict(zodToJsonSchema(loopPlanningIRSchema, {
   target: "openAi",
   $refStrategy: "none",
-  override: (definition) => (
-    (definition as { typeName?: string }).typeName === "ZodRecord"
-    || (definition as { typeName?: string }).typeName === "ZodAny"
-    || (definition as { typeName?: string }).typeName === "ZodUnknown"
-      ? {
-          type: "string",
-          description: "JSON-encoded value. Return valid JSON text for this field.",
-        }
-      : ignoreOverride
-  ),
 })) as Record<string, unknown>;
 
+function arraySchema(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected planner array schema");
+  const schema = value as Record<string, unknown>;
+  if (schema.type === "array") return schema;
+  const variants = Array.isArray(schema.anyOf) ? schema.anyOf : [];
+  const arrayVariant = variants.find((entry) =>
+    entry && typeof entry === "object" && !Array.isArray(entry) && (entry as Record<string, unknown>).type === "array");
+  if (!arrayVariant || typeof arrayVariant !== "object" || Array.isArray(arrayVariant)) {
+    throw new Error("Expected planner array schema variant");
+  }
+  return arrayVariant as Record<string, unknown>;
+}
+
+function objectProperties(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected planner object schema");
+  const properties = (value as Record<string, unknown>).properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+    throw new Error("Expected planner object properties");
+  }
+  return properties as Record<string, unknown>;
+}
+
+export function loopPlanningIRJsonSchemaForContracts(input: {
+  internalToolRefs: string[];
+  connectorContractRefs: string[];
+}): Record<string, unknown> {
+  const schema = structuredClone(loopPlanningIRJsonSchema);
+  const rootProperties = objectProperties(schema);
+  const semanticAgents = arraySchema(rootProperties.semanticAgents);
+  const internalRefs = [...new Set(input.internalToolRefs)];
+  if (internalRefs.length === 0) {
+    semanticAgents.maxItems = 0;
+  } else {
+    const semanticAgentProperties = objectProperties(semanticAgents.items);
+    semanticAgentProperties.toolRef = { type: "string", enum: internalRefs };
+  }
+
+  const selectedActions = arraySchema(rootProperties.selectedActions);
+  const connectorRefs = [...new Set(input.connectorContractRefs)];
+  if (connectorRefs.length === 0) {
+    selectedActions.maxItems = 0;
+  } else {
+    const selectedActionProperties = objectProperties(selectedActions.items);
+    selectedActionProperties.contractRef = { type: "string", enum: connectorRefs };
+  }
+  return schema;
+}
+
 export type LoopPlanningIR = z.infer<typeof loopPlanningIRSchema>;
-export type PlanningDecision = z.infer<typeof planningDecisionSchema>;
+export type LoopPlanningIRV2 = LoopPlanningIR;
 export type PlannedRequiredValue = z.infer<typeof plannedRequiredValueSchema>;
 export type ExplicitActionInputBinding = z.infer<typeof explicitActionInputBindingSchema>;
+export type ExplicitBindingRef = ExplicitActionInputBinding;
 export type SelectedConnectorAction = z.infer<typeof selectedConnectorActionSchema>;
+export type SelectedContractRef = SelectedConnectorAction;
 export type UnresolvedPlanningIssue = z.infer<typeof unresolvedPlanningIssueSchema>;
+export type PlannedArtifact = z.infer<typeof plannedArtifactSchema>;
 
 export type PlanningCompilationIssue = {
   code: string;
@@ -205,6 +199,69 @@ export type CompiledLoopPlanningIR = {
     allowedWriteActions: Array<{ toolkit: string; actionSlug: string; risk: "write" | "destructive"; description: string; requiresPreSendApproval: true }>;
   };
 };
+
+function schemaForType(type: z.infer<typeof jsonValueTypeSchema>): Record<string, unknown> {
+  if (type === "array") return { type: "array", items: {} };
+  if (type === "object") return { type: "object", properties: {}, additionalProperties: false };
+  return { type };
+}
+
+function setSchemaAtPath(
+  root: Record<string, unknown>,
+  path: string,
+  schema: Record<string, unknown>,
+  required: boolean,
+): void {
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length === 0) return;
+  let current = root;
+  for (const segment of segments.slice(0, -1)) {
+    const properties = current.properties as Record<string, unknown>;
+    const existing = properties[segment];
+    if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+      properties[segment] = { type: "object", properties: {}, required: [], additionalProperties: false };
+    }
+    current = properties[segment] as Record<string, unknown>;
+  }
+  const properties = current.properties as Record<string, unknown>;
+  const leaf = segments.at(-1)!;
+  properties[leaf] = schema;
+  if (required) {
+    const requiredFields = new Set(Array.isArray(current.required) ? current.required as string[] : []);
+    requiredFields.add(leaf);
+    current.required = [...requiredFields];
+  }
+}
+
+function schemaFromFields(fields: PlannedArtifact["fields"]): Record<string, unknown> {
+  const root: Record<string, unknown> = {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  };
+  for (const field of fields) {
+    setSchemaAtPath(root, field.path, schemaForType(field.type), field.required);
+  }
+  return root;
+}
+
+function artifactContract(artifact: PlannedArtifact) {
+  const fields = artifact.representation === "text"
+    ? [{ path: "/text", type: "string" as const, required: true }]
+    : artifact.fields;
+  return {
+    description: artifact.description,
+    schema: schemaFromFields(fields),
+    representation: artifact.representation,
+    mediaType: artifact.representation === "json" ? "application/json" as const : "text/plain" as const,
+    visibility: artifact.visibility,
+  };
+}
+
+function requiredValueSchema(value: PlannedRequiredValue): Record<string, unknown> {
+  return schemaForType(value.valueType);
+}
 
 function schemaRequiredPaths(schema: Record<string, unknown>, base = ""): string[] {
   const required = Array.isArray(schema.required)
@@ -247,8 +304,37 @@ function schemaAtPath(schema: Record<string, unknown>, path: string): Record<str
 function schemasCompatible(source: Record<string, unknown>, target: Record<string, unknown>): boolean {
   const sourceType = typeof source.type === "string" ? source.type : null;
   const targetType = typeof target.type === "string" ? target.type : null;
-  return !sourceType || !targetType || sourceType === targetType
-    || (sourceType === "integer" && targetType === "number");
+  if (!sourceType || !targetType) return true;
+  if (sourceType === targetType) return true;
+  if (
+    (sourceType === "integer" || sourceType === "number")
+    && (targetType === "integer" || targetType === "number")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function normalizePlannedRequiredValue(value: PlannedRequiredValue): PlannedRequiredValue {
+  if (value.status === "resolved") return value;
+  if (value.lifecycle === "runtime_input" && value.sourceKind === "operator_input") {
+    return { ...value, status: "resolved" };
+  }
+  if (value.lifecycle === "workflow_config" && value.sourceKind === "stable_config" && value.stableScalar != null) {
+    return { ...value, status: "resolved" };
+  }
+  return value;
+}
+
+function redundantBlockingIssue(
+  issue: UnresolvedPlanningIssue,
+  requiredValues: PlannedRequiredValue[],
+): boolean {
+  if (!issue.blocksApproval) return false;
+  if (issue.kind !== "required_value" && issue.kind !== "decision") return false;
+  const runtimeInputs = requiredValues.filter((value) => value.lifecycle === "runtime_input");
+  if (runtimeInputs.length === 0) return false;
+  return runtimeInputs.every((value) => normalizePlannedRequiredValue(value).status === "resolved");
 }
 
 function bindingSourceToRuntime(
@@ -270,7 +356,6 @@ function bindingSourceToRuntime(
     }
     return null;
   }
-  if (source.kind === "stable_config") return { kind: "stable_config", path: source.path };
   if (source.kind === "artifact") return source.key ? { kind: "artifact", key: source.key, path: source.path } : null;
   return null;
 }
@@ -308,10 +393,9 @@ function validateBinding(input: {
   targetSchema: Record<string, unknown>;
   outputSchemas: Map<string, Record<string, unknown>>;
   requiredValues: Map<string, PlannedRequiredValue>;
-  stableConfig?: Record<string, unknown>;
   issues: PlanningCompilationIssue[];
 }): void {
-  const { binding, owner, targetSchema, outputSchemas, requiredValues, stableConfig, issues } = input;
+  const { binding, owner, targetSchema, outputSchemas, requiredValues, issues } = input;
   const target = schemaAtPath(targetSchema, binding.targetPath);
   if (!target) {
     issues.push({
@@ -333,11 +417,9 @@ function validateBinding(input: {
     ? "agent_output"
     : binding.source.kind === "connector_output"
       ? "connector_output"
-      : binding.source.kind === "stable_config"
-        ? "stable_config"
-        : binding.source.kind === "artifact"
-          ? "artifact"
-          : null;
+      : binding.source.kind === "artifact"
+        ? "artifact"
+        : null;
   if (expectedDirectProvenance && binding.provenance !== expectedDirectProvenance) {
     issues.push({
       code: "binding_provenance_mismatch",
@@ -369,14 +451,14 @@ function validateBinding(input: {
         path: owner,
       });
     }
-    if (!value.allowedSourceKinds.includes(binding.provenance)) {
+    if (value.sourceKind !== binding.provenance) {
       issues.push({
         code: "required_value_source_policy",
         message: `${owner} binding ${binding.targetPath} violates required value ${value.key} source policy.`,
         path: owner,
       });
     }
-    sourceSchema = value.valueSchema;
+    sourceSchema = requiredValueSchema(value);
   } else if (binding.source.kind === "agent_output" || binding.source.kind === "connector_output") {
     sourceSchema = binding.source.nodeId
       ? schemaAtPath(outputSchemas.get(binding.source.nodeId) ?? {}, binding.source.path)
@@ -385,21 +467,6 @@ function validateBinding(input: {
       issues.push({
         code: "unknown_source_path",
         message: `${owner} binding source path does not exist: ${binding.source.nodeId ?? "unknown"}${binding.source.path}`,
-        path: owner,
-      });
-    }
-  } else if (binding.source.kind === "stable_config") {
-    const segments = binding.source.path.split("/").filter(Boolean);
-    let current: unknown = stableConfig;
-    for (const segment of segments) {
-      current = current && typeof current === "object" && !Array.isArray(current)
-        ? (current as Record<string, unknown>)[segment]
-        : undefined;
-    }
-    if (current === undefined) {
-      issues.push({
-        code: "unknown_stable_config_path",
-        message: `${owner} binding ${binding.targetPath} references absent stable configuration ${binding.source.path}.`,
         path: owner,
       });
     }
@@ -418,33 +485,76 @@ function stableConfigForAction(
   action: SelectedConnectorAction,
   requiredValues: Map<string, PlannedRequiredValue>,
 ): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...action.stableConfig };
+  const result: Record<string, unknown> = {};
   for (const binding of action.bindings) {
     if (binding.source.kind !== "required_value" || !binding.source.key) continue;
     const value = requiredValues.get(binding.source.key);
-    if (value?.lifecycle === "workflow_config" && value.status === "resolved" && value.stableValue !== undefined) {
-      result[value.key] = value.stableValue;
+    if (value?.lifecycle === "workflow_config" && value.status === "resolved" && value.stableScalar != null) {
+      result[value.key] = value.stableScalar;
     }
   }
   return result;
 }
 
-export function compileLoopPlanningIR(input: {
+function sourceSchemaForBinding(
+  binding: ExplicitActionInputBinding,
+  outputSchemas: Map<string, Record<string, unknown>>,
+  requiredValues: Map<string, PlannedRequiredValue>,
+): Record<string, unknown> {
+  if (binding.source.kind === "required_value" && binding.source.key) {
+    const value = requiredValues.get(binding.source.key);
+    return value ? requiredValueSchema(value) : {};
+  }
+  if ((binding.source.kind === "agent_output" || binding.source.kind === "connector_output") && binding.source.nodeId) {
+    return schemaAtPath(outputSchemas.get(binding.source.nodeId) ?? {}, binding.source.path) ?? {};
+  }
+  return {};
+}
+
+function semanticInputContract(
+  agent: LoopPlanningIR["semanticAgents"][number],
+  outputSchemas: Map<string, Record<string, unknown>>,
+  requiredValues: Map<string, PlannedRequiredValue>,
+) {
+  const schema: Record<string, unknown> = {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  };
+  for (const binding of agent.inputBindings) {
+    setSchemaAtPath(
+      schema,
+      binding.targetPath,
+      sourceSchemaForBinding(binding, outputSchemas, requiredValues),
+      binding.required,
+    );
+  }
+  return { description: `Explicit inputs for ${agent.name}`, schema };
+}
+
+export function compileLoopPlanningIRV2(input: {
   planningIR: LoopPlanningIR;
   contracts: ToolContract[];
 }): { ok: true; compiled: CompiledLoopPlanningIR } | { ok: false; issues: PlanningCompilationIssue[] } {
   const ir = loopPlanningIRSchema.parse(input.planningIR);
+  const normalizedRequiredValues = ir.requiredValues.map(normalizePlannedRequiredValue);
   const issues: PlanningCompilationIssue[] = ir.unresolvedIssues
     .filter((issue) => issue.blocksApproval)
-    .map((issue) => ({ code: `unresolved_${issue.kind}`, message: issue.message, path: issue.relatedRef }));
-  const requiredValues = new Map(ir.requiredValues.map((value) => [value.key, value]));
+    .filter((issue) => !redundantBlockingIssue(issue, normalizedRequiredValues))
+    .map((issue) => ({
+      code: `unresolved_${issue.kind}`,
+      message: issue.message,
+      ...(issue.relatedRef ? { path: issue.relatedRef } : {}),
+    }));
+  const requiredValues = new Map(normalizedRequiredValues.map((value) => [value.key, value]));
   const contracts = new Map(input.contracts.map((contract) => [contract.toolRef.toLowerCase(), contract]));
   const nodeIds = new Set<string>();
   const consumedSemanticOutputs = new Set<string>();
   const consumedRequiredValues = new Set<string>();
-  const outputSchemas = new Map(ir.semanticAgents.map((agent) => [agent.id, agent.outputContract.schema]));
+  const outputSchemas = new Map(ir.semanticAgents.map((agent) => [agent.id, artifactContract(agent.outputArtifact).schema]));
   for (const action of ir.selectedActions) {
-    const contract = contracts.get(action.toolRef.toLowerCase());
+    const contract = contracts.get(action.contractRef.toLowerCase());
     if (contract) outputSchemas.set(action.id, contract.outputSchema);
   }
   const responsibilities = new Set<string>();
@@ -453,13 +563,35 @@ export function compileLoopPlanningIR(input: {
     issues.push({ code: "empty_plan", message: "Planning IR must declare at least one semantic agent or connector action." });
   }
 
-  for (const value of ir.requiredValues) {
+  for (const value of normalizedRequiredValues) {
     if (value.status === "unresolved" && value.lifecycle !== "derived") {
       issues.push({ code: "unresolved_required_value", message: `Required value "${value.key}" is unresolved.`, path: value.key });
     }
   }
+  for (const agent of ir.semanticAgents) {
+    if (agent.outputArtifact.representation === "text" && agent.outputArtifact.fields.length > 0) {
+      issues.push({
+        code: "text_artifact_fields",
+        message: `Text artifact ${agent.outputArtifact.id} must use the implicit /text field rather than declaring structured fields.`,
+        path: agent.id,
+      });
+    }
+    const fieldPaths = new Set<string>();
+    for (const field of agent.outputArtifact.fields) {
+      if (fieldPaths.has(field.path)) {
+        issues.push({
+          code: "duplicate_artifact_field",
+          message: `Artifact ${agent.outputArtifact.id} declares field ${field.path} more than once.`,
+          path: agent.id,
+        });
+      }
+      fieldPaths.add(field.path);
+    }
+  }
 
   const semanticChildren = ir.semanticAgents.map((agent) => {
+    const inputContract = semanticInputContract(agent, outputSchemas, requiredValues);
+    const outputContract = artifactContract(agent.outputArtifact);
     if (nodeIds.has(agent.id)) issues.push({ code: "duplicate_node_id", message: `Duplicate node id: ${agent.id}`, path: agent.id });
     nodeIds.add(agent.id);
     const responsibility = agent.responsibility.trim().toLowerCase();
@@ -484,10 +616,9 @@ export function compileLoopPlanningIR(input: {
       validateBinding({
         binding,
         owner: agent.id,
-        targetSchema: agent.inputContract.schema,
+        targetSchema: inputContract.schema,
         outputSchemas,
         requiredValues,
-        stableConfig: agent.toolConfig,
         issues,
       });
     }
@@ -496,14 +627,13 @@ export function compileLoopPlanningIR(input: {
       name: agent.name,
       nodeKind: "agent" as const,
       task: agent.task,
-      goal: agent.goal,
-      tools: [{ ref: agent.toolRef, ...(agent.toolConfig ? { config: agent.toolConfig } : {}) }],
-      doneCriteria: agent.doneCriteria,
-      inputContract: agent.inputContract,
-      outputContract: agent.outputContract,
+      goal: agent.responsibility,
+      tools: [{ ref: agent.toolRef }],
+      doneCriteria: [`${agent.responsibility} is complete.`],
+      inputContract,
+      outputContract,
       handoffBindings: compileBindings(agent.inputBindings, requiredValues, issues, agent.id),
-      ...(agent.reviewGate ? { gate: agent.reviewGate } : {}),
-      outputArtifactId: `${agent.id}_output`,
+      outputArtifactId: agent.outputArtifact.id,
       outputArtifactKind: "structured_output",
     };
   });
@@ -513,56 +643,33 @@ export function compileLoopPlanningIR(input: {
   const actionChildren = ir.selectedActions.flatMap((action) => {
     if (nodeIds.has(action.id)) issues.push({ code: "duplicate_node_id", message: `Duplicate node id: ${action.id}`, path: action.id });
     nodeIds.add(action.id);
-    const contract = contracts.get(action.toolRef.toLowerCase());
-    const parsedRef = parseConnectorActionToolRef(action.toolRef);
+    const contract = contracts.get(action.contractRef.toLowerCase());
+    const parsedRef = parseConnectorActionToolRef(action.contractRef);
     if (!contract || !parsedRef) {
-      issues.push({ code: "unknown_action", message: `Selected action has no exact discovered contract: ${action.toolRef}`, path: action.id });
+      issues.push({ code: "unknown_action", message: `Selected action has no exact discovered contract: ${action.contractRef}`, path: action.id });
       return [];
     }
     const declaredRisk = String(contract.constraints.risk ?? "").toLowerCase();
     if (declaredRisk && declaredRisk !== "read" && action.annotation.effect === "read_external") {
       issues.push({
         code: "unsafe_risk_annotation",
-        message: `${action.toolRef} is not declared read-only by its exact contract and cannot be planned as a read action.`,
+        message: `${action.contractRef} is not declared read-only by its exact contract and cannot be planned as a read action.`,
         path: action.id,
       });
-    }
-    for (const assertion of action.annotation.semanticAssertions) {
-      for (const path of assertion.paths) {
-        if (path !== "/" && !schemaAtPath(contract.inputSchema, path)) {
-          issues.push({
-            code: "unknown_assertion_path",
-            message: `${action.toolRef} semantic assertion references a path absent from the exact input schema: ${path}`,
-            path: action.id,
-          });
-        }
-      }
     }
     for (const binding of action.bindings) {
       if ((binding.source.kind === "agent_output" || binding.source.kind === "connector_output") && binding.source.nodeId) {
         consumedSemanticOutputs.add(binding.source.nodeId);
-      }
-      const policy = action.annotation.fieldPolicies.find((item) => item.path === binding.targetPath);
-      if (!policy) {
-        issues.push({ code: "missing_field_policy", message: `${action.toolRef} binding ${binding.targetPath} has no explicit field policy.`, path: action.id });
-      } else {
-        if (policy.valuePolicy !== binding.valuePolicy) {
-          issues.push({ code: "field_policy_mismatch", message: `${action.toolRef} binding ${binding.targetPath} conflicts with its declared value policy.`, path: action.id });
-        }
-        if (!policy.allowedSourceKinds.includes(binding.provenance)) {
-          issues.push({ code: "invalid_provenance", message: `${action.toolRef} binding ${binding.targetPath} uses disallowed provenance ${binding.provenance}.`, path: action.id });
-        }
       }
       if (binding.source.kind === "required_value") {
         if (binding.source.key) consumedRequiredValues.add(binding.source.key);
       }
       validateBinding({
         binding,
-        owner: action.toolRef,
+        owner: action.contractRef,
         targetSchema: contract.inputSchema,
         outputSchemas,
         requiredValues,
-        stableConfig: stableConfigForAction(action, requiredValues),
         issues,
       });
     }
@@ -571,7 +678,7 @@ export function compileLoopPlanningIR(input: {
       const covered = [...boundPaths].some((boundPath) =>
         boundPath === requiredPath || requiredPath.startsWith(`${boundPath}/`));
       if (!covered) {
-        issues.push({ code: "missing_required_binding", message: `${action.toolRef} has no explicit binding for required input ${requiredPath}.`, path: action.id });
+        issues.push({ code: "missing_required_binding", message: `${action.contractRef} has no explicit binding for required input ${requiredPath}.`, path: action.id });
       }
     }
     const uncertain = action.annotation.effect === "uncertain" || action.annotation.confidence === "low";
@@ -598,15 +705,15 @@ export function compileLoopPlanningIR(input: {
     const stableConfig = stableConfigForAction(action, requiredValues);
     return [{
       id: action.id,
-      name: action.name,
+      name: contract.name,
       nodeKind: "action" as const,
       task: action.purpose,
       goal: action.purpose,
-      tools: [{ ref: action.toolRef, ...(Object.keys(stableConfig).length > 0 ? { config: stableConfig } : {}) }],
-      doneCriteria: action.doneCriteria,
-      inputContract: { description: `Exact input contract for ${action.toolRef}`, schema: contract.inputSchema },
+      tools: [{ ref: action.contractRef, ...(Object.keys(stableConfig).length > 0 ? { config: stableConfig } : {}) }],
+      doneCriteria: ["The provider reports a successful action result."],
+      inputContract: { description: `Exact input contract for ${action.contractRef}`, schema: contract.inputSchema },
       outputContract: {
-        description: `Exact output contract for ${action.toolRef}`,
+        description: `Exact output contract for ${action.contractRef}`,
         schema: contract.outputSchema,
         representation: "json" as const,
         mediaType: "application/json" as const,
@@ -620,7 +727,7 @@ export function compileLoopPlanningIR(input: {
   });
 
   for (const agent of ir.semanticAgents) {
-    const isOperatorVisibleTerminal = agent.outputContract.visibility === "operator";
+    const isOperatorVisibleTerminal = agent.outputArtifact.visibility === "operator";
     if (
       !consumedSemanticOutputs.has(agent.id)
       && !isOperatorVisibleTerminal
@@ -629,7 +736,7 @@ export function compileLoopPlanningIR(input: {
       issues.push({ code: "unused_semantic_output", message: `Semantic agent ${agent.id} has no declared consumer.`, path: agent.id });
     }
   }
-  for (const value of ir.requiredValues) {
+  for (const value of normalizedRequiredValues) {
     if (value.lifecycle !== "derived" && !consumedRequiredValues.has(value.key)) {
       issues.push({ code: "unused_required_value", message: `Required value ${value.key} has no declared consumer.`, path: value.key });
     }
@@ -653,7 +760,7 @@ export function compileLoopPlanningIR(input: {
   }
   if (issues.length > 0) return { ok: false, issues };
 
-  const inputRequirements: InputRequirement[] = ir.requiredValues
+  const inputRequirements: InputRequirement[] = normalizedRequiredValues
     .filter((value) => value.lifecycle === "runtime_input")
     .map((value) => ({
       key: value.key,
@@ -688,3 +795,6 @@ export function compileLoopPlanningIR(input: {
     },
   };
 }
+
+/** Compatibility export for callers that compile the current planning IR version. */
+export const compileLoopPlanningIR = compileLoopPlanningIRV2;

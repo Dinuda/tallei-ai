@@ -3,18 +3,22 @@ import test from "node:test";
 
 import {
   contractsForPlannerCorrection,
-  decodePlannerWireValue,
+  compactPlannerContracts,
   planningAttemptStopReason,
   planningIssueFingerprint,
   planningProgressConfig,
   shouldRetryPlanningTransportFailure,
 } from "../../../src/services/loop-engine/architect.js";
-import { loopPlanningIRJsonSchema, loopPlanningIRSchema } from "../../../src/services/loop-engine/planning-ir.js";
+import {
+  loopPlanningIRJsonSchema,
+  loopPlanningIRJsonSchemaForContracts,
+  loopPlanningIRSchema,
+} from "../../../src/services/loop-engine/planning-ir.js";
 import { buildComposioActionContract, getStaticToolContract } from "../../../src/services/tool-spec/tool-contracts.js";
 
 const issue = (code: string, path: string) => ({ code, path, message: `${code} at ${path}` });
 
-test("planning IR strict schema encodes free-form records without open additional properties", () => {
+test("planning IR v2 strict schema contains no arbitrary objects or encoded JSON", () => {
   const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
       value.forEach(visit);
@@ -40,46 +44,142 @@ test("planning IR strict schema encodes free-form records without open additiona
 
   visit(loopPlanningIRJsonSchema);
   const serialized = JSON.stringify(loopPlanningIRJsonSchema);
-  assert.match(serialized, /user_prompt/);
-  assert.match(serialized, /JSON-encoded value/);
+  assert.doesNotMatch(serialized, /JSON-encoded value/);
+  assert.doesNotMatch(serialized, /inputSchema|outputSchema|stableConfig|valueSchema/);
+  assert.ok(Buffer.byteLength(serialized) < 8_000);
   assert.doesNotMatch(serialized, /reviewedSpec/);
   assert.doesNotMatch(serialized, /"default":/);
 });
 
-test("planner wire decoder rejects malformed encoded schemas with exact paths", () => {
-  const decoded = decodePlannerWireValue({
+test("planning IR v2 accepts explicit null only for genuinely nullable fields", () => {
+  const parsed = loopPlanningIRSchema.parse({
+    version: "v2",
+    title: "Draft",
+    summary: "Draft content",
+    strategy: "Draft content",
+    schedule: { cron: "0 9 * * 5", timezone: "UTC" },
+    requiredValues: [{
+      key: "topic",
+      label: "Topic",
+      description: "Topic supplied for each run",
+      lifecycle: "runtime_input",
+      timing: "run_start",
+      sensitivity: "public",
+      valueType: "string",
+      surface: "input.text",
+      sourceKind: "operator_input",
+      status: "resolved",
+      stableScalar: null,
+    }],
     semanticAgents: [{
-      outputContract: {
-        schema: "{\"type\":\"object\"",
+      id: "writer",
+      name: "Writer",
+      responsibility: "Write content",
+      task: "Write content",
+      toolRef: "internal.llm_only",
+      inputBindings: [{
+        source: { kind: "required_value", key: "topic", path: "/" },
+        targetPath: "/topic",
+        required: true,
+        valuePolicy: "passthrough",
+        provenance: "operator_input",
+      }],
+      outputArtifact: {
+        id: "draft",
+        description: "Draft",
+        representation: "text",
+        visibility: "operator",
+        fields: [],
       },
     }],
-  });
-  assert.equal(decoded.issues.length, 1);
-  assert.equal(decoded.issues[0]?.code, "invalid_encoded_json");
-  assert.equal(decoded.issues[0]?.path, "semanticAgents.0.outputContract.schema");
-});
-
-test("planner wire decoder converts valid encoded schemas into objects", () => {
-  const decoded = decodePlannerWireValue({
-    semanticAgents: [{
-      outputContract: {
-        schema: "{\"type\":\"object\",\"properties\":{}}",
-      },
+    selectedActions: [],
+    unresolvedIssues: [{
+      id: "connector",
+      kind: "action",
+      message: "No action selected",
+      blocksApproval: false,
+      relatedRef: null,
     }],
   });
-  assert.deepEqual(decoded.issues, []);
-  assert.deepEqual(
-    (decoded.value as { semanticAgents: Array<{ outputContract: { schema: unknown } }> })
-      .semanticAgents[0]?.outputContract.schema,
-    { type: "object", properties: {} },
-  );
+  assert.equal(parsed.requiredValues[0]?.stableScalar, null);
+  assert.equal(parsed.semanticAgents[0]?.inputBindings[0]?.source.kind, "required_value");
+  assert.equal(parsed.unresolvedIssues[0]?.relatedRef, null);
 });
 
-test("planning progress configuration never permits more than two corrections", () => {
+test("planner schema scopes semantic and connector references to loaded contracts", () => {
+  const schema = loopPlanningIRJsonSchemaForContracts({
+    internalToolRefs: ["internal.llm_only", "internal.web_search"],
+    connectorContractRefs: ["composio.gmail.action.gmail_send_email"],
+  }) as any;
+  const arrayVariant = (value: any) => value.type === "array"
+    ? value
+    : value.anyOf.find((entry: any) => entry.type === "array");
+  const semanticItems = arrayVariant(schema.properties.semanticAgents).items;
+  const actionItems = arrayVariant(schema.properties.selectedActions).items;
+  assert.deepEqual(semanticItems.properties.toolRef.enum, ["internal.llm_only", "internal.web_search"]);
+  assert.deepEqual(actionItems.properties.contractRef.enum, ["composio.gmail.action.gmail_send_email"]);
+});
+
+test("planner schema forbids connector actions when discovery returns no contracts", () => {
+  const schema = loopPlanningIRJsonSchemaForContracts({
+    internalToolRefs: ["internal.llm_only"],
+    connectorContractRefs: [],
+  }) as any;
+  const selectedActions = schema.properties.selectedActions.type === "array"
+    ? schema.properties.selectedActions
+    : schema.properties.selectedActions.anyOf.find((entry: any) => entry.type === "array");
+  assert.equal(selectedActions.maxItems, 0);
+});
+
+test("planner bindings cannot reference an undeclared stable configuration object", () => {
+  const result = loopPlanningIRSchema.safeParse({
+    version: "v2",
+    title: "Draft",
+    summary: "Draft",
+    strategy: "Draft",
+    schedule: { cron: "0 9 * * 5", timezone: "UTC" },
+    requiredValues: [],
+    semanticAgents: [{
+      id: "writer",
+      name: "Writer",
+      responsibility: "Write",
+      task: "Write",
+      toolRef: "internal.llm_only",
+      inputBindings: [{
+        source: { kind: "stable_config", path: "/default_topic" },
+        targetPath: "/topic",
+        required: true,
+        valuePolicy: "passthrough",
+        provenance: "stable_config",
+      }],
+      outputArtifact: {
+        id: "draft",
+        description: "Draft",
+        representation: "text",
+        visibility: "operator",
+        fields: [],
+      },
+    }],
+    selectedActions: [],
+    unresolvedIssues: [],
+  });
+  assert.equal(result.success, false);
+});
+
+test("compact planner contracts expose references and field summaries without exact schemas", () => {
+  const contract = getStaticToolContract("internal.web_search")!;
+  const [view] = compactPlannerContracts([contract]);
+  assert.equal(view?.contractRef, contract.toolRef);
+  assert.equal("inputSchema" in (view ?? {}), false);
+  assert.equal("outputSchema" in (view ?? {}), false);
+  assert.equal(view?.inputFields.some((field) => field.path === "/query"), true);
+});
+
+test("planning progress configuration never permits more than one correction", () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS;
   process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS = "99";
   try {
-    assert.equal(planningProgressConfig().maxCorrectionAttempts, 2);
+    assert.equal(planningProgressConfig().maxCorrectionAttempts, 1);
   } finally {
     if (previous === undefined) delete process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS;
     else process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS = previous;
@@ -123,34 +223,25 @@ test("targeted corrections retain every exact internal contract and only referen
     outputSchema: { type: "object", properties: { id: { type: "string" } } },
   });
   const previousIR = loopPlanningIRSchema.parse({
-    version: "v1",
+    version: "v2",
     title: "Send",
     summary: "Send",
     strategy: "Send",
     schedule: { cron: "0 9 * * 5", timezone: "UTC" },
-    decisions: [],
     requiredValues: [],
     semanticAgents: [],
     selectedActions: [{
       id: "send",
-      name: "Send",
-      toolRef: selected.toolRef,
+      contractRef: selected.toolRef,
       purpose: "Send",
-      stableConfig: {},
       annotation: {
         effect: "write_external",
         confidence: "high",
         approvalRequired: true,
-        evidence: [{ source: "tool_contract", reference: selected.toolRef, explanation: "Exact contract." }],
-        semanticAssertions: [],
-        fieldPolicies: [],
       },
       bindings: [],
-      doneCriteria: ["Sent"],
     }],
     unresolvedIssues: [],
-    rationale: [],
-    suggestedChannels: ["primary"],
   });
   const internalContracts = [getStaticToolContract("internal.llm_only")!, getStaticToolContract("internal.web_search")!];
   assert.deepEqual(
