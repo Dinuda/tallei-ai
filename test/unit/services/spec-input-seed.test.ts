@@ -17,9 +17,19 @@ test("seedRequiredValuesFromSpec maps operational inputs but skips review surfac
   ]);
   assert.equal(seeded.length, 1);
   assert.equal(seeded[0]?.key, "recipientList");
-  assert.equal(seeded[0]?.lifecycle, "runtime_input");
+  assert.equal(seeded[0]?.lifecycle, "workflow_config");
   assert.equal(seeded[0]?.valueType, "array");
+  assert.equal(seeded[0]?.sourceKind, "stable_config");
   assert.equal(seeded[0]?.status, "resolved");
+});
+
+test("seedRequiredValuesFromSpec seeds before_step inputs as runtime_input", () => {
+  const seeded = seedRequiredValuesFromSpec([
+    { key: "selectedSources", surface: "input.text", when: "before_step", required: true },
+  ]);
+  assert.equal(seeded.length, 1);
+  assert.equal(seeded[0]?.lifecycle, "runtime_input");
+  assert.equal(seeded[0]?.sourceKind, "operator_input");
 });
 
 test("mergeCompiledInputRequirementsWithSpec unions spec and compiled requirements", () => {
@@ -138,6 +148,56 @@ test("planning compiler builds artifact schemas for nested and indexed field pat
     ],
   });
   assert.equal(compiled.ok, true);
+});
+
+test("planning compiler rejects undeclared semantic tool instruction bindings", () => {
+  const makePlan = (toolRef: "internal.llm_only" | "internal.web_search", targetPath: "/prompt" | "/query") => loopPlanningIRSchema.parse({
+    version: "v2",
+    title: "Semantic tool",
+    summary: "Run a semantic tool.",
+    strategy: "Use the task as the tool instruction.",
+    schedule: { cron: "0 9 * * 5", timezone: "UTC" },
+    requiredValues: [],
+    semanticAgents: [{
+      id: "semantic_agent",
+      name: "Semantic Agent",
+      responsibility: "Complete semantic work.",
+      task: "Complete the semantic work described by the loop goal.",
+      toolRef,
+      inputBindings: [{
+        source: { kind: "required_value", key: targetPath.slice(1), path: "/" },
+        targetPath,
+        required: true,
+        valuePolicy: "passthrough",
+        provenance: "stable_config",
+      }],
+      outputArtifact: {
+        id: "draft",
+        description: "Newsletter draft",
+        representation: "text",
+        visibility: "operator",
+        rendererRef: null,
+        reviewMode: "none",
+        editable: false,
+        fields: [],
+      },
+    }],
+    selectedActions: [],
+    unresolvedIssues: [],
+  });
+  for (const [toolRef, targetPath] of [
+    ["internal.llm_only", "/prompt"],
+    ["internal.web_search", "/query"],
+  ] as const) {
+    const compiled = compileLoopPlanningIR({
+      planningIR: makePlan(toolRef, targetPath),
+      contracts: [getStaticToolContract(toolRef)!],
+    });
+    assert.equal(compiled.ok, false);
+    if (compiled.ok) continue;
+    assert.equal(compiled.issues.some((issue) => issue.code === "unknown_required_value"), true);
+    assert.equal(compiled.issues.some((issue) => issue.code === "invalid_binding_source"), true);
+  }
 });
 
 test("planning compiler attaches draft_review gate when requested for content agent", () => {

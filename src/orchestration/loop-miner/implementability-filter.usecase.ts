@@ -20,6 +20,7 @@ const DELIVERY_CAPABILITIES = ["notification:whatsapp", "notification:email", "r
 function normalizeCapability(value: string): string {
   const key = value.trim().toLowerCase().replace(/[\s_-]+/g, "");
   if (key === "googlecalendar") return "googlecalendar";
+  if (key === "googledocs") return "googledocs";
   return key;
 }
 
@@ -61,6 +62,9 @@ function inferRequiredCapabilities(input: QualifiedLoopInput, signalText: string
   if (/\b(notion)\b/.test(signalText)) required.add("notion");
   if (/\b(linear)\b/.test(signalText)) required.add("linear");
   if (/\b(calendar|meeting scheduling|schedule meeting)\b/.test(signalText)) required.add("googlecalendar");
+  if (/\b(google docs?|googledocs|document creation)\b/.test(signalText)) required.add("googledocs");
+  if (/\b(cal\.?com|booking|appointment scheduling)\b/.test(signalText)) required.add("cal");
+  if (/\b(mailchimp|newsletter|email campaign|audience)\b/.test(signalText)) required.add("mailchimp");
 
   if (/\bresend\b/.test(signalText)) required.add("resend");
   if (/\bgmail\b/.test(signalText)) required.add("gmail");

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildPlannerCorrectionPrompt,
   contractsForPlannerCorrection,
   compactPlannerContracts,
   planningAttemptStopReason,
@@ -205,14 +206,14 @@ test("compact planner contracts expose references and field summaries without ex
   assert.equal(view?.contractRef, contract.toolRef);
   assert.equal("inputSchema" in (view ?? {}), false);
   assert.equal("outputSchema" in (view ?? {}), false);
-  assert.equal(view?.inputFields.some((field) => field.path === "/query"), true);
+  assert.deepEqual(view?.inputFields, []);
 });
 
-test("planning progress configuration never permits more than one correction", () => {
+test("planning progress uses a fixed bounded correction budget", () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS;
   process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS = "99";
   try {
-    assert.equal(planningProgressConfig().maxCorrectionAttempts, 1);
+    assert.equal(planningProgressConfig().maxCorrectionAttempts, 3);
   } finally {
     if (previous === undefined) delete process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS;
     else process.env.TALLEI_LOOP_BUILDER__MAX_PLANNING_CORRECTIONS = previous;
@@ -287,6 +288,57 @@ test("targeted corrections retain every exact internal and discovered connector 
   );
 });
 
+test("planner correction prompt audits dangling required value bindings", () => {
+  const previousIR = loopPlanningIRSchema.parse({
+    version: "v2",
+    title: "Research",
+    summary: "Research AI news.",
+    strategy: "Research.",
+    schedule: { cron: "0 9 * * 5", timezone: "UTC" },
+    requiredValues: [],
+    semanticAgents: [{
+      id: "ai_news_researcher",
+      name: "AI News Researcher",
+      responsibility: "Research AI news.",
+      task: "Research current AI news.",
+      toolRef: "internal.web_search",
+      inputBindings: [{
+        source: { kind: "required_value", key: "text", path: "/" },
+        targetPath: "/text",
+        required: true,
+        valuePolicy: "passthrough",
+        provenance: "stable_config",
+      }],
+      outputArtifact: {
+        id: "research",
+        description: "Research",
+        representation: "text",
+        visibility: "operator",
+        rendererRef: null,
+        reviewMode: "none",
+        editable: false,
+        fields: [],
+      },
+    }],
+    selectedActions: [],
+    unresolvedIssues: [],
+  });
+  const prompt = JSON.parse(buildPlannerCorrectionPrompt({
+    previousIR,
+    compilationIssues: [
+      issue("unknown_required_value", "ai_news_researcher"),
+      issue("invalid_binding_source", "ai_news_researcher.bindings[0]"),
+    ],
+    contracts: [getStaticToolContract("internal.web_search")!],
+  }));
+  assert.deepEqual(prompt.bindingAudit.declaredRequiredValueKeys, []);
+  assert.deepEqual(prompt.bindingAudit.danglingRequiredValueBindings, [{
+    owner: "ai_news_researcher",
+    targetPath: "/text",
+    missingRequiredValueKey: "text",
+  }]);
+});
+
 test("planning issue fingerprints are stable across ordering and messages", () => {
   const first = [issue("unknown_action", "send"), issue("missing_binding", "send./to")];
   const second = [
@@ -296,14 +348,14 @@ test("planning issue fingerprints are stable across ordering and messages", () =
   assert.equal(planningIssueFingerprint(first), planningIssueFingerprint(second));
 });
 
-test("planning attempts stop when correction issues repeat", () => {
+test("planning attempts continue when correction issues repeat before the limit", () => {
   const issues = [issue("unknown_action", "send")];
   assert.equal(planningAttemptStopReason({
     previousIssues: issues,
     currentIssues: issues,
     correction: true,
     lastAttempt: false,
-  }), "repeated_issues");
+  }), undefined);
 });
 
 test("planning attempts stop when a correction only introduces more issues", () => {

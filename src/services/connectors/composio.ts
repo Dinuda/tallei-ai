@@ -125,12 +125,15 @@ export function inferComposioAppKey(scopes: string[]): string | null {
     const service = first.replace("https://www.googleapis.com/auth/", "").split(".")[0];
     if (service === "gmail" || service === "mail") return "gmail";
     if (service === "calendar") return "googlecalendar";
-    if (service === "drive" || service === "docs" || service === "sheets" || service === "slides") return "google";
+    if (service === "drive") return "google";
+    if (service === "docs") return "googledocs";
+    if (service === "sheets" || service === "slides") return "google";
     return service || null;
   }
   if (first.includes("google.com") || first.includes("googleapis.com")) {
     if (first.includes("mail")) return "gmail";
     if (first.includes("calendar")) return "googlecalendar";
+    if (first.includes("docs")) return "googledocs";
     if (first.includes("drive")) return "google";
     return "google";
   }
@@ -186,6 +189,28 @@ function getComposioVercelClient(): Composio<VercelProvider> {
   return composioVercelClient;
 }
 
+type ComposioRawToolsClient = {
+  list?: (filters: Record<string, unknown>) => Promise<unknown>;
+  retrieve?: (slug: string, params?: Record<string, unknown>) => Promise<unknown>;
+};
+
+/**
+ * The Composio SDK's high-level helpers (`tools.list`, `getRawComposioTools`,
+ * `getRawComposioToolBySlug`) run every tool through `ToolSchema.parse`
+ * (`transformToolCases`). That schema requires `output_parameters` to be a
+ * `{ type: "object", properties: {...} }` JSON schema, but the API returns
+ * `output_parameters: {}` for many tools, so a single tool throws a ZodError and
+ * the entire batch fails (ComposioHQ/composio#3354). We therefore read from the
+ * SDK's underlying raw HTTP client, which returns the unparsed API response, and
+ * normalize it ourselves with the schema-tolerant `normalizeComposioAction`.
+ */
+function getComposioRawToolsClient(): ComposioRawToolsClient | null {
+  const composio = getComposioVercelClient() as unknown as {
+    client?: { tools?: ComposioRawToolsClient };
+  };
+  return composio.client?.tools ?? null;
+}
+
 function schemaHasFileUploadableInput(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   if (Array.isArray(value)) return value.some(schemaHasFileUploadableInput);
@@ -201,15 +226,11 @@ async function resolveComposioToolExecutionMetadata(actionSlug: string): Promise
   const cacheKey = actionSlug.trim().toUpperCase();
   const cached = composioToolExecutionMetadataCache.get(cacheKey);
   if (cached) return cached;
-  const composio = getComposioVercelClient() as unknown as {
-    tools?: {
-      getRawComposioToolBySlug?: (slug: string) => Promise<unknown>;
-    };
-  };
-  if (!composio.tools?.getRawComposioToolBySlug) {
+  const rawTools = getComposioRawToolsClient();
+  if (!rawTools?.retrieve) {
     throw new Error(`Composio SDK cannot resolve a toolkit version for ${actionSlug}`);
   }
-  const tool = toObjectRecord(await composio.tools.getRawComposioToolBySlug(actionSlug));
+  const tool = toObjectRecord(await rawTools.retrieve(actionSlug, { toolkit_versions: "latest" }));
   const version = String(tool.version ?? "").trim();
   if (!version || version.toLowerCase() === "latest") {
     throw new Error(`Composio returned no concrete toolkit version for ${actionSlug}`);
@@ -398,16 +419,14 @@ export async function listComposioToolkitTools(toolkitSlug: string): Promise<Com
       .filter((item): item is ComposioActionView => Boolean(item));
 
   try {
-    const composio = getComposioVercelClient() as unknown as {
-      tools?: { getRawComposioTools?: (args: Record<string, unknown>) => Promise<unknown> };
-    };
-    if (composio.tools?.getRawComposioTools) {
-      const response = await composio.tools.getRawComposioTools({
-        toolkits: [toolkit],
+    const rawTools = getComposioRawToolsClient();
+    if (rawTools?.list) {
+      const response = await rawTools.list({
+        toolkit_slug: toolkit,
         limit: 50,
-        important: false,
+        toolkit_versions: "latest",
       });
-      const items = filterComposioToolkitActions(normalizeItems(response));
+      const items = filterComposioToolkitActions(normalizeItems(normalizeComposioToolSearchResponse(response)));
       if (items.length > 0) return items;
     }
   } catch (error) {
@@ -488,24 +507,13 @@ async function searchComposioToolsViaHttp(query: string, limit: number): Promise
 }
 
 async function searchComposioToolsViaSdk(query: string, limit: number): Promise<ComposioToolSearchResult[]> {
-  const composio = getComposioVercelClient() as unknown as {
-    tools?: {
-      list?: (args: Record<string, unknown>) => Promise<unknown>;
-      getRawComposioTools?: (args: Record<string, unknown>) => Promise<unknown>;
-    };
-  };
-  const response = composio.tools?.list
-    ? await composio.tools.list({
-        query,
-        limit,
-        include_deprecated: false,
-      })
-    : composio.tools?.getRawComposioTools
-      ? await composio.tools.getRawComposioTools({
-          search: query,
-          limit,
-        })
-      : null;
+  const rawTools = getComposioRawToolsClient();
+  if (!rawTools?.list) return [];
+  const response = await rawTools.list({
+    search: query,
+    limit,
+    toolkit_versions: "latest",
+  });
   if (!response) return [];
   return parseComposioSearchItems(normalizeComposioToolSearchResponse(response), limit);
 }

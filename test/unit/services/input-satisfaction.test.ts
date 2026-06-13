@@ -264,6 +264,86 @@ test("noSlopSpecDraftSchema rejects undeclared input surfaces", () => {
   assert.equal(parsed.success, false);
 });
 
+test("input.file accepts pasted text when no fileRef is provided", () => {
+  const definition = buildLoopDefinition({
+    ...strictWorkflowFields,
+    task: "Draft launch email from product brief",
+    cron: "0 9 * * 5",
+    timezone: "UTC",
+    inputRequirements: [{
+      key: "product_brief_or_link",
+      surface: "input.file",
+      label: "Product brief or link",
+      required: true,
+      when: "run_start",
+    }],
+    agentGraph: {
+      parent: { id: "parent", name: "Coordinator", task: "Coordinate", policy: "Draft from brief" },
+      children: [{
+        id: "draft",
+        name: "Draft Agent",
+        task: "Draft launch email",
+        goal: "Produce email draft",
+        tools: [{ ref: "internal.llm_only" }],
+      }],
+    },
+  });
+  const emptyContext = runtimeContextSchema.parse({ inputs: {} });
+  assert.equal(evaluateAt(definition, emptyContext, "run_start").length, 1);
+
+  const nextContext = applyGateSurfaceSubmission({
+    definition,
+    context: emptyContext,
+    values: {
+      product_brief_or_link: {
+        surface: "input.file",
+        text: "Tallei Loops turns repeated patterns into reusable automations.",
+      },
+    },
+  });
+  assert.equal(nextContext.inputs.product_brief_or_link, "Tallei Loops turns repeated patterns into reusable automations.");
+  assert.equal(evaluateAt(definition, nextContext, "run_start").length, 0);
+});
+
+test("applyGateSurfaceSubmission rejects undeclared keys with declared input list", () => {
+  const definition = buildLoopDefinition({
+    ...strictWorkflowFields,
+    task: "Send to subscriber list",
+    cron: "0 9 * * 5",
+    timezone: "UTC",
+    inputRequirements: [{
+      key: "subscriber_list",
+      surface: "input.contacts_csv",
+      when: "run_start",
+      required: true,
+    }],
+    agentGraph: {
+      parent: { id: "parent", name: "Coordinator", task: "Coordinate", policy: "Send" },
+      children: [{
+        id: "send",
+        name: "Send Agent",
+        task: "Send email",
+        goal: "Deliver",
+        tools: [{ ref: "internal.llm_only" }],
+      }],
+    },
+  });
+  const context = runtimeContextSchema.parse({ inputs: {} });
+  assert.throws(
+    () => applyGateSurfaceSubmission({
+      definition,
+      context,
+      values: {
+        recipients: {
+          surface: "input.contacts_csv",
+          contacts: [{ email: "alex@example.com" }],
+        },
+      },
+    }),
+    /Undeclared operator input: recipients\. Declared inputs: subscriber_list\./,
+  );
+});
+
 test("team email requires run_start content only when explicitly declared", () => {
   assert.equal(specRequiresRunStartContent({
     delivery: { target: "team_email" },

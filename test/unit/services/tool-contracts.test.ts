@@ -16,6 +16,14 @@ test("internal tools expose stable contracts and render recommendations", () => 
   assert.equal(contract.renderRecommendations.some((rec) => rec.target === "canvas.email"), true);
 });
 
+test("semantic internal tool contracts derive instructions from agent tasks", () => {
+  for (const ref of ["internal.llm_only", "internal.memory_search", "internal.web_search"]) {
+    const contract = getStaticToolContract(ref);
+    assert.ok(contract);
+    assert.deepEqual(contract.inputSchema, { type: "object", properties: {}, required: [] });
+  }
+});
+
 test("Composio action contracts preserve SDK schemas and declared risk without use-case overrides", () => {
   const contract = buildComposioActionContract({
     toolkit: "resend",

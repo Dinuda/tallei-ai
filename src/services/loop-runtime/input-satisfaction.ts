@@ -118,7 +118,10 @@ export function validateSurfaceValue(
   }
   if (surface === "input.file") {
     const ref = typeof value === "string" ? value.trim() : "";
-    if (!ref) return { ok: false, message: "File reference is required." };
+    if (!ref) return { ok: false, message: "File reference or pasted content is required." };
+    if (detectPlaceholderText(ref)) {
+      return { ok: false, message: `${requirement?.key ?? "Input"} still contains placeholder text.` };
+    }
     return { ok: true };
   }
   return { ok: true };
@@ -209,7 +212,7 @@ export function applySurfaceSubmission(input: {
     };
   }
   if (requirement.surface === "input.file") {
-    const fileRef = value.fileRef?.trim() ?? "";
+    const fileRef = value.fileRef?.trim() || value.text?.trim() || "";
     return { inputs: { [key]: fileRef } };
   }
   const text = value.text?.trim() ?? "";
@@ -228,7 +231,11 @@ export function applyGateSurfaceSubmission(input: {
 
   for (const [key, value] of Object.entries(input.values)) {
     const requirement = byKey.get(key);
-    if (!requirement) throw new Error(`Undeclared operator input: ${key}`);
+    if (!requirement) {
+      const declared = requirements.map((req) => req.key);
+      const hint = declared.length > 0 ? ` Declared inputs: ${declared.join(", ")}.` : "";
+      throw new Error(`Undeclared operator input: ${key}.${hint}`);
+    }
     if (isBlankSubmissionValue(value) && isRequirementSatisfied(requirement, input.context, input.definition).satisfied) {
       continue;
     }

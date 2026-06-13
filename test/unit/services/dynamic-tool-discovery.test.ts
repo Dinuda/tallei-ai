@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   interleaveDiscoveredToolResults,
+  mergeDiscoveredToolContracts,
   mergeRequiredToolContracts,
 } from "../../../src/services/tool-spec/discovery.js";
 import { normalizeComposioToolSearchResponse } from "../../../src/services/connectors/composio.js";
@@ -61,6 +62,23 @@ test("discovery interleaves query results before applying the global cap", () =>
     "composio.gmail.action.gmail_send_email",
     "composio.search.action.two",
   ]);
+});
+
+test("discovery merging preserves capability query provenance", () => {
+  const contract = buildComposioActionContract({
+    toolkit: "provider_x",
+    actionSlug: "PROVIDER_X_SEND",
+    risk: "send",
+    inputSchema: { type: "object", properties: { body: { type: "string" } }, required: ["body"] },
+    outputSchema: { type: "object", properties: { id: { type: "string" } } },
+  });
+  const [merged] = mergeDiscoveredToolContracts(
+    [{ contract, connected: false, source: "learned_catalog", capabilityQueries: ["provider x create message"] }],
+    [{ contract, connected: true, source: "composio_search", capabilityQueries: ["provider x send message"] }],
+  );
+  assert.equal(merged?.source, "composio_search");
+  assert.equal(merged?.connected, true);
+  assert.deepEqual(merged?.capabilityQueries, ["provider x create message", "provider x send message"]);
 });
 
 test("roster validation accepts persisted exact dynamic action contracts", async () => {

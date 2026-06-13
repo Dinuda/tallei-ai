@@ -12,6 +12,8 @@ import {
   type NoSlopSpecStatus,
 } from "../loop-engine/spec-contracts.js";
 import { loopIntentContextSchema, type LoopIntentContext } from "../loop-engine/intent-context.js";
+import { normalizeProviderIdentity } from "../loop-engine/spec-required-connectors.js";
+import { listComposioToolkits } from "../connectors/composio.js";
 
 export type LoopSpecView = {
   id: string;
@@ -128,9 +130,25 @@ export function renderIntentContextMarkdown(intentContext?: LoopIntentContext): 
   return lines.join("\n");
 }
 
-export function specSemanticIssues(spec: NoSlopSpec): string[] {
-  void spec;
-  return [];
+export function specSemanticIssues(spec: NoSlopSpec, expectedProvider = ""): string[] {
+  const expectedIdentity = normalizeProviderIdentity(expectedProvider);
+  if (!expectedIdentity || normalizeProviderIdentity(spec.delivery.provider) === expectedIdentity) return [];
+  return [
+    `delivery.provider must preserve the explicitly requested available provider ${expectedProvider}; received ${spec.delivery.provider}.`,
+  ];
+}
+
+function providerMentionPattern(value: string): RegExp | null {
+  const words = value.trim().toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  if (words.length === 0) return null;
+  return new RegExp(`\\b${words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^a-z0-9]+")}\\b`, "i");
+}
+
+async function explicitAvailableProvider(intent: string): Promise<string> {
+  const toolkits = await listComposioToolkits().catch(() => []);
+  const matches = toolkits.filter((toolkit) =>
+    [toolkit.slug, toolkit.name].some((value) => providerMentionPattern(value)?.test(intent)));
+  return matches.length === 1 ? matches[0]!.slug : "";
 }
 
 export function normalizeBehavioralSpec(spec: NoSlopSpec): NoSlopSpec {
@@ -177,7 +195,7 @@ export async function hydrateLoopSpecJson(
   const schema = mode === "draft" ? noSlopSpecDraftSchema : noSlopSpecSchema;
   const parsed = schema.parse(normalized);
   if (mode === "approved" && options?.validateSemantics) {
-    const semanticIssues = specSemanticIssues(parsed);
+    const semanticIssues = specSemanticIssues(parsed, await explicitAvailableProvider(options.intent ?? ""));
     if (semanticIssues.length > 0) {
       throw new Error(`Spec contains implementation details that cannot be approved: ${semanticIssues.join("; ")}`);
     }
@@ -271,6 +289,7 @@ function specSystemPrompt(): string {
     "Default to delivery.provider none unless the user explicitly asks the loop to send, post, publish, create, update, or delete through a connected app.",
     "Do not invent connector action inputs. Exact required inputs are resolved from the selected action schema at runtime.",
     "If outbound delivery is requested, describe the desired delivery behavior in delivery.description and set delivery.provider to the requested provider name when known.",
+    "An explicitly named available provider is authoritative. Preserve that provider in delivery.provider; never substitute a different provider.",
     "Connector bindings are system-owned. Always leave connectorPolicy.allowedReadActions and connectorPolicy.allowedWriteActions empty.",
     "Declare inputRequirements for runtime checkpoints only — never block build-time generation.",
     "inputRequirements[].surface MUST be one of: input.text, input.markdown, input.contacts_csv, input.audience_id, input.file, review.draft, review.email, confirm.send. Never invent types like input.boolean.",
@@ -354,6 +373,9 @@ async function generateSpecJson(input: {
 }): Promise<NoSlopSpec> {
   let validationFixes: string[] = [];
   let lastError: unknown = null;
+  const expectedProvider = await explicitAvailableProvider(
+    [input.prompt, input.intentContext?.resolvedIntent].filter(Boolean).join("\n"),
+  );
 
   for (let attempt = 0; attempt <= SPEC_GENERATION_MAX_RETRIES; attempt += 1) {
     const sections = [
@@ -361,6 +383,7 @@ async function generateSpecJson(input: {
       input.intentContext ? `Resolved intent decisions (authoritative over conflicting raw request wording):\n${input.intentContext.resolvedIntent}` : null,
       input.currentSpec ? `Current spec markdown:\n${input.currentSpec.bodyMarkdown}` : null,
       input.feedback ? `Requested refinement:\n${input.feedback}` : null,
+      expectedProvider ? `Explicitly requested available provider (must be preserved exactly in delivery.provider):\n${expectedProvider}` : null,
       validationFixes.length > 0
         ? `Required fixes from schema validation (address all):\n${validationFixes.map((fix) => `- ${fix}`).join("\n")}`
         : null,
@@ -371,7 +394,7 @@ async function generateSpecJson(input: {
         responseFormat: "json_object",
         temperature: 0.2,
         maxTokens: 2500,
-        reasoningEffort: "minimal",
+        reasoningEffort: process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT ?? "minimal" as any,
         messages: [
           { role: "system", content: specSystemPrompt() },
           { role: "user", content: sections },
@@ -386,7 +409,7 @@ async function generateSpecJson(input: {
       }
 
       const behavioralSpec = normalizeBehavioralSpec(noSlopSpecDraftSchema.parse(rawSpec));
-      const semanticIssues = specSemanticIssues(behavioralSpec);
+      const semanticIssues = specSemanticIssues(behavioralSpec, expectedProvider);
       if (semanticIssues.length > 0) throw new SpecSemanticError(semanticIssues);
       const withoutBindings = stripModelExecutionBindings(behavioralSpec);
       return parsePreparedSpecJson(withoutBindings);

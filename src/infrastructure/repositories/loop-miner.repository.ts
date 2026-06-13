@@ -739,12 +739,15 @@ function inferComposioAppKeyFromScopes(scopes: string[]): string | null {
     const service = first.replace("https://www.googleapis.com/auth/", "").split(".")[0];
     if (service === "gmail" || service === "mail") return "gmail";
     if (service === "calendar") return "googlecalendar";
-    if (service === "drive" || service === "docs" || service === "sheets" || service === "slides") return "google";
+    if (service === "drive") return "google";
+    if (service === "docs") return "googledocs";
+    if (service === "sheets" || service === "slides") return "google";
     return service || null;
   }
   if (first.includes("google.com") || first.includes("googleapis.com")) {
     if (first.includes("mail")) return "gmail";
     if (first.includes("calendar")) return "googlecalendar";
+    if (first.includes("docs")) return "googledocs";
     if (first.includes("drive")) return "google";
     return "google";
   }

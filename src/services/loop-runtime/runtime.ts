@@ -27,7 +27,7 @@ import {
 } from "../connectors/composio.js";
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
 import { loopRunAgentSchema, type LoopContactRow, type LoopRunAgent } from "../loop-executor/types.js";
-import type { CanvasEmailTemplate } from "./email-canvas.js";
+import { deriveSubjectFromBody, type CanvasEmailTemplate } from "./email-canvas.js";
 import {
   selectLatestArtifactsByKey,
 } from "./artifact-selection.js";
@@ -38,12 +38,15 @@ import {
 import { parseContactListCsv } from "../loop-executor/csv-parser.js";
 import {
   ConnectorActionPayloadError,
+  mergeStableConfigWithRuntimeInputs,
+  normalizeConnectorPayloadForSchema,
   resolveConnectorActionContract,
+  resolveConnectorOutputForValidation,
   sanitizeConnectorDetails,
   validateConnectorActionOutput,
 } from "./connector-action-payload.js";
 import { validateConnectorReadiness } from "../tool-spec/action-readiness.js";
-import { resolveAgentHandoffBindings } from "./typed-handoff.js";
+import { buildPriorOutputIndex, extractStructuredOutputFromArtifact, resolveAgentHandoffBindings } from "./typed-handoff.js";
 import { runtimeContextSchema, runtimeDefinitionSchema, type RuntimeContext, type RuntimeDefinition } from "./types.js";
 import {
   evaluateExecutionBlockingAt,
@@ -193,11 +196,16 @@ async function prepareConnectorActionPayload(input: {
     definition: input.definition,
     toolRef: input.toolRef,
   });
+  const operatorInputs = resolvedRuntimeInputs(input.definition, input.context);
   const handoff = resolveAgentHandoffBindings({
     agent: input.agent,
     priorOutputs: input.priorOutputs,
-    operatorInputs: resolvedRuntimeInputs(input.definition, input.context),
-    stableConfig: input.assignmentConfig,
+    operatorInputs,
+    stableConfig: mergeStableConfigWithRuntimeInputs(
+      input.assignmentConfig,
+      operatorInputs,
+      input.agent.handoffBindings,
+    ),
   });
   const invalidProvenance = handoff.resolvedBindings.filter((binding) => !binding.provenanceValid);
   const unresolvedRequired = handoff.resolvedBindings.filter((binding) => binding.binding.required && !binding.resolved);
@@ -228,7 +236,8 @@ async function prepareConnectorActionPayload(input: {
       },
     );
   }
-  const validation = validateConnectorReadiness(contract.readiness, handoff.value);
+  const payload = normalizeConnectorPayloadForSchema(handoff.value, contract.readiness.effectiveInputSchema);
+  const validation = validateConnectorReadiness(contract.readiness, payload);
   if (!validation.valid) {
     throw new ConnectorActionPayloadError(
       `Typed handoff does not satisfy ${contract.toolRef}`,
@@ -236,7 +245,7 @@ async function prepareConnectorActionPayload(input: {
     );
   }
   const compiled = {
-    payload: handoff.value,
+    payload,
     validation,
     attempts: 0,
     model: "typed_handoff",
@@ -322,13 +331,11 @@ function connectorPayloadPreparationDetails(prepared: Awaited<ReturnType<typeof 
 
 function outputValidationForResult(
   contract: { outputSchema: Record<string, unknown> },
-  result: { output?: Record<string, unknown>; actionOutputData?: unknown },
+  result: { output?: Record<string, unknown>; rawResponse?: Record<string, unknown>; actionOutputData?: unknown; ok?: boolean },
 ) {
-  const properties = asObject(contract.outputSchema.properties);
-  const validatesConnectorEnvelope = "ok" in properties && "output" in properties;
   return validateConnectorActionOutput(
     contract,
-    validatesConnectorEnvelope ? result : result.actionOutputData ?? result.output ?? {},
+    resolveConnectorOutputForValidation(contract, result),
   );
 }
 
@@ -789,8 +796,17 @@ async function promoteCanvasArtifactToStructuredOutput(
       ? emailTemplate.html
       : row.body;
   if (!text.trim()) return;
+  const subject = typeof emailTemplate.subject === "string" && emailTemplate.subject.trim()
+    ? emailTemplate.subject.trim()
+    : deriveSubjectFromBody(text);
+  const structuredOutput = {
+    subject,
+    body: text,
+  };
   const dataJson = JSON.stringify({
     text,
+    data: { structuredOutput },
+    structuredOutput,
     promotedFromCanvas: input.canvasArtifactKey,
     emailTemplate,
   });
@@ -1004,10 +1020,11 @@ async function handleExecuteStep(command: CommandRow) {
     body: string;
     data_json: unknown;
     step_index: number;
+    agent_id: string;
     created_at: string;
     version: number;
   }>(
-    `SELECT a.artifact_key, a.kind, a.body, a.data_json, s.step_index, a.created_at, a.version
+    `SELECT a.artifact_key, a.kind, a.body, a.data_json, s.step_index, s.agent_id, a.created_at, a.version
      FROM loop_engine_artifacts a
      JOIN loop_engine_step_attempts s ON s.id = a.step_attempt_id
      WHERE a.run_id = $1
@@ -1018,21 +1035,39 @@ async function handleExecuteStep(command: CommandRow) {
     [command.run_id, row.step_index],
   );
   const latestArtifactRows = selectLatestArtifactsByKey(artifactRows.rows);
-  const priorOutputs = Object.fromEntries(
-    latestArtifactRows.map((artifact) => [
-      artifact.artifact_key,
-      {
-        artifactId: artifact.artifact_key,
-        kind: artifact.kind,
-        stepIndex: artifact.step_index,
-        body: compactArtifactBody(artifact.body),
-        data: compactArtifactData(artifact.data_json),
-      },
-    ]),
-  );
-  const agentHandoff = buildAgentHandoff(agent, runMemoryFromContext(context), priorOutputs, {
-    userProfile: context.userProfile ?? definition.builderMeta?.workflowUserProfile ?? null,
+  const priorOutputs = buildPriorOutputIndex({
+    artifacts: latestArtifactRows.map((artifact) => {
+      const structuredOutput = extractStructuredOutputFromArtifact(artifact.data_json, artifact.body);
+      return {
+        artifact_key: artifact.artifact_key,
+        agent_id: artifact.agent_id,
+        envelope: {
+          artifactId: artifact.artifact_key,
+          kind: artifact.kind,
+          stepIndex: artifact.step_index,
+          body: compactArtifactBody(artifact.body),
+          data: compactArtifactData(artifact.data_json),
+          // Preserve the small structured output un-truncated so connector bindings
+          // (e.g. gmail /subject, /body) resolve even when data_json is compacted.
+          ...(structuredOutput ? { structuredOutput } : {}),
+        },
+      };
+    }),
+    children: definition.agentGraph?.children ?? [],
   });
+  const agentHandoff = {
+    ...buildAgentHandoff(agent, runMemoryFromContext(context), priorOutputs, {
+      userProfile: context.userProfile ?? definition.builderMeta?.workflowUserProfile ?? null,
+    }),
+    ...(agent.handoffBindings.length > 0
+      ? resolveAgentHandoffBindings({
+        agent,
+        priorOutputs,
+        operatorInputs: resolvedRuntimeInputs(definition, context),
+        stableConfig: asObject(agent.tools[0]?.config),
+      }).value
+      : {}),
+  };
   const priorComments = latestArtifactRows.map((artifact) => ({
     author: artifact.artifact_key,
     body: compactArtifactBody(artifact.body),
@@ -2556,7 +2591,12 @@ export async function saveAgentOutput(input: {
   const row = existing.rows[0];
   if (!row) throw new Error("Agent output not found");
 
-  const output = { ...asObject(row.output_json), text: input.text, operatorEdited: true };
+  // Derive a subject from the first heading/line so downstream email bindings can resolve /subject.
+  const body = input.text.trim();
+  const subject = deriveSubjectFromBody(body);
+  const structuredOutput = { body, subject };
+
+  const output = { ...asObject(row.output_json), text: input.text, data: { structuredOutput }, operatorEdited: true };
   await pool.query(
     `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
     [input.stepId, JSON.stringify(output)],
@@ -2567,6 +2607,17 @@ export async function saveAgentOutput(input: {
      WHERE run_id = $1 AND step_attempt_id = $3 AND status = 'pending'`,
     [input.runId, input.text, input.stepId],
   );
+
+  // Look up the original artifact key for this agent so the edit is stored under the same key
+  // and buildPriorOutputIndex maps it correctly to downstream bindings.
+  const originalArtifact = await pool.query<{ artifact_key: string }>(
+    `SELECT artifact_key FROM loop_engine_artifacts
+     WHERE run_id = $1 AND step_attempt_id = $2 AND kind = 'structured_output' AND invalidated_at IS NULL
+     ORDER BY version DESC LIMIT 1`,
+    [input.runId, input.stepId],
+  );
+  const artifactKey = originalArtifact.rows[0]?.artifact_key ?? `${row.agent_id}:operator_edit`;
+
   await pool.query(
     `INSERT INTO loop_engine_artifacts
      (tenant_id, user_id, run_id, step_attempt_id, artifact_key, version, kind, body, data_json)
@@ -2578,9 +2629,9 @@ export async function saveAgentOutput(input: {
       row.user_id,
       input.runId,
       input.stepId,
-      `${row.agent_id}:operator_edit`,
+      artifactKey,
       input.text,
-      JSON.stringify({ text: input.text, operatorEdited: true }),
+      JSON.stringify({ text: input.text, data: { structuredOutput }, structuredOutput, operatorEdited: true }),
     ],
   );
   await insertEvent({

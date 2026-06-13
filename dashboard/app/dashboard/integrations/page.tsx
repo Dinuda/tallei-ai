@@ -95,6 +95,9 @@ const APP_META: Record<
   gdrive: { scopes: [], color: "#34A853", category: "Storage" },
   dropbox: { scopes: [], color: "#0061FF", category: "Storage" },
   onedrive: { scopes: [], color: "#0078D4", category: "Storage" },
+  googledocs: { scopes: ["googledocs.create_document"], color: "#4285F4", category: "Productivity" },
+  cal: { scopes: ["cal.create_booking"], color: "#292929", category: "Scheduling" },
+  mailchimp: { scopes: ["mailchimp.add_campaign"], color: "#FFE01B", category: "Communication" },
 };
 
 const CATEGORIES: AppCategory[] = [
@@ -107,7 +110,7 @@ const CATEGORIES: AppCategory[] = [
   "Storage",
 ];
 
-const RECOMMENDED_KEYS = ["resend", "gmail", "slack", "googlecalendar", "github", "notion"];
+const RECOMMENDED_KEYS = ["resend", "gmail", "slack", "googlecalendar", "github", "notion", "googledocs", "cal"];
 
 const PENDING_CONNECTOR_KEY = "tallei:pending-connector-auth";
 

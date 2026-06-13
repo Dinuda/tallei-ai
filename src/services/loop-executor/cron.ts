@@ -22,6 +22,34 @@ const DOW_NAME_TO_CRON: Record<string, string> = {
   saturday: "6",
 };
 
+function normalizeDowToken(token: string): string {
+  const key = token.trim().toLowerCase();
+  return DOW_NAME_TO_CRON[key] ?? token;
+}
+
+function normalizeDowField(raw: string): string {
+  return raw.split(",").map((part) => {
+    const trimmed = part.trim();
+    if (!trimmed) return trimmed;
+    const [rangePart, stepPart] = trimmed.split("/");
+    const step = stepPart ? `/${stepPart}` : "";
+    if (rangePart === "*") return `${rangePart}${step}`;
+    if (rangePart.includes("-")) {
+      const [start, end] = rangePart.split("-");
+      return `${normalizeDowToken(start)}-${normalizeDowToken(end)}${step}`;
+    }
+    return `${normalizeDowToken(rangePart)}${step}`;
+  }).join(",");
+}
+
+function normalizeCronFields(fields: string[]): string[] {
+  if (fields.length !== CRON_PARTS) return fields;
+  return [
+    ...fields.slice(0, 4),
+    normalizeDowField(fields[4]),
+  ];
+}
+
 function parseField(raw: string, min: number, max: number, options?: { normalizeSevenToZero?: boolean }): Set<number> {
   const values = new Set<number>();
   const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
@@ -80,10 +108,7 @@ export function normalizeDesignCron(expression: string, sourceText = ""): string
   }
 
   if (fields.length === 5) {
-    const dowKey = fields[4].toLowerCase();
-    if (DOW_NAME_TO_CRON[dowKey]) {
-      fields[4] = DOW_NAME_TO_CRON[dowKey];
-    }
+    fields = normalizeCronFields(fields);
     raw = fields.join(" ");
   }
 
@@ -101,17 +126,19 @@ export function normalizeDesignCron(expression: string, sourceText = ""): string
 
 export function validateFiveFieldCron(expression: string): string {
   const normalized = expression.trim().replace(/\s+/g, " ");
-  const fields = normalized.split(" ");
+  let fields = normalized.split(" ");
   if (fields.length !== CRON_PARTS) {
     throw new Error("Schedule must be a standard 5-field cron expression");
   }
+  fields = normalizeCronFields(fields);
+  const cron = fields.join(" ");
 
   parseField(fields[0], 0, 59);
   parseField(fields[1], 0, 23);
   parseField(fields[2], 1, 31);
   parseField(fields[3], 1, 12);
   parseField(fields[4], 0, 7, { normalizeSevenToZero: true });
-  return normalized;
+  return cron;
 }
 
 function fieldIsWildcard(raw: string): boolean {

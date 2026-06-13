@@ -46,6 +46,8 @@ export interface ToolContract {
   source: ToolContractSource;
   readiness?: import("./action-readiness.js").ConnectorActionReadinessContract;
   semanticAnnotation?: Record<string, unknown>;
+  /** Action-specific planner guidance attached when the contract is loaded. */
+  planningHints?: string[];
 }
 
 export interface ToolSpec {

@@ -196,7 +196,14 @@ export async function createLoopWorkflow(input: {
   title?: string;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
-  const definition = normalizeLoopDefinitionForRuntime(loopDefinitionSchema.parse(input.definition));
+  const parsed = loopDefinitionSchema.parse(input.definition);
+  const definition = normalizeLoopDefinitionForRuntime({
+    ...parsed,
+    schedule: {
+      ...parsed.schedule,
+      cron: normalizeDesignCron(parsed.schedule.cron, parsed.goal),
+    },
+  });
   runtimeDefinitionSchema.parse(definition);
 
   const workflowId = randomUUID();

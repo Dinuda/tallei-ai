@@ -31,9 +31,19 @@ export {
   isRenderTargetCompatible,
   parseConnectorActionToolRef,
 } from "./tool-contracts.js";
+export {
+  enrichContractPlanningGuidance,
+  planningHintsForContract,
+} from "./contract-planning-guidance.js";
 export { TOOL_USE_CASES, getUseCasesByCategory, getUseCasesByTool } from "./use-cases.js";
 export { renderToolSpecMarkdown, renderUseCasesMarkdown } from "./render-markdown.js";
-export { discoverToolsForIntent, discoverToolsForQueries, mergeRequiredToolContracts, type DiscoveredToolContract } from "./discovery.js";
+export {
+  discoverToolsForIntent,
+  discoverToolsForQueries,
+  mergeDiscoveredToolContracts,
+  mergeRequiredToolContracts,
+  type DiscoveredToolContract,
+} from "./discovery.js";
 export { listLearnedToolSpecs, listLearnedUseCases, recordLearnedWorkflow, searchLearnedToolSpecs } from "./learned-catalog.js";
 
 export async function buildToolSpecRegistry(

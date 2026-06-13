@@ -68,6 +68,7 @@ import {
   buildSurfaceSubmission,
   primaryInputSurface,
   readCheckpointSurfaces,
+  resolveContactsCheckpointSurface,
 } from "@/lib/input-surfaces/registry";
 import {
   Tooltip,
@@ -1876,24 +1877,30 @@ export default function StableLoopRunPage() {
 
   async function saveGateContacts(
     gate: Interaction,
+    requirementKey: string,
     input: { csvText?: string; contacts?: ContactRow[]; audienceId?: string },
   ) {
     setBusy(`/interactions/${gate.id}/contacts`);
     setError(null);
     try {
+      const contactSurface = resolveContactsCheckpointSurface({
+        blocks: operatorView?.interactionId === gate.id ? operatorView.blocks : undefined,
+        gatePayload: gate.payload_json,
+      });
+      if (!contactSurface || contactSurface.key !== requirementKey) {
+        throw new Error(`Recipient input ${requirementKey} is not declared for this checkpoint.`);
+      }
       const response = await fetch(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           command: "submit_input",
-          values: {
-            recipients: {
-              surface: "input.contacts_csv",
-              ...(input.csvText ? { csvText: input.csvText } : {}),
-              ...(input.contacts ? { contacts: input.contacts } : {}),
-              ...(input.audienceId ? { audienceId: input.audienceId } : {}),
-            },
-          },
+          values: buildSurfaceSubmission({
+            surface: contactSurface,
+            csvText: input.csvText,
+            contacts: input.contacts,
+            audienceId: input.audienceId,
+          }),
         }),
       });
       const payload = await response.json().catch(() => ({})) as {
@@ -2191,10 +2198,10 @@ export default function StableLoopRunPage() {
                     busy={Boolean(busy)}
                     contactSourceKind={contactSourceKind}
                     recipientCount={savedRecipientCount}
-                    onSaveContacts={async (input) => {
+                    onSaveContacts={async (requirementKey, input) => {
                       const gate = pendingInteraction ?? contactsUploadGate;
                       if (!gate) return;
-                      await saveGateContacts(gate, input);
+                      await saveGateContacts(gate, requirementKey, input);
                     }}
                     memoryItems={memoryGateItems}
                     sourceItems={sourceGateItems}

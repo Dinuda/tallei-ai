@@ -33,6 +33,21 @@ test("spec layer does not rewrite or heuristically reject model-owned semantics"
   assert.deepEqual(specSemanticIssues(parsed), []);
 });
 
+test("spec semantics preserve any explicitly requested available provider", () => {
+  const parsed = noSlopSpecDraftSchema.parse(behavior);
+  assert.deepEqual(
+    specSemanticIssues(parsed, "customerio"),
+    ["delivery.provider must preserve the explicitly requested available provider customerio; received gmail."],
+  );
+  assert.deepEqual(
+    specSemanticIssues({
+      ...parsed,
+      delivery: { ...parsed.delivery, provider: "customer_io" },
+    }, "customerio"),
+    [],
+  );
+});
+
 test("spec markdown preserves behavioral delivery without injecting action slugs", () => {
   const markdown = renderSpecMarkdown(noSlopSpecSchema.parse(behavior));
   assert.match(markdown, /Provider: gmail/);

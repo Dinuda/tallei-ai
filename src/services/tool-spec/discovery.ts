@@ -8,7 +8,39 @@ export type DiscoveredToolContract = {
   contract: ToolContract;
   connected: boolean;
   source: "composio_search" | "learned_catalog" | "required_spec";
+  capabilityQueries?: string[];
 };
+
+function mergeDiscoveryEntry(
+  existing: DiscoveredToolContract | undefined,
+  incoming: DiscoveredToolContract,
+): DiscoveredToolContract {
+  if (!existing) return incoming;
+  const preferred = existing.source === "learned_catalog" && incoming.source === "composio_search"
+    ? incoming
+    : existing;
+  return {
+    ...preferred,
+    connected: existing.connected || incoming.connected,
+    capabilityQueries: [...new Set([
+      ...(existing.capabilityQueries ?? []),
+      ...(incoming.capabilityQueries ?? []),
+    ])],
+  };
+}
+
+export function mergeDiscoveredToolContracts(
+  ...resultSets: DiscoveredToolContract[][]
+): DiscoveredToolContract[] {
+  const merged = new Map<string, DiscoveredToolContract>();
+  for (const entries of resultSets) {
+    for (const entry of entries) {
+      const key = entry.contract.toolRef.toLowerCase();
+      merged.set(key, mergeDiscoveryEntry(merged.get(key), entry));
+    }
+  }
+  return [...merged.values()];
+}
 
 export function interleaveDiscoveredToolResults(
   resultSets: DiscoveredToolContract[][],
@@ -21,10 +53,7 @@ export function interleaveDiscoveredToolResults(
       const entry = entries[index];
       if (!entry) continue;
       const key = entry.contract.toolRef.toLowerCase();
-      const existing = merged.get(key);
-      if (!existing || (existing.source === "learned_catalog" && entry.source === "composio_search")) {
-        merged.set(key, entry);
-      }
+      merged.set(key, mergeDiscoveryEntry(merged.get(key), entry));
       if (merged.size >= limit) break;
     }
   }
@@ -74,13 +103,15 @@ export async function discoverToolsForQueries(auth: AuthContext, queries: string
     searchComposioTools(query, cappedLimit),
     searchLearnedToolSpecs(query, cappedLimit),
   ])));
-  const normalizedSets = resultSets.map(([sdkResults, learnedResults]) => {
+  const normalizedSets = resultSets.map(([sdkResults, learnedResults], index) => {
+    const capabilityQuery = searchQueries[index]!;
     const merged = new Map<string, DiscoveredToolContract>();
     for (const learned of learnedResults) {
       merged.set(learned.toolRef.toLowerCase(), {
         contract: learned.contract,
         connected: connected.has(learned.toolkit.toLowerCase()),
         source: "learned_catalog",
+        capabilityQueries: [capabilityQuery],
       });
     }
     for (const action of sdkResults) {
@@ -90,6 +121,7 @@ export async function discoverToolsForQueries(auth: AuthContext, queries: string
         contract,
         connected: connected.has(action.toolkit.toLowerCase()),
         source: "composio_search",
+        capabilityQueries: [capabilityQuery],
       });
     }
     return [...merged.values()];

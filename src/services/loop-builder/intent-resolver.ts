@@ -6,6 +6,10 @@ import { loopDefinitionSchema, loopStageApprovalChannelInputSchema } from "../lo
 import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { channelsFromDesign, designLoopFromIntent, loopBuilderTraceSchema } from "../loop-engine/architect.js";
 import { approvedSpecSnapshot, getLoopSpec } from "./specs.js";
+import { compileLoopPlanningIR, loopPlanningIRSchema } from "../loop-engine/planning-ir.js";
+import { normalizeDesignCron } from "../loop-executor/cron.js";
+import { INTERNAL_TOOL_SPECS } from "../tool-spec/internal-tools.js";
+import type { ToolContract } from "../tool-spec/types.js";
 
 /** Optional UI hint passed to the LLM — does not bypass the builder. */
 export const builderTemplateHintSchema = z.enum([
@@ -116,7 +120,38 @@ export async function saveLoopBuilderProposal(input: {
   workspaceId?: string | null;
 }) {
   const proposal = loopBuilderProposalSchema.parse(input.proposal);
-  const definition = proposal.definition;
+  let definition = proposal.definition;
+  const planningIRResult = definition.builderMeta?.planningIR
+    ? loopPlanningIRSchema.safeParse(definition.builderMeta.planningIR)
+    : null;
+  if (planningIRResult?.success) {
+    const internalContracts = INTERNAL_TOOL_SPECS.flatMap((tool) => tool.contract ? [tool.contract] : []);
+    const connectorContracts = ((definition.builderMeta?.discoveredToolContracts ?? [])
+      .filter((value) => Boolean(value && typeof value === "object" && typeof (value as { toolRef?: unknown }).toolRef === "string"))) as unknown as ToolContract[];
+    const contracts = [...internalContracts, ...connectorContracts];
+    const compiled = compileLoopPlanningIR({
+      planningIR: planningIRResult.data,
+      contracts,
+    });
+    if (!compiled.ok) {
+      throw new Error(`Loop planning IR failed structural compilation: ${compiled.issues.map((issue) => issue.message).join("; ")}`);
+    }
+    definition = {
+      ...definition,
+      schedule: {
+        ...planningIRResult.data.schedule,
+        cron: normalizeDesignCron(planningIRResult.data.schedule.cron, definition.goal),
+      },
+      agentGraph: compiled.compiled.graph,
+      inputRequirements: compiled.compiled.inputRequirements,
+      operatorInteractionPlan: compiled.compiled.operatorInteractionPlan,
+      connectorPolicy: compiled.compiled.connectorPolicy,
+      builderMeta: {
+        ...definition.builderMeta,
+        planningIR: planningIRResult.data as unknown as Record<string, unknown>,
+      },
+    };
+  }
   const schedule = {
     cron: input.cron ?? definition.schedule.cron,
     timezone: input.timezone ?? definition.schedule.timezone,

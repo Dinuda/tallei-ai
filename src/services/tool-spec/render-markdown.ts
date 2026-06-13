@@ -94,6 +94,12 @@ function renderContract(lines: string[], contract: ToolContract): void {
   } else {
     lines.push("**Render recommendations:** none");
   }
+  if (contract.planningHints && contract.planningHints.length > 0) {
+    lines.push("**Planning hints:**");
+    for (const hint of contract.planningHints) {
+      lines.push(`- ${hint}`);
+    }
+  }
   lines.push("");
   lines.push("**Output Schema:**");
   lines.push("```json");

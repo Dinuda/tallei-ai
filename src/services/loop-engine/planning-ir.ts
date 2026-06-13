@@ -461,19 +461,52 @@ function sensitivityForSeededRequirement(req: InputRequirement): PlannedRequired
   return "public";
 }
 
+function lifecycleForSeededRequirement(req: InputRequirement): PlannedRequiredValue["lifecycle"] {
+  if (req.surface === "input.contacts_csv" || req.surface === "input.audience_id") {
+    return "workflow_config";
+  }
+  if (req.when === "before_step" || req.when === "before_send") {
+    return "runtime_input";
+  }
+  return "workflow_config";
+}
+
+function sourceKindForLifecycle(lifecycle: PlannedRequiredValue["lifecycle"]): PlannedRequiredValue["sourceKind"] {
+  if (lifecycle === "workflow_config") return "stable_config";
+  if (lifecycle === "runtime_input") return "operator_input";
+  return "agent_output";
+}
+
+function normalizeRequiredValueSourceKinds(values: PlannedRequiredValue[]): PlannedRequiredValue[] {
+  return values.map((value) => {
+    const expected = sourceKindForLifecycle(value.lifecycle);
+    return value.sourceKind === expected ? value : { ...value, sourceKind: expected };
+  });
+}
+
+const SCHEDULE_OWNED_REQUIRED_VALUE_KEYS = new Set(["timezone", "cron"]);
+
+/** cron and timezone are owned by planningIR.schedule, not requiredValues. */
+export function stripScheduleOwnedRequiredValues(values: PlannedRequiredValue[]): PlannedRequiredValue[] {
+  return values.filter((value) => !SCHEDULE_OWNED_REQUIRED_VALUE_KEYS.has(value.key));
+}
+
 export function seedRequiredValuesFromSpec(requirements: InputRequirement[]): PlannedRequiredValue[] {
   return requirements.flatMap((req) => {
     if (!shouldSeedRequiredValueFromSpec(req.surface)) return [];
+    const lifecycle = lifecycleForSeededRequirement(req);
     return [{
       key: req.key,
       label: req.label ?? defaultLabelForKey(req.key),
-      description: req.description ?? `Runtime value for ${req.key}.`,
-      lifecycle: "runtime_input" as const,
+      description: req.description ?? (lifecycle === "workflow_config"
+        ? `Build-time configuration for ${req.key}.`
+        : `Runtime value for ${req.key}.`),
+      lifecycle,
       timing: timingForSeededRequirement(req),
       sensitivity: sensitivityForSeededRequirement(req),
       valueType: valueTypeForSurface(req.surface),
       surface: req.surface,
-      sourceKind: "operator_input" as const,
+      sourceKind: sourceKindForLifecycle(lifecycle),
       status: "resolved" as const,
       stableScalar: null,
     }];
@@ -548,9 +581,10 @@ function validateBinding(input: {
   outputSchemas: Map<string, Record<string, unknown>>;
   requiredValues: Map<string, PlannedRequiredValue>;
   textArtifactProducers: Map<string, PlannedArtifact>;
+  artifactIdToAgentId: Map<string, string>;
   issues: PlanningCompilationIssue[];
 }): void {
-  const { binding, owner, targetSchema, outputSchemas, requiredValues, textArtifactProducers, issues } = input;
+  const { binding, owner, targetSchema, outputSchemas, requiredValues, textArtifactProducers, artifactIdToAgentId, issues } = input;
   const target = schemaAtPath(targetSchema, binding.targetPath);
   if (!target) {
     issues.push({
@@ -609,7 +643,7 @@ function validateBinding(input: {
     if (value.sourceKind !== binding.provenance) {
       issues.push({
         code: "required_value_source_policy",
-        message: `${owner} binding ${binding.targetPath} violates required value ${value.key} source policy.`,
+        message: `${owner} binding ${binding.targetPath} violates required value ${value.key} source policy. lifecycle ${value.lifecycle} requires sourceKind ${expectedProvenance ?? value.sourceKind} and binding provenance ${expectedProvenance ?? binding.provenance}.`,
         path: owner,
       });
     }
@@ -653,9 +687,8 @@ function validateBinding(input: {
       ? schemaAtPath(outputSchemas.get(binding.source.nodeId) ?? {}, normalizedPath)
       : null;
     if (!sourceSchema) {
-      const sourceRoot = binding.source.nodeId
-        ? outputSchemas.get(binding.source.nodeId)
-        : undefined;
+      const sourceNodeId = binding.source.nodeId;
+      const sourceRoot = sourceNodeId ? outputSchemas.get(sourceNodeId) : undefined;
       const validPaths = sourceRoot ? schemaAddressablePaths(sourceRoot) : [];
       const declaredPrefix = longestDeclaredSourcePrefix(sourceRoot, normalizedPath);
       if (
@@ -666,14 +699,23 @@ function validateBinding(input: {
       ) {
         issues.push({
           code: "opaque_connector_output_path",
-          message: `${owner} binding source path ${declaredPath} drills into undeclared connector output under ${binding.source.nodeId}. The exact contract only exposes: ${formatAvailablePaths(validPaths)}. Rebind to one of those exact paths, or replace the multi-action draft chain with a single direct send action whose inputs bind from the semantic agent.`,
-          path: binding.source.nodeId ?? owner,
+          message: `${owner} binding source path ${declaredPath} drills into undeclared connector output under ${sourceNodeId}. The exact contract only exposes: ${formatAvailablePaths(validPaths)}. Rebind to one of those exact paths, or replace the multi-action draft chain with a single direct send action whose inputs bind from the semantic agent.`,
+          path: sourceNodeId ?? owner,
+        });
+        return;
+      }
+      const correctAgentId = sourceNodeId ? artifactIdToAgentId.get(sourceNodeId) : undefined;
+      if (sourceRoot === undefined && sourceNodeId && correctAgentId) {
+        issues.push({
+          code: "artifact_id_used_as_node_id",
+          message: `${owner} binding source.nodeId "${sourceNodeId}" is an artifact id, not an agent id. Replace source.nodeId with the producing agent's id: "${correctAgentId}".`,
+          path: owner,
         });
         return;
       }
       issues.push({
         code: "unknown_source_path",
-        message: `${owner} binding source path does not exist: ${binding.source.nodeId ?? "unknown"}${declaredPath}. Valid source paths for ${binding.source.nodeId ?? "unknown"}: ${formatAvailablePaths(validPaths)}.`,
+        message: `${owner} binding source path does not exist: ${sourceNodeId ?? "unknown"}${declaredPath}. Valid source paths for ${sourceNodeId ?? "unknown"}: ${formatAvailablePaths(validPaths)}.`,
         path: owner,
       });
     }
@@ -688,12 +730,12 @@ function validateBinding(input: {
   }
 }
 
-function stableConfigForAction(
-  action: SelectedConnectorAction,
+function stableConfigForBindings(
+  bindings: ExplicitActionInputBinding[],
   requiredValues: Map<string, PlannedRequiredValue>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  for (const binding of action.bindings) {
+  for (const binding of bindings) {
     if (binding.source.kind !== "required_value" || !binding.source.key) continue;
     const value = requiredValues.get(binding.source.key);
     if (value?.lifecycle === "workflow_config" && value.status === "resolved" && value.stableScalar != null) {
@@ -745,7 +787,13 @@ export function compileLoopPlanningIRV2(input: {
   contracts: ToolContract[];
   options?: { draftReviewAgentIds?: Set<string> };
 }): { ok: true; compiled: CompiledLoopPlanningIR } | { ok: false; issues: PlanningCompilationIssue[] } {
-  const ir = loopPlanningIRSchema.parse(input.planningIR);
+  const parsed = loopPlanningIRSchema.parse(input.planningIR);
+  const ir = {
+    ...parsed,
+    requiredValues: stripScheduleOwnedRequiredValues(
+      normalizeRequiredValueSourceKinds(parsed.requiredValues),
+    ),
+  };
   void input.options;
   const runtimeEdgeCasePattern = /\b(zero|no|empty|0)\b.{0,60}\b(results?|stories|items?|sources?)\b|\bif\b.{0,80}\b(runtime|agent|should|instruct|proceed|abort|expand)\b|\boperator must resolve this at runtime\b/i;
   const issues: PlanningCompilationIssue[] = ir.unresolvedIssues
@@ -772,6 +820,9 @@ export function compileLoopPlanningIRV2(input: {
     ir.semanticAgents
       .filter((agent) => agent.outputArtifact.representation === "text")
       .map((agent) => [agent.id, agent.outputArtifact]),
+  );
+  const artifactIdToAgentId = new Map(
+    ir.semanticAgents.map((agent) => [agent.outputArtifact.id, agent.id]),
   );
   for (const action of ir.selectedActions) {
     const contract = contracts.get(action.contractRef.toLowerCase());
@@ -840,6 +891,7 @@ export function compileLoopPlanningIRV2(input: {
         outputSchemas,
         requiredValues,
         textArtifactProducers,
+        artifactIdToAgentId,
         issues,
       });
     }
@@ -849,7 +901,12 @@ export function compileLoopPlanningIRV2(input: {
       nodeKind: "agent" as const,
       task: agent.task,
       goal: agent.responsibility,
-      tools: [{ ref: agent.toolRef }],
+      tools: [{
+        ref: agent.toolRef,
+        ...(Object.keys(stableConfigForBindings(agent.inputBindings, requiredValues)).length > 0
+          ? { config: stableConfigForBindings(agent.inputBindings, requiredValues) }
+          : {}),
+      }],
       doneCriteria: [`${agent.responsibility} is complete.`],
       inputContract,
       outputContract,
@@ -895,6 +952,7 @@ export function compileLoopPlanningIRV2(input: {
         outputSchemas,
         requiredValues,
         textArtifactProducers,
+        artifactIdToAgentId,
         issues,
       });
     }
@@ -931,7 +989,7 @@ export function compileLoopPlanningIRV2(input: {
         requiresPreSendApproval: false,
       });
     }
-    const stableConfig = stableConfigForAction(action, requiredValues);
+    const stableConfig = stableConfigForBindings(action.bindings, requiredValues);
     return [{
       id: action.id,
       name: contract.name,
@@ -980,7 +1038,11 @@ export function compileLoopPlanningIRV2(input: {
   for (const [nodeIndex, node] of allNodes.entries()) {
     for (const binding of node.handoffBindings) {
       if (binding.source.kind === "agent_output" && binding.source.agentId && !nodeIds.has(binding.source.agentId)) {
-        issues.push({ code: "unknown_binding_source", message: `${node.id} references unknown source node ${binding.source.agentId}.`, path: node.id });
+        const correctId = artifactIdToAgentId.get(binding.source.agentId);
+        const hint = correctId
+          ? ` "${binding.source.agentId}" is an artifact id — use the producing agent's id "${correctId}" as source.nodeId instead.`
+          : "";
+        issues.push({ code: "unknown_binding_source", message: `${node.id} references unknown source node ${binding.source.agentId}.${hint}`, path: node.id });
       }
       if (
         binding.source.kind === "agent_output"

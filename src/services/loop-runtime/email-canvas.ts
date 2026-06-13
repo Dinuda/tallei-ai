@@ -202,6 +202,8 @@ function deriveSubjectFromBody(body: string): string {
   return firstContent.replace(/^#{1,6}\s+/, "").replace(/^\*\*|\*\*$/g, "").slice(0, 140);
 }
 
+export { deriveSubjectFromBody };
+
 function makeRow(id: string, contents: UnlayerContent[], padding = "0px"): UnlayerRow {
   return {
     id: `row-${id}`,

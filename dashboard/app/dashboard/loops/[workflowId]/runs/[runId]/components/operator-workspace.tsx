@@ -54,7 +54,7 @@ export type OperatorWorkspaceProps = {
   busy: boolean;
   contactSourceKind: ContactSourceKind;
   recipientCount: number;
-  onSaveContacts: (input: { csvText?: string; contacts?: ContactRow[]; audienceId?: string }) => Promise<void>;
+  onSaveContacts: (requirementKey: string, input: { csvText?: string; contacts?: ContactRow[]; audienceId?: string }) => Promise<void>;
   memoryItems: MemoryGateItem[];
   sourceItems: SourceGateItem[];
   addedSources: SourceGateItem[];
@@ -251,7 +251,7 @@ function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNo
         contactSourceKind={readContactSourceKind(block.props)}
         recipientCount={ctx.recipientCount}
         busy={ctx.busy}
-        onSave={ctx.onSaveContacts}
+        onSave={(input) => ctx.onSaveContacts(block.id, input)}
       />
     );
   }

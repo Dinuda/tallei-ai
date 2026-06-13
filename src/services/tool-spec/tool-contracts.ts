@@ -6,6 +6,7 @@ import type {
   ToolRenderTarget,
 } from "./types.js";
 import { buildConnectorActionReadinessContract } from "./action-readiness.js";
+import { enrichContractPlanningGuidance } from "./contract-planning-guidance.js";
 
 type ActionLike = {
   toolkit: string;
@@ -67,7 +68,7 @@ export function buildComposioActionContract(action: ActionLike): ToolContract {
   const outputSchema = action.outputSchema!;
   const effect = effectFromDeclaredRisk(action);
   const executionMode = executionModeForEffect(effect);
-  return {
+  return enrichContractPlanningGuidance({
     toolRef,
     provider: "composio",
     name: action.name?.trim() || action.actionSlug,
@@ -93,7 +94,7 @@ export function buildComposioActionContract(action: ActionLike): ToolContract {
     },
     source: "composio_sdk",
     readiness: buildConnectorActionReadinessContract({ toolRef, inputSchema }),
-  };
+  });
 }
 
 export function buildConnectedSearchContract(toolkit: string): ToolContract {
@@ -163,7 +164,7 @@ export function getStaticToolContract(ref: string): ToolContract | null {
       skillTags: ["draft", "summarize", "transform", "analyze"],
       effect: "none",
       resources: ["text", "document", "email", "message"],
-      inputSchema: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+      inputSchema: { type: "object", properties: {}, required: [] },
       outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
       executionMode: "llm_assisted",
       approval: { required: false },
@@ -184,7 +185,7 @@ export function getStaticToolContract(ref: string): ToolContract | null {
       skillTags: ["search", "retrieve"],
       effect: "none",
       resources: ["memory", "text"],
-      inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+      inputSchema: { type: "object", properties: {}, required: [] },
       outputSchema: { type: "object", properties: { text: { type: "string" }, memories: { type: "array" } }, required: ["text"] },
       executionMode: "short_circuit",
       approval: { required: false, suggestedGate: "memory_confirmation", reason: "Operator may curate returned memories when the workflow needs review." },
@@ -202,7 +203,7 @@ export function getStaticToolContract(ref: string): ToolContract | null {
       skillTags: ["search", "retrieve"],
       effect: "read_external",
       resources: ["web", "source", "document"],
-      inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+      inputSchema: { type: "object", properties: {}, required: [] },
       outputSchema: { type: "object", properties: { text: { type: "string" }, sources: { type: "array" } }, required: ["text"] },
       executionMode: "short_circuit",
       approval: { required: false, suggestedGate: "source_confirmation", reason: "Operator may curate sources when the workflow needs review." },

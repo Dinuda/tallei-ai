@@ -194,6 +194,39 @@ test("planning compiler instructs planner to remove unused required values", () 
   assert.match(issue?.message ?? "", /Remove it from requiredValues; do not invent a consumer/);
 });
 
+test("planning compiler strips timezone required values owned by schedule", () => {
+  const action = buildComposioActionContract({
+    toolkit: "gmail",
+    actionSlug: "GMAIL_SEND_EMAIL",
+    risk: "send",
+    inputSchema: {
+      type: "object",
+      properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" } },
+      required: ["to", "subject", "body"],
+    },
+    outputSchema: { type: "object", properties: { id: { type: "string" } } },
+  });
+  const plan = newsletterPlan(action.toolRef);
+  plan.requiredValues.push({
+    key: "timezone",
+    label: "Timezone",
+    description: "Execution timezone.",
+    lifecycle: "workflow_config",
+    timing: "run_start",
+    sensitivity: "public",
+    surface: "input.text",
+    valueType: "string",
+    sourceKind: "stable_config",
+    status: "resolved",
+    stableScalar: "America/New_York",
+  });
+  const compiled = compileLoopPlanningIR({
+    planningIR: plan,
+    contracts: [getStaticToolContract("internal.llm_only")!, action],
+  });
+  assert.equal(compiled.ok, true);
+});
+
 test("planning compiler reports text artifact bindings that need json fields", () => {
   const plan = newsletterPlan("composio.gmail.action.gmail_send_email");
   plan.semanticAgents[0]!.outputArtifact = {
@@ -552,4 +585,91 @@ test("planning compiler permits a final operator-visible semantic artifact witho
     contracts: [getStaticToolContract("internal.llm_only")!],
   });
   assert.equal(compiled.ok, true);
+});
+
+test("planning compiler normalizes workflow_config sourceKind to stable_config", () => {
+  const send = buildComposioActionContract({
+    toolkit: "gmail",
+    actionSlug: "GMAIL_SEND_EMAIL",
+    risk: "send",
+    inputSchema: {
+      type: "object",
+      properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" } },
+      required: ["to", "subject", "body"],
+    },
+    outputSchema: { type: "object", properties: { id: { type: "string" } } },
+  });
+  const plan = newsletterPlan(send.toolRef);
+  plan.requiredValues.push({
+    key: "preferred_timezone",
+    label: "Timezone",
+    description: "Preferred timezone.",
+    lifecycle: "workflow_config",
+    timing: "run_start",
+    sensitivity: "public",
+    surface: "input.text",
+    valueType: "string",
+    sourceKind: "operator_input",
+    status: "resolved",
+    stableScalar: "America/New_York",
+  });
+  plan.semanticAgents[0]!.inputBindings.push({
+    source: { kind: "required_value", key: "preferred_timezone", path: "/" },
+    targetPath: "/timezone",
+    required: true,
+    valuePolicy: "passthrough",
+    provenance: "stable_config",
+  });
+  const compiled = compileLoopPlanningIR({
+    planningIR: plan,
+    contracts: [getStaticToolContract("internal.llm_only")!, send],
+  });
+  assert.equal(compiled.ok, true, compiled.ok ? "" : JSON.stringify((compiled as { issues: unknown[] }).issues));
+});
+
+test("planning compiler rejects boolean targets bound from string required values", () => {
+  const send = buildComposioActionContract({
+    toolkit: "gmail",
+    actionSlug: "GMAIL_SEND_EMAIL",
+    risk: "send",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string" },
+        subject: { type: "string" },
+        body: { type: "string" },
+        is_html: { type: "boolean" },
+      },
+      required: ["to", "subject", "body"],
+    },
+    outputSchema: { type: "object", properties: { id: { type: "string" } } },
+  });
+  const plan = newsletterPlan(send.toolRef);
+  plan.requiredValues.push({
+    key: "html_mode",
+    label: "HTML mode",
+    description: "Whether email is HTML.",
+    lifecycle: "workflow_config",
+    timing: "run_start",
+    sensitivity: "public",
+    surface: "input.text",
+    valueType: "string",
+    sourceKind: "stable_config",
+    status: "resolved",
+    stableScalar: "true",
+  });
+  plan.selectedActions[0]!.bindings.push({
+    source: { kind: "required_value", key: "html_mode", path: "/" },
+    targetPath: "/is_html",
+    required: false,
+    valuePolicy: "passthrough",
+    provenance: "stable_config",
+  });
+  const compiled = compileLoopPlanningIR({
+    planningIR: plan,
+    contracts: [getStaticToolContract("internal.llm_only")!, send],
+  });
+  assert.equal(compiled.ok, false);
+  if (compiled.ok) return;
+  assert.ok(compiled.issues.some((issue) => issue.code === "incompatible_binding"));
 });

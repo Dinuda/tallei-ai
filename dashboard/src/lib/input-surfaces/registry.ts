@@ -58,6 +58,73 @@ export function surfaceUsesContactsInput(surface: InputSurface): boolean {
   return surface === "input.contacts_csv" || surface === "input.audience_id";
 }
 
+type CollectInputItem = {
+  requiredValueKey: string;
+  surface: InputSurface;
+  label?: string;
+  description?: string;
+  required?: boolean;
+  satisfied?: boolean;
+};
+
+function readCollectInputItems(gatePayload?: Record<string, unknown> | null): CollectInputItem[] {
+  const operatorInteraction = gatePayload?.operatorInteraction;
+  if (!operatorInteraction || typeof operatorInteraction !== "object" || Array.isArray(operatorInteraction)) return [];
+  const items = (operatorInteraction as { items?: unknown[] }).items;
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const requiredValueKey = typeof row.requiredValueKey === "string" ? row.requiredValueKey.trim() : "";
+    const surface = typeof row.surface === "string" ? row.surface.trim() : "";
+    if (!requiredValueKey || !surface.startsWith("input.")) return [];
+    return [{
+      requiredValueKey,
+      surface: surface as InputSurface,
+      label: typeof row.label === "string" ? row.label : undefined,
+      description: typeof row.description === "string" ? row.description : undefined,
+      required: row.required !== false,
+      satisfied: row.satisfied === true,
+    }];
+  });
+}
+
+export function resolveContactsCheckpointSurface(input: {
+  blocks?: Array<{
+    id: string;
+    surface?: string;
+    label?: string;
+    description?: string;
+    required?: boolean;
+    satisfied?: boolean;
+  }>;
+  gatePayload?: Record<string, unknown> | null;
+}): CheckpointSurface | null {
+  const fromBlock = input.blocks?.find((block) =>
+    block.surface === "input.contacts_csv" || block.surface === "input.audience_id");
+  if (fromBlock?.surface === "input.contacts_csv" || fromBlock?.surface === "input.audience_id") {
+    return {
+      key: fromBlock.id,
+      surface: fromBlock.surface,
+      required: fromBlock.required ?? true,
+      satisfied: fromBlock.satisfied ?? false,
+      label: fromBlock.label,
+      description: fromBlock.description,
+    };
+  }
+  const fromPayload = readCollectInputItems(input.gatePayload).find((item) =>
+    item.surface === "input.contacts_csv" || item.surface === "input.audience_id");
+  if (!fromPayload) return null;
+  return {
+    key: fromPayload.requiredValueKey,
+    surface: fromPayload.surface,
+    required: fromPayload.required ?? true,
+    satisfied: fromPayload.satisfied ?? false,
+    label: fromPayload.label,
+    description: fromPayload.description,
+  };
+}
+
 export function buildSurfaceSubmission(input: {
   surface: CheckpointSurface;
   text?: string;

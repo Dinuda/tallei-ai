@@ -84,8 +84,20 @@ type ConnectorTool = { toolkit: string; actionSlug: string; name: string; risk: 
 type AgentGraphChild = {
   id: string;
   name: string;
+  nodeKind?: "agent" | "transform" | "operator_input" | "action" | "checkpoint";
   task: string;
   tools?: Array<{ ref: string }>;
+};
+
+type PlannedRequiredValue = {
+  key: string;
+  label: string;
+  description: string;
+  lifecycle: "workflow_config" | "runtime_input" | "derived";
+  valueType: "string" | "number" | "integer" | "boolean" | "object" | "array";
+  surface: string;
+  stableScalar: string | number | boolean | null;
+  status: "resolved" | "unresolved";
 };
 
 type BuilderProposal = {
@@ -115,6 +127,11 @@ type BuilderProposal = {
       model?: string;
       noSlopSpec?: { id: string; title: string; version: number; approvedAt: string };
       designDiagnostics?: Record<string, unknown>;
+      planningIR?: {
+        requiredValues?: PlannedRequiredValue[];
+        [key: string]: unknown;
+      };
+      discoveredToolContracts?: Array<Record<string, unknown>>;
     };
   };
   suggestedChannels: string[];
@@ -127,6 +144,44 @@ type BuilderProposal = {
   noSlopSpec?: { id: string; title: string; version: number; approvedAt: string };
   trace?: { stages?: Array<Record<string, unknown>> };
 };
+
+function pendingWorkflowConfigValues(proposal: BuilderProposal): PlannedRequiredValue[] {
+  const requiredValues = proposal.definition.builderMeta?.planningIR?.requiredValues ?? [];
+  return requiredValues.filter((value) => value.lifecycle === "workflow_config" && value.stableScalar == null);
+}
+
+function patchProposalWithConfig(proposal: BuilderProposal, drafts: Record<string, string>): BuilderProposal {
+  const planningIR = proposal.definition.builderMeta?.planningIR;
+  if (!planningIR?.requiredValues) return proposal;
+  const requiredValues = planningIR.requiredValues.map((value) => {
+    if (value.lifecycle !== "workflow_config" || value.stableScalar != null) return value;
+    const raw = drafts[value.key]?.trim();
+    if (!raw) return value;
+    let stableScalar: string | number | boolean = raw;
+    if (value.valueType === "number" || value.valueType === "integer") {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) {
+        stableScalar = value.valueType === "integer" ? Math.trunc(parsed) : parsed;
+      }
+    } else if (value.valueType === "boolean") {
+      stableScalar = raw.toLowerCase() === "true" || raw === "1";
+    }
+    return { ...value, stableScalar, status: "resolved" as const };
+  });
+  return {
+    ...proposal,
+    definition: {
+      ...proposal.definition,
+      builderMeta: {
+        ...proposal.definition.builderMeta,
+        planningIR: {
+          ...planningIR,
+          requiredValues,
+        },
+      },
+    },
+  };
+}
 
 type BuilderProgress = {
   status?: string;
@@ -229,8 +284,21 @@ export default function NewLoopBuilderPage() {
   const [clarificationOpen, setClarificationOpen] = useState(false);
   const [analysisFallback, setAnalysisFallback] = useState<string | null>(null);
   const [builderProgress, setBuilderProgress] = useState<BuilderProgress | null>(null);
+  const [configDrafts, setConfigDrafts] = useState<Record<string, string>>({});
+  const [showConfigureStep, setShowConfigureStep] = useState(false);
 
-  const agents = useMemo(() => proposal?.definition.agentGraph?.children ?? [], [proposal]);
+  const executableNodes = useMemo(() => proposal?.definition.agentGraph?.children ?? [], [proposal]);
+  const agents = useMemo(() => executableNodes.filter((node) => node.nodeKind !== "action"), [executableNodes]);
+  const actions = useMemo(() => executableNodes.filter((node) => node.nodeKind === "action"), [executableNodes]);
+  const workflowConfigValues = useMemo(
+    () => (proposal ? pendingWorkflowConfigValues(proposal) : []),
+    [proposal],
+  );
+  const runtimeInputInteractions = useMemo(
+    () => (proposal?.definition.operatorInteractionPlan?.interactions ?? [])
+      .filter((interaction) => interaction.kind === "collect_input"),
+    [proposal],
+  );
   const designDiagnostics = proposal?.definition.builderMeta?.designDiagnostics ?? null;
   const architectTrace = proposal?.trace ?? designDiagnostics?.trace ?? null;
   const approved = spec?.status === "approved";
@@ -448,6 +516,8 @@ export default function NewLoopBuilderPage() {
       } else {
         throw new Error("Loop builder returned no job id or proposal");
       }
+      setConfigDrafts({});
+      setShowConfigureStep(false);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Failed to generate loop");
     } finally {
@@ -457,13 +527,23 @@ export default function NewLoopBuilderPage() {
 
   async function saveProposal() {
     if (!proposal) return;
+    const pending = pendingWorkflowConfigValues(proposal);
+    if (pending.length > 0) {
+      const missing = pending.filter((value) => !configDrafts[value.key]?.trim());
+      if (missing.length > 0) {
+        setShowConfigureStep(true);
+        setError(`Set build-time configuration for: ${missing.map((value) => value.label).join(", ")}`);
+        return;
+      }
+    }
+    const patchedProposal = patchProposalWithConfig(proposal, configDrafts);
     setBusy("save");
     setError(null);
     try {
       const response = await fetch("/api/loop-builder/save", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ proposal }),
+        body: JSON.stringify({ proposal: patchedProposal }),
       });
       const payload = await readJson<{ loop?: { id: string } }>(response);
       if (!response.ok) throw new Error(detailMessage(payload, "Failed to save loop"));
@@ -537,6 +617,8 @@ export default function NewLoopBuilderPage() {
                   setIntentAnswers({});
                   setAnalysisFallback(null);
                   setBuilderProgress(null);
+                  setConfigDrafts({});
+                  setShowConfigureStep(false);
                 }}>
                   Start over
                 </Button>
@@ -597,9 +679,19 @@ export default function NewLoopBuilderPage() {
                   {busy === "generate" ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
                   {busy === "generate" ? "Generating agents..." : "Generate agents"}
                 </Button>
-                <Button type="button" variant="outline" className="h-9 gap-1.5" disabled={!proposal || busy !== null} onClick={() => void saveProposal()}>
+                <Button type="button" variant="outline" className="h-9 gap-1.5" disabled={!proposal || busy !== null} onClick={() => {
+                  if (workflowConfigValues.length > 0) {
+                    setShowConfigureStep(true);
+                    return;
+                  }
+                  void saveProposal();
+                }}>
                   {busy === "save" ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-                  {busy === "save" ? "Saving..." : "Save & open"}
+                  {busy === "save"
+                    ? "Saving..."
+                    : workflowConfigValues.length > 0
+                      ? "Configure & save"
+                      : "Save & open"}
                 </Button>
               </div>
             </Card>
@@ -646,6 +738,77 @@ export default function NewLoopBuilderPage() {
             </Button>
           </Card>
 
+          {proposal && (showConfigureStep || workflowConfigValues.length > 0) ? (
+            <Card className="rounded-md border-l-4 border-l-[var(--accent)] p-4">
+              <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Build-time configuration</div>
+              <h2 className="mt-1 text-lg font-semibold text-[var(--text)]">Configure this loop</h2>
+              <p className="mt-1 text-sm text-[var(--text-2)]">
+                These settings are asked once when you create the loop. Per-run inputs — like choosing which sources to include after research — happen during execution.
+              </p>
+              <div className="mt-4 space-y-4">
+                {workflowConfigValues.map((value) => {
+                  const isTimezone = /timezone|tz\b/i.test(value.key + " " + value.label);
+                  const inputHint = isTimezone ? "IANA timezone — e.g. Asia/Kolkata, America/New_York, Europe/London, UTC" : undefined;
+                  return (
+                    <div key={value.key} className="rounded-md border border-[var(--border-light)] bg-white p-3">
+                      <label className="text-sm font-medium text-[var(--text)]" htmlFor={`config-${value.key}`}>
+                        {value.label}
+                      </label>
+                      <p className="mt-1 text-xs text-[var(--text-muted)]">{value.description}</p>
+                      {inputHint ? (
+                        <p className="mt-1 text-xs text-[var(--accent)]">{inputHint}</p>
+                      ) : null}
+                      {value.valueType === "boolean" ? (
+                        <select
+                          id={`config-${value.key}`}
+                          className="mt-2 h-10 w-full rounded-md border border-[var(--border-light)] bg-white px-3 text-sm outline-none focus:border-[var(--accent)]"
+                          value={configDrafts[value.key] ?? ""}
+                          onChange={(event) => setConfigDrafts((current) => ({
+                            ...current,
+                            [value.key]: event.target.value,
+                          }))}
+                        >
+                          <option value="">Select…</option>
+                          <option value="true">Yes</option>
+                          <option value="false">No</option>
+                        </select>
+                      ) : (
+                        <input
+                          id={`config-${value.key}`}
+                          type={value.valueType === "number" || value.valueType === "integer" ? "number" : "text"}
+                          className="mt-2 h-10 w-full rounded-md border border-[var(--border-light)] bg-white px-3 text-sm outline-none focus:border-[var(--accent)]"
+                          value={configDrafts[value.key] ?? ""}
+                          onChange={(event) => setConfigDrafts((current) => ({
+                            ...current,
+                            [value.key]: event.target.value,
+                          }))}
+                          placeholder={isTimezone ? "e.g. Asia/Kolkata" : value.label}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {runtimeInputInteractions.length > 0 ? (
+                <div className="mt-4 rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3 text-sm text-[var(--text-2)]">
+                  <span className="font-medium text-[var(--text)]">At run time:</span>{" "}
+                  {runtimeInputInteractions.map((interaction) => interaction.label ?? interaction.id).join(", ")}
+                </div>
+              ) : null}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button type="button" className="h-9 gap-1.5" disabled={busy !== null} onClick={() => void saveProposal()}>
+                  {busy === "save" ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                  {busy === "save" ? "Saving..." : "Save & open"}
+                </Button>
+                {showConfigureStep ? (
+                  <Button type="button" variant="outline" className="h-9" disabled={busy !== null} onClick={() => setShowConfigureStep(false)}>
+                    Back
+                  </Button>
+                ) : null}
+              </div>
+            </Card>
+          ) : null}
+
           {proposal ? (
             <Card className="rounded-md p-4">
               <div className="flex flex-wrap items-start justify-between gap-4">
@@ -655,11 +818,12 @@ export default function NewLoopBuilderPage() {
                   <p className="mt-1 text-sm text-[var(--text-2)]">{proposal.summary}</p>
                 </div>
                 <div className="rounded-md border border-[var(--border-light)] px-2 py-1 text-xs text-[var(--text-muted)]">
-                  {agents.length} agents
+                  {agents.length} agents · {actions.length} actions
                 </div>
               </div>
 
-              <div className="mt-4 space-y-3">
+              <div className="mt-4 text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Semantic agents</div>
+              <div className="mt-2 space-y-3">
                 {agents.map((agent, index) => (
                   <div key={agent.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
                     <div className="text-sm font-medium text-[var(--text)]">{index + 1}. {agent.name}</div>
@@ -670,6 +834,23 @@ export default function NewLoopBuilderPage() {
                   </div>
                 ))}
               </div>
+
+              {actions.length ? (
+                <>
+                  <div className="mt-5 text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Connector action capabilities</div>
+                  <div className="mt-2 space-y-3">
+                    {actions.map((action, index) => (
+                      <div key={action.id} className="rounded-md border border-amber-300/70 bg-amber-50/70 p-3">
+                        <div className="text-sm font-medium text-[var(--text)]">{index + 1}. {action.name}</div>
+                        <p className="mt-2 text-sm text-[var(--text-2)]">{action.task}</p>
+                        <p className="mt-2 text-xs font-medium text-amber-800">
+                          Capability: {action.tools?.map((tool) => tool.ref).join(", ") || "No exact connector contract"}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : null}
 
               <div className="mt-5">
                 <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Code spec</div>
