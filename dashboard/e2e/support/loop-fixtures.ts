@@ -52,7 +52,7 @@ export type SeededLoopFixture = {
   scenario: ScenarioName;
   workflowId: string;
   runId: string;
-  gateId: string;
+  interactionId: string;
   stepAttemptId: string;
   title: string;
   url: string;
@@ -147,6 +147,12 @@ function makeDefinition(input: {
     deliveryExpectation?: string;
   };
   inputsRequired?: string[];
+  inputRequirements?: Array<{
+    key: string;
+    surface: "input.text" | "input.markdown" | "input.contacts_csv" | "input.audience_id" | "input.file";
+    when: "run_start" | "before_send" | "before_step";
+    required: boolean;
+  }>;
 }) {
   const child = {
     id: input.child.id,
@@ -170,7 +176,7 @@ function makeDefinition(input: {
     ceo: {
       name: "Tallei Agent",
       task: `Coordinate the workflow: ${input.goal}`,
-      policy: "Keep the queue moving and stop only at declared operator gates.",
+      policy: "Keep the queue moving and stop only at declared operator interactions.",
     },
     draftPolicy: {
       requireDraftBeforeExternalAction: true,
@@ -179,12 +185,13 @@ function makeDefinition(input: {
     ...(input.delivery ? { delivery: input.delivery } : {}),
     ...(input.connectorPolicy ? { connectorPolicy: input.connectorPolicy } : {}),
     ...(input.inputsRequired?.length ? { inputsRequired: input.inputsRequired } : {}),
+    ...(input.inputRequirements?.length ? { inputRequirements: input.inputRequirements } : {}),
     agentGraph: {
       parent: {
         id: "parent_agent",
         name: "Tallei Agent",
         task: `Coordinate the workflow: ${input.goal}`,
-        policy: "Keep the queue moving and stop only at declared operator gates.",
+        policy: "Keep the queue moving and stop only at declared operator interactions.",
         connectorHub: {
           provider: "composio",
           label: "Composio",
@@ -274,7 +281,7 @@ async function insertRun(input: {
   auth: AuthFixture;
   runId: string;
   workflowId: string;
-  status: "waiting_for_gate" | "running" | "failed";
+  status: "waiting_for_interaction" | "running" | "failed";
   definition: Record<string, unknown>;
   context: Record<string, unknown>;
   errorMessage?: string;
@@ -304,7 +311,7 @@ async function insertStepAttempt(input: {
   stepId: string;
   agentId: string;
   agentSnapshot: Record<string, unknown>;
-  status: "waiting_for_gate" | "failed" | "succeeded";
+  status: "waiting_for_interaction" | "failed" | "succeeded";
   outputText?: string;
   outputData?: Record<string, unknown>;
   errorMessage?: string;
@@ -332,30 +339,103 @@ async function insertStepAttempt(input: {
   );
 }
 
+function typedInteractionKind(
+  gateType: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send",
+): "collect_input" | "review_artifact" {
+  return gateType === "missing_input" ? "collect_input" : "review_artifact";
+}
+
+function buildTypedInteractionPayload(input: {
+  gateType: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
+  interactionId: string;
+  payload: Record<string, unknown>;
+}): Record<string, unknown> {
+  const surfaces = Array.isArray(input.payload.surfaces)
+    ? input.payload.surfaces as Array<Record<string, unknown>>
+    : [];
+  const surface = surfaces[0] ?? {};
+  const agentId = typeof input.payload.agentId === "string" ? input.payload.agentId : "agent";
+  const outputText = typeof (input.payload.result as { text?: string } | undefined)?.text === "string"
+    ? (input.payload.result as { text: string }).text
+    : "";
+  if (input.gateType === "missing_input" || (typeof surface.surface === "string" && surface.surface.startsWith("input."))) {
+    const key = typeof surface.key === "string" ? surface.key : "required_input";
+    const itemSurface = typeof surface.surface === "string" ? surface.surface : "input.text";
+    return {
+      ...input.payload,
+      operatorInteraction: {
+        kind: "collect_input",
+        interactionIds: [input.interactionId],
+        items: [{
+          id: `required:${key}`,
+          kind: "collect_input",
+          requiredValueKey: key,
+          consumingNodeId: agentId,
+          surface: itemSurface,
+          timing: typeof input.payload.when === "string" ? input.payload.when : "run_start",
+          valueType: itemSurface === "input.contacts_csv" ? "array" : "string",
+          label: typeof surface.label === "string" ? surface.label : key,
+          description: typeof surface.description === "string" ? surface.description : `Provide ${key}.`,
+          required: surface.required !== false,
+          satisfied: surface.satisfied === true,
+        }],
+      },
+    };
+  }
+  const props = surface.props && typeof surface.props === "object" && !Array.isArray(surface.props)
+    ? surface.props as Record<string, unknown>
+    : {};
+  const renderTarget = typeof props.renderTarget === "string"
+    ? props.renderTarget
+    : typeof input.payload.renderTarget === "string"
+      ? input.payload.renderTarget
+      : null;
+  const artifactId = typeof surface.key === "string" ? surface.key : `${agentId}_output`;
+  return {
+    ...input.payload,
+    gateType: input.gateType,
+    operatorInteraction: {
+      kind: "review_artifact",
+      interactionId: input.interactionId,
+      artifactId,
+      rendererRef: input.gateType === "draft_review" || input.gateType === "pre_send" ? renderTarget : null,
+      editable: input.gateType === "draft_review" && renderTarget === "canvas.email",
+      producerNodeId: agentId,
+      outputText,
+    },
+  };
+}
+
 async function insertGate(input: {
   auth: AuthFixture;
   runId: string;
   stepId: string;
-  gateId: string;
+  interactionId: string;
   gateType: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
   status: "pending" | "approved" | "submitted" | "rejected";
   question: string;
   payload: Record<string, unknown>;
 }) {
+  const interactionKind = typedInteractionKind(input.gateType);
+  const payload = buildTypedInteractionPayload({
+    gateType: input.gateType,
+    interactionId: input.interactionId,
+    payload: input.payload,
+  });
   await pool.query(
-    `INSERT INTO loop_engine_gates
-     (id, tenant_id, user_id, run_id, step_attempt_id, gate_type, status, question, payload_json, decision_json, idempotency_key, completed_at, created_at, updated_at)
+    `INSERT INTO loop_engine_interactions
+     (id, tenant_id, user_id, run_id, step_attempt_id, interaction_kind, status, question, payload_json, decision_json, idempotency_key, completed_at, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, '{}'::jsonb, $10, $11::timestamptz, NOW(), NOW())`,
     [
-      input.gateId,
+      input.interactionId,
       input.auth.tenantId,
       input.auth.userId,
       input.runId,
       input.stepId,
-      input.gateType,
+      interactionKind,
       input.status,
       input.question,
-      JSON.stringify(input.payload),
+      JSON.stringify(payload),
       `fixture:${input.runId}:${input.gateType}`,
       input.status === "pending" ? null : nowIso(),
     ],
@@ -413,7 +493,7 @@ async function seedInputStartFixture(auth: AuthFixture, satisfied = false): Prom
   const workflowId = randomUUID();
   const runId = randomUUID();
   const stepId = randomUUID();
-  const gateId = randomUUID();
+  const interactionId = randomUUID();
   const title = satisfied ? "Sprint input already saved" : "Sprint input required";
   const definition = makeDefinition({
     goal: "Capture sprint notes before drafting begins",
@@ -442,7 +522,7 @@ async function seedInputStartFixture(auth: AuthFixture, satisfied = false): Prom
     auth,
     runId,
     workflowId,
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     definition,
     context: satisfied ? { inputs: { sprint_notes: "Sprint notes already captured." }, approvedMemories: [], approvedSources: {}, operatorRevisions: {} } : { inputs: {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} },
   });
@@ -458,14 +538,14 @@ async function seedInputStartFixture(auth: AuthFixture, satisfied = false): Prom
       toolRef: "internal.llm_only",
       gate: { type: "missing_input", question: "Paste sprint notes before drafting begins." },
     }),
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     outputText: "Paste the missing input below to continue.",
   });
   await insertGate({
     auth,
     runId,
     stepId,
-    gateId,
+    interactionId,
     gateType: "missing_input",
     status: "pending",
     question: "Paste sprint notes before drafting begins.",
@@ -476,14 +556,14 @@ async function seedInputStartFixture(auth: AuthFixture, satisfied = false): Prom
       extra: { when: "run_start" },
     }),
   });
-  return { scenario: satisfied ? "input-start-satisfied" : "input-start", workflowId, runId, gateId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
+  return { scenario: satisfied ? "input-start-satisfied" : "input-start", workflowId, runId, interactionId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
 }
 
 async function seedMemoryFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixture, "auth">> {
   const workflowId = randomUUID();
   const runId = randomUUID();
   const stepId = randomUUID();
-  const gateId = randomUUID();
+  const interactionId = randomUUID();
   const title = "Memory confirmation";
   const definition = makeDefinition({
     goal: "Choose which memories should be passed to the writer",
@@ -515,7 +595,7 @@ async function seedMemoryFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
     auth,
     runId,
     workflowId,
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     definition,
     context: { inputs: {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} },
   });
@@ -531,7 +611,7 @@ async function seedMemoryFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
       toolRef: "internal.memory_search",
       gate: { type: "memory_confirmation", question: "Select which memories the next agent may use." },
     }),
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     outputText: "Relevant memories found.",
     outputData: { sources: items.map((item) => ({ id: item.id, text: item.excerpt })) },
   });
@@ -539,7 +619,7 @@ async function seedMemoryFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
     auth,
     runId,
     stepId,
-    gateId,
+    interactionId,
     gateType: "memory_confirmation",
     status: "pending",
     question: "Select which memories the next agent may use.",
@@ -550,14 +630,14 @@ async function seedMemoryFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
       extra: { items, result: { text: "Relevant memories found." } },
     }),
   });
-  return { scenario: "memory-confirmation", workflowId, runId, gateId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
+  return { scenario: "memory-confirmation", workflowId, runId, interactionId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
 }
 
 async function seedSourceFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixture, "auth">> {
   const workflowId = randomUUID();
   const runId = randomUUID();
   const stepId = randomUUID();
-  const gateId = randomUUID();
+  const interactionId = randomUUID();
   const title = "Source confirmation";
   const definition = makeDefinition({
     goal: "Approve the web sources before drafting",
@@ -588,7 +668,7 @@ async function seedSourceFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
     auth,
     runId,
     workflowId,
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     definition,
     context: { inputs: {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} },
   });
@@ -604,7 +684,7 @@ async function seedSourceFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
       toolRef: "internal.web_search",
       gate: { type: "source_confirmation", question: "Select sources, add custom URLs, then approve or revise." },
     }),
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     outputText: "Source candidates ready.",
     outputData: { sources: items.map((item) => ({ id: item.id, text: item.snippet })) },
   });
@@ -612,7 +692,7 @@ async function seedSourceFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
     auth,
     runId,
     stepId,
-    gateId,
+    interactionId,
     gateType: "source_confirmation",
     status: "pending",
     question: "Select sources, add custom URLs, then approve or revise.",
@@ -623,14 +703,14 @@ async function seedSourceFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixt
       extra: { items, result: { text: "Source candidates ready." } },
     }),
   });
-  return { scenario: "source-confirmation", workflowId, runId, gateId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
+  return { scenario: "source-confirmation", workflowId, runId, interactionId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
 }
 
 async function seedDraftFixture(auth: AuthFixture, renderTarget: "canvas.email" | "canvas.preview"): Promise<Omit<SeededLoopFixture, "auth">> {
   const workflowId = randomUUID();
   const runId = randomUUID();
   const stepId = randomUUID();
-  const gateId = randomUUID();
+  const interactionId = randomUUID();
   const title = renderTarget === "canvas.email" ? "Draft review email" : "Draft review preview";
   const artifactKey = renderTarget === "canvas.email" ? "draft_email:canvas.email" : "draft_preview:canvas.email";
   const definition = makeDefinition({
@@ -663,7 +743,7 @@ async function seedDraftFixture(auth: AuthFixture, renderTarget: "canvas.email" 
     auth,
     runId,
     workflowId,
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     definition,
     context: { inputs: {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} },
   });
@@ -681,7 +761,7 @@ async function seedDraftFixture(auth: AuthFixture, renderTarget: "canvas.email" 
       renderTarget,
       outputArtifactId: artifactKey.replace(/:canvas\.email$/, ""),
     }),
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     outputText: renderTarget === "canvas.email"
       ? "Subject: Sprint update\n\nDraft body ready for review."
       : "Preview body ready for review.",
@@ -714,7 +794,7 @@ async function seedDraftFixture(auth: AuthFixture, renderTarget: "canvas.email" 
     auth,
     runId,
     stepId,
-    gateId,
+    interactionId,
     gateType: "draft_review",
     status: "pending",
     question: "Review the draft, then save & approve or request changes.",
@@ -725,20 +805,20 @@ async function seedDraftFixture(auth: AuthFixture, renderTarget: "canvas.email" 
       extra: { renderTarget, canvasArtifactKey: artifactKey, result: { text: "Draft ready for review." } },
     }),
   });
-  return { scenario: renderTarget === "canvas.email" ? "draft-review-email" : "draft-review-preview", workflowId, runId, gateId, stepAttemptId: stepId, artifactKey, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
+  return { scenario: renderTarget === "canvas.email" ? "draft-review-email" : "draft-review-preview", workflowId, runId, interactionId, stepAttemptId: stepId, artifactKey, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
 }
 
 async function seedRecipientUploadFixture(auth: AuthFixture, savedContacts: boolean): Promise<Omit<SeededLoopFixture, "auth">> {
   const workflowId = randomUUID();
   const runId = randomUUID();
   const stepId = randomUUID();
-  const gateId = randomUUID();
+  const interactionId = randomUUID();
   const title = savedContacts ? "Recipient upload with saved contacts" : "Recipient upload";
   const definition = makeDefinition({
     goal: "Collect recipients before delivery",
     child: {
       id: "recipient_gate",
-      name: "Recipient Gate",
+      name: "Recipient Interaction",
       task: "Collect recipients and continue.",
       goal: "Save recipients before continuing.",
       toolRef: "internal.llm_only",
@@ -766,7 +846,7 @@ async function seedRecipientUploadFixture(auth: AuthFixture, savedContacts: bool
     auth,
     runId,
     workflowId,
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     definition,
     context: savedContacts
       ? {
@@ -793,37 +873,37 @@ async function seedRecipientUploadFixture(auth: AuthFixture, savedContacts: bool
     agentId: "recipient_gate",
     agentSnapshot: baseAgentSnapshot({
       id: "recipient_gate",
-      name: "Recipient Gate",
+      name: "Recipient Interaction",
       task: "Collect recipients and continue.",
       toolRef: "internal.llm_only",
       gate: { type: "pre_send", question: "Upload or paste recipients before sending." },
     }),
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     outputText: "Recipient list required.",
   });
   await insertGate({
     auth,
     runId,
     stepId,
-    gateId,
-    gateType: "pre_send",
+    interactionId,
+    gateType: "missing_input",
     status: "pending",
     question: "Upload or paste recipients before sending.",
     payload: checkpointPayload({
       reason: "missing_requirements",
       blocking: { agentId: "recipient_gate", stepIndex: 0 },
       surfaces: [surface],
-      extra: { uiBlocks: [{ type: "contacts_upload", required: true, mode: "uploaded" }], recipientStatus: savedContacts ? "ready" : "missing" },
+      extra: { when: "before_send", uiBlocks: [{ type: "contacts_upload", required: true, mode: "uploaded" }], recipientStatus: savedContacts ? "ready" : "missing" },
     }),
   });
-  return { scenario: "recipient-upload", workflowId, runId, gateId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
+  return { scenario: "recipient-upload", workflowId, runId, interactionId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
 }
 
 async function seedPreSendFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixture, "auth">> {
   const workflowId = randomUUID();
   const runId = randomUUID();
   const stepId = randomUUID();
-  const gateId = randomUUID();
+  const interactionId = randomUUID();
   const title = "Pre-send approval";
   const deliveryAction = "composio.resend.action.resend_send_email";
   const definition = makeDefinition({
@@ -875,7 +955,7 @@ async function seedPreSendFixture(auth: AuthFixture): Promise<Omit<SeededLoopFix
     auth,
     runId,
     workflowId,
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     definition,
     context: {
       inputs: {},
@@ -907,7 +987,7 @@ async function seedPreSendFixture(auth: AuthFixture): Promise<Omit<SeededLoopFix
       renderTarget: "canvas.email",
       outputArtifactId: "send_agent_output",
     }),
-    status: "waiting_for_gate",
+    status: "waiting_for_interaction",
     outputText: "Final send payload is ready.",
   });
   await insertArtifact({
@@ -933,7 +1013,7 @@ async function seedPreSendFixture(auth: AuthFixture): Promise<Omit<SeededLoopFix
     auth,
     runId,
     stepId,
-    gateId,
+    interactionId,
     gateType: "pre_send",
     status: "pending",
     question: "Approve the final send payload.",
@@ -959,14 +1039,14 @@ async function seedPreSendFixture(auth: AuthFixture): Promise<Omit<SeededLoopFix
       },
     }),
   });
-  return { scenario: "pre-send", workflowId, runId, gateId, stepAttemptId: stepId, artifactKey: "send_agent_output:canvas.email", title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
+  return { scenario: "pre-send", workflowId, runId, interactionId, stepAttemptId: stepId, artifactKey: "send_agent_output:canvas.email", title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
 }
 
 async function seedFailedRecipientRecoveryFixture(auth: AuthFixture): Promise<Omit<SeededLoopFixture, "auth">> {
   const workflowId = randomUUID();
   const runId = randomUUID();
   const stepId = randomUUID();
-  const gateId = randomUUID();
+  const interactionId = randomUUID();
   const title = "Failed recipient recovery";
   const definition = makeDefinition({
     goal: "Recover from a missing recipient failure",
@@ -1036,7 +1116,7 @@ async function seedFailedRecipientRecoveryFixture(auth: AuthFixture): Promise<Om
     auth,
     runId,
     stepId,
-    gateId,
+    interactionId,
     gateType: "pre_send",
     status: "rejected",
     question: "Approve the final send payload.",
@@ -1072,7 +1152,7 @@ async function seedFailedRecipientRecoveryFixture(auth: AuthFixture): Promise<Om
       },
     }),
   });
-  return { scenario: "failed-recipient-recovery", workflowId, runId, gateId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
+  return { scenario: "failed-recipient-recovery", workflowId, runId, interactionId, stepAttemptId: stepId, title, url: `/dashboard/loops/${workflowId}/runs/${runId}` };
 }
 
 export async function seedLoopRunFixture(scenario: ScenarioName): Promise<SeededLoopFixture> {

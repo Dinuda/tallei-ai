@@ -89,6 +89,9 @@ test("planning IR v2 accepts explicit null only for genuinely nullable fields", 
         description: "Draft",
         representation: "text",
         visibility: "operator",
+        rendererRef: null,
+        reviewMode: "required",
+        editable: true,
         fields: [],
       },
     }],
@@ -157,6 +160,9 @@ test("planner bindings cannot reference an undeclared stable configuration objec
         description: "Draft",
         representation: "text",
         visibility: "operator",
+        rendererRef: null,
+        reviewMode: "required",
+        editable: true,
         fields: [],
       },
     }],
@@ -164,6 +170,33 @@ test("planner bindings cannot reference an undeclared stable configuration objec
     unresolvedIssues: [],
   });
   assert.equal(result.success, false);
+});
+
+test("planner required values cannot model approval or review interactions as data", () => {
+  const plan = loopPlanningIRSchema.safeParse({
+    version: "v2",
+    title: "Approval as data",
+    summary: "Invalid approval value.",
+    strategy: "Invalid.",
+    schedule: { cron: "0 9 * * 5", timezone: "UTC" },
+    requiredValues: [{
+      key: "approvalConfirmed",
+      label: "Approval",
+      description: "Approval state.",
+      lifecycle: "runtime_input",
+      timing: "before_action",
+      sensitivity: "public",
+      valueType: "boolean",
+      surface: "confirm.send",
+      sourceKind: "operator_input",
+      status: "resolved",
+      stableScalar: null,
+    }],
+    semanticAgents: [],
+    selectedActions: [],
+    unresolvedIssues: [],
+  });
+  assert.equal(plan.success, false);
 });
 
 test("compact planner contracts expose references and field summaries without exact schemas", () => {
@@ -207,7 +240,7 @@ test("planner retries one transport failure but never retries structural output 
   }), false);
 });
 
-test("targeted corrections retain every exact internal contract and only referenced connector contracts", () => {
+test("targeted corrections retain every exact internal and discovered connector contract", () => {
   const selected = buildComposioActionContract({
     toolkit: "gmail",
     actionSlug: "GMAIL_SEND_EMAIL",
@@ -250,7 +283,7 @@ test("targeted corrections retain every exact internal contract and only referen
       internalContracts,
       connectorContracts: [selected, unrelated],
     }).map((contract) => contract.toolRef),
-    [...internalContracts.map((contract) => contract.toolRef), selected.toolRef],
+    [...internalContracts.map((contract) => contract.toolRef), selected.toolRef, unrelated.toolRef],
   );
 });
 

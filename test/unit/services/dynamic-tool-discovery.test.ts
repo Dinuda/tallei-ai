@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  discoveryQueriesForRequiredActions,
-  inferRequiredConnectorActions,
   interleaveDiscoveredToolResults,
   mergeRequiredToolContracts,
 } from "../../../src/services/tool-spec/discovery.js";
@@ -42,39 +40,6 @@ test("spec-required actions preserve an already discovered exact contract", asyn
   assert.equal(merged[0]?.source, "composio_search");
 });
 
-test("inferRequiredConnectorActions adds gmail send for newsletter delivery prompts", () => {
-  const actions = inferRequiredConnectorActions({
-    prompt: "Create and send a weekly newsletter to subscribers",
-    deliveryProvider: "none",
-    deliveryDescription: "Send the newsletter email.",
-  });
-  assert.deepEqual(actions, [{
-    toolkit: "gmail",
-    actionSlug: "GMAIL_SEND_EMAIL",
-    risk: "send",
-  }]);
-});
-
-test("inferRequiredConnectorActions parses an explicit composio delivery provider", () => {
-  const actions = inferRequiredConnectorActions({
-    prompt: "Send updates",
-    deliveryProvider: "composio.resend.action.resend_send_email",
-  });
-  assert.equal(actions.length, 1);
-  assert.equal(actions[0]?.toolkit, "resend");
-  assert.equal(actions[0]?.actionSlug, "RESEND_SEND_EMAIL");
-  assert.equal(actions[0]?.risk, "send");
-});
-
-test("discoveryQueriesForRequiredActions appends toolkit queries when search missed delivery", () => {
-  const queries = discoveryQueriesForRequiredActions(["web research"], [{
-    toolkit: "gmail",
-    actionSlug: "GMAIL_SEND_EMAIL",
-    risk: "send",
-  }]);
-  assert.deepEqual(queries, ["web research", "gmail send email"]);
-});
-
 test("discovery interleaves query results before applying the global cap", () => {
   const entry = (toolkit: string, actionSlug: string) => ({
     contract: buildComposioActionContract({
@@ -111,6 +76,7 @@ test("roster validation accepts persisted exact dynamic action contracts", async
     cron: "0 9 * * 1",
     timezone: "UTC",
     allowedToolRefs: [contract.toolRef],
+    operatorInteractionPlan: { version: "v1", interactions: [] },
     agentGraph: {
       parent: { id: "parent", name: "Orchestrator", task: "Coordinate", policy: "Use declared contracts." },
       children: [{
@@ -124,6 +90,8 @@ test("roster validation accepts persisted exact dynamic action contracts", async
     builderMeta: {
       designedBy: "loop_architect",
       preApproved: true,
+      planningIRVersion: "v2",
+      planningIR: {},
       discoveredToolContracts: [contract as unknown as Record<string, unknown>],
     },
   });

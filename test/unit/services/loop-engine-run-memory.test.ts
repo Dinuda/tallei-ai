@@ -13,18 +13,6 @@ import { detectPlaceholderText } from "../../../src/services/loop-engine/contrac
 import { evaluateAgentGoal } from "../../../src/services/loop-engine/goal-eval.js";
 import { buildAgentSystemPrompt, buildAgentUserPrompt } from "../../../src/services/loop-executor/tool-catalog.js";
 
-test("applyGateDecisionToRunMemory stores sprint_notes from missing_input gate", () => {
-  const patch = applyGateDecisionToRunMemory({
-    gateType: "missing_input",
-    decision: { value: "Shipped recall fix.\nIn progress: dedup rollout." },
-    definition: { inputsRequired: ["sprint_notes"] },
-  });
-
-  assert.deepEqual(patch.inputs, {
-    sprint_notes: "Shipped recall fix.\nIn progress: dedup rollout.",
-  });
-});
-
 test("resolveRequiredInputKeys falls back to agent graph provided inputs", () => {
   const keys = resolveRequiredInputKeys({
     agentGraph: {

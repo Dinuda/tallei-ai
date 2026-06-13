@@ -95,6 +95,18 @@ type BuilderProposal = {
     goal: string;
     schedule: { cron: string; timezone: string };
     allowedToolRefs?: string[];
+    operatorInteractionPlan?: {
+      version: "v1";
+      interactions: Array<{
+        id: string;
+        kind: "collect_input" | "review_artifact" | "confirm_action" | "connect_connector";
+        label?: string;
+        surface?: string;
+        artifactId?: string;
+        rendererRef?: string | null;
+        contractRef?: string;
+      }>;
+    };
     agentGraph?: {
       parent?: { name: string; task: string; policy: string };
       children?: AgentGraphChild[];
@@ -819,6 +831,27 @@ export default function NewLoopBuilderPage() {
                 <p className="mt-1 text-sm text-[var(--text-2)]">
                   {proposal.suggestedToolRefs.length ? proposal.suggestedToolRefs.join(", ") : "No tools suggested"}
                 </p>
+              </Card>
+
+              <Card className="rounded-md p-4">
+                <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Operator interactions</div>
+                <div className="mt-3 space-y-2">
+                  {(proposal.definition.operatorInteractionPlan?.interactions ?? []).map((interaction) => (
+                    <div key={interaction.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
+                      <div className="text-sm font-medium text-[var(--text)]">{interaction.kind.replace(/_/g, " ")}</div>
+                      <p className="mt-1 text-xs text-[var(--text-muted)]">
+                        {interaction.label
+                          ?? interaction.artifactId
+                          ?? interaction.contractRef
+                          ?? interaction.surface
+                          ?? interaction.id}
+                      </p>
+                    </div>
+                  ))}
+                  {(proposal.definition.operatorInteractionPlan?.interactions ?? []).length === 0 ? (
+                    <p className="text-sm text-[var(--text-2)]">No operator interaction is required during this workflow.</p>
+                  ) : null}
+                </div>
               </Card>
 
               <Card className="rounded-md p-4">

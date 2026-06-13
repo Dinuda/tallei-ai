@@ -7,7 +7,7 @@ import { connectorActionToolRef, getStaticToolContract } from "../tool-spec/tool
 export const runtimeRunStatusSchema = z.enum([
   "queued",
   "running",
-  "waiting_for_gate",
+  "waiting_for_interaction",
   "blocked",
   "succeeded",
   "failed",
@@ -17,7 +17,7 @@ export const runtimeRunStatusSchema = z.enum([
 export const runtimeCommandTypeSchema = z.enum([
   "start_run",
   "execute_step",
-  "continue_after_gate",
+  "continue_after_interaction",
   "finalize_run",
   "retry_step",
 ]);
@@ -62,36 +62,15 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
   if (engineVersion !== "loop_engine_v3") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Only loop_engine_v3 definitions can run" });
   }
-  if (definition.builderMeta?.contractDrivenGraph !== "v1") {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Workflow uses the legacy implicit execution model. Refine or re-draft this workflow.",
-    });
-  }
   if (!definition.agentGraph?.children.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "A v3 run requires at least one child agent" });
   }
-  if (definition.plan) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Legacy plans are not supported" });
-  }
   const hasConnectorActions = (definition.agentGraph?.children ?? []).some((agent) =>
     agent.tools.some((tool) => /^composio\.[a-z0-9_-]+\.action\./.test(tool.ref.toLowerCase())));
-  if (
-    hasConnectorActions
-    && (
-      !["v1", "v2"].includes(definition.builderMeta?.planningIRVersion ?? "")
-      || !definition.builderMeta?.planningIR
-    )
-  ) {
+  if (!definition.builderMeta?.planningIR) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "Connector workflow requires a model-planned, contract-validated planning IR. Refine or re-draft this workflow.",
-    });
-  }
-  if (hasConnectorActions && definition.builderMeta?.typedConnectorHandoffs !== "v2") {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Connector workflow requires typed connector handoffs. Refine or re-draft this workflow.",
+      message: "Workflow requires a model-planned, contract-validated planning IR.",
     });
   }
   if (definition.delivery && definition.delivery.provider !== "none") {
@@ -112,7 +91,7 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
     if (!agent.nodeKind || !agent.outputContract?.mediaType || !agent.outputContract.visibility) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `Workflow node ${agent.id} uses a legacy implicit contract. Refine or re-draft this workflow.`,
+        message: `Workflow node ${agent.id} requires explicit contracts.`,
       });
     }
     const agentToolContracts = agent.tools.map((tool) => ({ tool, contract: contractForRef(tool.ref) }));
@@ -133,7 +112,11 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
           message: `Connector action ${tool.ref} is not approved by this workflow's connector policy`,
         });
       }
+      const requiredContractInputs = Array.isArray(contract?.inputSchema.required)
+        ? contract.inputSchema.required
+        : [];
       if (/^composio\.[a-z0-9_-]+\.action\./.test(normalizedRef)
+        && requiredContractInputs.length > 0
         && agent.handoffBindings.length === 0) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -168,13 +151,9 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
     if (approvalContract && !hasApprovedWrite) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require an approved connector policy action" });
     }
-    if (hasApprovedWrite && (!agent.gate || agent.gate.type !== "pre_send")) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require their contract approval gate" });
-    } else if (approvalContract && (!agent.gate || (approvalContract.approval.suggestedGate && agent.gate.type !== approvalContract.approval.suggestedGate))) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require their contract approval gate" });
-    }
-    if (agent.gate?.type === "pre_send" && !approvalContract && !hasApprovedWrite) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pre_send gates require a tool contract that needs external approval" });
+    if (hasApprovedWrite && !definition.operatorInteractionPlan.interactions.some((item) =>
+      item.kind === "confirm_action" && item.actionNodeId === agent.id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require a typed confirmation interaction" });
     }
   }
 });

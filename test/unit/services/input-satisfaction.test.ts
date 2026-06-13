@@ -15,12 +15,22 @@ import { runtimeContextSchema } from "../../../src/services/loop-runtime/types.j
 import { buildLoopDefinition } from "../../../src/services/loop-executor/creator.js";
 import { emptyRunMemory, isMisclassifiedDraftReviewGate } from "../../../src/services/loop-runtime/memory.js";
 
+const strictWorkflowFields = {
+  operatorInteractionPlan: { version: "v1" as const, interactions: [] },
+  builderMeta: {
+    designedBy: "loop_architect" as const,
+    preApproved: true,
+    planningIRVersion: "v2" as const,
+    planningIR: {},
+  },
+};
+
 function syncEmailDefinition() {
   return buildLoopDefinition({
+    ...strictWorkflowFields,
     task: "Send weekly internal sync email from sprint notes",
     cron: "0 9 * * 5",
     timezone: "UTC",
-    inputsRequired: ["sprint_notes"],
     inputRequirements: [{
       key: "sprint_notes",
       surface: "input.markdown",
@@ -71,6 +81,7 @@ test("run_start requirements stay unsatisfied until operator markdown is provide
 
 test("blank stale submission is ignored when context already satisfies the input", () => {
   const definition = buildLoopDefinition({
+    ...strictWorkflowFields,
     task: "Validate saved review notes",
     cron: "0 9 * * 5",
     timezone: "UTC",
@@ -112,6 +123,7 @@ test("blank stale submission is ignored when context already satisfies the input
 
 test("collectRequirements does not derive inputs from delivery metadata", () => {
   const definition = buildLoopDefinition({
+    ...strictWorkflowFields,
     task: "Send newsletter",
     cron: "0 9 * * 1",
     timezone: "UTC",
@@ -143,6 +155,7 @@ test("collectRequirements does not derive inputs from delivery metadata", () => 
 
 test("confirm_send does not block execution once recipient input is ready", () => {
   const definition = buildLoopDefinition({
+    ...strictWorkflowFields,
     task: "Send newsletter",
     cron: "0 9 * * 5",
     timezone: "UTC",

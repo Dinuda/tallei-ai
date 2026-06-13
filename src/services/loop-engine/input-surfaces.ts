@@ -16,6 +16,25 @@ export const inputSurfaceSchema = z.enum([
 
 export type InputSurface = z.infer<typeof inputSurfaceSchema>;
 
+export const dataInputSurfaceSchema = z.enum([
+  "input.text",
+  "input.markdown",
+  "input.contacts_csv",
+  "input.audience_id",
+  "input.file",
+]);
+
+export type DataInputSurface = z.infer<typeof dataInputSurfaceSchema>;
+
+export type InputValueType = "string" | "number" | "integer" | "boolean" | "object" | "array";
+
+export function inputSurfaceAcceptsValueType(surface: InputSurface, valueType: InputValueType): boolean {
+  if (surface === "input.contacts_csv") return valueType === "array";
+  if (surface === "input.file" || surface === "input.audience_id") return valueType === "string";
+  if (surface === "input.text" || surface === "input.markdown") return valueType === "string";
+  return false;
+}
+
 const INPUT_SURFACE_VALUES = inputSurfaceSchema.options;
 
 /** Parse an explicitly declared input surface without semantic guessing. */
@@ -45,11 +64,6 @@ function preprocessInputRequirement(value: unknown): unknown {
     surface: typeof row.surface === "string" ? row.surface.trim().toLowerCase() : row.surface,
     when: normalizeInputRequirementWhen(row.when),
   };
-}
-
-export function normalizeInputRequirementsArray(value: unknown): unknown {
-  if (!Array.isArray(value)) return value;
-  return value.map(preprocessInputRequirement);
 }
 
 export const inputRequirementWhenSchema = z.enum(["run_start", "before_send", "before_step"]);
@@ -121,18 +135,8 @@ export type SurfaceSubmissionValue = z.infer<typeof surfaceSubmissionValueSchema
 
 export const gateSurfaceSubmissionSchema = z.record(surfaceSubmissionValueSchema);
 
-/** Legacy string keys derived from structured requirements. */
-export function inputRequirementKeys(requirements: InputRequirement[]): string[] {
-  return [...new Set(requirements.map((req) => req.key))];
-}
-
 export function defaultLabelForKey(key: string): string {
   return key.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-export function defaultSurfaceForKey(key: string): InputSurface {
-  void key;
-  return "input.text";
 }
 
 export function isReviewInputSurface(surface: InputSurface): boolean {
@@ -142,27 +146,6 @@ export function isReviewInputSurface(surface: InputSurface): boolean {
     || surface === "review.sources"
     || surface === "review.memories"
     || surface === "confirm.send";
-}
-
-/** Map output contract renderer id to operator review surface. */
-export function surfaceFromRenderer(renderer: string | null | undefined): InputSurface | undefined {
-  if (!renderer) return undefined;
-  if (renderer === "canvas.email") return "review.email";
-  if (renderer === "canvas.preview") return "review.preview";
-  return undefined;
-}
-
-/** Map legacy agent gate.type to the canonical operator surface (UI contract). */
-export function defaultSurfaceForGateType(gateType: string): InputSurface {
-  switch (gateType) {
-    case "memory_confirmation": return "review.memories";
-    case "source_confirmation": return "review.sources";
-    case "draft_review": return "review.draft";
-    case "pre_send": return "confirm.send";
-    case "missing_input":
-    default:
-      return "input.markdown";
-  }
 }
 
 export function isApprovalSurface(surface: InputSurface): boolean {
@@ -220,34 +203,10 @@ export function requirementMatchesSpec(designReq: InputRequirement, specReq: Inp
   return requirementSlotKey(designReq) === requirementSlotKey(specReq);
 }
 
-/** Infer structured requirements from legacy inputsRequired string keys. */
-export function requirementsFromLegacyKeys(keys: string[]): InputRequirement[] {
-  return keys.map((key) => ({
-    key,
-    surface: defaultSurfaceForKey(key),
-    label: defaultLabelForKey(key),
-    required: true,
-    when: "run_start" as const,
-  }));
-}
-
 /** True when the approved spec explicitly requires operator-pasted content before agents run. */
 export function specRequiresRunStartContent(spec: {
   delivery?: { provider?: string; target?: string };
   inputRequirements?: InputRequirement[];
 }): boolean {
   return (spec.inputRequirements ?? []).some((req) => req.when === "run_start" && req.required);
-}
-
-/** Merge explicit requirements with legacy keys without duplicating keys. */
-export function normalizeInputRequirements(input: {
-  inputRequirements?: InputRequirement[];
-  inputsRequired?: string[];
-}): InputRequirement[] {
-  const explicit = input.inputRequirements ?? [];
-  const explicitKeys = new Set(explicit.map((req) => req.key));
-  const legacy = requirementsFromLegacyKeys(
-    (input.inputsRequired ?? []).filter((key) => !explicitKeys.has(key)),
-  );
-  return [...explicit, ...legacy];
 }

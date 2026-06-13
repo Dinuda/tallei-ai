@@ -52,7 +52,7 @@ import type { ContactRow } from "./components/contacts-input";
 import {
   AgentProgressPips,
   readGateAgentOutput,
-} from "./components/gate-workspace-ui";
+} from "./components/operator-interaction-ui";
 import {
   OperatorWorkspace,
   OperatorViewStamp,
@@ -60,6 +60,7 @@ import {
   operatorApproveLabel,
   operatorBandImperative,
   operatorShowPrimaryAction,
+  operatorShowReject,
   operatorShowRevise,
 } from "./components/operator-workspace";
 import type { OperatorView } from "@/lib/operator-view-types";
@@ -114,7 +115,7 @@ type StepAttempt = {
     name?: string;
     task?: string;
     tools?: Array<{ ref: string }>;
-    gate?: { type?: Gate["gate_type"]; question?: string };
+    gate?: { type?: Interaction["interaction_kind"]; question?: string };
   };
   attempt: number;
   status: string;
@@ -133,9 +134,9 @@ type RunEvent = {
   payload_json: Record<string, unknown>;
 };
 
-type Gate = {
+type Interaction = {
   id: string;
-  gate_type: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
+  interaction_kind: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
   status: string;
   question: string;
   payload_json: { items?: Array<MemoryGateItem | SourceGateItem>; result?: { text?: string } } & Record<string, unknown>;
@@ -200,7 +201,7 @@ type RunProjection = {
   };
   context?: Record<string, unknown>;
   steps: StepAttempt[];
-  gates: Gate[];
+  interactions: Interaction[];
   artifacts: Artifact[];
   events: RunEvent[];
   operatorView?: OperatorView;
@@ -215,7 +216,7 @@ const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
 });
 
 function label(value: string) {
-  if (value === "waiting_for_gate") return "Paused · Needs Approval";
+  if (value === "waiting_for_interaction") return "Paused · Needs Approval";
   if (value === "waiting_for_approval") return "Paused · Needs Approval";
   return value.replaceAll("_", " ");
 }
@@ -257,7 +258,7 @@ function StatusBadge({ status }: { status: string }) {
     ? "neutral"
     : status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected"
       ? "red"
-      : status === "waiting_for_gate" || status === "pending"
+      : status === "waiting_for_interaction" || status === "pending"
         ? "amber"
         : status === "running"
           ? "blue"
@@ -270,7 +271,7 @@ function RunStatusPill({ status }: { status: string }) {
     ? "border-[#86c8a8] bg-[#edf8f2] text-[#166534]"
     : status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected"
       ? "border-[#d9a3a3] bg-[#fdf2f2] text-[#991b1b]"
-      : status === "waiting_for_gate" || status === "pending"
+      : status === "waiting_for_interaction" || status === "pending"
         ? "border-[#9bb8d9] bg-[#edf3fb] text-[#1e4070]"
         : status === "running"
           ? "border-[#b8c9dc] bg-[#f0f4f9] text-[#334155]"
@@ -328,7 +329,7 @@ function getStepDisplayContent(step: StepAttempt | null | undefined): string {
   if (text) return text;
   const error = step?.error_json?.message?.trim();
   if (error) return error;
-  if (step?.status === "waiting_for_gate") {
+  if (step?.status === "waiting_for_interaction") {
     return "This agent finished its run and is waiting for your approval.";
   }
   if (step?.status === "running") return "This agent is still running.";
@@ -343,7 +344,7 @@ function buildParentAgentNarrative({
   parentRunPhase,
   currentStep,
   currentStepLabel,
-  pendingGate,
+  pendingInteraction,
   operatorView,
   latestSteps,
   doneSteps,
@@ -352,7 +353,7 @@ function buildParentAgentNarrative({
   parentRunPhase: ParentRunPhase;
   currentStep: StepAttempt | null;
   currentStepLabel: string;
-  pendingGate: Gate | null;
+  pendingInteraction: Interaction | null;
   operatorView: OperatorView | null;
   latestSteps: StepAttempt[];
   doneSteps: number;
@@ -368,9 +369,9 @@ function buildParentAgentNarrative({
     ? `Queue: ${workerNames.map(formatWorkerDisplayName).join(" → ")}.`
     : "Queue: waiting for agents.";
   const orchestration = workerNames.length > 0
-    ? `Coordinates ${workerNames.length} agents — assigns each slot, validates output, passes deliverables downstream, and holds at approval gates until you respond.`
-    : "Coordinates the job — assigns agents, validates output, and holds at gates until you respond.";
-  const upNextWorker = pendingGate
+    ? `Coordinates ${workerNames.length} agents — assigns each slot, validates output, passes deliverables downstream, and holds at approval interactions until you respond.`
+    : "Coordinates the job — assigns agents, validates output, and holds at interactions until you respond.";
+  const upNextWorker = pendingInteraction
     ? getNextWorkerName(run, latestSteps)
     : currentStep
       ? latestSteps.find((step) => step.step_index === currentStep.step_index + 1)?.agent_snapshot?.name
@@ -380,22 +381,28 @@ function buildParentAgentNarrative({
   const upNextWorkerLabel = upNextWorker ? formatWorkerDisplayName(upNextWorker) : null;
 
   let statusLine = "";
-  if (parentRunPhase === "paused" && pendingGate && operatorView) {
-    const primary = operatorView.blocks.find((block) => block.required && !block.satisfied)?.surface
-      ?? operatorView.blocks[0]?.surface;
-    const gateHint = primary === "review.memories"
+  if (parentRunPhase === "paused" && pendingInteraction && operatorView) {
+    const primary = operatorView.blocks.find((block) => block.required && !block.satisfied)
+      ?? operatorView.blocks[0]
+      ?? null;
+    const surface = primary?.surface;
+    const gateHint = surface === "review.memories"
       ? "Select which memories the next agent may use."
-      : primary === "review.sources"
+      : surface === "review.sources"
         ? "Select web sources and add custom URLs before continuing."
-        : primary === "input.markdown" || primary === "input.text"
+        : surface === "input.markdown" || surface === "input.text"
           ? "Provide the missing input in the workspace."
-          : primary === "review.draft" || primary === "review.email"
+          : surface === "review.draft" || surface === "review.email"
             ? "Review the draft in the workspace, then approve or request changes."
-            : primary === "input.contacts_csv" || primary === "input.audience_id"
+            : surface === "input.contacts_csv" || surface === "input.audience_id"
               ? "Add recipients in the workspace, save contacts, then continue."
-              : primary === "confirm.send"
+              : surface === "confirm.send"
                 ? "Review the final draft, then approve send."
-                : "Confirm in the workspace before the run continues.";
+                : primary?.kind === "confirm_action"
+                  ? "Review the validated external action, then approve or reject."
+                  : primary?.kind === "connect_connector"
+                    ? "Connect the required app, then verify and continue."
+                    : "Confirm in the workspace before the run continues.";
     const gateLabel = operatorView.workspace.stamp.name.toLowerCase();
     statusLine = `Paused at ${currentStepLabel.toLowerCase()} for ${gateLabel}. ${gateHint}${upNextWorkerLabel ? ` After approval, ${upNextWorkerLabel} is next.` : ""}`;
   } else if (parentRunPhase === "running" && currentStep) {
@@ -435,7 +442,7 @@ type ParentRunPhase = "paused" | "running" | "blocked" | "done" | "idle";
 
 function canRetryStepAttempt(step: StepAttempt, runStatus?: string): boolean {
   if (step.status === "failed" || step.status === "cancelled") return true;
-  return step.status === "waiting_for_gate"
+  return step.status === "waiting_for_interaction"
     && (runStatus === "failed" || runStatus === "blocked" || runStatus === "cancelled");
 }
 
@@ -454,7 +461,7 @@ function resolveRetryTargetStep(
   if (failedLatest) return failedLatest;
 
   const stalledGate = [...latestSteps]
-    .filter((step) => step.status === "waiting_for_gate")
+    .filter((step) => step.status === "waiting_for_interaction")
     .sort((left, right) => right.step_index - left.step_index)[0];
   if (stalledGate) return stalledGate;
 
@@ -470,11 +477,11 @@ function resolveRetryTargetStep(
 
 function resolveCurrentStep(
   latestSteps: StepAttempt[],
-  pendingGate: Gate | null,
+  pendingInteraction: Interaction | null,
   currentStepIndex: number | null | undefined,
 ): StepAttempt | null {
-  const gateStep = latestSteps.find((step) => step.status === "waiting_for_gate");
-  if (pendingGate && gateStep) return gateStep;
+  const gateStep = latestSteps.find((step) => step.status === "waiting_for_interaction");
+  if (pendingInteraction && gateStep) return gateStep;
 
   const runningStep = latestSteps.find((step) => step.status === "running");
   if (runningStep) return runningStep;
@@ -494,10 +501,10 @@ function resolveCurrentStep(
 function resolveStepRowPhase(
   step: StepAttempt,
   currentStep: StepAttempt | null,
-  pendingGate: Gate | null,
+  pendingInteraction: Interaction | null,
 ): StepRowPhase {
   const isCurrent = currentStep?.id === step.id;
-  if (isCurrent && pendingGate && step.status === "waiting_for_gate") return "current_gate";
+  if (isCurrent && pendingInteraction && step.status === "waiting_for_interaction") return "current_gate";
   if (isCurrent && step.status === "running") return "current_running";
   if (step.status === "running") return "running";
   if (step.status === "failed" || step.status === "cancelled") return "failed";
@@ -509,12 +516,12 @@ function resolveStepRowPhase(
 
 function resolveParentRunPhase(
   runStatus: string,
-  pendingGate: Gate | null,
+  pendingInteraction: Interaction | null,
   hasFailure: boolean,
 ): ParentRunPhase {
-  if (pendingGate) return "paused";
+  if (pendingInteraction) return "paused";
   if (hasFailure || runStatus === "blocked" || runStatus === "failed" || runStatus === "cancelled") return "blocked";
-  if (runStatus === "running" || runStatus === "waiting_for_gate") return "running";
+  if (runStatus === "running" || runStatus === "waiting_for_interaction") return "running";
   if (runStatus === "succeeded") return "done";
   return "idle";
 }
@@ -746,7 +753,7 @@ function extractMemorySearchSources(data: unknown): MemorySearchSource[] {
   return rows;
 }
 
-function readMemoryGateItems(gate: Gate | null | undefined): MemoryGateItem[] {
+function readMemoryGateItems(gate: Interaction | null | undefined): MemoryGateItem[] {
   const rawItems = Array.isArray(gate?.payload_json.items) ? gate.payload_json.items : [];
   return rawItems
     .map((row): MemoryGateItem | null => {
@@ -779,7 +786,7 @@ function buildMemoryGateDecisionItems(items: MemoryGateItem[], selectedIds: Set<
   }));
 }
 
-function readSourceGateItems(gate: Gate | null | undefined): SourceGateItem[] {
+function readSourceGateItems(gate: Interaction | null | undefined): SourceGateItem[] {
   const rawItems = Array.isArray(gate?.payload_json.items) ? gate.payload_json.items : [];
   return rawItems
     .map((row): SourceGateItem | null => {
@@ -827,14 +834,14 @@ function readSavedAudienceId(context?: Record<string, unknown>): string {
   return typeof audienceId === "string" ? audienceId.trim() : "";
 }
 
-function resolveContactsUploadGate(gates: Gate[] | undefined, pendingGate: Gate | null): Gate | null {
-  if (pendingGate?.gate_type === "pre_send") return pendingGate;
-  const ordered = [...(gates ?? [])].reverse();
-  const pendingRecipient = ordered.find((gate) => gate.gate_type === "pre_send" && gate.status === "pending");
+function resolveContactsUploadGate(interactions: Interaction[] | undefined, pendingInteraction: Interaction | null): Interaction | null {
+  if (pendingInteraction?.interaction_kind === "pre_send") return pendingInteraction;
+  const ordered = [...(interactions ?? [])].reverse();
+  const pendingRecipient = ordered.find((gate) => gate.interaction_kind === "pre_send" && gate.status === "pending");
   if (pendingRecipient) return pendingRecipient;
-  const pendingPreSend = ordered.find((gate) => gate.gate_type === "pre_send" && gate.status === "pending");
+  const pendingPreSend = ordered.find((gate) => gate.interaction_kind === "pre_send" && gate.status === "pending");
   if (pendingPreSend) return pendingPreSend;
-  return ordered.find((gate) => gate.gate_type === "pre_send") ?? null;
+  return ordered.find((gate) => gate.interaction_kind === "pre_send") ?? null;
 }
 
 function readSavedContacts(context?: Record<string, unknown>): ContactRow[] {
@@ -858,7 +865,7 @@ function getNextWorkerName(
   run: RunProjection | null,
   latestSteps: StepAttempt[],
 ): string | null {
-  const gateStep = latestSteps.find((step) => step.status === "waiting_for_gate");
+  const gateStep = latestSteps.find((step) => step.status === "waiting_for_interaction");
   if (gateStep) {
     const next = latestSteps.find((step) => step.step_index === gateStep.step_index + 1);
     if (next) return next.agent_snapshot?.name ?? next.agent_id;
@@ -887,7 +894,7 @@ const failureBandTexture = [
   "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(248,113,113,0.08), transparent 55%)",
 ].join(", ");
 
-function RejectionTypeStamp({ subject = "Gate" }: { subject?: string }) {
+function RejectionTypeStamp({ subject = "Interaction" }: { subject?: string }) {
   return (
     <div className="flex min-w-0 items-center gap-2.5">
       <span
@@ -1022,7 +1029,7 @@ function RunningSlotText({ stages }: { stages: string[] }) {
 function RunStatusBand({
   gateResolvedFlash,
   transitioningAfterGate,
-  pendingGate,
+  pendingInteraction,
   operatorView,
   runStatus,
   failureStep,
@@ -1033,6 +1040,7 @@ function RunStatusBand({
   approveLabel,
   approveDisabled,
   showRevise,
+  showReject,
   onApprove,
   onRevise,
   onReject,
@@ -1041,7 +1049,7 @@ function RunStatusBand({
 }: {
   gateResolvedFlash: boolean;
   transitioningAfterGate: boolean;
-  pendingGate: Gate | null;
+  pendingInteraction: Interaction | null;
   operatorView: OperatorView | null;
   runStatus: string;
   failureStep: StepAttempt | null;
@@ -1052,6 +1060,7 @@ function RunStatusBand({
   approveLabel: string;
   approveDisabled: boolean;
   showRevise: boolean;
+  showReject: boolean;
   onApprove: () => void;
   onRevise: () => void;
   onReject: () => void;
@@ -1060,8 +1069,8 @@ function RunStatusBand({
 }) {
   const runningStages = useMemo(() => buildRunningStages(activeStageName), [activeStageName]);
   const isSucceeded = runStatus === "succeeded";
-  const showFailure = Boolean((failureStep || failureMessage) && !pendingGate && !gateResolvedFlash && !transitioningAfterGate);
-  const bandHeight = (pendingGate && !gateResolvedFlash) || showFailure ? 80 : 64;
+  const showFailure = Boolean((failureStep || failureMessage) && !pendingInteraction && !gateResolvedFlash && !transitioningAfterGate);
+  const bandHeight = (pendingInteraction && !gateResolvedFlash) || showFailure ? 80 : 64;
 
   const shellClass = gateResolvedFlash
     ? "border-[#86c8a8] bg-[#edf8f2]"
@@ -1069,7 +1078,7 @@ function RunStatusBand({
       ? "border-[#86c8a8] bg-[#edf8f2]"
     : transitioningAfterGate
       ? "border-[#b8c9dc] bg-[#f0f4f9]"
-    : pendingGate
+    : pendingInteraction
       ? "border-[#9bb8d9] bg-[#edf3fb]"
       : showFailure
         ? "border-[#d9a3a3] bg-[#fdf2f2]"
@@ -1085,7 +1094,7 @@ function RunStatusBand({
           "repeating-linear-gradient(0deg, transparent, transparent 11px, rgba(5,150,105,0.028) 11px, rgba(5,150,105,0.028) 12px)",
           "radial-gradient(ellipse 120% 80% at 0% 50%, rgba(16,185,129,0.06), transparent 55%)",
         ].join(", ")
-    : pendingGate
+    : pendingInteraction
       ? statusBandTexture
       : transitioningAfterGate
         ? [
@@ -1180,7 +1189,7 @@ function RunStatusBand({
               <span className="text-[13px] font-medium">Processing</span>
             </div>
           </motion.div>
-        ) : pendingGate && operatorView ? (
+        ) : pendingInteraction && operatorView ? (
           <motion.div
             key="gate"
             initial={{ opacity: 0 }}
@@ -1197,14 +1206,16 @@ function RunStatusBand({
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-3">
-              <EditorialActionButton
-                label="Reject"
-                glyph="reject"
-                variant="secondary"
-                onClick={onReject}
-                disabled={busy}
-                className="px-4 text-[14px]"
-              />
+              {showReject ? (
+                <EditorialActionButton
+                  label="Reject"
+                  glyph="reject"
+                  variant="secondary"
+                  onClick={onReject}
+                  disabled={busy}
+                  className="px-4 text-[14px]"
+                />
+              ) : null}
               {showRevise ? (
                 <EditorialActionButton
                   label="Revise"
@@ -1500,19 +1511,19 @@ export default function StableLoopRunPage() {
       || (artifact.kind !== "structured_output" && !artifact.data_json?.artifactEnvelope)),
     [latestArtifacts],
   );
-  const pendingGate = useMemo(() => run?.gates.find((gate) => gate.status === "pending") ?? null, [run?.gates]);
+  const pendingInteraction = useMemo(() => run?.interactions.find((gate) => gate.status === "pending") ?? null, [run?.interactions]);
   const operatorView = run?.operatorView ?? null;
   const contactsUploadGate = useMemo(
-    () => resolveContactsUploadGate(run?.gates, pendingGate),
-    [pendingGate, run?.gates],
+    () => resolveContactsUploadGate(run?.interactions, pendingInteraction),
+    [pendingInteraction, run?.interactions],
   );
   const gateStep = useMemo(
-    () => latestSteps.find((step) => step.status === "waiting_for_gate") ?? null,
+    () => latestSteps.find((step) => step.status === "waiting_for_interaction") ?? null,
     [latestSteps],
   );
   const rejectedGate = useMemo(
-    () => [...(run?.gates ?? [])].reverse().find((gate) => gate.status === "rejected") ?? null,
-    [run?.gates],
+    () => [...(run?.interactions ?? [])].reverse().find((gate) => gate.status === "rejected") ?? null,
+    [run?.interactions],
   );
   const runHasTerminalFailure = run?.status === "failed" || run?.status === "blocked" || run?.status === "cancelled";
   const failureRetryTarget = useMemo(
@@ -1534,35 +1545,35 @@ export default function StableLoopRunPage() {
   const savedAudienceId = useMemo(() => readSavedAudienceId(run?.context), [run?.context]);
   const contactSourceKind = useMemo(() => {
     const block = operatorView?.blocks.find((row) => row.surface === "input.contacts_csv" || row.surface === "input.audience_id");
-    const contactSource = block?.props?.contactSource ?? contactsUploadGate?.payload_json?.contactSource ?? pendingGate?.payload_json?.contactSource;
+    const contactSource = block?.props?.contactSource ?? contactsUploadGate?.payload_json?.contactSource ?? pendingInteraction?.payload_json?.contactSource;
     if (contactSource && typeof contactSource === "object" && !Array.isArray(contactSource)) {
       const kind = (contactSource as Record<string, unknown>).kind;
       if (kind === "configured" || kind === "uploaded" || kind === "operator_input" || kind === "none") return kind;
     }
     return block?.surface === "input.audience_id" ? "configured" : "uploaded";
-  }, [contactsUploadGate?.payload_json, operatorView?.blocks, pendingGate?.payload_json]);
+  }, [contactsUploadGate?.payload_json, operatorView?.blocks, pendingInteraction?.payload_json]);
 
   useEffect(() => {
-    if (prevGateId && !pendingGate) {
+    if (prevGateId && !pendingInteraction) {
       setGateResolvedFlash(true);
       const timer = window.setTimeout(() => setGateResolvedFlash(false), 400);
       return () => window.clearTimeout(timer);
     }
-    setPrevGateId(pendingGate?.id ?? null);
-  }, [pendingGate, prevGateId]);
+    setPrevGateId(pendingInteraction?.id ?? null);
+  }, [pendingInteraction, prevGateId]);
 
   const currentStep = useMemo(
-    () => resolveCurrentStep(latestSteps, pendingGate, run?.current_step_index),
-    [latestSteps, pendingGate, run?.current_step_index],
+    () => resolveCurrentStep(latestSteps, pendingInteraction, run?.current_step_index),
+    [latestSteps, pendingInteraction, run?.current_step_index],
   );
   const activelyExecutingAfterGate = Boolean(
-    !pendingGate &&
+    !pendingInteraction &&
       run?.status === "running" &&
       currentStep?.status === "running" &&
       finalArtifacts.length > 0,
   );
   const transitioningAfterGate = Boolean(
-    !pendingGate &&
+    !pendingInteraction &&
       !terminalStatuses.has(run?.status ?? "idle") &&
       (gateTransitionStepId || activelyExecutingAfterGate),
   );
@@ -1578,14 +1589,14 @@ export default function StableLoopRunPage() {
       : currentStepLabel;
   useEffect(() => {
     if (!gateTransitionStepId) return;
-    if (!run || terminalStatuses.has(run.status) || pendingGate) {
+    if (!run || terminalStatuses.has(run.status) || pendingInteraction) {
       setGateTransitionStepId(null);
     }
-  }, [gateTransitionStepId, pendingGate, run]);
+  }, [gateTransitionStepId, pendingInteraction, run]);
   const doneSteps = latestSteps.filter((step) => step.status === "succeeded").length;
   const parentRunPhase = useMemo(
-    () => resolveParentRunPhase(run?.status ?? "idle", pendingGate, Boolean(failureRetryTarget) && !transitioningAfterGate),
-    [failureRetryTarget, pendingGate, run?.status, transitioningAfterGate],
+    () => resolveParentRunPhase(run?.status ?? "idle", pendingInteraction, Boolean(failureRetryTarget) && !transitioningAfterGate),
+    [failureRetryTarget, pendingInteraction, run?.status, transitioningAfterGate],
   );
   const parentAgentNarrative = useMemo(() => {
     if (!run) {
@@ -1603,49 +1614,50 @@ export default function StableLoopRunPage() {
       parentRunPhase,
       currentStep,
       currentStepLabel,
-      pendingGate,
+      pendingInteraction,
       operatorView,
       latestSteps,
       doneSteps,
     });
-  }, [currentStep, currentStepLabel, doneSteps, latestSteps, operatorView, parentRunPhase, pendingGate, run]);
+  }, [currentStep, currentStepLabel, doneSteps, latestSteps, operatorView, parentRunPhase, pendingInteraction, run]);
   const activeStageName = useMemo(() => {
     if (currentStep) {
       return formatWorkerDisplayName(currentStep.agent_snapshot?.name ?? `Slot ${currentStep.step_index + 1}`);
     }
-    if (pendingGate) return pendingGate.gate_type;
+    if (pendingInteraction) return pendingInteraction.interaction_kind;
     return "Initializing";
-  }, [currentStep, pendingGate]);
+  }, [currentStep, pendingInteraction]);
   const memoryGateItems = useMemo(
-    () => pendingGate ? readMemoryGateItems(pendingGate) : [],
-    [pendingGate],
+    () => pendingInteraction ? readMemoryGateItems(pendingInteraction) : [],
+    [pendingInteraction],
   );
   const sourceGateItems = useMemo(
-    () => pendingGate ? readSourceGateItems(pendingGate) : [],
-    [pendingGate],
+    () => pendingInteraction ? readSourceGateItems(pendingInteraction) : [],
+    [pendingInteraction],
   );
   const sourceGateAdded = useMemo(
-    () => (pendingGate ? addedSources[pendingGate.id] ?? [] : []),
-    [addedSources, pendingGate],
+    () => (pendingInteraction ? addedSources[pendingInteraction.id] ?? [] : []),
+    [addedSources, pendingInteraction],
   );
   const selectedMemoryIds = useMemo(
-    () => new Set(memorySelections[pendingGate?.id ?? ""] ?? memoryGateItems.filter((item) => item.include !== false).map((item) => item.id)),
-    [memoryGateItems, memorySelections, pendingGate?.id],
+    () => new Set(memorySelections[pendingInteraction?.id ?? ""] ?? memoryGateItems.filter((item) => item.include !== false).map((item) => item.id)),
+    [memoryGateItems, memorySelections, pendingInteraction?.id],
   );
   const selectedSourceIds = useMemo(
-    () => new Set(sourceSelections[pendingGate?.id ?? ""] ?? [
+    () => new Set(sourceSelections[pendingInteraction?.id ?? ""] ?? [
       ...sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
       ...sourceGateAdded.map((item) => item.id),
     ]),
-    [pendingGate?.id, sourceGateAdded, sourceGateItems, sourceSelections],
+    [pendingInteraction?.id, sourceGateAdded, sourceGateItems, sourceSelections],
   );
-  const inputSurfaceActive = Boolean(operatorView?.actions.includes("submit"));
+  const inputSurfaceActive = Boolean(operatorView?.actions.some((action) =>
+    action.command === "submit_input" || action.command === "verify_connection"));
   const selectedStep = useMemo(() => {
     if (selectedStepId) return orderedSteps.find((step) => step.id === selectedStepId) ?? null;
-    if (inputSurfaceActive && operatorView?.gateId) return null;
+    if (inputSurfaceActive && operatorView?.interactionId) return null;
     if (currentStep) return orderedSteps.find((step) => step.id === currentStep.id) ?? currentStep;
-    return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_gate" || step.status === "running") ?? null;
-  }, [currentStep, inputSurfaceActive, operatorView?.gateId, orderedSteps, selectedStepId]);
+    return [...orderedSteps].reverse().find((step) => getStepText(step) || step.status === "waiting_for_interaction" || step.status === "running") ?? null;
+  }, [currentStep, inputSurfaceActive, operatorView?.interactionId, orderedSteps, selectedStepId]);
   const selectedStepContext = selectedStepId ? selectedStep : null;
   const selectedArtifact = useMemo(() => {
     if (!selectedArtifactId) return null;
@@ -1665,11 +1677,19 @@ export default function StableLoopRunPage() {
 
   const finalArtifactName = inferGoalArtifactName(run, activeArtifact);
   const activeCanvasArtifact = useMemo(() => {
-    const gateCanvasKey = typeof pendingGate?.payload_json.canvasArtifactKey === "string"
-      ? pendingGate.payload_json.canvasArtifactKey
-      : null;
+    const gateCanvasKey = typeof operatorView?.meta?.canvasArtifactKey === "string"
+      ? operatorView.meta.canvasArtifactKey
+      : typeof pendingInteraction?.payload_json.canvasArtifactKey === "string"
+        ? pendingInteraction.payload_json.canvasArtifactKey
+        : null;
+    const resolveCanvasArtifact = (artifactKey: string) => {
+      const direct = finalArtifacts.find((artifact) => artifact.artifact_key === artifactKey);
+      if (direct) return direct;
+      const legacyRendererKey = artifactKey.replace(/:renderer:/, ":");
+      return finalArtifacts.find((artifact) => artifact.artifact_key === legacyRendererKey) ?? null;
+    };
     if (gateCanvasKey) {
-      const fromGate = finalArtifacts.find((artifact) => artifact.artifact_key === gateCanvasKey);
+      const fromGate = resolveCanvasArtifact(gateCanvasKey);
       if (fromGate) return fromGate;
     }
     if (selectedArtifact?.kind === "canvas_email" || selectedArtifact?.kind === "canvas_preview") return selectedArtifact;
@@ -1677,19 +1697,21 @@ export default function StableLoopRunPage() {
       const paired = finalArtifacts.find(
         (artifact) =>
           artifact.artifact_key === `${selectedArtifact.artifact_key}:canvas.email` ||
-          artifact.artifact_key === `${selectedArtifact.artifact_key}:canvas.preview`,
+          artifact.artifact_key === `${selectedArtifact.artifact_key}:canvas.preview` ||
+          artifact.artifact_key === `${selectedArtifact.artifact_key}:renderer:canvas.email` ||
+          artifact.artifact_key === `${selectedArtifact.artifact_key}:renderer:canvas.preview`,
       );
       if (paired) return paired;
     }
     return finalArtifacts.find(
       (artifact) => artifact.kind === "canvas_email" || artifact.kind === "canvas_preview",
     ) ?? null;
-  }, [finalArtifacts, pendingGate, selectedArtifact]);
+  }, [finalArtifacts, operatorView?.meta?.canvasArtifactKey, pendingInteraction, selectedArtifact]);
   const activeCanvasTemplate = activeCanvasArtifact?.data_json?.emailTemplate ?? null;
   const inspectingAgentOutput = Boolean(selectedStepId && selectedStep);
   const showOperatorWorkspace = Boolean(
     operatorView?.blocks.length
-    && (operatorView.gateId || operatorView.blocks.some((block) => block.required && !block.satisfied)),
+    && (operatorView.interactionId || operatorView.blocks.some((block) => block.required && !block.satisfied)),
   );
   const centerTitle = inspectingAgentOutput
     ? `${formatWorkerDisplayName(selectedStep?.agent_snapshot?.name ?? selectedStep?.agent_id ?? "Agent")} output`
@@ -1780,67 +1802,67 @@ export default function StableLoopRunPage() {
     [orderedSteps],
   );
   const gateAgentOutput = useMemo(() => {
-    if (!pendingGate) return "";
-    return readGateAgentOutput(pendingGate.payload_json, getStepDisplayContent(gateStep));
-  }, [gateStep, pendingGate]);
+    if (!pendingInteraction) return "";
+    return readGateAgentOutput(pendingInteraction.payload_json, getStepDisplayContent(gateStep));
+  }, [gateStep, pendingInteraction]);
   useEffect(() => {
     const hasMemorySurface = operatorView?.blocks.some((block) => block.surface === "review.memories");
-    if (!pendingGate || !hasMemorySurface) return;
+    if (!pendingInteraction || !hasMemorySurface) return;
     setMemorySelections((current) => {
-      if (current[pendingGate.id]) return current;
+      if (current[pendingInteraction.id]) return current;
       return {
         ...current,
-        [pendingGate.id]: memoryGateItems.filter((item) => item.include !== false).map((item) => item.id),
+        [pendingInteraction.id]: memoryGateItems.filter((item) => item.include !== false).map((item) => item.id),
       };
     });
-  }, [memoryGateItems, operatorView?.blocks, pendingGate]);
+  }, [memoryGateItems, operatorView?.blocks, pendingInteraction]);
   useEffect(() => {
     const hasSourceSurface = operatorView?.blocks.some((block) => block.surface === "review.sources");
-    if (!pendingGate || !hasSourceSurface) return;
+    if (!pendingInteraction || !hasSourceSurface) return;
     setSourceSelections((current) => {
-      if (current[pendingGate.id]) return current;
+      if (current[pendingInteraction.id]) return current;
       return {
         ...current,
-        [pendingGate.id]: sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
+        [pendingInteraction.id]: sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
       };
     });
-  }, [operatorView?.blocks, pendingGate, sourceGateItems]);
+  }, [operatorView?.blocks, pendingInteraction, sourceGateItems]);
 
-  function toggleMemorySelection(gateId: string, memoryId: string, checked: boolean) {
+  function toggleMemorySelection(interactionId: string, memoryId: string, checked: boolean) {
     setMemorySelections((current) => {
-      const currentIds = new Set(current[gateId] ?? memoryGateItems.filter((item) => item.include !== false).map((item) => item.id));
+      const currentIds = new Set(current[interactionId] ?? memoryGateItems.filter((item) => item.include !== false).map((item) => item.id));
       if (checked) currentIds.add(memoryId);
       else currentIds.delete(memoryId);
       return {
         ...current,
-        [gateId]: [...currentIds],
+        [interactionId]: [...currentIds],
       };
     });
   }
 
-  function toggleSourceSelection(gateId: string, sourceId: string, checked: boolean) {
+  function toggleSourceSelection(interactionId: string, sourceId: string, checked: boolean) {
     setSourceSelections((current) => {
-      const currentIds = new Set(current[gateId] ?? [
+      const currentIds = new Set(current[interactionId] ?? [
         ...sourceGateItems.filter((item) => item.include !== false).map((item) => item.id),
-        ...(addedSources[gateId] ?? []).map((item) => item.id),
+        ...(addedSources[interactionId] ?? []).map((item) => item.id),
       ]);
       if (checked) currentIds.add(sourceId);
       else currentIds.delete(sourceId);
       return {
         ...current,
-        [gateId]: [...currentIds],
+        [interactionId]: [...currentIds],
       };
     });
   }
 
-  function addCustomSource(gateId: string, source: SourceGateItem) {
+  function addCustomSource(interactionId: string, source: SourceGateItem) {
     setAddedSources((current) => ({
       ...current,
-      [gateId]: [...(current[gateId] ?? []), source],
+      [interactionId]: [...(current[interactionId] ?? []), source],
     }));
     setSourceSelections((current) => ({
       ...current,
-      [gateId]: [...new Set([...(current[gateId] ?? []), source.id])],
+      [interactionId]: [...new Set([...(current[interactionId] ?? []), source.id])],
     }));
   }
 
@@ -1853,16 +1875,26 @@ export default function StableLoopRunPage() {
   }
 
   async function saveGateContacts(
-    gate: Gate,
+    gate: Interaction,
     input: { csvText?: string; contacts?: ContactRow[]; audienceId?: string },
   ) {
-    setBusy(`/gates/${gate.id}/contacts`);
+    setBusy(`/interactions/${gate.id}/contacts`);
     setError(null);
     try {
-      const response = await fetch(`/api/workflows/runs/${runId}/gates/${gate.id}/contacts`, {
+      const response = await fetch(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          command: "submit_input",
+          values: {
+            recipients: {
+              surface: "input.contacts_csv",
+              ...(input.csvText ? { csvText: input.csvText } : {}),
+              ...(input.contacts ? { contacts: input.contacts } : {}),
+              ...(input.audienceId ? { audienceId: input.audienceId } : {}),
+            },
+          },
+        }),
       });
       const payload = await response.json().catch(() => ({})) as {
         error?: string;
@@ -1886,9 +1918,12 @@ export default function StableLoopRunPage() {
     }
   }
 
-  function submitGate(gate: Gate, action: "approve" | "input" | "reject") {
+  function submitGate(gate: Interaction, action: "approve" | "input" | "reject") {
     if (action === "reject") {
-      void post(`/api/workflows/runs/${runId}/gates/${gate.id}/reject`, { reason: "Rejected by operator" });
+      void post(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, {
+        command: "reject",
+        value: { reason: "Rejected by operator" },
+      });
       return;
     }
     if (action === "input") {
@@ -1896,16 +1931,31 @@ export default function StableLoopRunPage() {
       setSelectedArtifactId(null);
       setLeftTab("output");
       setGateTransitionStepId(currentStep?.id ?? gate.id);
-      const projectedInputBlocks = operatorView?.gateId === gate.id
-        ? operatorView.blocks.filter((block) => block.surface.startsWith("input."))
+      const projectedInputBlocks = operatorView?.interactionId === gate.id
+        ? operatorView.blocks.filter((block) => block.surface?.startsWith("input."))
         : [];
+      if (projectedInputBlocks.length > 0) {
+        const values = Object.fromEntries(projectedInputBlocks.map((block) => [
+          block.id,
+          {
+            surface: block.surface!,
+            ...(block.surface === "input.contacts_csv" && savedContacts.length > 0 ? { contacts: savedContacts } : {}),
+            ...(block.surface === "input.audience_id" && savedAudienceId ? { audienceId: savedAudienceId } : {}),
+            ...(!block.satisfied && block.surface !== "input.contacts_csv" && block.surface !== "input.audience_id"
+              ? { text: inputValues[`${gate.id}:${block.id}`] ?? inputValues[gate.id] ?? "" }
+              : {}),
+          },
+        ]));
+        void post(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, { command: "submit_input", values });
+        return;
+      }
       const projectedBlock = projectedInputBlocks.find((block) => block.required && !block.satisfied)
         ?? projectedInputBlocks[0]
         ?? null;
       const projectedSurface = projectedBlock
         ? {
             key: projectedBlock.id,
-            surface: projectedBlock.surface,
+            surface: projectedBlock.surface!,
             required: projectedBlock.required,
             satisfied: projectedBlock.satisfied,
             label: projectedBlock.label,
@@ -1921,7 +1971,8 @@ export default function StableLoopRunPage() {
       if (surface) {
         const recipientSurface = surface.surface === "input.contacts_csv" || surface.surface === "input.audience_id";
         const satisfiedInputSurface = surface.satisfied && surface.surface.startsWith("input.");
-        void post(`/api/workflows/runs/${runId}/gates/${gate.id}/submit`, {
+        void post(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, {
+          command: "submit_input",
           values: satisfiedInputSurface || (recipientSurface && savedRecipientCount > 0)
             ? {}
             : buildSurfaceSubmission({
@@ -1933,7 +1984,10 @@ export default function StableLoopRunPage() {
         });
         return;
       }
-      void post(`/api/workflows/runs/${runId}/gates/${gate.id}/input`, { value: inputValues[gate.id] ?? "" });
+      void post(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, {
+        command: "submit_input",
+        values: {},
+      });
       return;
     }
     setSelectedStepId(null);
@@ -1942,8 +1996,12 @@ export default function StableLoopRunPage() {
     setGateTransitionStepId(currentStep?.id ?? gate.id);
     const primarySurface = operatorView?.blocks.find((block) => block.required && !block.satisfied)?.surface
       ?? operatorView?.blocks[0]?.surface;
-    void post(`/api/workflows/runs/${runId}/gates/${gate.id}/approve`, {
-      channel: "dashboard",
+    const primaryKind = operatorView?.blocks.find((block) => block.required && !block.satisfied)?.kind
+      ?? operatorView?.blocks[0]?.kind;
+    void post(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, {
+      command: "approve",
+      value: {
+        channel: "dashboard",
       ...(primarySurface === "review.memories"
         ? {
             items: buildMemoryGateDecisionItems(
@@ -1964,19 +2022,21 @@ export default function StableLoopRunPage() {
             ),
           }
         : {}),
-      ...(primarySurface === "confirm.send" && savedContacts.length > 0
-        ? { contacts: savedContacts }
-        : {}),
+        ...(primarySurface === "confirm.send" || primaryKind === "confirm_action"
+          ? savedContacts.length > 0 ? { contacts: savedContacts } : {}
+          : {}),
+      },
     });
   }
 
-  function submitRevise(gate: Gate) {
+  function submitRevise(gate: Interaction) {
     setSelectedStepId(null);
     setSelectedArtifactId(null);
     setLeftTab("output");
     setGateTransitionStepId(currentStep?.id ?? gate.id);
-    void post(`/api/workflows/runs/${runId}/gates/${gate.id}/revise`, {
-      feedback: reviseFeedback[gate.id]?.trim() || undefined,
+    void post(`/api/workflows/runs/${runId}/interactions/${gate.id}/commands`, {
+      command: "revise",
+      value: { feedback: reviseFeedback[gate.id]?.trim() || undefined },
     });
   }
 
@@ -2054,7 +2114,7 @@ export default function StableLoopRunPage() {
         <RunStatusBand
           gateResolvedFlash={gateResolvedFlash}
           transitioningAfterGate={transitioningAfterGate}
-          pendingGate={pendingGate}
+          pendingInteraction={pendingInteraction}
           operatorView={operatorView}
           runStatus={run.status}
           failureStep={failureRetryTarget}
@@ -2068,20 +2128,26 @@ export default function StableLoopRunPage() {
             recipientCount: savedRecipientCount,
           }) : "Approve"}
           approveDisabled={operatorView ? operatorApproveDisabled(operatorView, {
-            inputValue: pendingGate ? (inputValues[pendingGate.id] ?? "") : "",
+            inputValue: pendingInteraction
+              ? operatorView.blocks.map((block) => inputValues[`${pendingInteraction.id}:${block.id}`] ?? "").join("")
+              : "",
             selectedSources: selectedSourceIds.size,
             recipientCount: savedRecipientCount,
           }) : false}
           showRevise={operatorView ? operatorShowRevise(operatorView) : false}
+          showReject={operatorView ? operatorShowReject(operatorView) : false}
           onApprove={() => {
-            if (!pendingGate || !operatorView) return;
+            if (!pendingInteraction || !operatorView) return;
             submitGate(
-              pendingGate,
-              operatorView.actions.includes("submit") ? "input" : "approve",
+              pendingInteraction,
+              operatorView.actions.some((action) =>
+                action.command === "submit_input" || action.command === "verify_connection")
+                ? "input"
+                : "approve",
             );
           }}
-          onRevise={() => pendingGate && submitRevise(pendingGate)}
-          onReject={() => pendingGate && submitGate(pendingGate, "reject")}
+          onRevise={() => pendingInteraction && submitRevise(pendingInteraction)}
+          onReject={() => pendingInteraction && submitGate(pendingInteraction, "reject")}
           onRerun={() => {
             if (!failureRetryTarget) return;
             void post(`/api/workflows/runs/${runId}/steps/${failureRetryTarget.id}/retry`);
@@ -2106,22 +2172,27 @@ export default function StableLoopRunPage() {
                   <OperatorWorkspace
                     operatorView={operatorView}
                     runId={runId}
-                    gateId={operatorView.gateId ?? pendingGate?.id ?? contactsUploadGate?.id ?? null}
+                    interactionId={operatorView.interactionId ?? pendingInteraction?.id ?? contactsUploadGate?.id ?? null}
                     agentName={formatWorkerDisplayName(gateStep?.agent_snapshot?.name ?? gateStep?.agent_id ?? "the agent")}
                     agentOutput={gateAgentOutput}
                     centerBody={centerBody}
                     activeCanvasArtifact={activeCanvasArtifact}
-                    inputValue={pendingGate ? (inputValues[pendingGate.id] ?? "") : ""}
-                    onInputChange={(value) => {
-                      if (!pendingGate) return;
-                      setInputValues((current) => ({ ...current, [pendingGate.id]: value }));
+                    inputValues={pendingInteraction
+                      ? Object.fromEntries(operatorView.blocks.map((block) => [
+                          block.id,
+                          inputValues[`${pendingInteraction.id}:${block.id}`] ?? inputValues[pendingInteraction.id] ?? "",
+                        ]))
+                      : {}}
+                    onInputChange={(blockId, value) => {
+                      if (!pendingInteraction) return;
+                      setInputValues((current) => ({ ...current, [`${pendingInteraction.id}:${blockId}`]: value }));
                     }}
-                    onSubmitInput={() => pendingGate && submitGate(pendingGate, "input")}
+                    onSubmitInput={() => pendingInteraction && submitGate(pendingInteraction, "input")}
                     busy={Boolean(busy)}
                     contactSourceKind={contactSourceKind}
                     recipientCount={savedRecipientCount}
                     onSaveContacts={async (input) => {
-                      const gate = pendingGate ?? contactsUploadGate;
+                      const gate = pendingInteraction ?? contactsUploadGate;
                       if (!gate) return;
                       await saveGateContacts(gate, input);
                     }}
@@ -2134,10 +2205,10 @@ export default function StableLoopRunPage() {
                     onToggleSource={toggleSourceSelection}
                     onInspectMemory={setMemoryDetail}
                     onAddSource={addCustomSource}
-                    reviseFeedback={pendingGate ? (reviseFeedback[pendingGate.id] ?? "") : ""}
+                    reviseFeedback={pendingInteraction ? (reviseFeedback[pendingInteraction.id] ?? "") : ""}
                     onReviseFeedbackChange={(value) => {
-                      if (!pendingGate) return;
-                      setReviseFeedback((current) => ({ ...current, [pendingGate.id]: value }));
+                      if (!pendingInteraction) return;
+                      setReviseFeedback((current) => ({ ...current, [pendingInteraction.id]: value }));
                     }}
                     onSaveCanvasEmail={async (artifact, value) => saveCanvasEmail(artifact as Artifact, value)}
                     onSaveAgentOutput={async (text) => {
@@ -2209,7 +2280,7 @@ export default function StableLoopRunPage() {
                                 This agent is still running. You can edit and save the current result now.
                               </p>
                             ) : null}
-                            {selectedStep?.status === "waiting_for_gate" || selectedStep?.status === "waiting_for_approval" ? (
+                            {selectedStep?.status === "waiting_for_interaction" || selectedStep?.status === "waiting_for_approval" ? (
                               <p className="text-[13px] text-[#6b7280]">
                                 This agent is waiting for approval. You can edit the result before approving.
                               </p>
@@ -2217,7 +2288,7 @@ export default function StableLoopRunPage() {
                             <EditableAgentOutput
                               text={centerBody}
                               saving={Boolean(busy)}
-                              forceEditing={selectedStep?.status === "running" || selectedStep?.status === "waiting_for_gate" || selectedStep?.status === "waiting_for_approval"}
+                              forceEditing={selectedStep?.status === "running" || selectedStep?.status === "waiting_for_interaction" || selectedStep?.status === "waiting_for_approval"}
                               onSave={async (text) => {
                                 if (!selectedStep) return;
                                 await saveAgentResult(selectedStep.id, text);
@@ -2403,7 +2474,7 @@ export default function StableLoopRunPage() {
               ))}
               {finalArtifacts.length === 0 ? (
                 <p className="border border-dashed border-[#d1d5db] bg-[#fafafa] px-5 py-6 text-[13px] text-[#9ca3af]">
-                  {pendingGate
+                  {pendingInteraction
                     ? "Blocked until approval completes."
                     : transitioningAfterGate
                       ? "Approval received. Waiting for the next artifact."
@@ -2440,7 +2511,7 @@ export default function StableLoopRunPage() {
                 <ChildAgentsHeader count={latestSteps.length} />
                 {latestSteps.map((step) => {
                   const selected = selectedStepId === step.id || (!selectedStepId && selectedStep?.id === step.id);
-                  const phase = resolveStepRowPhase(step, currentStep, pendingGate);
+                  const phase = resolveStepRowPhase(step, currentStep, pendingInteraction);
                   const isCurrent = currentStep?.id === step.id;
                   return (
                     <ChildAgentRow
@@ -2487,7 +2558,7 @@ export default function StableLoopRunPage() {
               ))}
               {contextEntries.length === 0 ? (
                 <p className="border border-dashed border-[#d1d5db] bg-[#fafafa] px-5 py-6 text-[13px] text-[#9ca3af]">
-                  {pendingGate ? "Pending your selection above." : "No approved memory or submitted input yet."}
+                  {pendingInteraction ? "Pending your selection above." : "No approved memory or submitted input yet."}
                 </p>
               ) : null}
             </EditorialSidebarPanel>

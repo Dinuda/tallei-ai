@@ -11,21 +11,31 @@ export type InputSurface =
   | "review.memories"
   | "confirm.send";
 
-export type OperatorAction = "submit" | "approve" | "revise" | "reject";
+export type OperatorCommand = "submit_input" | "approve" | "revise" | "reject" | "verify_connection";
+
+export type OperatorAction = {
+  id: string;
+  command: OperatorCommand;
+  label: string;
+  enabled: boolean;
+  disabledReason?: string;
+};
 
 export type OperatorBlock = {
+  kind: "collect_input" | "review_artifact" | "confirm_action" | "connect_connector";
   id: string;
-  surface: InputSurface;
+  surface?: InputSurface;
   required: boolean;
   satisfied: boolean;
   label?: string;
   description?: string;
   props?: Record<string, unknown>;
   data?: unknown;
+  interaction?: Record<string, unknown>;
 };
 
 export type OperatorView = {
-  gateId: string | null;
+  interactionId: string | null;
   workspace: {
     title: string;
     subtitle: string;
@@ -49,9 +59,9 @@ export function primaryPendingBlock(view: OperatorView | null | undefined): Oper
 }
 
 export function viewHasInputSurface(view: OperatorView | null | undefined): boolean {
-  return Boolean(view?.blocks.some((block) => block.surface.startsWith("input.") && block.required && !block.satisfied));
+  return Boolean(view?.blocks.some((block) => block.surface?.startsWith("input.") && block.required && !block.satisfied));
 }
 
 export function viewHasApprovalActions(view: OperatorView | null | undefined): boolean {
-  return Boolean(view?.actions.includes("approve"));
+  return Boolean(view?.actions.some((action) => action.command === "approve"));
 }

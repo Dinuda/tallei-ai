@@ -10,6 +10,7 @@ import { connectorPolicySchema, noSlopSpecSnapshotSchema } from "../loop-engine/
 import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
 import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
 import { dataContractSchema } from "../loop-engine/data-contract.js";
+import { operatorInteractionPlanSchema } from "../loop-engine/operator-interactions.js";
 
 /** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
 export function normalizeOptionalString(value: unknown): unknown {
@@ -36,15 +37,8 @@ export const loopGateTypeSchema = z.enum([
   "draft_review",
   "pre_send",
 ]);
-
 export type LoopGateType = z.infer<typeof loopGateTypeSchema>;
-
-export const loopAgentGateSchema = z.object({
-  type: loopGateTypeSchema,
-  question: z.string().min(1),
-});
-
-export type LoopAgentGate = z.infer<typeof loopAgentGateSchema>;
+export const loopAgentGateSchema = z.object({ type: loopGateTypeSchema, question: z.string().min(1) });
 
 export const loopAgentContractSchema = dataContractSchema;
 
@@ -66,21 +60,9 @@ export const agentHandoffBindingSchema = z.object({
 
 export type AgentHandoffBinding = z.infer<typeof agentHandoffBindingSchema>;
 
-function normalizeDeliveryProvider(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const row = value as Record<string, unknown>;
-  const provider = typeof row.provider === "string" ? row.provider.trim() : "";
-  if (provider) return { provider };
-  const legacyTarget = typeof row.target === "string" ? row.target.trim().toLowerCase() : "none";
-  return { provider: legacyTarget === "none" ? "none" : "none" };
-}
-
-export const loopDeliveryRoutingSchema = z.preprocess(
-  normalizeDeliveryProvider,
-  z.object({
-    provider: z.string().min(1),
-  }),
-);
+export const loopDeliveryRoutingSchema = z.object({
+  provider: z.string().min(1),
+});
 
 export type LoopDeliveryRouting = z.infer<typeof loopDeliveryRoutingSchema>;
 
@@ -306,9 +288,9 @@ export const loopDefinitionSchema = z.object({
   delivery: loopDeliveryRoutingSchema.optional(),
   connectorPolicy: connectorPolicySchema.optional(),
   inputRequirements: z.array(inputRequirementSchema).default([]).optional(),
-  inputsRequired: z.array(z.string().min(1)).default([]).optional(),
+  operatorInteractionPlan: operatorInteractionPlanSchema,
   engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
-  agentGraph: loopAgentGraphSchema.optional(),
+  agentGraph: loopAgentGraphSchema,
   plan: loopPlanSchema.optional(),
   builderMeta: z.object({
     designedBy: z.enum(["ceo_llm", "loop_architect"]).default("ceo_llm"),
@@ -324,12 +306,10 @@ export const loopDefinitionSchema = z.object({
     }).optional(),
     designDiagnostics: z.record(z.unknown()).optional(),
     discoveredToolContracts: z.array(z.record(z.unknown())).optional(),
-    planningIRVersion: z.enum(["v1", "v2"]).optional(),
-    planningIR: z.record(z.unknown()).optional(),
-    typedConnectorHandoffs: z.enum(["v1", "v2"]).optional(),
-    contractDrivenGraph: z.literal("v1").optional(),
+    planningIRVersion: z.literal("v2"),
+    planningIR: z.record(z.unknown()),
     workflowUserProfile: workflowUserProfileSchema.optional(),
-  }).optional(),
+  }),
 });
 
 export type LoopDefinition = z.infer<typeof loopDefinitionSchema>;

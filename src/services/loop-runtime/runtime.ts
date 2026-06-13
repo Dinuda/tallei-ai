@@ -5,15 +5,15 @@ import { pool } from "../../infrastructure/db/index.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
 import { extractWebSearchSources } from "../loop-engine/contracts.js";
 import { contractMediaType, contractRenderer, contractVisibility } from "../loop-engine/data-contract.js";
-import { renderArtifact } from "./artifact-renderers.js";
 import {
-  agentCollectsRunStartInput,
-  applyGateDecisionToRunMemory,
-  buildAgentHandoff,
-  buildOperatorRevisionPatch,
-  isMisclassifiedDraftReviewGate,
-  type RunMemory,
-} from "./memory.js";
+  activeOperatorInteractionSchema,
+  findOperatorInteraction,
+  operatorInteractionCommandSchema,
+  type OperatorInteractionKind,
+  type OperatorInteractionPlanItem,
+} from "../loop-engine/operator-interactions.js";
+import { renderArtifact } from "./artifact-renderers.js";
+import { buildAgentHandoff, buildOperatorRevisionPatch, applyGateDecisionToRunMemory, type RunMemory } from "./memory.js";
 import { runLoopAgent } from "../loop-executor/agent-runner.js";
 import {
   loadWorkflowUserProfile,
@@ -26,7 +26,7 @@ import {
   markConnectorActionEventFailed,
 } from "../connectors/composio.js";
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
-import { loopRunAgentSchema, type LoopContactRow, type LoopGateType, type LoopRunAgent } from "../loop-executor/types.js";
+import { loopRunAgentSchema, type LoopContactRow, type LoopRunAgent } from "../loop-executor/types.js";
 import type { CanvasEmailTemplate } from "./email-canvas.js";
 import {
   selectLatestArtifactsByKey,
@@ -53,19 +53,8 @@ import {
   readRequirementValue,
   resolvedRuntimeInputs,
 } from "./input-satisfaction.js";
-import {
-  buildApprovalCheckpoint,
-  buildRequirementCheckpoint,
-  classifyOperatorCheckpoint,
-  checkpointPayload,
-  checkpointQuestion,
-  readOperatorCheckpoint,
-  resolveOperatorCheckpointContinuation,
-} from "./operator-checkpoint.js";
 import { projectOperatorView } from "./operator-view.js";
 import {
-  defaultSurfaceForGateType,
-  surfaceFromRenderer,
   gateSurfaceSubmissionSchema,
   isInputSurface,
   type InputRequirementWhen,
@@ -82,7 +71,7 @@ type CommandRow = {
   user_id: string;
   run_id: string;
   step_attempt_id: string | null;
-  command_type: "start_run" | "execute_step" | "continue_after_gate" | "finalize_run" | "retry_step";
+  command_type: "start_run" | "execute_step" | "continue_after_interaction" | "finalize_run" | "retry_step";
   attempts: number;
   max_attempts: number;
   payload_json: unknown;
@@ -90,6 +79,22 @@ type CommandRow = {
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function isTypedOperatorWorkflow(definition: RuntimeDefinition): boolean {
+  return definition.builderMeta?.planningIRVersion === "v2";
+}
+
+function requirePlannedInteraction<TKind extends OperatorInteractionPlanItem["kind"]>(
+  definition: RuntimeDefinition,
+  kind: TKind,
+  predicate: (item: Extract<OperatorInteractionPlanItem, { kind: TKind }>) => boolean,
+): Extract<OperatorInteractionPlanItem, { kind: TKind }> | undefined {
+  const interaction = findOperatorInteraction(definition.operatorInteractionPlan, kind, predicate);
+  if (!interaction && isTypedOperatorWorkflow(definition)) {
+    throw new Error(`Typed operator interaction plan is missing ${kind}. Refine or re-draft this workflow.`);
+  }
+  return interaction;
 }
 
 function runMemoryFromContext(context: RuntimeContext): RunMemory {
@@ -188,9 +193,6 @@ async function prepareConnectorActionPayload(input: {
     definition: input.definition,
     toolRef: input.toolRef,
   });
-  if (input.definition.builderMeta?.typedConnectorHandoffs !== "v2") {
-    throw new Error("This connector workflow predates typed connector handoffs. Refine or re-draft the workflow before running it.");
-  }
   const handoff = resolveAgentHandoffBindings({
     agent: input.agent,
     priorOutputs: input.priorOutputs,
@@ -517,17 +519,17 @@ async function handleStartRun(command: CommandRow) {
   });
 }
 
-async function createGate(input: {
+async function createInteraction(input: {
   command: CommandRow;
   attemptId: string;
-  gateType: LoopGateType;
+  gateType: OperatorInteractionKind;
   question: string;
   payload: Record<string, unknown>;
 }) {
   const id = randomUUID();
   await pool.query(
-    `INSERT INTO loop_engine_gates
-     (id, tenant_id, user_id, run_id, step_attempt_id, gate_type, question, payload_json, idempotency_key)
+    `INSERT INTO loop_engine_interactions
+     (id, tenant_id, user_id, run_id, step_attempt_id, interaction_kind, question, payload_json, idempotency_key)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
      ON CONFLICT (idempotency_key) DO NOTHING`,
     [
@@ -539,15 +541,15 @@ async function createGate(input: {
       input.gateType,
       input.question,
       JSON.stringify(input.payload),
-      `attempt:${input.attemptId}:gate:${input.gateType}`,
+      `attempt:${input.attemptId}:interaction:${input.gateType}`,
     ],
   );
   await pool.query(
-    `UPDATE loop_engine_step_attempts SET status = 'waiting_for_gate', updated_at = NOW() WHERE id = $1`,
+    `UPDATE loop_engine_step_attempts SET status = 'waiting_for_interaction', updated_at = NOW() WHERE id = $1`,
     [input.attemptId],
   );
   await pool.query(
-    `UPDATE loop_engine_runs SET status = 'waiting_for_gate', updated_at = NOW() WHERE id = $1`,
+    `UPDATE loop_engine_runs SET status = 'waiting_for_interaction', updated_at = NOW() WHERE id = $1`,
     [input.command.run_id],
   );
   await insertEvent({
@@ -555,8 +557,8 @@ async function createGate(input: {
     userId: input.command.user_id,
     runId: input.command.run_id,
     stepAttemptId: input.attemptId,
-    eventType: "gate_waiting",
-    payload: { gateType: input.gateType, question: input.question },
+    eventType: "interaction_waiting",
+    payload: { interactionKind: input.gateType, question: input.question },
   });
 }
 
@@ -569,88 +571,62 @@ async function openRequirementCheckpoint(input: {
   context: RuntimeContext;
   when: InputRequirementWhen;
 }): Promise<boolean> {
-  const unsatisfied = evaluateExecutionBlockingAt(input.definition, input.context, input.when);
+  const unsatisfied = evaluateExecutionBlockingAt(input.definition, input.context, input.when)
+    .filter((row) => {
+      if (!isTypedOperatorWorkflow(input.definition)) return true;
+      return Boolean(findOperatorInteraction(
+        input.definition.operatorInteractionPlan,
+        "collect_input",
+        (item) => item.requiredValueKey === row.requirement.key && item.consumingNodeId === input.agent.id,
+      ));
+    });
   if (unsatisfied.length === 0) return false;
 
   const requirements = unsatisfied.map((row) => row.requirement);
-  const checkpoint = buildRequirementCheckpoint({
-    requirements,
-    blocking: { agentId: input.agent.id, stepIndex: input.stepIndex },
+  const plannedInteractions = requirements.flatMap((requirement) => {
+    const interaction = requirePlannedInteraction(
+      input.definition,
+      "collect_input",
+      (item) => item.requiredValueKey === requirement.key && item.consumingNodeId === input.agent.id,
+    );
+    return interaction ? [interaction] : [];
   });
-  const gateType: LoopGateType = input.when === "before_send"
-      ? "pre_send"
-      : "missing_input";
-
-  await createGate({
+  const items = requirements.map((requirement) => ({
+    id: `required:${requirement.key}`,
+    kind: "collect_input" as const,
+    requiredValueKey: requirement.key,
+    consumingNodeId: input.agent.id,
+    surface: requirement.surface,
+    timing: requirement.when,
+    valueType: requirement.surface === "input.contacts_csv" ? "array" : "string",
+    label: requirement.label ?? requirement.key,
+    description: requirement.description ?? `Provide ${requirement.label ?? requirement.key} to continue.`,
+    required: requirement.required,
+  }));
+  const question = items.length === 1
+    ? items[0]!.description
+    : `Provide ${items.map((item) => item.label).join(", ")} to continue.`;
+  await createInteraction({
     command: input.command,
     attemptId: input.attemptId,
-    gateType,
-    question: checkpointQuestion(checkpoint),
-    payload: checkpointPayload({
-      checkpoint,
+    gateType: "collect_input",
+    question,
+    payload: {
+      when: input.when,
       agentId: input.agent.id,
       stepIndex: input.stepIndex,
-      extra: { when: input.when },
-    }),
+      operatorInteraction: {
+        kind: "collect_input",
+        interactionIds: plannedInteractions.map((item) => item.id),
+        items: items.map((item) => ({ ...item, satisfied: false })),
+      },
+    },
   });
   await pool.query(
     `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-    [input.attemptId, JSON.stringify({ text: checkpointQuestion(checkpoint), data: { when: input.when, checkpoint } })],
+    [input.attemptId, JSON.stringify({ text: question, data: { when: input.when, requiredValues: items } })],
   );
   return true;
-}
-
-async function openConnectorActionInputCheckpoint(input: {
-  command: CommandRow;
-  attemptId: string;
-  stepIndex: number;
-  agent: LoopRunAgent;
-  error: ConnectorActionPayloadError;
-}) {
-  const description = connectorActionFailureMessage(input.error);
-  const checkpoint = buildRequirementCheckpoint({
-    requirements: [{
-      key: "connector_action_inputs",
-      surface: "input.text",
-      required: true,
-      when: "before_step",
-      label: "Connector action inputs",
-      description: `${description}. Provide the missing values or a JSON object using fields from the action schema.`,
-    }],
-    blocking: { agentId: input.agent.id, stepIndex: input.stepIndex },
-    propsForKey: () => ({
-      actionContract: sanitizeConnectorDetails(input.error.details.contract),
-      validationErrors: input.error.details.validationErrors,
-    }),
-  });
-  await createGate({
-    command: input.command,
-    attemptId: input.attemptId,
-    gateType: "missing_input",
-    question: checkpointQuestion(checkpoint),
-    payload: checkpointPayload({
-      checkpoint,
-      agentId: input.agent.id,
-      stepIndex: input.stepIndex,
-      extra: {
-        when: "before_step",
-        kind: "connector_action_inputs",
-        contract: sanitizeConnectorDetails(input.error.details.contract),
-        validationErrors: input.error.details.validationErrors,
-      },
-    }),
-  });
-  await pool.query(
-    `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-    [input.attemptId, JSON.stringify(connectorStepOutput({
-      message: description,
-      prepared: {
-        contract: sanitizeConnectorDetails(input.error.details.contract),
-        validationErrors: input.error.details.validationErrors,
-        payloadCompilation: { attempts: input.error.details.attempts, valid: false },
-      },
-    }))],
-  );
 }
 
 async function openConnectorConnectionCheckpoint(input: {
@@ -658,6 +634,7 @@ async function openConnectorConnectionCheckpoint(input: {
   attemptId: string;
   stepIndex: number;
   agent: LoopRunAgent;
+  definition: RuntimeDefinition;
   toolkit: string;
   actionSlug: string;
   toolRef: string;
@@ -670,47 +647,37 @@ async function openConnectorConnectionCheckpoint(input: {
   };
   const connected = new Set(connectedAppToolkits(await listConnectorAccounts(auth).catch(() => [])));
   if (connected.has(input.toolkit.toLowerCase())) return false;
-
-  const checkpoint = buildRequirementCheckpoint({
-    requirements: [{
-      key: `connect_${input.toolkit.toLowerCase()}`,
-      surface: "input.text",
-      required: true,
+  const interaction = requirePlannedInteraction(
+    input.definition,
+    "connect_connector",
+    (item) => item.actionNodeId === input.agent.id && item.contractRef === input.toolRef,
+  );
+  const question = `Connect ${input.toolkit} to continue ${input.actionSlug}.`;
+  await createInteraction({
+    command: input.command,
+    attemptId: input.attemptId,
+    gateType: "connect_connector",
+    question,
+    payload: {
       when: "before_step",
-      label: `Connect ${input.toolkit}`,
-      description: `Connect ${input.toolkit}, verify the connection, then continue this connector action.`,
-    }],
-    blocking: { agentId: input.agent.id, stepIndex: input.stepIndex },
-    satisfiedKeys: new Set([`connect_${input.toolkit.toLowerCase()}`]),
-    propsForKey: () => ({
+      agentId: input.agent.id,
+      stepIndex: input.stepIndex,
       connectorSetup: {
         provider: "composio",
         toolkit: input.toolkit,
         actionSlug: input.actionSlug,
         toolRef: input.toolRef,
       },
-    }),
-  });
-  await createGate({
-    command: input.command,
-    attemptId: input.attemptId,
-    gateType: "missing_input",
-    question: `Connect ${input.toolkit} to continue ${input.actionSlug}.`,
-    payload: checkpointPayload({
-      checkpoint,
-      agentId: input.agent.id,
-      stepIndex: input.stepIndex,
-      extra: {
-        when: "before_step",
-        kind: "connector_connection",
-        connectorSetup: {
-          provider: "composio",
-          toolkit: input.toolkit,
-          actionSlug: input.actionSlug,
-          toolRef: input.toolRef,
-        },
+      operatorInteraction: {
+        kind: "connect_connector",
+        interactionId: interaction?.id ?? randomUUID(),
+        actionNodeId: input.agent.id,
+        contractRef: input.toolRef,
+        toolkit: input.toolkit,
+        actionSlug: input.actionSlug,
+        connected: false,
       },
-    }),
+    },
   });
   await pool.query(
     `UPDATE loop_engine_step_attempts SET output_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
@@ -722,8 +689,42 @@ async function openConnectorConnectionCheckpoint(input: {
   return true;
 }
 
+async function openCurationReviewCheckpoint(input: {
+  command: CommandRow;
+  attemptId: string;
+  stepIndex: number;
+  agent: LoopRunAgent;
+  gateType: "memory_confirmation" | "source_confirmation";
+  question: string;
+  output: Record<string, unknown>;
+  resultData: Record<string, unknown>;
+}): Promise<void> {
+  const basePayload = {
+    ...gatePayloadForResult("review_artifact", input.agent.id, input.stepIndex, input.output, input.resultData),
+    gateType: input.gateType,
+  };
+  await createInteraction({
+    command: input.command,
+    attemptId: input.attemptId,
+    gateType: "review_artifact",
+    question: input.question,
+    payload: {
+      ...basePayload,
+      operatorInteraction: {
+        kind: "review_artifact",
+        interactionId: `review:${input.agent.outputArtifactId ?? `${input.agent.id}_output`}`,
+        artifactId: input.agent.outputArtifactId ?? `${input.agent.id}_output`,
+        rendererRef: null,
+        editable: input.gateType === "source_confirmation",
+        producerNodeId: input.agent.id,
+        outputText: typeof input.output.text === "string" ? input.output.text : "",
+      },
+    },
+  });
+}
+
 function gatePayloadForResult(
-  gateType: LoopGateType,
+  gateType: OperatorInteractionKind,
   agentId: string,
   stepIndex: number,
   output: Record<string, unknown>,
@@ -752,8 +753,7 @@ function gatePayloadForResult(
     agentId,
     stepIndex,
     result: output,
-    ...(gateType === "memory_confirmation" ? { items } : {}),
-    ...(gateType === "source_confirmation" ? { items: sourceConfirmationItems(resultData) } : {}),
+    ...(items.length > 0 ? { items } : {}),
   };
 }
 
@@ -811,16 +811,6 @@ async function promoteCanvasArtifactToStructuredOutput(
       dataJson,
     ],
   );
-}
-
-function gateQuestionForEvaluation(input: {
-  agent: LoopRunAgent;
-  gateType: LoopGateType;
-  reason: string;
-}) {
-  return input.agent.gate?.type === input.gateType
-    ? input.agent.gate.question
-    : input.reason;
 }
 
 function isAffirmativeGateInput(value: Record<string, unknown>) {
@@ -1048,32 +1038,7 @@ async function handleExecuteStep(command: CommandRow) {
     body: compactArtifactBody(artifact.body),
   }));
 
-  if (agentCollectsRunStartInput(agent)) {
-    const runStartRequirements = collectRequirements(definition)
-      .filter((requirement) => requirement.when === "run_start" && isInputSurface(requirement.surface));
-    const missingRunStartRequirements = evaluateExecutionBlockingAt(definition, context, "run_start");
-    if (runStartRequirements.length > 0 && missingRunStartRequirements.length === 0) {
-      await pool.query(
-        `UPDATE loop_engine_step_attempts
-         SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(),
-             lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
-         WHERE id = $1`,
-        [command.step_attempt_id, JSON.stringify({
-          text: "Required run-start inputs are already available.",
-          data: { inputKeys: runStartRequirements.map((requirement) => requirement.key) },
-        })],
-      );
-      await insertEvent({
-        tenantId: command.tenant_id,
-        userId: command.user_id,
-        runId: command.run_id,
-        stepAttemptId: command.step_attempt_id,
-        eventType: "step_succeeded",
-        payload: { agentId: agent.id, stepIndex: row.step_index, inputCollectorSkipped: true },
-      });
-      await queueNextStep(command, definition, row.step_index);
-      return;
-    }
+  if (isTypedOperatorWorkflow(definition)) {
     if (await openRequirementCheckpoint({
       command,
       attemptId: command.step_attempt_id,
@@ -1082,9 +1047,16 @@ async function handleExecuteStep(command: CommandRow) {
       definition,
       context,
       when: "run_start",
-    })) {
-      return;
-    }
+    })) return;
+    if (await openRequirementCheckpoint({
+      command,
+      attemptId: command.step_attempt_id,
+      stepIndex: row.step_index,
+      agent,
+      definition,
+      context,
+      when: "before_step",
+    })) return;
   }
 
   if (agent.tools.some((tool) => tool.ref === "internal.operator_input")) {
@@ -1128,6 +1100,7 @@ async function handleExecuteStep(command: CommandRow) {
       attemptId: command.step_attempt_id,
       stepIndex: row.step_index,
       agent,
+      definition,
       toolkit: connectorAction.toolkit,
       actionSlug: connectorAction.actionSlug,
       toolRef: connectorAction.assignment.ref,
@@ -1158,12 +1131,13 @@ async function handleExecuteStep(command: CommandRow) {
       });
     } catch (error) {
       if (!(error instanceof ConnectorActionPayloadError)) throw error;
-      await openConnectorActionInputCheckpoint({
+      await failConnectorActionStep({
         command,
         attemptId: command.step_attempt_id,
-        stepIndex: row.step_index,
-        agent,
-        error,
+        message: `Compiled connector bindings could not produce a valid payload: ${connectorActionFailureMessage(error)}`,
+        details: error.details,
+        toolkit: connectorAction.toolkit,
+        actionSlug: connectorAction.actionSlug,
       });
       return;
     }
@@ -1248,10 +1222,15 @@ async function handleExecuteStep(command: CommandRow) {
     const specSnapshot = definition.builderMeta?.noSlopSpec ?? null;
     const payloadHash = sha256Json(payload);
     const specHash = sha256Json(specSnapshot);
-    await createGate({
+    const confirmInteraction = requirePlannedInteraction(
+      definition,
+      "confirm_action",
+      (item) => item.actionNodeId === agent.id && item.contractRef === connectorAction.assignment.ref,
+    );
+    await createInteraction({
       command,
       attemptId: command.step_attempt_id,
-      gateType: "pre_send",
+      gateType: "confirm_action",
       question: agent.gate?.question ?? `Approve ${getLoopTool(connectorAction.assignment.ref)?.label ?? connectorAction.actionSlug}?`,
       payload: {
         kind: "connector_action",
@@ -1269,6 +1248,18 @@ async function handleExecuteStep(command: CommandRow) {
         grillMeChecklist: specSnapshot?.specJson?.guardrails ?? [],
         contract: prepared.contract,
         payloadCompilation: preparationDetails.payloadCompilation,
+        ...(confirmInteraction ? {
+          operatorInteraction: {
+            kind: "confirm_action",
+            interactionId: confirmInteraction.id,
+            actionNodeId: confirmInteraction.actionNodeId,
+            contractRef: confirmInteraction.contractRef,
+            effect: confirmInteraction.effect,
+            sanitizedPayload: asObject(sanitizeConnectorDetails(payload)),
+            payloadHash,
+            validation: { valid: true, errors: [] },
+          },
+        } : {}),
       },
     });
     await pool.query(
@@ -1368,7 +1359,7 @@ async function handleExecuteStep(command: CommandRow) {
   });
   const declaredRenderer = contractRenderer(agent.outputContract);
   const canvasArtifactKey = declaredRenderer
-    ? `${agent.outputArtifactId ?? `${agent.id}_output`}:renderer:${declaredRenderer}`
+    ? `${agent.outputArtifactId ?? `${agent.id}_output`}:${declaredRenderer}`
     : null;
   if (declaredRenderer && canvasArtifactKey) {
     const renderedValue = agentResult.structuredOutput
@@ -1388,38 +1379,52 @@ async function handleExecuteStep(command: CommandRow) {
     }
   }
 
+  const plannedReviewInteraction = findOperatorInteraction(
+    definition.operatorInteractionPlan,
+    "review_artifact",
+    (item) => item.producerNodeId === agent.id && item.artifactId === agent.outputArtifactId,
+  );
   if (goalEval.status === "needs_input") {
-    const requestedGateType = goalEval.gateType ?? agent.gate?.type ?? "missing_input";
-    const hasWebSources = sourceConfirmationItems(agentResult.data).length > 0;
-    const gateType: LoopGateType = hasWebSources && requestedGateType === "draft_review"
-      ? "source_confirmation"
-      : requestedGateType;
+    if (goalEval.gateType === "memory_confirmation" || goalEval.gateType === "source_confirmation") {
+      await openCurationReviewCheckpoint({
+        command,
+        attemptId: command.step_attempt_id,
+        stepIndex: row.step_index,
+        agent,
+        gateType: goalEval.gateType,
+        question: goalEval.reason,
+        output,
+        resultData: agentResult.data,
+      });
+      return;
+    }
+    if (!plannedReviewInteraction) {
+      throw new Error(`Agent ${agent.id} requested an undeclared operator interaction.`);
+    }
+  }
+  if (plannedReviewInteraction) {
+    const gateType: OperatorInteractionKind = "review_artifact";
     const basePayload = {
       ...gatePayloadForResult(gateType, agent.id, row.step_index, output, agentResult.data),
       ...(canvasArtifactKey ? { renderTarget: declaredRenderer, canvasArtifactKey } : {}),
     };
-    const checkpoint = buildApprovalCheckpoint({
-      gateType,
-      surface: hasWebSources
-        ? "review.sources"
-        : (surfaceFromRenderer(contractRenderer(agent.outputContract)) ?? defaultSurfaceForGateType(gateType)),
-      blocking: { agentId: agent.id, stepIndex: row.step_index },
-      props: {
-        ...(declaredRenderer ? { renderTarget: declaredRenderer } : {}),
-        ...(canvasArtifactKey ? { canvasArtifactKey } : {}),
-      },
-    });
-    await createGate({
+    await createInteraction({
       command,
       attemptId: command.step_attempt_id,
       gateType,
-      question: gateQuestionForEvaluation({ agent, gateType, reason: goalEval.reason }),
-      payload: checkpointPayload({
-        checkpoint,
-        agentId: agent.id,
-        stepIndex: row.step_index,
-        extra: basePayload,
-      }),
+      question: `Review ${plannedReviewInteraction.artifactId}.`,
+      payload: {
+        ...basePayload,
+        operatorInteraction: {
+          kind: "review_artifact",
+          interactionId: plannedReviewInteraction.id,
+          artifactId: plannedReviewInteraction.artifactId,
+          rendererRef: plannedReviewInteraction.rendererRef,
+          editable: plannedReviewInteraction.editable,
+          producerNodeId: plannedReviewInteraction.producerNodeId,
+          outputText: agentResult.text,
+        },
+      },
     });
     return;
   }
@@ -1443,10 +1448,10 @@ async function handleExecuteStep(command: CommandRow) {
 
 async function handleContinueAfterGate(command: CommandRow) {
   const payload = asObject(command.payload_json);
-  const gateId = typeof payload.gateId === "string" ? payload.gateId : null;
-  if (!gateId) throw new Error("continue_after_gate command has no gate");
+  const interactionId = typeof payload.interactionId === "string" ? payload.interactionId : null;
+  if (!interactionId) throw new Error("continue_after_interaction command has no gate");
   const result = await pool.query<{
-    gate_type: LoopGateType;
+    interaction_kind: OperatorInteractionKind;
     status: string;
     payload_json: unknown;
     step_attempt_id: string;
@@ -1456,13 +1461,13 @@ async function handleContinueAfterGate(command: CommandRow) {
     definition_snapshot: unknown;
     context_json: unknown;
   }>(
-    `SELECT g.gate_type, g.status, g.payload_json, g.step_attempt_id, a.step_index, a.attempt,
+    `SELECT g.interaction_kind, g.status, g.payload_json, g.step_attempt_id, a.step_index, a.attempt,
             a.agent_snapshot, r.definition_snapshot, r.context_json
-     FROM loop_engine_gates g
+     FROM loop_engine_interactions g
      JOIN loop_engine_step_attempts a ON a.id = g.step_attempt_id
      JOIN loop_engine_runs r ON r.id = g.run_id
      WHERE g.id = $1 AND g.run_id = $2 LIMIT 1`,
-    [gateId, command.run_id],
+    [interactionId, command.run_id],
   );
   const row = result.rows[0];
   if (!row) return;
@@ -1470,7 +1475,7 @@ async function handleContinueAfterGate(command: CommandRow) {
   const context = runtimeContextSchema.parse(row.context_json);
   const agent = loopRunAgentSchema.parse(row.agent_snapshot);
   const gatePayload = asObject(row.payload_json);
-  if (row.gate_type === "pre_send" && isConnectorActionPreSendGate(gatePayload)) {
+  if (row.interaction_kind === "confirm_action") {
     if (row.status !== "approved") return;
     const payload = asObject(gatePayload.payload);
     const payloadHash = typeof gatePayload.payloadHash === "string" ? gatePayload.payloadHash : "";
@@ -1564,7 +1569,7 @@ async function handleContinueAfterGate(command: CommandRow) {
       await pool.query(
         `UPDATE loop_engine_step_attempts
          SET status = 'succeeded', output_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
-         WHERE id = $1 AND status = 'waiting_for_gate'`,
+         WHERE id = $1 AND status = 'waiting_for_interaction'`,
         [row.step_attempt_id, JSON.stringify(connectorStepOutput({
           message: `Connector action completed: ${connectorAction.toolkit}/${connectorAction.actionSlug}`,
           prepared: asObject(details),
@@ -1600,28 +1605,15 @@ async function handleContinueAfterGate(command: CommandRow) {
     }
     return;
   }
-  const treatAsDraftReview = isMisclassifiedDraftReviewGate({
-    gateType: row.gate_type,
-    gateStatus: row.status,
-    agent,
-    gatePayload,
-    definition,
-    runMemory: runMemoryFromContext(context),
-  });
-  const checkpointKind = classifyOperatorCheckpoint(gatePayload);
-  const isLegacyRequirementGate = checkpointKind === "unknown" && (
-    (row.gate_type === "missing_input" && !treatAsDraftReview)
-    || (row.gate_type === "pre_send" && !isConnectorActionPreSendGate(gatePayload))
-  );
-  const continuation = resolveOperatorCheckpointContinuation({
-    payload: gatePayload,
-    legacyRequirementGate: isLegacyRequirementGate,
-    runStartInputCollector: agentCollectsRunStartInput(agent),
-  });
+  const activeInteraction = activeOperatorInteractionSchema.safeParse(gatePayload.operatorInteraction);
+  if (!activeInteraction.success) throw new Error("Interaction is missing typed operator state.");
+  const continuation = activeInteraction.data.kind === "collect_input" || activeInteraction.data.kind === "connect_connector"
+    ? "retry_step"
+    : "complete_step";
   if (continuation === "retry_step") {
     await pool.query(
       `UPDATE loop_engine_step_attempts SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status = 'waiting_for_gate'`,
+       WHERE id = $1 AND status = 'waiting_for_interaction'`,
       [row.step_attempt_id],
     );
     const retryId = await createAttempt({
@@ -1648,7 +1640,7 @@ async function handleContinueAfterGate(command: CommandRow) {
   }
   await pool.query(
     `UPDATE loop_engine_step_attempts SET status = 'succeeded', finished_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND status = 'waiting_for_gate'`,
+     WHERE id = $1 AND status = 'waiting_for_interaction'`,
     [row.step_attempt_id],
   );
   await queueNextStep(command, definition, row.step_index);
@@ -1656,13 +1648,13 @@ async function handleContinueAfterGate(command: CommandRow) {
 
 async function handleFinalizeRun(command: CommandRow) {
   const pending = await pool.query(
-    `SELECT id FROM loop_engine_gates WHERE run_id = $1 AND status = 'pending' LIMIT 1`,
+    `SELECT id FROM loop_engine_interactions WHERE run_id = $1 AND status = 'pending' LIMIT 1`,
     [command.run_id],
   );
   if (pending.rows[0]) throw new Error("Cannot finalize a run with a pending gate");
   const reviewedArtifacts = await pool.query<{ canvas_artifact_key: string | null }>(
     `SELECT DISTINCT payload_json->>'canvasArtifactKey' AS canvas_artifact_key
-     FROM loop_engine_gates
+     FROM loop_engine_interactions
      WHERE run_id = $1
        AND status = 'approved'
        AND payload_json ? 'canvasArtifactKey'`,
@@ -1679,7 +1671,7 @@ async function handleFinalizeRun(command: CommandRow) {
   await pool.query(
     `UPDATE loop_engine_runs
      SET status = 'succeeded', finished_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND status IN ('running', 'waiting_for_gate')`,
+     WHERE id = $1 AND status IN ('running', 'waiting_for_interaction')`,
     [command.run_id],
   );
   await insertEvent({
@@ -1714,7 +1706,7 @@ async function handleRetryStep(command: CommandRow) {
 async function processCommand(command: CommandRow) {
   if (command.command_type === "start_run") return handleStartRun(command);
   if (command.command_type === "execute_step") return handleExecuteStep(command);
-  if (command.command_type === "continue_after_gate") return handleContinueAfterGate(command);
+  if (command.command_type === "continue_after_interaction") return handleContinueAfterGate(command);
   if (command.command_type === "finalize_run") return handleFinalizeRun(command);
   return handleRetryStep(command);
 }
@@ -1814,28 +1806,22 @@ export async function getLoopRuntimeProjection(auth: AuthContext, runId: string)
   );
   const run = runResult.rows[0];
   if (!run) throw new Error("Loop run not found");
-  const [steps, gates, artifacts, events] = await Promise.all([
+  const [steps, interactions, artifacts, events] = await Promise.all([
     pool.query(`SELECT * FROM loop_engine_step_attempts WHERE run_id = $1 ORDER BY step_index, attempt`, [runId]),
-    pool.query(`SELECT * FROM loop_engine_gates WHERE run_id = $1 ORDER BY created_at`, [runId]),
+    pool.query(`SELECT * FROM loop_engine_interactions WHERE run_id = $1 ORDER BY created_at`, [runId]),
     pool.query(`SELECT * FROM loop_engine_artifacts WHERE run_id = $1 ORDER BY created_at`, [runId]),
     pool.query(`SELECT * FROM loop_engine_events WHERE run_id = $1 ORDER BY created_at, id`, [runId]),
   ]);
-  const errorMessage = run.error_json && typeof run.error_json === "object" && !Array.isArray(run.error_json)
-    ? (run.error_json as Record<string, unknown>).message
-    : undefined;
   const operatorView = projectOperatorView({
     status: run.status,
-    errorMessage: typeof errorMessage === "string" ? errorMessage : undefined,
-    context: run.context_json as Record<string, unknown>,
-    gates: gates.rows,
-    steps: steps.rows,
+    interactions: interactions.rows,
   });
   return {
     ...run,
     definition: run.definition_snapshot,
     context: run.context_json,
     steps: steps.rows,
-    gates: gates.rows,
+    interactions: interactions.rows,
     artifacts: artifacts.rows,
     events: events.rows,
     operatorView,
@@ -1853,10 +1839,10 @@ export async function listLoopRuntimeRuns(auth: AuthContext, workflowId: string)
   return result.rows;
 }
 
-export async function decideLoopRuntimeGate(input: {
+export async function executeLoopRuntimeInteractionCommand(input: {
   auth: AuthContext;
   runId: string;
-  gateId: string;
+  interactionId: string;
   decision: "approve" | "input" | "reject";
   value: Record<string, unknown>;
 }) {
@@ -1866,7 +1852,7 @@ export async function decideLoopRuntimeGate(input: {
     const gateResult = await client.query<{
       id: string;
       status: string;
-      gate_type: LoopGateType;
+      interaction_kind: OperatorInteractionKind;
       decision_json: unknown;
       payload_json: unknown;
       definition_snapshot: unknown;
@@ -1874,61 +1860,52 @@ export async function decideLoopRuntimeGate(input: {
       tenant_id: string;
       user_id: string;
     }>(
-      `SELECT g.id, g.status, g.gate_type, g.decision_json, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id
-       FROM loop_engine_gates g JOIN loop_engine_runs r ON r.id = g.run_id
+      `SELECT g.id, g.status, g.interaction_kind, g.decision_json, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id
+       FROM loop_engine_interactions g JOIN loop_engine_runs r ON r.id = g.run_id
        WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
        FOR UPDATE`,
-      [input.gateId, input.runId, input.auth.tenantId, input.auth.userId],
+      [input.interactionId, input.runId, input.auth.tenantId, input.auth.userId],
     );
     const gate = gateResult.rows[0];
     if (!gate) throw new Error("Loop gate not found");
     if (gate.status !== "pending") {
       await client.query("COMMIT");
-      return { runId: input.runId, gateId: input.gateId, status: gate.status, decision: gate.decision_json };
+      return { runId: input.runId, interactionId: input.interactionId, status: gate.status, decision: gate.decision_json };
     }
-    const decision = input.decision === "input" && gate.gate_type !== "missing_input" && isAffirmativeGateInput(input.value)
-      ? "approve"
-      : input.decision;
-    if (input.decision === "input" && gate.gate_type !== "missing_input" && decision !== "approve") {
-      throw new Error("Approval gate requires an explicit approve or reject decision");
+    const gatePayload = asObject(gate.payload_json);
+    const activeInteraction = activeOperatorInteractionSchema.safeParse(gatePayload.operatorInteraction);
+    if (activeInteraction.success) {
+      const allowed = activeInteraction.data.kind === "collect_input" || activeInteraction.data.kind === "connect_connector"
+        ? new Set(["input"])
+        : new Set(["approve", "reject"]);
+      if (!allowed.has(input.decision)) {
+        throw new Error(`Operator command ${input.decision} is not allowed for ${activeInteraction.data.kind}.`);
+      }
     }
+    const decision = input.decision;
     if (decision === "reject") {
       await client.query(
-        `UPDATE loop_engine_gates SET status = 'rejected', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
+        `UPDATE loop_engine_interactions SET status = 'rejected', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
          WHERE id = $1`,
-        [input.gateId, JSON.stringify(input.value)],
+        [input.interactionId, JSON.stringify(input.value)],
       );
       await client.query(
         `UPDATE loop_engine_runs SET status = 'blocked', error_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-        [input.runId, JSON.stringify({ message: "Gate rejected", gateId: input.gateId })],
+        [input.runId, JSON.stringify({ message: "Interaction rejected", interactionId: input.interactionId })],
       );
       await client.query(
         `UPDATE loop_engine_step_attempts
          SET status = 'failed', error_json = $2::jsonb, finished_at = NOW(), updated_at = NOW()
-         WHERE id = (SELECT step_attempt_id FROM loop_engine_gates WHERE id = $1)
-           AND status = 'waiting_for_gate'`,
-        [input.gateId, JSON.stringify({ message: "Gate rejected", gateId: input.gateId })],
+         WHERE id = (SELECT step_attempt_id FROM loop_engine_interactions WHERE id = $1)
+           AND status = 'waiting_for_interaction'`,
+        [input.interactionId, JSON.stringify({ message: "Interaction rejected", interactionId: input.interactionId })],
       );
       await client.query("COMMIT");
-      return { runId: input.runId, gateId: input.gateId, status: "rejected" };
+      return { runId: input.runId, interactionId: input.interactionId, status: "rejected" };
     }
     const definition = runtimeDefinitionSchema.parse(gate.definition_snapshot);
     const currentContext = runtimeContextSchema.parse(gate.context_json);
-    const gatePayload = asObject(gate.payload_json);
-    const gateAgentId = typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined;
-    const patch = applyGateDecisionToRunMemory({
-      gateType: gate.gate_type,
-      decision: input.value,
-      definition,
-      gateAgentId,
-    });
-    let deliveryRecipients = patch.deliveryRecipients
-      ? {
-          ...patch.deliveryRecipients,
-          documentRef: patch.deliveryRecipients.documentRef ?? currentContext.deliveryRecipients?.documentRef,
-          lotRef: patch.deliveryRecipients.lotRef ?? currentContext.deliveryRecipients?.lotRef,
-        }
-      : currentContext.deliveryRecipients;
+    let deliveryRecipients = currentContext.deliveryRecipients;
     if (deliveryRecipients?.contacts.length && !deliveryRecipients.documentRef) {
       const docRefs = await stashContactListAsDocument({
         auth: input.auth,
@@ -1945,19 +1922,25 @@ export async function decideLoopRuntimeGate(input: {
       });
     }
     const nextContext = runtimeContextSchema.parse({
-      inputs: { ...currentContext.inputs, ...(patch.inputs ?? {}) },
-      approvedMemories: patch.approvedMemories ?? currentContext.approvedMemories,
-      approvedSources: patch.approvedSources
-        ? { ...currentContext.approvedSources, ...patch.approvedSources }
-        : currentContext.approvedSources,
+      inputs: currentContext.inputs,
+      approvedMemories: currentContext.approvedMemories,
+      approvedSources: currentContext.approvedSources,
       operatorRevisions: currentContext.operatorRevisions,
       deliveryRecipients,
+      ...applyGateDecisionToRunMemory({
+        gateType: typeof gatePayload.gateType === "string"
+          ? gatePayload.gateType as "memory_confirmation" | "source_confirmation" | "pre_send" | "missing_input" | "draft_review"
+          : "draft_review",
+        decision: input.value,
+        definition,
+        gateAgentId: typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined,
+      }),
     });
     const status = decision === "input" ? "submitted" : "approved";
     await client.query(
-      `UPDATE loop_engine_gates SET status = $2, decision_json = $3::jsonb, completed_at = NOW(), updated_at = NOW()
+      `UPDATE loop_engine_interactions SET status = $2, decision_json = $3::jsonb, completed_at = NOW(), updated_at = NOW()
        WHERE id = $1`,
-      [input.gateId, status, JSON.stringify(input.value)],
+      [input.interactionId, status, JSON.stringify(input.value)],
     );
     if (decision === "approve") {
       const canvasArtifactKey = typeof gatePayload.canvasArtifactKey === "string" ? gatePayload.canvasArtifactKey : null;
@@ -1966,7 +1949,7 @@ export async function decideLoopRuntimeGate(input: {
           runId: input.runId,
           artifactKey: canvasArtifactKey,
         });
-        if (gate.gate_type === "draft_review") {
+        if (gate.interaction_kind === "review_artifact") {
           await promoteCanvasArtifactToStructuredOutput(client, {
             runId: input.runId,
             canvasArtifactKey,
@@ -1982,12 +1965,12 @@ export async function decideLoopRuntimeGate(input: {
     await client.query(
       `INSERT INTO loop_engine_commands
        (tenant_id, user_id, run_id, command_type, idempotency_key, payload_json)
-       VALUES ($1, $2, $3, 'continue_after_gate', $4, $5::jsonb)
+       VALUES ($1, $2, $3, 'continue_after_interaction', $4, $5::jsonb)
        ON CONFLICT (idempotency_key) DO NOTHING`,
-      [gate.tenant_id, gate.user_id, input.runId, `gate:${input.gateId}:continue`, JSON.stringify({ gateId: input.gateId })],
+      [gate.tenant_id, gate.user_id, input.runId, `gate:${input.interactionId}:continue`, JSON.stringify({ interactionId: input.interactionId })],
     );
     await client.query("COMMIT");
-    return { runId: input.runId, gateId: input.gateId, status };
+    return { runId: input.runId, interactionId: input.interactionId, status };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -1996,10 +1979,10 @@ export async function decideLoopRuntimeGate(input: {
   }
 }
 
-export async function submitLoopRuntimeGate(input: {
+export async function submitLoopRuntimeInteractionInputs(input: {
   auth: AuthContext;
   runId: string;
-  gateId: string;
+  interactionId: string;
   values: Record<string, SurfaceSubmissionValue>;
 }) {
   const parsedValues = gateSurfaceSubmissionSchema.parse(input.values);
@@ -2009,7 +1992,7 @@ export async function submitLoopRuntimeGate(input: {
     const gateResult = await client.query<{
       id: string;
       status: string;
-      gate_type: LoopGateType;
+      interaction_kind: OperatorInteractionKind;
       payload_json: unknown;
       definition_snapshot: unknown;
       context_json: unknown;
@@ -2017,23 +2000,29 @@ export async function submitLoopRuntimeGate(input: {
       user_id: string;
       step_attempt_id: string;
     }>(
-      `SELECT g.id, g.status, g.gate_type, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id, g.step_attempt_id
-       FROM loop_engine_gates g JOIN loop_engine_runs r ON r.id = g.run_id
+      `SELECT g.id, g.status, g.interaction_kind, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id, g.step_attempt_id
+       FROM loop_engine_interactions g JOIN loop_engine_runs r ON r.id = g.run_id
        WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
        FOR UPDATE`,
-      [input.gateId, input.runId, input.auth.tenantId, input.auth.userId],
+      [input.interactionId, input.runId, input.auth.tenantId, input.auth.userId],
     );
     const gate = gateResult.rows[0];
     if (!gate) throw new Error("Loop gate not found");
     if (gate.status !== "pending") {
       await client.query("COMMIT");
-      return { runId: input.runId, gateId: input.gateId, status: gate.status, satisfied: false };
+      return { runId: input.runId, interactionId: input.interactionId, status: gate.status, satisfied: false };
     }
 
     const definition = runtimeDefinitionSchema.parse(gate.definition_snapshot);
     const currentContext = runtimeContextSchema.parse(gate.context_json);
     const gatePayload = asObject(gate.payload_json);
-    if (gate.gate_type === "pre_send" && isConnectorActionPreSendGate(gatePayload)) {
+    const activeInteraction = activeOperatorInteractionSchema.safeParse(gatePayload.operatorInteraction);
+    if (activeInteraction.success
+      && activeInteraction.data.kind !== "collect_input"
+      && activeInteraction.data.kind !== "connect_connector") {
+      throw new Error(`Operator input submission is not allowed for ${activeInteraction.data.kind}.`);
+    }
+    if (gate.interaction_kind === "confirm_action") {
       let nextContext = applyGateSurfaceSubmission({
         definition,
         context: currentContext,
@@ -2069,17 +2058,11 @@ export async function submitLoopRuntimeGate(input: {
       const satisfied = recipientCount > 0 || Boolean(nextContext.deliveryRecipients?.audienceId?.trim());
       return {
         runId: input.runId,
-        gateId: input.gateId,
+        interactionId: input.interactionId,
         status: "pending",
         satisfied,
       };
     }
-
-    const checkpoint = readOperatorCheckpoint(gatePayload);
-    const whenRaw = gatePayload.when;
-    const when: InputRequirementWhen = whenRaw === "before_send" || whenRaw === "before_step"
-      ? whenRaw
-      : "run_start";
 
     let nextContext = applyGateSurfaceSubmission({
       definition,
@@ -2112,38 +2095,38 @@ export async function submitLoopRuntimeGate(input: {
       [input.runId, JSON.stringify(nextContext)],
     );
 
-    const remaining = evaluateExecutionBlockingAt(definition, nextContext, when);
+    const plannedKeys = activeInteraction.success && activeInteraction.data.kind === "collect_input"
+      ? new Set(activeInteraction.data.items.map((item) => item.requiredValueKey))
+      : null;
+    const remaining = evaluateExecutionBlockingAt(definition, nextContext, "run_start")
+      .filter((row) => !plannedKeys || plannedKeys.has(row.requirement.key));
     if (remaining.length > 0) {
-      const requirements = remaining.map((row) => row.requirement);
-      const updatedCheckpoint = buildRequirementCheckpoint({
-        requirements,
-        blocking: checkpoint?.blocking ?? {
-          agentId: typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined,
-        },
-        satisfiedKeys: new Set(
-          collectRequirements(definition)
-            .filter((req) => req.when === when)
-            .filter((req) => isRequirementSatisfied(req, nextContext, definition).satisfied)
-            .map((req) => req.key),
-        ),
-      });
-      const updatedPayload = checkpointPayload({
-        checkpoint: updatedCheckpoint,
+      const updatedPayload = {
+        when: gatePayload.when ?? "run_start",
         agentId: typeof gatePayload.agentId === "string" ? gatePayload.agentId : undefined,
         stepIndex: typeof gatePayload.stepIndex === "number" ? gatePayload.stepIndex : undefined,
-        extra: {
-          when,
-          ...(gatePayload.uiBlocks ? { uiBlocks: gatePayload.uiBlocks } : {}),
-        },
-      });
+        operatorInteraction: activeInteraction.success && activeInteraction.data.kind === "collect_input"
+          ? {
+              ...activeInteraction.data,
+              items: activeInteraction.data.items.map((item) => ({
+                ...item,
+                satisfied: isRequirementSatisfied(
+                  collectRequirements(definition).find((requirement) => requirement.key === item.requiredValueKey)!,
+                  nextContext,
+                  definition,
+                ).satisfied,
+              })),
+            }
+          : undefined,
+      };
       await client.query(
-        `UPDATE loop_engine_gates SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
-        [input.gateId, JSON.stringify(updatedPayload)],
+        `UPDATE loop_engine_interactions SET payload_json = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [input.interactionId, JSON.stringify(updatedPayload)],
       );
       await client.query("COMMIT");
       return {
         runId: input.runId,
-        gateId: input.gateId,
+        interactionId: input.interactionId,
         status: "pending",
         satisfied: false,
         pendingKeys: remaining.map((row) => row.requirement.key),
@@ -2151,9 +2134,9 @@ export async function submitLoopRuntimeGate(input: {
     }
 
     await client.query(
-      `UPDATE loop_engine_gates SET status = 'submitted', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
+      `UPDATE loop_engine_interactions SET status = 'submitted', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
        WHERE id = $1`,
-      [input.gateId, JSON.stringify({ values: parsedValues })],
+      [input.interactionId, JSON.stringify({ values: parsedValues })],
     );
     await client.query(
       `UPDATE loop_engine_runs SET status = 'running', updated_at = NOW() WHERE id = $1`,
@@ -2162,12 +2145,12 @@ export async function submitLoopRuntimeGate(input: {
     await client.query(
       `INSERT INTO loop_engine_commands
        (tenant_id, user_id, run_id, command_type, idempotency_key, payload_json)
-       VALUES ($1, $2, $3, 'continue_after_gate', $4, $5::jsonb)
+       VALUES ($1, $2, $3, 'continue_after_interaction', $4, $5::jsonb)
        ON CONFLICT (idempotency_key) DO NOTHING`,
-      [gate.tenant_id, gate.user_id, input.runId, `gate:${input.gateId}:continue`, JSON.stringify({ gateId: input.gateId })],
+      [gate.tenant_id, gate.user_id, input.runId, `gate:${input.interactionId}:continue`, JSON.stringify({ interactionId: input.interactionId })],
     );
     await client.query("COMMIT");
-    return { runId: input.runId, gateId: input.gateId, status: "submitted", satisfied: true };
+    return { runId: input.runId, interactionId: input.interactionId, status: "submitted", satisfied: true };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -2176,10 +2159,10 @@ export async function submitLoopRuntimeGate(input: {
   }
 }
 
-export async function uploadLoopRuntimeGateContacts(input: {
+export async function uploadLoopRuntimeInteractionContacts(input: {
   auth: AuthContext;
   runId: string;
-  gateId: string;
+  interactionId: string;
   csvText?: string;
   contacts?: LoopContactRow[];
   audienceId?: string;
@@ -2197,25 +2180,25 @@ export async function uploadLoopRuntimeGateContacts(input: {
   try {
     await client.query("BEGIN");
     const gateResult = await client.query<{
-      gate_type: LoopGateType;
+      interaction_kind: OperatorInteractionKind;
       status: string;
       payload_json: unknown;
       context_json: unknown;
       definition_snapshot: unknown;
       workflow_title: string;
     }>(
-      `SELECT g.gate_type, g.status, g.payload_json, r.context_json, r.definition_snapshot, w.title AS workflow_title
-       FROM loop_engine_gates g
+      `SELECT g.interaction_kind, g.status, g.payload_json, r.context_json, r.definition_snapshot, w.title AS workflow_title
+       FROM loop_engine_interactions g
        JOIN loop_engine_runs r ON r.id = g.run_id
        JOIN workflows w ON w.id = r.workflow_id
        WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
        FOR UPDATE`,
-      [input.gateId, input.runId, input.auth.tenantId, input.auth.userId],
+      [input.interactionId, input.runId, input.auth.tenantId, input.auth.userId],
     );
     const gate = gateResult.rows[0];
     if (!gate) throw new Error("Loop gate not found");
-    if (gate.gate_type !== "pre_send") {
-      throw new Error("Contacts can only be uploaded for pre_send gates.");
+    if (gate.interaction_kind !== "collect_input") {
+      throw new Error("Contacts can only be uploaded for collect_input interactions.");
     }
 
     const definition = runtimeDefinitionSchema.parse(gate.definition_snapshot);
@@ -2254,7 +2237,7 @@ export async function uploadLoopRuntimeGateContacts(input: {
     await client.query("COMMIT");
     return {
       runId: input.runId,
-      gateId: input.gateId,
+      interactionId: input.interactionId,
       recipientCount: deliveryRecipients.recipientCount,
       preview: deliveryRecipients.contacts.slice(0, 5),
       audienceId: deliveryRecipients.audienceId ?? null,
@@ -2269,10 +2252,10 @@ export async function uploadLoopRuntimeGateContacts(input: {
   }
 }
 
-export async function reviseLoopRuntimeGate(input: {
+export async function reviseLoopRuntimeInteraction(input: {
   auth: AuthContext;
   runId: string;
-  gateId: string;
+  interactionId: string;
   value: Record<string, unknown>;
 }) {
   const client = await pool.connect();
@@ -2299,23 +2282,27 @@ export async function reviseLoopRuntimeGate(input: {
     }>(
       `SELECT g.id, g.status, g.payload_json, r.definition_snapshot, r.context_json, r.tenant_id, r.user_id,
               g.step_attempt_id, a.step_index, a.attempt, a.agent_snapshot
-       FROM loop_engine_gates g
+       FROM loop_engine_interactions g
        JOIN loop_engine_runs r ON r.id = g.run_id
        JOIN loop_engine_step_attempts a ON a.id = g.step_attempt_id
        WHERE g.id = $1 AND g.run_id = $2 AND r.tenant_id = $3 AND r.user_id = $4
        FOR UPDATE`,
-      [input.gateId, input.runId, input.auth.tenantId, input.auth.userId],
+      [input.interactionId, input.runId, input.auth.tenantId, input.auth.userId],
     );
     const gate = gateResult.rows[0];
     if (!gate) throw new Error("Loop gate not found");
     if (gate.status !== "pending") {
       await client.query("COMMIT");
-      return { runId: input.runId, gateId: input.gateId, status: gate.status };
+      return { runId: input.runId, interactionId: input.interactionId, status: gate.status };
     }
 
     const gatePayload = asObject(gate.payload_json);
+    const activeInteraction = activeOperatorInteractionSchema.safeParse(gatePayload.operatorInteraction);
+    if (activeInteraction.success && activeInteraction.data.kind !== "review_artifact") {
+      throw new Error(`Operator revision is not allowed for ${activeInteraction.data.kind}.`);
+    }
     const agentId = typeof gatePayload.agentId === "string" ? gatePayload.agentId : "";
-    if (!agentId) throw new Error("Gate payload missing agentId");
+    if (!agentId) throw new Error("Interaction payload missing agentId");
 
     const feedback = typeof input.value.feedback === "string" ? input.value.feedback : undefined;
     const editedText = typeof input.value.editedText === "string" ? input.value.editedText : undefined;
@@ -2330,9 +2317,9 @@ export async function reviseLoopRuntimeGate(input: {
     });
 
     await client.query(
-      `UPDATE loop_engine_gates SET status = 'submitted', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
+      `UPDATE loop_engine_interactions SET status = 'submitted', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
        WHERE id = $1`,
-      [input.gateId, JSON.stringify({ action: "revise", ...input.value })],
+      [input.interactionId, JSON.stringify({ action: "revise", ...input.value })],
     );
     await client.query(
       `UPDATE loop_engine_runs SET context_json = $2::jsonb, status = 'running', current_step_index = $3, updated_at = NOW()
@@ -2342,7 +2329,7 @@ export async function reviseLoopRuntimeGate(input: {
     await client.query(
       `UPDATE loop_engine_step_attempts
        SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status = 'waiting_for_gate'`,
+       WHERE id = $1 AND status = 'waiting_for_interaction'`,
       [gate.step_attempt_id],
     );
 
@@ -2381,7 +2368,7 @@ export async function reviseLoopRuntimeGate(input: {
     });
   }
 
-  return { runId: input.runId, gateId: input.gateId, status: "submitted", action: "revise" };
+  return { runId: input.runId, interactionId: input.interactionId, status: "submitted", action: "revise" };
 }
 
 export async function cancelLoopRuntimeRun(auth: AuthContext, runId: string) {
@@ -2399,7 +2386,7 @@ export async function cancelLoopRuntimeRun(auth: AuthContext, runId: string) {
   );
   await pool.query(
     `UPDATE loop_engine_step_attempts SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
-     WHERE run_id = $1 AND status IN ('queued', 'running', 'waiting_for_gate')`,
+     WHERE run_id = $1 AND status IN ('queued', 'running', 'waiting_for_interaction')`,
     [runId],
   );
   return getLoopRuntimeProjection(auth, runId);
@@ -2426,17 +2413,17 @@ export async function retryLoopRuntimeStep(auth: AuthContext, runId: string, ste
   const retryable = row && (
     row.step_status === "failed"
     || row.step_status === "cancelled"
-    || (row.step_status === "waiting_for_gate" && ["failed", "blocked", "cancelled"].includes(row.run_status))
+    || (row.step_status === "waiting_for_interaction" && ["failed", "blocked", "cancelled"].includes(row.run_status))
   );
   if (!retryable || !row) throw new Error("Retryable step attempt not found");
 
   await pool.query(
-    `UPDATE loop_engine_gates
+    `UPDATE loop_engine_interactions
      SET status = 'rejected', decision_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
      WHERE step_attempt_id = $1 AND status = 'pending'`,
     [stepAttemptId, JSON.stringify({ reason: "operator_retry" })],
   );
-  if (row.step_status === "waiting_for_gate") {
+  if (row.step_status === "waiting_for_interaction") {
     await pool.query(
       `UPDATE loop_engine_step_attempts
        SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
@@ -2453,7 +2440,7 @@ export async function retryLoopRuntimeStep(auth: AuthContext, runId: string, ste
   );
   await pool.query(
     `UPDATE loop_engine_step_attempts SET status = 'cancelled', finished_at = NOW(), updated_at = NOW()
-     WHERE run_id = $1 AND step_index > $2 AND status IN ('queued', 'running', 'waiting_for_gate', 'succeeded')`,
+     WHERE run_id = $1 AND step_index > $2 AND status IN ('queued', 'running', 'waiting_for_interaction', 'succeeded')`,
     [runId, row.step_index],
   );
   const retryId = await createAttempt({
@@ -2575,7 +2562,7 @@ export async function saveAgentOutput(input: {
     [input.stepId, JSON.stringify(output)],
   );
   await pool.query(
-    `UPDATE loop_engine_gates
+    `UPDATE loop_engine_interactions
      SET payload_json = jsonb_set(payload_json, '{result,text}', to_jsonb($2::text), true), updated_at = NOW()
      WHERE run_id = $1 AND step_attempt_id = $3 AND status = 'pending'`,
     [input.runId, input.text, input.stepId],
@@ -2605,6 +2592,38 @@ export async function saveAgentOutput(input: {
     payload: { agentId: row.agent_id },
   });
   return getLoopRuntimeProjection(input.auth, input.runId);
+}
+
+export async function executeOperatorInteractionCommand(input: {
+  auth: AuthContext;
+  runId: string;
+  interactionId: string;
+  command: unknown;
+}) {
+  const command = operatorInteractionCommandSchema.parse(input.command);
+  if (command.command === "submit_input") {
+    return submitLoopRuntimeInteractionInputs({
+      auth: input.auth,
+      runId: input.runId,
+      interactionId: input.interactionId,
+      values: gateSurfaceSubmissionSchema.parse(command.values),
+    });
+  }
+  if (command.command === "revise") {
+    return reviseLoopRuntimeInteraction({
+      auth: input.auth,
+      runId: input.runId,
+      interactionId: input.interactionId,
+      value: command.value,
+    });
+  }
+  return executeLoopRuntimeInteractionCommand({
+    auth: input.auth,
+    runId: input.runId,
+    interactionId: input.interactionId,
+    decision: command.command === "verify_connection" ? "input" : command.command,
+    value: command.value,
+  });
 }
 
 let timer: NodeJS.Timeout | null = null;

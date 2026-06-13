@@ -6,6 +6,10 @@ type Scenario = SeededLoopFixture["scenario"];
 
 const appOrigin = "http://localhost:3001";
 
+function interactionCommandUrl(runId: string, interactionId: string) {
+  return `/api/workflows/runs/${runId}/interactions/${interactionId}/commands`;
+}
+
 async function openFixture(page: Page, scenario: Scenario) {
   const fixture = await seedLoopRunFixture(scenario);
   const { domain, path, ...cookie } = authCookieValue(fixture.auth);
@@ -41,11 +45,12 @@ test("run-start input requires text, then submits the exact surface payload", as
   await textbox.fill("Sprint notes: release is Friday and QA signed off.");
   await expect(page.getByRole("button", { name: "Submit input" })).toBeEnabled();
 
-  const posted = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/submit`));
+  const posted = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Submit input" }).evaluate((element) => {
     (element as HTMLButtonElement).click();
   });
   await expect(posted).resolves.toEqual({
+    command: "submit_input",
     values: {
       sprint_notes: {
         surface: "input.markdown",
@@ -66,9 +71,9 @@ test("run-start input already in memory stops requesting it and continues with a
   await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
   await expect(page.getByPlaceholder("Paste or type sprint notes…")).toHaveCount(0);
 
-  const posted = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/submit`));
+  const posted = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(posted).resolves.toEqual({ values: {} });
+  await expect(posted).resolves.toEqual({ command: "submit_input", values: {} });
 });
 
 test("memory confirmation keeps selection state and sends the selected items on approve", async ({ page }) => {
@@ -81,15 +86,18 @@ test("memory confirmation keeps selection state and sends the selected items on 
   await page.getByRole("checkbox", { name: /Include memory Sprint notes say the release moved to Friday/i }).uncheck();
   await expect(page.getByRole("button", { name: "Approve (1)" })).toBeVisible();
 
-  const posted = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/approve`));
+  const posted = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Approve (1)" }).click();
   await expect(posted).resolves.toMatchObject({
-    channel: "dashboard",
-    items: [
-      { id: "mem_1", include: false },
-      { id: "mem_2", include: true },
-      { id: "mem_3", include: false },
-    ],
+    command: "approve",
+    value: {
+      channel: "dashboard",
+      items: [
+        { id: "mem_1", include: false },
+        { id: "mem_2", include: true },
+        { id: "mem_3", include: false },
+      ],
+    },
   });
 });
 
@@ -111,10 +119,11 @@ test("source confirmation supports disabled guards, custom sources, and revise p
   await expect(page.getByRole("checkbox", { name: /Include source Custom source/i })).toBeVisible();
 
   await page.getByPlaceholder("Optional feedback when revising (re-runs research with your notes)").fill("Rework with fresher sources.");
-  const posted = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/revise`));
+  const posted = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Revise" }).click();
   await expect(posted).resolves.toEqual({
-    feedback: "Rework with fresher sources.",
+    command: "revise",
+    value: { feedback: "Rework with fresher sources." },
   });
 });
 
@@ -122,12 +131,15 @@ test("canvas.email draft review shows the editable renderer and saves from the g
   const fixture = await openFixture(page, "draft-review-email");
 
   await expect(page.getByRole("button", { name: "Edit draft" })).toBeVisible();
-  await expect(page.getByText("Review the email draft, then save & approve or request changes.")).toBeVisible();
+  await expect(page.getByText("Review the draft, then save & approve or request changes.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Save & Approve" })).toBeVisible();
 
-  const posted = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/approve`));
+  const posted = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Save & Approve" }).click();
-  await expect(posted).resolves.toMatchObject({ channel: "dashboard" });
+  await expect(posted).resolves.toMatchObject({
+    command: "approve",
+    value: { channel: "dashboard" },
+  });
 });
 
 test("canvas.preview renders the preview-only variant and allows revise with feedback", async ({ page }) => {
@@ -138,9 +150,9 @@ test("canvas.preview renders the preview-only variant and allows revise with fee
   await expect(page.getByRole("button", { name: "Save & Approve" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Revise" })).toBeVisible();
 
-  const posted = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/revise`));
+  const posted = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Revise" }).click();
-  await expect(posted).resolves.toEqual({});
+  await expect(posted).resolves.toEqual({ command: "revise", value: {} });
 });
 
 test("recipient upload saves contacts and then continues instead of reopening the upload UI", async ({ page }) => {
@@ -150,15 +162,21 @@ test("recipient upload saves contacts and then continues instead of reopening th
   await page.getByRole("tab", { name: "Paste emails" }).click();
   await page.locator("textarea").first().fill("alex@example.com\ncasey@example.com");
 
-  const savePayload = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/contacts`));
+  const savePayload = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Save contacts", exact: true }).evaluate((element) => {
     (element as HTMLButtonElement).click();
   });
   await expect(savePayload).resolves.toMatchObject({
-    contacts: [
-      { email: "alex@example.com" },
-      { email: "casey@example.com" },
-    ],
+    command: "submit_input",
+    values: {
+      recipients: {
+        surface: "input.contacts_csv",
+        contacts: [
+          { email: "alex@example.com" },
+          { email: "casey@example.com" },
+        ],
+      },
+    },
   });
 
   await expect(page.locator("main").getByText("Recipients saved", { exact: true })).toBeVisible();
@@ -166,9 +184,9 @@ test("recipient upload saves contacts and then continues instead of reopening th
   await expect(page.getByRole("button", { name: "Continue (2 recipients)" })).toBeEnabled();
   await expect(page.getByRole("tab", { name: "Paste emails" })).toHaveCount(0);
 
-  const continuePayload = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/submit`));
+  const continuePayload = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Continue (2 recipients)" }).click();
-  await expect(continuePayload).resolves.toEqual({ values: {} });
+  await expect(continuePayload).resolves.toEqual({ command: "submit_input", values: {} });
 });
 
 test("pre-send approval includes the saved contacts and render target payload", async ({ page }) => {
@@ -177,14 +195,17 @@ test("pre-send approval includes the saved contacts and render target payload", 
   await expect(page.getByRole("button", { name: "Edit draft" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve & send (2)" })).toBeVisible();
 
-  const posted = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/approve`));
+  const posted = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Approve & send (2)" }).click();
   await expect(posted).resolves.toMatchObject({
-    channel: "dashboard",
-    contacts: [
-      { email: "alex@example.com", name: "Alex" },
-      { email: "casey@example.com", name: "Casey" },
-    ],
+    command: "approve",
+    value: {
+      channel: "dashboard",
+      contacts: [
+        { email: "alex@example.com", name: "Alex" },
+        { email: "casey@example.com", name: "Casey" },
+      ],
+    },
   });
 });
 
@@ -197,15 +218,21 @@ test("failed recipient recovery stays on the recovery path and retries after con
 
   await page.getByRole("tab", { name: "Paste emails" }).click();
   await page.locator("textarea").first().fill("alex@example.com\ncasey@example.com");
-  const savePayload = expectRequestJson(page, (url) => url.endsWith(`/api/workflows/runs/${fixture.runId}/gates/${fixture.gateId}/contacts`));
+  const savePayload = expectRequestJson(page, (url) => url.endsWith(interactionCommandUrl(fixture.runId, fixture.interactionId)));
   await page.getByRole("button", { name: "Save contacts", exact: true }).evaluate((element) => {
     (element as HTMLButtonElement).click();
   });
   await expect(savePayload).resolves.toMatchObject({
-    contacts: [
-      { email: "alex@example.com" },
-      { email: "casey@example.com" },
-    ],
+    command: "submit_input",
+    values: {
+      recipients: {
+        surface: "input.contacts_csv",
+        contacts: [
+          { email: "alex@example.com" },
+          { email: "casey@example.com" },
+        ],
+      },
+    },
   });
 
   await expect(page.getByRole("button", { name: "Save contacts", exact: true })).toHaveCount(0);

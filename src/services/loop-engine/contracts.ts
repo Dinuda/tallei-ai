@@ -223,12 +223,6 @@ export function preprocessArchitectOutput(value: unknown): unknown {
   const root = value as Record<string, unknown>;
   const next: Record<string, unknown> = { ...root };
 
-  if (Array.isArray(root.inputsRequired)) {
-    next.inputsRequired = root.inputsRequired
-      .map(coerceArchitectInputKey)
-      .filter((key): key is string => Boolean(key));
-  }
-
   if (Array.isArray(root.rationale)) {
     next.rationale = root.rationale.filter((line): line is string => typeof line === "string" && line.trim().length > 0);
   }
@@ -243,10 +237,7 @@ export function preprocessArchitectOutput(value: unknown): unknown {
     const provider = typeof delivery.provider === "string" ? delivery.provider.trim() : "";
     if (provider) {
       next.delivery = { provider };
-    } else {
-      const legacyTarget = typeof delivery.target === "string" ? delivery.target.trim().toLowerCase() : "none";
-      next.delivery = { provider: legacyTarget === "none" ? "none" : "none" };
-    }
+    } else throw new Error("Architect delivery requires an explicit provider.");
   }
 
   if (Array.isArray(root.inputRequirements)) {
@@ -270,7 +261,6 @@ const loopArchitectOutputBaseSchema = z.object({
   title: z.string().min(1),
   summary: z.string().min(1),
   strategyText: z.string().min(1),
-  inputsRequired: z.array(z.string().min(1)).default([]),
   inputRequirements: z.array(inputRequirementSchema).default([]),
   delivery: loopDeliveryRoutingSchema,
   schedule: z.object({

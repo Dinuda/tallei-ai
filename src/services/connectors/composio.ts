@@ -445,55 +445,83 @@ export function normalizeComposioToolSearchResponse(response: unknown): unknown[
   return [];
 }
 
+function parseComposioSearchItems(items: unknown[], cappedLimit: number): ComposioToolSearchResult[] {
+  const results: ComposioToolSearchResult[] = [];
+  for (const item of items) {
+    const row = toObjectRecord(item);
+    if (row.isDeprecated === true || row.is_deprecated === true) continue;
+    const toolkitRow = toObjectRecord(row.toolkit);
+    const rawToolkit = String(toolkitRow.slug ?? row.toolkitSlug ?? row.toolkit_slug ?? "").trim();
+    if (!rawToolkit) continue;
+    const toolkit = normalizeComposioAppKey(rawToolkit);
+    const action = normalizeComposioAction(toolkit, row);
+    if (!action || !toolkit) continue;
+    results.push({
+      ...action,
+      toolkitName: String(toolkitRow.name ?? toolkit),
+      tags: Array.isArray(row.tags) ? row.tags.filter((tag): tag is string => typeof tag === "string") : [],
+    });
+  }
+  return [...new Map(results.map((result) => [
+    `${result.toolkit}:${result.actionSlug}`.toLowerCase(),
+    result,
+  ])).values()].slice(0, cappedLimit);
+}
+
+async function searchComposioToolsViaHttp(query: string, limit: number): Promise<ComposioToolSearchResult[]> {
+  const encodedQuery = encodeURIComponent(query);
+  const paths = [
+    `/api/v3.1/tools?query=${encodedQuery}&limit=${limit}&include_deprecated=false`,
+    `/api/v3/tools?query=${encodedQuery}&limit=${limit}&include_deprecated=false`,
+  ];
+  for (const path of paths) {
+    try {
+      const data = await composioRequest<{ items?: unknown[]; tools?: unknown[] }>({ path });
+      const items = normalizeComposioToolSearchResponse(data);
+      const results = parseComposioSearchItems(items, limit);
+      if (results.length > 0) return results;
+    } catch (error) {
+      console.warn(`[connectors] composio tool search http failed for ${path}:`, error);
+    }
+  }
+  return [];
+}
+
+async function searchComposioToolsViaSdk(query: string, limit: number): Promise<ComposioToolSearchResult[]> {
+  const composio = getComposioVercelClient() as unknown as {
+    tools?: {
+      list?: (args: Record<string, unknown>) => Promise<unknown>;
+      getRawComposioTools?: (args: Record<string, unknown>) => Promise<unknown>;
+    };
+  };
+  const response = composio.tools?.list
+    ? await composio.tools.list({
+        query,
+        limit,
+        include_deprecated: false,
+      })
+    : composio.tools?.getRawComposioTools
+      ? await composio.tools.getRawComposioTools({
+          search: query,
+          limit,
+        })
+      : null;
+  if (!response) return [];
+  return parseComposioSearchItems(normalizeComposioToolSearchResponse(response), limit);
+}
+
 export async function searchComposioTools(query: string, limit = 12): Promise<ComposioToolSearchResult[]> {
   if (!isComposioConfigured()) return [];
   const normalizedQuery = query.trim().replace(/\s+/g, " ");
   if (!normalizedQuery) return [];
   const cappedLimit = Math.max(1, Math.min(limit, 50));
   try {
-    const composio = getComposioVercelClient() as unknown as {
-      tools?: {
-        list?: (args: Record<string, unknown>) => Promise<unknown>;
-        getRawComposioTools?: (args: Record<string, unknown>) => Promise<unknown>;
-      };
-    };
-    const response = composio.tools?.list
-      ? await composio.tools.list({
-          query: normalizedQuery,
-          limit: cappedLimit,
-          include_deprecated: false,
-        })
-      : composio.tools?.getRawComposioTools
-        ? await composio.tools.getRawComposioTools({
-            search: normalizedQuery,
-            limit: cappedLimit,
-          })
-        : null;
-    const items = normalizeComposioToolSearchResponse(response);
-    const results: ComposioToolSearchResult[] = [];
-    for (const item of items) {
-      const row = toObjectRecord(item);
-      if (row.isDeprecated === true || row.is_deprecated === true) continue;
-      const toolkitRow = toObjectRecord(row.toolkit);
-      const rawToolkit = String(toolkitRow.slug ?? row.toolkitSlug ?? row.toolkit_slug ?? "").trim();
-      if (!rawToolkit) continue;
-      const toolkit = normalizeComposioAppKey(rawToolkit);
-      const action = normalizeComposioAction(toolkit, row);
-      if (!action || !toolkit) continue;
-      results.push({
-        ...action,
-        toolkitName: String(toolkitRow.name ?? toolkit),
-        tags: Array.isArray(row.tags) ? row.tags.filter((tag): tag is string => typeof tag === "string") : [],
-      });
-    }
-    return [...new Map(results.map((result) => [
-      `${result.toolkit}:${result.actionSlug}`.toLowerCase(),
-      result,
-    ])).values()].slice(0, cappedLimit);
+    const sdkResults = await searchComposioToolsViaSdk(normalizedQuery, cappedLimit);
+    if (sdkResults.length > 0) return sdkResults;
   } catch (error) {
-    console.warn("[connectors] composio tool search failed:", error);
-    return [];
+    console.warn("[connectors] composio tool search sdk failed:", error);
   }
+  return searchComposioToolsViaHttp(normalizedQuery, cappedLimit);
 }
 
 /** Toolkit slugs from Connected Apps (`connector_accounts`), not notification Channels. */
@@ -674,28 +702,9 @@ async function executeComposioActionDirect(input: {
     version,
     ...(input.accountId ? { connectedAccountId: input.accountId } : {}),
   };
-  // The SDK warns for any action whose schema supports file uploads, even when no file
-  // argument is supplied. Use the same versioned REST execution path without enabling
-  // unsafe automatic local-file uploads.
-  if (composio.tools?.execute && !metadata.hasFileUploadableInput) {
-    try {
-      const result = await composio.tools.execute(input.actionSlug, executeArgs);
-      return { adapter: "composio-sdk", result: toObjectRecord(result) };
-    } catch (error) {
-      console.warn(`[connectors] composio sdk execute failed for ${input.actionSlug}; falling back to REST:`, error);
-    }
-  }
-  const result = await composioRequest<Record<string, unknown>>({
-    path: `/api/v3.1/tools/execute/${encodeURIComponent(input.actionSlug)}`,
-    method: "POST",
-    body: {
-      ...(input.accountId ? { connected_account_id: input.accountId } : {}),
-      user_id: getComposioEntityId(input.auth),
-      arguments: input.payload,
-      version,
-    },
-  });
-  return { adapter: "composio-rest", result };
+  if (!composio.tools?.execute) throw new Error("Composio SDK execute API is unavailable.");
+  const result = await composio.tools.execute(input.actionSlug, executeArgs);
+  return { adapter: "composio-sdk", result: toObjectRecord(result) };
 }
 
 export async function executeApprovedComposioAction(input: {

@@ -79,8 +79,8 @@ export function buildLoopDefinition(input: {
   deliveryType?: string;
   delivery?: LoopDeliveryRouting;
   connectorPolicy?: LoopDefinition["connectorPolicy"];
-  inputsRequired?: string[];
   inputRequirements?: LoopDefinition["inputRequirements"];
+  operatorInteractionPlan?: LoopDefinition["operatorInteractionPlan"];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
   builderMeta?: LoopDefinition["builderMeta"];
 }): LoopDefinition {
@@ -118,8 +118,8 @@ export function buildLoopDefinition(input: {
     ...(input.deliveryType?.trim() ? { deliveryType: input.deliveryType.trim() } : {}),
     ...(input.delivery ? { delivery: input.delivery } : {}),
     ...(input.connectorPolicy ? { connectorPolicy: input.connectorPolicy } : {}),
-    ...(input.inputsRequired?.length ? { inputsRequired: input.inputsRequired } : {}),
     ...(input.inputRequirements?.length ? { inputRequirements: input.inputRequirements } : {}),
+    ...(input.operatorInteractionPlan ? { operatorInteractionPlan: input.operatorInteractionPlan } : {}),
     ...(input.engineVersion ? { engineVersion: input.engineVersion } : {}),
     agentGraph,
     ...(input.builderMeta ? { builderMeta: input.builderMeta } : {}),
@@ -136,8 +136,8 @@ export function buildLoopDefinitionFromCeoDesign(input: {
   };
   delivery?: LoopDeliveryRouting;
   connectorPolicy?: LoopDefinition["connectorPolicy"];
-  inputsRequired?: string[];
   inputRequirements?: LoopDefinition["inputRequirements"];
+  operatorInteractionPlan?: LoopDefinition["operatorInteractionPlan"];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
 }): LoopDefinition {
   const allowedToolRefs = uniqueStrings(
@@ -152,8 +152,8 @@ export function buildLoopDefinitionFromCeoDesign(input: {
     deliveryType: input.design.deliveryType,
     delivery: input.delivery,
     connectorPolicy: input.connectorPolicy,
-    inputsRequired: input.inputsRequired,
     inputRequirements: input.inputRequirements,
+    operatorInteractionPlan: input.operatorInteractionPlan,
     engineVersion: input.engineVersion,
     builderMeta: input.design.builderMeta,
   });

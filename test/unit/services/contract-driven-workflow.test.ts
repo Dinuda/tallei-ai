@@ -187,11 +187,13 @@ test("runtime accepts explicit contract graphs and rejects legacy implicit graph
     cron: "0 9 * * 1",
     timezone: "UTC",
     engineVersion: "loop_engine_v3",
+    operatorInteractionPlan: { version: "v1", interactions: [] },
     builderMeta: {
       designedBy: "loop_architect",
       engineVersion: "loop_engine_v3",
       preApproved: true,
-      contractDrivenGraph: "v1",
+      planningIRVersion: "v2",
+      planningIR: {},
     },
     agentGraph: {
       parent: { id: "parent", name: "Coordinator", task: "Coordinate", policy: "Use declared contracts." },
@@ -214,8 +216,5 @@ test("runtime accepts explicit contract graphs and rejects legacy implicit graph
     },
   });
   assert.equal(runtimeDefinitionSchema.safeParse(definition).success, true);
-  assert.equal(runtimeDefinitionSchema.safeParse({
-    ...definition,
-    builderMeta: { ...definition.builderMeta, contractDrivenGraph: undefined },
-  }).success, false);
+  assert.equal(runtimeDefinitionSchema.safeParse({ ...definition, operatorInteractionPlan: undefined }).success, false);
 });

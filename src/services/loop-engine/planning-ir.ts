@@ -1,7 +1,16 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import { inputSurfaceSchema, type InputRequirement } from "./input-surfaces.js";
+import {
+  canonicalizeInputRequirementsList,
+  dataInputSurfaceSchema,
+  defaultLabelForKey,
+  inputSurfaceAcceptsValueType,
+  type DataInputSurface,
+  type InputRequirement,
+  type InputRequirementContext,
+  type InputSurface,
+} from "./input-surfaces.js";
 import {
   loopAgentGraphSchema,
   type AgentHandoffBinding,
@@ -9,6 +18,7 @@ import {
 } from "../loop-executor/types.js";
 import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import type { ToolContract } from "../tool-spec/types.js";
+import type { OperatorInteractionPlan, OperatorInteractionPlanItem } from "./operator-interactions.js";
 
 const jsonValueTypeSchema = z.enum(["string", "number", "integer", "boolean", "object", "array"]);
 const sourceKindSchema = z.enum([
@@ -27,7 +37,7 @@ export const plannedRequiredValueSchema = z.object({
   timing: z.enum(["run_start", "before_step", "before_action"]),
   sensitivity: z.enum(["public", "private", "secret"]),
   valueType: jsonValueTypeSchema,
-  surface: inputSurfaceSchema,
+  surface: dataInputSurfaceSchema,
   sourceKind: sourceKindSchema,
   status: z.enum(["resolved", "unresolved"]),
   stableScalar: z.union([z.string(), z.number(), z.boolean()]).nullable().default(null),
@@ -59,6 +69,9 @@ export const plannedArtifactSchema = z.object({
   description: z.string().min(1),
   representation: z.enum(["text", "json"]),
   visibility: z.enum(["internal", "operator"]),
+  rendererRef: z.string().min(1).nullable(),
+  reviewMode: z.enum(["none", "required"]),
+  editable: z.boolean(),
   fields: z.array(plannedArtifactFieldSchema).max(32),
 });
 
@@ -198,12 +211,48 @@ export type CompiledLoopPlanningIR = {
     allowedReadActions: Array<{ toolkit: string; actionSlug: string; risk: "read"; description: string; requiresPreSendApproval: false }>;
     allowedWriteActions: Array<{ toolkit: string; actionSlug: string; risk: "write" | "destructive"; description: string; requiresPreSendApproval: true }>;
   };
+  operatorInteractionPlan: OperatorInteractionPlan;
 };
 
 function schemaForType(type: z.infer<typeof jsonValueTypeSchema>): Record<string, unknown> {
   if (type === "array") return { type: "array", items: {} };
   if (type === "object") return { type: "object", properties: {}, additionalProperties: false };
   return { type };
+}
+
+function emptyObjectSchema(): Record<string, unknown> {
+  return { type: "object", properties: {}, required: [], additionalProperties: false };
+}
+
+function ensureObjectNode(node: Record<string, unknown>): Record<string, unknown> {
+  if (node.type === "array") return ensureObjectNode(node.items as Record<string, unknown>);
+  if (!node.properties || typeof node.properties !== "object" || Array.isArray(node.properties)) {
+    node.type = "object";
+    node.properties = {};
+    if (!Array.isArray(node.required)) node.required = [];
+    if (node.additionalProperties === undefined) node.additionalProperties = false;
+  }
+  return node;
+}
+
+function ensureArrayNode(node: Record<string, unknown>): Record<string, unknown> {
+  if (node.type !== "array") {
+    node.type = "array";
+    node.items = emptyObjectSchema();
+    delete node.properties;
+    delete node.required;
+  } else if (!node.items || typeof node.items !== "object" || Array.isArray(node.items)) {
+    node.items = emptyObjectSchema();
+  }
+  return node;
+}
+
+function childObjectSchema(existing: unknown): Record<string, unknown> {
+  if (!existing || typeof existing !== "object" || Array.isArray(existing)) return emptyObjectSchema();
+  const node = existing as Record<string, unknown>;
+  if (node.type === "object") return ensureObjectNode(node);
+  if (node.type === "array") return ensureArrayNode(node);
+  return emptyObjectSchema();
 }
 
 function setSchemaAtPath(
@@ -216,20 +265,28 @@ function setSchemaAtPath(
   if (segments.length === 0) return;
   let current = root;
   for (const segment of segments.slice(0, -1)) {
-    const properties = current.properties as Record<string, unknown>;
-    const existing = properties[segment];
-    if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
-      properties[segment] = { type: "object", properties: {}, required: [], additionalProperties: false };
+    if (/^\d+$/.test(segment)) {
+      const arrayNode = ensureArrayNode(current);
+      current = ensureObjectNode(arrayNode.items as Record<string, unknown>);
+      continue;
     }
+    const objectNode = ensureObjectNode(current);
+    const properties = objectNode.properties as Record<string, unknown>;
+    properties[segment] = childObjectSchema(properties[segment]);
     current = properties[segment] as Record<string, unknown>;
   }
-  const properties = current.properties as Record<string, unknown>;
   const leaf = segments.at(-1)!;
+  if (/^\d+$/.test(leaf)) {
+    ensureArrayNode(current).items = schema;
+    return;
+  }
+  const objectNode = ensureObjectNode(current);
+  const properties = objectNode.properties as Record<string, unknown>;
   properties[leaf] = schema;
   if (required) {
-    const requiredFields = new Set(Array.isArray(current.required) ? current.required as string[] : []);
+    const requiredFields = new Set(Array.isArray(objectNode.required) ? objectNode.required as string[] : []);
     requiredFields.add(leaf);
-    current.required = [...requiredFields];
+    objectNode.required = [...requiredFields];
   }
 }
 
@@ -256,6 +313,7 @@ function artifactContract(artifact: PlannedArtifact) {
     representation: artifact.representation,
     mediaType: artifact.representation === "json" ? "application/json" as const : "text/plain" as const,
     visibility: artifact.visibility,
+    ...(artifact.rendererRef ? { renderer: artifact.rendererRef } : {}),
   };
 }
 
@@ -301,6 +359,69 @@ function schemaAtPath(schema: Record<string, unknown>, path: string): Record<str
   return current;
 }
 
+export function schemaAddressablePaths(schema: Record<string, unknown>, base = ""): string[] {
+  const paths = new Set<string>(["/"]);
+  const visit = (node: Record<string, unknown>, path: string): void => {
+    if (path) paths.add(path);
+    if (node.type === "array") {
+      const items = node.items;
+      if (items && typeof items === "object" && !Array.isArray(items)) {
+        visit(items as Record<string, unknown>, path);
+      }
+      return;
+    }
+    const properties = node.properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) return;
+    for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      visit(value as Record<string, unknown>, `${path}/${key}`);
+    }
+  };
+  visit(schema, base);
+  return [...paths].sort();
+}
+
+function formatAvailablePaths(paths: string[]): string {
+  if (paths.length === 0) return "none";
+  return paths.slice(0, 24).join(", ");
+}
+
+function bindingPathUsesDotNotation(path: string): boolean {
+  return path.split("/").filter(Boolean).some((segment) => segment.includes("."));
+}
+
+function normalizeBindingPathSyntax(path: string): string {
+  if (path === "/") return path;
+  const segments = path.split("/").filter(Boolean);
+  return `/${segments.flatMap((segment) => segment.split(".").filter(Boolean)).join("/")}`;
+}
+
+function longestDeclaredSourcePrefix(
+  schema: Record<string, unknown> | undefined,
+  path: string,
+): string | null {
+  if (!schema) return null;
+  const normalized = normalizeBindingPathSyntax(path);
+  const segments = normalized.split("/").filter(Boolean);
+  let current: Record<string, unknown> | null = schema;
+  let lastValid = "/";
+  for (const segment of segments) {
+    if (!current) break;
+    const next = schemaAtPath(current, `/${segment}`);
+    if (!next) break;
+    lastValid = lastValid === "/" ? `/${segment}` : `${lastValid}/${segment}`;
+    current = next;
+  }
+  return lastValid;
+}
+
+function schemaTypeSummary(schema: Record<string, unknown> | null | undefined): string {
+  if (!schema) return "unknown";
+  if (typeof schema.type === "string") return schema.type;
+  if (Array.isArray(schema.type)) return schema.type.filter((value): value is string => typeof value === "string").join("|");
+  return "unspecified";
+}
+
 function schemasCompatible(source: Record<string, unknown>, target: Record<string, unknown>): boolean {
   const sourceType = typeof source.type === "string" ? source.type : null;
   const targetType = typeof target.type === "string" ? target.type : null;
@@ -312,29 +433,62 @@ function schemasCompatible(source: Record<string, unknown>, target: Record<strin
   ) {
     return true;
   }
+  // Operator contact lists are supplied as CSV text and normalized to arrays at runtime.
+  if (sourceType === "string" && targetType === "array") return true;
+  if (sourceType === "array" && targetType === "string") return true;
   return false;
 }
 
-function normalizePlannedRequiredValue(value: PlannedRequiredValue): PlannedRequiredValue {
-  if (value.status === "resolved") return value;
-  if (value.lifecycle === "runtime_input" && value.sourceKind === "operator_input") {
-    return { ...value, status: "resolved" };
-  }
-  if (value.lifecycle === "workflow_config" && value.sourceKind === "stable_config" && value.stableScalar != null) {
-    return { ...value, status: "resolved" };
-  }
-  return value;
+function shouldSeedRequiredValueFromSpec(surface: InputSurface): surface is DataInputSurface {
+  return surface.startsWith("input.");
 }
 
-function redundantBlockingIssue(
-  issue: UnresolvedPlanningIssue,
-  requiredValues: PlannedRequiredValue[],
-): boolean {
-  if (!issue.blocksApproval) return false;
-  if (issue.kind !== "required_value" && issue.kind !== "decision") return false;
-  const runtimeInputs = requiredValues.filter((value) => value.lifecycle === "runtime_input");
-  if (runtimeInputs.length === 0) return false;
-  return runtimeInputs.every((value) => normalizePlannedRequiredValue(value).status === "resolved");
+function valueTypeForSurface(surface: InputSurface): z.infer<typeof jsonValueTypeSchema> {
+  if (surface === "input.contacts_csv") return "array";
+  if (surface === "input.file") return "string";
+  return "string";
+}
+
+function timingForSeededRequirement(req: InputRequirement): PlannedRequiredValue["timing"] {
+  if (req.surface === "confirm.send") return "before_action";
+  if (req.when === "before_send") return "before_action";
+  if (req.when === "before_step") return "before_step";
+  return "run_start";
+}
+
+function sensitivityForSeededRequirement(req: InputRequirement): PlannedRequiredValue["sensitivity"] {
+  if (req.surface === "input.contacts_csv" || req.surface === "input.audience_id") return "private";
+  return "public";
+}
+
+export function seedRequiredValuesFromSpec(requirements: InputRequirement[]): PlannedRequiredValue[] {
+  return requirements.flatMap((req) => {
+    if (!shouldSeedRequiredValueFromSpec(req.surface)) return [];
+    return [{
+      key: req.key,
+      label: req.label ?? defaultLabelForKey(req.key),
+      description: req.description ?? `Runtime value for ${req.key}.`,
+      lifecycle: "runtime_input" as const,
+      timing: timingForSeededRequirement(req),
+      sensitivity: sensitivityForSeededRequirement(req),
+      valueType: valueTypeForSurface(req.surface),
+      surface: req.surface,
+      sourceKind: "operator_input" as const,
+      status: "resolved" as const,
+      stableScalar: null,
+    }];
+  });
+}
+
+export function mergeCompiledInputRequirementsWithSpec(input: {
+  compiled: InputRequirement[];
+  specRequirements: InputRequirement[];
+  context: InputRequirementContext;
+}): InputRequirement[] {
+  return canonicalizeInputRequirementsList(
+    [...input.compiled, ...input.specRequirements],
+    input.context,
+  );
 }
 
 function bindingSourceToRuntime(
@@ -393,14 +547,15 @@ function validateBinding(input: {
   targetSchema: Record<string, unknown>;
   outputSchemas: Map<string, Record<string, unknown>>;
   requiredValues: Map<string, PlannedRequiredValue>;
+  textArtifactProducers: Map<string, PlannedArtifact>;
   issues: PlanningCompilationIssue[];
 }): void {
-  const { binding, owner, targetSchema, outputSchemas, requiredValues, issues } = input;
+  const { binding, owner, targetSchema, outputSchemas, requiredValues, textArtifactProducers, issues } = input;
   const target = schemaAtPath(targetSchema, binding.targetPath);
   if (!target) {
     issues.push({
       code: "unknown_target_path",
-      message: `${owner} binding targets a path absent from its exact input contract: ${binding.targetPath}`,
+      message: `${owner} binding targets a path absent from its exact input contract: ${binding.targetPath}. Valid target paths: ${formatAvailablePaths(schemaAddressablePaths(targetSchema))}.`,
       path: owner,
     });
   }
@@ -460,13 +615,65 @@ function validateBinding(input: {
     }
     sourceSchema = requiredValueSchema(value);
   } else if (binding.source.kind === "agent_output" || binding.source.kind === "connector_output") {
+    const producerArtifact = binding.source.nodeId
+      ? textArtifactProducers.get(binding.source.nodeId)
+      : undefined;
+    if (
+      producerArtifact?.representation === "text"
+      && binding.source.path !== "/"
+      && binding.source.path !== "/text"
+    ) {
+      issues.push({
+        code: "text_artifact_needs_json_fields",
+        message: `${binding.source.nodeId} is a text artifact exposing only /text. Binding ${binding.source.path} requires changing outputArtifact to representation json with an explicit ${binding.source.path} field, or rebind to /text.`,
+        path: binding.source.nodeId ?? owner,
+      });
+      return;
+    }
+    const declaredPath = binding.source.path;
+    const normalizedPath = normalizeBindingPathSyntax(declaredPath);
+    if (bindingPathUsesDotNotation(declaredPath)) {
+      issues.push({
+        code: "invalid_source_path_syntax",
+        message: `${owner} binding source path ${declaredPath} uses dot notation. Connector and agent output paths must use slash-separated JSON pointer segments such as ${normalizedPath}.`,
+        path: owner,
+      });
+      return;
+    }
+    const firstSegment = normalizedPath.split("/").filter(Boolean)[0] ?? "";
+    if (firstSegment === "input") {
+      issues.push({
+        code: "connector_input_path_used_as_source",
+        message: `${owner} binding source path ${declaredPath} references the /input sub-object of node ${binding.source.nodeId ?? "unknown"}, which is that node's input schema, not its output. Bind from a semantic agent outputArtifact field or a declared connector outputPaths entry instead.`,
+        path: owner,
+      });
+      return;
+    }
     sourceSchema = binding.source.nodeId
-      ? schemaAtPath(outputSchemas.get(binding.source.nodeId) ?? {}, binding.source.path)
+      ? schemaAtPath(outputSchemas.get(binding.source.nodeId) ?? {}, normalizedPath)
       : null;
     if (!sourceSchema) {
+      const sourceRoot = binding.source.nodeId
+        ? outputSchemas.get(binding.source.nodeId)
+        : undefined;
+      const validPaths = sourceRoot ? schemaAddressablePaths(sourceRoot) : [];
+      const declaredPrefix = longestDeclaredSourcePrefix(sourceRoot, normalizedPath);
+      if (
+        binding.source.kind === "connector_output"
+        && declaredPrefix
+        && declaredPrefix !== normalizedPath
+        && validPaths.includes(declaredPrefix)
+      ) {
+        issues.push({
+          code: "opaque_connector_output_path",
+          message: `${owner} binding source path ${declaredPath} drills into undeclared connector output under ${binding.source.nodeId}. The exact contract only exposes: ${formatAvailablePaths(validPaths)}. Rebind to one of those exact paths, or replace the multi-action draft chain with a single direct send action whose inputs bind from the semantic agent.`,
+          path: binding.source.nodeId ?? owner,
+        });
+        return;
+      }
       issues.push({
         code: "unknown_source_path",
-        message: `${owner} binding source path does not exist: ${binding.source.nodeId ?? "unknown"}${binding.source.path}`,
+        message: `${owner} binding source path does not exist: ${binding.source.nodeId ?? "unknown"}${declaredPath}. Valid source paths for ${binding.source.nodeId ?? "unknown"}: ${formatAvailablePaths(validPaths)}.`,
         path: owner,
       });
     }
@@ -475,7 +682,7 @@ function validateBinding(input: {
   if (sourceSchema && target && !schemasCompatible(sourceSchema, target)) {
     issues.push({
       code: "incompatible_binding",
-      message: `${owner} binding ${binding.targetPath} has an incompatible source type.`,
+      message: `${owner} binding ${binding.targetPath} has incompatible types: source ${binding.source.path} is ${schemaTypeSummary(sourceSchema)}, target ${binding.targetPath} requires ${schemaTypeSummary(target)}.`,
       path: owner,
     });
   }
@@ -536,23 +743,36 @@ function semanticInputContract(
 export function compileLoopPlanningIRV2(input: {
   planningIR: LoopPlanningIR;
   contracts: ToolContract[];
+  options?: { draftReviewAgentIds?: Set<string> };
 }): { ok: true; compiled: CompiledLoopPlanningIR } | { ok: false; issues: PlanningCompilationIssue[] } {
   const ir = loopPlanningIRSchema.parse(input.planningIR);
-  const normalizedRequiredValues = ir.requiredValues.map(normalizePlannedRequiredValue);
+  void input.options;
+  const runtimeEdgeCasePattern = /\b(zero|no|empty|0)\b.{0,60}\b(results?|stories|items?|sources?)\b|\bif\b.{0,80}\b(runtime|agent|should|instruct|proceed|abort|expand)\b|\boperator must resolve this at runtime\b/i;
   const issues: PlanningCompilationIssue[] = ir.unresolvedIssues
-    .filter((issue) => issue.blocksApproval)
-    .filter((issue) => !redundantBlockingIssue(issue, normalizedRequiredValues))
+    .filter((issue) => {
+      if (!issue.blocksApproval) return false;
+      if (runtimeEdgeCasePattern.test(issue.message)) {
+        console.warn(`[planning-ir] Dropping runtime edge-case unresolved issue (should not block planning): ${issue.id}`);
+        return false;
+      }
+      return true;
+    })
     .map((issue) => ({
       code: `unresolved_${issue.kind}`,
       message: issue.message,
       ...(issue.relatedRef ? { path: issue.relatedRef } : {}),
     }));
-  const requiredValues = new Map(normalizedRequiredValues.map((value) => [value.key, value]));
+  const requiredValues = new Map(ir.requiredValues.map((value) => [value.key, value]));
   const contracts = new Map(input.contracts.map((contract) => [contract.toolRef.toLowerCase(), contract]));
   const nodeIds = new Set<string>();
   const consumedSemanticOutputs = new Set<string>();
   const consumedRequiredValues = new Set<string>();
   const outputSchemas = new Map(ir.semanticAgents.map((agent) => [agent.id, artifactContract(agent.outputArtifact).schema]));
+  const textArtifactProducers = new Map(
+    ir.semanticAgents
+      .filter((agent) => agent.outputArtifact.representation === "text")
+      .map((agent) => [agent.id, agent.outputArtifact]),
+  );
   for (const action of ir.selectedActions) {
     const contract = contracts.get(action.contractRef.toLowerCase());
     if (contract) outputSchemas.set(action.id, contract.outputSchema);
@@ -563,7 +783,7 @@ export function compileLoopPlanningIRV2(input: {
     issues.push({ code: "empty_plan", message: "Planning IR must declare at least one semantic agent or connector action." });
   }
 
-  for (const value of normalizedRequiredValues) {
+  for (const value of ir.requiredValues) {
     if (value.status === "unresolved" && value.lifecycle !== "derived") {
       issues.push({ code: "unresolved_required_value", message: `Required value "${value.key}" is unresolved.`, path: value.key });
     }
@@ -572,7 +792,7 @@ export function compileLoopPlanningIRV2(input: {
     if (agent.outputArtifact.representation === "text" && agent.outputArtifact.fields.length > 0) {
       issues.push({
         code: "text_artifact_fields",
-        message: `Text artifact ${agent.outputArtifact.id} must use the implicit /text field rather than declaring structured fields.`,
+        message: `Text artifact ${agent.outputArtifact.id} must declare fields: [] and use the implicit /text output. Change representation to json only when downstream consumers require multiple named fields.`,
         path: agent.id,
       });
     }
@@ -619,6 +839,7 @@ export function compileLoopPlanningIRV2(input: {
         targetSchema: inputContract.schema,
         outputSchemas,
         requiredValues,
+        textArtifactProducers,
         issues,
       });
     }
@@ -633,6 +854,9 @@ export function compileLoopPlanningIRV2(input: {
       inputContract,
       outputContract,
       handoffBindings: compileBindings(agent.inputBindings, requiredValues, issues, agent.id),
+      ...(agent.outputArtifact.reviewMode === "required" ? {
+        gate: { type: "draft_review" as const, question: `Review ${agent.name} output before continuing.` },
+      } : {}),
       outputArtifactId: agent.outputArtifact.id,
       outputArtifactKind: "structured_output",
     };
@@ -670,6 +894,7 @@ export function compileLoopPlanningIRV2(input: {
         targetSchema: contract.inputSchema,
         outputSchemas,
         requiredValues,
+        textArtifactProducers,
         issues,
       });
     }
@@ -678,7 +903,11 @@ export function compileLoopPlanningIRV2(input: {
       const covered = [...boundPaths].some((boundPath) =>
         boundPath === requiredPath || requiredPath.startsWith(`${boundPath}/`));
       if (!covered) {
-        issues.push({ code: "missing_required_binding", message: `${action.contractRef} has no explicit binding for required input ${requiredPath}.`, path: action.id });
+        issues.push({
+          code: "missing_required_binding",
+          message: `${action.contractRef} has no explicit binding for required input ${requiredPath}. Valid target paths: ${formatAvailablePaths(schemaAddressablePaths(contract.inputSchema))}.`,
+          path: action.id,
+        });
       }
     }
     const uncertain = action.annotation.effect === "uncertain" || action.annotation.confidence === "low";
@@ -736,9 +965,13 @@ export function compileLoopPlanningIRV2(input: {
       issues.push({ code: "unused_semantic_output", message: `Semantic agent ${agent.id} has no declared consumer.`, path: agent.id });
     }
   }
-  for (const value of normalizedRequiredValues) {
+  for (const value of ir.requiredValues) {
     if (value.lifecycle !== "derived" && !consumedRequiredValues.has(value.key)) {
-      issues.push({ code: "unused_required_value", message: `Required value ${value.key} has no declared consumer.`, path: value.key });
+      issues.push({
+        code: "unused_required_value",
+        message: `Required value ${value.key} has no declared consumer. Remove it from requiredValues; do not invent a consumer.`,
+        path: value.key,
+      });
     }
   }
 
@@ -758,9 +991,88 @@ export function compileLoopPlanningIRV2(input: {
       }
     }
   }
+
+  const operatorInteractions: OperatorInteractionPlanItem[] = [];
+  for (const value of ir.requiredValues.filter((candidate) => candidate.lifecycle === "runtime_input")) {
+    const consumer = [
+      ...ir.semanticAgents.map((agent) => ({ id: agent.id, bindings: agent.inputBindings })),
+      ...ir.selectedActions.map((action) => ({ id: action.id, bindings: action.bindings })),
+    ].find((node) => node.bindings.some((binding) =>
+      binding.source.kind === "required_value" && binding.source.key === value.key));
+    if (!consumer) continue;
+    if (!inputSurfaceAcceptsValueType(value.surface, value.valueType)) {
+      issues.push({
+        code: "input_surface_type_mismatch",
+        message: `Input surface ${value.surface} cannot collect ${value.valueType} required value ${value.key}.`,
+        path: value.key,
+      });
+      continue;
+    }
+    operatorInteractions.push({
+      id: `collect:${value.key}`,
+      kind: "collect_input",
+      requiredValueKey: value.key,
+      consumingNodeId: consumer.id,
+      surface: value.surface,
+      timing: value.timing === "run_start" ? "run_start" : value.timing === "before_action" ? "before_send" : "before_step",
+      valueType: value.valueType,
+      label: value.label,
+      description: value.description,
+      required: true,
+    });
+  }
+  for (const agent of ir.semanticAgents.filter((candidate) => candidate.outputArtifact.reviewMode === "required")) {
+    if (agent.outputArtifact.visibility !== "operator") {
+      issues.push({
+        code: "review_artifact_not_operator_visible",
+        message: `Reviewed artifact ${agent.outputArtifact.id} must be operator-visible.`,
+        path: agent.id,
+      });
+      continue;
+    }
+    if (agent.outputArtifact.rendererRef && !["canvas.email", "canvas.preview"].includes(agent.outputArtifact.rendererRef)) {
+      issues.push({
+        code: "unknown_renderer",
+        message: `Reviewed artifact ${agent.outputArtifact.id} uses unknown renderer ${agent.outputArtifact.rendererRef}.`,
+        path: agent.id,
+      });
+      continue;
+    }
+    operatorInteractions.push({
+      id: `review:${agent.outputArtifact.id}`,
+      kind: "review_artifact",
+      producerNodeId: agent.id,
+      artifactId: agent.outputArtifact.id,
+      rendererRef: agent.outputArtifact.rendererRef,
+      editable: agent.outputArtifact.editable,
+      allowedCommands: ["approve", "revise", "reject"],
+    });
+  }
+  for (const action of ir.selectedActions) {
+    operatorInteractions.push({
+      id: `connect:${action.id}`,
+      kind: "connect_connector",
+      actionNodeId: action.id,
+      contractRef: action.contractRef,
+    });
+    const uncertain = action.annotation.effect === "uncertain" || action.annotation.confidence === "low";
+    const requiresApproval = action.annotation.approvalRequired || uncertain
+      || action.annotation.effect === "write_external"
+      || action.annotation.effect === "irreversible_external";
+    if (requiresApproval) {
+      operatorInteractions.push({
+        id: `confirm:${action.id}`,
+        kind: "confirm_action",
+        actionNodeId: action.id,
+        contractRef: action.contractRef,
+        effect: action.annotation.effect === "read_external" ? "uncertain" : action.annotation.effect,
+        approvalRequired: true,
+      });
+    }
+  }
   if (issues.length > 0) return { ok: false, issues };
 
-  const inputRequirements: InputRequirement[] = normalizedRequiredValues
+  const inputRequirements: InputRequirement[] = ir.requiredValues
     .filter((value) => value.lifecycle === "runtime_input")
     .map((value) => ({
       key: value.key,
@@ -792,6 +1104,7 @@ export function compileLoopPlanningIRV2(input: {
       graph,
       inputRequirements,
       connectorPolicy: { allowedReadActions: readActions, allowedWriteActions: writeActions },
+      operatorInteractionPlan: { version: "v1", interactions: operatorInteractions },
     },
   };
 }

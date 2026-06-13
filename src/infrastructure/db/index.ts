@@ -29,20 +29,7 @@ function createPool(connectionString: string): pg.Pool {
   return dbPool;
 }
 
-function shouldFallback(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const anyError = error as Error & { code?: string };
-  const code = anyError.code || "";
-  return (
-    code === "ENOTFOUND" ||
-    code === "ECONNREFUSED" ||
-    code === "ETIMEDOUT" ||
-    /getaddrinfo|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(anyError.message)
-  );
-}
-
 export let pool = createPool(config.databaseUrl);
-let fallbackAttempted = false;
 
 type DbClient = pg.PoolClient;
 
@@ -140,31 +127,6 @@ async function backfillMemoryTypes(client: DbClient): Promise<void> {
        WHERE id = $4`,
       [classified.memoryType, classified.category, classified.isPinned, row.id]
     );
-  }
-}
-
-async function connectWithFallback(): Promise<DbClient> {
-  try {
-    return await pool.connect();
-  } catch (error) {
-    const fallbackUrl = config.databaseUrlFallback;
-    const canFallback =
-      !fallbackAttempted &&
-      config.nodeEnv !== "production" &&
-      Boolean(fallbackUrl) &&
-      fallbackUrl !== config.databaseUrl &&
-      shouldFallback(error);
-
-    if (!canFallback) {
-      throw error;
-    }
-
-    fallbackAttempted = true;
-    console.warn(
-      `[db] primary DATABASE_URL unreachable; retrying with DATABASE_URL_FALLBACK (${fallbackUrl})`
-    );
-    pool = createPool(fallbackUrl);
-    return await pool.connect();
   }
 }
 
@@ -385,7 +347,7 @@ async function restorePoolSessionTimeouts(client: DbClient): Promise<void> {
 }
 
 export async function initDb() {
-  const client = await connectWithFallback();
+  const client = await pool.connect();
   let migrationSessionConfigured = false;
   try {
     if (!config.dbAutoMigrateOnBoot) {
@@ -1063,7 +1025,7 @@ export async function initDb() {
         run_mode TEXT NOT NULL DEFAULT 'scheduled'
           CHECK (run_mode IN ('scheduled', 'manual')),
         status TEXT NOT NULL DEFAULT 'scheduled'
-          CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'waiting_for_gate', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
+          CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'waiting_for_interaction', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
         scheduled_for TIMESTAMPTZ,
         strategy_output TEXT,
         waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1085,9 +1047,12 @@ export async function initDb() {
         ADD COLUMN IF NOT EXISTS waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE;
       ALTER TABLE workflow_runs
         DROP CONSTRAINT IF EXISTS workflow_runs_status_check;
+      UPDATE workflow_runs
+        SET status = 'waiting_for_interaction', updated_at = NOW()
+        WHERE status = 'waiting_for_gate';
       ALTER TABLE workflow_runs
         ADD CONSTRAINT workflow_runs_status_check
-        CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'waiting_for_gate', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled'));
+        CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'waiting_for_interaction', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled'));
     `);
 
     await client.query(`
@@ -1280,7 +1245,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
         status TEXT NOT NULL DEFAULT 'queued'
-          CHECK (status IN ('queued', 'running', 'waiting_for_gate', 'blocked', 'succeeded', 'failed', 'cancelled')),
+          CHECK (status IN ('queued', 'running', 'waiting_for_interaction', 'blocked', 'succeeded', 'failed', 'cancelled')),
         definition_snapshot JSONB NOT NULL,
         context_json JSONB NOT NULL DEFAULT '{"inputs":{},"approvedMemories":[]}'::jsonb,
         current_step_index INTEGER,
@@ -1306,7 +1271,7 @@ export async function initDb() {
         agent_snapshot JSONB NOT NULL,
         attempt INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'queued'
-          CHECK (status IN ('queued', 'running', 'waiting_for_gate', 'succeeded', 'failed', 'cancelled')),
+          CHECK (status IN ('queued', 'running', 'waiting_for_interaction', 'succeeded', 'failed', 'cancelled')),
         input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         error_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -1330,7 +1295,7 @@ export async function initDb() {
         run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
         step_attempt_id UUID REFERENCES loop_engine_step_attempts(id) ON DELETE CASCADE,
         command_type TEXT NOT NULL
-          CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_gate', 'finalize_run', 'retry_step')),
+          CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_interaction', 'finalize_run', 'retry_step')),
         status TEXT NOT NULL DEFAULT 'pending'
           CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled')),
         idempotency_key TEXT NOT NULL UNIQUE,
@@ -1348,14 +1313,14 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_loop_engine_commands_dispatch
         ON loop_engine_commands(status, not_before, created_at);
 
-      CREATE TABLE IF NOT EXISTS loop_engine_gates (
+      CREATE TABLE IF NOT EXISTS loop_engine_interactions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
         step_attempt_id UUID NOT NULL REFERENCES loop_engine_step_attempts(id) ON DELETE CASCADE,
-        gate_type TEXT NOT NULL
-          CHECK (gate_type IN ('memory_confirmation', 'source_confirmation', 'missing_input', 'draft_review', 'recipient_upload', 'pre_send')),
+        interaction_kind TEXT NOT NULL
+          CHECK (interaction_kind IN ('collect_input', 'review_artifact', 'confirm_action', 'connect_connector')),
         status TEXT NOT NULL DEFAULT 'pending'
           CHECK (status IN ('pending', 'approved', 'submitted', 'rejected')),
         question TEXT NOT NULL,
@@ -1367,8 +1332,8 @@ export async function initDb() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
-      CREATE INDEX IF NOT EXISTS idx_loop_engine_gates_run_status
-        ON loop_engine_gates(run_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_interactions_run_status
+        ON loop_engine_interactions(run_id, status, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS loop_engine_artifacts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1415,6 +1380,47 @@ export async function initDb() {
         AND workflow_id IN (
           SELECT id FROM workflows WHERE status = 'archived' AND definition_version = 'loop_executor_v2'
         );
+
+      DO $$
+      BEGIN
+        IF to_regclass('public.loop_engine_gates') IS NOT NULL THEN
+          UPDATE loop_engine_runs
+          SET status = 'failed',
+              error_json = '{"message":"Run uses obsolete operator interactions and must be re-drafted."}'::jsonb,
+              finished_at = COALESCE(finished_at, NOW()),
+              updated_at = NOW()
+          WHERE status NOT IN ('succeeded', 'failed', 'cancelled')
+            AND EXISTS (SELECT 1 FROM loop_engine_gates g WHERE g.run_id = loop_engine_runs.id);
+          DROP TABLE loop_engine_gates CASCADE;
+        END IF;
+      END $$;
+
+      ALTER TABLE loop_engine_runs
+        DROP CONSTRAINT IF EXISTS loop_engine_runs_status_check;
+      UPDATE loop_engine_runs
+        SET status = 'waiting_for_interaction', updated_at = NOW()
+        WHERE status = 'waiting_for_gate';
+      ALTER TABLE loop_engine_runs
+        ADD CONSTRAINT loop_engine_runs_status_check
+        CHECK (status IN ('queued', 'running', 'waiting_for_interaction', 'blocked', 'succeeded', 'failed', 'cancelled'));
+
+      ALTER TABLE loop_engine_step_attempts
+        DROP CONSTRAINT IF EXISTS loop_engine_step_attempts_status_check;
+      UPDATE loop_engine_step_attempts
+        SET status = 'waiting_for_interaction', updated_at = NOW()
+        WHERE status = 'waiting_for_gate';
+      ALTER TABLE loop_engine_step_attempts
+        ADD CONSTRAINT loop_engine_step_attempts_status_check
+        CHECK (status IN ('queued', 'running', 'waiting_for_interaction', 'succeeded', 'failed', 'cancelled'));
+
+      ALTER TABLE loop_engine_commands
+        DROP CONSTRAINT IF EXISTS loop_engine_commands_command_type_check;
+      UPDATE loop_engine_commands
+        SET command_type = 'continue_after_interaction', updated_at = NOW()
+        WHERE command_type = 'continue_after_gate';
+      ALTER TABLE loop_engine_commands
+        ADD CONSTRAINT loop_engine_commands_command_type_check
+        CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_interaction', 'finalize_run', 'retry_step'));
     `);
 
     await client.query(`
@@ -2541,16 +2547,6 @@ export async function initDb() {
         AND connector_type IS NULL
     `);
     await applySupabaseRlsPolicies(client);
-
-    await client.query(`
-      ALTER TABLE loop_engine_gates
-      DROP CONSTRAINT IF EXISTS loop_engine_gates_gate_type_check;
-    `);
-    await client.query(`
-      ALTER TABLE loop_engine_gates
-      ADD CONSTRAINT loop_engine_gates_gate_type_check
-      CHECK (gate_type IN ('memory_confirmation', 'source_confirmation', 'missing_input', 'draft_review', 'recipient_upload', 'pre_send'));
-    `);
 
     console.log("Database schema initialized successfully.");
   } catch (error) {

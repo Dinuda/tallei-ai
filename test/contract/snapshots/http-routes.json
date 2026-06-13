@@ -656,32 +656,7 @@
   },
   {
     "method": "POST",
-    "path": "/api/workflows/runs/:runId/gates/:gateId/approve",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/gates/:gateId/contacts",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/gates/:gateId/input",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/gates/:gateId/reject",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/gates/:gateId/revise",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/workflows/runs/:runId/gates/:gateId/submit",
+    "path": "/api/workflows/runs/:runId/interactions/:interactionId/commands",
     "source": "src/routes/workflows.ts"
   },
   {

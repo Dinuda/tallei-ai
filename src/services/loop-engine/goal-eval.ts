@@ -270,7 +270,7 @@ function deterministicGuards(input: {
   }
 
   if (!contentInputsSatisfied && asksOperatorForInput(text) && !canvasDraftAgent && isInputValidationAgent(input.agent)) {
-    const requiredKey = contentKeys[0] ?? input.definition.inputsRequired?.[0] ?? "required_input";
+    const requiredKey = contentKeys[0] ?? input.definition.inputRequirements?.[0]?.key ?? "required_input";
     return goalEvalResultSchema.parse({
       status: "needs_input",
       reason: `Required input is missing. Provide ${requiredKey.replace(/_/g, " ")} to continue.`,

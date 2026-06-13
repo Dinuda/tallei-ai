@@ -68,6 +68,7 @@ test("Vertex document search records low latency timing", async () => {
     const fields = currentRequestTimingStore()?.fields ?? {};
     assert.equal(typeof fields["vertex_document_search_ms"], "number");
     assert.equal(fields["vertex_document_search_status"], "success");
+    assert.ok(Number.isFinite(Number(fields["vertex_document_search_ms"])));
     assert.ok(Number(fields["vertex_document_search_ms"]) < 50);
   });
 });

@@ -22,9 +22,17 @@ import {
   type WorkflowCriticResult,
 } from "./contracts.js";
 import {
+  deriveRequiredConnectorActionsFromSpec,
+  prioritizeDiscoveredConnectors,
+  specSemanticPipeline,
+  supplementDiscoveryQueriesFromSpec,
+} from "./spec-required-connectors.js";
+import {
   compileLoopPlanningIR,
   loopPlanningIRJsonSchemaForContracts,
   loopPlanningIRSchema,
+  schemaAddressablePaths,
+  seedRequiredValuesFromSpec,
   type LoopPlanningIR,
   type PlanningCompilationIssue,
 } from "./planning-ir.js";
@@ -33,8 +41,6 @@ import { formatWorkflowUserProfile, loadWorkflowUserProfile } from "./workflow-u
 import {
   buildToolSpecRegistry,
   discoverToolsForQueries,
-  discoveryQueriesForRequiredActions,
-  inferRequiredConnectorActions,
   mergeRequiredToolContracts,
 } from "../tool-spec/index.js";
 import type { ToolContract } from "../tool-spec/types.js";
@@ -270,6 +276,7 @@ export function compactPlannerContracts(contracts: ToolContract[]) {
     provider: contract.provider,
     inputFields: schemaFields(contract.inputSchema).slice(0, 40),
     outputFields: schemaFields(contract.outputSchema).slice(0, 40),
+    outputPaths: schemaAddressablePaths(contract.outputSchema).slice(0, 24),
     declaredRisk: contract.constraints.risk ?? null,
     toolkitVersion: contract.constraints.toolkitVersion ?? null,
     connected: contract.constraints.connected ?? null,
@@ -283,16 +290,13 @@ export function contractsForPlannerCorrection(input: {
   internalContracts: ToolContract[];
   connectorContracts: ToolContract[];
 }): ToolContract[] {
-  const referencedConnectorRefs = new Set(input.previousIR.selectedActions.map((action) => action.contractRef.toLowerCase()));
-  return [
-    ...input.internalContracts,
-    ...input.connectorContracts.filter((contract) => referencedConnectorRefs.has(contract.toolRef.toLowerCase())),
-  ];
+  return [...input.internalContracts, ...input.connectorContracts];
 }
 
 async function generateToolSearchPlan(input: {
   prompt: string;
   intentContext?: NoSlopSpecSnapshot["intentContext"];
+  specDelivery?: { provider: string; description: string };
   previousQueries?: string[];
   chat: typeof loopBuilderOpenAiChat;
 }) {
@@ -315,6 +319,7 @@ async function generateToolSearchPlan(input: {
           "Return only the bounded connector catalogue search queries.",
           "Each query must be a concise 2-5 word capability search for a connector tool catalogue, not an action slug.",
           "When the request names an app or provider, include that exact app or provider name in the relevant query.",
+          "When specDelivery describes email send and calendar scheduling, emit separate queries for each capability.",
           "Use separate queries for materially different connector capabilities.",
           input.previousQueries?.length
             ? "The previous queries returned no exact contracts. Reformulate them into shorter provider-and-capability searches."
@@ -328,6 +333,7 @@ async function generateToolSearchPlan(input: {
         content: JSON.stringify({
           request: input.prompt,
           resolvedIntent: input.intentContext?.resolvedIntent ?? null,
+          specDelivery: input.specDelivery ?? null,
           previousQueriesWithNoResults: input.previousQueries ?? [],
         }),
       },
@@ -346,10 +352,15 @@ function buildPlannerPrompt(input: {
   connectorContracts: ToolContract[];
   priorPlanningIR?: LoopPlanningIR;
 }): string {
+  const specInputCandidates = input.noSlopSpec
+    ? seedRequiredValuesFromSpec(input.noSlopSpec.specJson.inputRequirements ?? [])
+    : [];
   return JSON.stringify({
     request: input.prompt,
     reviewedSpec: input.noSlopSpec?.specJson ?? null,
     resolvedIntent: input.noSlopSpec?.intentContext ?? null,
+    specInputCandidates,
+    specSemanticPipeline: input.noSlopSpec ? specSemanticPipeline(input.noSlopSpec.specJson) : [],
     profile: input.profile,
     recalledContext: input.memories,
     preferences: input.preferences,
@@ -380,6 +391,10 @@ function buildPlannerPrompt(input: {
       "review.memories",
       "confirm.send",
     ],
+    platformRenderers: [
+      { rendererRef: "canvas.email", accepts: ["text", "json"], purpose: "Editable email artifact review." },
+      { rendererRef: "canvas.preview", accepts: ["text", "json"], purpose: "Read-only final artifact preview." },
+    ],
   });
 }
 
@@ -403,8 +418,23 @@ function planningSystemPrompt(): string {
     "Select connector actions only from discoveredConnectorActions and place them in selectedActions.",
     "When discoveredConnectorActions is empty, do not invent a connector tool ref, runtime connector action, or delivery semantic agent.",
     "A missing connector contract may be declared as an unresolved action issue, but semanticAgents must still use only exact internalTools.",
-    "Do not require an external research connector when an available internal search tool satisfies the research work.",
+    "Prefer internal.web_search for research; do not select an external search connector when an available internal search tool satisfies the research work.",
+    "specInputCandidates are data-input candidates declared by the reviewed spec. Include a candidate in requiredValues only when it has an explicit semantic-agent or connector-action consumer in this plan.",
+    "Omit any specInputCandidate that describes platform approval policy, approvers, review control flow, connector authorization, or data unused by the executable plan.",
+    "Every requiredValues entry must have at least one explicit consumer. Never preserve an unused required value merely because it appeared in the reviewed spec.",
+    "Do not add connector account names, sender addresses, OAuth tokens, authorization state, approval state, or approver lists as additional required values.",
+    "When a spec agent goal names multiple distinct connector actions (e.g., send email and create calendar invite), each must be a separate entry in selectedActions with its own contractRef and bindings.",
+    "selectedActions is an executable action list, not a menu of alternatives. Never include mutually exclusive actions and ask runtime or the operator to select one.",
+    "When multiple discovered actions could satisfy the same delivery behavior, select exactly one action supported by the reviewed spec and resolved intent. If the reviewed spec leaves the behavior open, make one explicit visible planning decision in strategy; do not emit both actions.",
+    "Never say the planner cannot autonomously choose between feasible actions. Action selection is the planner's responsibility.",
+    "Never model connector delivery or scheduling as a semantic agent. Dispatch, send, and calendar actions belong only in selectedActions.",
+    "Approval is platform control flow, never connector data. Express it only through selectedActions.annotation.approvalRequired. Never create requiredValues, bindings, or unresolvedIssues for approval confirmation, approver lists, approval enforcement, confirm.send, or approval tokens.",
+    "The runtime guarantees that an action requiring approval cannot execute before its compiled confirm_action interaction is approved. Do not ask the plan, connector payload, or operator input to enforce that guarantee.",
+    "Follow specSemanticPipeline order: each semantic agent except the final content agent must declare inputBindings from the upstream agent output or bind its output into the downstream agent or selectedActions.",
+    "Do not create standalone context, briefing, or coordination semantic agents. Fold product context into research or analysis agents.",
+    "Recipient and attendee lists from input.contacts_csv use valueType array and may bind to connector array fields such as /attendees.",
     "Select actions by exact contractRef. For every selected action, inspect the compact field contract and declare every required field source with an explicit binding.",
+    "Bind every required connector input. Bind an optional connector input only when the workflow genuinely needs it and an exact type-compatible source exists; otherwise omit that optional binding.",
     "Never invent recipients, IDs, files, credentials, account values, or other passthrough values.",
     "Declare such values in requiredValues with an explicit lifecycle and bind them through required_value.",
     "Passthrough means opaque externally supplied identity data only. Generated research, stories, summaries, drafts, bodies, subjects, and other semantic content are derivable, not passthrough.",
@@ -418,10 +448,23 @@ function planningSystemPrompt(): string {
     "Semantic agents must have one meaningful responsibility and each output must have a declared downstream consumer.",
     "Use inputBindings to declare semantic agent dependencies. Do not rely on names or prose to imply handoffs.",
     "Declare compact output artifacts with named JSON-pointer fields and primitive JSON types. Never author JSON Schema.",
+    "Every output artifact must explicitly declare rendererRef, reviewMode, and editable.",
+    "Use reviewMode required only when an operator must review that exact artifact. Use rendererRef null when no renderer is needed.",
+    "An editable reviewed email artifact should use rendererRef canvas.email. A read-only reviewed preview should use canvas.preview.",
     "Text artifacts declare no fields and expose the implicit /text field. Use a json artifact when downstream steps need named structured fields.",
-    "Use unresolvedIssues rather than guessing when a decision, action, value source, or binding cannot be established.",
+    "Email, newsletter, and Gmail draft/send actions that require separate subject and body fields must use representation json with explicit /subject and /body fields on the composing agent outputArtifact.",
+    "A text artifact MUST use fields: []. If downstream consumers need multiple named fields, use representation json and declare those exact fields.",
+    "For every agent_output or connector_output binding, source.nodeId must be the exact producer node id and source.path must use slash-separated JSON pointer segments only. Never use dot notation such as /data.response_data.draft_id; use /data/response_data/draft_id only when that exact path appears in the producer outputPaths.",
+    "For connector_output bindings, source.path must exactly match one path in the producer contract outputPaths or outputFields. Do not invent nested fields under opaque connector envelopes such as /data when only /data itself is declared.",
+    "Prefer one direct Gmail send action bound from the reviewed semantic agent when outputPaths do not expose draft identifiers. Do not chain create-draft and send-draft actions unless the create action outputPaths explicitly include the exact draft id field you need.",
+    "Before returning, audit every binding against the artifacts declared in the same response. If a consumer needs a missing derivable field, add that field to the responsible producer artifact; otherwise remove or resolve the binding.",
+    "Use unresolvedIssues only for genuinely unresolvable planning decisions: a required connector contract is missing, no action in discoveredConnectorActions satisfies a delivery requirement, or a required data source identity cannot be determined. Set blocksApproval true only for these cases.",
+    "Never emit a blocking unresolved issue for runtime operational edge cases. Zero-result research, empty data sets, blocked sources, or conditional email-vs-no-email behaviour are handled by the semantic agent at runtime, not by the planner. Set blocksApproval false or omit the issue entirely.",
+    "Connector action nodes only expose output schema paths in their outputPaths. Never bind a downstream action from a connector node's /input sub-object; /input is not an output path. Bind derived content (subject, body, summaries) from the semantic agent outputArtifact fields.",
     "A runtime input may remain without an actual value, but its lifecycle and source decision must be resolved.",
     "For an approved reviewed spec, resolve safe operational omissions as explicit visible model decisions. Do not silently default them.",
+    "Do not block an approved reviewed spec merely because several feasible implementation actions exist. Select the smallest action chain that directly implements the reviewed behavior.",
+    "Schedule timezone and exact times are workflow configuration decisions, not runtime computation tasks. Use resolved intent or reviewed spec values; when the reviewed spec permits an assumption, record the assumption in strategy and provide a concrete schedule.",
     "Do not emit implementation-detail clarification questions here; intent clarification happens before planning.",
   ].join(" ");
 }
@@ -435,10 +478,25 @@ function correctionSystemPrompt(): string {
     "Every selected action contractRef must exactly match a supplied connector contract.",
     "Never represent a connector action, missing connector, delivery coordinator, or runtime-provided tool as a semantic agent.",
     "If a connector contract is unavailable, remove every semantic agent that pretends to perform that connector action and retain only genuine semantic work.",
+    "selectedActions is executable, not a runtime choice menu. Remove mutually exclusive alternative actions and keep exactly the action that implements the reviewed behavior.",
+    "The planner owns action selection. Never retain an unresolved issue whose reason is that the planner cannot choose between feasible discovered actions.",
     "Every non-terminal semantic agent output must bind to a downstream consumer. Mark the final operator-visible draft as visibility operator, or wire its artifact fields into a selected action.",
+    "Wire research and context agents into the next pipeline agent using agent_output inputBindings. Remove orphan context agents that duplicate upstream work.",
+    "Recipient lists bound to /attendees or /to may use required_value sources with valueType array.",
     "Runtime inputs with lifecycle runtime_input and sourceKind operator_input must use status resolved.",
+    "Approval is already enforced by the compiled confirm_action interaction. Remove required values, bindings, and unresolved issues for approval confirmation, approver lists, approval enforcement, confirm.send, or approval tokens.",
+    "Remove every requiredValues entry reported as unused_required_value. Do not retain it or invent a consumer for it.",
     "Match action annotation effect to contract declaredRisk. Integer action fields require integer artifact fields or stable_config scalars.",
+    "For incompatible_binding issues, change or remove the binding according to the exact source and target types in the issue. Never bind an optional action field without a type-compatible source.",
+    "For missing_required_binding issues, add an explicit proven source for that exact required target path. If no source exists, preserve one unresolved binding issue rather than inventing a value.",
+    "For text_artifact_needs_json_fields issues, change the producer outputArtifact to representation json and declare every named field referenced by downstream bindings, such as /subject and /body for email actions.",
+    "For text_artifact_fields issues, either set fields to [] and consume /text, or change the artifact to json when multiple named outputs are semantically required.",
     "Remove bindings whose target paths are absent from the receiving agent input contract, or explicitly shape that input contract when the binding is semantically required.",
+    "For unknown_source_path or connector_input_path_used_as_source issues: connector nodes never expose /input. Remove the binding and instead bind from the semantic agent outputArtifact field that produces the same content. Add the missing field to that outputArtifact if needed.",
+    "For unresolved_decision or unresolved_binding issues whose message describes a runtime edge case (zero results, empty data, conditional fallback), remove the issue — set blocksApproval false or drop it. These are agent runtime concerns, not planning blockers.",
+    "For invalid_source_path_syntax issues, rewrite the path with slash-separated segments exactly as suggested in the issue.",
+    "For opaque_connector_output_path issues, stop drilling into undeclared connector output. Rebind to a listed outputPaths value or replace the draft chain with one direct send action fed by the semantic agent.",
+    "Audit all source.nodeId and source.path pairs against semantic outputArtifact.fields and connector outputPaths before returning the corrected IR.",
     "Do not invent sources, actions, bindings, identifiers, recipients, files, or credentials.",
   ].join(" ");
 }
@@ -572,7 +630,6 @@ function compatibleDesign(ir: LoopPlanningIR, graph: ReturnType<typeof loopAgent
     title: ir.title,
     summary: ir.summary,
     strategyText: ir.strategy,
-    inputsRequired: ir.requiredValues.filter((value) => value.lifecycle === "runtime_input").map((value) => value.key),
     inputRequirements: [],
     delivery: { provider: writeAction?.contractRef ?? "none" },
     schedule: ir.schedule,
@@ -629,25 +686,32 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     text: item.text,
     category: item.category ?? null,
   }));
+  const specDelivery = input.noSlopSpec ? {
+    provider: input.noSlopSpec.specJson.delivery.provider,
+    description: input.noSlopSpec.specJson.delivery.description ?? "",
+  } : undefined;
   const search = await generateToolSearchPlan({
     prompt,
     intentContext: input.noSlopSpec?.intentContext,
+    specDelivery,
     chat,
   });
-  const specPolicyActions = input.noSlopSpec
-    ? [...input.noSlopSpec.specJson.connectorPolicy.allowedReadActions, ...input.noSlopSpec.specJson.connectorPolicy.allowedWriteActions]
+  const specRequiredActions = input.noSlopSpec
+    ? deriveRequiredConnectorActionsFromSpec(input.noSlopSpec.specJson)
     : [];
-  const inferredActions = inferRequiredConnectorActions({
-    prompt,
-    deliveryProvider: input.noSlopSpec?.specJson.delivery.provider,
-    deliveryDescription: input.noSlopSpec?.specJson.delivery.description,
-    intentText: input.noSlopSpec?.intentContext?.resolvedIntent,
-  });
-  const requiredActions = [...specPolicyActions, ...inferredActions];
-  let discoveryQueries = discoveryQueriesForRequiredActions(
-    [...new Set(search.plan.queries.map((query) => query.trim()).filter(Boolean))],
-    inferredActions,
-  );
+  const requiredActions = input.noSlopSpec
+    ? [
+        ...input.noSlopSpec.specJson.connectorPolicy.allowedReadActions,
+        ...input.noSlopSpec.specJson.connectorPolicy.allowedWriteActions,
+        ...specRequiredActions,
+      ]
+    : [];
+  let discoveryQueries = input.noSlopSpec
+    ? supplementDiscoveryQueriesFromSpec(
+        [...new Set(search.plan.queries.map((query) => query.trim()).filter(Boolean))],
+        input.noSlopSpec.specJson,
+      )
+    : [...new Set(search.plan.queries.map((query) => query.trim()).filter(Boolean))].slice(0, 4);
   reportLoopBuilderProgress({
     stage: "tool_discovery",
     message: `Searching connector catalogue with ${discoveryQueries.length} bounded ${discoveryQueries.length === 1 ? "query" : "queries"}`,
@@ -656,6 +720,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
       modelQueries: search.plan.queries,
       effectiveQueries: discoveryQueries,
       requiredActions,
+      specRequiredActions,
     },
   });
   let discoveredBySearch = await discoverToolsForQueries(input.auth, discoveryQueries, 12);
@@ -669,15 +734,24 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     const retrySearch = await generateToolSearchPlan({
       prompt,
       intentContext: input.noSlopSpec?.intentContext,
+      specDelivery,
       previousQueries: discoveryQueries,
       chat,
     });
-    discoveryQueries = [...new Set(retrySearch.plan.queries.map((query) => query.trim()).filter(Boolean))].slice(0, 4);
+    discoveryQueries = input.noSlopSpec
+      ? supplementDiscoveryQueriesFromSpec(
+          [...new Set(retrySearch.plan.queries.map((query) => query.trim()).filter(Boolean))],
+          input.noSlopSpec.specJson,
+        )
+      : [...new Set(retrySearch.plan.queries.map((query) => query.trim()).filter(Boolean))].slice(0, 4);
     discoveredBySearch = await discoverToolsForQueries(input.auth, discoveryQueries, 12);
   }
-  const discovered = await mergeRequiredToolContracts(
-    discoveredBySearch,
-    requiredActions,
+  const discovered = prioritizeDiscoveredConnectors(
+    await mergeRequiredToolContracts(
+      discoveredBySearch,
+      requiredActions,
+    ),
+    specRequiredActions,
   );
   const connectorContracts = discovered.map((entry) => ({
     ...entry.contract,
@@ -815,7 +889,10 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
       cron: planningIR.schedule.cron.trim(),
       timezone: planningIR.schedule.timezone.trim(),
     };
-    compiled = compileLoopPlanningIR({ planningIR, contracts: [...internalContracts, ...connectorContracts] });
+    compiled = compileLoopPlanningIR({
+      planningIR,
+      contracts: [...internalContracts, ...connectorContracts],
+    });
     const issuesAfter = compiled.ok ? [] : compiled.issues;
     const issueComparison = comparePlanningIssues(issuesBefore, issuesAfter);
     const stopReason = planningAttemptStopReason({
@@ -975,15 +1052,13 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         planningIRVersion: "v2",
         planningIR: planningIR as unknown as Record<string, unknown>,
         discoveredToolContracts: plannedConnectorContracts as unknown as Array<Record<string, unknown>>,
-        typedConnectorHandoffs: "v2",
-        contractDrivenGraph: "v1",
         ...(profile ? { workflowUserProfile: profile } : {}),
       },
     },
     delivery,
     connectorPolicy: compiled.compiled.connectorPolicy,
-    inputsRequired: compiled.compiled.inputRequirements.map((requirement) => requirement.key),
     inputRequirements: compiled.compiled.inputRequirements,
+    operatorInteractionPlan: compiled.compiled.operatorInteractionPlan,
     engineVersion: LOOP_ENGINE_VERSION,
   });
 

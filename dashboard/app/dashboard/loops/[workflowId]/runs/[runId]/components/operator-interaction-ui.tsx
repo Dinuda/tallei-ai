@@ -13,15 +13,6 @@ function isEvalSystemMessage(text: string): boolean {
   return /output contains placeholder|unfilled template|placeholder_detected/i.test(text);
 }
 
-export function gateStatusImperative(mode: string): string {
-  if (mode === "missing_input") return "Paste the missing input below to continue";
-  if (mode === "memory_confirmation") return "Select which memories the next agent may use";
-  if (mode === "source_confirmation") return "Select sources, add custom URLs, then approve or revise";
-  if (mode === "draft_review") return "Review the draft, then save & approve or request changes";
-  if (mode === "pre_send") return "Review the final draft, then approve send";
-  return "Review and decide how to continue";
-}
-
 export function resolveInputFieldLabel(
   inputsRequired: string[] | undefined,
   gateQuestion: string | undefined,
@@ -77,12 +68,15 @@ export function AgentProgressPips({
   currentStepId?: string | null;
 }) {
   return (
-    <div className="flex items-center gap-1.5" aria-label={`${steps.filter((s) => s.status === "succeeded" || s.status === "approved").length} of ${steps.length} agents done`}>
+    <div
+      className="flex items-center gap-1.5"
+      aria-label={`${steps.filter((s) => s.status === "succeeded" || s.status === "approved").length} of ${steps.length} agents done`}
+    >
       {steps.map((step) => {
         const isDone = step.status === "succeeded" || step.status === "approved";
         const isActive = step.id === currentStepId
           || step.status === "running"
-          || step.status === "waiting_for_gate";
+          || step.status === "waiting_for_interaction";
         return (
           <span
             key={step.id}
@@ -99,6 +93,21 @@ export function AgentProgressPips({
         {steps.filter((s) => s.status === "succeeded" || s.status === "approved").length}/{steps.length}
       </span>
     </div>
+  );
+}
+
+function GateSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="border-b border-[#e5e7eb] px-7 py-6 last:border-b-0">
+      <h3 className="text-[13px] font-semibold tracking-wide text-[#374151] uppercase">{title}</h3>
+      <div className="mt-4">{children}</div>
+    </section>
   );
 }
 
@@ -159,7 +168,7 @@ export function MissingInputWorkspace({
             What {agentName} produced
           </p>
           <p className="mb-4 text-[13px] leading-5 text-[#6b7280]">
-            Highlighted sections are placeholders or gaps — your input above replaces them.
+            Highlighted sections are placeholders or gaps - your input above replaces them.
           </p>
           <div className="rounded-md border border-[#ebebeb] bg-[#f7f7f5] px-5 py-4">
             <HighlightedDraftText text={agentOutput} />
@@ -167,21 +176,6 @@ export function MissingInputWorkspace({
         </section>
       ) : null}
     </div>
-  );
-}
-
-function GateSection({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="border-b border-[#e5e7eb] px-7 py-6 last:border-b-0">
-      <h3 className="text-[13px] font-semibold tracking-wide text-[#374151] uppercase">{title}</h3>
-      <div className="mt-4">{children}</div>
-    </section>
   );
 }
 

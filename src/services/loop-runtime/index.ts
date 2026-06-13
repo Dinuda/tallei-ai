@@ -1,7 +1,8 @@
 export {
   cancelLoopRuntimeRun,
-  decideLoopRuntimeGate,
-  reviseLoopRuntimeGate,
+  executeLoopRuntimeInteractionCommand,
+  executeOperatorInteractionCommand,
+  reviseLoopRuntimeInteraction,
   dispatchLoopRuntimeCommands,
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
@@ -11,18 +12,7 @@ export {
   startLoopRuntimeWorker,
   startManualLoopRun,
   stopLoopRuntimeWorker,
-  submitLoopRuntimeGate,
-  uploadLoopRuntimeGateContacts,
+  submitLoopRuntimeInteractionInputs,
+  uploadLoopRuntimeInteractionContacts,
 } from "./runtime.js";
 export { runtimeContextSchema, runtimeDefinitionSchema, runtimeRunStatusSchema } from "./types.js";
-export {
-  agentCollectsRunStartInput,
-  applyGateDecisionToRunMemory,
-  buildAgentHandoff,
-  emptyRunMemory,
-  hasRequiredRunInputs,
-  isInputValidationAgent,
-  resolveRequiredInputKeys,
-  type ApprovedMemory,
-  type RunMemory,
-} from "./memory.js";

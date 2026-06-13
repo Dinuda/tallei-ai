@@ -9,7 +9,7 @@ import {
   DraftReviewWorkspace,
   MissingInputWorkspace,
   resolveInputFieldPlaceholder,
-} from "./gate-workspace-ui";
+} from "./operator-interaction-ui";
 import {
   MemoryReviewSurface,
   readMemoryItemsFromBlockData,
@@ -43,13 +43,13 @@ type CanvasArtifact = {
 export type OperatorWorkspaceProps = {
   operatorView: OperatorView;
   runId: string;
-  gateId: string | null;
+  interactionId: string | null;
   agentName: string;
   agentOutput?: string;
   centerBody?: string;
   activeCanvasArtifact?: CanvasArtifact | null;
-  inputValue: string;
-  onInputChange: (value: string) => void;
+  inputValues: Record<string, string>;
+  onInputChange: (blockId: string, value: string) => void;
   onSubmitInput: () => void;
   busy: boolean;
   contactSourceKind: ContactSourceKind;
@@ -60,10 +60,10 @@ export type OperatorWorkspaceProps = {
   addedSources: SourceGateItem[];
   selectedMemoryIds: Set<string>;
   selectedSourceIds: Set<string>;
-  onToggleMemory: (gateId: string, memoryId: string, checked: boolean) => void;
-  onToggleSource: (gateId: string, sourceId: string, checked: boolean) => void;
+  onToggleMemory: (interactionId: string, memoryId: string, checked: boolean) => void;
+  onToggleSource: (interactionId: string, sourceId: string, checked: boolean) => void;
   onInspectMemory: (item: MemoryGateItem) => void;
-  onAddSource: (gateId: string, source: SourceGateItem) => void;
+  onAddSource: (interactionId: string, source: SourceGateItem) => void;
   reviseFeedback: string;
   onReviseFeedbackChange: (value: string) => void;
   onSaveCanvasEmail: (
@@ -94,7 +94,7 @@ function blockAgentOutput(block: OperatorBlock, fallback?: string): string {
 
 function ConnectorSetupWorkspace({ block, runId, busy }: { block: OperatorBlock; runId: string; busy: boolean }) {
   const [error, setError] = useState<string | null>(null);
-  const setup = block.props?.connectorSetup;
+  const setup = block.kind === "connect_connector" ? block.data : block.props?.connectorSetup;
   const row = setup && typeof setup === "object" && !Array.isArray(setup)
     ? setup as Record<string, unknown>
     : {};
@@ -158,8 +158,51 @@ function ConnectorSetupWorkspace({ block, runId, busy }: { block: OperatorBlock;
 }
 
 function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNode {
-  const gateId = ctx.gateId ?? "";
+  const interactionId = ctx.interactionId ?? "";
   const surface = block.surface;
+
+  if (block.kind === "connect_connector") {
+    return <ConnectorSetupWorkspace block={block} runId={ctx.runId} busy={ctx.busy} />;
+  }
+
+  if (block.kind === "confirm_action") {
+    const data = block.data && typeof block.data === "object" && !Array.isArray(block.data)
+      ? block.data as Record<string, unknown>
+      : {};
+    return (
+      <div className="space-y-5 px-7 py-6">
+        <div>
+          <p className="text-[12px] font-semibold tracking-[0.12em] text-[#2d5a87] uppercase">Validated external action</p>
+          <h3 className="mt-2 text-[20px] font-bold text-[#111827]">{String(data.contractRef ?? block.id)}</h3>
+          <p className="mt-1 text-[13px] text-[#6b7280]">Effect: {String(data.effect ?? "external action")}</p>
+        </div>
+        <pre className="max-h-[420px] overflow-auto border border-[#d1d5db] bg-[#f8fafc] p-4 text-[12px] leading-5 text-[#111827]">
+          {JSON.stringify(data.payload ?? {}, null, 2)}
+        </pre>
+      </div>
+    );
+  }
+
+  if (block.kind === "review_artifact") {
+    const output = blockAgentOutput(block, ctx.agentOutput ?? ctx.centerBody);
+    const template = ctx.activeCanvasArtifact?.data_json?.emailTemplate;
+    return (
+      <DraftReviewWorkspace agentOutput={output}>
+        {ctx.activeCanvasArtifact && template ? (
+          <ArtifactRenderer
+            artifact={{ ...ctx.activeCanvasArtifact, invalidated_at: ctx.activeCanvasArtifact.invalidated_at ?? null }}
+            runId={ctx.runId}
+            saving={ctx.busy}
+            onSave={async (data) => {
+              await ctx.onSaveCanvasEmail(ctx.activeCanvasArtifact!, data as Parameters<typeof ctx.onSaveCanvasEmail>[1]);
+            }}
+          />
+        ) : output ? (
+          <EditableAgentOutput text={output} saving={ctx.busy} forceEditing onSave={ctx.onSaveAgentOutput} />
+        ) : undefined}
+      </DraftReviewWorkspace>
+    );
+  }
 
   if (surface === "input.text" || surface === "input.markdown" || surface === "input.file") {
     if (block.props?.connectorSetup) {
@@ -181,10 +224,10 @@ function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNo
         agentName={ctx.agentName}
         fieldLabel={block.label ?? "Required input"}
         fieldPlaceholder={block.description ?? resolveInputFieldPlaceholder([block.id])}
-        value={ctx.inputValue}
-        onChange={ctx.onInputChange}
+        value={ctx.inputValues[block.id] ?? ""}
+        onChange={(value) => ctx.onInputChange(block.id, value)}
         onSubmit={ctx.onSubmitInput}
-        submitDisabled={!ctx.inputValue.trim()}
+        submitDisabled={!ctx.inputValues[block.id]?.trim()}
         busy={ctx.busy}
       />
     );
@@ -213,14 +256,14 @@ function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNo
     );
   }
 
-  if (surface === "review.memories" && gateId) {
+  if (surface === "review.memories" && interactionId) {
     const items = readMemoryItemsFromBlockData(block.data).length > 0
       ? readMemoryItemsFromBlockData(block.data)
       : ctx.memoryItems;
     return (
       <>
         <MemoryReviewSurface
-          gateId={gateId}
+          gateId={interactionId}
           items={items}
           selectedIds={ctx.selectedMemoryIds}
           onToggle={ctx.onToggleMemory}
@@ -235,14 +278,14 @@ function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNo
     );
   }
 
-  if (surface === "review.sources" && gateId) {
+  if (surface === "review.sources" && interactionId) {
     const items = readSourceItemsFromBlockData(block.data).length > 0
       ? readSourceItemsFromBlockData(block.data)
       : ctx.sourceItems;
     return (
       <>
         <SourceReviewSurface
-          gateId={gateId}
+          gateId={interactionId}
           items={items}
           addedSources={ctx.addedSources}
           selectedIds={ctx.selectedSourceIds}
@@ -368,20 +411,32 @@ export function OperatorViewStamp({ stamp }: { stamp: { tag: string; name: strin
   );
 }
 
+function primaryBlock(view: OperatorView): OperatorBlock | null {
+  return view.blocks.find((block) => block.required && !block.satisfied) ?? view.blocks[0] ?? null;
+}
+
 export function operatorBandImperative(view: OperatorView): string {
-  if (view.blocks.some((block) => block.props?.connectorSetup)) return "Connect the required app, then verify and continue";
-  const primary = view.blocks.find((block) => block.required && !block.satisfied)?.surface
-    ?? view.blocks[0]?.surface;
+  if (view.blocks.some((block) => block.kind === "connect_connector")) return "Connect the required app, then verify and continue";
+  const primary = primaryBlock(view);
+  const surface = primary?.surface;
   const allInputsSatisfied = view.blocks.length > 0
-    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface.startsWith("input."));
-  if (view.actions.includes("submit") && allInputsSatisfied) return "Required input is already available. Continue the run";
-  if (primary === "input.markdown" || primary === "input.text") return "Paste the missing input below to continue";
-  if (primary === "review.memories") return "Select which memories the next agent may use";
-  if (primary === "review.sources") return "Select sources, add custom URLs, then approve or revise";
-  if (primary === "review.draft" || primary === "review.email") return "Review the draft, then save & approve or request changes";
-  if (primary === "review.preview") return "Review the final preview, then approve or request changes";
-  if (primary === "input.contacts_csv" || primary === "input.audience_id") return "Add recipients for this send, then continue";
-  if (primary === "confirm.send") return "Review the final draft, then approve send";
+    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface?.startsWith("input."));
+  if (view.actions.some((action) => action.command === "submit_input") && allInputsSatisfied) return "Required input is already available. Continue the run";
+  if (primary?.kind === "confirm_action") return "Review the validated external action, then approve or reject";
+  if (primary?.kind === "review_artifact" && surface === "review.memories") return "Select which memories the next agent may use";
+  if (primary?.kind === "review_artifact" && surface === "review.sources") return "Select sources, add custom URLs, then approve or revise";
+  if (primary?.kind === "review_artifact" && (surface === "review.draft" || surface === "review.email")) {
+    return "Review the draft, then save & approve or request changes";
+  }
+  if (primary?.kind === "review_artifact" && surface === "review.preview") return "Review the final preview, then approve or request changes";
+  if (primary?.kind === "review_artifact" && surface === "confirm.send") return "Review the final draft, then approve send";
+  if (surface === "input.markdown" || surface === "input.text") return "Paste the missing input below to continue";
+  if (surface === "review.memories") return "Select which memories the next agent may use";
+  if (surface === "review.sources") return "Select sources, add custom URLs, then approve or revise";
+  if (surface === "review.draft" || surface === "review.email") return "Review the draft, then save & approve or request changes";
+  if (surface === "review.preview") return "Review the final preview, then approve or request changes";
+  if (surface === "input.contacts_csv" || surface === "input.audience_id") return "Add recipients for this send, then continue";
+  if (surface === "confirm.send") return "Review the final draft, then approve send";
   return view.workspace.subtitle;
 }
 
@@ -389,21 +444,26 @@ export function operatorApproveLabel(
   view: OperatorView,
   counts: { selectedMemories: number; selectedSources: number; recipientCount: number },
 ): string {
-  if (view.blocks.some((block) => block.props?.connectorSetup)) return "Verify & Continue";
-  const primary = view.blocks.find((block) => block.required && !block.satisfied)?.surface ?? view.blocks[0]?.surface;
+  const primaryAction = view.actions.find((action) => action.command === "approve"
+    || action.command === "submit_input"
+    || action.command === "verify_connection");
+  if (primaryAction) return primaryAction.label;
+  const primary = primaryBlock(view);
+  const surface = primary?.surface;
   const allInputsSatisfied = view.blocks.length > 0
-    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface.startsWith("input."));
-  if (primary === "review.memories" && counts.selectedMemories > 0) return `Approve (${counts.selectedMemories})`;
-  if (primary === "review.sources" && counts.selectedSources > 0) return `Approve (${counts.selectedSources})`;
-  if (primary === "review.draft" || primary === "review.email") return "Save & Approve";
-  if (primary === "input.contacts_csv" || primary === "input.audience_id") {
+    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface?.startsWith("input."));
+  if (surface === "review.memories" && counts.selectedMemories > 0) return `Approve (${counts.selectedMemories})`;
+  if (surface === "review.sources" && counts.selectedSources > 0) return `Approve (${counts.selectedSources})`;
+  if (surface === "review.draft" || surface === "review.email") return "Save & Approve";
+  if (surface === "input.contacts_csv" || surface === "input.audience_id") {
     return counts.recipientCount > 0 ? `Continue (${counts.recipientCount} recipients)` : "Save contacts to continue";
   }
-  if (view.actions.includes("submit") && allInputsSatisfied) return "Continue";
-  if (view.actions.includes("submit")) return "Submit input";
-  if (primary === "confirm.send") {
+  if (view.actions.some((action) => action.command === "submit_input") && allInputsSatisfied) return "Continue";
+  if (view.actions.some((action) => action.command === "submit_input")) return "Submit input";
+  if (surface === "confirm.send") {
     return counts.recipientCount > 0 ? `Approve & send (${counts.recipientCount})` : "Approve & send";
   }
+  if (primary?.kind === "confirm_action") return "Approve action";
   return "Approve";
 }
 
@@ -411,24 +471,34 @@ export function operatorApproveDisabled(
   view: OperatorView,
   counts: { inputValue: string; selectedSources: number; recipientCount: number },
 ): boolean {
-  const primary = view.blocks.find((block) => block.required && !block.satisfied)?.surface ?? view.blocks[0]?.surface;
+  const primary = primaryBlock(view);
+  const surface = primary?.surface;
   const allInputsSatisfied = view.blocks.length > 0
-    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface.startsWith("input."));
-  if (primary === "review.sources") return counts.selectedSources === 0;
-  if (primary === "input.contacts_csv" || primary === "input.audience_id") return counts.recipientCount === 0;
-  if (view.actions.includes("submit") && allInputsSatisfied) return false;
-  if (view.actions.includes("submit")) return !counts.inputValue.trim();
+    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface?.startsWith("input."));
+  const primaryAction = view.actions.find((action) => action.command === "approve"
+    || action.command === "submit_input"
+    || action.command === "verify_connection");
+  if (primaryAction && !primaryAction.enabled) return true;
+  if (surface === "review.sources") return counts.selectedSources === 0;
+  if (surface === "input.contacts_csv" || surface === "input.audience_id") return counts.recipientCount === 0;
+  if (view.actions.some((action) => action.command === "submit_input") && allInputsSatisfied) return false;
+  if (view.actions.some((action) => action.command === "submit_input")) return !counts.inputValue.trim();
   return false;
 }
 
 export function operatorShowRevise(view: OperatorView): boolean {
-  return view.actions.includes("revise");
+  return view.actions.some((action) => action.command === "revise");
+}
+
+export function operatorShowReject(view: OperatorView): boolean {
+  return view.actions.some((action) => action.command === "reject");
 }
 
 export function operatorShowPrimaryAction(view: OperatorView): boolean {
-  if (!view.actions.includes("submit")) return true;
-  const primary = view.blocks.find((block) => block.required && !block.satisfied)?.surface ?? view.blocks[0]?.surface;
-  if (primary === "input.contacts_csv" || primary === "input.audience_id") return true;
+  if (!view.actions.some((action) => action.command === "submit_input")) return true;
+  const primary = primaryBlock(view);
+  const surface = primary?.surface;
+  if (surface === "input.contacts_csv" || surface === "input.audience_id") return true;
   return view.blocks.length > 0
-    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface.startsWith("input."));
+    && view.blocks.every((block) => !block.required || block.satisfied || !block.surface?.startsWith("input."));
 }

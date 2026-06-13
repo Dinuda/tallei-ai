@@ -13,18 +13,14 @@ import {
 } from "../../../services/loop-executor/index.js";
 import {
   cancelLoopRuntimeRun,
-  decideLoopRuntimeGate,
-  reviseLoopRuntimeGate,
+  executeOperatorInteractionCommand,
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
   retryLoopRuntimeStep,
   saveAgentOutput,
   saveCanvasEmailArtifact,
   startManualLoopRun,
-  submitLoopRuntimeGate,
-  uploadLoopRuntimeGateContacts,
 } from "../../../services/loop-runtime/index.js";
-import { gateSurfaceSubmissionSchema } from "../../../services/loop-engine/input-surfaces.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
@@ -32,7 +28,7 @@ router.use(authMiddleware);
 
 const workflowIdSchema = z.object({ workflowId: z.string().uuid() });
 const runIdSchema = z.object({ runId: z.string().uuid() });
-const gateIdSchema = z.object({ gateId: z.string().uuid() });
+const interactionIdSchema = z.object({ interactionId: z.string().uuid() });
 const stepIdSchema = z.object({ stepId: z.string().uuid() });
 const artifactKeySchema = z.object({ artifactKey: z.string().trim().min(1).max(240) });
 
@@ -52,8 +48,6 @@ const assignWorkspaceSchema = z.object({
   workspaceId: z.string().uuid().nullable(),
 });
 
-const gateInputSchema = z.object({ value: z.string().min(1).max(1_000_000) });
-const gateRejectSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() });
 const canvasEmailSaveSchema = z.object({
   design: z.unknown(),
   html: z.string().min(1).max(5_000_000),
@@ -249,96 +243,18 @@ router.post("/runs/:runId/artifacts/:artifactKey/canvas/email", requireScopes(["
   }
 });
 
-const gateContactsSchema = z.object({
-  csvText: z.string().optional(),
-  contacts: z.array(z.object({
-    email: z.string().email(),
-    name: z.string().optional(),
-  })).optional(),
-  audienceId: z.string().trim().min(1).optional(),
-}).refine((body) => Boolean(body.csvText?.trim()) || (body.contacts?.length ?? 0) > 0 || Boolean(body.audienceId?.trim()), {
-  message: "Provide csvText, contacts, or audienceId.",
-});
-
-router.post("/runs/:runId/gates/:gateId/contacts", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+router.post("/runs/:runId/interactions/:interactionId/commands", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse(req.params);
-    const { gateId } = gateIdSchema.parse(req.params);
-    const body = gateContactsSchema.parse(req.body ?? {});
-    res.json(await uploadLoopRuntimeGateContacts({
+    const { interactionId } = interactionIdSchema.parse(req.params);
+    res.json(await executeOperatorInteractionCommand({
       auth: req.authContext!,
       runId,
-      gateId,
-      csvText: body.csvText,
-      contacts: body.contacts,
-      audienceId: body.audienceId,
+      interactionId,
+      command: req.body,
     }));
   } catch (error) {
-    sendError(res, error, "Failed to upload gate contacts");
-  }
-});
-
-router.post("/runs/:runId/gates/:gateId/submit", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse(req.params);
-    const { gateId } = gateIdSchema.parse(req.params);
-    const values = gateSurfaceSubmissionSchema.parse(
-      req.body && typeof req.body === "object" && !Array.isArray(req.body) && req.body.values && typeof req.body.values === "object"
-        ? req.body.values
-        : req.body ?? {},
-    );
-    res.json(await submitLoopRuntimeGate({
-      auth: req.authContext!,
-      runId,
-      gateId,
-      values,
-    }));
-  } catch (error) {
-    sendError(res, error, "Failed to submit gate surfaces");
-  }
-});
-
-router.post("/runs/:runId/gates/:gateId/approve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse(req.params);
-    const { gateId } = gateIdSchema.parse(req.params);
-    const value = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
-    res.json(await decideLoopRuntimeGate({ auth: req.authContext!, runId, gateId, decision: "approve", value }));
-  } catch (error) {
-    sendError(res, error, "Failed to approve gate");
-  }
-});
-
-router.post("/runs/:runId/gates/:gateId/input", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse(req.params);
-    const { gateId } = gateIdSchema.parse(req.params);
-    const value = gateInputSchema.parse(req.body ?? {});
-    res.json(await decideLoopRuntimeGate({ auth: req.authContext!, runId, gateId, decision: "input", value }));
-  } catch (error) {
-    sendError(res, error, "Failed to submit gate input");
-  }
-});
-
-router.post("/runs/:runId/gates/:gateId/reject", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse(req.params);
-    const { gateId } = gateIdSchema.parse(req.params);
-    const value = gateRejectSchema.parse(req.body ?? {});
-    res.json(await decideLoopRuntimeGate({ auth: req.authContext!, runId, gateId, decision: "reject", value }));
-  } catch (error) {
-    sendError(res, error, "Failed to reject gate");
-  }
-});
-
-router.post("/runs/:runId/gates/:gateId/revise", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse(req.params);
-    const { gateId } = gateIdSchema.parse(req.params);
-    const value = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
-    res.json(await reviseLoopRuntimeGate({ auth: req.authContext!, runId, gateId, value }));
-  } catch (error) {
-    sendError(res, error, "Failed to revise gate");
+    sendError(res, error, "Failed to execute operator interaction command");
   }
 });
 

@@ -17,6 +17,13 @@ function stableDefinition() {
     ceo: { name: "Parent", task: "Coordinate", policy: "Use reviewed artifacts" },
     draftPolicy: { requireDraftBeforeExternalAction: true, approvalRequiredFor: [] },
     delivery: { provider: "none" },
+    operatorInteractionPlan: { version: "v1" as const, interactions: [] },
+    builderMeta: {
+      designedBy: "loop_architect" as const,
+      preApproved: true,
+      planningIRVersion: "v2" as const,
+      planningIR: {},
+    },
     agentGraph: {
       parent: { id: "parent", name: "Parent", task: "Coordinate", policy: "Use reviewed artifacts" },
       children: [{

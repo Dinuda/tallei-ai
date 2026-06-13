@@ -21,23 +21,6 @@ function sanitizeStoredAnswer(value: string): string {
     .slice(0, 1000);
 }
 
-function fallbackAnalysis(prompt: string, feasibility: LoopIntentAnalysis["connectorFeasibility"], model?: string): LoopIntentAnalysis {
-  return loopIntentAnalysisSchema.parse({
-    normalizedIntent: {
-      outcome: prompt.trim().replace(/\s+/g, " "),
-      toolCategories: [],
-      cadence: "Resolve from the request.",
-      approvalModel: "Resolve from the request or clarification decisions.",
-      runtimeInputs: [],
-    },
-    questions: [],
-    assumptions: ["Intent analysis failed; unresolved semantic decisions must be reviewed during planning."],
-    connectorFeasibility: feasibility,
-    ...(model ? { model } : {}),
-    analyzedAt: new Date().toISOString(),
-  });
-}
-
 export function isUserFacingIntentQuestion(question: LoopIntentAnalysis["questions"][number]): boolean {
   void question;
   return true;
@@ -47,8 +30,8 @@ export async function analyzeLoopBuilderIntent(input: { auth: AuthContext; promp
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error("Prompt is required");
   const [preferences, profile] = await Promise.all([
-    listPreferences(input.auth).catch(() => []),
-    loadWorkflowUserProfile(input.auth).catch(() => null),
+    listPreferences(input.auth),
+    loadWorkflowUserProfile(input.auth),
   ]);
   const searchResponse = await loopBuilderOpenAiChat({
     responseFormat: "json_object",
@@ -62,7 +45,7 @@ export async function analyzeLoopBuilderIntent(input: { auth: AuthContext; promp
       },
       { role: "user", content: prompt },
     ],
-  }).catch(() => null);
+  });
   let queries: string[] = [];
   if (searchResponse) {
     try {
@@ -74,7 +57,7 @@ export async function analyzeLoopBuilderIntent(input: { auth: AuthContext; promp
       queries = [];
     }
   }
-  const discovered = await discoverToolsForQueries(input.auth, queries, 12).catch(() => []);
+  const discovered = await discoverToolsForQueries(input.auth, queries, 12);
   const contractViews = discovered.map((entry) => ({
     toolRef: entry.contract.toolRef,
     name: entry.contract.name,
@@ -84,8 +67,6 @@ export async function analyzeLoopBuilderIntent(input: { auth: AuthContext; promp
     declaredRisk: entry.contract.constraints.risk ?? null,
     connected: entry.connected,
   }));
-  let lastModel: string | undefined;
-
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const response = await loopBuilderOpenAiChat({
@@ -137,7 +118,6 @@ export async function analyzeLoopBuilderIntent(input: { auth: AuthContext; promp
           },
         ],
       });
-      lastModel = response.model;
       const raw = JSON.parse(response.text) as Record<string, unknown>;
       const parsed = loopIntentAnalysisSchema.parse({
         ...raw,
@@ -151,11 +131,11 @@ export async function analyzeLoopBuilderIntent(input: { auth: AuthContext; promp
         analyzedAt: new Date().toISOString(),
       });
       return parsed;
-    } catch {
-      // Retry once, then fall back to deterministic analysis.
+    } catch (error) {
+      if (attempt === 1) throw error;
     }
   }
-  return fallbackAnalysis(prompt, [], lastModel);
+  throw new Error("Intent analysis failed.");
 }
 
 export function resolveLoopIntentContext(input: {

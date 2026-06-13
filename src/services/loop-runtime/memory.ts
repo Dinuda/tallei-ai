@@ -62,7 +62,7 @@ export function resolveRequiredInputKeys(
   definition: LoopDefinition,
   gateFields?: Array<{ key: string }>,
 ): string[] {
-  if (definition.inputsRequired?.length) return [...definition.inputsRequired];
+  if (definition.inputRequirements?.length) return definition.inputRequirements.map((item) => item.key);
   const fromGraph: string[] = [];
   for (const child of definition.agentGraph?.children ?? []) {
     const schema = child.inputContract?.schema;

@@ -1,11 +1,8 @@
 import type { z } from "zod";
 import { detectPlaceholderText } from "../loop-engine/contracts.js";
 import {
-  defaultLabelForKey,
-  defaultSurfaceForKey,
   inputRequirementSchema,
   isInputSurface,
-  normalizeInputRequirements,
   type InputRequirement,
   type InputRequirementWhen,
   type InputSurface,
@@ -27,10 +24,7 @@ export type RequirementEvaluation = {
 export type ValidationResult = { ok: true } | { ok: false; message: string };
 
 export function collectRequirements(definition: LoopDefinition): InputRequirement[] {
-  return normalizeInputRequirements({
-    inputRequirements: definition.inputRequirements,
-    inputsRequired: definition.inputsRequired,
-  });
+  return definition.inputRequirements ?? [];
 }
 
 export function readRequirementValue(
@@ -233,13 +227,8 @@ export function applyGateSurfaceSubmission(input: {
   let nextRecipients = input.context.deliveryRecipients;
 
   for (const [key, value] of Object.entries(input.values)) {
-    const requirement = byKey.get(key) ?? inputRequirementSchema.parse({
-      key,
-      surface: value.surface,
-      label: defaultLabelForKey(key),
-      required: true,
-      when: defaultSurfaceForKey(key) === "input.contacts_csv" ? "before_send" : "run_start",
-    });
+    const requirement = byKey.get(key);
+    if (!requirement) throw new Error(`Undeclared operator input: ${key}`);
     if (isBlankSubmissionValue(value) && isRequirementSatisfied(requirement, input.context, input.definition).satisfied) {
       continue;
     }
