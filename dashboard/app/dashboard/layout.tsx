@@ -273,6 +273,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <Link href="/dashboard" className="flex items-center">
               <Image src="/tallei.svg" alt="Tallei" width={79} height={32} className="h-8 w-auto" />
             </Link>
+            {pathname === "/dashboard/loops/new" ? (
+              <div className="absolute left-[248px] hidden h-14 flex-col justify-center border-l border-slate-200 pl-6 md:flex">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
+                <div className="text-sm font-semibold leading-none text-slate-900">Create a loop</div>
+              </div>
+            ) : null}
           </div>
 
           <div className="flex items-center gap-2 pl-3 sm:pl-4">

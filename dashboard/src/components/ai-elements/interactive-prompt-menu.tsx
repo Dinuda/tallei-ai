@@ -83,10 +83,10 @@ export function InteractivePromptMenu({
 
   return (
     <div className={cn(
-      "w-full overflow-hidden rounded-xl border bg-card shadow-lg",
+      "w-full overflow-hidden rounded-xl border bg-[#f5f3ff] shadow-lg",
       placement === "composer"
-        ? "rounded-lg border-input bg-background shadow-none"
-        : "my-3 shadow-sm",
+        ? "rounded-lg border-[#c7b8ff] shadow-none"
+        : "my-3 shadow-sm border-[#d1d5db]",
     )}>
       <div className="px-4 pb-2 pt-4 text-sm font-medium">{question}</div>
       <div className="space-y-1 px-2">

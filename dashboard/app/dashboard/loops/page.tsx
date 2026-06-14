@@ -188,7 +188,7 @@ function mapDatabaseLoopToInsight(loop: Loop): LoopInsight {
   }));
 
   const memories = allMemories.filter((mem, index, self) => 
-    index === self.findIndex((t) => t.text === mem.text)
+    index === self.findIndex((t) => t.text.trim().toLowerCase() === mem.text.trim().toLowerCase())
   );
 
   const pastDates = [
@@ -460,23 +460,35 @@ function LoopCard({
       exit={{ opacity: 0, scale: 0.96 }}
       transition={{ type: "spring", stiffness: 260, damping: 24, delay: index * 0.08 }}
     >
-      <Card className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
+      <Card className="group relative overflow-hidden rounded-none border border-slate-200 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
         {/* Header */}
         <div className="mb-5 flex items-center justify-between">
-          <div className="flex items-center gap-1.5 rounded-full border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 shadow-sm">
-            <RotateCcw size={12} className="text-slate-500" />
-            {loop.frequency}
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-none border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 shadow-sm">
+              <RotateCcw size={12} className="text-slate-500" />
+              {loop.frequency}
+              {looped && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    <p className="text-xs">Ritual active</p>
+                  </TooltipContent>
+                </Tooltip>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-2">
             {days <= 3 && days > 0 && (
-              <div className="flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+              <div className="flex items-center gap-1 rounded-none bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
                 <Clock size={10} />
                 {formatExactDateTime(loop.nextPredicted)}
               </div>
             )}
             <button
               onClick={() => onDismiss(loop.id)}
-              className="grid h-7 w-7 place-items-center rounded-full text-slate-400 opacity-0 transition hover:bg-slate-100 hover:text-slate-700 group-hover:opacity-100"
+              className="grid h-7 w-7 place-items-center rounded-none text-slate-400 opacity-0 transition hover:bg-slate-100 hover:text-slate-700 group-hover:opacity-100"
             >
               <X size={14} />
             </button>
@@ -485,7 +497,7 @@ function LoopCard({
 
         {/* Title */}
         <div className="mb-6">
-          <h3 className="text-xl font-bold text-[var(--text)]">{loop.name}</h3>
+          <h3 className="text-xl font-bold text-[var(--text)] line-clamp-2 min-h-[3.5rem]">{loop.name}</h3>
         </div>
 
         {/* Memory Deck */}
@@ -517,29 +529,15 @@ function LoopCard({
             )}
           </div>
 
-          {!looped ? (
-            <Button
-              onClick={async () => {
-                try {
-                  await onLoop(loop.id);
-                  setLooped(true);
-                } catch {
-                  setLooped(false);
-                }
-              }}
-              disabled={running}
-              className="h-9 gap-2 rounded-lg px-4 text-sm font-medium text-white shadow-sm"
-              style={{ backgroundColor: ACCENT }}
-            >
-              {running ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
-              {actionLabel}
-            </Button>
-          ) : (
-            <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-1.5 text-sm font-medium text-slate-700">
-              <Check size={14} className="text-slate-500" />
-              Ritual active
-            </div>
-          )}
+          <Button
+            onClick={() => onLoop(loop.id)}
+            disabled={running}
+            className="h-9 gap-2 rounded-none px-4 text-sm font-medium text-white shadow-sm transition-all hover:brightness-110 hover:shadow-md active:scale-95"
+            style={{ backgroundColor: ACCENT }}
+          >
+            {running ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+            Open loop
+          </Button>
         </div>
       </Card>
     </motion.div>
@@ -568,7 +566,11 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
         const loopNext = new Date(loop.nextPredicted);
         loopNext.setHours(0, 0, 0, 0);
         
-        return loopNext.getTime() === dayTimestamp;
+        if (loopNext.getTime() === dayTimestamp) return true;
+        if (loop.frequency === "Daily" && loopNext.getTime() <= dayTimestamp) return true;
+        if (loop.frequency === "Weekly" && loopNext.getDay() === dayDate.getDay() && loopNext.getTime() <= dayTimestamp) return true;
+        
+        return false;
       });
       return {
         date: dayDate,
@@ -598,7 +600,7 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
                     role="button"
                     tabIndex={0}
                     className={`h-6 min-w-0 flex-1 cursor-pointer rounded-[2px] transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-1 ${
-                      isEmpty ? "bg-slate-100" : "bg-[#94a3b8]"
+                      isEmpty ? "bg-slate-200" : "bg-[#94a3b8]"
                     }`}
                     style={
                       isEmpty
@@ -621,10 +623,10 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
                     {day.loops.length > 0 ? (
                       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                         {day.loops.map((loop) => (
-                           <div key={loop.id} className="group relative flex items-start gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition-all hover:border-[#4338ca]/30 hover:shadow-md">
-                             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[#4338ca] ring-1 ring-inset ring-indigo-100/50">
-                               <Calendar size={16} />
-                             </div>
+                          <div key={loop.id} className="group relative flex items-start gap-4 rounded-none border border-slate-200 bg-white p-4 shadow-sm transition-all hover:border-[#4338ca]/30 hover:shadow-md">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-none bg-indigo-50 text-[#4338ca] ring-1 ring-inset ring-indigo-100/50">
+                              <Calendar size={16} />
+                            </div>
                              <div className="min-w-0 flex-1">
                                <h4 className="truncate text-sm font-semibold text-slate-900">{loop.name}</h4>
                                <p className="mt-0.5 truncate text-xs text-slate-500">{loop.frequency}</p>
@@ -751,7 +753,7 @@ export default function LoopsPage() {
     <TooltipProvider delayDuration={150}>
       <div className="flex h-[calc(100vh-72px)] flex-col bg-[#f8fafc]">
         {/* Header */}
-        <header className="mx-auto flex w-full max-w-5xl flex-wrap items-end justify-between gap-4 border-b border-[var(--border-light)] px-6 py-8">
+        <header className="mx-auto flex w-full max-w-5xl flex-wrap items-end justify-between gap-4 border-b border-[var(--border-light)] py-8">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-[var(--text)]">Loops</h1>
             <p className="mt-1 text-sm text-[var(--text-2)]">
@@ -760,25 +762,10 @@ export default function LoopsPage() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="flex items-center rounded-lg border border-[var(--border-light)] bg-white p-1 shadow-sm">
-              {(["all", "high", "medium"] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
-                    filter === f
-                      ? "bg-slate-100 text-slate-900 shadow-sm"
-                      : "text-slate-500 hover:text-slate-700"
-                  }`}
-                >
-                  {f === "all" ? "All" : f === "high" ? "High confidence" : "Medium"}
-                </button>
-              ))}
-            </div>
             <Button
               type="button"
               variant="outline"
-              className="h-9 gap-1.5 rounded-lg shadow-sm bg-white"
+              className="h-9 gap-1.5 rounded-none shadow-sm bg-white"
               onClick={loadLoops}
               disabled={loading}
             >
@@ -808,7 +795,7 @@ export default function LoopsPage() {
           ) : null}
 
           <div className="mx-auto mb-8 flex max-w-5xl flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center rounded-lg border border-[var(--border-light)] bg-white p-1 shadow-sm">
+            <div className="flex items-center rounded-none border border-[var(--border-light)] bg-white p-1 shadow-sm">
               {[
                 { id: "all", name: "All workspaces" },
                 { id: "unassigned", name: "Unassigned" },
@@ -818,7 +805,7 @@ export default function LoopsPage() {
                   key={workspace.id}
                   type="button"
                   onClick={() => setWorkspaceFilter(workspace.id)}
-                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                  className={`rounded-none px-3 py-1.5 text-xs font-medium transition ${
                     workspaceFilter === workspace.id
                       ? "bg-slate-100 text-slate-900 shadow-sm"
                       : "text-slate-500 hover:text-slate-700"
@@ -830,7 +817,7 @@ export default function LoopsPage() {
             </div>
             
             <div
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs shadow-sm transition ${
+              className={`inline-flex items-center gap-2 rounded-none border px-3 py-1.5 text-xs shadow-sm transition ${
                 activeChannel
                   ? activeChannel.kind === "telegram"
                     ? "border-sky-200 bg-sky-50"
@@ -877,7 +864,7 @@ export default function LoopsPage() {
                 animate={{ opacity: 1 }}
                 className="flex h-full flex-col items-center justify-center gap-5 text-center"
               >
-                <div className="grid h-16 w-16 place-items-center rounded-xl bg-slate-100 shadow-sm">
+                <div className="grid h-16 w-16 place-items-center rounded-none bg-slate-100 shadow-sm">
                   <Sparkles size={28} className="text-slate-400" />
                 </div>
                 <div>

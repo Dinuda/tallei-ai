@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import {
@@ -12,7 +12,7 @@ import {
   lastAssistantMessageIsCompleteWithToolCalls,
   type UIMessage,
 } from "ai";
-import { ArrowLeft, Wand2 } from "lucide-react";
+import { Wand2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
@@ -46,25 +46,10 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 
-type BuilderSession = {
-  id: string;
-  phase: string;
-  composioSessionId: string;
-  intentAnalysis: unknown;
-  discoveredToolContracts: Array<{ name?: string; toolRef?: string }>;
-  currentProposal: { title?: string; summary?: string } | null;
-  specId: string | null;
-  workflowId: string | null;
-  error: { message: string } | null;
-};
 
 export default function NewLoopBuilderPage() {
   const sessionIdRef = useRef<string | null>(null);
-  const [session, setSession] = useState<BuilderSession | null>(null);
-  const [progress, setProgress] = useState<Array<{ id: number; message: string; status: string }>>([]);
   const [dismissedPromptId, setDismissedPromptId] = useState<string | null>(null);
   const transport = useMemo(() => new DefaultChatTransport({
     api: "/api/loop-builder/chat",
@@ -76,7 +61,6 @@ export default function NewLoopBuilderPage() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error ?? "Failed to load builder session");
     sessionIdRef.current = sessionId;
-    setSession(payload.session);
     return payload.messages as UIMessage[];
   }, []);
 
@@ -86,11 +70,6 @@ export default function NewLoopBuilderPage() {
       lastAssistantMessageIsCompleteWithApprovalResponses({ messages: currentMessages })
       || lastAssistantMessageIsCompleteWithToolCalls({ messages: currentMessages }),
     onData: (part) => {
-      if (part.type === "data-progress") {
-        const events = (part.data as { events?: Array<{ id: number; message: string; status: string }> }).events;
-        if (events) setProgress(events);
-        return;
-      }
       if (part.type !== "data-session") return;
       const nextId = (part.data as { sessionId?: string }).sessionId;
       if (!nextId || nextId === sessionIdRef.current) return;
@@ -116,23 +95,14 @@ export default function NewLoopBuilderPage() {
   }, [activePromptId]);
 
   return (
-    <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-[1500px] flex-col gap-5 p-6">
-      <header className="flex items-start justify-between gap-4 border-b pb-5">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"><Wand2 className="size-4" /> LOOP BUILDER</div>
-          <h1 className="text-3xl font-semibold">Create a loop</h1>
-          <p className="mt-1 text-muted-foreground">One durable session analyzes intent, discovers exact tools, drafts the spec, and builds the workflow.</p>
-        </div>
-        <Button asChild variant="outline"><Link href="/dashboard/loops"><ArrowLeft className="mr-2 size-4" />Back</Link></Button>
-      </header>
-
-      <main className="grid min-h-0 flex-1 gap-5">
-        <Card className="flex min-h-[70vh] max-h-[calc(100vh-12rem)] flex-col overflow-hidden">
-          <Conversation>
-            <ConversationContent>
+    <div className="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-white">
+      <div className="relative flex h-full flex-col overflow-hidden">
+        <Conversation>
+            <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
               <ScrollOnToolComplete messages={messages} />
               {messages.length === 0 && (
                 <ConversationEmptyState
+                  className="max-w-3xl"
                   icon={<Wand2 className="size-8" />}
                   title="Describe the loop you want"
                   description="Intent analysis runs first and discovers the tools required for that intent."
@@ -185,8 +155,8 @@ export default function NewLoopBuilderPage() {
                               <ConfirmationAccepted>Approved.</ConfirmationAccepted>
                               <ConfirmationRejected>Rejected.</ConfirmationRejected>
                               <ConfirmationActions>
-                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: false })} variant="outline">Reject</ConfirmationAction>
-                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: true })}>Approve</ConfirmationAction>
+                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: false })} variant="outline" className="border-[#d1d5db] text-[#6b7280] hover:bg-[#fafafa]">Reject</ConfirmationAction>
+                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: true })} className="border-[#92400e] bg-[#fffbeb] text-[#92400e] hover:bg-[#fef3c7]">Approve</ConfirmationAction>
                               </ConfirmationActions>
                             </Confirmation>
                           );
@@ -224,53 +194,52 @@ export default function NewLoopBuilderPage() {
             </ConversationContent>
             <ConversationScrollButton />
           </Conversation>
-          <div className="relative border-t p-4">
-            <div className="relative overflow-hidden rounded-lg">
-              <AnimatePresence initial={false} mode="wait">
-                {showInteractivePrompt ? (
-                  <motion.div
-                    key="interactive-prompt"
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.98, y: 8 }}
-                    initial={{ opacity: 0, scale: 0.98, y: 16 }}
-                    transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                  >
-                    <InteractivePromptTool
-                      disabled={status !== "ready"}
-                      onDismiss={() => setDismissedPromptId(activeInteractivePrompt!.toolCallId)}
-                      onSubmit={(answer) => addToolOutput({
-                        tool: "interactivePrompt",
-                        toolCallId: activeInteractivePrompt!.toolCallId,
-                        output: answer,
-                      })}
-                      part={activeInteractivePrompt!}
-                      placement="composer"
-                    />
-                  </motion.div>
-                ) : (
-                  <motion.div
-                    key="prompt-input"
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.98, y: 12 }}
-                    initial={{ opacity: 0, y: 8 }}
-                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-                  >
-                    <PromptInput onSubmit={({ text }) => {
-                      if (text.trim()) return sendMessage({ text });
-                    }}>
-                      <PromptInputTextarea placeholder="Describe the loop, answer a clarification, or request a refinement..." />
-                      <PromptInputFooter>
-                        <span className="text-xs text-muted-foreground">{session ? `Phase: ${session.phase}` : "A new session starts with your first message"}</span>
-                        <PromptInputSubmit onStop={stop} status={status} />
-                      </PromptInputFooter>
-                    </PromptInput>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+        <div className="px-4 pb-4 pt-2">
+          <div className="mx-auto max-w-3xl">
+            <AnimatePresence initial={false} mode="wait">
+              {showInteractivePrompt ? (
+                <motion.div
+                  key="interactive-prompt"
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                  initial={{ opacity: 0, scale: 0.98, y: 16 }}
+                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                >
+                  <InteractivePromptTool
+                    disabled={status !== "ready"}
+                    onDismiss={() => setDismissedPromptId(activeInteractivePrompt!.toolCallId)}
+                    onSubmit={(answer) => addToolOutput({
+                      tool: "interactivePrompt",
+                      toolCallId: activeInteractivePrompt!.toolCallId,
+                      output: answer,
+                    })}
+                    part={activeInteractivePrompt!}
+                    placement="composer"
+                  />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="prompt-input"
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.98, y: 12 }}
+                  initial={{ opacity: 0, y: 8 }}
+                  transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                >
+                  <PromptInput className="[&_[data-slot=input-group]]:rounded-full [&_[data-slot=input-group]]:border-[#e5e7eb] [&_[data-slot=input-group]]:bg-white [&_[data-slot=input-group]]:shadow-sm [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:py-1.5 [&_[data-slot=input-group]]:min-h-10 [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-[#d1d5db] [&_[data-slot=input-group]]:!ring-0" onSubmit={({ text }) => {
+                    if (text.trim()) return sendMessage({ text });
+                  }}>
+                    <PromptInputTextarea placeholder="Describe the loop, answer a clarification, or request a refinement..." className="min-h-0 pr-12 py-1.5" />
+                    <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
+                      <PromptInputSubmit onStop={stop} status={status} className="bg-black text-white rounded-full hover:bg-neutral-800" />
+                    </PromptInputFooter>
+                  </PromptInput>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
-        </Card>
-      </main>
+        </div>
+        <p className="pb-4 text-center text-[11px] text-[#999]">Tallei can make mistakes. Check important info.</p>
+      </div>
     </div>
   );
 }
@@ -296,10 +265,10 @@ function InteractivePromptTool({
     const options = input.options ?? [];
     return (
       <div className={cn(
-        "w-full overflow-hidden rounded-xl border bg-card",
+        "w-full overflow-hidden rounded-2xl border border-[#d1d5db] bg-[#f5f3ff] shadow-sm",
         placement === "composer"
-          ? "rounded-lg border-input bg-background shadow-none"
-          : "my-3 shadow-sm",
+          ? ""
+          : "my-3",
       )}>
         <div className="flex items-center gap-2 px-4 pb-2 pt-4 text-sm font-medium">
           <span>{input.question ?? "Analyzing your request"}</span>
