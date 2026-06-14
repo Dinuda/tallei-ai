@@ -265,7 +265,7 @@ function InteractivePromptTool({
     const options = input.options ?? [];
     return (
       <div className={cn(
-        "w-full overflow-hidden rounded-2xl border border-[#d1d5db] bg-[#f5f3ff] shadow-sm",
+        "w-full overflow-hidden rounded-2xl border border-[#e8e5f0] bg-[#f9f8fc] shadow-sm",
         placement === "composer"
           ? ""
           : "my-3",
@@ -280,23 +280,34 @@ function InteractivePromptTool({
         </div>
         {options.length > 0 && (
           <div className="space-y-1 px-2 pb-3">
-            {options.map((option, index) => (
+            {options.map((option) => (
               <div
-                key={option.id ?? index}
+                key={option.id}
                 className="flex animate-in fade-in slide-in-from-bottom-1 items-start gap-3 rounded-lg px-2.5 py-2"
                 style={{ animationDuration: "300ms" }}
               >
-                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] text-muted-foreground">
-                  {index + 1}
+                <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#e8e5f0] bg-white overflow-hidden">
+                  {option.icon ? (
+                    <img
+                      alt={option.label}
+                      className="size-5 object-contain"
+                      draggable={false}
+                      src={`https://logos.composio.dev/api/${option.icon}`}
+                    />
+                  ) : (
+                    <span className="text-[11px] text-[#8a86a0]">
+                      {option.label.charAt(0).toUpperCase()}
+                    </span>
+                  )}
                 </span>
                 <span className="text-sm text-muted-foreground">{option.label}</span>
               </div>
             ))}
             <div className="flex animate-pulse items-start gap-3 rounded-lg px-2.5 py-2">
-              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] text-muted-foreground/30">
-                {options.length + 1}
+              <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#e8e5f0] bg-white text-[11px] text-[#8a86a0]/30">
+                <span className="h-4 w-4 rounded-full bg-[#e8e5f0]" />
               </span>
-              <span className="h-4 w-32 rounded bg-muted" />
+              <span className="h-4 w-32 rounded bg-[#e8e5f0]" />
             </div>
           </div>
         )}

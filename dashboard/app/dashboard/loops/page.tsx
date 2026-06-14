@@ -11,6 +11,7 @@ import {
   Check,
   Clock,
   Loader2,
+  Plus,
   RefreshCw,
   RotateCcw,
   Sparkles,
@@ -462,7 +463,7 @@ function LoopCard({
     >
       <Card className="group relative overflow-hidden rounded-none border border-slate-200 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
         {/* Header */}
-        <div className="mb-5 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1.5 rounded-none border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 shadow-sm">
               <RotateCcw size={12} className="text-slate-500" />
@@ -496,17 +497,17 @@ function LoopCard({
         </div>
 
         {/* Title */}
-        <div className="mb-6">
+        <div className="mb-4">
           <h3 className="text-xl font-bold text-[var(--text)] line-clamp-2 min-h-[3.5rem]">{loop.name}</h3>
         </div>
 
         {/* Memory Deck */}
-        <div className="mb-8">
+        <div className="mb-3">
           <MemoryDeck memories={memories} />
         </div>
 
         {/* Timeline */}
-        <div className="mb-8 flex justify-center">
+        <div className="mb-3 flex justify-center">
           <CreativeTimeline
             conversations={loop.conversations}
             nextPredicted={loop.nextPredicted}
@@ -753,7 +754,7 @@ export default function LoopsPage() {
     <TooltipProvider delayDuration={150}>
       <div className="flex h-[calc(100vh-72px)] flex-col bg-[#f8fafc]">
         {/* Header */}
-        <header className="mx-auto flex w-full max-w-5xl flex-wrap items-end justify-between gap-4 border-b border-[var(--border-light)] py-8">
+        <header className="mx-auto flex w-full max-w-5xl flex-wrap items-end justify-between gap-4 border-b border-[var(--border-light)] py-8 px-6">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-[var(--text)]">Loops</h1>
             <p className="mt-1 text-sm text-[var(--text-2)]">
@@ -762,6 +763,14 @@ export default function LoopsPage() {
           </div>
 
           <div className="flex items-center gap-3">
+            <Button
+              type="button"
+              onClick={() => router.push("/dashboard/loops/new")}
+              className="h-9 gap-1.5 rounded-none shadow-sm bg-orange-500 hover:bg-orange-600 text-white"
+            >
+              <Plus size={14} />
+              New loop
+            </Button>
             <Button
               type="button"
               variant="outline"

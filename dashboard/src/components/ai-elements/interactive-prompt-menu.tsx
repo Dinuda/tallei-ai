@@ -12,6 +12,7 @@ export type InteractivePromptOption = {
   label: string;
   value: string;
   description?: string;
+  icon?: string;
 };
 
 export type InteractivePromptAnswer = {
@@ -20,6 +21,59 @@ export type InteractivePromptAnswer = {
   otherText?: string;
   answerText: string;
 };
+
+function ProviderLogo({
+  icon,
+  label,
+  selected,
+  index,
+}: {
+  icon?: string;
+  label: string;
+  selected: boolean;
+  index: number;
+}) {
+  const src = icon
+    ? `https://logos.composio.dev/api/${icon}`
+    : undefined;
+
+  if (!src) {
+    return (
+      <span
+        className={cn(
+          "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px]",
+          selected
+            ? "border-[#4338ca] bg-[#4338ca] text-white"
+            : "border-[#e8e5f0] bg-white text-[#8a86a0]"
+        )}
+      >
+        {selected ? <Check className="size-3" /> : index + 1}
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className={cn(
+        "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border overflow-hidden",
+        selected
+          ? "border-[#4338ca] bg-[#4338ca]"
+          : "border-[#e8e5f0] bg-white"
+      )}
+    >
+      {selected ? (
+        <Check className="size-4 text-white" />
+      ) : (
+        <img
+          alt={label}
+          className="size-5 object-contain"
+          draggable={false}
+          src={src}
+        />
+      )}
+    </span>
+  );
+}
 
 export function InteractivePromptMenu({
   question,
@@ -44,9 +98,14 @@ export function InteractivePromptMenu({
   onSubmit: (answer: InteractivePromptAnswer) => void;
   onDismiss?: () => void;
 }) {
-  const [selectedIds, setSelectedIds] = useState<string[]>(submittedAnswer?.selectedOptionIds ?? []);
+  const [selectedIds, setSelectedIds] = useState<string[]>(
+    submittedAnswer?.selectedOptionIds ?? []
+  );
   const [otherText, setOtherText] = useState(submittedAnswer?.otherText ?? "");
-  const recommended = useMemo(() => new Set(recommendedOptionIds), [recommendedOptionIds]);
+  const recommended = useMemo(
+    () => new Set(recommendedOptionIds),
+    [recommendedOptionIds]
+  );
   const isSubmitted = Boolean(submittedAnswer);
 
   useEffect(() => {
@@ -60,13 +119,19 @@ export function InteractivePromptMenu({
 
   function toggle(optionId: string) {
     if (disabled || isSubmitted) return;
-    setSelectedIds((current) => allowMultiple
-      ? current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId]
-      : [optionId]);
+    setSelectedIds((current) =>
+      allowMultiple
+        ? current.includes(optionId)
+          ? current.filter((id) => id !== optionId)
+          : [...current, optionId]
+        : [optionId]
+    );
   }
 
   function submit() {
-    const selectedOptions = options.filter((option) => selectedIds.includes(option.id));
+    const selectedOptions = options.filter((option) =>
+      selectedIds.includes(option.id)
+    );
     const custom = otherText.trim();
     const answerText = [
       ...selectedOptions.map((option) => option.value),
@@ -82,12 +147,14 @@ export function InteractivePromptMenu({
   }
 
   return (
-    <div className={cn(
-      "w-full overflow-hidden rounded-xl border bg-[#f5f3ff] shadow-lg",
-      placement === "composer"
-        ? "rounded-lg border-[#c7b8ff] shadow-none"
-        : "my-3 shadow-sm border-[#d1d5db]",
-    )}>
+    <div
+      className={cn(
+        "w-full overflow-hidden rounded-xl border bg-[#f9f8fc] shadow-lg",
+        placement === "composer"
+          ? "rounded-lg border-[#e8e5f0] shadow-none"
+          : "my-3 shadow-sm border-[#e8e5f0]"
+      )}
+    >
       <div className="px-4 pb-2 pt-4 text-sm font-medium">{question}</div>
       <div className="space-y-1 px-2">
         {options.map((option, index) => {
@@ -95,31 +162,42 @@ export function InteractivePromptMenu({
           return (
             <button
               className={cn(
-                "flex w-full items-start gap-3 rounded-lg px-2.5 py-2 text-left transition-colors",
-                selected ? "bg-muted text-foreground" : "hover:bg-muted/60",
-                (disabled || isSubmitted) && "cursor-default",
+                "flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors",
+                selected ? "bg-[#f0edff] text-foreground" : "hover:bg-[#f5f3ff]",
+                (disabled || isSubmitted) && "cursor-default"
               )}
               disabled={disabled || isSubmitted}
               key={option.id}
               onClick={() => toggle(option.id)}
               type="button"
             >
-              <span className={cn(
-                "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px]",
-                selected && "border-foreground bg-foreground text-background",
-              )}>
-                {selected ? <Check className="size-3" /> : index + 1}
-              </span>
+              <ProviderLogo
+                icon={option.icon}
+                index={index}
+                label={option.label}
+                selected={selected}
+              />
               <span className="min-w-0 flex-1">
-                <span className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
                   <span>{option.label}</span>
                   {recommended.has(option.id) && (
-                    <span className="text-xs text-muted-foreground">(Recommended)</span>
+                    <span className="rounded-full border border-[#e8e5f0] bg-white px-2 py-0.5 text-[10px] font-medium text-[#8a86a0]">
+                      Recommended
+                    </span>
                   )}
                 </span>
-                {option.description && <span className="mt-0.5 block text-xs text-muted-foreground">{option.description}</span>}
+                {option.description && (
+                  <span className="mt-0.5 block text-xs text-[#8a86a0]">
+                    {option.description}
+                  </span>
+                )}
               </span>
-              <Circle className={cn("mt-1 size-2 text-muted-foreground", selected && "fill-current")} />
+              <Circle
+                className={cn(
+                  "mt-2 size-2 text-[#d1cfd8]",
+                  selected && "fill-[#4338ca] text-[#4338ca]"
+                )}
+              />
             </button>
           );
         })}
@@ -155,11 +233,23 @@ export function InteractivePromptMenu({
             </Button>
           )}
           <span className="text-xs text-muted-foreground">
-            {isSubmitted ? `Answered: ${submittedAnswer?.answerText}` : allowMultiple ? "Select one or more options" : ""}
+            {isSubmitted
+              ? `Answered: ${submittedAnswer?.answerText}`
+              : allowMultiple
+                ? "Select one or more options"
+                : ""}
           </span>
         </div>
         {!isSubmitted && (
-          <Button disabled={disabled || (selectedIds.length === 0 && !otherText.trim())} onClick={submit} size="sm" type="button">
+          <Button
+            disabled={
+              disabled ||
+              (selectedIds.length === 0 && !otherText.trim())
+            }
+            onClick={submit}
+            size="sm"
+            type="button"
+          >
             Submit <CornerDownLeft className="size-3.5" />
           </Button>
         )}
