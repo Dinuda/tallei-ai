@@ -23,6 +23,7 @@ import {
   createWorkflowBuilderSession,
   findWorkflowBuilderSessionBySpec,
   listWorkflowBuilderMessages,
+  normalizeWorkflowBuilderMessages,
   replaceWorkflowBuilderMessages,
   requireWorkflowBuilderSession,
   type WorkflowBuilderSession,
@@ -58,12 +59,18 @@ async function waitForCommand(
   onProgress?: (command: Awaited<ReturnType<typeof getWorkflowBuilderCommand>>) => void,
 ) {
   let eventCount = -1;
-  for (let attempt = 0; attempt < 600; attempt += 1) {
+  let attemptsWithoutProgress = 0;
+  // Backend planning attempts can take up to 300s; give a generous window and
+  // only timeout when no progress events have arrived for a long stretch.
+  while (attemptsWithoutProgress < 2400) {
     const command = await getWorkflowBuilderCommand(auth, commandId);
     if (!command) throw new Error("Builder command disappeared");
     if (command.events.length !== eventCount) {
       eventCount = command.events.length;
+      attemptsWithoutProgress = 0;
       onProgress?.(command);
+    } else {
+      attemptsWithoutProgress += 1;
     }
     if (command.status === "completed" || command.status === "failed" || command.status === "rejected") return command;
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -105,7 +112,7 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
       execute: (input) => runTool(auth, sessionId, "getAvailableTools", input),
     }),
     interactivePrompt: tool({
-      description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command.",
+      description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command. Only set the 'icon' field when an option represents a known external service or app (e.g., HubSpot, Salesforce, Slack, Notion, Gmail). For action options like 'Approve spec', 'Refine the spec', 'Save workflow', 'Other', or 'I will connect manually', leave the 'icon' field empty.",
       inputSchema: z.object({
         question: z.string().min(1),
         options: z.array(z.object({
@@ -113,6 +120,7 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
           label: z.string().min(1),
           value: z.string().min(1),
           description: z.string().optional(),
+          icon: z.string().optional(),
         })).min(2).max(8),
         recommendedOptionIds: z.array(z.string().min(1)).max(8).default([]),
         allowMultiple: z.boolean().default(false),
@@ -130,18 +138,16 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
       execute: (input) => runTool(auth, sessionId, "refineSpec", input),
     }),
     approveSpec: tool({
-      description: "Approve the current behavioral spec. Call when the user asks to approve it. Requires explicit UI approval.",
+      description: "Approve the current behavioral spec. Call when the user selects 'Approve spec' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
       inputSchema: z.object({
         specJson: z.unknown().optional(),
         bodyMarkdown: z.string().optional(),
       }),
-      needsApproval: true,
       execute: (input) => runTool(auth, sessionId, "approveSpec", { ...input, approved: true }),
     }),
     archiveSpec: tool({
-      description: "Archive the current spec. This is destructive and requires explicit UI approval.",
+      description: "Archive the current spec. Call when the user selects 'Archive and start over' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
       inputSchema: z.object({}),
-      needsApproval: true,
       execute: (input) => runTool(auth, sessionId, "archiveSpec", { ...input, approved: true }),
     }),
     generateWorkflowGraph: tool({
@@ -155,13 +161,12 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
       execute: (input) => runTool(auth, sessionId, "refineWorkflowGraph", input),
     }),
     saveWorkflow: tool({
-      description: "Persist the generated workflow. Requires explicit UI approval.",
+      description: "Persist the generated workflow. Call when the user selects 'Save workflow' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
       inputSchema: z.object({
         cron: z.string().optional(),
         timezone: z.string().optional(),
         workspaceId: z.string().uuid().nullable().optional(),
       }),
-      needsApproval: true,
       execute: (input) => runTool(auth, sessionId, "saveWorkflow", { ...input, approved: true }),
     }),
   };
@@ -174,6 +179,7 @@ function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
     "If an answer would materially change the outcome, schedule, runtime inputs, approval model, or required capabilities, ask for clarification.",
     "Whenever a clarification can be expressed as choices, including binary yes/no questions, call interactivePrompt and stop. Ask only one interactive prompt at a time.",
     "Use allowMultiple only when more than one choice may be selected. Include a recommended option when a safe default exists. Use allowOther when a custom answer is reasonable.",
+    "For options representing known services or integrations (e.g., HubSpot, Salesforce, Slack, Notion, Mailchimp), include the Composio icon key in the 'icon' field of each option. Common keys: hubspot, salesforce, pipedrive, zoho-crm, slack, notion, mailchimp, gmail, github, airtable, trello, asana, zendesk, stripe, google-sheets, google-docs.",
     "Only ask a normal assistant text question when it genuinely cannot be represented as useful choices.",
     "Never ask the user to paste API keys, passwords, or credentials. Offer account connection as an option instead.",
     "Before calling getAvailableTools, if runtime inputs are needed (such as Mailchimp account connection, target audience/list, send time/timezone, or news sources/keywords to monitor), do not list them in prose text. Instead, gather them by presenting concrete choices using interactivePrompt. Each runtime input requirement or connection choice must be asked via interactivePrompt.",
@@ -181,6 +187,7 @@ function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
     "Never call draftSpec before getAvailableTools. Never invent or search for tools outside getAvailableTools.",
     "After calling draftSpec, explain the draft briefly and immediately call interactivePrompt in the same turn to present a choice to the user: 'Approve spec' (recommended, with value 'Approve the spec') and 'Refine the spec'. Do not wait for the user to manually type or request approval in prose.",
     "When the user requests spec approval (such as selecting 'Approve spec'), call approveSpec. After approval succeeds, immediately call generateWorkflowGraph without asking for another approval.",
+    "If generateWorkflowGraph fails (e.g., times out) and the session is in the 'failed' phase, you can retry generateWorkflowGraph in a subsequent turn because the spec is still approved. Prefer retrying once before asking the user what to do.",
     "Use refineSpec for feedback about the behavioral contract and refineWorkflowGraph for feedback about an existing graph.",
     "After calling generateWorkflowGraph, explain the result briefly and immediately call interactivePrompt in the same turn to present the next steps: 'Save workflow' (recommended), 'Refine the graph', and 'Archive and start over'. Do not wait for prose feedback or wait for the user to explicitly request saving/archiving.",
     "Never output a bulleted, numbered, or formatted list of options or actions the user can take in your prose text response. If you have choices, next steps, or decisions to offer, you must present them via interactivePrompt.",
@@ -226,7 +233,9 @@ function proposalSessionId(proposal: unknown): string | null {
 router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = chatSchema.parse(req.body ?? {});
-    const messages = await validateUIMessages({ messages: body.messages as UIMessage[] });
+    const messages = await validateUIMessages({
+      messages: normalizeWorkflowBuilderMessages(body.messages),
+    });
     const last = messages.at(-1);
     const firstUserText = messages.find((message) => message.role === "user");
     const text = messageText(last?.role === "user" ? last : firstUserText);

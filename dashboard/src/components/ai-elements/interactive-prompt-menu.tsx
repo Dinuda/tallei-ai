@@ -149,10 +149,10 @@ export function InteractivePromptMenu({
   return (
     <div
       className={cn(
-        "w-full overflow-hidden rounded-xl border bg-[#f9f8fc] shadow-lg",
+        "w-full overflow-hidden bg-[#f9f8fc]",
         placement === "composer"
-          ? "rounded-lg border-[#e8e5f0] shadow-none"
-          : "my-3 shadow-sm border-[#e8e5f0]"
+          ? "rounded-none border-0 shadow-none"
+          : "my-3 rounded-xl border border-[#e8e5f0] shadow-sm"
       )}
     >
       <div className="px-4 pb-2 pt-4 text-sm font-medium">{question}</div>
@@ -167,7 +167,7 @@ export function InteractivePromptMenu({
                 (disabled || isSubmitted) && "cursor-default"
               )}
               disabled={disabled || isSubmitted}
-              key={option.id}
+              key={option.id ?? `option-${index}`}
               onClick={() => toggle(option.id)}
               type="button"
             >

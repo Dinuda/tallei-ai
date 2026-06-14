@@ -1,6 +1,7 @@
 "use client";
 
 
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import {
@@ -12,7 +13,7 @@ import {
   lastAssistantMessageIsCompleteWithToolCalls,
   type UIMessage,
 } from "ai";
-import { Wand2 } from "lucide-react";
+import { Paperclip, Plus } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
@@ -20,9 +21,14 @@ import { cn } from "@/lib/utils";
 import {
   Conversation,
   ConversationContent,
-  ConversationEmptyState,
   ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import {
   InteractivePromptMenu,
@@ -46,6 +52,11 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+
+const LoopSuggestionCards = dynamic(
+  () => import("@/components/loop-suggestion-cards").then((mod) => mod.LoopSuggestionCards),
+  { ssr: false },
+);
 
 
 export default function NewLoopBuilderPage() {
@@ -89,23 +100,66 @@ export default function NewLoopBuilderPage() {
   const activeInteractivePrompt = findActiveInteractivePrompt(messages);
   const activePromptId = activeInteractivePrompt?.toolCallId ?? null;
   const showInteractivePrompt = activePromptId !== null && activePromptId !== dismissedPromptId;
+  const submitComposerText = useCallback(async (text: string) => {
+    const answerText = text.trim();
+    if (!answerText) return;
+
+    if (activeInteractivePrompt?.state === "input-available" && activePromptId === dismissedPromptId) {
+      const promptMessageIndex = messages.findIndex((message) =>
+        message.parts.some((part) =>
+          isToolUIPart(part) && part.toolCallId === activeInteractivePrompt.toolCallId
+        )
+      );
+      if (promptMessageIndex >= 0) {
+        const answer = {
+          selectedOptionIds: [],
+          selectedValues: [],
+          otherText: answerText,
+          answerText,
+        } satisfies InteractivePromptAnswer;
+        const answeredPromptMessages = messages.slice(0, promptMessageIndex + 1).map((message, messageIndex) =>
+          messageIndex === promptMessageIndex
+            ? {
+                ...message,
+                parts: message.parts.map((part) =>
+                  isToolUIPart(part) && part.toolCallId === activeInteractivePrompt.toolCallId
+                    ? { ...part, state: "output-available", output: answer } as ToolPart
+                    : part
+                ),
+              }
+            : message
+        );
+        setMessages([
+          ...answeredPromptMessages,
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: answerText }],
+          },
+        ]);
+        await sendMessage();
+        return;
+      }
+    }
+
+    await sendMessage({ text: answerText });
+  }, [activeInteractivePrompt, activePromptId, dismissedPromptId, messages, sendMessage, setMessages]);
 
   useEffect(() => {
     setDismissedPromptId(null);
   }, [activePromptId]);
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-white">
-      <div className="relative flex h-full flex-col overflow-hidden">
+    <div className="relative flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-white">
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-0 h-[400px] bg-gradient-to-t from-slate-100 to-transparent" />
+      <div className="relative z-10 flex h-full flex-col overflow-hidden">
         <Conversation>
             <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
               <ScrollOnToolComplete messages={messages} />
               {messages.length === 0 && (
-                <ConversationEmptyState
+                <LoopSuggestionCards
                   className="max-w-3xl"
-                  icon={<Wand2 className="size-8" />}
-                  title="Describe the loop you want"
-                  description="Intent analysis runs first and discovers the tools required for that intent."
+                  onSelect={submitComposerText}
                 />
               )}
               {messages.map((message) => (
@@ -115,7 +169,7 @@ export default function NewLoopBuilderPage() {
                       if (part.type === "text") return <MessageResponse key={index}>{part.text}</MessageResponse>;
                       if (isReasoningUIPart(part)) {
                         return (
-                          <Reasoning isStreaming={part.state === "streaming"} key={index}>
+                          <Reasoning isStreaming={part.state === "streaming"} defaultOpen key={`reasoning-${index}`}>
                             <ReasoningTrigger />
                             <ReasoningContent>{part.text}</ReasoningContent>
                           </Reasoning>
@@ -124,18 +178,11 @@ export default function NewLoopBuilderPage() {
                       if (isToolUIPart(part)) {
                         const toolName = getToolName(part);
                         if (toolName === "interactivePrompt") {
-                          if (part.state === "input-streaming") {
-                            return (
-                              <InteractivePromptTool
-                                disabled
-                                key={index}
-                                onSubmit={() => undefined}
-                                part={part}
-                                placement="transcript"
-                              />
-                            );
+                          // Stream the prompt only in the composer input area.
+                          // In the transcript, show only submitted/completed states.
+                          if (part.state === "input-streaming" || part.state === "input-available") {
+                            return null;
                           }
-                          if (part.state === "input-available") return null;
                           return (
                             <InteractivePromptTool
                               disabled
@@ -196,46 +243,67 @@ export default function NewLoopBuilderPage() {
           </Conversation>
         <div className="px-4 pb-4 pt-2">
           <div className="mx-auto max-w-3xl">
-            <AnimatePresence initial={false} mode="wait">
-              {showInteractivePrompt ? (
-                <motion.div
-                  key="interactive-prompt"
-                  animate={{ opacity: 1, scale: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.98, y: 8 }}
-                  initial={{ opacity: 0, scale: 0.98, y: 16 }}
-                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                >
-                  <InteractivePromptTool
-                    disabled={status !== "ready"}
-                    onDismiss={() => setDismissedPromptId(activeInteractivePrompt!.toolCallId)}
-                    onSubmit={(answer) => addToolOutput({
-                      tool: "interactivePrompt",
-                      toolCallId: activeInteractivePrompt!.toolCallId,
-                      output: answer,
-                    })}
-                    part={activeInteractivePrompt!}
-                    placement="composer"
-                  />
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="prompt-input"
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.98, y: 12 }}
-                  initial={{ opacity: 0, y: 8 }}
-                  transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-                >
-                  <PromptInput className="[&_[data-slot=input-group]]:rounded-full [&_[data-slot=input-group]]:border-[#e5e7eb] [&_[data-slot=input-group]]:bg-white [&_[data-slot=input-group]]:shadow-sm [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:py-1.5 [&_[data-slot=input-group]]:min-h-10 [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-[#d1d5db] [&_[data-slot=input-group]]:!ring-0" onSubmit={({ text }) => {
-                    if (text.trim()) return sendMessage({ text });
-                  }}>
-                    <PromptInputTextarea placeholder="Describe the loop, answer a clarification, or request a refinement..." className="min-h-0 pr-12 py-1.5" />
+            <motion.div
+              className="relative overflow-hidden rounded-[24px] border border-[#e5e7eb] bg-white shadow-sm transition-colors focus-within:border-[#d1d5db]"
+              layout
+              transition={{ layout: { duration: 0.32, ease: [0.16, 1, 0.3, 1] } }}
+            >
+              <AnimatePresence initial={false} mode="popLayout">
+                {showInteractivePrompt ? (
+                  <motion.div
+                    key="interactive-prompt"
+                    animate={{ clipPath: "inset(0% 0% 0% 0% round 24px)", opacity: 1, y: 0 }}
+                    exit={{ clipPath: "inset(85% 0% 0% 0% round 24px)", opacity: 0, y: 20 }}
+                    initial={{ clipPath: "inset(85% 0% 0% 0% round 24px)", opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <InteractivePromptTool
+                      disabled={status !== "ready"}
+                      onDismiss={() => setDismissedPromptId(activeInteractivePrompt!.toolCallId)}
+                      onSubmit={(answer) => addToolOutput({
+                        tool: "interactivePrompt",
+                        toolCallId: activeInteractivePrompt!.toolCallId,
+                        output: answer,
+                      })}
+                      part={activeInteractivePrompt!}
+                      placement="composer"
+                    />
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="prompt-input"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    initial={{ opacity: 0, y: 10 }}
+                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                  <PromptInput className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0" onSubmit={({ text }) => submitComposerText(text)}>
+                    <PromptInputTextarea placeholder="Describe the loop, answer a clarification, or request a refinement..." className="min-h-0 pr-12 pb-2" />
+
+                    <div className="absolute bottom-3 left-4 flex items-center gap-4 text-slate-400">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button type="button" className="flex size-7 items-center justify-center rounded-full bg-slate-100 transition-colors hover:bg-slate-200">
+                            <Plus size={16} className="text-slate-600" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-56 rounded-2xl p-2 shadow-lg">
+                          <DropdownMenuItem className="gap-3 rounded-xl px-3 py-2 text-[14px]">
+                            <Paperclip size={18} className="text-slate-700" />
+                            <span>Add photos & files</span>
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+
                     <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
-                      <PromptInputSubmit onStop={stop} status={status} className="bg-black text-white rounded-full hover:bg-neutral-800" />
+                      <PromptInputSubmit onStop={stop} status={status} className="rounded-full bg-indigo-900 text-white hover:bg-indigo-800" />
                     </PromptInputFooter>
                   </PromptInput>
-                </motion.div>
-              )}
-            </AnimatePresence>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
           </div>
         </div>
         <p className="pb-4 text-center text-[11px] text-[#999]">Tallei can make mistakes. Check important info.</p>
@@ -265,10 +333,10 @@ function InteractivePromptTool({
     const options = input.options ?? [];
     return (
       <div className={cn(
-        "w-full overflow-hidden rounded-2xl border border-[#e8e5f0] bg-[#f9f8fc] shadow-sm",
+        "w-full overflow-hidden bg-[#f9f8fc]",
         placement === "composer"
-          ? ""
-          : "my-3",
+          ? "rounded-none border-0 shadow-none"
+          : "my-3 rounded-2xl border border-[#e8e5f0] shadow-sm",
       )}>
         <div className="flex items-center gap-2 px-4 pb-2 pt-4 text-sm font-medium">
           <span>{input.question ?? "Analyzing your request"}</span>
@@ -280,27 +348,27 @@ function InteractivePromptTool({
         </div>
         {options.length > 0 && (
           <div className="space-y-1 px-2 pb-3">
-            {options.map((option) => (
+            {options.map((option, optionIndex) => (
               <div
-                key={option.id}
+                key={option.id ?? `option-${optionIndex}`}
                 className="flex animate-in fade-in slide-in-from-bottom-1 items-start gap-3 rounded-lg px-2.5 py-2"
                 style={{ animationDuration: "300ms" }}
               >
                 <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#e8e5f0] bg-white overflow-hidden">
                   {option.icon ? (
                     <img
-                      alt={option.label}
+                      alt={option.label ?? ""}
                       className="size-5 object-contain"
                       draggable={false}
                       src={`https://logos.composio.dev/api/${option.icon}`}
                     />
                   ) : (
                     <span className="text-[11px] text-[#8a86a0]">
-                      {option.label.charAt(0).toUpperCase()}
+                      {(option.label ?? "?").charAt(0).toUpperCase()}
                     </span>
                   )}
                 </span>
-                <span className="text-sm text-muted-foreground">{option.label}</span>
+                <span className="text-sm text-muted-foreground">{option.label ?? ""}</span>
               </div>
             ))}
             <div className="flex animate-pulse items-start gap-3 rounded-lg px-2.5 py-2">
@@ -419,5 +487,3 @@ function AvailableTools({ part }: { part: ToolPart }) {
     </CollapsibleTool>
   );
 }
-
-

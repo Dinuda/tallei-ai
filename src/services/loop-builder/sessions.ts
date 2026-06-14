@@ -184,6 +184,7 @@ export async function replaceWorkflowBuilderMessages(
   sessionId: string,
   messages: UIMessage[],
 ): Promise<void> {
+  const normalizedMessages = normalizeWorkflowBuilderMessages(messages);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -191,7 +192,7 @@ export async function replaceWorkflowBuilderMessages(
       `DELETE FROM workflow_builder_messages WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3`,
       [sessionId, auth.tenantId, auth.userId],
     );
-    for (const message of messages) {
+    for (const message of normalizedMessages) {
       await client.query(
         `INSERT INTO workflow_builder_messages (session_id, tenant_id, user_id, message_json)
          VALUES ($1, $2, $3, $4::jsonb)`,
@@ -215,5 +216,17 @@ export async function listWorkflowBuilderMessages(auth: AuthContext, sessionId: 
      ORDER BY sequence ASC`,
     [sessionId, auth.tenantId, auth.userId],
   );
-  return result.rows.map((row) => row.message_json);
+  return normalizeWorkflowBuilderMessages(result.rows.map((row) => row.message_json));
+}
+
+export function normalizeWorkflowBuilderMessages(messages: unknown[]): UIMessage[] {
+  return messages.filter((message): message is UIMessage =>
+    Boolean(
+      message
+      && typeof message === "object"
+      && "parts" in message
+      && Array.isArray(message.parts)
+      && message.parts.length > 0,
+    )
+  );
 }

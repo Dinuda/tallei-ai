@@ -14,7 +14,7 @@ import {
   type LoopBuilderProgressEvent,
   type LoopBuilderUsage,
 } from "./progress.js";
-import { approveLoopSpec, archiveLoopSpec, draftLoopSpec, refineLoopSpec } from "./specs.js";
+import { approveLoopSpec, archiveLoopSpec, draftLoopSpec, getLoopSpec, refineLoopSpec } from "./specs.js";
 import { refineLoopBuilderProposal, resolveLoopBuilderIntent, saveLoopBuilderProposal } from "./intent-resolver.js";
 import {
   createWorkflowBuilderSession,
@@ -115,7 +115,7 @@ function requireApproval(input: Record<string, unknown>, tool: BuilderToolName):
 }
 
 async function execute(auth: AuthContext, sessionId: string, toolName: BuilderToolName, input: Record<string, unknown>) {
-  const session = await requireWorkflowBuilderSession(auth, sessionId);
+  let session = await requireWorkflowBuilderSession(auth, sessionId);
   switch (toolName) {
     case "getAvailableTools": {
       requirePhase(session.phase, ["new", "analyzing", "needs_clarification", "failed"], toolName);
@@ -208,6 +208,14 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       return { ok: true };
     }
     case "generateWorkflowGraph": {
+      // Allow retry after a previous graph-generation failure left the session in 'failed'.
+      if (session.phase === "failed" && session.specId) {
+        const spec = await getLoopSpec(auth, session.specId);
+        if (spec && spec.status === "approved") {
+          await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_approved", error: null });
+          session = await requireWorkflowBuilderSession(auth, sessionId);
+        }
+      }
       requirePhase(session.phase, ["spec_approved"], toolName);
       if (!session.specId) throw new Error("Session has no approved spec");
       const proposal = await resolveLoopBuilderIntent({
