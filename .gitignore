@@ -10,3 +10,4 @@ dashboard/node_modules/
 memory.db
 login-ngrok.png
 .env*
+generated/

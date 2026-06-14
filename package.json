@@ -19,10 +19,12 @@
     "test:integration": "tsx --test test/integration/*.test.ts",
     "baseline:metrics": "node scripts/baseline-metrics.mjs",
     "setup:claude": "node scripts/setup-claude-mcp.mjs",
-    "setup:chatgpt": "node scripts/setup-chatgpt-actions.mjs"
+    "setup:chatgpt": "node scripts/setup-chatgpt-actions.mjs",
+    "sync:composio-catalog": "node scripts/sync-composio-catalog.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.78",
+    "@ai-sdk/openai": "^3.0.71",
     "@anthropic-ai/sdk": "^0.40.1",
     "@azure/identity": "^4.13.1",
     "@azure/search-documents": "^12.2.0",

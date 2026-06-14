@@ -1,1125 +1,818 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { ArrowLeft, Check, FileText, Loader2, RefreshCw, Save, Wand2 } from "lucide-react";
-
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useChat } from "@ai-sdk/react";
+import {
+  DefaultChatTransport,
+  getToolName,
+  isReasoningUIPart,
+  isToolUIPart,
+  lastAssistantMessageIsCompleteWithApprovalResponses,
+  lastAssistantMessageIsCompleteWithToolCalls,
+  type UIMessage,
+} from "ai";
+import { AnimatePresence, motion } from "motion/react";
+import gsap from "gsap";
+import { ChevronRight, Wand2, Info, Newspaper, Users, LineChart, GitPullRequest, Zap, ArrowRight } from "lucide-react";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 
-type IntentChoice = {
+import {
+  Conversation,
+  ConversationContent,
+  ConversationEmptyState,
+  ConversationScrollButton,
+} from "@/components/ai-elements/conversation";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import {
+  InteractivePromptMenu,
+  type InteractivePromptAnswer,
+  type InteractivePromptOption,
+} from "@/components/ai-elements/interactive-prompt-menu";
+import {
+  Confirmation,
+  ConfirmationAction,
+  ConfirmationActions,
+  ConfirmationAccepted,
+  ConfirmationRejected,
+  ConfirmationRequest,
+  ConfirmationTitle,
+} from "@/components/ai-elements/confirmation";
+import {
+  PromptInput,
+  PromptInputFooter,
+  PromptInputSubmit,
+  PromptInputTextarea,
+} from "@/components/ai-elements/prompt-input";
+import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
+import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+
+const TEMPLATES = [
+  {
+    title: "Weekly Newsletter",
+    description: "Compile industry news, summarize top stories, and draft a formatted email digest.",
+    icon: Newspaper,
+    prompt: "Create a weekly newsletter digest loop that compiles the latest industry news, summarizes it, and drafts a newsletter email draft.",
+    accentColor: "#3d7a5a",
+    bgFrom: "#d4ede0",
+    bgTo: "#eaf5ee",
+    iconBg: "#3d7a5a",
+    borderColor: "#a8d4b8",
+  },
+  {
+    title: "Lead Follow-up",
+    description: "Monitor new sign-ups and draft personalized welcome emails three days after joining.",
+    icon: Users,
+    prompt: "Create a lead nurturing loop that monitors new sign-ups, checks if they've been contacted, and drafts a personalized email after 3 days.",
+    accentColor: "#2a5ca8",
+    bgFrom: "#cdddf5",
+    bgTo: "#e8f0fc",
+    iconBg: "#2a5ca8",
+    borderColor: "#9ab8e8",
+  },
+  {
+    title: "Competitor Monitor",
+    description: "Scrape competitor pricing pages daily, extract changes, and post Slack alerts.",
+    icon: LineChart,
+    prompt: "Create a competitor monitor loop that scrapes competitor pricing pages daily, summaries changes, and alerts our Slack channel.",
+    accentColor: "#7a4a1a",
+    bgFrom: "#f0dfc4",
+    bgTo: "#f8f0e5",
+    iconBg: "#9a5a1a",
+    borderColor: "#dfc090",
+  },
+  {
+    title: "GitHub Issue Triager",
+    description: "Watch new repo issues, AI-categorize them, and notify the development team.",
+    icon: GitPullRequest,
+    prompt: "Create a GitHub issue triager loop that watches for new repository issues, analyzes the issue text, categorizes it, and notifies Slack.",
+    accentColor: "#7a2a38",
+    bgFrom: "#f5d0d8",
+    bgTo: "#fce8ec",
+    iconBg: "#9a2a38",
+    borderColor: "#e8a0b0",
+  },
+];
+
+const SUGGESTIONS = [
+  { label: "HN Weekly Digest", prompt: "Create a loop that fetches top Hacker News posts weekly, summarizes them, and emails me the report." },
+  { label: "Support Email Translation", prompt: "Create a loop that reads incoming support emails in other languages, translates them to English, and alerts our Slack channel." },
+  { label: "SQL Daily Summary", prompt: "Create a loop that runs a SQL query on our database daily, summarizes new signups, and sends a Slack update." },
+  { label: "Competitor SEO Checker", prompt: "Create a loop that monitors competitor blog posts via RSS feeds and summaries their keywords." },
+];
+
+type BuilderSession = {
   id: string;
-  label: string;
-  value: string;
-  impact: string;
+  phase: string;
+  composioSessionId: string;
+  intentAnalysis: unknown;
+  discoveredToolContracts: Array<{ name?: string; toolRef?: string }>;
+  currentProposal: { title?: string; summary?: string } | null;
+  specId: string | null;
+  workflowId: string | null;
+  error: { message: string } | null;
 };
-
-type IntentQuestion = {
-  id: string;
-  question: string;
-  reason: string;
-  choices: IntentChoice[];
-  recommendedChoiceId: string;
-};
-
-type IntentAnalysis = {
-  normalizedIntent: {
-    outcome: string;
-    toolCategories: string[];
-    cadence: string;
-    approvalModel: string;
-    runtimeInputs: string[];
-  };
-  questions: IntentQuestion[];
-  assumptions: string[];
-};
-
-type IntentContext = {
-  decisions: Array<{
-    questionId: string;
-    question: string;
-    answer: string;
-    source: "user" | "recommended_assumption";
-  }>;
-  assumptions: string[];
-  resolvedIntent: string;
-};
-
-type IntentAnswerDraft = {
-  choiceId?: string;
-  freeText?: string;
-};
-
-type LoopSpec = {
-  id: string;
-  title: string;
-  status: "draft" | "approved" | "archived";
-  version: number;
-  sourcePrompt: string;
-  bodyMarkdown: string;
-  specJson?: {
-    delivery?: { provider: string; description?: string };
-    connectorPolicy?: {
-      allowedReadActions?: Array<{ toolkit: string; actionSlug: string; risk: string }>;
-      allowedWriteActions?: Array<{ toolkit: string; actionSlug: string; risk: string; requiresPreSendApproval?: boolean }>;
-    };
-    inputRequirements?: Array<{ key: string; surface: string; label: string }>;
-  };
-  intentContext?: IntentContext;
-  approvedAt: string | null;
-};
-
-type ConnectorAccount = { id: string; appKey: string | null; status: string };
-type ConnectorTool = { toolkit: string; actionSlug: string; name: string; risk: "read" | "write" | "send" | "destructive" };
-
-type AgentGraphChild = {
-  id: string;
-  name: string;
-  nodeKind?: "agent" | "transform" | "operator_input" | "action" | "checkpoint";
-  task: string;
-  tools?: Array<{ ref: string }>;
-};
-
-type PlannedRequiredValue = {
-  key: string;
-  label: string;
-  description: string;
-  lifecycle: "workflow_config" | "runtime_input" | "derived";
-  valueType: "string" | "number" | "integer" | "boolean" | "object" | "array";
-  surface: string;
-  stableScalar: string | number | boolean | null;
-  status: "resolved" | "unresolved";
-};
-
-type BuilderProposal = {
-  title: string;
-  summary: string;
-  definition: {
-    goal: string;
-    schedule: { cron: string; timezone: string };
-    allowedToolRefs?: string[];
-    operatorInteractionPlan?: {
-      version: "v1";
-      interactions: Array<{
-        id: string;
-        kind: "collect_input" | "review_artifact" | "confirm_action" | "connect_connector";
-        label?: string;
-        surface?: string;
-        artifactId?: string;
-        rendererRef?: string | null;
-        contractRef?: string;
-      }>;
-    };
-    agentGraph?: {
-      parent?: { name: string; task: string; policy: string };
-      children?: AgentGraphChild[];
-    };
-    builderMeta?: {
-      model?: string;
-      noSlopSpec?: { id: string; title: string; version: number; approvedAt: string };
-      designDiagnostics?: Record<string, unknown>;
-      planningIR?: {
-        requiredValues?: PlannedRequiredValue[];
-        [key: string]: unknown;
-      };
-      discoveredToolContracts?: Array<Record<string, unknown>>;
-    };
-  };
-  suggestedChannels: string[];
-  suggestedToolRefs: string[];
-  memories: Array<{ id: string; text: string }>;
-  preferences: Array<{ id: string; text: string; category?: string | null }>;
-  rationale: string[];
-  designedBy?: string;
-  model?: string;
-  noSlopSpec?: { id: string; title: string; version: number; approvedAt: string };
-  trace?: { stages?: Array<Record<string, unknown>> };
-};
-
-function pendingWorkflowConfigValues(proposal: BuilderProposal): PlannedRequiredValue[] {
-  const requiredValues = proposal.definition.builderMeta?.planningIR?.requiredValues ?? [];
-  return requiredValues.filter((value) => value.lifecycle === "workflow_config" && value.stableScalar == null);
-}
-
-function patchProposalWithConfig(proposal: BuilderProposal, drafts: Record<string, string>): BuilderProposal {
-  const planningIR = proposal.definition.builderMeta?.planningIR;
-  if (!planningIR?.requiredValues) return proposal;
-  const requiredValues = planningIR.requiredValues.map((value) => {
-    if (value.lifecycle !== "workflow_config" || value.stableScalar != null) return value;
-    const raw = drafts[value.key]?.trim();
-    if (!raw) return value;
-    let stableScalar: string | number | boolean = raw;
-    if (value.valueType === "number" || value.valueType === "integer") {
-      const parsed = Number(raw);
-      if (Number.isFinite(parsed)) {
-        stableScalar = value.valueType === "integer" ? Math.trunc(parsed) : parsed;
-      }
-    } else if (value.valueType === "boolean") {
-      stableScalar = raw.toLowerCase() === "true" || raw === "1";
-    }
-    return { ...value, stableScalar, status: "resolved" as const };
-  });
-  return {
-    ...proposal,
-    definition: {
-      ...proposal.definition,
-      builderMeta: {
-        ...proposal.definition.builderMeta,
-        planningIR: {
-          ...planningIR,
-          requiredValues,
-        },
-      },
-    },
-  };
-}
-
-type BuilderProgress = {
-  status?: string;
-  kind?: string;
-  events?: Array<{
-    id: number;
-    at: string;
-    stage: string;
-    message: string;
-    status: "running" | "completed" | "failed";
-    model?: string;
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-    estimatedCostUsd?: number;
-    details?: unknown;
-  }>;
-  usage?: {
-    calls: number;
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-    estimatedCostUsd: number;
-    models: Record<string, number>;
-  };
-};
-
-const BUILDER_POLL_INTERVAL_MS = 2000;
-const BUILDER_POLL_MAX_ATTEMPTS = 150;
-const SPEC_POLL_INTERVAL_MS = 3000;
-const SPEC_POLL_MAX_ATTEMPTS = 100;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-async function readJson<T>(response: Response): Promise<T & { error?: string; details?: Array<{ message?: string }> }> {
-  return response.json().catch(() => ({}));
-}
-
-async function pollLoopBuilderJob(jobId: string, onProgress: (progress: BuilderProgress) => void): Promise<BuilderProposal> {
-  for (let attempt = 0; attempt < BUILDER_POLL_MAX_ATTEMPTS; attempt += 1) {
-    const response = await fetch(`/api/loop-builder/jobs/${jobId}`, { cache: "no-store" });
-    const payload = await readJson<BuilderProgress & { proposal?: BuilderProposal }>(response);
-    if (!response.ok) throw new Error(payload.error ?? "Failed to check loop design status");
-    onProgress(payload);
-    if (payload.status === "completed" && payload.proposal) return payload.proposal;
-    if (payload.status === "failed") throw new Error(payload.error ?? "Loop design failed");
-    await sleep(BUILDER_POLL_INTERVAL_MS);
-  }
-  throw new Error("Loop design is still running. Try again in a moment.");
-}
-
-async function pollSpecJob(jobId: string, onProgress: (progress: BuilderProgress) => void): Promise<LoopSpec> {
-  for (let attempt = 0; attempt < SPEC_POLL_MAX_ATTEMPTS; attempt += 1) {
-    const response = await fetch(`/api/loop-builder/jobs/${jobId}`, { cache: "no-store" });
-    const payload = await readJson<BuilderProgress & { spec?: LoopSpec }>(response);
-    if (!response.ok) throw new Error(payload.error ?? "Failed to check spec status");
-    onProgress(payload);
-    if (payload.status === "completed" && payload.spec) return payload.spec;
-    if (payload.status === "failed") throw new Error(payload.error ?? "Spec generation failed");
-    await sleep(SPEC_POLL_INTERVAL_MS);
-  }
-  throw new Error("Spec generation is still running. Try again in a moment.");
-}
-
-async function pollIntentAnalysisJob(jobId: string, onProgress: (progress: BuilderProgress) => void): Promise<IntentAnalysis> {
-  for (let attempt = 0; attempt < SPEC_POLL_MAX_ATTEMPTS; attempt += 1) {
-    const response = await fetch(`/api/loop-builder/jobs/${jobId}`, { cache: "no-store" });
-    const payload = await readJson<BuilderProgress & { intentAnalysis?: IntentAnalysis }>(response);
-    if (!response.ok) throw new Error(payload.error ?? "Failed to check intent analysis status");
-    onProgress(payload);
-    if (payload.status === "completed" && payload.intentAnalysis) return payload.intentAnalysis;
-    if (payload.status === "failed") throw new Error(payload.error ?? "Intent analysis failed");
-    await sleep(BUILDER_POLL_INTERVAL_MS);
-  }
-  throw new Error("Intent analysis is still running. Try again in a moment.");
-}
-
-function detailMessage(payload: { error?: string; details?: Array<{ message?: string }> }, fallback: string): string {
-  const detail = payload.details?.[0]?.message;
-  return detail ? `${payload.error ?? fallback}: ${detail}` : (payload.error ?? fallback);
-}
 
 export default function NewLoopBuilderPage() {
-  const router = useRouter();
-  const [prompt, setPrompt] = useState("");
-  const [feedback, setFeedback] = useState("");
-  const [spec, setSpec] = useState<LoopSpec | null>(null);
-  const [specMarkdown, setSpecMarkdown] = useState("");
-  const [specCode, setSpecCode] = useState("");
-  const [proposal, setProposal] = useState<BuilderProposal | null>(null);
-  const [busy, setBusy] = useState<"draft" | "refine" | "approve" | "generate" | "save" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [connectors, setConnectors] = useState<ConnectorAccount[]>([]);
-  const [connectorTools, setConnectorTools] = useState<Record<string, ConnectorTool[]>>({});
-  const [intentAnalysis, setIntentAnalysis] = useState<IntentAnalysis | null>(null);
-  const [intentAnalysisJobId, setIntentAnalysisJobId] = useState<string | null>(null);
-  const [intentAnswers, setIntentAnswers] = useState<Record<string, IntentAnswerDraft>>({});
-  const [clarificationOpen, setClarificationOpen] = useState(false);
-  const [analysisFallback, setAnalysisFallback] = useState<string | null>(null);
-  const [builderProgress, setBuilderProgress] = useState<BuilderProgress | null>(null);
-  const [configDrafts, setConfigDrafts] = useState<Record<string, string>>({});
-  const [showConfigureStep, setShowConfigureStep] = useState(false);
+  const sessionIdRef = useRef<string | null>(null);
+  const [session, setSession] = useState<BuilderSession | null>(null);
+  const [progress, setProgress] = useState<Array<{ id: number; message: string; status: string }>>([]);
+  const [dismissedPromptId, setDismissedPromptId] = useState<string | null>(null);
+  const [commands, setCommands] = useState<any[]>([]);
+  const [logsDialogOpen, setLogsDialogOpen] = useState(false);
 
-  const executableNodes = useMemo(() => proposal?.definition.agentGraph?.children ?? [], [proposal]);
-  const agents = useMemo(() => executableNodes.filter((node) => node.nodeKind !== "action"), [executableNodes]);
-  const actions = useMemo(() => executableNodes.filter((node) => node.nodeKind === "action"), [executableNodes]);
-  const workflowConfigValues = useMemo(
-    () => (proposal ? pendingWorkflowConfigValues(proposal) : []),
-    [proposal],
-  );
-  const runtimeInputInteractions = useMemo(
-    () => (proposal?.definition.operatorInteractionPlan?.interactions ?? [])
-      .filter((interaction) => interaction.kind === "collect_input"),
-    [proposal],
-  );
-  const designDiagnostics = proposal?.definition.builderMeta?.designDiagnostics ?? null;
-  const architectTrace = proposal?.trace ?? designDiagnostics?.trace ?? null;
-  const approved = spec?.status === "approved";
-  const connectedKeys = useMemo(() => {
-    return [...new Set(
-      connectors
-        .filter((connector) => connector.status === "connected")
-        .map((connector) => (connector.appKey ?? "").trim().toLowerCase())
-        .filter(Boolean),
-    )];
-  }, [connectors]);
-  const delivery = spec?.specJson?.delivery;
-  const connectorPolicy = spec?.specJson?.connectorPolicy;
-  const hasOutboundDelivery = Boolean(delivery?.provider && delivery.provider.toLowerCase() !== "none");
-  const writeActions = connectorPolicy?.allowedWriteActions ?? [];
+  const transport = useMemo(() => new DefaultChatTransport({
+    api: "/api/loop-builder/chat",
+    body: () => ({ sessionId: sessionIdRef.current ?? undefined }),
+  }), []);
 
-  useEffect(() => {
-    async function loadConnectors() {
-      try {
-        const response = await fetch("/api/connectors", { cache: "no-store" });
-        const payload = await response.json().catch(() => ({}));
-        setConnectors(Array.isArray(payload.connectors) ? payload.connectors : []);
-      } catch {
-        setConnectors([]);
-      }
-    }
-    void loadConnectors();
+  const refreshSession = useCallback(async (sessionId: string) => {
+    const response = await fetch(`/api/loop-builder/sessions/${sessionId}`, { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error ?? "Failed to load builder session");
+    sessionIdRef.current = sessionId;
+    setSession(payload.session);
+    setCommands(payload.commands ?? []);
+    return payload.messages as UIMessage[];
   }, []);
 
+  const totalUsage = useMemo(() => {
+    const usage = {
+      calls: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      estimatedCostUsd: 0,
+    };
+    for (const cmd of commands) {
+      if (cmd.usage) {
+        usage.calls += cmd.usage.calls ?? 0;
+        usage.promptTokens += cmd.usage.promptTokens ?? 0;
+        usage.completionTokens += cmd.usage.completionTokens ?? 0;
+        usage.totalTokens += cmd.usage.totalTokens ?? 0;
+        usage.estimatedCostUsd += cmd.usage.estimatedCostUsd ?? 0;
+      }
+    }
+    return usage;
+  }, [commands]);
+
+  const { messages, sendMessage, setMessages, status, error, stop, addToolApprovalResponse, addToolOutput } = useChat({
+    transport,
+    sendAutomaticallyWhen: ({ messages: currentMessages }) =>
+      lastAssistantMessageIsCompleteWithApprovalResponses({ messages: currentMessages })
+      || lastAssistantMessageIsCompleteWithToolCalls({ messages: currentMessages }),
+    onData: (part) => {
+      if (part.type === "data-progress") {
+        const events = (part.data as { events?: Array<{ id: number; message: string; status: string }> }).events;
+        if (events) setProgress(events);
+        return;
+      }
+      if (part.type !== "data-session") return;
+      const nextId = (part.data as { sessionId?: string }).sessionId;
+      if (!nextId || nextId === sessionIdRef.current) return;
+      sessionIdRef.current = nextId;
+      window.history.replaceState(null, "", `/dashboard/loops/new?session=${encodeURIComponent(nextId)}`);
+    },
+    onFinish: () => {
+      if (sessionIdRef.current) void refreshSession(sessionIdRef.current).then(setMessages);
+    },
+  });
+
   useEffect(() => {
-    async function loadTools() {
-      const next: Record<string, ConnectorTool[]> = {};
-      for (const toolkit of connectedKeys.slice(0, 12)) {
-        try {
-          const response = await fetch(`/api/connectors/composio/toolkits/${encodeURIComponent(toolkit)}/tools`, { cache: "no-store" });
-          const payload = await response.json().catch(() => ({}));
-          next[toolkit] = Array.isArray(payload.tools) ? payload.tools.slice(0, 12) : [];
-        } catch {
-          next[toolkit] = [];
-        }
-      }
-      setConnectorTools(next);
-    }
-    void loadTools();
-  }, [connectedKeys]);
+    const sessionId = new URLSearchParams(window.location.search).get("session");
+    if (sessionId) void refreshSession(sessionId).then(setMessages);
+  }, [refreshSession, setMessages]);
 
-  async function submitSpecDraft(input?: {
-    analysisJobId?: string;
-    answers?: Array<{ questionId: string; choiceId?: string; freeText?: string }>;
-    skippedQuestionIds?: string[];
-  }) {
-    setBusy("draft");
-    setError(null);
-    setProposal(null);
-    try {
-      const response = await fetch("/api/loop-builder/specs/draft", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          prompt,
-          ...(input?.analysisJobId ? { intentAnalysisJobId: input.analysisJobId } : {}),
-          ...(input?.answers?.length ? { answers: input.answers } : {}),
-          ...(input?.skippedQuestionIds?.length ? { skippedQuestionIds: input.skippedQuestionIds } : {}),
-        }),
-      });
-      const payload = await readJson<{ jobId?: string; spec?: LoopSpec }>(response);
-      if (!response.ok) throw new Error(detailMessage(payload, "Failed to draft spec"));
-      let resultSpec: LoopSpec;
-      if (payload.jobId) {
-        resultSpec = await pollSpecJob(payload.jobId, setBuilderProgress);
-      } else if (payload.spec) {
-        resultSpec = payload.spec;
-      } else {
-        throw new Error("Spec draft returned no job id or spec");
-      }
-      setSpec(resultSpec);
-      setSpecMarkdown(resultSpec.bodyMarkdown);
-      setSpecCode(JSON.stringify(resultSpec.specJson ?? {}, null, 2));
-      setFeedback("");
-      setClarificationOpen(false);
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Failed to draft spec");
-    } finally {
-      setBusy(null);
-    }
-  }
+  const activeInteractivePrompt = findActiveInteractivePrompt(messages);
+  const activePromptId = activeInteractivePrompt?.toolCallId ?? null;
+  const showInteractivePrompt = activePromptId !== null && activePromptId !== dismissedPromptId;
 
-  async function draftSpec() {
-    setBusy("draft");
-    setError(null);
-    setProposal(null);
-    setBuilderProgress(null);
-    setAnalysisFallback(null);
-    let analysisJobId: string | null = null;
-    try {
-      const response = await fetch("/api/loop-builder/intent/analyze", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-      const payload = await readJson<{ jobId?: string }>(response);
-      if (!response.ok || !payload.jobId) throw new Error(detailMessage(payload, "Failed to analyze intent"));
-      analysisJobId = payload.jobId;
-      const analysis = await pollIntentAnalysisJob(payload.jobId, setBuilderProgress);
-      setIntentAnalysis(analysis);
-      setIntentAnalysisJobId(payload.jobId);
-      setIntentAnswers({});
-      if (analysis.questions.length > 0) {
-        setClarificationOpen(true);
-        setBusy(null);
-        return;
-      }
-    } catch {
-      setAnalysisFallback("Intent analysis was unavailable. The spec was drafted from the original request using the clearest available assumptions.");
-      await submitSpecDraft();
-      return;
-    }
-    await submitSpecDraft({ analysisJobId: analysisJobId! });
-  }
+  useEffect(() => {
+    setDismissedPromptId(null);
+  }, [activePromptId]);
 
-  async function draftWithClarifications(useRecommendedOnly = false) {
-    if (!intentAnalysis || !intentAnalysisJobId) return;
-    const answers = useRecommendedOnly
-      ? []
-      : intentAnalysis.questions.flatMap((question) => {
-          const answer = intentAnswers[question.id];
-          if (!answer?.choiceId && !answer?.freeText?.trim()) return [];
-          return [{
-            questionId: question.id,
-            ...(answer.choiceId ? { choiceId: answer.choiceId } : {}),
-            ...(answer.freeText?.trim() ? { freeText: answer.freeText.trim() } : {}),
-          }];
-        });
-    const answeredIds = new Set(answers.map((answer) => answer.questionId));
-    const skippedQuestionIds = intentAnalysis.questions
-      .filter((question) => useRecommendedOnly || !answeredIds.has(question.id))
-      .map((question) => question.id);
-    await submitSpecDraft({
-      analysisJobId: intentAnalysisJobId,
-      answers,
-      skippedQuestionIds,
-    });
-  }
-
-  async function refineSpec() {
-    if (!spec) return;
-    setBusy("refine");
-    setError(null);
-    setProposal(null);
-    setBuilderProgress(null);
-    try {
-      const response = await fetch(`/api/loop-builder/specs/${spec.id}/refine`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ feedback }),
-      });
-      const payload = await readJson<{ jobId?: string; spec?: LoopSpec }>(response);
-      if (!response.ok) throw new Error(detailMessage(payload, "Failed to refine spec"));
-      let resultSpec: LoopSpec;
-      if (payload.jobId) {
-        resultSpec = await pollSpecJob(payload.jobId, setBuilderProgress);
-      } else if (payload.spec) {
-        resultSpec = payload.spec;
-      } else {
-        throw new Error("Spec refine returned no job id or spec");
-      }
-      setSpec(resultSpec);
-      setSpecMarkdown(resultSpec.bodyMarkdown);
-      setSpecCode(JSON.stringify(resultSpec.specJson ?? {}, null, 2));
-      setFeedback("");
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Failed to refine spec");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function approveSpec() {
-    if (!spec) return;
-    setBusy("approve");
-    setError(null);
-    setProposal(null);
-    try {
-      const parsedSpecJson = specCode.trim() ? JSON.parse(specCode) : undefined;
-      const response = await fetch(`/api/loop-builder/specs/${spec.id}/approve`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ bodyMarkdown: specMarkdown, specJson: parsedSpecJson }),
-      });
-      const payload = await readJson<{ spec?: LoopSpec }>(response);
-      if (!response.ok || !payload.spec) throw new Error(detailMessage(payload, "Failed to approve spec"));
-      setSpec(payload.spec);
-      setSpecMarkdown(payload.spec.bodyMarkdown);
-      setSpecCode(JSON.stringify(payload.spec.specJson ?? parsedSpecJson ?? {}, null, 2));
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Failed to approve spec");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function generateProposal() {
-    if (!spec) return;
-    setBusy("generate");
-    setError(null);
-    setBuilderProgress(null);
-    try {
-      const response = await fetch(`/api/loop-builder/specs/${spec.id}/generate`, { method: "POST" });
-      const payload = await readJson<{ jobId?: string; proposal?: BuilderProposal }>(response);
-      if (!response.ok) throw new Error(detailMessage(payload, "Failed to generate loop"));
-      if (payload.jobId) {
-        setProposal(await pollLoopBuilderJob(payload.jobId, setBuilderProgress));
-      } else if (payload.proposal) {
-        setProposal(payload.proposal);
-      } else {
-        throw new Error("Loop builder returned no job id or proposal");
-      }
-      setConfigDrafts({});
-      setShowConfigureStep(false);
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Failed to generate loop");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function saveProposal() {
-    if (!proposal) return;
-    const pending = pendingWorkflowConfigValues(proposal);
-    if (pending.length > 0) {
-      const missing = pending.filter((value) => !configDrafts[value.key]?.trim());
-      if (missing.length > 0) {
-        setShowConfigureStep(true);
-        setError(`Set build-time configuration for: ${missing.map((value) => value.label).join(", ")}`);
-        return;
-      }
-    }
-    const patchedProposal = patchProposalWithConfig(proposal, configDrafts);
-    setBusy("save");
-    setError(null);
-    try {
-      const response = await fetch("/api/loop-builder/save", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ proposal: patchedProposal }),
-      });
-      const payload = await readJson<{ loop?: { id: string } }>(response);
-      if (!response.ok) throw new Error(detailMessage(payload, "Failed to save loop"));
-      const workflowId = payload.loop?.id;
-      if (!workflowId) throw new Error("Loop saved but no workflow id was returned");
-      router.push(`/dashboard/loops/${workflowId}`);
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Failed to save loop");
-    } finally {
-      setBusy(null);
-    }
-  }
+  const phaseLabel = session?.phase
+    ? session.phase.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    : null;
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-6 py-6">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
-            <Wand2 size={14} />
-            Loop builder
+    <main
+      className="flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden bg-[#f7f8fb] text-[#121a31]"
+      style={{ fontFamily: "var(--font-fustat)" }}
+    >
+      <div className="mx-auto flex min-h-0 w-full max-w-[1100px] flex-1 flex-col px-7 py-5">
+        {/* Header */}
+        <header className="mb-4 shrink-0 flex items-center justify-between gap-4">
+          <div>
+            <nav className="mb-2 flex items-center gap-2 text-[13px] font-medium text-[#9ca3af]">
+              <Link href="/dashboard/loops" className="hover:text-[#111827] transition-colors">Loops</Link>
+              <ChevronRight className="size-3.5" />
+              <span className="text-[#111827]">New loop</span>
+            </nav>
+            <div className="flex items-center gap-3">
+              <h1
+                className="text-[25px] font-bold leading-tight tracking-[-0.02em] text-[#111827]"
+                style={{ fontFamily: "var(--font-title)" }}
+              >
+                Loop Builder
+              </h1>
+              {phaseLabel && (
+                <span
+                  className="inline-flex items-center border border-[#b8c9dc] bg-[#f0f4f9] px-2.5 py-1 text-[11px] font-semibold tracking-wide uppercase text-[#334155]"
+                >
+                  {phaseLabel}
+                </span>
+              )}
+              {session && (
+                <button
+                  onClick={() => setLogsDialogOpen(true)}
+                  className="inline-flex items-center justify-center rounded-full text-[#9ca3af] hover:text-[#111827] hover:bg-black/5 p-1.5 transition-colors"
+                  title="View logs and token costs"
+                >
+                  <Info className="size-5" />
+                </button>
+              )}
+            </div>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-[var(--text)]">Create a loop</h1>
-          <p className="mt-1 text-sm text-[var(--text-2)]">
-            Draft and approve the loop spec first. Tallei generates agents only after that behavioral contract is approved.
-          </p>
-        </div>
-        <Button asChild variant="outline" className="h-9 gap-1.5">
-          <Link href="/dashboard/loops">
-            <ArrowLeft size={14} />
-            Back
-          </Link>
-        </Button>
-      </header>
-
-      {error ? (
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs">{error}</pre>
-        </div>
-      ) : null}
-      {analysisFallback ? (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          {analysisFallback}
-        </div>
-      ) : null}
-
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_420px]">
-        <section className="space-y-4">
-          <Card className="rounded-md p-4">
-            <label className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">What should repeat?</label>
-            <textarea
-              className="mt-2 min-h-36 w-full rounded-md border border-[var(--border-light)] bg-white p-3 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[rgba(126,183,27,.18)]"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              disabled={Boolean(spec)}
-              placeholder="Example: Every Friday, research what's new in AI tooling, draft a product essay in my voice from memory, and hold it for review."
-            />
-            <div className="mt-4 flex flex-wrap gap-2">
-              <Button type="button" className="h-9 gap-1.5" disabled={!prompt.trim() || busy !== null || Boolean(spec)} onClick={() => void draftSpec()}>
-                {busy === "draft" ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
-                {busy === "draft" ? "Drafting spec..." : "Draft spec"}
-              </Button>
-              {spec ? (
-                <Button type="button" variant="outline" className="h-9" disabled={busy !== null} onClick={() => {
-                  setSpec(null);
-                  setSpecMarkdown("");
-                  setSpecCode("");
-                  setProposal(null);
-                  setFeedback("");
-                  setIntentAnalysis(null);
-                  setIntentAnalysisJobId(null);
-                  setIntentAnswers({});
-                  setAnalysisFallback(null);
-                  setBuilderProgress(null);
-                  setConfigDrafts({});
-                  setShowConfigureStep(false);
-                }}>
-                  Start over
-                </Button>
-              ) : null}
-            </div>
-          </Card>
-
-          {spec ? (
-            <Card className="rounded-md p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">No-slop spec</div>
-                  <h2 className="mt-1 text-lg font-semibold text-[var(--text)]">{spec.title}</h2>
-                  <p className="mt-1 text-xs text-[var(--text-muted)]">Version {spec.version}</p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${approved ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
-                    {approved ? "Approved" : "Needs approval"}
-                  </span>
-                  {hasOutboundDelivery ? (
-                    <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
-                      Outbound · {delivery?.provider}
-                    </span>
-                  ) : (
-                    <span className="rounded-full bg-[var(--muted)] px-2 py-0.5 text-xs font-medium text-[var(--text-muted)]">
-                      Dashboard only
-                    </span>
-                  )}
-                </div>
-              </div>
-              <textarea
-                className="mt-4 min-h-96 w-full rounded-md border border-[var(--border-light)] bg-white p-3 font-mono text-xs leading-5 text-[var(--text)] outline-none focus:border-[var(--accent)]"
-                value={specMarkdown}
-                onChange={(event) => {
-                  setSpecMarkdown(event.target.value);
-                  setProposal(null);
-                }}
-                disabled={approved || busy !== null}
-              />
-              <div className="mt-4">
-                <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Code spec</div>
-                <textarea
-                  className="mt-2 min-h-80 w-full rounded-md border border-[var(--border-light)] bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100 outline-none focus:border-[var(--accent)]"
-                  value={specCode}
-                  onChange={(event) => {
-                    setSpecCode(event.target.value);
-                    setProposal(null);
-                  }}
-                  disabled={approved || busy !== null}
-                />
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Button type="button" className="h-9 gap-1.5" disabled={approved || !specMarkdown.trim() || busy !== null} onClick={() => void approveSpec()}>
-                  {busy === "approve" ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                  {busy === "approve" ? "Approving..." : "Approve spec"}
-                </Button>
-                <Button type="button" variant="outline" className="h-9 gap-1.5" disabled={!approved || busy !== null} onClick={() => void generateProposal()}>
-                  {busy === "generate" ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                  {busy === "generate" ? "Generating agents..." : "Generate agents"}
-                </Button>
-                <Button type="button" variant="outline" className="h-9 gap-1.5" disabled={!proposal || busy !== null} onClick={() => {
-                  if (workflowConfigValues.length > 0) {
-                    setShowConfigureStep(true);
-                    return;
-                  }
-                  void saveProposal();
-                }}>
-                  {busy === "save" ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-                  {busy === "save"
-                    ? "Saving..."
-                    : workflowConfigValues.length > 0
-                      ? "Configure & save"
-                      : "Save & open"}
-                </Button>
-              </div>
-            </Card>
-          ) : null}
-
-          {spec?.intentContext ? (
-            <Card className="rounded-md border-l-4 border-l-sky-500 p-4">
-              <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Intent decisions and assumptions</div>
-              <div className="mt-3 space-y-3">
-                {spec.intentContext.decisions.map((decision) => (
-                  <div key={decision.questionId} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
-                    <div className="text-sm font-medium text-[var(--text)]">{decision.question}</div>
-                    <p className="mt-1 text-sm text-[var(--text-2)]">{decision.answer}</p>
-                    <span className="mt-2 inline-block rounded bg-white px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-[var(--text-muted)]">
-                      {decision.source === "user" ? "Answered" : "Recommended assumption"}
-                    </span>
-                  </div>
-                ))}
-                {spec.intentContext.assumptions.map((assumption, index) => (
-                  <p key={index} className="text-sm text-[var(--text-2)]">Assumption: {assumption}</p>
-                ))}
-              </div>
-            </Card>
-          ) : null}
-
-          <Card className="rounded-md p-4">
-            <label className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Spec refinement notes</label>
-            <textarea
-              className="mt-2 min-h-24 w-full rounded-md border border-[var(--border-light)] bg-white p-3 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
-              value={feedback}
-              onChange={(event) => setFeedback(event.target.value)}
-              disabled={!spec || approved || busy !== null}
-              placeholder="Before approval: tighten the success criteria, change the cadence, add a guardrail, etc."
-            />
-            <Button
-              type="button"
-              variant="outline"
-              className="mt-3 h-9 gap-1.5"
-              disabled={!spec || approved || !feedback.trim() || busy !== null}
-              onClick={() => void refineSpec()}
+          {session?.workflowId && (
+            <Link
+              href={`/dashboard/loops/${session.workflowId}`}
+              className="btn-secondary rounded-none h-8 text-[13px] inline-flex items-center gap-1.5"
             >
-              {busy === "refine" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-              Refine spec
-            </Button>
-          </Card>
+              View workflow
+            </Link>
+          )}
+        </header>
 
-          {proposal && (showConfigureStep || workflowConfigValues.length > 0) ? (
-            <Card className="rounded-md border-l-4 border-l-[var(--accent)] p-4">
-              <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Build-time configuration</div>
-              <h2 className="mt-1 text-lg font-semibold text-[var(--text)]">Configure this loop</h2>
-              <p className="mt-1 text-sm text-[var(--text-2)]">
-                These settings are asked once when you create the loop. Per-run inputs — like choosing which sources to include after research — happen during execution.
-              </p>
-              <div className="mt-4 space-y-4">
-                {workflowConfigValues.map((value) => {
-                  const isTimezone = /timezone|tz\b/i.test(value.key + " " + value.label);
-                  const inputHint = isTimezone ? "IANA timezone — e.g. Asia/Kolkata, America/New_York, Europe/London, UTC" : undefined;
-                  return (
-                    <div key={value.key} className="rounded-md border border-[var(--border-light)] bg-white p-3">
-                      <label className="text-sm font-medium text-[var(--text)]" htmlFor={`config-${value.key}`}>
-                        {value.label}
-                      </label>
-                      <p className="mt-1 text-xs text-[var(--text-muted)]">{value.description}</p>
-                      {inputHint ? (
-                        <p className="mt-1 text-xs text-[var(--accent)]">{inputHint}</p>
-                      ) : null}
-                      {value.valueType === "boolean" ? (
-                        <select
-                          id={`config-${value.key}`}
-                          className="mt-2 h-10 w-full rounded-md border border-[var(--border-light)] bg-white px-3 text-sm outline-none focus:border-[var(--accent)]"
-                          value={configDrafts[value.key] ?? ""}
-                          onChange={(event) => setConfigDrafts((current) => ({
-                            ...current,
-                            [value.key]: event.target.value,
-                          }))}
-                        >
-                          <option value="">Select…</option>
-                          <option value="true">Yes</option>
-                          <option value="false">No</option>
-                        </select>
-                      ) : (
-                        <input
-                          id={`config-${value.key}`}
-                          type={value.valueType === "number" || value.valueType === "integer" ? "number" : "text"}
-                          className="mt-2 h-10 w-full rounded-md border border-[var(--border-light)] bg-white px-3 text-sm outline-none focus:border-[var(--accent)]"
-                          value={configDrafts[value.key] ?? ""}
-                          onChange={(event) => setConfigDrafts((current) => ({
-                            ...current,
-                            [value.key]: event.target.value,
-                          }))}
-                          placeholder={isTimezone ? "e.g. Asia/Kolkata" : value.label}
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              {runtimeInputInteractions.length > 0 ? (
-                <div className="mt-4 rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3 text-sm text-[var(--text-2)]">
-                  <span className="font-medium text-[var(--text)]">At run time:</span>{" "}
-                  {runtimeInputInteractions.map((interaction) => interaction.label ?? interaction.id).join(", ")}
-                </div>
-              ) : null}
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Button type="button" className="h-9 gap-1.5" disabled={busy !== null} onClick={() => void saveProposal()}>
-                  {busy === "save" ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-                  {busy === "save" ? "Saving..." : "Save & open"}
-                </Button>
-                {showConfigureStep ? (
-                  <Button type="button" variant="outline" className="h-9" disabled={busy !== null} onClick={() => setShowConfigureStep(false)}>
-                    Back
-                  </Button>
-                ) : null}
-              </div>
-            </Card>
-          ) : null}
+        {/* Main workspace */}
+        <div className="min-h-0 flex-1 flex flex-col overflow-hidden border border-[#d1d5db] bg-white">
+          {/* Conversation area */}
+          <Conversation>
+            <ConversationContent>
+              {messages.length === 0 && (
+                <LoopBuilderEmptyState status={status} onSend={(text) => sendMessage({ text })} />
+              )}
+              {messages.map((message) => (
+                <Message from={message.role} key={message.id}>
+                  <MessageContent>
+                    {message.parts.map((part, index) => {
+                      if (part.type === "text") return <MessageResponse key={index}>{part.text}</MessageResponse>;
+                      if (isReasoningUIPart(part)) {
+                        return (
+                          <Reasoning isStreaming={part.state === "streaming"} key={index}>
+                            <ReasoningTrigger />
+                            <ReasoningContent>{part.text}</ReasoningContent>
+                          </Reasoning>
+                        );
+                      }
+                      if (isToolUIPart(part)) {
+                        const toolName = getToolName(part);
+                        if (toolName === "interactivePrompt") {
+                          if (part.state === "input-streaming" || part.state === "input-available") return null;
+                          return (
+                            <InteractivePromptTool
+                              disabled
+                              key={index}
+                              onSubmit={() => undefined}
+                              part={part}
+                            />
+                          );
+                        }
+                        if (part.state === "approval-requested" || part.state === "approval-responded" || part.state === "output-denied") {
+                          return (
+                            <Confirmation approval={part.approval} key={index} state={part.state}>
+                              <ConfirmationTitle>Approve <strong>{toolName}</strong>?</ConfirmationTitle>
+                              <ConfirmationRequest>
+                                <p className="text-sm text-muted-foreground">This operation changes a persisted artifact or workflow.</p>
+                              </ConfirmationRequest>
+                              <ConfirmationAccepted>Approved.</ConfirmationAccepted>
+                              <ConfirmationRejected>Rejected.</ConfirmationRejected>
+                              <ConfirmationActions>
+                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: false })} className="rounded-none border border-[#d1d5db] bg-white text-[#374151] hover:bg-[#fafafa] shadow-none font-medium h-8 px-3">Reject</ConfirmationAction>
+                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: true })} className="rounded-none border border-[#1e4070] bg-[#1e4070] text-white hover:bg-[#17355e] font-semibold h-8 px-3">Approve</ConfirmationAction>
+                              </ConfirmationActions>
+                            </Confirmation>
+                          );
+                        }
+                        if (toolName === "getAvailableTools" && part.state === "output-available") {
+                          return <AvailableTools key={index} part={part} />;
+                        }
+                        return (
+                          <Tool defaultOpen key={index}>
+                            {part.type === "dynamic-tool"
+                              ? <ToolHeader type={part.type} state={part.state} toolName={part.toolName} />
+                              : <ToolHeader type={part.type} state={part.state} />}
+                            <ToolContent>
+                              <ToolInput input={part.input} />
+                              <ToolOutput output={part.output} errorText={part.errorText} />
+                            </ToolContent>
+                          </Tool>
+                        );
+                      }
+                      return null;
+                    })}
+                  </MessageContent>
+                </Message>
+              ))}
+              {error && <p className="text-sm text-destructive px-4 py-2">{error.message}</p>}
+            </ConversationContent>
+            <ConversationScrollButton />
+          </Conversation>
 
-          {proposal ? (
-            <Card className="rounded-md p-4">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Generated agent spec</div>
-                  <h2 className="mt-2 text-lg font-semibold text-[var(--text)]">{proposal.title}</h2>
-                  <p className="mt-1 text-sm text-[var(--text-2)]">{proposal.summary}</p>
-                </div>
-                <div className="rounded-md border border-[var(--border-light)] px-2 py-1 text-xs text-[var(--text-muted)]">
-                  {agents.length} agents · {actions.length} actions
-                </div>
-              </div>
-
-              <div className="mt-4 text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Semantic agents</div>
-              <div className="mt-2 space-y-3">
-                {agents.map((agent, index) => (
-                  <div key={agent.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
-                    <div className="text-sm font-medium text-[var(--text)]">{index + 1}. {agent.name}</div>
-                    <p className="mt-2 text-sm text-[var(--text-2)]">{agent.task}</p>
-                    {agent.tools?.length ? (
-                      <p className="mt-2 text-xs text-[var(--text-muted)]">Tools: {agent.tools.map((tool) => tool.ref).join(", ")}</p>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-
-              {actions.length ? (
-                <>
-                  <div className="mt-5 text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Connector action capabilities</div>
-                  <div className="mt-2 space-y-3">
-                    {actions.map((action, index) => (
-                      <div key={action.id} className="rounded-md border border-amber-300/70 bg-amber-50/70 p-3">
-                        <div className="text-sm font-medium text-[var(--text)]">{index + 1}. {action.name}</div>
-                        <p className="mt-2 text-sm text-[var(--text-2)]">{action.task}</p>
-                        <p className="mt-2 text-xs font-medium text-amber-800">
-                          Capability: {action.tools?.map((tool) => tool.ref).join(", ") || "No exact connector contract"}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : null}
-
-              <div className="mt-5">
-                <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Code spec</div>
-                <pre className="mt-2 max-h-[520px] overflow-auto rounded-md border border-[var(--border-light)] bg-slate-950 p-3 text-xs leading-5 text-slate-100">
-                  {JSON.stringify(proposal.definition, null, 2)}
-                </pre>
-              </div>
-
-              {designDiagnostics ? (
-                <div className="mt-5">
-                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Agent generation output</div>
-                  <pre className="mt-2 max-h-[420px] overflow-auto rounded-md border border-[var(--border-light)] bg-slate-950 p-3 text-xs leading-5 text-slate-100">
-                    {JSON.stringify(designDiagnostics, null, 2)}
-                  </pre>
-                </div>
-              ) : null}
-
-              {architectTrace ? (
-                <div className="mt-5">
-                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Generation trace</div>
-                  <pre className="mt-2 max-h-[320px] overflow-auto rounded-md border border-[var(--border-light)] bg-slate-950 p-3 text-xs leading-5 text-slate-100">
-                    {JSON.stringify(architectTrace, null, 2)}
-                  </pre>
-                </div>
-              ) : null}
-            </Card>
-          ) : null}
-        </section>
-
-        <aside className="space-y-4">
-          {builderProgress ? (
-            <Card className="overflow-hidden rounded-md border-slate-300 bg-slate-950 text-slate-100">
-              <div className="flex items-start justify-between gap-3 border-b border-slate-800 px-4 py-3">
-                <div>
-                  <div className="flex items-center gap-2 text-sm font-semibold">
-                    {builderProgress.status === "running" || builderProgress.status === "pending"
-                      ? <Loader2 size={14} className="animate-spin text-lime-400" />
-                      : <Check size={14} className="text-lime-400" />}
-                    Live builder log
-                  </div>
-                  <p className="mt-1 text-xs text-slate-400">{builderProgress.kind ?? "builder"} · {builderProgress.status ?? "running"}</p>
-                </div>
-                <div className="text-right">
-                  <div className="font-mono text-lg font-semibold text-lime-300">
-                    ${(builderProgress.usage?.estimatedCostUsd ?? 0).toFixed(6)}
-                  </div>
-                  <div className="text-[10px] uppercase tracking-wider text-slate-500">estimated cost</div>
-                </div>
-              </div>
-              <div className="grid grid-cols-3 border-b border-slate-800 text-center">
-                <div className="px-2 py-2">
-                  <div className="font-mono text-sm">{builderProgress.usage?.calls ?? 0}</div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">AI calls</div>
-                </div>
-                <div className="border-x border-slate-800 px-2 py-2">
-                  <div className="font-mono text-sm">{(builderProgress.usage?.promptTokens ?? 0).toLocaleString()}</div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Input tokens</div>
-                </div>
-                <div className="px-2 py-2">
-                  <div className="font-mono text-sm">{(builderProgress.usage?.completionTokens ?? 0).toLocaleString()}</div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Output tokens</div>
-                </div>
-              </div>
-              <div className="max-h-[680px] space-y-3 overflow-y-auto px-4 py-3 font-mono text-xs">
-                {(builderProgress.events ?? []).length > 0 ? (builderProgress.events ?? []).map((event) => (
-                  <div key={event.id} className="border-l border-slate-700 pl-3">
-                    <div className="flex justify-between gap-3 text-slate-500">
-                      <span>{new Date(event.at).toLocaleTimeString()}</span>
-                      <span>{event.stage}</span>
-                    </div>
-                    <div className={event.status === "failed" ? "mt-1 text-red-300" : "mt-1 text-slate-200"}>{event.message}</div>
-                    {event.model ? (
-                      <div className="mt-1 text-slate-500">
-                        {event.model} · {(event.totalTokens ?? 0).toLocaleString()} tokens · ${(event.estimatedCostUsd ?? 0).toFixed(6)}
-                      </div>
-                    ) : null}
-                    {event.details !== undefined ? (
-                      <details className="mt-2 rounded border border-slate-800 bg-black/30">
-                        <summary className="cursor-pointer select-none px-2 py-1.5 text-[11px] uppercase tracking-wide text-slate-400 hover:text-slate-200">
-                          Detailed process data
-                        </summary>
-                        <pre className="max-h-96 overflow-auto border-t border-slate-800 p-2 text-[11px] leading-5 text-slate-300">
-                          {JSON.stringify(event.details, null, 2)}
-                        </pre>
-                      </details>
-                    ) : null}
-                  </div>
-                )) : <p className="text-slate-500">Waiting for the first builder event...</p>}
-              </div>
-            </Card>
-          ) : null}
-
-          <Card className="rounded-md p-4">
-            <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--text)]">
-              <Check size={15} />
-              Builder state
-            </div>
-            <div className="space-y-3 text-sm text-[var(--text-2)]">
-              <p>1. Analyze the request and clarify only decisions that materially change the loop.</p>
-              <p>2. Refine or edit the spec until it captures the behavior you want.</p>
-              <p>3. Approve the spec, generate agents, then save the loop.</p>
-            </div>
-          </Card>
-
-          <Card className="rounded-md p-4">
-            <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Connected app capabilities</div>
-            {connectedKeys.length === 0 ? (
-              <p className="mt-2 text-sm text-[var(--text-2)]">No connected apps available for this loop.</p>
-            ) : (
-              <div className="mt-3 space-y-3">
-                {connectedKeys.map((toolkit) => (
-                  <div key={toolkit} className="rounded-md border border-[var(--border-light)] p-3">
-                    <div className="text-sm font-medium text-[var(--text)]">{toolkit}</div>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {(connectorTools[toolkit] ?? []).slice(0, 8).map((tool) => (
-                        <span key={tool.actionSlug} className={`rounded px-1.5 py-0.5 text-[11px] ${tool.risk === "read" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
-                          {tool.name || tool.actionSlug} · {tool.risk}
-                        </span>
-                      ))}
-                      {(connectorTools[toolkit] ?? []).length === 0 ? (
-                        <span className="text-xs text-[var(--text-muted)]">Search is available; action discovery returned no tools.</span>
-                      ) : null}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {spec ? (
-              <div className="mt-4 rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3 text-xs text-[var(--text-2)]">
-                <div className="font-medium text-[var(--text)]">Delivery</div>
-                {hasOutboundDelivery ? (
-                  <>
-                    <p className="mt-1">Provider: <span className="font-medium text-[var(--text)]">{delivery?.provider}</span></p>
-                    {delivery?.description ? <p className="mt-1">{delivery.description}</p> : null}
-                    <p className="mt-2">
-                      Send actions:{" "}
-                      {writeActions.length > 0
-                        ? writeActions.map((action) => `${action.toolkit}/${action.actionSlug}`).join(", ")
-                        : approved
-                          ? "none"
-                          : "bound from Connected Apps when you approve"}
-                    </p>
-                  </>
+          {/* Composer area */}
+          <div className="shrink-0 border-t border-[#e5e7eb] bg-[#fafafa] px-4 py-3">
+            <div className="relative overflow-hidden">
+              <AnimatePresence initial={false} mode="wait">
+                {showInteractivePrompt ? (
+                  <motion.div
+                    key="interactive-prompt"
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                    initial={{ opacity: 0, scale: 0.98, y: 16 }}
+                    transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <InteractivePromptTool
+                      disabled={status !== "ready"}
+                      onDismiss={() => setDismissedPromptId(activeInteractivePrompt!.toolCallId)}
+                      onSubmit={(answer) => addToolOutput({
+                        tool: "interactivePrompt",
+                        toolCallId: activeInteractivePrompt!.toolCallId,
+                        output: answer,
+                      })}
+                      part={activeInteractivePrompt!}
+                      placement="composer"
+                    />
+                  </motion.div>
                 ) : (
-                  <p className="mt-1">No outbound delivery — artifacts stay in the dashboard.</p>
+                  <motion.div
+                    key="prompt-input"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.98, y: 12 }}
+                    initial={{ opacity: 0, y: 8 }}
+                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <PromptInput
+                      onSubmit={({ text }) => {
+                        if (text.trim()) return sendMessage({ text });
+                      }}
+                      className="[&>[data-slot=input-group]]:rounded-none [&>[data-slot=input-group]]:border-[#d1d5db] [&>[data-slot=input-group]]:bg-white [&>[data-slot=input-group]]:shadow-none"
+                    >
+                      <PromptInputTextarea placeholder="Describe the loop, answer a clarification, or request a refinement..." />
+                      <PromptInputFooter>
+                        <span className="text-xs text-[#9ca3af]">
+                          {progress.length > 0
+                            ? progress.at(-1)?.message
+                            : session
+                              ? `Phase: ${session.phase}`
+                              : "A new session starts with your first message"}
+                        </span>
+                        <PromptInputSubmit
+                          onStop={stop}
+                          status={status}
+                          className="rounded-none border border-[#d1d5db] bg-white text-[#374151] hover:bg-[#fafafa] shadow-none transition-colors"
+                        />
+                      </PromptInputFooter>
+                    </PromptInput>
+                  </motion.div>
                 )}
-              </div>
-            ) : null}
-          </Card>
+              </AnimatePresence>
+            </div>
+          </div>
+        </div>
 
-          {proposal ? (
-            <>
-              <Card className="rounded-md p-4">
-                <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Schedule</div>
-                <p className="mt-1 text-sm text-[var(--text-2)]">
-                  {proposal.definition.schedule.cron} ({proposal.definition.schedule.timezone})
-                </p>
-                <div className="mt-4 text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Tools</div>
-                <p className="mt-1 text-sm text-[var(--text-2)]">
-                  {proposal.suggestedToolRefs.length ? proposal.suggestedToolRefs.join(", ") : "No tools suggested"}
-                </p>
-              </Card>
-
-              <Card className="rounded-md p-4">
-                <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Operator interactions</div>
-                <div className="mt-3 space-y-2">
-                  {(proposal.definition.operatorInteractionPlan?.interactions ?? []).map((interaction) => (
-                    <div key={interaction.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
-                      <div className="text-sm font-medium text-[var(--text)]">{interaction.kind.replace(/_/g, " ")}</div>
-                      <p className="mt-1 text-xs text-[var(--text-muted)]">
-                        {interaction.label
-                          ?? interaction.artifactId
-                          ?? interaction.contractRef
-                          ?? interaction.surface
-                          ?? interaction.id}
-                      </p>
-                    </div>
-                  ))}
-                  {(proposal.definition.operatorInteractionPlan?.interactions ?? []).length === 0 ? (
-                    <p className="text-sm text-[var(--text-2)]">No operator interaction is required during this workflow.</p>
-                  ) : null}
-                </div>
-              </Card>
-
-              <Card className="rounded-md p-4">
-                <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Rationale</div>
-                <div className="mt-2 space-y-2">
-                  {proposal.rationale.map((line, index) => (
-                    <p key={index} className="text-sm text-[var(--text-2)]">{line}</p>
-                  ))}
-                </div>
-              </Card>
-            </>
-          ) : null}
-        </aside>
+        {/* Session error */}
+        {session?.error && (
+          <div className="mt-3 shrink-0 border border-[#d9a3a3] bg-[#fdf2f2] px-4 py-3 text-[13px] text-[#991b1b]">
+            {session.error.message}
+          </div>
+        )}
       </div>
 
-      <Dialog open={clarificationOpen} onOpenChange={(open) => {
-        setClarificationOpen(open);
-        if (!open) setBusy(null);
-      }}>
-        <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Clarify the loop intent</DialogTitle>
-            <DialogDescription>
-              These optional decisions materially change the workflow. Unanswered questions use the marked recommendation.
+      <Dialog open={logsDialogOpen} onOpenChange={setLogsDialogOpen}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col p-0 overflow-hidden bg-white text-[#121a31] border border-[#d1d5db] rounded-lg">
+          <DialogHeader className="p-6 border-b border-[#e5e7eb] shrink-0">
+            <DialogTitle className="text-xl font-bold text-[#111827]">
+              Session Logs & Cost Tracker
+            </DialogTitle>
+            <DialogDescription className="text-sm text-[#6b7280]">
+              Real-time execution logs and API token metrics for loop builder session.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-5">
-            {intentAnalysis?.questions.map((question, questionIndex) => (
-              <section key={question.id} className="rounded-lg border border-[var(--border-light)] p-4">
-                <div className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">Decision {questionIndex + 1}</div>
-                <h3 className="mt-1 text-base font-semibold text-[var(--text)]">{question.question}</h3>
-                <p className="mt-1 text-sm text-[var(--text-2)]">{question.reason}</p>
-                <div className="mt-3 grid gap-2">
-                  {question.choices.map((choice) => {
-                    const selected = intentAnswers[question.id]?.choiceId === choice.id;
-                    const recommended = question.recommendedChoiceId === choice.id;
+          {/* Modal body */}
+          <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-6">
+            {/* Cost section */}
+            <div className="bg-[#f8fafc] border border-[#e2e8f0] p-4 rounded-lg">
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-[#475569] mb-3">
+                Token Cost Summary
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
+                <div className="bg-white p-3 border border-[#e2e8f0] rounded">
+                  <div className="text-xs text-[#64748b]">Total Calls</div>
+                  <div className="text-lg font-bold text-[#0f172a]">{totalUsage.calls}</div>
+                </div>
+                <div className="bg-white p-3 border border-[#e2e8f0] rounded">
+                  <div className="text-xs text-[#64748b]">Prompt Tokens</div>
+                  <div className="text-lg font-bold text-[#0f172a]">{totalUsage.promptTokens.toLocaleString()}</div>
+                </div>
+                <div className="bg-white p-3 border border-[#e2e8f0] rounded">
+                  <div className="text-xs text-[#64748b]">Completion Tokens</div>
+                  <div className="text-lg font-bold text-[#0f172a]">{totalUsage.completionTokens.toLocaleString()}</div>
+                </div>
+                <div className="bg-white p-3 border border-[#e2e8f0] rounded">
+                  <div className="text-xs text-[#64748b]">Total Tokens</div>
+                  <div className="text-lg font-bold text-[#0f172a]">{totalUsage.totalTokens.toLocaleString()}</div>
+                </div>
+                <div className="bg-white p-3 border border-[#e2e8f0] rounded col-span-2 sm:col-span-1">
+                  <div className="text-xs text-[#64748b]">Total Cost (USD)</div>
+                  <div className="text-lg font-bold text-[#0f172a]">${totalUsage.estimatedCostUsd.toFixed(6)}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Execution logs section */}
+            <div className="space-y-4">
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-[#475569]">
+                Execution Command History
+              </h3>
+              {commands.length === 0 ? (
+                <p className="text-sm text-[#94a3b8] italic">No commands executed in this session yet.</p>
+              ) : (
+                <div className="space-y-4">
+                  {commands.map((cmd) => {
+                    const statusColors = ({
+                      pending: "bg-gray-100 text-gray-700 border-gray-200",
+                      running: "bg-blue-50 text-blue-700 border-blue-200 animate-pulse",
+                      completed: "bg-green-50 text-green-700 border-green-200",
+                      failed: "bg-red-50 text-red-700 border-red-200",
+                      rejected: "bg-amber-50 text-amber-700 border-amber-200",
+                    } as Record<string, string>)[cmd.status] || "bg-gray-50 text-gray-600";
+
                     return (
-                      <button
-                        key={choice.id}
-                        type="button"
-                        className={`rounded-md border p-3 text-left transition-colors ${
-                          selected
-                            ? "border-sky-500 bg-sky-50"
-                            : "border-[var(--border-light)] bg-white hover:border-sky-300"
-                        }`}
-                        onClick={() => setIntentAnswers((current) => ({
-                          ...current,
-                          [question.id]: { ...current[question.id], choiceId: choice.id },
-                        }))}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-sm font-medium text-[var(--text)]">{choice.label}</span>
-                          {recommended ? <span className="rounded bg-green-50 px-1.5 py-0.5 text-[11px] font-medium text-green-700">Recommended</span> : null}
+                      <div key={cmd.id} className="border border-[#e2e8f0] rounded-lg overflow-hidden bg-white">
+                        {/* Command header */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 bg-[#f8fafc] px-4 py-3 border-b border-[#e2e8f0] text-sm">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold font-mono text-[#0f172a]">{cmd.toolName}</span>
+                            <span className={`px-2 py-0.5 text-xs font-semibold border rounded-full ${statusColors}`}>
+                              {cmd.status}
+                            </span>
+                          </div>
+                          <div className="text-xs text-[#64748b]">
+                            {new Date(cmd.createdAt).toLocaleTimeString()}
+                          </div>
                         </div>
-                        <p className="mt-1 text-xs text-[var(--text-muted)]">{choice.impact}</p>
-                      </button>
+
+                        {/* Command body */}
+                        <div className="p-4 space-y-3">
+                          {/* Cost info */}
+                          {cmd.usage && (cmd.usage.totalTokens > 0 || cmd.usage.calls > 0) && (
+                            <div className="text-xs text-[#64748b] bg-[#f8fafc] p-2 rounded flex flex-wrap gap-x-4 gap-y-1">
+                              <span><strong>Calls:</strong> {cmd.usage.calls}</span>
+                              <span><strong>Tokens:</strong> {cmd.usage.totalTokens?.toLocaleString()}</span>
+                              <span><strong>Cost:</strong> ${cmd.usage.estimatedCostUsd?.toFixed(6)}</span>
+                            </div>
+                          )}
+
+                          {/* Error text if failed */}
+                          {cmd.error && (
+                            <div className="text-xs border border-red-100 bg-red-50/50 p-2.5 rounded text-red-700 font-mono whitespace-pre-wrap">
+                              <strong>Error:</strong> {cmd.error}
+                            </div>
+                          )}
+
+                          {/* Events/logs list */}
+                          <div className="space-y-1.5">
+                            <div className="text-xs font-semibold text-[#475569]">Steps Logs:</div>
+                            {(!cmd.events || cmd.events.length === 0) ? (
+                              <div className="text-xs text-[#94a3b8] italic">No logs recorded for this command.</div>
+                            ) : (
+                              <div className="max-h-48 overflow-y-auto space-y-1 bg-gray-50 p-3 rounded font-mono text-xs border border-gray-100">
+                                {cmd.events.map((evt: any, i: number) => (
+                                  <div key={i} className="flex gap-2 text-[#334155]">
+                                    <span className="text-[#94a3b8] shrink-0">
+                                      {evt.at ? new Date(evt.at).toLocaleTimeString() : `[Step ${evt.id || i + 1}]`}
+                                    </span>
+                                    <span className={evt.status === "failed" ? "text-red-600" : ""}>
+                                      {evt.message}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
-                <label className="mt-3 block text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
-                  Optional custom answer
-                </label>
-                <input
-                  className="mt-1 h-10 w-full rounded-md border border-[var(--border-light)] bg-white px-3 text-sm outline-none focus:border-sky-500"
-                  value={intentAnswers[question.id]?.freeText ?? ""}
-                  onChange={(event) => setIntentAnswers((current) => ({
-                    ...current,
-                    [question.id]: { ...current[question.id], freeText: event.target.value },
-                  }))}
-                  placeholder="Override the suggested answers"
-                />
-              </section>
-            ))}
+              )}
+            </div>
           </div>
-
-          <DialogFooter>
-            <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void draftWithClarifications(true)}>
-              Use recommended assumptions
-            </Button>
-            <Button type="button" disabled={busy !== null} onClick={() => void draftWithClarifications(false)}>
-              {busy === "draft" ? <Loader2 size={14} className="animate-spin" /> : null}
-              Draft with answers
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
+    </main>
+  );
+}
+
+function InteractivePromptTool({
+  part,
+  disabled,
+  onSubmit,
+  onDismiss,
+  placement,
+}: {
+  part: ToolPart;
+  disabled: boolean;
+  onSubmit: (answer: InteractivePromptAnswer) => void;
+  onDismiss?: () => void;
+  placement?: "transcript" | "composer";
+}) {
+  if (part.state === "input-streaming") {
+    return <p className="my-3 text-sm text-muted-foreground">Preparing choices...</p>;
+  }
+  const input = part.input && typeof part.input === "object" ? part.input as {
+    question?: string;
+    options?: InteractivePromptOption[];
+    recommendedOptionIds?: string[];
+    allowMultiple?: boolean;
+    allowOther?: boolean;
+  } : {};
+  const output = part.state === "output-available" && part.output && typeof part.output === "object"
+    ? part.output as InteractivePromptAnswer
+    : undefined;
+  return (
+    <InteractivePromptMenu
+      allowMultiple={input.allowMultiple}
+      allowOther={input.allowOther}
+      disabled={disabled || part.state !== "input-available"}
+      onDismiss={onDismiss}
+      onSubmit={onSubmit}
+      options={input.options ?? []}
+      placement={placement}
+      question={input.question ?? "Choose an option"}
+      recommendedOptionIds={input.recommendedOptionIds}
+      submittedAnswer={output}
+    />
+  );
+}
+
+function findActiveInteractivePrompt(messages: UIMessage[]): ToolPart | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
+    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = message.parts[partIndex];
+      if (part && isToolUIPart(part) && getToolName(part) === "interactivePrompt"
+        && (part.state === "input-streaming" || part.state === "input-available")) {
+        return part;
+      }
+    }
+  }
+  return null;
+}
+
+function AvailableTools({ part }: { part: ToolPart }) {
+  const output = part.output && typeof part.output === "object" ? part.output as { tools?: Array<{
+    name?: string;
+    description?: string;
+    connected?: boolean;
+    risk?: string | null;
+  }> } : {};
+  return (
+    <Tool defaultOpen>
+      {part.type === "dynamic-tool"
+        ? <ToolHeader type={part.type} state={part.state} toolName={part.toolName} />
+        : <ToolHeader type={part.type} state={part.state} />}
+      <ToolContent>
+        <div className="space-y-2 p-3">
+          {(output.tools ?? []).length === 0 && <p className="text-sm text-muted-foreground">No external connector actions are required.</p>}
+          {(output.tools ?? []).map((item, index) => (
+            <div className="border border-[#e5e7eb] bg-[#fafafa] p-3 text-sm" key={`${item.name}-${index}`}>
+              <div className="font-semibold text-[#111827]">{item.name ?? "Available tool"}</div>
+              <div className="mt-0.5 text-[#6b7280]">{item.description}</div>
+              <div className="mt-1.5 text-[11px] font-semibold uppercase tracking-wide text-[#9ca3af]">
+                {item.connected ? "Connected" : "Connection required"} · Risk: {item.risk ?? "unknown"}
+              </div>
+            </div>
+          ))}
+        </div>
+      </ToolContent>
+    </Tool>
+  );
+}
+
+function LoopBuilderEmptyState({
+  status,
+  onSend,
+}: {
+  status: string;
+  onSend: (text: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [inputValue, setInputValue] = useState("");
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const ctx = gsap.context(() => {
+      // Stagger the hero elements in
+      gsap.fromTo(
+        ".es-hero",
+        { opacity: 0, y: 18 },
+        { opacity: 1, y: 0, duration: 0.55, ease: "power3.out" },
+      );
+
+      // Stagger composer in
+      gsap.fromTo(
+        ".es-composer",
+        { opacity: 0, y: 14 },
+        { opacity: 1, y: 0, duration: 0.5, ease: "power3.out", delay: 0.12 },
+      );
+
+      // Section label
+      gsap.fromTo(
+        ".es-section-label",
+        { opacity: 0 },
+        { opacity: 1, duration: 0.4, ease: "power2.out", delay: 0.25 },
+      );
+
+      // Cards stagger in with y + opacity
+      gsap.fromTo(
+        ".es-card",
+        { opacity: 0, y: 22, scale: 0.97 },
+        {
+          opacity: 1,
+          y: 0,
+          scale: 1,
+          duration: 0.48,
+          ease: "power3.out",
+          stagger: 0.075,
+          delay: 0.28,
+        },
+      );
+
+      // Suggestion chips stagger
+      gsap.fromTo(
+        ".es-chip",
+        { opacity: 0, x: -8 },
+        {
+          opacity: 1,
+          x: 0,
+          duration: 0.35,
+          ease: "power2.out",
+          stagger: 0.06,
+          delay: 0.55,
+        },
+      );
+    }, el);
+
+    return () => ctx.revert();
+  }, []);
+
+  const handleSubmit = () => {
+    if (inputValue.trim() && status === "ready") {
+      onSend(inputValue.trim());
+      setInputValue("");
+    }
+  };
+
+  return (
+    <div ref={containerRef} className="flex flex-col w-full max-w-3xl mx-auto px-4 pt-8 pb-4 gap-7" style={{ fontFamily: "var(--font-fustat)" }}>
+
+      {/* Hero */}
+      <div className="es-hero text-center space-y-2">
+        <div
+          className="inline-flex items-center justify-center size-11 mb-3 text-white"
+          style={{ background: "#111827" }}
+        >
+          <Wand2 className="size-5" />
+        </div>
+        <h2
+          className="text-[24px] font-bold tracking-[-0.025em] text-[#111827]"
+          style={{ fontFamily: "var(--font-title)" }}
+        >
+          What loop do you want to build?
+        </h2>
+        <p className="text-[13px] text-[#6b7280] max-w-md mx-auto leading-relaxed">
+          Describe it in plain language. The AI analyses intent, discovers the right tools, and builds the workflow.
+        </p>
+      </div>
+
+      {/* Standalone composer */}
+      <div className="es-composer">
+        <div className="border border-[#d1d5db] bg-white shadow-sm">
+          <textarea
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit();
+              }
+            }}
+            placeholder="e.g. Send me a weekly digest of Hacker News top stories..."
+            rows={3}
+            disabled={status !== "ready"}
+            className="w-full resize-none bg-transparent px-4 pt-4 pb-2 text-[14px] text-[#111827] placeholder:text-[#9ca3af] outline-none border-none disabled:opacity-60"
+            style={{ fontFamily: "var(--font-fustat)" }}
+          />
+          <div className="flex items-center justify-between px-3 pb-3">
+            <span className="text-[11px] text-[#9ca3af]">
+              Press <kbd className="border border-[#e5e7eb] bg-[#fafafa] px-1 py-0.5 text-[10px] font-mono">⏎</kbd> to send · <kbd className="border border-[#e5e7eb] bg-[#fafafa] px-1 py-0.5 text-[10px] font-mono">Shift ⏎</kbd> for newline
+            </span>
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={!inputValue.trim() || status !== "ready"}
+              className="inline-flex items-center gap-1.5 border border-[#111827] bg-[#111827] px-3.5 py-1.5 text-[12px] font-semibold text-white hover:bg-[#1f2937] transition-colors disabled:opacity-40"
+            >
+              Build loop <ArrowRight className="size-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Discover loops */}
+      <div>
+        <div className="es-section-label flex items-center justify-between pb-2.5 border-b border-[#e5e7eb] mb-4">
+          <h3
+            className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#6b7280]"
+            style={{ fontFamily: "var(--font-title)" }}
+          >
+            Discover Loops
+          </h3>
+          <div className="flex items-center gap-1 text-[11px] text-[#9ca3af]">
+            <Zap className="size-3" />
+            <span>Templates</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          {TEMPLATES.map((tpl) => {
+            const Icon = tpl.icon;
+            return (
+              <button
+                key={tpl.title}
+                disabled={status !== "ready"}
+                onClick={() => onSend(tpl.prompt)}
+                className="es-card group flex flex-col text-left p-4 border transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 disabled:opacity-40"
+                style={{
+                  background: `linear-gradient(135deg, ${tpl.bgFrom} 0%, ${tpl.bgTo} 100%)`,
+                  borderColor: tpl.borderColor,
+                }}
+              >
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div
+                    className="inline-flex items-center justify-center size-8 flex-shrink-0"
+                    style={{ background: tpl.iconBg }}
+                  >
+                    <Icon className="size-4 text-white" />
+                  </div>
+                  <ArrowRight
+                    className="size-3.5 mt-0.5 opacity-0 group-hover:opacity-60 transition-opacity flex-shrink-0"
+                    style={{ color: tpl.accentColor }}
+                  />
+                </div>
+                <span
+                  className="text-[13px] font-bold tracking-[-0.01em] leading-snug"
+                  style={{ fontFamily: "var(--font-title)", color: tpl.accentColor }}
+                >
+                  {tpl.title}
+                </span>
+                <p
+                  className="mt-1.5 text-[11.5px] leading-relaxed font-medium opacity-80"
+                  style={{ color: tpl.accentColor }}
+                >
+                  {tpl.description}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Quick suggestions */}
+      <div className="flex flex-wrap gap-2 pb-2">
+        {SUGGESTIONS.map((sug) => (
+          <button
+            key={sug.label}
+            disabled={status !== "ready"}
+            onClick={() => onSend(sug.prompt)}
+            className="es-chip border border-[#d1d5db] bg-white px-3 py-1.5 text-[12px] font-medium text-[#374151] hover:bg-[#f3f4f6] hover:border-[#9ca3af] transition-all disabled:opacity-40"
+          >
+            {sug.label}
+          </button>
+        ))}
+      </div>
+
     </div>
   );
 }

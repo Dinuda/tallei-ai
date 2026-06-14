@@ -46,6 +46,7 @@ type BuilderContext = {
   feedback?: string;
   specId?: string;
   priorProposal?: LoopBuilderProposal;
+  discoveredToolContracts?: ToolContract[];
 };
 
 function normalizePrompt(value: string): string {
@@ -78,6 +79,7 @@ export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<L
     feedback: input.feedback,
     noSlopSpec,
     priorProposal: input.priorProposal,
+    discoveredToolContracts: input.discoveredToolContracts,
   });
 
   const templateId = input.templateId ?? "custom";
@@ -109,6 +111,7 @@ export async function refineLoopBuilderProposal(input: BuilderContext & { priorP
     feedback: input.feedback ?? prompt,
     specId: input.specId ?? input.priorProposal.noSlopSpec?.id,
     priorProposal: input.priorProposal,
+    discoveredToolContracts: input.discoveredToolContracts,
   });
 }
 

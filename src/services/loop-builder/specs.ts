@@ -364,6 +364,20 @@ function stripModelExecutionBindings(rawSpec: unknown): unknown {
   };
 }
 
+export async function prepareGeneratedLoopSpec(input: {
+  prompt: string;
+  intentContext?: LoopIntentContext;
+  rawSpec: unknown;
+}): Promise<NoSlopSpec> {
+  const expectedProvider = await explicitAvailableProvider(
+    [input.prompt, input.intentContext?.resolvedIntent].filter(Boolean).join("\n"),
+  );
+  const behavioralSpec = normalizeBehavioralSpec(noSlopSpecDraftSchema.parse(input.rawSpec));
+  const semanticIssues = specSemanticIssues(behavioralSpec, expectedProvider);
+  if (semanticIssues.length > 0) throw new SpecSemanticError(semanticIssues);
+  return parsePreparedSpecJson(stripModelExecutionBindings(behavioralSpec));
+}
+
 async function generateSpecJson(input: {
   auth: AuthContext;
   prompt: string;
@@ -439,6 +453,19 @@ export async function draftLoopSpec(input: {
   if (!prompt) throw new Error("Prompt is required");
   const intentContext = input.intentContext ? loopIntentContextSchema.parse(input.intentContext) : undefined;
   const specJson = await generateSpecJson({ auth: input.auth, prompt, intentContext });
+  return persistGeneratedLoopSpec({ auth: input.auth, prompt, intentContext, specJson });
+}
+
+export async function persistGeneratedLoopSpec(input: {
+  auth: AuthContext;
+  prompt: string;
+  intentContext?: LoopIntentContext;
+  specJson: NoSlopSpec;
+}): Promise<LoopSpecView> {
+  const prompt = input.prompt.trim();
+  if (!prompt) throw new Error("Prompt is required");
+  const intentContext = input.intentContext ? loopIntentContextSchema.parse(input.intentContext) : undefined;
+  const specJson = parsePreparedSpecJson(input.specJson);
   const title = titleFromPurpose(specJson.purpose);
   const slug = slugify(title);
   const bodyMarkdown = renderSpecMarkdown(specJson);

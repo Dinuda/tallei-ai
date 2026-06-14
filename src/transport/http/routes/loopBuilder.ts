@@ -1,80 +1,448 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import { createOpenAI } from "@ai-sdk/openai";
+import {
+  convertToModelMessages,
+  createUIMessageStream,
+  pipeUIMessageStreamToResponse,
+  stepCountIs,
+  streamText,
+  tool,
+  validateUIMessages,
+  type UIMessage,
+} from "ai";
 
+import { getLoopSpec, listLoopSpecs } from "../../../services/loop-builder/specs.js";
 import {
-  enqueueLoopBuilderProposeJob,
-  enqueueLoopBuilderRefineJob,
-  enqueueIntentAnalysisJob,
-  enqueueSpecDraftJob,
-  enqueueSpecRefineJob,
-  getLoopBuilderJob,
-  resolveIntentContextFromJob,
-} from "../../../services/loop-builder/jobs.js";
+  dispatchWorkflowBuilderCommand,
+  getWorkflowBuilderCommand,
+  type BuilderToolName,
+} from "../../../services/loop-builder/dispatcher.js";
+import { loopBuilderOpenAiModel } from "../../../services/loop-builder/openai-chat.js";
 import {
-  approveLoopSpec,
-  archiveLoopSpec,
-  getLoopSpec,
-  listLoopSpecs,
-} from "../../../services/loop-builder/specs.js";
-import {
-  builderTemplateHintSchema,
-  saveLoopBuilderProposal,
-  loopBuilderProposalSchema,
-} from "../../../services/loop-builder/intent-resolver.js";
-import { loopIntentAnswerSchema } from "../../../services/loop-engine/intent-context.js";
+  createWorkflowBuilderSession,
+  findWorkflowBuilderSessionBySpec,
+  listWorkflowBuilderMessages,
+  replaceWorkflowBuilderMessages,
+  requireWorkflowBuilderSession,
+  type WorkflowBuilderSession,
+} from "../../../services/loop-builder/sessions.js";
+import { pool } from "../../../infrastructure/db/index.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
 
-const promptSchema = z.object({
+router.use(authMiddleware);
+
+const chatSchema = z.object({
+  sessionId: z.string().uuid().optional(),
+  messages: z.array(z.unknown()).min(1),
+});
+
+const promptCompatibilitySchema = z.object({
   prompt: z.string().trim().min(1).max(10_000),
-  templateId: builderTemplateHintSchema.optional(),
+  sessionId: z.string().uuid().optional(),
   specId: z.string().uuid().optional(),
   feedback: z.string().trim().min(1).max(5000).optional(),
-  priorProposal: loopBuilderProposalSchema.optional(),
+  priorProposal: z.unknown().optional(),
 });
 
-const specIdSchema = z.object({ specId: z.string().uuid() });
+function messageText(message: UIMessage | undefined): string {
+  if (!message) return "";
+  return message.parts.filter((part) => part.type === "text").map((part) => part.text).join("").trim();
+}
 
-const specDraftSchema = z.object({
-  prompt: z.string().trim().min(1).max(10_000),
-  intentAnalysisJobId: z.string().uuid().optional(),
-  answers: z.array(loopIntentAnswerSchema).max(3).optional(),
-  skippedQuestionIds: z.array(z.string().min(1)).max(3).optional(),
+async function waitForCommand(
+  auth: NonNullable<AuthRequest["authContext"]>,
+  commandId: string,
+  onProgress?: (command: Awaited<ReturnType<typeof getWorkflowBuilderCommand>>) => void,
+) {
+  let eventCount = -1;
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const command = await getWorkflowBuilderCommand(auth, commandId);
+    if (!command) throw new Error("Builder command disappeared");
+    if (command.events.length !== eventCount) {
+      eventCount = command.events.length;
+      onProgress?.(command);
+    }
+    if (command.status === "completed" || command.status === "failed" || command.status === "rejected") return command;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("Builder command timed out");
+}
+
+async function runTool(
+  auth: NonNullable<AuthRequest["authContext"]>,
+  sessionId: string,
+  toolName: BuilderToolName,
+  input: Record<string, unknown>,
+) {
+  const command = await dispatchWorkflowBuilderCommand({ auth, sessionId, toolName, input });
+  const completed = await waitForCommand(auth, command.jobId);
+  if (completed.status !== "completed") {
+    throw new Error(completed.error ?? `${toolName} failed`);
+  }
+  return completed.result ?? {};
+}
+
+const normalizedIntentSchema = z.object({
+  outcome: z.string().min(1),
+  toolCategories: z.array(z.string().min(1)).default([]),
+  cadence: z.string().min(1),
+  approvalModel: z.string().min(1),
+  runtimeInputs: z.array(z.string().min(1)).default([]),
 });
 
-const specRefineSchema = z.object({
-  feedback: z.string().trim().min(1).max(5000),
+function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId: string) {
+  return {
+    getAvailableTools: tool({
+      description: "Discover the exact available connector actions required by a clear, resolved workflow intent. Always call this before draftSpec.",
+      inputSchema: z.object({
+        normalizedIntent: normalizedIntentSchema,
+        resolvedIntent: z.string().min(1),
+        assumptions: z.array(z.string().min(1)).default([]),
+      }),
+      execute: (input) => runTool(auth, sessionId, "getAvailableTools", input),
+    }),
+    interactivePrompt: tool({
+      description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command.",
+      inputSchema: z.object({
+        question: z.string().min(1),
+        options: z.array(z.object({
+          id: z.string().min(1),
+          label: z.string().min(1),
+          value: z.string().min(1),
+          description: z.string().optional(),
+        })).min(2).max(8),
+        recommendedOptionIds: z.array(z.string().min(1)).max(8).default([]),
+        allowMultiple: z.boolean().default(false),
+        allowOther: z.boolean().default(true),
+      }),
+    }),
+    draftSpec: tool({
+      description: "Create and persist the behavioral loop spec after getAvailableTools has completed.",
+      inputSchema: z.object({}),
+      execute: (input) => runTool(auth, sessionId, "draftSpec", input),
+    }),
+    refineSpec: tool({
+      description: "Refine the current draft spec from user feedback. This invalidates approval and any generated graph.",
+      inputSchema: z.object({ feedback: z.string().min(1) }),
+      execute: (input) => runTool(auth, sessionId, "refineSpec", input),
+    }),
+    approveSpec: tool({
+      description: "Approve the current behavioral spec. Call when the user asks to approve it. Requires explicit UI approval.",
+      inputSchema: z.object({
+        specJson: z.unknown().optional(),
+        bodyMarkdown: z.string().optional(),
+      }),
+      needsApproval: true,
+      execute: (input) => runTool(auth, sessionId, "approveSpec", { ...input, approved: true }),
+    }),
+    archiveSpec: tool({
+      description: "Archive the current spec. This is destructive and requires explicit UI approval.",
+      inputSchema: z.object({}),
+      needsApproval: true,
+      execute: (input) => runTool(auth, sessionId, "archiveSpec", { ...input, approved: true }),
+    }),
+    generateWorkflowGraph: tool({
+      description: "Generate the executable workflow graph from the approved spec and persisted discovered contracts.",
+      inputSchema: z.object({}),
+      execute: (input) => runTool(auth, sessionId, "generateWorkflowGraph", input),
+    }),
+    refineWorkflowGraph: tool({
+      description: "Refine the current workflow graph from user feedback without changing builder or Composio sessions.",
+      inputSchema: z.object({ feedback: z.string().min(1) }),
+      execute: (input) => runTool(auth, sessionId, "refineWorkflowGraph", input),
+    }),
+    saveWorkflow: tool({
+      description: "Persist the generated workflow. Requires explicit UI approval.",
+      inputSchema: z.object({
+        cron: z.string().optional(),
+        timezone: z.string().optional(),
+        workspaceId: z.string().uuid().nullable().optional(),
+      }),
+      needsApproval: true,
+      execute: (input) => runTool(auth, sessionId, "saveWorkflow", { ...input, approved: true }),
+    }),
+  };
+}
+
+function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
+  return [
+    "You are the loop builder analyzer and orchestrator.",
+    "Reason internally about the user's intent and clarification answers. Intent analysis and clarification resolution are not tools.",
+    "If an answer would materially change the outcome, schedule, runtime inputs, approval model, or required capabilities, ask for clarification.",
+    "Whenever a clarification can be expressed as choices, including binary yes/no questions, call interactivePrompt and stop. Ask only one interactive prompt at a time.",
+    "Use allowMultiple only when more than one choice may be selected. Include a recommended option when a safe default exists. Use allowOther when a custom answer is reasonable.",
+    "Only ask a normal assistant text question when it genuinely cannot be represented as useful choices.",
+    "Never ask the user to paste API keys, passwords, or credentials. Offer account connection as an option instead.",
+    "Before calling getAvailableTools, if runtime inputs are needed (such as Mailchimp account connection, target audience/list, send time/timezone, or news sources/keywords to monitor), do not list them in prose text. Instead, gather them by presenting concrete choices using interactivePrompt. Each runtime input requirement or connection choice must be asked via interactivePrompt.",
+    "When the intent is clear, call getAvailableTools with a complete normalized resolved intent. After it succeeds, call draftSpec in the same turn.",
+    "Never call draftSpec before getAvailableTools. Never invent or search for tools outside getAvailableTools.",
+    "After calling draftSpec, explain the draft briefly and immediately call interactivePrompt in the same turn to present a choice to the user: 'Approve spec' (recommended, with value 'Approve the spec') and 'Refine the spec'. Do not wait for the user to manually type or request approval in prose.",
+    "When the user requests spec approval (such as selecting 'Approve spec'), call approveSpec. After approval succeeds, immediately call generateWorkflowGraph without asking for another approval.",
+    "Use refineSpec for feedback about the behavioral contract and refineWorkflowGraph for feedback about an existing graph.",
+    "After calling generateWorkflowGraph, explain the result briefly and immediately call interactivePrompt in the same turn to present the next steps: 'Save workflow' (recommended), 'Refine the graph', and 'Archive and start over'. Do not wait for prose feedback or wait for the user to explicitly request saving/archiving.",
+    "Never output a bulleted, numbered, or formatted list of options or actions the user can take in your prose text response. If you have choices, next steps, or decisions to offer, you must present them via interactivePrompt.",
+    "Keep visible rationale concise. Do not reveal hidden chain-of-thought.",
+    `Current durable session projection:\n${JSON.stringify({
+      phase: session.phase,
+      goal: session.goal,
+      intentAnalysis: session.intentAnalysis,
+      resolvedIntent: session.resolvedIntent,
+      discoveredTools: session.discoveredToolContracts.map((contract) => ({
+        name: contract.name,
+        description: contract.description,
+        connected: contract.constraints.connected ?? false,
+        risk: contract.constraints.risk ?? null,
+      })),
+      specId: session.specId,
+      proposal: session.currentProposal ? {
+        title: session.currentProposal.title,
+        summary: session.currentProposal.summary,
+      } : null,
+      workflowId: session.workflowId,
+      error: session.error,
+    })}`,
+  ].join("\n\n");
+}
+
+async function requireSessionForSpec(req: AuthRequest, specId: string) {
+  const session = await findWorkflowBuilderSessionBySpec(req.authContext!, specId);
+  if (!session) throw new Error("A workflow builder session correlated to this spec is required");
+  return session;
+}
+
+function proposalSessionId(proposal: unknown): string | null {
+  if (!proposal || typeof proposal !== "object") return null;
+  const definition = (proposal as { definition?: unknown }).definition;
+  if (!definition || typeof definition !== "object") return null;
+  const builderMeta = (definition as { builderMeta?: unknown }).builderMeta;
+  if (!builderMeta || typeof builderMeta !== "object") return null;
+  const value = (builderMeta as { workflowBuilderSessionId?: unknown }).workflowBuilderSessionId;
+  return typeof value === "string" ? value : null;
+}
+
+router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = chatSchema.parse(req.body ?? {});
+    const messages = await validateUIMessages({ messages: body.messages as UIMessage[] });
+    const last = messages.at(-1);
+    const firstUserText = messages.find((message) => message.role === "user");
+    const text = messageText(last?.role === "user" ? last : firstUserText);
+    if (!text && !body.sessionId) {
+      res.status(400).json({ error: "A text message is required" });
+      return;
+    }
+    const session = body.sessionId
+      ? await requireWorkflowBuilderSession(req.authContext!, body.sessionId)
+      : await createWorkflowBuilderSession(req.authContext!, text);
+    const sessionId = session.id;
+    const tools = analyzerTools(req.authContext!, sessionId);
+    const openai = createOpenAI({
+      apiKey: process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY,
+    });
+    const result = streamText({
+      model: openai(loopBuilderOpenAiModel()),
+      system: analyzerSystemPrompt(session),
+      messages: await convertToModelMessages(messages, { tools }),
+      tools,
+      stopWhen: stepCountIs(10),
+      onError: ({ error }) => console.error("Loop builder analyzer stream failed:", error),
+    });
+    const stream = createUIMessageStream({
+      originalMessages: messages,
+      execute: async ({ writer }) => {
+        writer.write({ type: "data-session", data: { sessionId }, transient: true });
+        writer.merge(result.toUIMessageStream({ originalMessages: messages, sendReasoning: true }));
+      },
+      onFinish: async ({ messages: completedMessages }) => {
+        await replaceWorkflowBuilderMessages(req.authContext!, sessionId, completedMessages);
+      },
+      onError: (error) => error instanceof Error ? error.message : String(error),
+    });
+    pipeUIMessageStreamToResponse({ response: res, stream });
+  } catch (error) {
+    const status = error instanceof z.ZodError ? 400 : /not available|requires|required|not found/i.test(error instanceof Error ? error.message : "") ? 409 : 500;
+    res.status(status).json({ error: error instanceof Error ? error.message : "Failed to process builder chat" });
+  }
 });
 
-const specApproveSchema = z.object({
-  bodyMarkdown: z.string().trim().min(1).max(100_000).optional(),
-  specJson: z.unknown().optional(),
+router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    const session = await requireWorkflowBuilderSession(req.authContext!, sessionId);
+    const messages = await validateUIMessages({ messages: await listWorkflowBuilderMessages(req.authContext!, sessionId) });
+    const commandsResult = await pool.query(
+      `SELECT id, tool_name, status, events_json, usage_json, error_text, created_at, updated_at
+       FROM workflow_builder_commands
+       WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3
+       ORDER BY created_at ASC`,
+      [sessionId, req.authContext!.tenantId, req.authContext!.userId]
+    );
+    const commands = commandsResult.rows.map(row => ({
+      id: row.id,
+      toolName: row.tool_name,
+      status: row.status,
+      events: row.events_json ?? [],
+      usage: row.usage_json ?? {},
+      error: row.error_text,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+    res.json({ session, messages, commands });
+  } catch (error) {
+    res.status(error instanceof z.ZodError ? 400 : 404).json({ error: error instanceof Error ? error.message : "Builder session not found" });
+  }
 });
-
-const saveSchema = z.object({
-  proposal: z.unknown(),
-  cron: z.string().trim().min(1).max(120).optional(),
-  timezone: z.string().trim().min(1).max(80).optional(),
-  workspaceId: z.string().uuid().nullable().optional(),
-});
-
-router.use(authMiddleware);
 
 router.post("/intent/analyze", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = z.object({ prompt: z.string().trim().min(1).max(10_000) }).parse(req.body ?? {});
-    res.status(202).json(enqueueIntentAnalysisJob({
+    const session = await createWorkflowBuilderSession(req.authContext!, body.prompt);
+    const command = await dispatchWorkflowBuilderCommand({
       auth: req.authContext!,
-      prompt: body.prompt,
-    }));
+      sessionId: session.id,
+      toolName: "getAvailableTools",
+      input: {
+        normalizedIntent: {
+          outcome: body.prompt,
+          toolCategories: [],
+          cadence: "As needed",
+          approvalModel: "Operator approval before external mutations",
+          runtimeInputs: [],
+        },
+        resolvedIntent: body.prompt,
+        assumptions: [],
+      },
+    });
+    res.status(202).json(command);
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error analyzing loop intent:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to analyze loop intent" });
+    res.status(error instanceof z.ZodError ? 400 : 500).json({ error: error instanceof Error ? error.message : "Failed to analyze loop intent" });
+  }
+});
+
+router.post("/specs/draft", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = z.object({ sessionId: z.string().uuid() }).parse(req.body ?? {});
+    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: body.sessionId, toolName: "draftSpec", input: {} });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to draft loop spec";
+    res.status(error instanceof z.ZodError ? 409 : /not available|required/i.test(message) ? 409 : 500).json({ error: message });
+  }
+});
+
+router.post("/specs/:specId/refine", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const specId = z.string().uuid().parse(req.params.specId);
+    const body = z.object({ feedback: z.string().trim().min(1).max(5000) }).parse(req.body ?? {});
+    const session = await requireSessionForSpec(req, specId);
+    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "refineSpec", input: body });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to refine loop spec";
+    res.status(error instanceof z.ZodError ? 400 : /required|not available/i.test(message) ? 409 : 500).json({ error: message });
+  }
+});
+
+router.post("/specs/:specId/approve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const specId = z.string().uuid().parse(req.params.specId);
+    const body = z.object({ bodyMarkdown: z.string().optional(), specJson: z.unknown().optional() }).parse(req.body ?? {});
+    const session = await requireSessionForSpec(req, specId);
+    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "approveSpec", input: { ...body, approved: true } });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to approve loop spec";
+    res.status(error instanceof z.ZodError ? 400 : /required|not available/i.test(message) ? 409 : 500).json({ error: message });
+  }
+});
+
+router.post("/specs/:specId/archive", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const specId = z.string().uuid().parse(req.params.specId);
+    const session = await requireSessionForSpec(req, specId);
+    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "archiveSpec", input: { approved: true } });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to archive loop spec";
+    res.status(/required|not available/i.test(message) ? 409 : 500).json({ error: message });
+  }
+});
+
+router.post("/specs/:specId/generate", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const specId = z.string().uuid().parse(req.params.specId);
+    const session = await requireSessionForSpec(req, specId);
+    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "generateWorkflowGraph", input: {} });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to generate workflow graph";
+    res.status(error instanceof z.ZodError ? 400 : /required|not available/i.test(message) ? 409 : 500).json({ error: message });
+  }
+});
+
+router.get("/jobs/:jobId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const command = await getWorkflowBuilderCommand(req.authContext!, z.string().uuid().parse(req.params.jobId));
+    if (!command) return void res.status(404).json({ error: "Loop builder job not found" });
+    res.json(command);
+  } catch (error) {
+    res.status(error instanceof z.ZodError ? 400 : 500).json({ error: error instanceof Error ? error.message : "Failed to read loop builder job" });
+  }
+});
+
+router.post("/propose", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = promptCompatibilitySchema.parse(req.body ?? {});
+    const session = body.sessionId
+      ? await requireWorkflowBuilderSession(req.authContext!, body.sessionId)
+      : body.specId ? await requireSessionForSpec(req, body.specId) : null;
+    if (!session) throw new Error("A correlated workflow builder session is required");
+    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "generateWorkflowGraph", input: {} });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to propose workflow";
+    res.status(error instanceof z.ZodError ? 400 : 409).json({ error: message });
+  }
+});
+
+router.post("/refine", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = promptCompatibilitySchema.parse(req.body ?? {});
+    const sessionId = body.sessionId ?? proposalSessionId(body.priorProposal);
+    if (!sessionId) throw new Error("A correlated workflow builder session is required");
+    const command = await dispatchWorkflowBuilderCommand({
+      auth: req.authContext!, sessionId, toolName: "refineWorkflowGraph",
+      input: { feedback: body.feedback ?? body.prompt },
+    });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to refine workflow";
+    res.status(error instanceof z.ZodError ? 400 : 409).json({ error: message });
+  }
+});
+
+router.post("/save", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = z.object({
+      sessionId: z.string().uuid().optional(),
+      proposal: z.unknown(),
+      cron: z.string().optional(),
+      timezone: z.string().optional(),
+      workspaceId: z.string().uuid().nullable().optional(),
+    }).parse(req.body ?? {});
+    const sessionId = body.sessionId ?? proposalSessionId(body.proposal);
+    if (!sessionId) throw new Error("A correlated workflow builder session is required");
+    const command = await dispatchWorkflowBuilderCommand({
+      auth: req.authContext!, sessionId, toolName: "saveWorkflow",
+      input: { cron: body.cron, timezone: body.timezone, workspaceId: body.workspaceId, approved: true },
+    });
+    res.status(202).json(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to save workflow";
+    res.status(error instanceof z.ZodError ? 400 : 409).json({ error: message });
   }
 });
 
@@ -88,42 +456,9 @@ router.get("/specs", requireScopes(["memory:read"]), async (req: AuthRequest, re
   }
 });
 
-router.post("/specs/draft", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = specDraftSchema.parse(req.body ?? {});
-    const intentContext = body.intentAnalysisJobId
-      ? resolveIntentContextFromJob({
-          auth: req.authContext!,
-          jobId: body.intentAnalysisJobId,
-          answers: body.answers,
-          skippedQuestionIds: body.skippedQuestionIds,
-        })
-      : undefined;
-    const job = enqueueSpecDraftJob({
-      auth: req.authContext!,
-      prompt: body.prompt,
-      intentContext,
-    });
-    res.status(202).json(job);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error drafting loop spec:", error);
-    const message = error instanceof Error ? error.message : "Failed to draft loop spec";
-    const status = /completed intent analysis job not found/i.test(message)
-      ? 409
-      : /unknown (?:intent question|skipped intent question|choice for intent question)/i.test(message)
-        ? 400
-        : 500;
-    res.status(status).json({ error: message });
-  }
-});
-
 router.get("/specs/:specId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
-    const { specId } = specIdSchema.parse(req.params);
+    const { specId } = z.object({ specId: z.string().uuid() }).parse(req.params);
     const spec = await getLoopSpec(req.authContext!, specId);
     if (!spec || spec.status === "archived") {
       res.status(404).json({ error: "Loop spec not found" });
@@ -137,183 +472,6 @@ router.get("/specs/:specId", requireScopes(["memory:read"]), async (req: AuthReq
     }
     console.error("Error reading loop spec:", error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to read loop spec" });
-  }
-});
-
-router.post("/specs/:specId/refine", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { specId } = specIdSchema.parse(req.params);
-    const body = specRefineSchema.parse(req.body ?? {});
-    const job = enqueueSpecRefineJob({
-      auth: req.authContext!,
-      specId,
-      feedback: body.feedback,
-    });
-    res.status(202).json(job);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error refining loop spec:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to refine loop spec" });
-  }
-});
-
-router.post("/specs/:specId/approve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { specId } = specIdSchema.parse(req.params);
-    const body = specApproveSchema.parse(req.body ?? {});
-    const spec = await approveLoopSpec({
-      auth: req.authContext!,
-      specId,
-      bodyMarkdown: body.bodyMarkdown,
-      specJson: body.specJson,
-    });
-    res.json({ spec });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    const message = error instanceof Error ? error.message : "Failed to approve loop spec";
-    const status = /not found/i.test(message)
-      ? 404
-      : /outbound delivery requires/i.test(message)
-        ? 400
-        : 500;
-    res.status(status).json({ error: message });
-  }
-});
-
-router.post("/specs/:specId/archive", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { specId } = specIdSchema.parse(req.params);
-    await archiveLoopSpec(req.authContext!, specId);
-    res.json({ ok: true });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to archive loop spec" });
-  }
-});
-
-router.post("/specs/:specId/generate", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { specId } = specIdSchema.parse(req.params);
-    const spec = await getLoopSpec(req.authContext!, specId);
-    if (!spec || spec.status === "archived") {
-      res.status(404).json({ error: "Loop spec not found" });
-      return;
-    }
-    if (spec.status !== "approved") {
-      res.status(409).json({ error: "Loop spec must be approved before generation" });
-      return;
-    }
-    const job = enqueueLoopBuilderProposeJob({
-      auth: req.authContext!,
-      prompt: spec.intentContext?.resolvedIntent ?? spec.sourcePrompt ?? spec.specJson.purpose,
-      specId,
-    });
-    res.status(202).json(job);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    const message = error instanceof Error ? error.message : "Failed to generate loop from spec";
-    const status = /outbound delivery requires/i.test(message) ? 400 : 500;
-    console.error("Error generating loop from spec:", error);
-    res.status(status).json({ error: message });
-  }
-});
-
-router.get("/jobs/:jobId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = z.string().uuid().parse(req.params.jobId);
-    const job = getLoopBuilderJob(req.authContext!, jobId);
-    if (!job) {
-      res.status(404).json({ error: "Loop builder job not found" });
-      return;
-    }
-    res.json(job);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error reading loop builder job:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to read loop builder job" });
-  }
-});
-
-router.post("/propose", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = promptSchema.parse(req.body ?? {});
-    const job = enqueueLoopBuilderProposeJob({
-      auth: req.authContext!,
-      prompt: body.prompt,
-      templateId: body.templateId,
-      specId: body.specId,
-      feedback: body.feedback,
-    });
-    res.status(202).json(job);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error proposing loop:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to propose loop" });
-  }
-});
-
-router.post("/refine", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = promptSchema.parse(req.body ?? {});
-    if (!body.priorProposal) {
-      res.status(400).json({ error: "priorProposal is required for refine" });
-      return;
-    }
-    const job = enqueueLoopBuilderRefineJob({
-      auth: req.authContext!,
-      prompt: body.prompt,
-      templateId: body.templateId,
-      specId: body.specId,
-      feedback: body.feedback,
-      priorProposal: body.priorProposal,
-    });
-    res.status(202).json(job);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error refining loop:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to refine loop" });
-  }
-});
-
-router.post("/save", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = saveSchema.parse(req.body ?? {});
-    const loop = await saveLoopBuilderProposal({
-      auth: req.authContext!,
-      proposal: body.proposal,
-      cron: body.cron,
-      timezone: body.timezone,
-      workspaceId: body.workspaceId,
-    });
-    res.status(201).json({ loop });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    console.error("Error saving loop:", error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to save loop" });
   }
 });
 

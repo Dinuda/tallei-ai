@@ -5,6 +5,7 @@ import { initDb } from "../infrastructure/db/index.js";
 import { TalleiOAuthProvider } from "../transport/mcp/oauth.js";
 import { createRateLimitMiddleware } from "../transport/http/middleware/rate-limit.middleware.js";
 import { createApp } from "../transport/http/app.js";
+import { loadToolsIndex } from "../services/connectors/composio-catalog.js";
 import { startWorkers, stopWorkers } from "./workers.js";
 import type { AppServices } from "./container.js";
 
@@ -61,6 +62,12 @@ export function composeAppServices(): AppServices {
       await initDb();
       startWorkers();
       server = await listenAsync(app, config.port, config.host);
+      // Warm the local Composio tool catalogue index in the background so the
+      // first loop-builder discovery call does not pay the 22MB JSON parse cost.
+      loadToolsIndex().then(
+        (index) => console.log(`[catalog] warmed ${index.length} tools from local index`),
+        (error) => console.warn("[catalog] failed to warm local tool index:", error),
+      );
       console.log(`Tallei backend listening on http://${config.host}:${config.port}`);
       console.log(`Public base URL: ${config.publicBaseUrl}`);
       console.log(`MCP public URL: ${mcpPublicUrl.toString()}`);

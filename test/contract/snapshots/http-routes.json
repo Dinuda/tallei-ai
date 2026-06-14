@@ -326,6 +326,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/loop-builder/chat",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
     "path": "/api/loop-builder/intent/analyze",
     "source": "src/routes/loopBuilder.ts"
   },
@@ -347,6 +352,11 @@
   {
     "method": "POST",
     "path": "/api/loop-builder/save",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/loop-builder/sessions/:sessionId",
     "source": "src/routes/loopBuilder.ts"
   },
   {

@@ -62,6 +62,12 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
   if (engineVersion !== "loop_engine_v3") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Only loop_engine_v3 definitions can run" });
   }
+  if (!definition.operatorInteractionPlan) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "A runtime definition requires an operator interaction plan.",
+    });
+  }
   if (!definition.agentGraph?.children.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "A v3 run requires at least one child agent" });
   }

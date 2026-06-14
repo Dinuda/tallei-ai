@@ -178,7 +178,7 @@ const composioToolExecutionMetadataCache = new Map<string, {
   hasFileUploadableInput: boolean;
 }>();
 
-function getComposioVercelClient(): Composio<VercelProvider> {
+export function getComposioVercelClient(): Composio<VercelProvider> {
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
   if (!composioVercelClient) {
     composioVercelClient = new Composio({

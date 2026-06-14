@@ -60,7 +60,7 @@ function candidateLoop(input: Partial<CandidateLoop>): CandidateLoop {
 test("implementability filter allows newsletter flow when WhatsApp delivery is enabled", () => {
   const useCase = new LoopImplementabilityFilterUseCase();
   const result = useCase.execute({
-    activeCapabilities: ["notification:whatsapp"],
+    activeCapabilities: ["notification:whatsapp", "mailchimp"],
     qualifiedLoops: [{
       candidateLoop: candidateLoop({
         loopName: "Newsletter broadcast",

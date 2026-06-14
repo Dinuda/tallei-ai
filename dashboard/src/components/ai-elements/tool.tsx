@@ -116,16 +116,19 @@ export type ToolInputProps = ComponentProps<"div"> & {
   input: ToolPart["input"];
 };
 
-export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
-  <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
-    <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-      Parameters
-    </h4>
-    <div className="rounded-md bg-muted/50">
-      <CodeBlock code={JSON.stringify(input, null, 2)} language="json" />
+export const ToolInput = ({ className, input, ...props }: ToolInputProps) => {
+  if (input === undefined) return null;
+  return (
+    <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
+      <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+        Parameters
+      </h4>
+      <div className="rounded-md bg-muted/50">
+        <CodeBlock code={JSON.stringify(input, null, 2) ?? ""} language="json" />
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 export type ToolOutputProps = ComponentProps<"div"> & {
   output: ToolPart["output"];
@@ -138,7 +141,7 @@ export const ToolOutput = ({
   errorText,
   ...props
 }: ToolOutputProps) => {
-  if (!(output || errorText)) {
+  if (output === undefined && !errorText) {
     return null;
   }
 
@@ -146,7 +149,7 @@ export const ToolOutput = ({
 
   if (typeof output === "object" && !isValidElement(output)) {
     Output = (
-      <CodeBlock code={JSON.stringify(output, null, 2)} language="json" />
+      <CodeBlock code={JSON.stringify(output, null, 2) ?? ""} language="json" />
     );
   } else if (typeof output === "string") {
     Output = <CodeBlock code={output} language="json" />;

@@ -960,19 +960,62 @@ export async function initDb() {
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         workflow_id UUID REFERENCES workflows(id) ON DELETE SET NULL,
-        status TEXT NOT NULL DEFAULT 'draft'
-          CHECK (status IN ('draft', 'saved', 'archived')),
+        phase TEXT NOT NULL DEFAULT 'new'
+          CHECK (phase IN ('new', 'analyzing', 'needs_clarification', 'intent_resolved', 'spec_drafted', 'spec_approved', 'graph_generated', 'saved', 'archived', 'failed')),
         title TEXT NOT NULL,
         goal TEXT NOT NULL,
-        transcript_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-        draft_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        debate_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_scope_updated
         ON workflow_builder_sessions(tenant_id, user_id, updated_at DESC);
+
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'new';
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS composio_session_id TEXT;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS workflow_run_id TEXT;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS spec_id UUID;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS intent_analysis_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS resolved_intent_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS discovered_tool_contracts_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS current_proposal_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS error_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS transcript_json;
+      ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS draft_json;
+      ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS debate_json;
+
+      CREATE TABLE IF NOT EXISTS workflow_builder_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id UUID NOT NULL REFERENCES workflow_builder_sessions(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        sequence BIGSERIAL NOT NULL,
+        message_json JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(session_id, sequence)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_messages_session
+        ON workflow_builder_messages(tenant_id, user_id, session_id, sequence);
+
+      CREATE TABLE IF NOT EXISTS workflow_builder_commands (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id UUID NOT NULL REFERENCES workflow_builder_sessions(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        tool_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'running', 'completed', 'failed', 'rejected')),
+        input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        events_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        usage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        result_json JSONB,
+        error_text TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_commands_scope
+        ON workflow_builder_commands(tenant_id, user_id, session_id, updated_at DESC);
     `);
 
     await client.query(`

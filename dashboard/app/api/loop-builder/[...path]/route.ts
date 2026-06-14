@@ -30,14 +30,6 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
   }
 }
 
-async function safeJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return { error: "Backend returned invalid JSON" };
-  }
-}
-
 async function resolveBackendUserId(req: NextRequest): Promise<string | null> {
   const session = await auth();
   if (session?.user?.id) return session.user.id;
@@ -79,13 +71,20 @@ async function proxy(req: NextRequest, method: "GET" | "POST"): Promise<Response
       headers["Content-Type"] = "application/json";
     }
 
-    const res = await fetchWithTimeout(target.toString(), {
+    const res = path === "chat" ? await fetch(target.toString(), {
+      method,
+      headers,
+      body,
+    }) : await fetchWithTimeout(target.toString(), {
       method,
       headers,
       body,
     });
-    const data = await safeJson(res);
-    return Response.json(data, { status: res.status });
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   } catch (error) {
     const isAbort = error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
     return Response.json(

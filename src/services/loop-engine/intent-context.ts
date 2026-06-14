@@ -18,6 +18,18 @@ export const loopIntentQuestionSchema = z.object({
   path: ["recommendedChoiceId"],
 });
 
+export const loopIntentInteractiveOptionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  description: z.string().min(1),
+});
+
+export const loopIntentInteractivePromptSchema = z.object({
+  id: z.string().min(1),
+  question: z.string().min(1),
+  options: z.array(loopIntentInteractiveOptionSchema).min(2).max(6),
+});
+
 export const loopIntentAnalysisSchema = z.object({
   normalizedIntent: z.object({
     outcome: z.string().min(1),
@@ -33,6 +45,8 @@ export const loopIntentAnalysisSchema = z.object({
     feasible: z.boolean(),
     reason: z.string().min(1),
   })).max(8).default([]),
+  interactivePrompts: z.array(loopIntentInteractivePromptSchema).max(3).default([]),
+  events: z.array(z.record(z.unknown())).max(10).default([]),
   model: z.string().optional(),
   analyzedAt: z.string().min(1),
 });

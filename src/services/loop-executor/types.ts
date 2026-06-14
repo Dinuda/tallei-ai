@@ -9,7 +9,7 @@ import { z } from "zod";
 import { connectorPolicySchema, noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
 import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
-import { dataContractSchema } from "../loop-engine/data-contract.js";
+import { dataContractSchema, normalizeContractSchema } from "../loop-engine/data-contract.js";
 import { operatorInteractionPlanSchema } from "../loop-engine/operator-interactions.js";
 
 /** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
@@ -30,17 +30,22 @@ export const LOOP_DEFINITION_VERSION = "loop_executor_v2";
 /** Agentic loop engine generation — preset-free design + gated controller runs. */
 export const LOOP_ENGINE_VERSION = "loop_engine_v3";
 
-export const loopGateTypeSchema = z.enum([
-  "memory_confirmation",
-  "source_confirmation",
-  "missing_input",
-  "draft_review",
-  "pre_send",
-]);
-export type LoopGateType = z.infer<typeof loopGateTypeSchema>;
+export const loopGateTypeSchema = z.string();
+export type LoopGateType = string;
 export const loopAgentGateSchema = z.object({ type: loopGateTypeSchema, question: z.string().min(1) });
 
-export const loopAgentContractSchema = dataContractSchema;
+export const loopAgentContractSchema = z.preprocess((val) => {
+  if (val && typeof val === "object" && !Array.isArray(val)) {
+    const obj = val as Record<string, unknown>;
+    if (obj.schema && typeof obj.schema === "object" && !Array.isArray(obj.schema)) {
+      return {
+        ...obj,
+        schema: normalizeContractSchema(obj.schema as Record<string, unknown>),
+      };
+    }
+  }
+  return val;
+}, dataContractSchema);
 
 export type LoopAgentContract = z.infer<typeof loopAgentContractSchema>;
 
@@ -288,7 +293,7 @@ export const loopDefinitionSchema = z.object({
   delivery: loopDeliveryRoutingSchema.optional(),
   connectorPolicy: connectorPolicySchema.optional(),
   inputRequirements: z.array(inputRequirementSchema).default([]).optional(),
-  operatorInteractionPlan: operatorInteractionPlanSchema,
+  operatorInteractionPlan: operatorInteractionPlanSchema.optional(),
   engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
   agentGraph: loopAgentGraphSchema,
   plan: loopPlanSchema.optional(),
@@ -306,10 +311,11 @@ export const loopDefinitionSchema = z.object({
     }).optional(),
     designDiagnostics: z.record(z.unknown()).optional(),
     discoveredToolContracts: z.array(z.record(z.unknown())).optional(),
-    planningIRVersion: z.literal("v2"),
-    planningIR: z.record(z.unknown()),
+    planningIRVersion: z.string().optional(),
+    planningIR: z.record(z.unknown()).optional(),
     workflowUserProfile: workflowUserProfileSchema.optional(),
-  }),
+    workflowBuilderSessionId: z.string().uuid().optional(),
+  }).optional(),
 });
 
 export type LoopDefinition = z.infer<typeof loopDefinitionSchema>;

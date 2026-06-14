@@ -59,7 +59,24 @@ function shorthandValueToJsonSchema(value: unknown): Record<string, unknown> {
 
 /** Coerce architect shorthand ({ text: "string" }) into canonical JSON Schema before validation. */
 export function normalizeContractSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  if (isCanonicalJsonSchema(schema)) return schema;
+  if (isCanonicalJsonSchema(schema)) {
+    if (schema.type === "object" && schema.properties && typeof schema.properties === "object") {
+      const properties: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(schema.properties as Record<string, unknown>)) {
+        if (typeof val === "string") {
+          properties[key] = shorthandValueToJsonSchema(val);
+        } else if (val && typeof val === "object" && !isCanonicalJsonSchema(val as Record<string, unknown>)) {
+          properties[key] = shorthandValueToJsonSchema(val);
+        } else if (val && typeof val === "object") {
+          properties[key] = normalizeContractSchema(val as Record<string, unknown>);
+        } else {
+          properties[key] = val;
+        }
+      }
+      return { ...schema, properties };
+    }
+    return schema;
+  }
   if (Object.keys(schema).length === 0) {
     return { type: "object", properties: {}, additionalProperties: false };
   }

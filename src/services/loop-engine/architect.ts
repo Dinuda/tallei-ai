@@ -25,9 +25,7 @@ import {
 import {
   deriveRequiredConnectorActionsFromSpec,
   normalizeProviderIdentity,
-  prioritizeDiscoveredConnectors,
   specSemanticPipeline,
-  supplementDiscoveryQueriesFromSpec,
 } from "./spec-required-connectors.js";
 import {
   compileLoopPlanningIR,
@@ -42,9 +40,6 @@ import { formatMemoriesForArchitect, recallForDesigner } from "./recall.js";
 import { formatWorkflowUserProfile, loadWorkflowUserProfile } from "./workflow-user-profile.js";
 import {
   buildToolSpecRegistry,
-  discoverToolsForQueries,
-  mergeDiscoveredToolContracts,
-  mergeRequiredToolContracts,
 } from "../tool-spec/index.js";
 import { planningHintsForContract } from "../tool-spec/contract-planning-guidance.js";
 import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
@@ -82,23 +77,8 @@ export type DesignLoopInput = {
     rationale: string[];
   };
   testOverrides?: DesignerTestOverrides;
+  discoveredToolContracts?: ToolContract[];
 };
-
-const toolSearchPlanSchema = z.object({
-  queries: z.array(z.string().min(1)).max(4).default([]),
-});
-const toolSearchPlanJsonSchema = {
-  type: "object",
-  properties: {
-    queries: {
-      type: "array",
-      items: { type: "string" },
-      maxItems: 4,
-    },
-  },
-  required: ["queries"],
-  additionalProperties: false,
-} as const;
 
 const MAX_PLANNING_CORRECTIONS = 3;
 const DEFAULT_PLANNING_ATTEMPT_TIMEOUT_MS = 180_000;
@@ -289,58 +269,6 @@ export function contractsForPlannerCorrection(input: {
   connectorContracts: ToolContract[];
 }): ToolContract[] {
   return [...input.internalContracts, ...input.connectorContracts];
-}
-
-async function generateToolSearchPlan(input: {
-  prompt: string;
-  intentContext?: NoSlopSpecSnapshot["intentContext"];
-  specDelivery?: { provider: string; description: string };
-  previousQueries?: string[];
-  coverageIssues?: PlanningCompilationIssue[];
-  chat: typeof loopBuilderOpenAiChat;
-}) {
-  const response = await input.chat({
-    responseFormat: {
-      type: "json_schema",
-      name: "tool_search_plan",
-      schema: toolSearchPlanJsonSchema,
-    },
-    temperature: 0,
-    maxTokens: 800,
-    exactMaxTokens: true,
-    retryEmptyResponses: false,
-    reasoningEffort: process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT === "low" ? "low" : "medium",
-    messages: [
-      {
-        role: "system",
-        content: [
-          "Identify whether exact external connector actions may be needed for this workflow.",
-          "Return only the bounded connector catalogue search queries.",
-          "Each query must be a concise 2-5 word capability search for a connector tool catalogue, not an action slug.",
-          "When the request names an app or provider, include that exact app or provider name in the relevant query.",
-          "When specDelivery describes email send and calendar scheduling, emit separate queries for each capability.",
-          "Use separate queries for materially different connector capabilities.",
-          "Decompose external delivery into the smallest provider capabilities needed to move the produced artifact through creation, content assignment or update, and final delivery when those are distinct catalogue actions.",
-          input.previousQueries?.length
-            ? "The previous queries did not cover the required executable capability chain. Reformulate them into shorter provider-and-capability searches that address the supplied coverage issues."
-            : "",
-          "Return no queries when internal reasoning/search tools are sufficient.",
-          "Do not choose actions yet.",
-        ].join(" "),
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          request: input.prompt,
-          resolvedIntent: input.intentContext?.resolvedIntent ?? null,
-          specDelivery: input.specDelivery ?? null,
-          previousQueriesWithNoResults: input.previousQueries ?? [],
-          coverageIssues: input.coverageIssues ?? [],
-        }),
-      },
-    ],
-  });
-  return { plan: toolSearchPlanSchema.parse(parseObject(response.text)), model: response.model };
 }
 
 function buildPlannerPrompt(input: {
@@ -799,16 +727,6 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     text: item.text,
     category: item.category ?? null,
   }));
-  const specDelivery = input.noSlopSpec ? {
-    provider: input.noSlopSpec.specJson.delivery.provider,
-    description: input.noSlopSpec.specJson.delivery.description ?? "",
-  } : undefined;
-  const search = await generateToolSearchPlan({
-    prompt,
-    intentContext: input.noSlopSpec?.intentContext,
-    specDelivery,
-    chat,
-  });
   const specRequiredActions = input.noSlopSpec
     ? deriveRequiredConnectorActionsFromSpec(input.noSlopSpec.specJson)
     : [];
@@ -819,75 +737,24 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         ...specRequiredActions,
       ]
     : [];
-  let discoveryQueries = input.noSlopSpec
-    ? supplementDiscoveryQueriesFromSpec(
-        [...new Set(search.plan.queries.map((query) => query.trim()).filter(Boolean))],
-        input.noSlopSpec.specJson,
-      )
-    : [...new Set(search.plan.queries.map((query) => query.trim()).filter(Boolean))].slice(0, 4);
-  reportLoopBuilderProgress({
-    stage: "tool_discovery",
-    message: `Searching connector catalogue with ${discoveryQueries.length} bounded ${discoveryQueries.length === 1 ? "query" : "queries"}`,
-    status: "running",
-    details: {
-      modelQueries: search.plan.queries,
-      effectiveQueries: discoveryQueries,
-      requiredActions,
-      specRequiredActions,
-    },
-  });
-  let discoveredBySearch = await discoverToolsForQueries(input.auth, discoveryQueries, 12);
-  if (discoveredBySearch.length === 0 && discoveryQueries.length > 0) {
-    reportLoopBuilderProgress({
-      stage: "tool_discovery",
-      message: "No exact connector contracts found; reformulating catalogue queries once",
-      status: "running",
-      details: { queriesWithNoResults: discoveryQueries },
-    });
-    const retrySearch = await generateToolSearchPlan({
-      prompt,
-      intentContext: input.noSlopSpec?.intentContext,
-      specDelivery,
-      previousQueries: discoveryQueries,
-      chat,
-    });
-    discoveryQueries = input.noSlopSpec
-      ? supplementDiscoveryQueriesFromSpec(
-          [...new Set(retrySearch.plan.queries.map((query) => query.trim()).filter(Boolean))],
-          input.noSlopSpec.specJson,
-        )
-      : [...new Set(retrySearch.plan.queries.map((query) => query.trim()).filter(Boolean))].slice(0, 4);
-    discoveredBySearch = await discoverToolsForQueries(input.auth, discoveryQueries, 12);
+  const connectorContracts = input.discoveredToolContracts ?? [];
+  if (requiredActions.length > 0 && connectorContracts.length === 0) {
+    throw new Error("Graph generation requires persisted connector contracts discovered before drafting");
   }
-  let discovered = prioritizeDiscoveredConnectors(
-    await mergeRequiredToolContracts(
-      discoveredBySearch,
-      requiredActions,
-    ),
-    specRequiredActions,
-    input.noSlopSpec?.specJson.delivery.provider,
-  );
-  let connectorContracts = discovered.map((entry) => ({
-    ...entry.contract,
-    constraints: { ...entry.contract.constraints, connected: entry.connected },
-  }));
   const internalContracts = baseRegistry.toolContracts.filter((contract) => contract.provider === "internal");
   reportLoopBuilderProgress({
-    stage: "tool_discovery",
-    message: `Loaded ${connectorContracts.length} connector contracts and ${internalContracts.length} internal contracts`,
+    stage: "contract_loading",
+    message: `Loaded ${connectorContracts.length} persisted connector contracts and ${internalContracts.length} internal contracts`,
     status: "completed",
     details: {
-      connectorContracts: discovered.map((entry) => ({
-        toolRef: entry.contract.toolRef,
-        name: entry.contract.name,
-        source: entry.source,
-        capabilityQueries: entry.capabilityQueries ?? [],
-        connected: entry.connected,
-        risk: entry.contract.constraints.risk ?? null,
-        toolkitVersion: entry.contract.constraints.toolkitVersion ?? null,
-        requiredInputPaths: Array.isArray(entry.contract.inputSchema.required) ? entry.contract.inputSchema.required : [],
+      connectorContracts: connectorContracts.map((contract) => ({
+        toolRef: contract.toolRef,
+        name: contract.name,
+        connected: contract.constraints.connected ?? false,
+        risk: contract.constraints.risk ?? null,
+        toolkitVersion: contract.constraints.toolkitVersion ?? null,
+        requiredInputPaths: Array.isArray(contract.inputSchema.required) ? contract.inputSchema.required : [],
       })),
-      effectiveQueries: discoveryQueries,
       internalContracts: internalContracts.map((contract) => ({ toolRef: contract.toolRef, name: contract.name })),
     },
   });
@@ -903,7 +770,6 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
   const maxPlanningAttempts = 1 + plannerConfig.maxCorrectionAttempts;
   const priorPlanningIRResult = loopPlanningIRSchema.safeParse(input.priorProposal?.definition.builderMeta?.planningIR);
   const priorPlanningIR = priorPlanningIRResult.success ? priorPlanningIRResult.data : undefined;
-  let discoveryExpanded = false;
 
   let transportFailures = 0;
   for (let attempt = 0; attempt < maxPlanningAttempts; attempt += 1) {
@@ -992,7 +858,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
       plannerStages.push(loopBuilderTraceStageSchema.parse({
         stage: "model_planner",
         model,
-        input: { attempt, searchQueries: search.plan.queries },
+        input: { attempt },
         output: { compilationIssues, stopReason: canRetryTransport ? null : failureReason },
       }));
       if (canRetryTransport) continue;
@@ -1016,38 +882,6 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     }) : compiled.issues;
     if (compiled.ok && issuesAfter.length > 0) {
       compiled = { ok: false, issues: issuesAfter };
-    }
-    if (!discoveryExpanded && issuesAfter.some((issue) =>
-      ["required_external_capability_undiscovered", "requested_provider_action_missing", "external_delivery_missing_lineage"].includes(issue.code))) {
-      discoveryExpanded = true;
-      reportLoopBuilderProgress({
-        stage: "tool_discovery",
-        message: "Required outbound capability is not covered; expanding connector discovery once",
-        status: "running",
-        details: { previousQueries: discoveryQueries, issues: issuesAfter },
-      });
-      const expansionSearch = await generateToolSearchPlan({
-        prompt,
-        intentContext: input.noSlopSpec?.intentContext,
-        specDelivery,
-        previousQueries: discoveryQueries,
-        coverageIssues: issuesAfter,
-        chat,
-      });
-      const expansionQueries = input.noSlopSpec
-        ? supplementDiscoveryQueriesFromSpec(expansionSearch.plan.queries, input.noSlopSpec.specJson)
-        : expansionSearch.plan.queries;
-      const expanded = await discoverToolsForQueries(input.auth, expansionQueries, 12);
-      discovered = prioritizeDiscoveredConnectors(
-        mergeDiscoveredToolContracts(discovered, expanded),
-        specRequiredActions,
-        input.noSlopSpec?.specJson.delivery.provider,
-      );
-      connectorContracts = discovered.map((entry) => ({
-        ...entry.contract,
-        constraints: { ...entry.contract.constraints, connected: entry.connected },
-      }));
-      discoveryQueries = [...new Set([...discoveryQueries, ...expansionQueries])].slice(0, 8);
     }
     const issueComparison = comparePlanningIssues(issuesBefore, issuesAfter);
     const stopReason = planningAttemptStopReason({
@@ -1110,7 +944,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     plannerStages.push(loopBuilderTraceStageSchema.parse({
       stage: "model_planner",
       model,
-      input: { attempt, searchQueries: search.plan.queries, compilationIssues: compilationIssues ?? [] },
+      input: { attempt, compilationIssues: compilationIssues ?? [] },
       output: { planningIR, compilation: compiled, attemptResult },
     }));
     if (compiled.ok) break;
@@ -1201,7 +1035,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
         agentSpecGeneration: { mode: "hybrid", model, generatedAt: new Date().toISOString() },
         designDiagnostics: {
           planningIR,
-          searchPlan: search.plan,
+          searchPlan: { queries: [] },
           ...(input.noSlopSpec?.intentContext ? { intentContext: input.noSlopSpec.intentContext } : {}),
         },
         planningIRVersion: "v2",
@@ -1243,10 +1077,9 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
   const trace = loopBuilderTraceSchema.parse({
     stages: [
       loopBuilderTraceStageSchema.parse({
-        stage: "tool_search_plan",
-        model: search.model,
+        stage: "persisted_connector_contracts",
         input: { prompt },
-        output: search.plan,
+        output: { discoveredTools: connectorContracts.length },
       }),
       ...plannerStages,
     ],
