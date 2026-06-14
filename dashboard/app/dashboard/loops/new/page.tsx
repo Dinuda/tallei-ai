@@ -14,7 +14,9 @@ import {
 } from "ai";
 import { ArrowLeft, Wand2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
+import { useStickToBottomContext } from "use-stick-to-bottom";
 
+import { cn } from "@/lib/utils";
 import {
   Conversation,
   ConversationContent,
@@ -124,10 +126,11 @@ export default function NewLoopBuilderPage() {
         <Button asChild variant="outline"><Link href="/dashboard/loops"><ArrowLeft className="mr-2 size-4" />Back</Link></Button>
       </header>
 
-      <main className="grid min-h-0 flex-1 gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <Card className="flex min-h-[70vh] flex-col overflow-hidden">
+      <main className="grid min-h-0 flex-1 gap-5">
+        <Card className="flex min-h-[70vh] max-h-[calc(100vh-12rem)] flex-col overflow-hidden">
           <Conversation>
             <ConversationContent>
+              <ScrollOnToolComplete messages={messages} />
               {messages.length === 0 && (
                 <ConversationEmptyState
                   icon={<Wand2 className="size-8" />}
@@ -151,7 +154,18 @@ export default function NewLoopBuilderPage() {
                       if (isToolUIPart(part)) {
                         const toolName = getToolName(part);
                         if (toolName === "interactivePrompt") {
-                          if (part.state === "input-streaming" || part.state === "input-available") return null;
+                          if (part.state === "input-streaming") {
+                            return (
+                              <InteractivePromptTool
+                                disabled
+                                key={index}
+                                onSubmit={() => undefined}
+                                part={part}
+                                placement="transcript"
+                              />
+                            );
+                          }
+                          if (part.state === "input-available") return null;
                           return (
                             <InteractivePromptTool
                               disabled
@@ -181,15 +195,24 @@ export default function NewLoopBuilderPage() {
                           return <AvailableTools key={index} part={part} />;
                         }
                         return (
-                          <Tool defaultOpen key={index}>
+                          <CollapsibleTool key={index} part={part}>
                             {part.type === "dynamic-tool"
                               ? <ToolHeader type={part.type} state={part.state} toolName={part.toolName} />
                               : <ToolHeader type={part.type} state={part.state} />}
-                            <ToolContent>
+                            <ToolContent
+                              className={cn(
+                                "transition-all",
+                                part.state !== "output-available" && [
+                                  "max-h-[360px] overflow-hidden",
+                                  "[mask-image:linear-gradient(to_bottom,black_85%,transparent_100%)]",
+                                  "[-webkit-mask-image:linear-gradient(to_bottom,black_85%,transparent_100%)]",
+                                ],
+                              )}
+                            >
                               <ToolInput input={part.input} />
                               <ToolOutput output={part.output} errorText={part.errorText} />
                             </ToolContent>
-                          </Tool>
+                          </CollapsibleTool>
                         );
                       }
                       return null;
@@ -247,32 +270,6 @@ export default function NewLoopBuilderPage() {
             </div>
           </div>
         </Card>
-
-        <Card className="h-fit space-y-5 p-5">
-          <div>
-            <h2 className="font-semibold">Current artifacts</h2>
-            <p className="text-sm text-muted-foreground">The persisted projection for this builder session.</p>
-          </div>
-          <Artifact label="Session" value={session?.id} />
-          <Artifact label="Composio session" value={session?.composioSessionId} />
-          <Artifact label="Phase" value={session?.phase} />
-          <Artifact label="Intent analysis" value={session?.intentAnalysis ? "Resolved or awaiting clarification" : undefined} />
-          <Artifact label="Discovered tools" value={session ? `${session.discoveredToolContracts.length} exact contracts` : undefined} />
-          <Artifact label="Spec" value={session?.specId ?? undefined} />
-          <Artifact label="Workflow graph" value={session?.currentProposal?.title} />
-          <Artifact label="Saved workflow" value={session?.workflowId ?? undefined} />
-          {progress.length > 0 && (
-            <div>
-              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Progress</div>
-              <div className="space-y-2">
-                {progress.slice(-5).map((event) => (
-                  <div className="text-sm" key={event.id}>{event.message}</div>
-                ))}
-              </div>
-            </div>
-          )}
-          {session?.error && <p className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{session.error.message}</p>}
-        </Card>
       </main>
     </div>
   );
@@ -292,7 +289,50 @@ function InteractivePromptTool({
   placement?: "transcript" | "composer";
 }) {
   if (part.state === "input-streaming") {
-    return <p className="my-3 text-sm text-muted-foreground">Preparing choices...</p>;
+    const input = part.input && typeof part.input === "object" ? part.input as {
+      question?: string;
+      options?: InteractivePromptOption[];
+    } : {};
+    const options = input.options ?? [];
+    return (
+      <div className={cn(
+        "w-full overflow-hidden rounded-xl border bg-card",
+        placement === "composer"
+          ? "rounded-lg border-input bg-background shadow-none"
+          : "my-3 shadow-sm",
+      )}>
+        <div className="flex items-center gap-2 px-4 pb-2 pt-4 text-sm font-medium">
+          <span>{input.question ?? "Analyzing your request"}</span>
+          <span className="inline-flex gap-0.5">
+            <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" style={{ animationDelay: "0ms" }} />
+            <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" style={{ animationDelay: "150ms" }} />
+            <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" style={{ animationDelay: "300ms" }} />
+          </span>
+        </div>
+        {options.length > 0 && (
+          <div className="space-y-1 px-2 pb-3">
+            {options.map((option, index) => (
+              <div
+                key={option.id ?? index}
+                className="flex animate-in fade-in slide-in-from-bottom-1 items-start gap-3 rounded-lg px-2.5 py-2"
+                style={{ animationDuration: "300ms" }}
+              >
+                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] text-muted-foreground">
+                  {index + 1}
+                </span>
+                <span className="text-sm text-muted-foreground">{option.label}</span>
+              </div>
+            ))}
+            <div className="flex animate-pulse items-start gap-3 rounded-lg px-2.5 py-2">
+              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] text-muted-foreground/30">
+                {options.length + 1}
+              </span>
+              <span className="h-4 w-32 rounded bg-muted" />
+            </div>
+          </div>
+        )}
+      </div>
+    );
   }
   const input = part.input && typeof part.input === "object" ? part.input as {
     question?: string;
@@ -320,6 +360,41 @@ function InteractivePromptTool({
   );
 }
 
+function ScrollOnToolComplete({ messages }: { messages: UIMessage[] }) {
+  const { scrollToBottom, isAtBottom } = useStickToBottomContext();
+  const lastCompletedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const completedTool = messages
+      .flatMap((message) => message.parts)
+      .find((part) => isToolUIPart(part) && part.state === "output-available" && "toolCallId" in part && part.toolCallId !== lastCompletedRef.current);
+
+    if (completedTool && "toolCallId" in completedTool) {
+      lastCompletedRef.current = completedTool.toolCallId;
+      if (isAtBottom) {
+        void scrollToBottom({
+          animation: { damping: 0.8, stiffness: 0.04, mass: 1.5 },
+          preserveScrollPosition: true,
+        });
+      }
+    }
+  }, [messages, scrollToBottom, isAtBottom]);
+
+  return null;
+}
+
+function CollapsibleTool({ part, children }: { part: ToolPart; children: React.ReactNode }) {
+  const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined);
+  const isCompleted = part.state === "output-available";
+  const open = isCompleted ? (userOpen ?? false) : (userOpen ?? true);
+
+  return (
+    <Tool open={open} onOpenChange={setUserOpen}>
+      {children}
+    </Tool>
+  );
+}
+
 function findActiveInteractivePrompt(messages: UIMessage[]): ToolPart | null {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = messages[messageIndex];
@@ -343,7 +418,7 @@ function AvailableTools({ part }: { part: ToolPart }) {
     risk?: string | null;
   }> } : {};
   return (
-    <Tool defaultOpen>
+    <CollapsibleTool part={part}>
       {part.type === "dynamic-tool"
         ? <ToolHeader type={part.type} state={part.state} toolName={part.toolName} />
         : <ToolHeader type={part.type} state={part.state} />}
@@ -361,15 +436,8 @@ function AvailableTools({ part }: { part: ToolPart }) {
           ))}
         </div>
       </ToolContent>
-    </Tool>
+    </CollapsibleTool>
   );
 }
 
-function Artifact({ label, value }: { label: string; value?: string | null }) {
-  return (
-    <div className="border-b pb-3 last:border-0">
-      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-1 break-all text-sm">{value || "Not created yet"}</div>
-    </div>
-  );
-}
+

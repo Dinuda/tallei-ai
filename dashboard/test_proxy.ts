@@ -2,7 +2,7 @@ import { config } from "dotenv";
 config({ path: ".env.local" });
 
 import { NextRequest } from "next/server";
-import { GET } from "./app/api/memories/cleanup/[...path]/route.ts";
+import { GET } from "./app/api/memories/cleanup/[...path]/route";
 
 async function run() {
   console.log("SECRET VALUE:", JSON.stringify(process.env.INTERNAL_API_SECRET));
