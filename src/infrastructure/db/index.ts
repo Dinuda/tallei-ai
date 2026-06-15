@@ -154,6 +154,99 @@ async function ensurePrimaryTenantMembership(client: DbClient, userId: string, e
   );
 }
 
+async function backfillWorkspaces(client: DbClient): Promise<void> {
+  const memberships = await client.query<{ tenant_id: string; user_id: string }>(
+    `SELECT tenant_id, user_id FROM tenant_memberships`
+  );
+
+  for (const membership of memberships.rows) {
+    const { tenant_id: tenantId, user_id: userId } = membership;
+
+    let personal = await client.query<{ id: string }>(
+      `SELECT id
+       FROM loop_workspaces
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND is_default = TRUE
+       LIMIT 1`,
+      [tenantId, userId]
+    );
+
+    if (!personal.rows[0]) {
+      const existing = await client.query<{ id: string }>(
+        `SELECT id
+         FROM loop_workspaces
+         WHERE tenant_id = $1
+           AND user_id = $2
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [tenantId, userId]
+      );
+      if (existing.rows[0]) {
+        await client.query(
+          `UPDATE loop_workspaces
+           SET kind = 'personal',
+               is_default = TRUE,
+               slug = 'personal',
+               updated_at = NOW()
+           WHERE id = $1`,
+          [existing.rows[0].id]
+        );
+        personal = existing;
+      } else {
+        personal = await client.query<{ id: string }>(
+          `INSERT INTO loop_workspaces
+             (tenant_id, user_id, name, description, slug, kind, is_default, icon, color, settings_json)
+           VALUES ($1, $2, 'Personal', NULL, 'personal', 'personal', TRUE, NULL, '#6366f1', '{}'::jsonb)
+           RETURNING id`,
+          [tenantId, userId]
+        );
+      }
+    }
+
+    const personalId = personal.rows[0]!.id;
+
+    await client.query(
+      `INSERT INTO workspace_memberships (workspace_id, tenant_id, user_id, role)
+       VALUES ($1, $2, $3, 'owner')
+       ON CONFLICT (user_id, workspace_id) DO NOTHING`,
+      [personalId, tenantId, userId]
+    );
+
+    await client.query(
+      `INSERT INTO user_workspace_preferences (user_id, tenant_id, last_active_workspace_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id) DO UPDATE
+         SET last_active_workspace_id = COALESCE(user_workspace_preferences.last_active_workspace_id, EXCLUDED.last_active_workspace_id),
+             updated_at = NOW()`,
+      [userId, tenantId, personalId]
+    );
+
+    const backfillTables = [
+      "workflows",
+      "notification_channels",
+      "connector_accounts",
+      "documents",
+      "document_lots",
+      "workflow_builder_sessions",
+      "collab_tasks",
+    ] as const;
+
+    for (const table of backfillTables) {
+      if (await hasColumn(client, table, "workspace_id")) {
+        await client.query(
+          `UPDATE ${table}
+           SET workspace_id = $1
+           WHERE tenant_id = $2
+             AND user_id = $3
+             AND workspace_id IS NULL`,
+          [personalId, tenantId, userId]
+        );
+      }
+    }
+  }
+}
+
 async function backfillTenants(client: DbClient): Promise<void> {
   const users = await client.query<{ id: string; email: string | null }>(
     "SELECT id, email FROM users"
@@ -2646,7 +2739,135 @@ export async function initDb() {
         ADD COLUMN IF NOT EXISTS pepper_version TEXT NOT NULL DEFAULT 'v1';
     `);
 
+    await client.query(`
+      ALTER TABLE loop_workspaces
+        ADD COLUMN IF NOT EXISTS slug TEXT,
+        ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'custom',
+        ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS icon TEXT,
+        ADD COLUMN IF NOT EXISTS color TEXT,
+        ADD COLUMN IF NOT EXISTS settings_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+      UPDATE loop_workspaces
+      SET kind = COALESCE(NULLIF(kind, ''), 'custom')
+      WHERE kind IS NULL OR kind = '';
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_workspaces_user_slug
+        ON loop_workspaces(user_id, slug)
+        WHERE slug IS NOT NULL;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_workspaces_user_default
+        ON loop_workspaces(user_id)
+        WHERE is_default = TRUE;
+
+      CREATE TABLE IF NOT EXISTS workspace_memberships (
+        workspace_id UUID NOT NULL REFERENCES loop_workspaces(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'admin', 'member')),
+        joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, workspace_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workspace_memberships_workspace
+        ON workspace_memberships(workspace_id, joined_at DESC);
+
+      CREATE TABLE IF NOT EXISTS user_workspace_preferences (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        last_active_workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE SET NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS workspace_memory_records (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        workspace_id UUID NOT NULL REFERENCES loop_workspaces(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        content_ciphertext TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual'
+          CHECK (source IN ('manual', 'loop_run', 'google_doc', 'faq_import')),
+        source_ref TEXT,
+        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        qdrant_point_id TEXT NOT NULL,
+        memory_type TEXT NOT NULL DEFAULT 'fact',
+        category TEXT,
+        tier TEXT NOT NULL DEFAULT 'short_term',
+        lifecycle TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        deleted_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workspace_memory_scope_created
+        ON workspace_memory_records(tenant_id, workspace_id, created_at DESC)
+        WHERE deleted_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS workspace_knowledge_bases (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        workspace_id UUID NOT NULL REFERENCES loop_workspaces(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('custom_faq', 'google_doc')),
+        config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workspace_knowledge_bases_scope
+        ON workspace_knowledge_bases(workspace_id, kind, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS workspace_knowledge_base_entries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        knowledge_base_id UUID NOT NULL REFERENCES workspace_knowledge_bases(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        workspace_id UUID NOT NULL REFERENCES loop_workspaces(id) ON DELETE CASCADE,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workspace_kb_entries_kb
+        ON workspace_knowledge_base_entries(knowledge_base_id, sort_order ASC);
+
+      ALTER TABLE notification_channels
+        ADD COLUMN IF NOT EXISTS workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS idx_notification_channels_workspace
+        ON notification_channels(tenant_id, user_id, workspace_id);
+
+      ALTER TABLE connector_accounts
+        ADD COLUMN IF NOT EXISTS workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS idx_connector_accounts_workspace
+        ON connector_accounts(tenant_id, user_id, workspace_id);
+
+      ALTER TABLE documents
+        ADD COLUMN IF NOT EXISTS workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS idx_documents_workspace
+        ON documents(tenant_id, user_id, workspace_id);
+
+      ALTER TABLE document_lots
+        ADD COLUMN IF NOT EXISTS workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS idx_document_lots_workspace
+        ON document_lots(tenant_id, user_id, workspace_id);
+
+      ALTER TABLE workflow_builder_sessions
+        ADD COLUMN IF NOT EXISTS workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_workspace
+        ON workflow_builder_sessions(tenant_id, user_id, workspace_id);
+
+      ALTER TABLE collab_tasks
+        ADD COLUMN IF NOT EXISTS workspace_id UUID REFERENCES loop_workspaces(id) ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS idx_collab_tasks_workspace
+        ON collab_tasks(tenant_id, user_id, workspace_id);
+    `);
+
     await backfillTenants(client);
+    await backfillWorkspaces(client);
     await client.query(`
       UPDATE api_keys
       SET revoked_at = NOW()

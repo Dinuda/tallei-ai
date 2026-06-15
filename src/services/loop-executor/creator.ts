@@ -231,7 +231,7 @@ export async function createLoopWorkflow(input: {
       workflowId,
       input.auth.tenantId,
       input.auth.userId,
-      input.workspaceId ?? null,
+      input.workspaceId ?? input.auth.workspaceId ?? null,
       title,
       fingerprint,
       definition.goal,
@@ -333,6 +333,7 @@ export async function getLoopWorkflow(auth: AuthContext, workflowId: string): Pr
 
 export async function listLoopWorkflows(auth: AuthContext): Promise<LoopWorkflowView[]> {
   await requireLoopAdmin(auth);
+  const workspaceId = auth.workspaceId;
   const result = await pool.query<{
     id: string;
     title: string;
@@ -351,9 +352,12 @@ export async function listLoopWorkflows(auth: AuthContext): Promise<LoopWorkflow
        AND user_id = $2
        AND definition_version = $3
        AND status IN ('verifying', 'active')
+       ${workspaceId ? "AND workspace_id = $4" : ""}
      ORDER BY updated_at DESC
      LIMIT 50`,
-    [auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION]
+    workspaceId
+      ? [auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION, workspaceId]
+      : [auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION]
   );
   return result.rows.map(mapLoopWorkflowRow);
 }

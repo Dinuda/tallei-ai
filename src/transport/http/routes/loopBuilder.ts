@@ -33,11 +33,17 @@ import {
   type WorkflowBuilderSession,
 } from "../../../services/loop-builder/sessions.js";
 import { pool } from "../../../infrastructure/db/index.js";
+import type { AuthContext } from "../../../domain/auth/index.js";
+import { listKnowledgeBindings } from "../../../services/knowledge-base.js";
+import { loadWorkflowUserProfile } from "../../../services/loop-engine/workflow-user-profile.js";
+import type { ToolContract } from "../../../services/tool-spec/types.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
+import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
 const router = Router();
 
 router.use(authMiddleware);
+router.use(workspaceMiddleware);
 
 const chatSchema = z.object({
   sessionId: z.string().uuid().optional(),
@@ -144,6 +150,12 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
         requirementId: z.string().min(1),
       }),
     }),
+    knowledgeBaseSetup: tool({
+      description: "Render the knowledge base picker for the pending grounding requirement. Pre-selects Tallei internal memory and workspace memory (including inter-loop history from prior runs). Additional FAQ/Google Doc collections and connected-app product/user search are optional checkboxes. No user-provided URLs are required. This is a UI interaction, not a builder command.",
+      inputSchema: z.object({
+        requirementId: z.string().min(1),
+      }),
+    }),
     interactivePrompt: tool({
       description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command. Only set the 'icon' field when an option represents a known external service or app (e.g., HubSpot, Salesforce, Slack, Notion, Gmail). For action options like 'Approve spec', 'Refine the spec', 'Save workflow', 'Other', or 'I will connect manually', leave the 'icon' field empty.",
       inputSchema: z.object({
@@ -215,7 +227,49 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
   };
 }
 
-function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
+function connectedSearchToolkits(contracts: ToolContract[]): Array<{ toolkit: string; name: string; connected: boolean }> {
+  const seen = new Set<string>();
+  const toolkits: Array<{ toolkit: string; name: string; connected: boolean }> = [];
+  for (const contract of contracts) {
+    const match = contract.toolRef.match(/^composio\.([^.]+)\.search$/i);
+    if (!match?.[1]) continue;
+    const toolkit = match[1].toLowerCase();
+    if (seen.has(toolkit)) continue;
+    seen.add(toolkit);
+    toolkits.push({
+      toolkit,
+      name: contract.name,
+      connected: contract.constraints.connected === true,
+    });
+  }
+  return toolkits;
+}
+
+async function buildAnalyzerSystemPrompt(
+  auth: AuthContext,
+  session: WorkflowBuilderSession,
+): Promise<string> {
+  const [bindings, profile] = await Promise.all([
+    listKnowledgeBindings(auth).catch(() => null),
+    loadWorkflowUserProfile(auth).catch(() => null),
+  ]);
+  const recalledPreferences = (profile?.memories ?? []).map((memory) => ({
+    id: memory.id,
+    text: memory.text.slice(0, 200),
+    category: memory.category ?? null,
+  }));
+  const groundingContext = {
+    builtinSources: ["tallei_memory", "workspace_memory"],
+    workspaceMemoryIncludes: "prior loop runs, synced docs, and workspace preferences in this workspace",
+    recalledPreferences,
+    workspaceKnowledgeBases: (bindings?.knowledgeBases ?? []).map((kb) => ({
+      id: kb.id,
+      name: kb.name,
+      kind: kb.kind,
+    })),
+    connectedSearchToolkits: connectedSearchToolkits(session.discoveredToolContracts),
+  };
+
   return [
     "You are the loop builder analyzer and orchestrator.",
     "Reason internally about the user's intent and clarification answers. Intent analysis and clarification resolution are not tools.",
@@ -227,8 +281,15 @@ function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
     "Never ask the user to paste API keys, passwords, or credentials. Offer account connection as an option instead.",
     "When the intent is clear and the user has not selected apps yet, call appSelection and stop. Never infer or silently select an app from the workflow description.",
     "After appSelection returns, call getAvailableTools with the complete normalized resolved intent and the exact selectedToolkits slugs from its output. Discover tools only from those apps.",
-    "After getAvailableTools, resolve every pending build-contract requirement one at a time. For a pending connector requirement, call connectorSetup and stop; never use interactivePrompt for connector setup and never offer connect later. For a pending trigger_schedule requirement, call scheduleSetup and stop. Never invent event-driven execution unless an exact discovered trigger capability explicitly supports it. Never offer schedules more frequent than hourly. For other requirements, ask the user for the requirement's value, then call resolveBuildRequirement with a typed value matching its schema.",
-    "After scheduleSetup returns, pass its exact typed value to resolveBuildRequirement. Do not reinterpret the selected schedule.",
+    "Grounding and knowledge sources playbook:",
+    "- Built-in sources (no URLs): tallei_memory and workspace_memory are always available. Workspace memory includes prior loop run outputs and preferences in the active workspace.",
+    "- When the user mentions internal knowledge, memory, docs, knowledge bases, company info, or FAQs, call knowledgeBaseSetup immediately and stop. Never ask for URLs, document names, or KB identifiers in prose.",
+    "- When groundingContext.recalledPreferences is non-empty and the user has not yet confirmed preferences this session, call interactivePrompt first with: question 'We found these saved preferences — are these what you want this loop to use, or something else?', options 'Use these preferences' (recommended), 'Use memory but I will adjust later', 'Skip preferences for this loop', allowOther true. Then continue to knowledgeBaseSetup when grounding is still pending.",
+    "- For a pending grounding requirement, never use interactivePrompt as the primary grounding UI when knowledgeBaseSetup is the correct tool.",
+    "- Optional product/user/CRM data: offer only via knowledgeBaseSetup external toolkit checkboxes or interactivePrompt using connectedSearchToolkits from groundingContext. If a toolkit is wanted but not connected, offer connectorSetup or skip — never require pasted URLs or credentials.",
+    "- User may choose no grounding via resolveBuildRequirement with { mode: 'none' } when allowNone is true.",
+    "After getAvailableTools, resolve every pending build-contract requirement one at a time. For a pending connector requirement, call connectorSetup and stop; never use interactivePrompt for connector setup and never offer connect later. For a pending trigger_schedule requirement, call scheduleSetup and stop. For a pending grounding requirement, call knowledgeBaseSetup and stop. Never invent event-driven execution unless an exact discovered trigger capability explicitly supports it. Never offer schedules more frequent than hourly. For other requirements, ask the user for the requirement's value, then call resolveBuildRequirement with a typed value matching its schema.",
+    "After scheduleSetup or knowledgeBaseSetup returns, pass its exact typed value to resolveBuildRequirement. Do not reinterpret the selected schedule or knowledge sources.",
     "Never show schema validation errors, cron expressions, tool identifiers, or internal validation wording to the user. If a requested capability is unavailable, say that capability is currently limited or unsupported and offer the nearest supported choice through the appropriate UI tool.",
     "Never treat unrelated prose as a valid requirement answer. Never silently assume a connector, trigger, schedule, source, template, stable input, or review policy.",
     "The user may explicitly choose no source or no template only when the requirement allows it; persist that choice through resolveBuildRequirement.",
@@ -269,6 +330,7 @@ function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
       } : null,
       workflowId: session.workflowId,
       error: null,
+      groundingContext,
     })}`,
   ].join("\n\n");
 }
@@ -315,9 +377,10 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
     const openai = createOpenAI({
       apiKey: process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY,
     });
+    const system = await buildAnalyzerSystemPrompt(req.authContext!, session);
     const result = streamText({
       model: openai(loopBuilderOpenAiModel()),
-      system: analyzerSystemPrompt(session),
+      system,
       messages: await convertToModelMessages(messages, { tools }),
       tools,
       stopWhen: stepCountIs(10),
@@ -364,7 +427,13 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
-    res.json({ session, messages, commands });
+    const profile = await loadWorkflowUserProfile(req.authContext!).catch(() => null);
+    const recalledPreferences = (profile?.memories ?? []).map((memory) => ({
+      id: memory.id,
+      text: memory.text.slice(0, 200),
+      category: memory.category ?? null,
+    }));
+    res.json({ session, messages, commands, recalledPreferences });
   } catch (error) {
     res.status(error instanceof z.ZodError ? 400 : 404).json({ error: error instanceof Error ? error.message : "Builder session not found" });
   }

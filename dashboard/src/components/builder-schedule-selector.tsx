@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Check, Clock3, LoaderCircle, Webhook } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 export type ScheduleSelectionOutput = {
   answerText: string;
@@ -49,11 +50,16 @@ export function BuilderScheduleSelector({
 
   if (completedOutput) {
     return (
-      <div className="my-3 border border-[#d1d5db] bg-white">
-        <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-2">
-          <p className="text-[10px] font-semibold tracking-[0.1em] text-[#6b7280] uppercase">Schedule selected</p>
+      <div className="my-3 border border-[#d1d5db] bg-white px-4 py-3">
+        <div className="flex items-center gap-3">
+          <span className="flex size-8 items-center justify-center bg-[#111827] text-white">
+            <Check className="size-4" />
+          </span>
+          <div>
+            <div className="text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>Schedule selected</div>
+            <div className="text-xs text-[#6b7280]">{completedOutput.answerText}</div>
+          </div>
         </div>
-        <div className="p-4 text-[13px] leading-6 text-[#111827]">{completedOutput.answerText}</div>
       </div>
     );
   }
@@ -67,23 +73,38 @@ export function BuilderScheduleSelector({
   return (
     <div className="w-full border border-[#d1d5db] bg-white">
       <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-3">
-        <h2 className="text-[14px] font-bold tracking-[-0.02em] text-[#111827]">Choose a schedule</h2>
-        <p className="mt-0.5 text-[13px] text-[#6b7280]">
-          {!loading && events.length > 0
-            ? "Choose what should start this loop."
-            : "Real-time triggers are not available for these connected apps yet. Choose hourly or daily instead."}
-        </p>
+        <div className="flex items-start gap-3">
+          <span className="flex size-8 shrink-0 items-center justify-center bg-[#e5e7eb] text-[#6b7280]">
+            <Clock3 className="size-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-[14px] font-bold tracking-[-0.02em] text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>Choose a schedule</h2>
+            <p className="mt-0.5 text-[13px] text-[#6b7280]">
+              {!loading && events.length > 0
+                ? "Choose what should start this loop."
+                : "Real-time triggers are not available for these connected apps yet. Choose hourly or daily instead."}
+            </p>
+          </div>
+        </div>
       </div>
 
       <div className="p-4">
-        {loading && <div className="flex items-center justify-center gap-2 py-5 text-xs text-[#6b7280]"><LoaderCircle className="size-4 animate-spin" /> Checking available triggers...</div>}
+        {loading && (
+          <div className="flex items-center gap-2 border border-dashed border-[#d1d5db] bg-[#fafafa] px-4 py-5 text-xs text-[#6b7280]">
+            <LoaderCircle className="size-4 animate-spin" /> Checking available triggers...
+          </div>
+        )}
+
         {!loading && events.length > 0 && (
           <div className="mb-4">
-            <p className="mb-2 text-[10px] font-semibold tracking-[0.1em] text-[#6b7280] uppercase">Event triggers</p>
-            <div className="space-y-1">
+            <p className="mb-2 text-[10px] font-semibold tracking-[0.1em] text-[#6b7280] uppercase" style={{ fontFamily: "var(--font-title)" }}>Event triggers</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {events.map((event) => (
                 <Button
-                  className="h-auto w-full justify-start border border-[#d1d5db] bg-white px-4 py-4 text-left text-[#111827] hover:bg-[#fafafa]"
+                  className={cn(
+                    "h-auto min-h-[72px] justify-start border bg-white px-4 py-3 text-left transition-colors",
+                    "border-[#e5e7eb] text-[#111827] hover:border-[#d1d5db] hover:bg-[#fafafa]"
+                  )}
                   key={`${event.toolkit}:${event.slug}`}
                   onClick={() => onComplete?.({
                     answerText: event.name,
@@ -93,21 +114,28 @@ export function BuilderScheduleSelector({
                   variant="outline"
                   style={{ borderRadius: 0 }}
                 >
-                  <Webhook className="mr-3 size-4 shrink-0 text-[#d97706]" />
-                  <span><span className="block text-sm font-medium">{event.name}</span><span className="mt-1 block text-xs font-normal text-[#6b7280]">{event.description}</span></span>
+                  <Webhook className="mr-3 size-4 shrink-0 text-[#6b7280]" />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium" style={{ fontFamily: "var(--font-title)" }}>{event.name}</span>
+                    <span className="mt-0.5 block text-xs font-normal text-[#6b7280]">{event.description}</span>
+                  </span>
                 </Button>
               ))}
             </div>
           </div>
         )}
+
         <div>
           {!loading && events.length > 0 && (
-            <p className="mb-2 text-[10px] font-semibold tracking-[0.1em] text-[#6b7280] uppercase">Schedule</p>
+            <p className="mb-2 text-[10px] font-semibold tracking-[0.1em] text-[#6b7280] uppercase" style={{ fontFamily: "var(--font-title)" }}>Schedule</p>
           )}
-          <div className="space-y-1">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {choices.map((choice) => (
               <Button
-                className="h-auto w-full justify-start border border-[#d1d5db] bg-white px-4 py-4 text-left text-[#111827] hover:bg-[#fafafa]"
+                className={cn(
+                  "h-auto min-h-[72px] justify-start border bg-white px-4 py-3 text-left transition-colors",
+                  "border-[#e5e7eb] text-[#111827] hover:border-[#d1d5db] hover:bg-[#fafafa]"
+                )}
                 key={choice.cron}
                 onClick={() => onComplete?.({
                   answerText: choice.label,
@@ -118,7 +146,10 @@ export function BuilderScheduleSelector({
                 style={{ borderRadius: 0 }}
               >
                 <Clock3 className="mr-3 size-4 shrink-0 text-[#6b7280]" />
-                <span><span className="block text-sm font-medium">{choice.label}</span><span className="mt-1 block text-xs font-normal text-[#6b7280]">{choice.description}</span></span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium" style={{ fontFamily: "var(--font-title)" }}>{choice.label}</span>
+                  <span className="mt-0.5 block text-xs font-normal text-[#6b7280]">{choice.description}</span>
+                </span>
               </Button>
             ))}
           </div>

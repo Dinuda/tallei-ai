@@ -33,9 +33,7 @@ function ProviderLogo({
   selected: boolean;
   index: number;
 }) {
-  const src = icon
-    ? `https://logos.composio.dev/api/${icon}`
-    : undefined;
+  const src = icon ? `https://logos.composio.dev/api/${icon}` : undefined;
 
   if (!src) {
     return (
@@ -43,8 +41,8 @@ function ProviderLogo({
         className={cn(
           "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px]",
           selected
-            ? "border-[#4338ca] bg-[#4338ca] text-white"
-            : "border-[#e8e5f0] bg-white text-[#8a86a0]"
+            ? "border-[#111827] bg-[#111827] text-white"
+            : "border-[#e5e7eb] bg-white text-[#6b7280]"
         )}
       >
         {selected ? <Check className="size-3" /> : index + 1}
@@ -55,21 +53,16 @@ function ProviderLogo({
   return (
     <span
       className={cn(
-        "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border overflow-hidden",
+        "mt-0.5 flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border",
         selected
-          ? "border-[#4338ca] bg-[#4338ca]"
-          : "border-[#e8e5f0] bg-white"
+          ? "border-[#111827] bg-[#111827]"
+          : "border-[#e5e7eb] bg-white"
       )}
     >
       {selected ? (
         <Check className="size-4 text-white" />
       ) : (
-        <img
-          alt={label}
-          className="size-5 object-contain"
-          draggable={false}
-          src={src}
-        />
+        <img alt={label} className="size-5 object-contain" draggable={false} src={src} />
       )}
     </span>
   );
@@ -149,21 +142,23 @@ export function InteractivePromptMenu({
   return (
     <div
       className={cn(
-        "w-full overflow-hidden bg-[#f9f8fc]",
+        "w-full overflow-hidden bg-white",
         placement === "composer"
-          ? "rounded-none border-0 shadow-none"
-          : "my-3 rounded-xl border border-[#e8e5f0] shadow-sm"
+          ? "border-0 shadow-none"
+          : "my-3 border border-[#d1d5db] shadow-sm"
       )}
     >
-      <div className="px-4 pb-2 pt-4 text-sm font-medium">{question}</div>
-      <div className="space-y-1 px-2">
+      <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-3 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+        {question}
+      </div>
+      <div className="space-y-1 p-2">
         {options.map((option, index) => {
           const selected = selectedIds.includes(option.id);
           return (
             <button
               className={cn(
-                "flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors",
-                selected ? "bg-[#f0edff] text-foreground" : "hover:bg-[#f5f3ff]",
+                "flex w-full items-start gap-3 border border-transparent px-3 py-2.5 text-left transition-colors",
+                selected ? "border-[#d1d5db] bg-[#fafafa] text-[#111827]" : "hover:bg-[#fafafa]",
                 (disabled || isSubmitted) && "cursor-default"
               )}
               disabled={disabled || isSubmitted}
@@ -178,24 +173,24 @@ export function InteractivePromptMenu({
                 selected={selected}
               />
               <span className="min-w-0 flex-1">
-                <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                <span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
                   <span>{option.label}</span>
                   {recommended.has(option.id) && (
-                    <span className="rounded-full border border-[#e8e5f0] bg-white px-2 py-0.5 text-[10px] font-medium text-[#8a86a0]">
+                    <span className="border border-[#e5e7eb] bg-[#fafafa] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#6b7280]">
                       Recommended
                     </span>
                   )}
                 </span>
                 {option.description && (
-                  <span className="mt-0.5 block text-xs text-[#8a86a0]">
+                  <span className="mt-0.5 block text-xs text-[#6b7280]">
                     {option.description}
                   </span>
                 )}
               </span>
               <Circle
                 className={cn(
-                  "mt-2 size-2 text-[#d1cfd8]",
-                  selected && "fill-[#4338ca] text-[#4338ca]"
+                  "mt-2 size-2 text-[#d1d5db]",
+                  selected && "fill-[#111827] text-[#111827]"
                 )}
               />
             </button>
@@ -203,10 +198,10 @@ export function InteractivePromptMenu({
         })}
       </div>
       {allowOther && !isSubmitted && (
-        <div className="mx-3 mt-2 flex items-center gap-2 border-t pt-3">
-          <Pencil className="size-4 shrink-0 text-muted-foreground" />
+        <div className="mx-3 mt-2 flex items-center gap-2 border-t border-[#e5e7eb] pt-3">
+          <Pencil className="size-4 shrink-0 text-[#6b7280]" />
           <Input
-            className="border-0 px-0 shadow-none focus-visible:ring-0"
+            className="border-0 px-0 text-[#111827] shadow-none placeholder:text-[#9ca3af] focus-visible:ring-0"
             disabled={disabled}
             onChange={(event) => setOtherText(event.target.value)}
             onKeyDown={(event) => {
@@ -217,11 +212,11 @@ export function InteractivePromptMenu({
           />
         </div>
       )}
-      <div className="flex items-center justify-between gap-3 px-3 py-3">
+      <div className="flex items-center justify-between gap-3 border-t border-[#e5e7eb] bg-[#fafafa] px-3 py-3">
         <div className="flex items-center gap-2">
           {placement === "composer" && onDismiss && !isSubmitted && (
             <Button
-              className="h-7 gap-1.5 px-2 text-xs"
+              className="h-7 gap-1.5 px-2 text-xs text-[#6b7280] hover:bg-white hover:text-[#111827]"
               disabled={disabled}
               onClick={onDismiss}
               size="sm"
@@ -229,10 +224,10 @@ export function InteractivePromptMenu({
               variant="ghost"
             >
               <X className="size-3.5" />
-              Dismiss <span className="text-muted-foreground">ESC</span>
+              Dismiss <span className="text-[#9ca3af]">ESC</span>
             </Button>
           )}
-          <span className="text-xs text-muted-foreground">
+          <span className="text-xs text-[#6b7280]">
             {isSubmitted
               ? `Answered: ${submittedAnswer?.answerText}`
               : allowMultiple
@@ -242,6 +237,7 @@ export function InteractivePromptMenu({
         </div>
         {!isSubmitted && (
           <Button
+            className="bg-[#111827] text-white hover:bg-[#374151]"
             disabled={
               disabled ||
               (selectedIds.length === 0 && !otherText.trim())
@@ -249,6 +245,7 @@ export function InteractivePromptMenu({
             onClick={submit}
             size="sm"
             type="button"
+            style={{ borderRadius: 0 }}
           >
             Submit <CornerDownLeft className="size-3.5" />
           </Button>

@@ -18,6 +18,7 @@ import {
 import { pool } from "../../../infrastructure/db/index.js";
 import { handleComposioTriggerWebhook } from "../../../services/loop-runtime/composio-trigger.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
+import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
 const router = Router();
 
@@ -43,6 +44,7 @@ router.post("/composio/webhook", async (req, res: Response) => {
 });
 
 router.use(authMiddleware);
+router.use(workspaceMiddleware);
 
 const createAuthSessionSchema = z.object({
   app_key: z.string().min(1).optional(),

@@ -58,6 +58,7 @@ import {
   resolvedRuntimeInputs,
 } from "./input-satisfaction.js";
 import { projectOperatorView } from "./operator-view.js";
+import { persistLoopRunWorkspaceMemory } from "../workspace-memory.js";
 import {
   gateSurfaceSubmissionSchema,
   isInputSurface,
@@ -1746,6 +1747,54 @@ async function handleFinalizeRun(command: CommandRow) {
     runId: command.run_id,
     eventType: "run_succeeded",
   });
+
+  try {
+    const runRow = await pool.query<{
+      workflow_id: string;
+      context_json: unknown;
+      title: string;
+      workspace_id: string | null;
+    }>(
+      `SELECT r.workflow_id, r.context_json, w.title, w.workspace_id
+       FROM loop_engine_runs r
+       JOIN workflows w ON w.id = r.workflow_id
+       WHERE r.id = $1
+       LIMIT 1`,
+      [command.run_id],
+    );
+    const row = runRow.rows[0];
+    if (row?.workspace_id) {
+      const context = runtimeContextSchema.parse(asObject(row.context_json));
+      const artifactRows = await pool.query<{ body: string | null }>(
+        `SELECT body
+         FROM loop_engine_artifacts
+         WHERE run_id = $1
+           AND body IS NOT NULL
+           AND invalidated_at IS NULL
+         ORDER BY created_at DESC
+         LIMIT 2`,
+        [command.run_id],
+      );
+      const auth: AuthContext = {
+        tenantId: command.tenant_id,
+        userId: command.user_id,
+        authMode: "internal",
+        plan: "free",
+        workspaceId: row.workspace_id,
+      };
+      await persistLoopRunWorkspaceMemory(auth, {
+        workflowId: row.workflow_id,
+        runId: command.run_id,
+        workflowTitle: row.title,
+        approvedMemories: context.approvedMemories,
+        artifactTexts: artifactRows.rows
+          .map((artifact) => artifact.body ?? "")
+          .filter((text) => text.trim().length > 0),
+      });
+    }
+  } catch {
+    // Inter-loop memory persistence must not block run finalization.
+  }
 }
 
 async function handleRetryStep(command: CommandRow) {

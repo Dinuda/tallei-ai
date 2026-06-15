@@ -28,6 +28,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import Image from "next/image";
+import { apiFetch } from "@/lib/api-fetch";
+import { useWorkspace } from "@/lib/workspace-context";
 
 /* ------------------------------------------------------------------ */
 // Types
@@ -672,10 +674,9 @@ function RhythmFooterTimeline({ loops }: { loops: LoopInsight[] }) {
 
 export default function LoopsPage() {
   const router = useRouter();
+  const { activeWorkspace } = useWorkspace();
   const [loops, setLoops] = useState<LoopInsight[]>([]);
-  const [workspaces, setWorkspaces] = useState<LoopWorkspace[]>([]);
   const [activeChannel, setActiveChannel] = useState<ActiveChannel | null>(null);
-  const [workspaceFilter, setWorkspaceFilter] = useState<"all" | "unassigned" | string>("all");
   const [filter, setFilter] = useState<"all" | "high" | "medium">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -686,21 +687,14 @@ export default function LoopsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [workspacesResponse, loopsResponse, channelsResponse] = await Promise.all([
-        fetch("/api/workflows/workspaces", { cache: "no-store" }),
-        fetch("/api/workflows/internal/loops", { cache: "no-store" }),
-        fetch("/api/channels", { cache: "no-store" }),
+      const [loopsResponse, channelsResponse] = await Promise.all([
+        apiFetch("/api/workflows/internal/loops", { cache: "no-store" }),
+        apiFetch("/api/channels", { cache: "no-store" }),
       ]);
-      const workspacesPayload = await workspacesResponse.json().catch(() => ({}));
       const loopsPayload = await loopsResponse.json().catch(() => ({}));
       const channelsPayload = await channelsResponse.json().catch(() => ({}));
 
       if (!loopsResponse.ok) throw new Error(loopsPayload.error ?? "Failed to load loops");
-
-      if (workspacesResponse.ok) {
-        setWorkspaces(Array.isArray(workspacesPayload.workspaces) ? workspacesPayload.workspaces as LoopWorkspace[] : []);
-      }
-      
       if (channelsResponse.ok) {
         const channels = Array.isArray(channelsPayload.channels) ? channelsPayload.channels as ActiveChannel[] : [];
         const primaryChannel = channels.find((channel) => channel.enabled && channel.isPrimary)
@@ -715,7 +709,7 @@ export default function LoopsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeWorkspace?.id]);
 
   useEffect(() => {
     void loadLoops();
@@ -740,15 +734,12 @@ export default function LoopsPage() {
   }, [router]);
 
   const filtered = useMemo(() => {
-    const byConfidence = filter === "high"
+    return filter === "high"
       ? loops.filter((l) => l.confidence >= 80)
       : filter === "medium"
       ? loops.filter((l) => l.confidence >= 60 && l.confidence < 80)
       : loops;
-    if (workspaceFilter === "all") return byConfidence;
-    if (workspaceFilter === "unassigned") return byConfidence.filter((loop) => !loop.workspaceId);
-    return byConfidence.filter((loop) => loop.workspaceId === workspaceFilter);
-  }, [loops, filter, workspaceFilter]);
+  }, [loops, filter]);
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -804,25 +795,8 @@ export default function LoopsPage() {
           ) : null}
 
           <div className="mx-auto mb-8 flex max-w-5xl flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center rounded-none border border-[var(--border-light)] bg-white p-1 shadow-sm">
-              {[
-                { id: "all", name: "All workspaces" },
-                { id: "unassigned", name: "Unassigned" },
-                ...workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name })),
-              ].map((workspace) => (
-                <button
-                  key={workspace.id}
-                  type="button"
-                  onClick={() => setWorkspaceFilter(workspace.id)}
-                  className={`rounded-none px-3 py-1.5 text-xs font-medium transition ${
-                    workspaceFilter === workspace.id
-                      ? "bg-slate-100 text-slate-900 shadow-sm"
-                      : "text-slate-500 hover:text-slate-700"
-                  }`}
-                >
-                  {workspace.name}
-                </button>
-              ))}
+            <div className="text-sm text-slate-500">
+              Showing loops in <span className="font-medium text-slate-800">{activeWorkspace?.name ?? "workspace"}</span>
             </div>
             
             <div

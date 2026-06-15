@@ -95,14 +95,18 @@ async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT" | "PATCH" 
   const target = new URL(`${backend}/api/workflows${path ? `/${path}` : ""}`);
   req.nextUrl.searchParams.forEach((value, key) => target.searchParams.set(key, value));
 
-  try {
-    const res = await fetchWithTimeout(target.toString(), {
-      method,
-      headers: {
+  const headers: Record<string, string> = {
         "content-type": "application/json",
         "X-Internal-Secret": SECRET,
         "X-User-Id": userId,
-      },
+      };
+  const workspaceId = req.headers.get("x-workspace-id");
+  if (workspaceId) headers["X-Workspace-Id"] = workspaceId;
+
+  try {
+    const res = await fetchWithTimeout(target.toString(), {
+      method,
+      headers,
       body: method === "GET" ? undefined : JSON.stringify(await req.json().catch(() => ({}))),
     });
     const data = await safeJson(res);

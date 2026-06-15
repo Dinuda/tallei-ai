@@ -7,6 +7,7 @@ export interface AuthContext {
   tenantId: string;
   authMode: AuthMode;
   plan: Plan;
+  workspaceId?: string;
   keyId?: string;
   connectorType?: string | null;
   clientId?: string;

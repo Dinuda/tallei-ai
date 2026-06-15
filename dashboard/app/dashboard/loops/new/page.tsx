@@ -60,6 +60,7 @@ import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-e
 import { BuilderConnectorChecklist } from "@/components/builder-connector-checklist";
 import { BuilderAppSelector, type AppSelectionOutput } from "@/components/builder-app-selector";
 import { BuilderScheduleSelector, type ScheduleSelectionOutput } from "@/components/builder-schedule-selector";
+import { BuilderKnowledgeBaseSelector, type KnowledgeBaseSelectionOutput } from "@/components/builder-knowledge-base-selector";
 
 const LoopSuggestionCards = dynamic(
   () => import("@/components/loop-suggestion-cards").then((mod) => mod.LoopSuggestionCards),
@@ -69,6 +70,10 @@ const LoopSuggestionCards = dynamic(
 
 export default function NewLoopBuilderPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [builderSession, setBuilderSession] = useState<{
+    discoveredToolContracts?: Array<{ toolRef?: string; name?: string; constraints?: { connected?: boolean } }>;
+  } | null>(null);
+  const [recalledPreferences, setRecalledPreferences] = useState<Array<{ id: string; text: string; category?: string | null }>>([]);
   const [dismissedPromptId, setDismissedPromptId] = useState<string | null>(null);
   const [commands, setCommands] = useState<any[]>([]);
 
@@ -94,6 +99,8 @@ export default function NewLoopBuilderPage() {
     if (!response.ok) throw new Error(payload.error ?? "Failed to load builder session");
     setSessionId(sessionId);
     setCommands(payload.commands ?? []);
+    setBuilderSession(payload.session ?? null);
+    setRecalledPreferences(Array.isArray(payload.recalledPreferences) ? payload.recalledPreferences : []);
     return payload.messages as UIMessage[];
   }, []);
 
@@ -131,6 +138,26 @@ export default function NewLoopBuilderPage() {
   const activeAppSelection = findActiveAppSelection(messages);
   const activeConnectorSetup = findActiveConnectorSetup(messages);
   const activeScheduleSetup = findActiveScheduleSetup(messages);
+  const activeKnowledgeBaseSetup = findActiveKnowledgeBaseSetup(messages);
+  const connectedSearchToolkits = useMemo(() => {
+    const contracts = builderSession?.discoveredToolContracts ?? [];
+    const seen = new Set<string>();
+    const toolkits: Array<{ toolkit: string; name: string; connected: boolean }> = [];
+    for (const contract of contracts) {
+      const toolRef = typeof contract.toolRef === "string" ? contract.toolRef : "";
+      const match = toolRef.match(/^composio\.([^.]+)\.search$/i);
+      if (!match?.[1]) continue;
+      const toolkit = match[1].toLowerCase();
+      if (seen.has(toolkit)) continue;
+      seen.add(toolkit);
+      toolkits.push({
+        toolkit,
+        name: typeof contract.name === "string" ? contract.name : `${toolkit} search`,
+        connected: contract.constraints?.connected === true,
+      });
+    }
+    return toolkits;
+  }, [builderSession]);
   const activePromptId = activeInteractivePrompt?.toolCallId ?? null;
   const showInteractivePrompt = activePromptId !== null && activePromptId !== dismissedPromptId;
   const submitComposerText = useCallback(async (text: string) => {
@@ -257,6 +284,18 @@ export default function NewLoopBuilderPage() {
                             sessionId={sessionId}
                           /> : null;
                         }
+                        if (toolName === "knowledgeBaseSetup") {
+                          if (part.state === "input-streaming" || part.state === "input-available") return null;
+                          const input = part.input && typeof part.input === "object" ? part.input as { requirementId?: string } : {};
+                          const output = part.output && typeof part.output === "object" ? part.output as KnowledgeBaseSelectionOutput : null;
+                          return output ? <BuilderKnowledgeBaseSelector
+                            completedOutput={output}
+                            connectedSearchToolkits={connectedSearchToolkits}
+                            key={index}
+                            recalledPreferences={recalledPreferences}
+                            requirementId={input.requirementId ?? "grounding"}
+                          /> : null;
+                        }
                         if (toolName === "resolveBuildRequirement" || toolName === "refreshConnectorAvailability") return null;
                         if (part.state === "approval-requested" || part.state === "approval-responded" || part.state === "output-denied") {
                           return (
@@ -350,6 +389,25 @@ export default function NewLoopBuilderPage() {
                       })}
                       requirementId={String((activeConnectorSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "connector_selection")}
                       sessionId={sessionId}
+                    />
+                  </motion.div>
+                ) : activeKnowledgeBaseSetup ? (
+                  <motion.div
+                    key="knowledge-base-setup"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <BuilderKnowledgeBaseSelector
+                      connectedSearchToolkits={connectedSearchToolkits}
+                      onComplete={(output) => addToolOutput({
+                        tool: "knowledgeBaseSetup",
+                        toolCallId: activeKnowledgeBaseSetup.toolCallId,
+                        output,
+                      })}
+                      recalledPreferences={recalledPreferences}
+                      requirementId={String((activeKnowledgeBaseSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "grounding")}
                     />
                   </motion.div>
                 ) : activeScheduleSetup && sessionId ? (
@@ -636,6 +694,19 @@ function findActiveConnectorSetup(messages: UIMessage[]): ToolPart | null {
         && (part.state === "input-streaming" || part.state === "input-available")) {
         return part;
       }
+    }
+  }
+  return null;
+}
+
+function findActiveKnowledgeBaseSetup(messages: UIMessage[]): ToolPart | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
+    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = message.parts[partIndex];
+      if (part && isToolUIPart(part) && getToolName(part) === "knowledgeBaseSetup"
+        && (part.state === "input-streaming" || part.state === "input-available")) return part;
     }
   }
   return null;

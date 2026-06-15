@@ -7,6 +7,8 @@ import {
   resolveBuildRequirement,
   selectedConnectorAccountId,
   selectedConnectorAccountIds,
+  selectedExternalDataToolkits,
+  selectedGroundingSources,
   selectedLoopTrigger,
   unresolvedBuildRequirements,
 } from "../../../src/services/loop-engine/build-contract.js";
@@ -289,4 +291,59 @@ test("approved behavioral specs preserve the resolved build contract", () => {
     buildContract: contract,
   });
   assert.equal(spec.buildContract?.requirements.every((entry) => entry.status === "resolved"), true);
+});
+
+const hubspotSearchContract: ToolContract = {
+  toolRef: "composio.hubspot.search",
+  provider: "composio",
+  name: "hubspot search",
+  description: "Search HubSpot",
+  skillTags: ["search"],
+  effect: "read_external",
+  resources: ["records"],
+  inputSchema: { type: "object", properties: {} },
+  outputSchema: { type: "object" },
+  executionMode: "short_circuit",
+  approval: { required: false },
+  renderRecommendations: [],
+  constraints: { toolkit: "hubspot", connected: true },
+  source: "composio_sdk",
+};
+
+test("grounding resolves with optional externalDataToolkits when discovered", () => {
+  const contract = deriveLoopBuildContract({ intentContext: intent, discoveredToolContracts: [hubspotSearchContract] });
+  const resolved = resolveBuildRequirement({
+    contract,
+    requirementId: "grounding",
+    value: {
+      mode: "sources",
+      sources: [{ type: "tallei_memory" }, { type: "workspace_memory" }],
+      externalDataToolkits: ["hubspot"],
+    },
+    discoveredToolContracts: [hubspotSearchContract],
+  });
+  const grounding = resolved.requirements.find((entry) => entry.id === "grounding")!;
+  assert.equal(grounding.status, "resolved");
+  assert.deepEqual(selectedExternalDataToolkits(resolved), ["hubspot"]);
+  assert.deepEqual(selectedGroundingSources(resolved), [
+    { type: "tallei_memory" },
+    { type: "workspace_memory" },
+  ]);
+});
+
+test("grounding rejects unknown externalDataToolkits", () => {
+  const contract = deriveLoopBuildContract({ intentContext: intent, discoveredToolContracts: [hubspotSearchContract] });
+  const resolved = resolveBuildRequirement({
+    contract,
+    requirementId: "grounding",
+    value: {
+      mode: "sources",
+      sources: [{ type: "workspace_memory" }],
+      externalDataToolkits: ["salesforce"],
+    },
+    discoveredToolContracts: [hubspotSearchContract],
+  });
+  const grounding = resolved.requirements.find((entry) => entry.id === "grounding")!;
+  assert.equal(grounding.status, "invalid");
+  assert.match(grounding.validationErrors.join(" "), /salesforce/i);
 });

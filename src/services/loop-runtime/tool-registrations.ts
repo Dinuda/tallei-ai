@@ -3,9 +3,60 @@ import { registerToolHandler, type ToolHandlerContext } from "../loop-executor/t
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
 import { runComposioToolkitPrompt } from "../connectors/composio.js";
 import { selectedConnectorAccountId } from "../loop-engine/build-contract.js";
+import { runGroundedKnowledgeSearch, type GroundingSource } from "../grounded-knowledge-search.js";
+import { selectedGroundingSources } from "../loop-engine/build-contract.js";
 import { runCuratedMemorySearch } from "./curated-memory-search.js";
 
+registerToolHandler("internal.workspace_memory_search", async (ctx: ToolHandlerContext) => {
+  const sources: GroundingSource[] = [{ type: "workspace_memory" }];
+  const result = await runGroundedKnowledgeSearch({
+    auth: ctx.auth,
+    goal: ctx.goal,
+    sources,
+    workflowId: ctx.workflowId,
+  });
+  return {
+    text: result.sources.length > 0
+      ? ["Workspace memory results:", ...result.sources.map((memory) => `- [${memory.id}] ${memory.text}`)].join("\n")
+      : "No workspace memories found for this run intent.",
+    data: { sources: result.sources },
+  };
+});
+
+registerToolHandler("internal.knowledge_base_search", async (ctx: ToolHandlerContext) => {
+  const groundingSources = selectedGroundingSources(ctx.definition?.buildContract);
+  const kbSources = groundingSources.filter((source): source is Extract<GroundingSource, { type: "knowledge_base" }> => source.type === "knowledge_base");
+  const result = await runGroundedKnowledgeSearch({
+    auth: ctx.auth,
+    goal: ctx.goal,
+    sources: kbSources.length > 0 ? kbSources : [{ type: "tallei_memory" }, { type: "workspace_memory" }],
+    workflowId: ctx.workflowId,
+  });
+  return {
+    text: result.sources.length > 0
+      ? ["Knowledge base results:", ...result.sources.map((memory) => `- [${memory.id}] ${memory.text}`)].join("\n")
+      : "No knowledge base entries found for this run intent.",
+    data: { sources: result.sources },
+  };
+});
+
 registerToolHandler("internal.memory_search", async (ctx: ToolHandlerContext) => {
+  const groundingSources = selectedGroundingSources(ctx.definition?.buildContract);
+  if (groundingSources.length > 0) {
+    const result = await runGroundedKnowledgeSearch({
+      auth: ctx.auth,
+      goal: ctx.goal,
+      sources: groundingSources,
+      workflowId: ctx.workflowId,
+    });
+    return {
+      text: result.sources.length > 0
+        ? ["Grounded knowledge results:", ...result.sources.map((memory) => `- [${memory.origin}:${memory.id}] ${memory.text}`)].join("\n")
+        : "No grounded knowledge found for this run intent.",
+      data: { sources: result.sources },
+    };
+  }
+
   const memoryConfig = readMemorySearchConfig(ctx.assignment.config, ctx.agent.task);
   const result = await runCuratedMemorySearch({
     auth: ctx.auth,

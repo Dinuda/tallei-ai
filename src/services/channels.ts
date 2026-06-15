@@ -752,14 +752,18 @@ async function deliverToChannel(input: {
 
 export async function listChannelsOverview(auth: AuthContext): Promise<ChannelsOverview> {
   await ensureDefaultGmailChannel(auth);
+  const workspaceClause = auth.workspaceId ? "AND workspace_id = $3" : "";
+  const channelParams: unknown[] = [auth.tenantId, auth.userId];
+  if (auth.workspaceId) channelParams.push(auth.workspaceId);
   const [channelsResult, messagesResult] = await Promise.all([
     pool.query<ChannelRow>(
       `SELECT id, kind, destination, enabled, is_primary, status, label, verified_at, last_error, last_error_at, config_json, created_at, updated_at
        FROM notification_channels
        WHERE tenant_id = $1
          AND user_id = $2
+         ${workspaceClause}
        ORDER BY is_primary DESC, created_at ASC`,
-      [auth.tenantId, auth.userId]
+      channelParams
     ),
     pool.query<ChannelMessageRow>(
       `SELECT m.id, m.channel_id, m.kind, m.direction, m.body, m.metadata_json, m.created_at

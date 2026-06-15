@@ -24,7 +24,9 @@ const sessionCache = new Map<string, { session: ComposioSession; cachedAt: numbe
 const SESSION_TTL_MS = 60 * 60 * 1000;
 
 function getComposioEntityId(auth: AuthContext): string {
-  return `${config.composioEntityPrefix}:${auth.tenantId}:${auth.userId}`;
+  const base = `${config.composioEntityPrefix}:${auth.tenantId}:${auth.userId}`;
+  if (!auth.workspaceId) return base;
+  return `${base}:${auth.workspaceId}`;
 }
 
 function isComposioConfigured(): boolean {

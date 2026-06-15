@@ -410,6 +410,8 @@ function planningSystemPrompt(): string {
     "Disconnected connector actions may be selected and compiled normally. Never add a requiredValue for authentication or account credentials.",
     "Use available internal tools for their declared capabilities. Do not require operator content when an available internal tool can produce the source data.",
     "Semantic tool instructions belong in semanticAgents.task. internal.llm_only receives its prompt from task and the loop goal; internal.web_search and internal.memory_search derive their query from task. Do not create /prompt or /query inputBindings merely to restate a semantic agent's task.",
+    "When reviewedSpec build contract grounding includes externalDataToolkits, assign matching composio.<toolkit>.search tools to research or analysis semantic agents that need product or user context. Prefer search over write actions.",
+    "Any semantic agent using internal.memory_search, internal.workspace_memory_search, or internal.knowledge_base_search whose output informs customer-facing or preference-sensitive work must declare gate { type: memory_confirmation, question: 'Are these the memories and preferences you want to use, or should we use something else?' }. Preference-typed memories always require this gate when surfaced.",
     "For each bound action field, provide an explicit semantic annotation based on the contract.",
     "Match selectedActions.annotation.effect to each contract declaredRisk. Use read_external only when declaredRisk is read.",
     "Unknown or low-confidence action risk must require approval.",

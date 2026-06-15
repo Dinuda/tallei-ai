@@ -232,13 +232,29 @@ export function deriveLoopBuildContract(input: {
     requirements.push(requirement({
       id: "grounding",
       kind: "grounding",
-      question: "What sources of truth should the loop use?",
-      reason: "The loop needs an explicit grounding decision before it can produce trusted factual or customer-facing work.",
+      question: "Which knowledge sources should ground this loop?",
+      reason: "Tallei internal memory and active workspace memory are built-in (no setup URLs). Workspace memory includes outputs and preferences from prior loop runs in this workspace. Workspace FAQ and Google Docs are optional add-ons. Connected apps can optionally supply product or user records.",
       required: true,
       allowNone: true,
       valueSchema: objectSchema({
         mode: { type: "string", enum: ["sources", "none"] },
-        sources: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
+        sources: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              type: { type: "string", enum: ["tallei_memory", "workspace_memory", "knowledge_base", "google_doc"] },
+              id: { type: "string", minLength: 1 },
+            },
+            required: ["type"],
+          },
+        },
+        externalDataToolkits: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+        },
       }, ["mode"]),
     }));
 
@@ -311,8 +327,26 @@ function semanticErrors(requirement: BuildRequirement, value: unknown, contracts
       if (unavailable.length > 0) return [`The selected connector actions are not connected: ${unavailable.map((entry) => entry.name).join(", ")}.`];
     }
   }
-  if (requirement.kind === "grounding" && record.mode === "sources" && !Array.isArray(record.sources)) {
-    return ["Grounding mode sources requires at least one source."];
+  if (requirement.kind === "grounding" && record.mode === "sources") {
+    if (!Array.isArray(record.sources) || record.sources.length === 0) {
+      return ["Grounding mode sources requires at least one source."];
+    }
+    const invalid = record.sources.some((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
+      const source = entry as Record<string, unknown>;
+      const type = source.type;
+      if (type !== "tallei_memory" && type !== "workspace_memory" && type !== "knowledge_base" && type !== "google_doc") return true;
+      if ((type === "knowledge_base" || type === "google_doc") && typeof source.id !== "string") return true;
+      return false;
+    });
+    if (invalid) return ["Each grounding source must be a structured object with a supported type."];
+    const externalToolkits = Array.isArray(record.externalDataToolkits) ? record.externalDataToolkits.map(String) : [];
+    for (const toolkit of externalToolkits) {
+      const normalized = toolkit.trim().toLowerCase();
+      const searchRef = `composio.${normalized}.search`;
+      const match = contracts.find((contract) => contract.toolRef.toLowerCase() === searchRef);
+      if (!match) return [`External data toolkit ${toolkit} was not discovered as a connected search capability.`];
+    }
   }
   if (requirement.kind === "artifact_contract" && record.mode === "supplied_template" && typeof record.template !== "string") {
     return ["A supplied template decision requires template content or a template reference."];
@@ -428,4 +462,42 @@ export function selectedConnectorAccountId(
     throw new Error(`Connector action for ${toolkit} requires an explicit account-scoped route because multiple accounts are selected.`);
   }
   return ids[0];
+}
+
+export type GroundingSourceRef =
+  | { type: "tallei_memory" }
+  | { type: "workspace_memory" }
+  | { type: "knowledge_base"; id: string }
+  | { type: "google_doc"; id: string };
+
+export function selectedGroundingSources(contract: LoopBuildContract | null | undefined): GroundingSourceRef[] {
+  if (!contract) return [];
+  const requirement = contract.requirements.find((entry) => entry.id === "grounding" && entry.status === "resolved");
+  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+    ? requirement.value as Record<string, unknown>
+    : {};
+  if (value.mode === "none") return [];
+  if (value.mode !== "sources" || !Array.isArray(value.sources)) return [];
+  const parsed: GroundingSourceRef[] = [];
+  for (const entry of value.sources) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const type = record.type;
+    if (type === "tallei_memory" || type === "workspace_memory") parsed.push({ type });
+    else if ((type === "knowledge_base" || type === "google_doc") && typeof record.id === "string") {
+      parsed.push({ type, id: record.id });
+    }
+  }
+  return parsed;
+}
+
+export function selectedExternalDataToolkits(contract: LoopBuildContract | null | undefined): string[] {
+  if (!contract) return [];
+  const requirement = contract.requirements.find((entry) => entry.id === "grounding" && entry.status === "resolved");
+  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+    ? requirement.value as Record<string, unknown>
+    : {};
+  if (value.mode === "none") return [];
+  if (!Array.isArray(value.externalDataToolkits)) return [];
+  return value.externalDataToolkits.map(String).filter((toolkit) => toolkit.trim().length > 0);
 }

@@ -25,9 +25,11 @@ import {
   startManualLoopRun,
 } from "../../../services/loop-runtime/index.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
+import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
 const router = Router();
 router.use(authMiddleware);
+router.use(workspaceMiddleware);
 
 const workflowIdSchema = z.object({ workflowId: z.string().uuid() });
 const runIdSchema = z.object({ runId: z.string().uuid() });

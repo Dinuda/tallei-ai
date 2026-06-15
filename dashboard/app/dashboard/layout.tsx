@@ -13,6 +13,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Toaster } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
+import { WorkspaceProvider } from "@/lib/workspace-context";
+import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 
 /* Suppress known React DevTools false-positive in React 19 / Next.js 16 */
 if (typeof window !== "undefined" && window.console && window.console.error) {
@@ -250,6 +252,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   } as const;
   const headerUiFont = dashboardUiFont;
   return (
+    <WorkspaceProvider>
     <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900" style={dashboardUiFont}>
       <a
         href="#main-content"
@@ -282,6 +285,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
 
           <div className="flex items-center gap-2 pl-3 sm:pl-4">
+            <WorkspaceSwitcher />
             {isFreePlan ? (
               <>
                 <div
@@ -373,5 +377,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </main>
       <Toaster position="top-right" />
     </div>
+    </WorkspaceProvider>
   );
 }

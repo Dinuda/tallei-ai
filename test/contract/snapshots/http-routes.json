@@ -325,6 +325,41 @@
     "source": "src/routes/keys.ts"
   },
   {
+    "method": "GET",
+    "path": "/api/knowledge-bases",
+    "source": "src/routes/knowledge-bases.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/knowledge-bases",
+    "source": "src/routes/knowledge-bases.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/knowledge-bases/:knowledgeBaseId/entries",
+    "source": "src/routes/knowledge-bases.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/knowledge-bases/:knowledgeBaseId/entries",
+    "source": "src/routes/knowledge-bases.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/knowledge-bases/:knowledgeBaseId/entries/:entryId",
+    "source": "src/routes/knowledge-bases.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/knowledge-bases/:knowledgeBaseId/sync",
+    "source": "src/routes/knowledge-bases.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/knowledge-bases/search",
+    "source": "src/routes/knowledge-bases.ts"
+  },
+  {
     "method": "POST",
     "path": "/api/loop-builder/chat",
     "source": "src/routes/loopBuilder.ts"
@@ -357,6 +392,21 @@
   {
     "method": "GET",
     "path": "/api/loop-builder/sessions/:sessionId",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/sessions/:sessionId/connectors/refresh",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/sessions/:sessionId/connectors/resolve",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/loop-builder/sessions/:sessionId/schedule-options",
     "source": "src/routes/loopBuilder.ts"
   },
   {
@@ -651,6 +701,21 @@
   },
   {
     "method": "GET",
+    "path": "/api/workflows/loops/:workflowId/verification",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/loops/:workflowId/verification/confirm",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workflows/loops/:workflowId/verification/run",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
     "path": "/api/workflows/runs/:runId",
     "source": "src/routes/workflows.ts"
   },
@@ -693,6 +758,51 @@
     "method": "POST",
     "path": "/api/workflows/workspaces/assign-loop",
     "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workspace-memory",
+    "source": "src/routes/workspace-memory.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workspace-memory",
+    "source": "src/routes/workspace-memory.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/workspace-memory/:memoryId",
+    "source": "src/routes/workspace-memory.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workspaces",
+    "source": "src/routes/workspaces.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workspaces",
+    "source": "src/routes/workspaces.ts"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/workspaces/:workspaceId",
+    "source": "src/routes/workspaces.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workspaces/:workspaceId",
+    "source": "src/routes/workspaces.ts"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/workspaces/:workspaceId",
+    "source": "src/routes/workspaces.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/workspaces/:workspaceId/activate",
+    "source": "src/routes/workspaces.ts"
   },
   {
     "method": "GET",

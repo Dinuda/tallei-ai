@@ -130,7 +130,9 @@ class ComposioActionExecutionError extends Error {
 }
 
 function getComposioEntityId(auth: AuthContext): string {
-  return `${config.composioEntityPrefix}:${auth.tenantId}:${auth.userId}`;
+  const base = `${config.composioEntityPrefix}:${auth.tenantId}:${auth.userId}`;
+  if (!auth.workspaceId) return base;
+  return `${base}:${auth.workspaceId}`;
 }
 
 export function inferComposioAppKey(scopes: string[]): string | null {
@@ -735,13 +737,14 @@ export async function reconcileComposioConnectorAccounts(input: {
     const providerLabel = typeof row.alias === "string" && row.alias.trim() ? row.alias.trim() : null;
     await pool.query(
       `INSERT INTO connector_accounts
-       (id, tenant_id, user_id, provider, external_account_id, display_label, status, scopes_json, metadata_json)
-       VALUES ($1, $2, $3, 'composio', $4, $5, $6, '[]'::jsonb, $7::jsonb)
+       (id, tenant_id, user_id, workspace_id, provider, external_account_id, display_label, status, scopes_json, metadata_json)
+       VALUES ($1, $2, $3, $8, 'composio', $4, $5, $6, '[]'::jsonb, $7::jsonb)
        ON CONFLICT (tenant_id, user_id, provider, external_account_id)
        DO UPDATE SET
          status = EXCLUDED.status,
          display_label = COALESCE(connector_accounts.display_label, EXCLUDED.display_label),
          metadata_json = COALESCE(connector_accounts.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json,
+         workspace_id = COALESCE(connector_accounts.workspace_id, EXCLUDED.workspace_id),
          updated_at = NOW()`,
       [
         randomUUID(),
@@ -751,6 +754,7 @@ export async function reconcileComposioConnectorAccounts(input: {
         providerLabel,
         status,
         JSON.stringify({ adapter: "composio", appKey: toolkit, alias: row.alias ?? null, wordId: row.wordId ?? null }),
+        input.auth.workspaceId ?? null,
       ],
     );
   }
@@ -1333,6 +1337,10 @@ export async function getConnectorAuthSession(input: {
 }
 
 export async function listConnectorAccounts(auth: AuthContext): Promise<ConnectorAccountView[]> {
+  const workspaceClause = auth.workspaceId ? "AND (workspace_id = $3 OR workspace_id IS NULL)" : "";
+  const params: unknown[] = [auth.tenantId, auth.userId];
+  if (auth.workspaceId) params.push(auth.workspaceId);
+
   const result = await pool.query<{
     id: string;
     provider: string;
@@ -1348,8 +1356,9 @@ export async function listConnectorAccounts(auth: AuthContext): Promise<Connecto
      FROM connector_accounts
      WHERE tenant_id = $1
        AND user_id = $2
+       ${workspaceClause}
      ORDER BY updated_at DESC`,
-    [auth.tenantId, auth.userId]
+    params
   );
   return result.rows.map((row) => {
     const scopes = Array.isArray(row.scopes_json) ? row.scopes_json.filter((v): v is string => typeof v === "string") : [];

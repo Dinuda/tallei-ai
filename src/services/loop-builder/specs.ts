@@ -12,7 +12,7 @@ import {
   type NoSlopSpecStatus,
 } from "../loop-engine/spec-contracts.js";
 import { loopIntentContextSchema, type LoopIntentContext } from "../loop-engine/intent-context.js";
-import { loopBuildContractSchema, type LoopBuildContract } from "../loop-engine/build-contract.js";
+import { loopBuildContractSchema, selectedExternalDataToolkits, selectedGroundingSources, type LoopBuildContract } from "../loop-engine/build-contract.js";
 import { normalizeProviderIdentity } from "../loop-engine/spec-required-connectors.js";
 import { listComposioToolkits } from "../connectors/composio.js";
 
@@ -123,6 +123,20 @@ export function renderSpecMarkdown(spec: NoSlopSpec): string {
     for (const requirement of spec.buildContract.requirements) {
       lines.push(`- ${requirement.kind}: ${requirement.status}${requirement.provenance ? ` (${requirement.provenance.source})` : ""}`);
       for (const warning of requirement.warnings) lines.push(`- Warning: ${warning}`);
+    }
+    const groundingSources = selectedGroundingSources(spec.buildContract);
+    const externalToolkits = selectedExternalDataToolkits(spec.buildContract);
+    if (groundingSources.length > 0 || externalToolkits.length > 0) {
+      lines.push("", "## Grounding Sources");
+      for (const source of groundingSources) {
+        if (source.type === "tallei_memory") lines.push("- Tallei internal memory");
+        else if (source.type === "workspace_memory") lines.push("- Workspace memory (includes inter-loop history)");
+        else if (source.type === "knowledge_base") lines.push(`- Knowledge base: ${source.id}`);
+        else if (source.type === "google_doc") lines.push(`- Google Doc knowledge base: ${source.id}`);
+      }
+      for (const toolkit of externalToolkits) {
+        lines.push(`- External product/user data: composio.${toolkit}.search`);
+      }
     }
   }
 

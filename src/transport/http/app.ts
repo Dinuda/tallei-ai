@@ -19,6 +19,9 @@ import connectorsRouter from "./routes/connectors.js";
 import channelsRouter from "./routes/channels.js";
 import loopBuilderRouter from "./routes/loopBuilder.js";
 import workflowsRouter from "./routes/workflows.js";
+import workspacesRouter from "./routes/workspaces.js";
+import knowledgeBasesRouter from "./routes/knowledge-bases.js";
+import workspaceMemoryRouter from "./routes/workspace-memory.js";
 import { createMcpRouter } from "../mcp/server.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requestTimingMiddleware } from "./middleware/request-timing.middleware.js";
@@ -113,6 +116,9 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/channels", deps.memoryRateLimit, channelsRouter);
   app.use("/api/loop-builder", deps.memoryRateLimit, loopBuilderRouter);
   app.use("/api/workflows", deps.memoryRateLimit, workflowsRouter);
+  app.use("/api/workspaces", deps.memoryRateLimit, workspacesRouter);
+  app.use("/api/knowledge-bases", deps.memoryRateLimit, knowledgeBasesRouter);
+  app.use("/api/workspace-memory", deps.memoryRateLimit, workspaceMemoryRouter);
   // Browser automation is intentionally disabled for production rollout.
   // app.use("/api/claude-onboarding", claudeOnboardingRouter);
   // app.use("/api/browser-use", browserUseRouter);
