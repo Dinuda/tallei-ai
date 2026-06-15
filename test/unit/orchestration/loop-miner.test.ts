@@ -1311,7 +1311,7 @@ test("runLoopMinerForUser builds loop memory episodes without episode-builder LL
             confidence: 0.9,
           }],
         }),
-        model: "gpt-4o-mini",
+        model: "gpt-gpt-5-nano",
         finishReason: "stop",
         usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
       };
@@ -1330,7 +1330,7 @@ test("runLoopMinerForUser builds loop memory episodes without episode-builder LL
           risks: [],
         }],
       }),
-      model: "gpt-4o-mini",
+      model: "gpt-gpt-5-nano",
       finishReason: "stop",
       usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
     };

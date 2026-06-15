@@ -16,6 +16,7 @@ import {
   Loader2,
   MoreHorizontal,
   RefreshCw,
+  RotateCcw,
   X,
   Brain,
   Puzzle,
@@ -209,6 +210,14 @@ type RunProjection = {
 };
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "blocked"]);
+
+function isSpecDrivenRun(run: RunProjection | null | undefined): boolean {
+  return run?.context?.engine === "loop_spec_v1";
+}
+
+function isSpecRunnerStep(step: StepAttempt): boolean {
+  return step.agent_id === "spec_runner" || step.id.endsWith(":spec-runner");
+}
 const currencyFormatter = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const numberFormatter = new Intl.NumberFormat("en-US");
 const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
@@ -272,9 +281,9 @@ function RunStatusPill({ status }: { status: string }) {
     ? "border-[#86c8a8] bg-[#edf8f2] text-[#166534]"
     : status === "failed" || status === "blocked" || status === "cancelled" || status === "rejected"
       ? "border-[#d9a3a3] bg-[#fdf2f2] text-[#991b1b]"
-      : status === "waiting_for_interaction" || status === "pending"
+      : status === "waiting_for_interaction" || status === "pending" || status === "waiting_for_approval"
         ? "border-[#9bb8d9] bg-[#edf3fb] text-[#1e4070]"
-        : status === "running"
+        : status === "running" || status === "queued"
           ? "border-[#b8c9dc] bg-[#f0f4f9] text-[#334155]"
           : "border-[#e5e7eb] bg-[#fafafa] text-[#6b7280]";
   return (
@@ -441,7 +450,10 @@ type StepRowPhase =
 
 type ParentRunPhase = "paused" | "running" | "blocked" | "done" | "idle";
 
-function canRetryStepAttempt(step: StepAttempt, runStatus?: string): boolean {
+function canRetryStepAttempt(step: StepAttempt, runStatus?: string, run?: RunProjection | null): boolean {
+  if (run && isSpecDrivenRun(run) && runStatus && terminalStatuses.has(runStatus) && isSpecRunnerStep(step)) {
+    return true;
+  }
   if (step.status === "failed" || step.status === "cancelled") return true;
   return step.status === "waiting_for_interaction"
     && (runStatus === "failed" || runStatus === "blocked" || runStatus === "cancelled");
@@ -452,7 +464,12 @@ function resolveRetryTargetStep(
   orderedSteps: StepAttempt[],
   runStatus: string | undefined,
   currentStepIndex: number | null | undefined,
+  run?: RunProjection | null,
 ): StepAttempt | null {
+  if (run && isSpecDrivenRun(run) && runStatus && terminalStatuses.has(runStatus)) {
+    return latestSteps.find((step) => isSpecRunnerStep(step)) ?? latestSteps[0] ?? null;
+  }
+
   const terminalRun = runStatus === "failed" || runStatus === "blocked" || runStatus === "cancelled";
   if (!terminalRun) return null;
 
@@ -468,11 +485,11 @@ function resolveRetryTargetStep(
 
   if (typeof currentStepIndex === "number") {
     const atCurrent = latestSteps.find((step) => step.step_index === currentStepIndex);
-    if (atCurrent && canRetryStepAttempt(atCurrent, runStatus)) return atCurrent;
+    if (atCurrent && canRetryStepAttempt(atCurrent, runStatus, run)) return atCurrent;
   }
 
   return [...orderedSteps]
-    .filter((step) => canRetryStepAttempt(step, runStatus))
+    .filter((step) => canRetryStepAttempt(step, runStatus, run))
     .sort((left, right) => right.step_index - left.step_index)[0] ?? null;
 }
 
@@ -1503,7 +1520,7 @@ export default function StableLoopRunPage() {
     for (const step of orderedSteps) byStep.set(step.step_index, step);
     return [...byStep.values()].sort((a, b) => a.step_index - b.step_index);
   }, [orderedSteps]);
-  const visibleArtifacts = useMemo(() => run?.artifacts.filter((artifact) => !artifact.invalidated_at) ?? [], [run]);
+  const visibleArtifacts = useMemo(() => (run?.artifacts ?? []).filter((artifact) => !artifact.invalidated_at), [run]);
   const latestArtifacts = useMemo(() => {
     return selectLatestArtifactsByKey(visibleArtifacts);
   }, [visibleArtifacts]);
@@ -1512,7 +1529,7 @@ export default function StableLoopRunPage() {
       || (artifact.kind !== "structured_output" && !artifact.data_json?.artifactEnvelope)),
     [latestArtifacts],
   );
-  const pendingInteraction = useMemo(() => run?.interactions.find((gate) => gate.status === "pending") ?? null, [run?.interactions]);
+  const pendingInteraction = useMemo(() => (run?.interactions ?? []).find((gate) => gate.status === "pending") ?? null, [run?.interactions]);
   const operatorView = run?.operatorView ?? null;
   const contactsUploadGate = useMemo(
     () => resolveContactsUploadGate(run?.interactions, pendingInteraction),
@@ -1528,9 +1545,14 @@ export default function StableLoopRunPage() {
   );
   const runHasTerminalFailure = run?.status === "failed" || run?.status === "blocked" || run?.status === "cancelled";
   const failureRetryTarget = useMemo(
-    () => resolveRetryTargetStep(latestSteps, orderedSteps, run?.status, run?.current_step_index),
-    [latestSteps, orderedSteps, run?.current_step_index, run?.status],
+    () => resolveRetryTargetStep(latestSteps, orderedSteps, run?.status, run?.current_step_index, run),
+    [latestSteps, orderedSteps, run],
   );
+  const canRetryRun = Boolean(run && (
+    isSpecDrivenRun(run)
+      ? terminalStatuses.has(run.status)
+      : failureRetryTarget
+  ));
   const isGateRejected = useMemo(() => {
     const message = `${error ?? ""} ${run?.error_json?.message ?? ""}`.toLowerCase();
     return message.includes("gate rejected") || Boolean(rejectedGate);
@@ -1753,6 +1775,16 @@ export default function StableLoopRunPage() {
     () => [...(run?.events ?? [])].sort((a, b) => a.created_at.localeCompare(b.created_at)),
     [run],
   );
+
+  async function retryRun(step?: StepAttempt | null) {
+    if (run && isSpecDrivenRun(run)) {
+      await post(`/api/workflows/runs/${runId}/retry`);
+      return;
+    }
+    if (step) {
+      await post(`/api/workflows/runs/${runId}/steps/${step.id}/retry`);
+    }
+  }
 
   async function post(path: string, body?: Record<string, unknown>) {
     setBusy(path);
@@ -2102,6 +2134,15 @@ export default function StableLoopRunPage() {
             <EditorialToolbarButton title="Refresh" onClick={() => void load()}>
               <RefreshCw className="size-4" />
             </EditorialToolbarButton>
+            {canRetryRun ? (
+              <EditorialToolbarButton
+                title="Retry run"
+                disabled={Boolean(busy)}
+                onClick={() => void retryRun(failureRetryTarget)}
+              >
+                <RotateCcw className="size-4" />
+              </EditorialToolbarButton>
+            ) : null}
             <EditorialToolbarButton title="Panels"><Columns2 className="size-4" /></EditorialToolbarButton>
             {!terminalStatuses.has(run.status) ? (
               <EditorialToolbarButton
@@ -2156,8 +2197,7 @@ export default function StableLoopRunPage() {
           onRevise={() => pendingInteraction && submitRevise(pendingInteraction)}
           onReject={() => pendingInteraction && submitGate(pendingInteraction, "reject")}
           onRerun={() => {
-            if (!failureRetryTarget) return;
-            void post(`/api/workflows/runs/${runId}/steps/${failureRetryTarget.id}/retry`);
+            void retryRun(failureRetryTarget);
           }}
           onShowFailureDetails={() => setFailureDialogOpen(true)}
         />
@@ -2252,12 +2292,12 @@ export default function StableLoopRunPage() {
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex min-w-0 items-center gap-3">
                       <CardTitle className="truncate text-[20px] font-bold tracking-[-0.02em] text-[#111827]">{centerTitle}</CardTitle>
-                      {selectedStep && canRetryStepAttempt(selectedStep, run?.status) ? (
+                      {selectedStep && canRetryStepAttempt(selectedStep, run?.status, run) ? (
                         <button
                           type="button"
                           title="Retry agent"
                           disabled={Boolean(busy)}
-                          onClick={() => void post(`/api/workflows/runs/${runId}/steps/${selectedStep.id}/retry`)}
+                          onClick={() => void retryRun(selectedStep)}
                           className="shrink-0 p-1.5 text-[#6b7280] transition-colors hover:text-[#111827] disabled:opacity-40"
                         >
                           <RefreshCw className="size-4" />
@@ -2330,7 +2370,7 @@ export default function StableLoopRunPage() {
                           const fullText = getStepDisplayContent(attempt);
                           const truncated = preview(fullText, 280);
                           const isExpandable = fullText.length > 280;
-                          const canRetry = canRetryStepAttempt(attempt, run?.status);
+                          const canRetry = canRetryStepAttempt(attempt, run?.status, run);
                           return (
                             <div key={attempt.id} className="bg-white">
                               <div className="flex w-full items-start justify-between gap-4 p-5">
@@ -2362,7 +2402,7 @@ export default function StableLoopRunPage() {
                                         type="button"
                                         title="Retry attempt"
                                         disabled={Boolean(busy)}
-                                        onClick={() => void post(`/api/workflows/runs/${runId}/steps/${attempt.id}/retry`)}
+                                        onClick={() => void retryRun(attempt)}
                                         className="p-1 text-[#6b7280] transition-colors hover:text-[#111827] disabled:opacity-40"
                                       >
                                         <RefreshCw className="size-4" />
@@ -2527,7 +2567,7 @@ export default function StableLoopRunPage() {
                       phase={phase}
                       selected={selected}
                       isCurrent={isCurrent}
-                      canRetry={canRetryStepAttempt(step, run?.status)}
+                      canRetry={canRetryStepAttempt(step, run?.status, run)}
                       toolRefs={resolveStepToolRefs(step, run?.definition)}
                       onSelect={() => {
                         setSelectedStepId(step.id);
@@ -2536,7 +2576,7 @@ export default function StableLoopRunPage() {
                       }}
                       onHire={() => showHiringToast(formatWorkerDisplayName(step.agent_snapshot?.name ?? step.agent_id))}
                       onInfo={() => setAgentInfoStepId(step.id)}
-                      onRerun={() => void post(`/api/workflows/runs/${runId}/steps/${step.id}/retry`)}
+                      onRerun={() => void retryRun(step)}
                     />
                   );
                 })}

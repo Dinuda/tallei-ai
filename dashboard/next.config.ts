@@ -39,6 +39,7 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: projectRoot,
   },
+  transpilePackages: ["@react-email/editor"],
 
   async rewrites() {
     return {

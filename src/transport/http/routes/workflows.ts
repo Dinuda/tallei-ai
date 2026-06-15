@@ -18,12 +18,21 @@ import {
   cancelLoopRuntimeRun,
   executeOperatorInteractionCommand,
   getLoopRuntimeProjection,
+  getSpecRunMessages,
+  getSpecRunEditorialProjection,
+  getWorkflowTriggerActivity,
+  isSpecDrivenWorkflow,
   listLoopRuntimeRuns,
+  listSpecLoopRuns,
   retryLoopRuntimeStep,
+  retrySpecLoopRun,
   saveAgentOutput,
   saveCanvasEmailArtifact,
   startManualLoopRun,
+  streamSpecRunChat,
 } from "../../../services/loop-runtime/index.js";
+import { LOOP_SPEC_DEFINITION_VERSION } from "../../../services/loop-runtime/spec-run-types.js";
+import { validateUIMessages, type UIMessage } from "ai";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
@@ -124,8 +133,14 @@ async function deleteLoop(req: AuthRequest, res: Response) {
 async function listRuns(req: AuthRequest, res: Response) {
   try {
     const { workflowId } = workflowIdSchema.parse(req.params);
-    await getLoopWorkflow(req.authContext!, workflowId);
-    const runs = await listLoopRuntimeRuns(req.authContext!, workflowId);
+    const loop = await getLoopWorkflow(req.authContext!, workflowId);
+    if (!loop) {
+      res.status(404).json({ error: "Loop workflow not found" });
+      return;
+    }
+    const runs = loop.definitionVersion === LOOP_SPEC_DEFINITION_VERSION || loop.runnableSpec
+      ? await listSpecLoopRuns(req.authContext!, workflowId)
+      : await listLoopRuntimeRuns(req.authContext!, workflowId);
     res.json({ runs });
   } catch (error) {
     sendError(res, error, "Failed to list runs");
@@ -180,6 +195,14 @@ router.get("/internal/loops/:workflowId", requireScopes(["memory:read"]), getLoo
 router.delete("/internal/loops/:workflowId", requireScopes(["memory:write"]), deleteLoop);
 router.get("/internal/loops/:workflowId/runs", requireScopes(["memory:read"]), listRuns);
 router.post("/internal/loops/:workflowId/runs", requireScopes(["memory:write"]), startRun);
+router.get("/internal/loops/:workflowId/triggers", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { workflowId } = workflowIdSchema.parse(req.params);
+    res.json({ triggers: await getWorkflowTriggerActivity(req.authContext!, workflowId) });
+  } catch (error) {
+    sendError(res, error, "Failed to read workflow triggers");
+  }
+});
 
 router.get("/workspaces", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
@@ -211,9 +234,53 @@ router.post("/workspaces/assign-loop", requireScopes(["memory:write"]), async (r
 router.get("/runs/:runId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse(req.params);
-    res.json({ run: await getLoopRuntimeProjection(req.authContext!, runId) });
+    try {
+      res.json({ run: await getSpecRunEditorialProjection(req.authContext!, runId) });
+      return;
+    } catch {
+      res.json({ run: await getLoopRuntimeProjection(req.authContext!, runId) });
+    }
   } catch (error) {
     sendError(res, error, "Failed to read run");
+  }
+});
+
+router.get("/runs/:runId/messages", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const messages = await getSpecRunMessages(req.authContext!, runId);
+    res.json({ messages });
+  } catch (error) {
+    sendError(res, error, "Failed to read run messages");
+  }
+});
+
+const runChatSchema = z.object({
+  runId: z.string().uuid(),
+  messages: z.array(z.unknown()),
+});
+
+router.post("/loops/:workflowId/run/chat", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { workflowId } = workflowIdSchema.parse(req.params);
+    const body = runChatSchema.parse(req.body ?? {});
+    const messages = await validateUIMessages({ messages: body.messages as UIMessage[] });
+    if (!(await isSpecDrivenWorkflow(req.authContext!, workflowId))) {
+      res.status(409).json({ error: "This workflow does not use the spec-driven runner." });
+      return;
+    }
+    await streamSpecRunChat({
+      auth: req.authContext!,
+      workflowId,
+      runId: body.runId,
+      messages,
+      res,
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      const status = error instanceof z.ZodError ? 400 : /not found/i.test(error instanceof Error ? error.message : "") ? 404 : 500;
+      res.status(status).json({ error: error instanceof Error ? error.message : "Failed to stream run chat" });
+    }
   }
 });
 
@@ -226,10 +293,25 @@ router.post("/runs/:runId/cancel", requireScopes(["memory:write"]), async (req: 
   }
 });
 
+router.post("/runs/:runId/retry", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    await retrySpecLoopRun(req.authContext!, runId);
+    res.status(202).json({ run: await getSpecRunEditorialProjection(req.authContext!, runId) });
+  } catch (error) {
+    sendError(res, error, "Failed to retry run");
+  }
+});
+
 router.post("/runs/:runId/steps/:stepId/retry", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const { runId } = runIdSchema.parse(req.params);
     const { stepId } = stepIdSchema.parse(req.params);
+    if (stepId.endsWith(":spec-runner")) {
+      await retrySpecLoopRun(req.authContext!, runId);
+      res.status(202).json({ run: await getSpecRunEditorialProjection(req.authContext!, runId) });
+      return;
+    }
     res.status(202).json({ run: await retryLoopRuntimeStep(req.authContext!, runId, stepId) });
   } catch (error) {
     sendError(res, error, "Failed to retry step");

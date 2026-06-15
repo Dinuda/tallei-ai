@@ -90,7 +90,7 @@ const evidenceRoleSchema = z.enum([
   "constraint",
 ]);
 
-export type CuratedMemoryEvidenceRole = z.infer<typeof evidenceRoleSchema>;
+type CuratedMemoryEvidenceRole = z.infer<typeof evidenceRoleSchema>;
 
 const queryPlanSchema = z.object({
   intent: z.string().min(1),
@@ -101,7 +101,7 @@ const queryPlanSchema = z.object({
   requiredEvidence: z.array(z.string()).default([]),
 });
 
-export type CuratedMemoryQueryPlan = z.infer<typeof queryPlanSchema>;
+type CuratedMemoryQueryPlan = z.infer<typeof queryPlanSchema>;
 
 const validationSchema = z.object({
   accepted: z.array(z.object({
@@ -116,7 +116,7 @@ const validationSchema = z.object({
   noEvidenceReason: z.string().optional(),
 });
 
-export interface CuratedMemorySearchSource {
+interface CuratedMemorySearchSource {
   id: string;
   text: string;
   score: number;
@@ -133,7 +133,7 @@ type CandidateMatch = {
   rank: number;
 };
 
-export interface CuratedMemorySearchTrace {
+interface CuratedMemorySearchTrace {
   query: string;
   queryPlan: CuratedMemoryQueryPlan;
   retrieval: {
@@ -170,7 +170,7 @@ export interface CuratedMemorySearchTrace {
   };
 }
 
-export interface CuratedMemorySearchResult {
+interface CuratedMemorySearchResult {
   queryPlan: CuratedMemoryQueryPlan;
   sources: CuratedMemorySearchSource[];
   rejectedCount: number;
@@ -180,7 +180,7 @@ export interface CuratedMemorySearchResult {
   noEvidenceReason?: string;
 }
 
-export interface CuratedMemorySearchInput {
+interface CuratedMemorySearchInput {
   auth: AuthContext;
   goal: string;
   agent: LoopRunAgent;
@@ -232,7 +232,7 @@ interface BlogCyclePolicy {
   rule: string;
 }
 
-export interface CuratedMemorySearchDeps {
+interface CuratedMemorySearchDeps {
   memoryRepository: Pick<MemoryRepository, "listAll" | "getByIds">;
   vectorRepository: Pick<VectorRepository, "searchVectors">;
   embedText: typeof embedText;

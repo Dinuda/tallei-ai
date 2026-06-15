@@ -1,13 +1,13 @@
 import { z } from "zod";
 
-export const loopIntentChoiceSchema = z.object({
+const loopIntentChoiceSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   value: z.string().min(1),
   impact: z.string().min(1),
 });
 
-export const loopIntentQuestionSchema = z.object({
+const loopIntentQuestionSchema = z.object({
   id: z.string().min(1),
   question: z.string().min(1),
   reason: z.string().min(1),
@@ -18,13 +18,13 @@ export const loopIntentQuestionSchema = z.object({
   path: ["recommendedChoiceId"],
 });
 
-export const loopIntentInteractiveOptionSchema = z.object({
+const loopIntentInteractiveOptionSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   description: z.string().min(1),
 });
 
-export const loopIntentInteractivePromptSchema = z.object({
+const loopIntentInteractivePromptSchema = z.object({
   id: z.string().min(1),
   question: z.string().min(1),
   options: z.array(loopIntentInteractiveOptionSchema).min(2).max(6),
@@ -51,7 +51,7 @@ export const loopIntentAnalysisSchema = z.object({
   analyzedAt: z.string().min(1),
 });
 
-export const loopIntentAnswerSchema = z.object({
+const loopIntentAnswerSchema = z.object({
   questionId: z.string().min(1),
   choiceId: z.string().min(1).optional(),
   freeText: z.string().trim().min(1).max(1000).optional(),
@@ -59,7 +59,7 @@ export const loopIntentAnswerSchema = z.object({
   message: "An answer requires a choice or free-text value.",
 });
 
-export const loopIntentDecisionSchema = z.object({
+const loopIntentDecisionSchema = z.object({
   questionId: z.string().min(1),
   question: z.string().min(1),
   answer: z.string().min(1),
@@ -75,5 +75,5 @@ export const loopIntentContextSchema = z.object({
 });
 
 export type LoopIntentAnalysis = z.infer<typeof loopIntentAnalysisSchema>;
-export type LoopIntentAnswer = z.infer<typeof loopIntentAnswerSchema>;
+type LoopIntentAnswer = z.infer<typeof loopIntentAnswerSchema>;
 export type LoopIntentContext = z.infer<typeof loopIntentContextSchema>;

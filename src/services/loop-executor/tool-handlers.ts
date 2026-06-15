@@ -8,7 +8,7 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { LoopDefinition, LoopRunAgent, LoopToolAssignment } from "./types.js";
 
-export type ToolHandlerResult = {
+type ToolHandlerResult = {
   text: string;
   data?: Record<string, unknown>;
   shortCircuit?: boolean;
@@ -27,7 +27,7 @@ export type ToolHandlerContext = {
   definition?: LoopDefinition;
 };
 
-export type ToolHandler = (ctx: ToolHandlerContext) => Promise<ToolHandlerResult>;
+type ToolHandler = (ctx: ToolHandlerContext) => Promise<ToolHandlerResult>;
 
 const handlers = new Map<string, ToolHandler>();
 
@@ -41,6 +41,6 @@ export function getToolHandler(ref: string): ToolHandler | undefined {
     ?? (/^composio\.[a-z0-9_-]+\.action\./i.test(ref) ? handlers.get("composio.*.action") : undefined);
 }
 
-export function hasToolHandler(ref: string): boolean {
+function hasToolHandler(ref: string): boolean {
   return Boolean(getToolHandler(ref));
 }

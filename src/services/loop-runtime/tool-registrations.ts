@@ -2,9 +2,11 @@ import { readMemorySearchConfig, runExaWebSearch } from "../loop-executor/agent-
 import { registerToolHandler, type ToolHandlerContext } from "../loop-executor/tool-handlers.js";
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
 import { runComposioToolkitPrompt } from "../connectors/composio.js";
-import { selectedConnectorAccountId } from "../loop-engine/build-contract.js";
+import {
+  selectedConnectorAccountId,
+  selectedGroundingSources,
+} from "../loop-engine/build-contract.js";
 import { runGroundedKnowledgeSearch, type GroundingSource } from "../grounded-knowledge-search.js";
-import { selectedGroundingSources } from "../loop-engine/build-contract.js";
 import { runCuratedMemorySearch } from "./curated-memory-search.js";
 
 registerToolHandler("internal.workspace_memory_search", async (ctx: ToolHandlerContext) => {

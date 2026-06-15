@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/tooltip";
 import Image from "next/image";
 import { apiFetch } from "@/lib/api-fetch";
+import { resolveLoopRunNavigation } from "@/lib/loop-run-navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 /* ------------------------------------------------------------------ */
@@ -73,12 +74,15 @@ type Loop = {
   id: string;
   title: string;
   status: string;
+  goal?: string;
   scheduleRrule?: string;
   nextRunAt?: string | null;
   lastScheduledAt?: string | null;
   createdAt?: string;
   updatedAt: string;
-  definition: {
+  definitionVersion?: string;
+  runnableSpec?: { goal?: string };
+  definition?: {
     goal: string;
     engineVersion?: string;
     builderMeta?: { engineVersion?: string; designedBy?: string; preApproved?: boolean };
@@ -180,7 +184,7 @@ function platformStyle(platform: Platform): {
 const ACCENT = "#4338ca";
 
 function mapDatabaseLoopToInsight(loop: Loop): LoopInsight {
-  const agents = loop.definition.agentGraph?.children ?? [];
+  const agents = loop.definition?.agentGraph?.children ?? [];
   
   const allMemories = agents.map((agent, i) => ({
     id: agent.id || `agent-${i}`,
@@ -209,7 +213,7 @@ function mapDatabaseLoopToInsight(loop: Loop): LoopInsight {
   }));
 
   let frequency = "Manual";
-  const cron = loop.definition.schedule?.cron ?? loop.scheduleRrule ?? "";
+  const cron = loop.definition?.schedule?.cron ?? loop.scheduleRrule ?? "";
   if (cron.trim()) {
     if (/0\s+9\s+\*\s+\*\s+1/.test(cron)) frequency = "Weekly";
     else if (/0\s+9\s+\*\s+\*/.test(cron)) frequency = "Daily";
@@ -219,7 +223,7 @@ function mapDatabaseLoopToInsight(loop: Loop): LoopInsight {
   return {
     id: loop.id,
     name: loop.title,
-    description: loop.definition.goal || loop.title,
+    description: loop.goal || loop.runnableSpec?.goal || loop.definition?.goal || loop.title,
     workspaceId: null,
     primarySourceFile: "workflow",
     frequency,
@@ -723,11 +727,10 @@ export default function LoopsPage() {
     setLoopActionError(null);
     setRunningLoopId(id);
     try {
-      // In a real application, triggering a loop could be an API call.
-      // For now, we redirect to the loop details page.
-      router.push(`/dashboard/loops/${id}`);
+      const href = await resolveLoopRunNavigation(id);
+      router.push(href);
     } catch (activateError) {
-      setLoopActionError(activateError instanceof Error ? activateError.message : "Failed to run loop");
+      setLoopActionError(activateError instanceof Error ? activateError.message : "Failed to open loop run");
     } finally {
       setRunningLoopId(null);
     }
@@ -758,6 +761,7 @@ export default function LoopsPage() {
               type="button"
               onClick={() => router.push("/dashboard/loops/new")}
               className="h-9 gap-1.5 rounded-none shadow-sm bg-orange-500 hover:bg-orange-600 text-white"
+              title="Open the loop builder to design or edit a loop"
             >
               <Plus size={14} />
               New loop

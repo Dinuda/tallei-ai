@@ -133,13 +133,13 @@ before stripping non-alphanumeric characters. This makes "A/Ls" → "als" rather
 
 ### HyDE (Hypothetical Document Embeddings)
 
-Generate a hypothetical memory text with gpt-4o-mini, embed it, search with the hypothetical embedding. Would improve recall for conversational queries where the query and stored text have low surface overlap.
+Generate a hypothetical memory text with gpt-gpt-5-nano, embed it, search with the hypothetical embedding. Would improve recall for conversational queries where the query and stored text have low surface overlap.
 
 **Rejected for now.** Adds ~150ms + ~$0.0002/call. The dump-all path makes it unnecessary for users with < ~60 long-term memories, which covers the majority. Can be added to the overflow path later if accuracy metrics show it's needed.
 
 ### LLM rerank
 
-After hybrid retrieval, ask gpt-4o-mini "which of these memories is relevant to the query?" Keep only the flagged ones.
+After hybrid retrieval, ask gpt-gpt-5-nano "which of these memories is relevant to the query?" Keep only the flagged ones.
 
 **Rejected for now.** Adds ~300ms + ~$0.0001/call. The host LLM (Claude/GPT-4) already does this reranking in-context for free. Only worth adding if precision@5 matters more than recall@30, which it doesn't given the host model.
 

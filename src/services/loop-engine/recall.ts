@@ -11,7 +11,7 @@ import {
   type WorkflowUserProfile,
 } from "./workflow-user-profile.js";
 
-export interface ScoredMemory {
+interface ScoredMemory {
   id: string;
   text: string;
   score: number;

@@ -40,12 +40,12 @@ function readLoopExecutorOpenAiApiKey() {
         throw new Error("Loop executor requires OPENAI_API_KEY (or TALLEI_LLM__OPENAI_API_KEY).");
     return key;
 }
-export function loopExecutorOpenAiModel() {
+function loopExecutorOpenAiModel() {
     const raw = (process.env.TALLEI_LOOP_EXECUTOR__OPENAI_MODEL
         || process.env.TALLEI_LLM__CHAT_MODEL
-        || "gpt-4o-mini").trim();
+        || "gpt-gpt-5-nano").trim();
     const normalized = raw.startsWith("openai/") ? raw.slice("openai/".length) : raw;
-    return /^gpt-/i.test(normalized) ? normalized : "gpt-4o-mini";
+    return /^gpt-/i.test(normalized) ? normalized : "gpt-gpt-5-nano";
 }
 function openAiClient() {
     if (cachedClient)

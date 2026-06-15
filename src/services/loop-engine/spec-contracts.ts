@@ -50,7 +50,7 @@ export const noSlopSpecAgentSchema = z.object({
   failureModes: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
 });
 
-export const connectorActionRiskSchema = z.enum(["read", "write", "send", "destructive"]);
+const connectorActionRiskSchema = z.enum(["read", "write", "send", "destructive"]);
 
 function normalizeConnectorActionRef(value: unknown): unknown {
   if (typeof value === "string") {
@@ -104,7 +104,7 @@ const baseConnectorActionPolicySchema = z.object({
   requiresPreSendApproval: z.boolean().default(true),
 });
 
-export const connectorActionPolicySchema = z.preprocess(
+const connectorActionPolicySchema = z.preprocess(
   normalizeConnectorActionRef,
   baseConnectorActionPolicySchema,
 );
@@ -191,6 +191,6 @@ export type NoSlopSpec = z.infer<typeof noSlopSpecSchema>;
 export type NoSlopSpecAgent = z.infer<typeof noSlopSpecAgentSchema>;
 export type NoSlopSpecStatus = z.infer<typeof noSlopSpecStatusSchema>;
 export type NoSlopSpecSnapshot = z.infer<typeof noSlopSpecSnapshotSchema>;
-export type ConnectorActionPolicy = z.infer<typeof connectorActionPolicySchema>;
+type ConnectorActionPolicy = z.infer<typeof connectorActionPolicySchema>;
 export type ConnectorActionRisk = z.infer<typeof connectorActionRiskSchema>;
-export type ConnectorPolicy = z.infer<typeof connectorPolicySchema>;
+type ConnectorPolicy = z.infer<typeof connectorPolicySchema>;

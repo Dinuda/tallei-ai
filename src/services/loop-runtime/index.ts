@@ -1,9 +1,6 @@
 export {
   cancelLoopRuntimeRun,
-  executeLoopRuntimeInteractionCommand,
   executeOperatorInteractionCommand,
-  reviseLoopRuntimeInteraction,
-  dispatchLoopRuntimeCommands,
   getLoopRuntimeProjection,
   listLoopRuntimeRuns,
   retryLoopRuntimeStep,
@@ -11,9 +8,16 @@ export {
   saveCanvasEmailArtifact,
   startLoopRuntimeWorker,
   startManualLoopRun,
-  startWebhookLoopRun,
   stopLoopRuntimeWorker,
-  submitLoopRuntimeInteractionInputs,
-  uploadLoopRuntimeInteractionContacts,
 } from "./runtime.js";
-export { runtimeContextSchema, runtimeDefinitionSchema, runtimeRunStatusSchema } from "./types.js";
+export {
+  getSpecRunMessages,
+  getSpecRunProjection,
+  isSpecDrivenWorkflow,
+  listSpecLoopRuns,
+  retrySpecLoopRun,
+  streamSpecRunChat,
+} from "./spec-runner.js";
+export { getSpecRunEditorialProjection } from "./spec-run-editorial-projection.js";
+export { startSpecLoopScheduler, stopSpecLoopScheduler } from "./spec-scheduler.js";
+export { getWorkflowTriggerActivity } from "./composio-trigger.js";

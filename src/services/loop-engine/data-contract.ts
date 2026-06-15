@@ -15,7 +15,7 @@ const JSON_SCHEMA_PRIMITIVE_TYPES = new Set([
   "array",
 ]);
 
-export function isCanonicalJsonSchema(schema: Record<string, unknown>): boolean {
+function isCanonicalJsonSchema(schema: Record<string, unknown>): boolean {
   return typeof schema.type === "string"
     || typeof schema.$ref === "string"
     || Array.isArray(schema.anyOf)
@@ -83,13 +83,13 @@ export function normalizeContractSchema(schema: Record<string, unknown>): Record
   return shorthandValueToJsonSchema(schema);
 }
 
-export const artifactMediaTypeSchema = z.enum([
+const artifactMediaTypeSchema = z.enum([
   "application/json",
   "text/plain",
   "text/markdown",
 ]);
 
-export const artifactVisibilitySchema = z.enum(["internal", "operator"]);
+const artifactVisibilitySchema = z.enum(["internal", "operator"]);
 
 export const dataContractSchema = z.object({
   description: z.string().min(1),
@@ -121,7 +121,7 @@ export const dataContractSchema = z.object({
   }
 });
 
-export type DataContract = z.infer<typeof dataContractSchema>;
+type DataContract = z.infer<typeof dataContractSchema>;
 
 export function contractMediaType(contract: Pick<DataContract, "representation" | "mediaType"> | undefined) {
   return contract?.mediaType ?? (contract?.representation === "json" ? "application/json" : "text/plain");

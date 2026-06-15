@@ -26,7 +26,7 @@ export const dataInputSurfaceSchema = z.enum([
 
 export type DataInputSurface = z.infer<typeof dataInputSurfaceSchema>;
 
-export type InputValueType = "string" | "number" | "integer" | "boolean" | "object" | "array";
+type InputValueType = "string" | "number" | "integer" | "boolean" | "object" | "array";
 
 export function inputSurfaceAcceptsValueType(surface: InputSurface, valueType: InputValueType): boolean {
   if (surface === "input.contacts_csv") return valueType === "array";
@@ -89,7 +89,7 @@ export type InputRequirementContext = {
   deliveryTarget: string;
 };
 
-export function extractInputRequirementContext(root: Record<string, unknown>): InputRequirementContext {
+function extractInputRequirementContext(root: Record<string, unknown>): InputRequirementContext {
   const delivery = root.delivery && typeof root.delivery === "object" && !Array.isArray(root.delivery)
     ? root.delivery as Record<string, unknown>
     : {};
@@ -119,7 +119,7 @@ export function normalizeSpecInputRequirements(value: unknown): unknown {
   };
 }
 
-export const surfaceSubmissionValueSchema = z.object({
+const surfaceSubmissionValueSchema = z.object({
   surface: inputSurfaceSchema,
   text: z.string().optional(),
   contacts: z.array(z.object({
@@ -139,7 +139,7 @@ export function defaultLabelForKey(key: string): string {
   return key.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-export function isReviewInputSurface(surface: InputSurface): boolean {
+function isReviewInputSurface(surface: InputSurface): boolean {
   return surface === "review.draft"
     || surface === "review.email"
     || surface === "review.preview"
@@ -148,7 +148,7 @@ export function isReviewInputSurface(surface: InputSurface): boolean {
     || surface === "confirm.send";
 }
 
-export function isApprovalSurface(surface: InputSurface): boolean {
+function isApprovalSurface(surface: InputSurface): boolean {
   return surface === "review.sources"
     || surface === "review.memories"
     || surface === "review.draft"
@@ -161,18 +161,18 @@ export function isInputSurface(surface: InputSurface): boolean {
   return surface.startsWith("input.");
 }
 
-export function isConfirmInputKey(key: string): boolean {
+function isConfirmInputKey(key: string): boolean {
   return key.trim().toLowerCase() === "confirm_send";
 }
 
-export function canonicalizeInputRequirement(
+function canonicalizeInputRequirement(
   req: InputRequirement,
   _context: { recipientKind: string; deliveryTarget: string },
 ): InputRequirement {
   return req;
 }
 
-export function dedupeInputRequirements(requirements: InputRequirement[]): InputRequirement[] {
+function dedupeInputRequirements(requirements: InputRequirement[]): InputRequirement[] {
   const byKey = new Map<string, InputRequirement>();
   for (const req of requirements) {
     byKey.set(req.key, req);
@@ -190,7 +190,7 @@ export function canonicalizeInputRequirementsList(
 }
 
 /** Stable slot for comparing spec vs design requirements after key aliasing. */
-export function requirementSlotKey(req: InputRequirement): string {
+function requirementSlotKey(req: InputRequirement): string {
   if (req.surface === "confirm.send" || isConfirmInputKey(req.key)) return "slot:confirm_send";
   if (req.surface === "review.email") return "slot:review_email";
   if (req.surface === "review.preview") return "slot:review_preview";
@@ -198,7 +198,7 @@ export function requirementSlotKey(req: InputRequirement): string {
   return `slot:${req.when}:${req.key}:${req.surface}`;
 }
 
-export function requirementMatchesSpec(designReq: InputRequirement, specReq: InputRequirement): boolean {
+function requirementMatchesSpec(designReq: InputRequirement, specReq: InputRequirement): boolean {
   if (designReq.key === specReq.key) return true;
   return requirementSlotKey(designReq) === requirementSlotKey(specReq);
 }

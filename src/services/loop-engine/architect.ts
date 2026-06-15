@@ -46,7 +46,7 @@ import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import type { ToolContract } from "../tool-spec/types.js";
 import { estimateLoopBuilderCostUsd, reportLoopBuilderProgress } from "../loop-builder/progress.js";
 
-export type DesignerTestOverrides = {
+type DesignerTestOverrides = {
   chat?: typeof loopBuilderOpenAiChat;
   recallForDesigner?: typeof recallForDesigner;
   listPreferences?: typeof listPreferences;
@@ -63,9 +63,9 @@ export const loopBuilderTraceSchema = z.object({
   stages: z.array(loopBuilderTraceStageSchema).default([]),
 });
 
-export type LoopBuilderTrace = z.infer<typeof loopBuilderTraceSchema>;
+type LoopBuilderTrace = z.infer<typeof loopBuilderTraceSchema>;
 
-export type DesignLoopInput = {
+type DesignLoopInput = {
   auth: AuthContext;
   prompt: string;
   feedback?: string;
@@ -86,7 +86,7 @@ const DEFAULT_PLANNING_MAX_COMPLETION_TOKENS = 8_000;
 const DEFAULT_PLANNING_EMPTY_RESPONSE_RETRY_TOKENS = 12_000;
 const DEFAULT_PLANNING_MAX_PROMPT_BYTES = 120_000;
 
-export type PlanningAttemptResult = {
+type PlanningAttemptResult = {
   attempt: number;
   kind: "initial" | "correction";
   durationMs: number;
@@ -261,7 +261,7 @@ export function compactPlannerContracts(contracts: ToolContract[]) {
   });
 }
 
-export type CompactToolContractView = ReturnType<typeof compactPlannerContracts>[number];
+type CompactToolContractView = ReturnType<typeof compactPlannerContracts>[number];
 
 export function contractsForPlannerCorrection(input: {
   previousIR: LoopPlanningIR;

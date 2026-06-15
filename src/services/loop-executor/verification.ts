@@ -15,14 +15,36 @@ import {
   validateConnectorActionOutput,
 } from "../loop-runtime/connector-action-payload.js";
 import { nextCronRunAt } from "./cron.js";
+import { parseRunnableSpec, type RunnableSpec } from "../loop-runtime/spec-run-types.js";
 import { loopDefinitionSchema } from "./types.js";
+import { deriveVerificationScope, deriveGroundingVerificationTargets, VERIFICATION_RUNTIME_TRANSPARENCY_NOTES, type VerificationTarget } from "./verification-scope.js";
+import { createLiveVerificationSpecCache, resolveLiveVerificationContract } from "./verification-spec.js";
+import {
+  buildProbePayload,
+  extractProbeChainState,
+  summarizeProbePayload,
+} from "./verification-probes.js";
+import { runGroundedKnowledgeSearch, type GroundingSource } from "../grounded-knowledge-search.js";
+import { loadWorkflowWorkspaceId } from "../loop-runtime/resolve-loop-run-auth.js";
 
 export type WorkflowVerificationStatus = "pending" | "running" | "awaiting_confirmation" | "failed" | "confirmed";
 export type WorkflowVerificationEvidence = {
   toolRef: string;
-  level: "executable_read" | "action_visibility";
+  level: "executable_read" | "action_visibility" | "dry_run" | "trigger_check" | "grounding_probe";
   ok: boolean;
   detail: string;
+  role?: "critical" | "optional";
+};
+
+export type DryRunStep = {
+  order: number;
+  label: string;
+  actionSlug: string;
+  toolkit: string;
+  role: "critical" | "optional";
+  ok: boolean;
+  detail: string;
+  payloadSummary?: string;
 };
 
 export type WorkflowVerificationView = {
@@ -31,6 +53,8 @@ export type WorkflowVerificationView = {
   status: WorkflowVerificationStatus;
   evidence: WorkflowVerificationEvidence[];
   failures: string[];
+  warnings: string[];
+  dryRunLog: DryRunStep[];
   confirmedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -42,6 +66,7 @@ type VerificationRow = {
   status: WorkflowVerificationStatus;
   evidence_json: WorkflowVerificationEvidence[];
   failures_json: string[];
+  warnings_json?: string[];
   confirmed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -52,13 +77,15 @@ function iso(value: Date | string | null): string | null {
   return value instanceof Date ? value.toISOString() : value;
 }
 
-function mapRow(row: VerificationRow): WorkflowVerificationView {
+function mapRow(row: VerificationRow, dryRunLog: DryRunStep[] = []): WorkflowVerificationView {
   return {
     id: row.id,
     workflowId: row.workflow_id,
     status: row.status,
     evidence: row.evidence_json ?? [],
     failures: row.failures_json ?? [],
+    warnings: row.warnings_json ?? [],
+    dryRunLog,
     confirmedAt: iso(row.confirmed_at),
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at)!,
@@ -69,7 +96,7 @@ export async function initializeWorkflowVerification(auth: AuthContext, workflow
   const result = await pool.query<VerificationRow>(
     `INSERT INTO workflow_verification_runs (workflow_id, tenant_id, user_id)
      VALUES ($1, $2, $3)
-     RETURNING id, workflow_id, status, evidence_json, failures_json, confirmed_at, created_at, updated_at`,
+     RETURNING id, workflow_id, status, evidence_json, failures_json, warnings_json, confirmed_at, created_at, updated_at`,
     [workflowId, auth.tenantId, auth.userId],
   );
   return mapRow(result.rows[0]!);
@@ -77,7 +104,7 @@ export async function initializeWorkflowVerification(auth: AuthContext, workflow
 
 export async function getWorkflowVerification(auth: AuthContext, workflowId: string): Promise<WorkflowVerificationView | null> {
   const result = await pool.query<VerificationRow>(
-    `SELECT id, workflow_id, status, evidence_json, failures_json, confirmed_at, created_at, updated_at
+    `SELECT id, workflow_id, status, evidence_json, failures_json, warnings_json, confirmed_at, created_at, updated_at
      FROM workflow_verification_runs
      WHERE workflow_id = $1 AND tenant_id = $2 AND user_id = $3
      ORDER BY created_at DESC LIMIT 1`,
@@ -92,9 +119,64 @@ function toolkitFor(contract: ToolContract): string {
   return contract.toolRef.match(/^composio\.([^.]+)\./i)?.[1] ?? "";
 }
 
-function hasNoRequiredInputs(contract: ToolContract): boolean {
-  const required = contract.inputSchema.required;
-  return !Array.isArray(required) || required.length === 0;
+function connectorActionToolRef(toolkit: string, actionSlug: string): string {
+  return `composio.${toolkit.toLowerCase()}.action.${actionSlug.replace(/-/g, "_").toUpperCase()}`;
+}
+
+function targetLabel(target: VerificationTarget, contract: ToolContract | null): string {
+  return contract?.name ?? target.name ?? target.actionSlug.replace(/_/g, " ").toLowerCase();
+}
+
+async function runDryRunProbe(input: {
+  auth: AuthContext;
+  verificationId: string;
+  target: VerificationTarget;
+  contract: ToolContract;
+  buildContract: LoopBuildContract;
+  runnableSpec: RunnableSpec | null;
+  chainState: Record<string, unknown>;
+}): Promise<{ ok: boolean; detail: string; payloadSummary: string; chainPatch: Record<string, unknown> }> {
+  const payload = buildProbePayload(input.contract, input.target, {
+    verificationId: input.verificationId,
+    runnableSpec: input.runnableSpec,
+    chainState: input.chainState,
+  });
+  const payloadSummary = summarizeProbePayload(payload);
+  const result = await executeApprovedComposioAction({
+    auth: input.auth,
+    toolkit: input.target.toolkit,
+    actionSlug: input.target.actionSlug,
+    connectorAccountId: selectedConnectorAccountId(input.buildContract, input.target.toolkit),
+    payload,
+    idempotencyKey: `verification:${input.verificationId}:${input.target.actionSlug}`,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      detail: result.error ?? "Dry-run probe reported failure.",
+      payloadSummary,
+      chainPatch: {},
+    };
+  }
+  const validation = validateConnectorActionOutput(
+    input.contract,
+    resolveConnectorOutputForValidation(input.contract, result),
+  );
+  if (!validation.valid) {
+    return {
+      ok: false,
+      detail: `Output schema mismatch: ${validation.errors.map((entry) => `${entry.path} ${entry.message}`).join("; ")}`,
+      payloadSummary,
+      chainPatch: {},
+    };
+  }
+  const output = result.actionOutputData ?? result.output;
+  return {
+    ok: true,
+    detail: "Dry-run probe succeeded and matched the live output schema.",
+    payloadSummary,
+    chainPatch: extractProbeChainState(input.target, output),
+  };
 }
 
 export async function runWorkflowVerification(auth: AuthContext, workflowId: string): Promise<WorkflowVerificationView> {
@@ -108,18 +190,31 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
   if (verification.status !== "pending") {
     verification = await initializeWorkflowVerification(auth, workflowId);
   }
+
   let definitionFailure: string | null = null;
   let workflowBuildContract: LoopBuildContract | null = null;
+  let runnableSpec: RunnableSpec | null = null;
   try {
     const metadata = workflow.rows[0].metadata_json && typeof workflow.rows[0].metadata_json === "object" && !Array.isArray(workflow.rows[0].metadata_json)
       ? workflow.rows[0].metadata_json as Record<string, unknown>
       : {};
-    const definition = loopDefinitionSchema.parse(metadata.loopDefinition);
-    assertBuildContractReady(definition.buildContract);
-    workflowBuildContract = definition.buildContract;
+    runnableSpec = parseRunnableSpec(metadata);
+    if (runnableSpec) {
+      workflowBuildContract = runnableSpec.buildContract
+        ?? runnableSpec.noSlopSpec.buildContract
+        ?? runnableSpec.noSlopSpec.specJson.buildContract
+        ?? null;
+      if (!workflowBuildContract) throw new Error("Runnable spec is missing build contract metadata.");
+      assertBuildContractReady(workflowBuildContract);
+    } else {
+      const definition = loopDefinitionSchema.parse(metadata.loopDefinition);
+      assertBuildContractReady(definition.buildContract);
+      workflowBuildContract = definition.buildContract;
+    }
   } catch (error) {
     definitionFailure = `Workflow build contract verification failed: ${error instanceof Error ? error.message : String(error)}`;
   }
+
   const sessionResult = await pool.query<{
     discovered_tool_contracts_json: ToolContract[];
     build_contract_json: LoopBuildContract | null;
@@ -132,30 +227,25 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
     [workflowId, auth.tenantId, auth.userId],
   );
   const session = sessionResult.rows[0];
-  const selected = new Set(session?.build_contract_json?.requirements
-    .filter((entry) => entry.kind === "connector" && entry.status === "resolved")
-    .flatMap((entry) => {
-      const value = entry.value && typeof entry.value === "object" && !Array.isArray(entry.value)
-        ? entry.value as Record<string, unknown>
-        : {};
-      return Array.isArray(value.selections) ? value.selections.flatMap((selection) => {
-        const record = selection && typeof selection === "object" && !Array.isArray(selection)
-          ? selection as Record<string, unknown>
-          : {};
-        return Array.isArray(record.actionSlugs) ? record.actionSlugs.map(String) : [];
-      }) : [];
-    }) ?? []);
+  const buildContract = workflowBuildContract ?? session?.build_contract_json ?? null;
+  const scope = buildContract
+    ? [
+      ...deriveVerificationScope({ runnableSpec, buildContract }),
+      ...deriveGroundingVerificationTargets(buildContract),
+    ]
+    : [];
+
   let visibilityFailure: string | null = null;
   let refreshedContracts = session?.discovered_tool_contracts_json ?? [];
-  if (selected.size > 0 && session) {
+  if (scope.length > 0 && session && buildContract) {
     try {
       const refreshed = await resolveConnectorAvailability({
         auth,
         contracts: refreshedContracts,
         previousComposioSessionId: session.composio_session_id,
         selectedAccountIdsByToolkit: Object.fromEntries(
-          [...new Set(refreshedContracts.map(toolkitFor))]
-            .map((toolkit) => [toolkit, selectedConnectorAccountIds(workflowBuildContract, toolkit)]),
+          [...new Set(scope.map((target) => target.toolkit))]
+            .map((toolkit) => [toolkit, selectedConnectorAccountIds(buildContract, toolkit)]),
         ),
       });
       refreshedContracts = refreshed.contracts;
@@ -168,74 +258,295 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
     } catch (error) {
       visibilityFailure = `Connector visibility check failed: ${error instanceof Error ? error.message : String(error)}`;
     }
-  } else if (selected.size > 0) {
+  } else if (scope.length > 0 && !session) {
     visibilityFailure = "Connector visibility check failed: the workflow has no correlated builder session.";
   }
-  const contracts: ToolContract[] = refreshedContracts
-    .filter((contract) => contract.provider !== "composio" || selected.has(String(contract.constraints.actionSlug ?? contract.name)))
-    .map((contract): ToolContract => contract);
+
   await pool.query(`UPDATE workflow_verification_runs SET status = 'running', updated_at = NOW() WHERE id = $1`, [verification.id]);
 
   const evidence: WorkflowVerificationEvidence[] = [];
   const failures: string[] = [definitionFailure, visibilityFailure].filter((value): value is string => Boolean(value));
-  if (contracts.length === 0) {
+  const warnings: string[] = [];
+  const dryRunLog: DryRunStep[] = [];
+  const liveSpecCache = createLiveVerificationSpecCache();
+  const chainState: Record<string, unknown> = {};
+
+  if (scope.length === 0) {
     evidence.push({
       toolRef: "internal.workflow_contract",
       level: "action_visibility",
       ok: true,
-      detail: "This workflow has no external connector actions. Its approved build contract and runtime definition are present.",
+      detail: "This workflow has no external connector actions on the verification scope.",
+    });
+    dryRunLog.push({
+      order: 1,
+      label: "Workflow contract",
+      actionSlug: "internal.workflow_contract",
+      toolkit: "internal",
+      role: "critical",
+      ok: true,
+      detail: "No scoped connector dry-run targets were required.",
     });
   }
-  for (const contract of contracts) {
-    if (contract.constraints.connected !== true) {
-      failures.push(`${contract.name}: connector account is not connected.`);
-      continue;
-    }
-    if (contract.provider === "composio" && contract.constraints.actionVisible !== true) {
-      failures.push(`${contract.name}: connector action visibility could not be confirmed.`);
-      continue;
-    }
-    if (contract.effect !== "read_external" || !hasNoRequiredInputs(contract)) {
-      evidence.push({
-        toolRef: contract.toolRef,
-        level: "action_visibility",
-        ok: true,
-        detail: "The connected account exposes the required action and exact contract. No safe zero-input read probe is available.",
-      });
-      continue;
-    }
-    try {
-      const result = await executeApprovedComposioAction({
-        auth,
-        toolkit: toolkitFor(contract),
-        actionSlug: String(contract.constraints.actionSlug ?? contract.name),
-        connectorAccountId: selectedConnectorAccountId(workflowBuildContract, toolkitFor(contract)),
-        payload: {},
-        idempotencyKey: `verification:${verification.id}:${contract.toolRef}`,
-      });
-      if (!result.ok) throw new Error(result.error ?? "Connector read probe reported failure.");
-      const validation = validateConnectorActionOutput(
-        contract,
-        resolveConnectorOutputForValidation(contract, result),
-      );
-      if (!validation.valid) {
-        throw new Error(`Output schema mismatch: ${validation.errors.map((entry) => `${entry.path} ${entry.message}`).join("; ")}`);
+
+  const sortedScope = [...scope].sort((left, right) => {
+    const order = (target: VerificationTarget) => {
+      if (target.probeKind === "trigger_check") return 0;
+      if (target.probeKind === "grounding_probe") return 1;
+      if (target.actionSlug.includes("CREATE")) return 2;
+      if (target.actionSlug.includes("GET") && target.actionSlug.includes("DRAFT")) return 3;
+      if (target.actionSlug.includes("SEND")) return 4;
+      return 5;
+    };
+    return order(left) - order(right);
+  });
+
+  let stepOrder = dryRunLog.length;
+  const workflowWorkspaceId = await loadWorkflowWorkspaceId(auth.tenantId, auth.userId, workflowId);
+  for (const target of sortedScope) {
+    stepOrder += 1;
+    const toolRef = target.probeKind === "trigger_check"
+      ? `composio.${target.toolkit}.trigger.${target.actionSlug}`
+      : target.probeKind === "grounding_probe"
+        ? `internal.grounding.${target.actionSlug}`
+        : connectorActionToolRef(target.toolkit, target.actionSlug);
+    const sessionContract = target.probeKind === "grounding_probe" ? null : refreshedContracts.find((contract) => {
+      const slug = String(contract.constraints.actionSlug ?? contract.name).replace(/-/g, "_").toUpperCase();
+      return toolkitFor(contract).toLowerCase() === target.toolkit.toLowerCase()
+        && slug === target.actionSlug.replace(/-/g, "_").toUpperCase();
+    });
+    const connected = target.probeKind === "grounding_probe" ? true : sessionContract?.constraints.connected === true;
+
+    if (target.probeKind === "grounding_probe") {
+      const source = target.groundingSource;
+      const label = target.name ?? target.actionSlug;
+      const needsWorkspace = source?.type === "workspace_memory"
+        || source?.type === "knowledge_base"
+        || source?.type === "google_doc";
+      if (!source) {
+        const detail = "Grounding probe target is missing source metadata.";
+        evidence.push({ toolRef, level: "grounding_probe", ok: false, detail, role: target.role });
+        dryRunLog.push({
+          order: stepOrder,
+          label,
+          actionSlug: target.actionSlug,
+          toolkit: target.toolkit,
+          role: target.role,
+          ok: false,
+          detail,
+        });
+        if (target.role === "critical") failures.push(`${label}: ${detail}`);
+        else warnings.push(`${label}: ${detail} (optional)`);
+        continue;
       }
-      evidence.push({ toolRef: contract.toolRef, level: "executable_read", ok: true, detail: "A non-destructive read probe succeeded and matched the exact output schema." });
-    } catch (error) {
-      failures.push(`${contract.name}: ${error instanceof Error ? error.message : String(error)}`);
+      if (needsWorkspace && !workflowWorkspaceId) {
+        const detail = "Loop uses workspace-scoped memory but no workspace is assigned to this workflow.";
+        evidence.push({ toolRef, level: "grounding_probe", ok: false, detail, role: target.role });
+        dryRunLog.push({
+          order: stepOrder,
+          label,
+          actionSlug: target.actionSlug,
+          toolkit: target.toolkit,
+          role: target.role,
+          ok: false,
+          detail,
+        });
+        failures.push(`${label}: ${detail}`);
+        continue;
+      }
+      try {
+        const verificationAuth = workflowWorkspaceId ? { ...auth, workspaceId: workflowWorkspaceId } : auth;
+        const result = await runGroundedKnowledgeSearch({
+          auth: verificationAuth,
+          goal: "verification probe",
+          sources: [source as GroundingSource],
+          workflowId,
+        });
+        const detail = `Grounding probe succeeded (${result.sources.length} result(s)).`;
+        evidence.push({ toolRef, level: "grounding_probe", ok: true, detail, role: target.role });
+        dryRunLog.push({
+          order: stepOrder,
+          label,
+          actionSlug: target.actionSlug,
+          toolkit: target.toolkit,
+          role: target.role,
+          ok: true,
+          detail,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        evidence.push({ toolRef, level: "grounding_probe", ok: false, detail, role: target.role });
+        dryRunLog.push({
+          order: stepOrder,
+          label,
+          actionSlug: target.actionSlug,
+          toolkit: target.toolkit,
+          role: target.role,
+          ok: false,
+          detail,
+        });
+        const message = `${label}: ${detail}`;
+        if (target.role === "critical") failures.push(message);
+        else warnings.push(`${message} (optional)`);
+      }
+      continue;
     }
+
+    if (target.probeKind === "trigger_check") {
+      try {
+        const registered = await registerComposioTrigger({
+          auth,
+          toolkit: target.toolkit,
+          triggerSlug: target.actionSlug,
+        });
+        const ok = Boolean(registered?.triggerId);
+        const detail = ok
+          ? "Event trigger registration succeeded for verification."
+          : "Event trigger registration did not return an active instance.";
+        evidence.push({ toolRef, level: "trigger_check", ok, detail, role: target.role });
+        dryRunLog.push({
+          order: stepOrder,
+          label: target.actionSlug,
+          actionSlug: target.actionSlug,
+          toolkit: target.toolkit,
+          role: target.role,
+          ok,
+          detail,
+        });
+        if (!ok) failures.push(`${target.actionSlug}: ${detail}`);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        evidence.push({ toolRef, level: "trigger_check", ok: false, detail, role: target.role });
+        dryRunLog.push({
+          order: stepOrder,
+          label: target.actionSlug,
+          actionSlug: target.actionSlug,
+          toolkit: target.toolkit,
+          role: target.role,
+          ok: false,
+          detail,
+        });
+        failures.push(`${target.actionSlug}: ${detail}`);
+      }
+      continue;
+    }
+
+    if (!connected) {
+      const message = `${targetLabel(target, sessionContract ?? null)}: connector account is not connected.`;
+      evidence.push({ toolRef, level: "action_visibility", ok: false, detail: message, role: target.role });
+      dryRunLog.push({
+        order: stepOrder,
+        label: targetLabel(target, sessionContract ?? null),
+        actionSlug: target.actionSlug,
+        toolkit: target.toolkit,
+        role: target.role,
+        ok: false,
+        detail: message,
+      });
+      if (target.role === "critical") failures.push(message);
+      else warnings.push(`${message} (optional)`);
+      continue;
+    }
+
+    if (target.probeKind === "visibility_only") {
+      const detail = "Connected account is available; visibility confirmed without a destructive dry-run.";
+      evidence.push({ toolRef, level: "action_visibility", ok: true, detail, role: target.role });
+      dryRunLog.push({
+        order: stepOrder,
+        label: targetLabel(target, sessionContract ?? null),
+        actionSlug: target.actionSlug,
+        toolkit: target.toolkit,
+        role: target.role,
+        ok: true,
+        detail,
+      });
+      continue;
+    }
+
+    if (!buildContract) {
+      const message = `${targetLabel(target, sessionContract ?? null)}: build contract missing for dry-run.`;
+      if (target.role === "critical") failures.push(message);
+      else warnings.push(message);
+      continue;
+    }
+
+    try {
+      const liveContract = await resolveLiveVerificationContract(target, liveSpecCache);
+      if (!liveContract) {
+        throw new Error("Live Composio action schema could not be resolved.");
+      }
+      const probe = await runDryRunProbe({
+        auth,
+        verificationId: verification.id,
+        target,
+        contract: liveContract,
+        buildContract,
+        runnableSpec,
+        chainState,
+      });
+      Object.assign(chainState, probe.chainPatch);
+      evidence.push({
+        toolRef,
+        level: "dry_run",
+        ok: probe.ok,
+        detail: probe.detail,
+        role: target.role,
+      });
+      dryRunLog.push({
+        order: stepOrder,
+        label: targetLabel(target, liveContract),
+        actionSlug: target.actionSlug,
+        toolkit: target.toolkit,
+        role: target.role,
+        ok: probe.ok,
+        detail: probe.detail,
+        payloadSummary: probe.payloadSummary,
+      });
+      const message = `${targetLabel(target, liveContract)}: ${probe.detail}`;
+      if (!probe.ok) {
+        if (target.role === "critical") failures.push(message);
+        else warnings.push(`${message} (optional)`);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const message = `${targetLabel(target, sessionContract ?? null)}: ${detail}`;
+      evidence.push({ toolRef, level: "dry_run", ok: false, detail, role: target.role });
+      dryRunLog.push({
+        order: stepOrder,
+        label: targetLabel(target, sessionContract ?? null),
+        actionSlug: target.actionSlug,
+        toolkit: target.toolkit,
+        role: target.role,
+        ok: false,
+        detail,
+      });
+      if (target.role === "critical") failures.push(message);
+      else warnings.push(`${message} (optional)`);
+    }
+  }
+
+  for (const note of VERIFICATION_RUNTIME_TRANSPARENCY_NOTES) {
+    stepOrder += 1;
+    dryRunLog.push({
+      order: stepOrder,
+      label: "Runtime note",
+      actionSlug: "internal.runtime_note",
+      toolkit: "internal",
+      role: "optional",
+      ok: true,
+      detail: note,
+    });
   }
 
   const status: WorkflowVerificationStatus = failures.length > 0 ? "failed" : "awaiting_confirmation";
   const result = await pool.query<VerificationRow>(
     `UPDATE workflow_verification_runs
-     SET status = $2, evidence_json = $3::jsonb, failures_json = $4::jsonb, updated_at = NOW()
+     SET status = $2, evidence_json = $3::jsonb, failures_json = $4::jsonb, warnings_json = $5::jsonb, updated_at = NOW()
      WHERE id = $1
-     RETURNING id, workflow_id, status, evidence_json, failures_json, confirmed_at, created_at, updated_at`,
-    [verification.id, status, JSON.stringify(evidence), JSON.stringify(failures)],
+     RETURNING id, workflow_id, status, evidence_json, failures_json, warnings_json, confirmed_at, created_at, updated_at`,
+    [verification.id, status, JSON.stringify(evidence), JSON.stringify(failures), JSON.stringify(warnings)],
   );
-  return mapRow(result.rows[0]!);
+  return mapRow(result.rows[0]!, dryRunLog);
 }
 
 export async function confirmWorkflowVerification(auth: AuthContext, workflowId: string): Promise<WorkflowVerificationView> {
@@ -254,8 +565,11 @@ export async function confirmWorkflowVerification(auth: AuthContext, workflowId:
   const metadata = snapshot.metadata_json && typeof snapshot.metadata_json === "object" && !Array.isArray(snapshot.metadata_json)
     ? snapshot.metadata_json as Record<string, unknown>
     : {};
-  const definition = loopDefinitionSchema.parse(metadata.loopDefinition);
-  const selectedTrigger = definition.buildContract ? selectedLoopTrigger(definition.buildContract) : null;
+  const runnableSpec = parseRunnableSpec(metadata);
+  const buildContract = runnableSpec
+    ? (runnableSpec.buildContract ?? runnableSpec.noSlopSpec.buildContract ?? runnableSpec.noSlopSpec.specJson.buildContract)
+    : loopDefinitionSchema.parse(metadata.loopDefinition).buildContract;
+  const selectedTrigger = buildContract ? selectedLoopTrigger(buildContract) : null;
   const registeredTrigger = selectedTrigger?.mode === "event"
     ? await registerComposioTrigger({ auth, toolkit: selectedTrigger.toolkit, triggerSlug: selectedTrigger.triggerSlug })
     : null;

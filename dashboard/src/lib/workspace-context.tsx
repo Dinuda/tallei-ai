@@ -21,7 +21,7 @@ type WorkspaceContextValue = {
   loading: boolean;
   refresh: (options?: { preferredWorkspaceId?: string | null }) => Promise<void>;
   setActiveWorkspace: (workspaceId: string) => Promise<void>;
-  createWorkspace: (input: { name: string; description?: string | null }) => Promise<Workspace>;
+  createWorkspace: (input: { name: string; description?: string | null; icon?: string | null; color?: string | null }) => Promise<Workspace>;
 };
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -66,7 +66,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     await refresh({ preferredWorkspaceId: workspaceId });
   }, [refresh]);
 
-  const createWorkspace = useCallback(async (input: { name: string; description?: string | null }) => {
+  const createWorkspace = useCallback(async (input: { name: string; description?: string | null; icon?: string | null; color?: string | null }) => {
     const response = await apiFetch("/api/workspaces", {
       method: "POST",
       body: JSON.stringify(input),

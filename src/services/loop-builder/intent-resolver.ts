@@ -1,23 +1,25 @@
 import { z } from "zod";
 
 import type { AuthContext } from "../../domain/auth/index.js";
-import { createLoopWorkflow } from "../loop-executor/creator.js";
+import { createLoopFromRunnableSpec, createLoopWorkflow } from "../loop-executor/creator.js";
 import { loopDefinitionSchema, loopStageApprovalChannelInputSchema } from "../loop-executor/types.js";
 import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { channelsFromDesign, designLoopFromIntent, loopBuilderTraceSchema } from "../loop-engine/architect.js";
 import { approvedSpecSnapshot, getLoopSpec } from "./specs.js";
 import { compileLoopPlanningIR, loopPlanningIRSchema } from "../loop-engine/planning-ir.js";
 import { normalizeDesignCron } from "../loop-executor/cron.js";
+import { selectedArtifactContract } from "../loop-engine/build-contract.js";
 import { INTERNAL_TOOL_SPECS } from "../tool-spec/internal-tools.js";
 import type { ToolContract } from "../tool-spec/types.js";
+import type { LoopBuildContract } from "../loop-engine/build-contract.js";
 
 /** Optional UI hint passed to the LLM — does not bypass the builder. */
-export const builderTemplateHintSchema = z.enum([
+const builderTemplateHintSchema = z.enum([
   "custom",
 ]);
-export type LoopBuilderTemplateHint = z.infer<typeof builderTemplateHintSchema>;
+type LoopBuilderTemplateHint = z.infer<typeof builderTemplateHintSchema>;
 
-export const loopBuilderProposalSchema = z.object({
+const loopBuilderProposalSchema = z.object({
   title: z.string().min(1),
   summary: z.string().min(1),
   templateId: builderTemplateHintSchema.default("custom"),
@@ -58,7 +60,7 @@ function templateHintFromRequest(templateId?: LoopBuilderTemplateHint): string |
   return undefined;
 }
 
-export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<LoopBuilderProposal> {
+async function resolveLoopBuilderIntent(input: BuilderContext): Promise<LoopBuilderProposal> {
   const prompt = normalizePrompt(input.prompt);
   if (!prompt) throw new Error("Prompt is required");
   const noSlopSpec = input.specId
@@ -102,7 +104,7 @@ export async function resolveLoopBuilderIntent(input: BuilderContext): Promise<L
   });
 }
 
-export async function refineLoopBuilderProposal(input: BuilderContext & { priorProposal: LoopBuilderProposal }): Promise<LoopBuilderProposal> {
+async function refineLoopBuilderProposal(input: BuilderContext & { priorProposal: LoopBuilderProposal }): Promise<LoopBuilderProposal> {
   const prompt = normalizePrompt(input.prompt);
   return resolveLoopBuilderIntent({
     auth: input.auth,
@@ -115,7 +117,7 @@ export async function refineLoopBuilderProposal(input: BuilderContext & { priorP
   });
 }
 
-export async function saveLoopBuilderProposal(input: {
+async function saveLoopBuilderProposal(input: {
   auth: AuthContext;
   proposal: unknown;
   cron?: string;
@@ -171,5 +173,41 @@ export async function saveLoopBuilderProposal(input: {
     title: proposal.title,
     workspaceId: input.workspaceId ?? null,
     initialStatus: input.initialStatus,
+  });
+}
+
+export async function saveLoopFromSpec(input: {
+  auth: AuthContext;
+  specSnapshot: import("../loop-engine/spec-contracts.js").NoSlopSpecSnapshot;
+  discoveredToolContracts: ToolContract[];
+  buildContract: LoopBuildContract;
+  cron: string;
+  timezone: string;
+  workspaceId?: string | null;
+  builderSessionId?: string;
+  initialStatus?: "active" | "verifying";
+}) {
+  const snapshot = noSlopSpecSnapshotSchema.parse(input.specSnapshot);
+  const buildContract = input.buildContract;
+  const cron = normalizeDesignCron(input.cron, snapshot.specJson.purpose);
+  const artifacts = selectedArtifactContract(buildContract);
+  const runnableSpec = {
+    version: "v1" as const,
+    goal: snapshot.specJson.purpose,
+    title: snapshot.title,
+    noSlopSpec: snapshot,
+    discoveredToolContracts: input.discoveredToolContracts as unknown as Array<Record<string, unknown>>,
+    schedule: { cron, timezone: input.timezone },
+    buildContract,
+    ...(artifacts ? { artifacts } : {}),
+    workspaceId: input.workspaceId ?? null,
+    ...(input.builderSessionId ? { builderSessionId: input.builderSessionId } : {}),
+  };
+  return createLoopFromRunnableSpec({
+    auth: input.auth,
+    spec: runnableSpec,
+    title: snapshot.title,
+    workspaceId: input.workspaceId ?? null,
+    initialStatus: input.initialStatus ?? "verifying",
   });
 }

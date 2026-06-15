@@ -1,7 +1,7 @@
 import type { AgentHandoffBinding, LoopRunAgent } from "../loop-executor/types.js";
 import { deriveSubjectFromBody } from "./email-canvas.js";
 
-export type HandoffResolution = {
+type HandoffResolution = {
   value: Record<string, unknown>;
   resolvedBindings: Array<{ binding: AgentHandoffBinding; resolved: boolean; provenanceValid: boolean }>;
 };

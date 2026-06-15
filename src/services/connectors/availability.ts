@@ -1,5 +1,6 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { ToolContract } from "../tool-spec/types.js";
+import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import { createComposioSession, invalidateComposioSession } from "./composio-session.js";
 import {
   connectedAppToolkits,
@@ -51,8 +52,28 @@ function toolkitFor(contract: ToolContract): string {
   return match?.[1]?.toLowerCase() ?? contract.name.toLowerCase();
 }
 
+function actionSlugCandidates(contract: ToolContract): string[] {
+  const candidates = new Set<string>();
+  const configured = String(contract.constraints.actionSlug ?? "").trim();
+  if (configured) {
+    candidates.add(configured.toUpperCase());
+    candidates.add(configured.toUpperCase().replace(/-/g, "_"));
+  }
+  const parsed = parseConnectorActionToolRef(contract.toolRef);
+  if (parsed) {
+    candidates.add(parsed.actionSlug.toUpperCase());
+    candidates.add(parsed.actionSlug.replace(/-/g, "_").toUpperCase());
+    candidates.add(parsed.actionSlug.replace(/_/g, "-").toUpperCase());
+  }
+  return [...candidates];
+}
+
 function actionSlugFor(contract: ToolContract): string {
-  return String(contract.constraints.actionSlug ?? contract.name).trim().toUpperCase();
+  return actionSlugCandidates(contract)[0] ?? String(contract.name).trim().toUpperCase();
+}
+
+function isActionVisible(contract: ToolContract, visibleSlugs: Set<string>): boolean {
+  return actionSlugCandidates(contract).some((slug) => visibleSlugs.has(slug));
 }
 
 export async function resolveConnectorAvailability(input: {
@@ -100,7 +121,7 @@ export async function resolveConnectorAvailability(input: {
         name: contract.name,
         description: contract.description,
         effect: contract.effect,
-        available: visibleSlugs.has(slug),
+        available: isActionVisible(contract, visibleSlugs),
       };
     });
     const unavailableActionSlugs = actions.filter((action) => !action.available).map((action) => action.slug);
@@ -137,7 +158,7 @@ export async function resolveConnectorAvailability(input: {
       constraints: {
         ...contract.constraints,
         connected: connectedToolkits.has(toolkit),
-        actionVisible: visibleSlugs.has(actionSlugFor(contract)),
+        actionVisible: isActionVisible(contract, visibleSlugs),
       },
     };
   });

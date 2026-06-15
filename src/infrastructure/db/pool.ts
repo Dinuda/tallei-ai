@@ -1,1 +1,1 @@
-export { pool } from "./index.js";
+export { pool, poolQuery, isTransientPoolError } from "./index.js";

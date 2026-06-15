@@ -4,7 +4,7 @@ import {
   type ConnectorAvailabilitySnapshot,
 } from "../connectors/availability.js";
 import { resolveBuildRequirement, unresolvedBuildRequirements } from "../loop-engine/build-contract.js";
-import { requireWorkflowBuilderSession, updateWorkflowBuilderSession } from "./sessions.js";
+import { requireWorkflowBuilderSession, updateWorkflowBuilderSession, phaseAfterRequirementsResolved } from "./sessions.js";
 
 export type BuilderConnectorChecklist = ConnectorAvailabilitySnapshot & {
   requirementId: string;
@@ -88,7 +88,7 @@ export async function resolveBuilderConnectorRequirement(
   });
   const unresolved = unresolvedBuildRequirements(buildContract);
   await updateWorkflowBuilderSession(auth, sessionId, {
-    phase: unresolved.length === 0 ? "intent_resolved" : "resolving_requirements",
+    phase: phaseAfterRequirementsResolved(session.phase, unresolved.length),
     buildContract,
     error: null,
   });

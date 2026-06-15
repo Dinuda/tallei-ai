@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { inputSurfaceSchema, inputRequirementWhenSchema } from "./input-surfaces.js";
 
-export const operatorCommandSchema = z.enum([
+const operatorCommandSchema = z.enum([
   "submit_input",
   "approve",
   "revise",
@@ -10,9 +10,9 @@ export const operatorCommandSchema = z.enum([
   "verify_connection",
 ]);
 
-export type OperatorCommand = z.infer<typeof operatorCommandSchema>;
+type OperatorCommand = z.infer<typeof operatorCommandSchema>;
 
-export const operatorInteractionKindSchema = z.enum([
+const operatorInteractionKindSchema = z.enum([
   "collect_input",
   "review_artifact",
   "confirm_action",
@@ -29,9 +29,9 @@ export const operatorInteractionCommandSchema = z.discriminatedUnion("command", 
   z.object({ command: z.literal("verify_connection"), value: z.record(z.unknown()).default({}) }),
 ]);
 
-export type OperatorInteractionCommand = z.infer<typeof operatorInteractionCommandSchema>;
+type OperatorInteractionCommand = z.infer<typeof operatorInteractionCommandSchema>;
 
-export const operatorActionSchema = z.object({
+const operatorActionSchema = z.object({
   id: z.string().min(1),
   command: operatorCommandSchema,
   label: z.string().min(1),
@@ -80,7 +80,7 @@ const connectConnectorPlanSchema = z.object({
   contractRef: z.string().min(1),
 });
 
-export const operatorInteractionPlanItemSchema = z.discriminatedUnion("kind", [
+const operatorInteractionPlanItemSchema = z.discriminatedUnion("kind", [
   collectInputPlanSchema,
   reviewArtifactPlanSchema,
   confirmActionPlanSchema,

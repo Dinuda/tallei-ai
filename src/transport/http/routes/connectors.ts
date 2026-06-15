@@ -24,11 +24,13 @@ const router = Router();
 
 router.post("/composio/webhook", async (req, res: Response) => {
   try {
-    const signature = typeof req.headers["x-composio-signature"] === "string"
-      ? req.headers["x-composio-signature"]
-      : undefined;
     const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody;
-    const isValid = verifyComposioWebhookSignature(rawBody, signature);
+    const isValid = verifyComposioWebhookSignature(rawBody, {
+      webhookId: typeof req.headers["webhook-id"] === "string" ? req.headers["webhook-id"] : undefined,
+      webhookTimestamp: typeof req.headers["webhook-timestamp"] === "string" ? req.headers["webhook-timestamp"] : undefined,
+      webhookSignature: typeof req.headers["webhook-signature"] === "string" ? req.headers["webhook-signature"] : undefined,
+      legacySignature: typeof req.headers["x-composio-signature"] === "string" ? req.headers["x-composio-signature"] : undefined,
+    });
     if (!isValid) {
       res.status(401).json({ error: "Invalid webhook signature" });
       return;

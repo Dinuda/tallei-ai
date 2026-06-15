@@ -143,7 +143,7 @@ export function renderSpecMarkdown(spec: NoSlopSpec): string {
   return lines.join("\n");
 }
 
-export function renderIntentContextMarkdown(intentContext?: LoopIntentContext): string {
+function renderIntentContextMarkdown(intentContext?: LoopIntentContext): string {
   if (!intentContext) return "";
   const lines = ["## Intent Decisions And Assumptions"];
   for (const decision of intentContext.decisions) {
@@ -208,7 +208,7 @@ function toIsoTimestamp(value: string | Date | null): string | null {
   return value instanceof Date ? value.toISOString() : value;
 }
 
-export async function hydrateLoopSpecJson(
+async function hydrateLoopSpecJson(
   auth: AuthContext,
   rawSpec: unknown,
   options?: { mode?: "draft" | "approved"; intent?: string; validateSemantics?: boolean },
@@ -387,7 +387,7 @@ function stripModelExecutionBindings(rawSpec: unknown): unknown {
   };
 }
 
-export async function prepareGeneratedLoopSpec(input: {
+async function prepareGeneratedLoopSpec(input: {
   prompt: string;
   intentContext?: LoopIntentContext;
   rawSpec: unknown;
@@ -492,7 +492,7 @@ export async function draftLoopSpec(input: {
   return persistGeneratedLoopSpec({ auth: input.auth, prompt, intentContext, specJson });
 }
 
-export async function persistGeneratedLoopSpec(input: {
+async function persistGeneratedLoopSpec(input: {
   auth: AuthContext;
   prompt: string;
   intentContext?: LoopIntentContext;

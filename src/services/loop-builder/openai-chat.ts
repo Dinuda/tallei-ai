@@ -79,7 +79,7 @@ export function loopBuilderOpenAiModel(): string {
     || "gpt-4o"
   ).trim();
   const normalized = raw.startsWith("openai/") ? raw.slice("openai/".length) : raw;
-  if (/^gpt-4o-mini$/i.test(normalized)) return "gpt-4o";
+  if (/^gpt-gpt-5-nano$/i.test(normalized)) return "gpt-4o";
   return /^gpt-/i.test(normalized) ? normalized : "gpt-4o";
 }
 
@@ -89,7 +89,7 @@ function openAiClient(): OpenAI {
   return cachedClient;
 }
 
-export type LoopBuilderOpenAiChatResult = {
+type LoopBuilderOpenAiChatResult = {
   text: string;
   model: string;
   finishReason: string | null;
@@ -125,7 +125,7 @@ function formatLoopBuilderEmptyResponseError(input: {
   return `Loop builder LLM returned empty response (${details}).`;
 }
 
-export type LoopBuilderJsonSchemaFormat = {
+type LoopBuilderJsonSchemaFormat = {
   type: "json_schema";
   name: string;
   schema: Record<string, unknown>;

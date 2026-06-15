@@ -10,7 +10,12 @@ import {
   startVertexDocumentBackfillWorker,
   stopVertexDocumentBackfillWorker,
 } from "../services/vertex-document-backfill.js";
-import { startLoopRuntimeWorker, stopLoopRuntimeWorker } from "../services/loop-runtime/index.js";
+import {
+  startLoopRuntimeWorker,
+  startSpecLoopScheduler,
+  stopLoopRuntimeWorker,
+  stopSpecLoopScheduler,
+} from "../services/loop-runtime/index.js";
 
 let workersRunning = false;
 
@@ -21,6 +26,7 @@ export function startWorkers(): void {
   startUploadedFileIngestWorker();
   startVertexDocumentBackfillWorker();
   startLoopRuntimeWorker();
+  startSpecLoopScheduler();
 }
 
 export function stopWorkers(): void {
@@ -30,4 +36,5 @@ export function stopWorkers(): void {
   stopUploadedFileIngestWorker();
   stopVertexDocumentBackfillWorker();
   stopLoopRuntimeWorker();
+  stopSpecLoopScheduler();
 }

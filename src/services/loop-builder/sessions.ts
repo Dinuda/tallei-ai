@@ -9,6 +9,8 @@ import type { ToolContract } from "../tool-spec/types.js";
 import type { LoopBuilderProposal } from "./intent-resolver.js";
 import type { LoopSpecView } from "./specs.js";
 import type { LoopBuildContract } from "../loop-engine/build-contract.js";
+import type { LoopBuilderUsage } from "./progress.js";
+import { emptyLoopBuilderUsage } from "./progress.js";
 
 export type WorkflowBuilderPhase =
   | "new"
@@ -22,6 +24,23 @@ export type WorkflowBuilderPhase =
   | "saved"
   | "archived"
   | "failed";
+
+const POST_INTENT_PHASES = new Set<WorkflowBuilderPhase>([
+  "spec_drafted",
+  "spec_approved",
+  "graph_generated",
+  "saved",
+]);
+
+/** Keep later phases when reconnecting a connector after spec save/approval. */
+export function phaseAfterRequirementsResolved(
+  currentPhase: WorkflowBuilderPhase,
+  unresolvedCount: number,
+): WorkflowBuilderPhase {
+  if (unresolvedCount > 0) return "resolving_requirements";
+  if (POST_INTENT_PHASES.has(currentPhase)) return currentPhase;
+  return "intent_resolved";
+}
 
 export type WorkflowBuilderSession = {
   id: string;
@@ -39,6 +58,7 @@ export type WorkflowBuilderSession = {
   currentProposal: LoopBuilderProposal | null;
   error: { message: string } | null;
   revision: number;
+  analyzerUsage: LoopBuilderUsage;
   createdAt: string;
   updatedAt: string;
 };
@@ -59,6 +79,7 @@ type SessionRow = {
   current_proposal_json: LoopBuilderProposal | null;
   error_json: { message: string } | null;
   revision: number;
+  analyzer_usage_json: LoopBuilderUsage | null;
   created_at: Date | string;
   updated_at: Date | string;
 };
@@ -85,6 +106,7 @@ function mapSession(row: SessionRow): WorkflowBuilderSession {
     currentProposal: row.current_proposal_json,
     error: row.error_json,
     revision: row.revision,
+    analyzerUsage: row.analyzer_usage_json ?? emptyLoopBuilderUsage(),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -92,7 +114,7 @@ function mapSession(row: SessionRow): WorkflowBuilderSession {
 
 const SESSION_COLUMNS = `id, phase, title, goal, composio_session_id, workflow_run_id, spec_id, workflow_id,
   intent_analysis_json, resolved_intent_json, discovered_tool_contracts_json, build_contract_json, current_proposal_json,
-  error_json, revision, created_at, updated_at`;
+  error_json, revision, analyzer_usage_json, created_at, updated_at`;
 
 export async function createWorkflowBuilderSession(auth: AuthContext, goal: string): Promise<WorkflowBuilderSession> {
   const normalizedGoal = goal.trim();
@@ -109,7 +131,7 @@ export async function createWorkflowBuilderSession(auth: AuthContext, goal: stri
   return mapSession(result.rows[0]!);
 }
 
-export async function getWorkflowBuilderSession(auth: AuthContext, sessionId: string): Promise<WorkflowBuilderSession | null> {
+async function getWorkflowBuilderSession(auth: AuthContext, sessionId: string): Promise<WorkflowBuilderSession | null> {
   const result = await pool.query<SessionRow>(
     `SELECT ${SESSION_COLUMNS}
      FROM workflow_builder_sessions
@@ -143,6 +165,8 @@ export async function updateWorkflowBuilderSession(
   sessionId: string,
   patch: {
     phase?: WorkflowBuilderPhase;
+    title?: string;
+    goal?: string;
     composioSessionId?: string;
     workflowRunId?: string | null;
     spec?: LoopSpecView | null;
@@ -158,6 +182,8 @@ export async function updateWorkflowBuilderSession(
   const result = await pool.query<SessionRow>(
     `UPDATE workflow_builder_sessions
      SET phase = COALESCE($4, phase),
+         title = COALESCE($25, title),
+         goal = COALESCE($26, goal),
          composio_session_id = CASE WHEN $5::boolean THEN $6 ELSE composio_session_id END,
          workflow_run_id = CASE WHEN $7::boolean THEN $8 ELSE workflow_run_id END,
          spec_id = CASE WHEN $9::boolean THEN $10::uuid ELSE spec_id END,
@@ -173,21 +199,50 @@ export async function updateWorkflowBuilderSession(
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3
      RETURNING ${SESSION_COLUMNS}`,
     [
-      sessionId, auth.tenantId, auth.userId, patch.phase ?? null,
-      "composioSessionId" in patch, patch.composioSessionId ?? null,
-      "workflowRunId" in patch, patch.workflowRunId ?? null,
-      "spec" in patch, patch.spec?.id ?? null,
-      "workflowId" in patch, patch.workflowId ?? null,
-      "intentAnalysis" in patch, patch.intentAnalysis ? JSON.stringify(patch.intentAnalysis) : null,
-      "resolvedIntent" in patch, patch.resolvedIntent ? JSON.stringify(patch.resolvedIntent) : null,
-      "discoveredToolContracts" in patch, JSON.stringify(patch.discoveredToolContracts ?? []),
-      "buildContract" in patch, patch.buildContract ? JSON.stringify(patch.buildContract) : null,
-      "currentProposal" in patch, patch.currentProposal ? JSON.stringify(patch.currentProposal) : null,
-      "error" in patch, patch.error ? JSON.stringify(patch.error) : null,
+      sessionId,
+      auth.tenantId,
+      auth.userId,
+      patch.phase ?? null,
+      "composioSessionId" in patch,
+      patch.composioSessionId ?? null,
+      "workflowRunId" in patch,
+      patch.workflowRunId ?? null,
+      "spec" in patch,
+      patch.spec?.id ?? null,
+      "workflowId" in patch,
+      patch.workflowId ?? null,
+      "intentAnalysis" in patch,
+      patch.intentAnalysis ? JSON.stringify(patch.intentAnalysis) : null,
+      "resolvedIntent" in patch,
+      patch.resolvedIntent ? JSON.stringify(patch.resolvedIntent) : null,
+      "discoveredToolContracts" in patch,
+      JSON.stringify(patch.discoveredToolContracts ?? []),
+      "buildContract" in patch,
+      patch.buildContract ? JSON.stringify(patch.buildContract) : null,
+      "currentProposal" in patch,
+      patch.currentProposal ? JSON.stringify(patch.currentProposal) : null,
+      "error" in patch,
+      patch.error ? JSON.stringify(patch.error) : null,
+      patch.title ?? null,
+      patch.goal ?? null,
     ],
   );
   if (!result.rows[0]) throw new Error("Workflow builder session not found");
   return mapSession(result.rows[0]);
+}
+
+export async function saveWorkflowBuilderAnalyzerUsage(
+  auth: AuthContext,
+  sessionId: string,
+  usage: LoopBuilderUsage,
+): Promise<void> {
+  const result = await pool.query(
+    `UPDATE workflow_builder_sessions
+     SET analyzer_usage_json = $4::jsonb, updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+    [sessionId, auth.tenantId, auth.userId, JSON.stringify(usage)],
+  );
+  if (result.rowCount === 0) throw new Error("Workflow builder session not found");
 }
 
 export async function replaceWorkflowBuilderMessages(

@@ -29,7 +29,7 @@ const sourceKindSchema = z.enum([
   "connector_output",
 ]);
 
-export const plannedRequiredValueSchema = z.object({
+const plannedRequiredValueSchema = z.object({
   key: z.string().min(1),
   label: z.string().min(1),
   description: z.string().min(1),
@@ -50,7 +50,7 @@ const plannedBindingSourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("artifact"), key: z.string().min(1), path: z.string().min(1) }),
 ]);
 
-export const explicitActionInputBindingSchema = z.object({
+const explicitActionInputBindingSchema = z.object({
   source: plannedBindingSourceSchema,
   targetPath: z.string().min(1),
   required: z.boolean(),
@@ -58,13 +58,13 @@ export const explicitActionInputBindingSchema = z.object({
   provenance: z.enum(["agent_output", "operator_input", "stable_config", "artifact", "connector_output"]),
 });
 
-export const plannedArtifactFieldSchema = z.object({
+const plannedArtifactFieldSchema = z.object({
   path: z.string().startsWith("/"),
   type: jsonValueTypeSchema,
   required: z.boolean(),
 });
 
-export const plannedArtifactSchema = z.object({
+const plannedArtifactSchema = z.object({
   id: z.string().min(1),
   description: z.string().min(1),
   representation: z.enum(["text", "json"]),
@@ -85,13 +85,13 @@ const semanticAgentSchema = z.object({
   outputArtifact: plannedArtifactSchema,
 });
 
-export const actionSemanticAnnotationSchema = z.object({
+const actionSemanticAnnotationSchema = z.object({
   effect: z.enum(["read_external", "write_external", "irreversible_external", "uncertain"]),
   confidence: z.enum(["low", "medium", "high"]),
   approvalRequired: z.boolean(),
 });
 
-export const selectedConnectorActionSchema = z.object({
+const selectedConnectorActionSchema = z.object({
   id: z.string().min(1),
   contractRef: z.string().min(1),
   purpose: z.string().min(1),
@@ -99,7 +99,7 @@ export const selectedConnectorActionSchema = z.object({
   bindings: z.array(explicitActionInputBindingSchema),
 });
 
-export const unresolvedPlanningIssueSchema = z.object({
+const unresolvedPlanningIssueSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["decision", "required_value", "action", "binding", "contract"]),
   message: z.string().min(1),
@@ -189,14 +189,14 @@ export function loopPlanningIRJsonSchemaForContracts(input: {
 }
 
 export type LoopPlanningIR = z.infer<typeof loopPlanningIRSchema>;
-export type LoopPlanningIRV2 = LoopPlanningIR;
-export type PlannedRequiredValue = z.infer<typeof plannedRequiredValueSchema>;
-export type ExplicitActionInputBinding = z.infer<typeof explicitActionInputBindingSchema>;
-export type ExplicitBindingRef = ExplicitActionInputBinding;
-export type SelectedConnectorAction = z.infer<typeof selectedConnectorActionSchema>;
-export type SelectedContractRef = SelectedConnectorAction;
-export type UnresolvedPlanningIssue = z.infer<typeof unresolvedPlanningIssueSchema>;
-export type PlannedArtifact = z.infer<typeof plannedArtifactSchema>;
+type LoopPlanningIRV2 = LoopPlanningIR;
+type PlannedRequiredValue = z.infer<typeof plannedRequiredValueSchema>;
+type ExplicitActionInputBinding = z.infer<typeof explicitActionInputBindingSchema>;
+type ExplicitBindingRef = ExplicitActionInputBinding;
+type SelectedConnectorAction = z.infer<typeof selectedConnectorActionSchema>;
+type SelectedContractRef = SelectedConnectorAction;
+type UnresolvedPlanningIssue = z.infer<typeof unresolvedPlanningIssueSchema>;
+type PlannedArtifact = z.infer<typeof plannedArtifactSchema>;
 
 export type PlanningCompilationIssue = {
   code: string;
@@ -204,7 +204,7 @@ export type PlanningCompilationIssue = {
   path?: string;
 };
 
-export type CompiledLoopPlanningIR = {
+type CompiledLoopPlanningIR = {
   graph: LoopAgentGraph;
   inputRequirements: InputRequirement[];
   connectorPolicy: {
@@ -487,7 +487,7 @@ function normalizeRequiredValueSourceKinds(values: PlannedRequiredValue[]): Plan
 const SCHEDULE_OWNED_REQUIRED_VALUE_KEYS = new Set(["timezone", "cron"]);
 
 /** cron and timezone are owned by planningIR.schedule, not requiredValues. */
-export function stripScheduleOwnedRequiredValues(values: PlannedRequiredValue[]): PlannedRequiredValue[] {
+function stripScheduleOwnedRequiredValues(values: PlannedRequiredValue[]): PlannedRequiredValue[] {
   return values.filter((value) => !SCHEDULE_OWNED_REQUIRED_VALUE_KEYS.has(value.key));
 }
 
@@ -782,7 +782,7 @@ function semanticInputContract(
   return { description: `Explicit inputs for ${agent.name}`, schema };
 }
 
-export function compileLoopPlanningIRV2(input: {
+function compileLoopPlanningIRV2(input: {
   planningIR: LoopPlanningIR;
   contracts: ToolContract[];
   options?: { draftReviewAgentIds?: Set<string> };

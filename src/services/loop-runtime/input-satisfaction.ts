@@ -1,7 +1,6 @@
 import type { z } from "zod";
 import { detectPlaceholderText } from "../loop-engine/contracts.js";
 import {
-  inputRequirementSchema,
   isInputSurface,
   type InputRequirement,
   type InputRequirementWhen,
@@ -15,13 +14,13 @@ import { runtimeContextSchema } from "./types.js";
 
 type RuntimeContextShape = z.infer<typeof runtimeContextSchema>;
 
-export type RequirementEvaluation = {
+type RequirementEvaluation = {
   requirement: InputRequirement;
   satisfied: boolean;
   message?: string;
 };
 
-export type ValidationResult = { ok: true } | { ok: false; message: string };
+type ValidationResult = { ok: true } | { ok: false; message: string };
 
 export function collectRequirements(definition: LoopDefinition): InputRequirement[] {
   return definition.inputRequirements ?? [];
@@ -165,7 +164,7 @@ export function evaluateExecutionBlockingAt(
     .filter((row) => isInputSurface(row.requirement.surface));
 }
 
-export function unsatisfiedRequirementKeys(
+function unsatisfiedRequirementKeys(
   definition: LoopDefinition,
   context: RuntimeContextShape,
   when: InputRequirementWhen,
@@ -173,7 +172,7 @@ export function unsatisfiedRequirementKeys(
   return evaluateAt(definition, context, when).map((result) => result.requirement.key);
 }
 
-export function applySurfaceSubmission(input: {
+function applySurfaceSubmission(input: {
   key: string;
   requirement: InputRequirement;
   value: SurfaceSubmissionValue;

@@ -14,6 +14,8 @@ const connectorServicePath = new URL("../../../src/services/connectors/composio.
 const connectorChecklistPath = new URL("../../../dashboard/src/components/builder-connector-checklist.tsx", import.meta.url);
 const appSelectorPath = new URL("../../../dashboard/src/components/builder-app-selector.tsx", import.meta.url);
 const scheduleSelectorPath = new URL("../../../dashboard/src/components/builder-schedule-selector.tsx", import.meta.url);
+const artifactStudioPath = new URL("../../../dashboard/src/components/email-artifact-studio.tsx", import.meta.url);
+const builderArtifactEditorPath = new URL("../../../dashboard/src/components/builder-artifact-editor.tsx", import.meta.url);
 const triggerWebhookPath = new URL("../../../src/services/loop-runtime/composio-trigger.ts", import.meta.url);
 const connectorRoutePath = new URL("../../../src/transport/http/routes/connectors.ts", import.meta.url);
 
@@ -79,7 +81,7 @@ test("required connectors use the inline connector checklist and a fresh availab
   assert.match(availability, /invalidateComposioSession\(input\.previousComposioSessionId\)/);
   assert.match(availability, /const session = await createComposioSession\(input\.auth, connectedAccounts\)/);
   assert.match(availability, /reconcileComposioConnectorAccounts/);
-  assert.match(availability, /actionVisible: visibleSlugs\.has/);
+  assert.match(availability, /isActionVisible\(contract, visibleSlugs\)/);
   assert.match(connectorService, /export async function resolveConnectedComposioAccountIds/);
   assert.match(connectorService, /preferredAuthConfigId/);
   assert.doesNotMatch(connectorService, /config\.composioAuthConfigId\s*\?\s*await createComposioConnectLink/);
@@ -133,7 +135,49 @@ test("builder-created workflows remain unscheduled until verification is confirm
   assert.match(route, /confirmActivation:\s*tool\(/);
   assert.match(creator, /initialStatus === "active" \? nextCronRunAt/);
   assert.match(verification, /status = 'active', next_run_at/);
-  assert.match(verification, /status !== "awaiting_confirmation"/);
+  assert.match(verification, /warnings_json/);
+  assert.match(verification, /dryRunLog/);
+});
+
+test("artifact contract uses the in-chat artifact composer", async () => {
+  const [route, builderPage, artifactStudio, builderArtifactEditor] = await Promise.all([
+    readFile(routePath, "utf8"),
+    readFile(builderPagePath, "utf8"),
+    readFile(artifactStudioPath, "utf8"),
+    readFile(builderArtifactEditorPath, "utf8"),
+  ]);
+
+  assert.match(route, /artifactSetup:\s*tool\(/);
+  assert.match(route, /call artifactSetup with draftTemplates entries/);
+  assert.match(route, /dryRunLog steps and evidence/);
+  assert.match(builderPage, /BuilderArtifactEditor/);
+  assert.match(builderPage, /findActiveArtifactSetup/);
+  assert.match(builderPage, /updateArtifactToolOutput/);
+  assert.match(builderArtifactEditor, /EmailArtifactPreviewCard/);
+  assert.match(artifactStudio, /Looks good — proceed/);
+  assert.match(artifactStudio, /persistArtifactBundle/);
+  assert.match(artifactStudio, /EmailArtifactCanvas/);
+  assert.match(artifactStudio, /EmailArtifactEditorPanel/);
+  assert.match(artifactStudio, /React Email editor/);
+  assert.match(artifactStudio, /ChatArtifactMinimap/);
+  assert.match(builderArtifactEditor, /ArtifactCanvasOverlay/);
+});
+
+test("operational build requirements use structured requirementSetup choices", async () => {
+  const [route, builderPage, requirementSelector, promptMenu] = await Promise.all([
+    readFile(routePath, "utf8"),
+    readFile(builderPagePath, "utf8"),
+    readFile(new URL("../../../dashboard/src/components/builder-requirement-selector.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../../../dashboard/src/components/ai-elements/interactive-prompt-menu.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(route, /requirementSetup:\s*tool\(/);
+  assert.match(route, /call requirementSetup and stop/);
+  assert.match(route, /allowOther true so the user can type custom guidance/);
+  assert.match(builderPage, /BuilderRequirementSelector/);
+  assert.match(builderPage, /findActiveRequirementSetup/);
+  assert.match(requirementSelector, /InteractivePromptMenu/);
+  assert.match(promptMenu, /Tell Tallei what to do differently/);
 });
 
 test("event choices come from discovered connector triggers and scheduled fallback is hourly or daily", async () => {
@@ -160,6 +204,21 @@ test("event choices come from discovered connector triggers and scheduled fallba
   assert.match(triggerWebhook, /workflow_connector_trigger_events/);
   assert.match(connectorRoute, /handleComposioTriggerWebhook/);
   assert.ok(connectorRoute.indexOf('router.post("/composio/webhook"') < connectorRoute.indexOf("router.use(authMiddleware)"));
+});
+
+test("spec save approves and persists in one saveLoop step", async () => {
+  const [route, dispatcher] = await Promise.all([
+    readFile(routePath, "utf8"),
+    readFile(dispatcherPath, "utf8"),
+  ]);
+
+  assert.doesNotMatch(route, /approveSpec:\s*tool\(/);
+  assert.match(route, /saveLoop approves and persists in one step/);
+  assert.match(route, /'Save loop' \(recommended/);
+  assert.match(dispatcher, /spec\.status !== "approved"/);
+  assert.match(dispatcher, /approveLoopSpec\(/);
+  assert.match(dispatcher, /\["spec_drafted", "spec_approved", "saved", "failed"\]/);
+  assert.match(dispatcher, /isRecoverableBuilderError/);
 });
 
 test("spec refinement and approval preserve the resolved build contract", async () => {

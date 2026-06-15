@@ -24,7 +24,7 @@ const ASSISTANT_OUTPUT_PATTERNS: RegExp[] = [
   /<antArtifact\b/i,
 ];
 
-export const workflowUserProfileMemorySchema = z.object({
+const workflowUserProfileMemorySchema = z.object({
   id: z.string().uuid(),
   text: z.string().min(1),
   category: z.string().nullable().optional(),
@@ -40,7 +40,7 @@ export const workflowUserProfileSchema = z.object({
 });
 
 export type WorkflowUserProfile = z.infer<typeof workflowUserProfileSchema>;
-export type WorkflowUserProfileMemory = z.infer<typeof workflowUserProfileMemorySchema>;
+type WorkflowUserProfileMemory = z.infer<typeof workflowUserProfileMemorySchema>;
 
 function readRowText(row: { content_ciphertext: string }): string {
   try {

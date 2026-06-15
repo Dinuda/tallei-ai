@@ -234,7 +234,7 @@ function dynamicActionTool(toolkit, action) {
     };
 }
 
-export function listLoopTools() {
+function listLoopTools() {
     return CATALOG
         .map(({ integrationKey: _i, composioAction: _a, isActionable: _x, ...view }) => view);
 }
@@ -276,7 +276,7 @@ export function getEffectiveLoopConstraints(definition) {
         discoveredToolContracts: definition.builderMeta?.discoveredToolContracts ?? definition.discoveredToolContracts ?? [],
     };
 }
-export function listAllowedLoopTools(definition) {
+function listAllowedLoopTools(definition) {
     const constraints = getEffectiveLoopConstraints(definition);
     const integrations = new Set(constraints.allowedIntegrations.map((v) => v.trim().toLowerCase()));
     const toolRefCap = constraints.allowedToolRefs?.length
@@ -307,10 +307,10 @@ export function getLoopTool(ref) {
     }
     return null;
 }
-export function isKnownLoopToolRef(ref) {
+function isKnownLoopToolRef(ref) {
     return Boolean(getLoopTool(ref));
 }
-export async function listAvailableConnectorActionTools(input) {
+async function listAvailableConnectorActionTools(input) {
     const actions = await listComposioToolkitTools(input.toolkit);
     return actions
         .map((action) => dynamicActionTool(normalizeToolRef(input.toolkit), action))
@@ -323,7 +323,7 @@ function normalizeIntegrations(definition) {
     }
     return values;
 }
-export async function validateToolAssignments(input) {
+async function validateToolAssignments(input) {
     const issues = [];
     const allowedIntegrations = normalizeIntegrations(input.definition);
     const allowedToolRefs = input.definition.allowedToolRefs
@@ -494,7 +494,7 @@ export function hasOnlyLlmTools(assignments) {
         return !entry || !entry.isActionable || entry.ref === "internal.llm_only";
     });
 }
-export function buildDraftFromToolResults(input) {
+function buildDraftFromToolResults(input) {
     const entry = getLoopTool(input.toolRef);
     if (!entry?.requiresApproval)
         return undefined;

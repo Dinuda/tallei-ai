@@ -47,7 +47,7 @@ function createMockClient(input: {
     chat: {
       completions: {
         create: input.chatCreate ?? (async () => ({
-          model: "gpt-4o-mini",
+          model: "gpt-gpt-5-nano",
           choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
         })),
@@ -67,7 +67,7 @@ test("openai provider does not emit payload logs when logging is disabled", asyn
   const capture = createCapturingLogger();
   const provider = new OpenAiProvider({
     client: createMockClient({}),
-    defaultChatModel: "gpt-4o-mini",
+    defaultChatModel: "gpt-gpt-5-nano",
     defaultEmbeddingModel: "text-embedding-3-small",
     defaultEmbeddingDimensions: 1536,
     payloadLoggingEnabled: false,
@@ -88,12 +88,12 @@ test("openai provider emits redacted payload logs for chat calls", async () => {
   const provider = new OpenAiProvider({
     client: createMockClient({
       chatCreate: async () => ({
-        model: "gpt-4o-mini",
+        model: "gpt-gpt-5-nano",
         choices: [{ message: { content: "super private completion" }, finish_reason: "stop" }],
         usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19 },
       }),
     }),
-    defaultChatModel: "gpt-4o-mini",
+    defaultChatModel: "gpt-gpt-5-nano",
     defaultEmbeddingModel: "text-embedding-3-small",
     defaultEmbeddingDimensions: 1536,
     payloadLoggingEnabled: true,
@@ -110,7 +110,7 @@ test("openai provider emits redacted payload logs for chat calls", async () => {
   });
 
   assert.equal(result.text, "super private completion");
-  assert.equal(result.model, "gpt-4o-mini");
+  assert.equal(result.model, "gpt-gpt-5-nano");
   assert.equal(result.finishReason, "stop");
   assert.equal(capture.entries.length, 1);
 
@@ -138,7 +138,7 @@ test("openai provider emits redacted payload logs for embedding calls without ve
         usage: { prompt_tokens: 10, total_tokens: 10 },
       }),
     }),
-    defaultChatModel: "gpt-4o-mini",
+    defaultChatModel: "gpt-gpt-5-nano",
     defaultEmbeddingModel: "text-embedding-3-small",
     defaultEmbeddingDimensions: 1536,
     payloadLoggingEnabled: true,
@@ -180,7 +180,7 @@ test("openai provider logs safe error metadata and rethrows mapped error", async
         throw error;
       },
     }),
-    defaultChatModel: "gpt-4o-mini",
+    defaultChatModel: "gpt-gpt-5-nano",
     defaultEmbeddingModel: "text-embedding-3-small",
     defaultEmbeddingDimensions: 1536,
     payloadLoggingEnabled: true,

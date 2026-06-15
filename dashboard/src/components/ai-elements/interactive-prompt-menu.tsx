@@ -198,18 +198,23 @@ export function InteractivePromptMenu({
         })}
       </div>
       {allowOther && !isSubmitted && (
-        <div className="mx-3 mt-2 flex items-center gap-2 border-t border-[#e5e7eb] pt-3">
-          <Pencil className="size-4 shrink-0 text-[#6b7280]" />
-          <Input
-            className="border-0 px-0 text-[#111827] shadow-none placeholder:text-[#9ca3af] focus-visible:ring-0"
-            disabled={disabled}
-            onChange={(event) => setOtherText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") submit();
-            }}
-            placeholder="No, and tell Tallei what to do differently"
-            value={otherText}
-          />
+        <div className="mx-3 mt-2 border-t border-[#e5e7eb] pt-3">
+          <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-wide text-[#9ca3af]">
+            Or describe it yourself
+          </p>
+          <div className="flex items-center gap-2">
+            <Pencil className="size-4 shrink-0 text-[#6b7280]" />
+            <Input
+              className="border-0 px-0 text-[#111827] shadow-none placeholder:text-[#9ca3af] focus-visible:ring-0"
+              disabled={disabled}
+              onChange={(event) => setOtherText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") submit();
+              }}
+              placeholder="Tell Tallei what to do differently"
+              value={otherText}
+            />
+          </div>
         </div>
       )}
       <div className="flex items-center justify-between gap-3 border-t border-[#e5e7eb] bg-[#fafafa] px-3 py-3">
@@ -231,8 +236,8 @@ export function InteractivePromptMenu({
             {isSubmitted
               ? `Answered: ${submittedAnswer?.answerText}`
               : allowMultiple
-                ? "Select one or more options"
-                : ""}
+                ? "Select one or more options, or describe your own approach below"
+                : "Pick an option, or describe your own approach below"}
           </span>
         </div>
         {!isSubmitted && (

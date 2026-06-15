@@ -4,7 +4,7 @@ import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.
 import { loopContactRowSchema, loopDefinitionSchema, loopRunAgentSchema } from "../loop-executor/types.js";
 import { connectorActionToolRef, getStaticToolContract } from "../tool-spec/tool-contracts.js";
 
-export const runtimeRunStatusSchema = z.enum([
+const runtimeRunStatusSchema = z.enum([
   "queued",
   "running",
   "waiting_for_interaction",
@@ -14,7 +14,7 @@ export const runtimeRunStatusSchema = z.enum([
   "cancelled",
 ]);
 
-export const runtimeCommandTypeSchema = z.enum([
+const runtimeCommandTypeSchema = z.enum([
   "start_run",
   "execute_step",
   "continue_after_interaction",
@@ -22,19 +22,19 @@ export const runtimeCommandTypeSchema = z.enum([
   "retry_step",
 ]);
 
-export const approvedWebSourceSchema = z.object({
+const approvedWebSourceSchema = z.object({
   title: z.string().min(1),
   url: z.string().min(1),
   snippet: z.string().min(1),
 });
 
-export const operatorRevisionSchema = z.object({
+const operatorRevisionSchema = z.object({
   feedback: z.string().optional(),
   editedText: z.string().optional(),
   at: z.string().min(1),
 });
 
-export const runtimeDeliveryRecipientsSchema = z.object({
+const runtimeDeliveryRecipientsSchema = z.object({
   uploadedAt: z.string().min(1),
   contacts: z.array(loopContactRowSchema),
   recipientCount: z.number().int().nonnegative(),
@@ -165,5 +165,5 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
 });
 
 export type RuntimeDefinition = z.infer<typeof runtimeDefinitionSchema>;
-export type RuntimeAgent = z.infer<typeof loopRunAgentSchema>;
+type RuntimeAgent = z.infer<typeof loopRunAgentSchema>;
 export type RuntimeContext = z.infer<typeof runtimeContextSchema>;

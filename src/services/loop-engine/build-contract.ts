@@ -5,7 +5,7 @@ import { nextCronRunAt, validateFiveFieldCron } from "../loop-executor/cron.js";
 import type { LoopIntentContext } from "./intent-context.js";
 import type { ToolContract } from "../tool-spec/types.js";
 
-export const buildRequirementKindSchema = z.enum([
+const buildRequirementKindSchema = z.enum([
   "connector",
   "trigger_schedule",
   "stable_input",
@@ -14,9 +14,9 @@ export const buildRequirementKindSchema = z.enum([
   "review_policy",
 ]);
 
-export const buildRequirementStatusSchema = z.enum(["unresolved", "resolved", "invalid"]);
+const buildRequirementStatusSchema = z.enum(["unresolved", "resolved", "invalid"]);
 
-export const buildRequirementSchema = z.object({
+const buildRequirementSchema = z.object({
   id: z.string().min(1),
   kind: buildRequirementKindSchema,
   question: z.string().min(1),
@@ -52,9 +52,9 @@ export const loopBuildContractSchema = z.object({
   updatedAt: z.string().min(1),
 });
 
-export type BuildRequirement = z.infer<typeof buildRequirementSchema>;
+type BuildRequirement = z.infer<typeof buildRequirementSchema>;
 export type LoopBuildContract = z.infer<typeof loopBuildContractSchema>;
-export type SelectedLoopTrigger =
+type SelectedLoopTrigger =
   | { mode: "schedule"; cron: string; timezone: string }
   | { mode: "event"; toolkit: string; triggerSlug: string };
 
@@ -348,8 +348,19 @@ function semanticErrors(requirement: BuildRequirement, value: unknown, contracts
       if (!match) return [`External data toolkit ${toolkit} was not discovered as a connected search capability.`];
     }
   }
-  if (requirement.kind === "artifact_contract" && record.mode === "supplied_template" && typeof record.template !== "string") {
-    return ["A supplied template decision requires template content or a template reference."];
+  if (requirement.kind === "artifact_contract" && record.mode === "supplied_template") {
+    if (typeof record.template !== "string") {
+      return ["A supplied template decision requires template content or a template reference."];
+    }
+    try {
+      const bundle = JSON.parse(record.template) as { templates?: Array<{ html?: string }> };
+      const templates = Array.isArray(bundle.templates) ? bundle.templates : [];
+      if (templates.length === 0 || !templates.some((entry) => typeof entry.html === "string" && entry.html.trim().length > 0)) {
+        return ["A supplied template decision requires at least one rendered email template with HTML."];
+      }
+    } catch {
+      return ["The supplied template bundle must be valid JSON with rendered templates."];
+    }
   }
   if (requirement.kind === "artifact_contract" && record.mode === "approved_generated_structure" && typeof record.structure !== "string") {
     return ["An approved generated structure decision requires the approved structure."];
@@ -500,4 +511,63 @@ export function selectedExternalDataToolkits(contract: LoopBuildContract | null 
   if (value.mode === "none") return [];
   if (!Array.isArray(value.externalDataToolkits)) return [];
   return value.externalDataToolkits.map(String).filter((toolkit) => toolkit.trim().length > 0);
+}
+
+type RunnableArtifactTemplate = {
+  id: string;
+  name: string;
+  templateId: string;
+  designId?: string;
+  subject: string;
+  html: string;
+  text?: string;
+  reactEmailSource?: string;
+  editorContent?: string;
+};
+
+type SelectedArtifactContract = {
+  mode: string;
+  designId?: string;
+  templates: RunnableArtifactTemplate[];
+  structure?: string;
+};
+
+export function selectedArtifactContract(
+  contract: LoopBuildContract | null | undefined,
+): SelectedArtifactContract | null {
+  if (!contract) return null;
+  const requirement = contract.requirements.find((entry) => entry.id === "artifact_contract" && entry.status === "resolved");
+  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+    ? requirement.value as Record<string, unknown>
+    : {};
+  const mode = typeof value.mode === "string" ? value.mode : "none";
+  if (mode === "none") return { mode, templates: [] };
+  if (mode === "approved_generated_structure") {
+    return {
+      mode,
+      templates: [],
+      ...(typeof value.structure === "string" ? { structure: value.structure } : {}),
+    };
+  }
+  if (mode !== "supplied_template" || typeof value.template !== "string") return null;
+  try {
+    const bundle = JSON.parse(value.template) as {
+      designId?: string;
+      templates?: RunnableArtifactTemplate[];
+    };
+    const templates = Array.isArray(bundle.templates)
+      ? bundle.templates.filter((entry) =>
+          typeof entry?.id === "string"
+          && typeof entry?.name === "string"
+          && typeof entry?.subject === "string"
+          && typeof entry?.html === "string")
+      : [];
+    return {
+      mode,
+      templates,
+      ...(typeof bundle.designId === "string" ? { designId: bundle.designId } : {}),
+    };
+  } catch {
+    return null;
+  }
 }

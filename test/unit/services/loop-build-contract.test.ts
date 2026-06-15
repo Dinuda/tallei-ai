@@ -7,6 +7,7 @@ import {
   resolveBuildRequirement,
   selectedConnectorAccountId,
   selectedConnectorAccountIds,
+  selectedArtifactContract,
   selectedExternalDataToolkits,
   selectedGroundingSources,
   selectedLoopTrigger,
@@ -346,4 +347,32 @@ test("grounding rejects unknown externalDataToolkits", () => {
   const grounding = resolved.requirements.find((entry) => entry.id === "grounding")!;
   assert.equal(grounding.status, "invalid");
   assert.match(grounding.validationErrors.join(" "), /salesforce/i);
+});
+
+test("selectedArtifactContract parses rendered template bundle from artifact_contract", () => {
+  const contract = deriveLoopBuildContract({ intentContext: intent, discoveredToolContracts: [] });
+  const resolved = resolveBuildRequirement({
+    contract,
+    requirementId: "artifact_contract",
+    value: {
+      mode: "supplied_template",
+      template: JSON.stringify({
+        templates: [{
+          id: "t1",
+          name: "Acknowledgment",
+          templateId: "acknowledgment",
+          subject: "We received your request",
+          html: "<p>Thanks</p>",
+          text: "Thanks",
+          reactEmailSource: JSON.stringify({ subject: "We received your request", greeting: "Hi", body: "Thanks", signOff: "Best" }),
+        }],
+      }),
+    },
+    discoveredToolContracts: [],
+  });
+  const artifacts = selectedArtifactContract(resolved);
+  assert.ok(artifacts);
+  assert.equal(artifacts?.mode, "supplied_template");
+  assert.equal(artifacts?.templates.length, 1);
+  assert.equal(artifacts?.templates[0]?.subject, "We received your request");
 });

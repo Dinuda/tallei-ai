@@ -6,18 +6,19 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Code2, Loader2, RefreshCw, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-
-type WorkflowListRun = {
-  id: string;
-  status: string;
-  createdAt: string;
-  updatedAt?: string;
-};
+import { triggerSourceLabel } from "@/lib/loop-run-navigation";
 
 type WorkflowListItem = {
   id: string;
   title: string;
-  latestRun: WorkflowListRun | null;
+  latestRun: {
+    id: string;
+    status: string;
+    triggerSource?: "manual" | "schedule" | "event";
+    triggerLabel?: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
 };
 
 type LiveRun = {
@@ -25,13 +26,15 @@ type LiveRun = {
   workflowTitle: string;
   runId: string;
   status: string;
+  triggerSource?: "manual" | "schedule" | "event";
+  triggerLabel?: string | null;
   createdAt: string;
   updatedAt: string;
 };
 
 function isLiveRunStatus(status?: string): boolean {
   if (!status) return false;
-  return !["completed", "failed", "cancelled", "skipped"].includes(status);
+  return ["queued", "running", "waiting_for_approval", "waiting_for_interaction"].includes(status);
 }
 
 function prettyRunStatus(status: string): string {
@@ -71,21 +74,22 @@ export default function DeveloperLoopsPage() {
   }, [loadWorkflows]);
 
   const activeRuns = useMemo<LiveRun[]>(() => {
-    return workflows
-      .map((workflow) => {
-        const run = workflow.latestRun;
-        if (!run || !isLiveRunStatus(run.status)) return null;
-        return {
-          workflowId: workflow.id,
-          workflowTitle: workflow.title,
-          runId: run.id,
-          status: run.status,
-          createdAt: run.createdAt,
-          updatedAt: run.updatedAt ?? run.createdAt,
-        };
-      })
-      .filter((item): item is LiveRun => Boolean(item))
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const items: LiveRun[] = [];
+    for (const workflow of workflows) {
+      const run = workflow.latestRun;
+      if (!run || !isLiveRunStatus(run.status)) continue;
+      items.push({
+        workflowId: workflow.id,
+        workflowTitle: workflow.title,
+        runId: run.id,
+        status: run.status,
+        triggerSource: run.triggerSource,
+        triggerLabel: run.triggerLabel,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+      });
+    }
+    return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }, [workflows]);
 
   return (
@@ -94,7 +98,7 @@ export default function DeveloperLoopsPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight text-[var(--text)]">Live loops</h1>
           <p className="mt-0.5 text-sm text-[var(--text-2)]">
-            Actively running workflows, approvals, and blocked runs.
+            Triggered and in-progress runs — open to review, approve, or intervene.
           </p>
         </div>
 
@@ -132,7 +136,7 @@ export default function DeveloperLoopsPage() {
               <div>
                 <h2 className="text-lg font-semibold text-[var(--text)]">No live runs right now</h2>
                 <p className="mt-1 max-w-sm text-sm text-[var(--text-2)]">
-                  Active workflows will show up here when they are executing, waiting for approval, or blocked.
+                  Scheduled and event-triggered runs will show up here when they need review or approval.
                 </p>
               </div>
             </div>
@@ -149,6 +153,9 @@ export default function DeveloperLoopsPage() {
                     <div>
                       <p className="text-sm font-semibold text-[var(--text)]">{run.workflowTitle}</p>
                       <p className="mt-1 text-xs text-[var(--text-muted)]">Run {run.runId.slice(0, 8)}</p>
+                      <p className="mt-1 text-[10px] font-medium text-[var(--text-2)]">
+                        {triggerSourceLabel(run.triggerSource, run.triggerLabel)}
+                      </p>
                     </div>
                     <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium capitalize text-slate-700">
                       {prettyRunStatus(run.status)}

@@ -39,6 +39,31 @@ type RecalledPreference = {
   category?: string | null;
 };
 
+function CheckboxRow({
+  checked,
+  onChange,
+  label,
+  meta,
+}: {
+  checked: boolean;
+  onChange: () => void;
+  label: string;
+  meta?: string;
+}) {
+  return (
+    <label className="group flex cursor-pointer items-start gap-3 py-1 text-sm text-violet-950">
+      <input type="checkbox" checked={checked} onChange={onChange} className="peer sr-only" />
+      <span className="mt-0.5 flex size-[22px] shrink-0 items-center justify-center border border-violet-200 bg-white transition-colors peer-checked:border-violet-600 peer-checked:bg-violet-600">
+        <Check className="size-4 text-white opacity-0 transition-opacity peer-checked:opacity-100" strokeWidth={3} />
+      </span>
+      <span className="min-w-0 leading-[22px]">
+        {label}
+        {meta ? <span className="ml-1.5 text-[11px] text-violet-700/70">({meta})</span> : null}
+      </span>
+    </label>
+  );
+}
+
 function buildOutput(
   requirementId: string,
   includeTallei: boolean,
@@ -135,11 +160,16 @@ export function BuilderKnowledgeBaseSelector({
 
   if (completedOutput) {
     return (
-      <div className="my-3 border border-[#d1d5db] bg-white">
-        <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-2">
-          <p className="text-[10px] font-semibold tracking-[0.1em] text-[#6b7280] uppercase">Knowledge sources selected</p>
+      <div className="my-3 border border-violet-200 bg-violet-50 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <span className="flex size-8 items-center justify-center bg-violet-600 text-white">
+            <Check className="size-4" />
+          </span>
+          <div>
+            <div className="text-sm font-semibold text-violet-950" style={{ fontFamily: "var(--font-title)" }}>Knowledge sources selected</div>
+            <div className="text-xs text-violet-700">{completedOutput.answerText}</div>
+          </div>
         </div>
-        <div className="p-4 text-[13px] leading-6 text-[#111827]">{completedOutput.answerText}</div>
       </div>
     );
   }
@@ -172,28 +202,22 @@ export function BuilderKnowledgeBaseSelector({
   const availableExternalToolkits = connectorToolkits.filter((entry) => entry.connected);
 
   return (
-    <div className="w-full border border-[#d1d5db] bg-white">
-      <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-3">
-        <h2 className="text-[14px] font-bold tracking-[-0.02em] text-[#111827]">Choose knowledge sources</h2>
-        <p className="mt-0.5 text-[13px] text-[#6b7280]">
+    <div className="w-full border border-violet-200 bg-violet-50/40">
+      <div className="border-b border-violet-100 bg-white px-4 py-3">
+        <h2 className="text-[14px] font-bold tracking-[-0.02em] text-violet-950" style={{ fontFamily: "var(--font-title)" }}>Choose knowledge sources</h2>
+        <p className="mt-0.5 text-[13px] text-violet-900/70">
           Tallei and workspace memory need no URLs. Workspace memory includes inter-loop history from prior runs in this workspace.
         </p>
       </div>
-      <div className="space-y-4 p-4">
+      <div className="space-y-5 p-4">
         <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Built-in memory</p>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={includeTallei} onChange={() => setIncludeTallei((value) => !value)} />
-            Tallei internal memory
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={includeWorkspace} onChange={() => setIncludeWorkspace((value) => !value)} />
-            Workspace memory (includes prior loop runs)
-          </label>
+          <p className="text-[10px] font-semibold tracking-[0.1em] text-violet-700 uppercase" style={{ fontFamily: "var(--font-title)" }}>Built-in memory</p>
+          <CheckboxRow checked={includeTallei} onChange={() => setIncludeTallei((value) => !value)} label="Tallei internal memory" />
+          <CheckboxRow checked={includeWorkspace} onChange={() => setIncludeWorkspace((value) => !value)} label="Workspace memory (includes prior loop runs)" />
         </div>
 
         {recalledPreferences.length > 0 ? (
-          <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+          <div className="border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
             <p className="font-medium">Saved preferences found</p>
             <p className="mt-1 text-xs text-amber-800">You will confirm these before the loop uses them.</p>
             <ul className="mt-2 list-disc space-y-1 pl-4 text-xs">
@@ -206,38 +230,39 @@ export function BuilderKnowledgeBaseSelector({
 
         {knowledgeBases.length > 0 ? (
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Additional workspace collections</p>
+            <p className="text-[10px] font-semibold tracking-[0.1em] text-violet-700 uppercase" style={{ fontFamily: "var(--font-title)" }}>Additional workspace collections</p>
             {knowledgeBases.map((kb) => (
-              <label key={kb.id} className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={selectedKbIds.includes(kb.id)} onChange={() => toggleKb(kb.id)} />
-                {kb.name} <span className="text-xs text-slate-500">({kb.kind === "google_doc" ? "Google Doc" : "FAQ"})</span>
-              </label>
+              <CheckboxRow
+                key={kb.id}
+                checked={selectedKbIds.includes(kb.id)}
+                onChange={() => toggleKb(kb.id)}
+                label={kb.name}
+                meta={kb.kind === "google_doc" ? "Google Doc" : "FAQ"}
+              />
             ))}
-            <p className="text-xs text-slate-500">Manage FAQs and Google Docs under workspace knowledge settings.</p>
+            <p className="text-xs text-violet-700/70">Manage FAQs and Google Docs under workspace knowledge settings.</p>
           </div>
         ) : null}
 
         {availableExternalToolkits.length > 0 ? (
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Optional: product and user data from connected apps</p>
+            <p className="text-[10px] font-semibold tracking-[0.1em] text-violet-700 uppercase" style={{ fontFamily: "var(--font-title)" }}>Optional: product and user data from connected apps</p>
             {availableExternalToolkits.map((entry) => (
-              <label key={entry.toolkit} className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={selectedExternalToolkits.includes(entry.toolkit)}
-                  onChange={() => toggleExternalToolkit(entry.toolkit)}
-                />
-                {entry.name}
-              </label>
+              <CheckboxRow
+                key={entry.toolkit}
+                checked={selectedExternalToolkits.includes(entry.toolkit)}
+                onChange={() => toggleExternalToolkit(entry.toolkit)}
+                label={entry.name}
+              />
             ))}
           </div>
         ) : null}
 
         <div className="flex flex-wrap gap-2 pt-1">
-          <Button variant="outline" onClick={submitDefaults}>
+          <Button variant="outline" onClick={submitDefaults} className="border-violet-200 bg-white text-violet-950 hover:bg-violet-50" style={{ borderRadius: 0 }}>
             Use defaults
           </Button>
-          <Button onClick={submit}>
+          <Button onClick={submit} className="bg-violet-700 text-white hover:bg-violet-800 border-0" style={{ borderRadius: 0 }}>
             <Check className="mr-2 size-4" />
             Confirm sources
           </Button>

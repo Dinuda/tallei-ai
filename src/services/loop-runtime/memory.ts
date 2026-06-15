@@ -6,14 +6,14 @@ import {
 } from "./contacts-context.js";
 import type { WebSearchSource } from "../loop-engine/contracts.js";
 
-export type ApprovedMemory = {
+type ApprovedMemory = {
   id: string;
   excerpt: string;
 };
 
-export type ApprovedWebSource = WebSearchSource;
+type ApprovedWebSource = WebSearchSource;
 
-export type OperatorRevision = {
+type OperatorRevision = {
   feedback?: string;
   editedText?: string;
   at: string;
@@ -54,7 +54,7 @@ export function agentCollectsRunStartInput(agent: {
 
 const DELIVERY_CONFIG_INPUT_PATTERN = /subscriber|audience|recipient|mailing.?list|contact.?list|list.?id|send.?to|broadcast.?list/i;
 
-export function isDeliveryConfigInputKey(key: string): boolean {
+function isDeliveryConfigInputKey(key: string): boolean {
   return DELIVERY_CONFIG_INPUT_PATTERN.test(key.trim());
 }
 
@@ -141,7 +141,7 @@ function readApprovedWebSourceRow(row: unknown): ApprovedWebSource | null {
   return { title, url, snippet };
 }
 
-export type GateMemoryPatch = Partial<Pick<RunMemory, "inputs" | "approvedMemories" | "approvedSources" | "operatorRevisions">> & {
+type GateMemoryPatch = Partial<Pick<RunMemory, "inputs" | "approvedMemories" | "approvedSources" | "operatorRevisions">> & {
   deliveryRecipients?: DeliveryRecipients;
 };
 

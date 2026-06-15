@@ -5,7 +5,7 @@ import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Code2, Menu, Sparkles, X } from "lucide-react";
+import { Code2, Menu, Sparkles, X, Pencil, Settings } from "lucide-react";
 import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,8 @@ import { cn } from "@/lib/utils";
 import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useRef } from "react";
 
 /* Suppress known React DevTools false-positive in React 19 / Next.js 16 */
 if (typeof window !== "undefined" && window.console && window.console.error) {
@@ -133,6 +135,7 @@ const NAV: NavSection[] = [
       { id: "channels", label: "Channels", href: "/dashboard/channels", icon: ICONS.channels },
       { id: "connectors", label: "AI Assistants", href: "/dashboard/setup", icon: ICONS.aiAssistants },
       { id: "connected-apps", label: "Connected Apps", href: "/dashboard/integrations", icon: ICONS.connectedApps },
+      { id: "workspace-settings", label: "Workspace Settings", href: "/dashboard/workspace/settings", icon: <Settings size={15} aria-hidden /> },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
     ],
   },
@@ -207,6 +210,103 @@ function NavSectionContent({ pathname, onNavigate }: { pathname: string; onNavig
   );
 }
 
+function LoopBuilderTitle() {
+  const searchParams = useSearchParams();
+  const sessionId = searchParams?.get("session");
+  const [title, setTitle] = useState("Create a loop");
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setTitle("Create a loop");
+      return;
+    }
+    fetch(`/api/loop-builder/sessions/${sessionId}`)
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to load");
+        return res.json();
+      })
+      .then((data) => {
+        const t = data?.session?.currentProposal?.title || data?.session?.goal || "Draft loop";
+        setTitle(t);
+      })
+      .catch((err) => {
+        console.error(err);
+        setTitle("Draft loop");
+      });
+  }, [sessionId]);
+
+  const handleEditStart = () => {
+    if (!sessionId) return;
+    setDraftTitle(title);
+    setIsEditing(true);
+    setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+  };
+
+  const handleSave = async () => {
+    if (!sessionId) return;
+    const trimmed = draftTitle.trim();
+    if (!trimmed || trimmed === title) {
+      setIsEditing(false);
+      return;
+    }
+    setTitle(trimmed);
+    setIsEditing(false);
+    try {
+      const res = await fetch(`/api/loop-builder/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: trimmed }),
+      });
+      if (!res.ok) {
+        throw new Error("Failed to save title");
+      }
+    } catch (err) {
+      console.error(err);
+      // fallback to original if failed
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      handleSave();
+    } else if (e.key === "Escape") {
+      setIsEditing(false);
+    }
+  };
+
+  return (
+    <div className="absolute left-[248px] hidden h-14 flex-col justify-center border-l border-slate-200 pl-6 md:flex">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
+      {isEditing ? (
+        <input
+          ref={inputRef}
+          value={draftTitle}
+          onChange={(e) => setDraftTitle(e.target.value)}
+          onBlur={handleSave}
+          onKeyDown={handleKeyDown}
+          className="text-sm font-semibold leading-none text-slate-900 border border-slate-300 rounded px-1 -ml-1 outline-none focus:ring-2 focus:ring-slate-400 w-[400px]"
+        />
+      ) : (
+        <div 
+          className="flex items-center gap-2 group cursor-pointer hover:opacity-80 transition-opacity"
+          onClick={handleEditStart}
+        >
+          <div className="text-sm font-semibold leading-none text-slate-900 line-clamp-1 max-w-[400px]" title={title}>
+            {title}
+          </div>
+          {sessionId && <Pencil size={12} className="text-slate-400" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? "";
   const { data: session } = useSession();
@@ -277,10 +377,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <Image src="/tallei.svg" alt="Tallei" width={79} height={32} className="h-8 w-auto" />
             </Link>
             {pathname === "/dashboard/loops/new" ? (
-              <div className="absolute left-[248px] hidden h-14 flex-col justify-center border-l border-slate-200 pl-6 md:flex">
-                <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
-                <div className="text-sm font-semibold leading-none text-slate-900">Create a loop</div>
-              </div>
+              <Suspense fallback={
+                <div className="absolute left-[248px] hidden h-14 flex-col justify-center border-l border-slate-200 pl-6 md:flex">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
+                  <div className="text-sm font-semibold leading-none text-slate-900">Create a loop</div>
+                </div>
+              }>
+                <LoopBuilderTitle />
+              </Suspense>
             ) : null}
           </div>
 

@@ -12,12 +12,14 @@ export default function WorkspaceSettingsPage() {
   const { activeWorkspace, refresh } = useWorkspace();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [iconUrl, setIconUrl] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!activeWorkspace) return;
     setName(activeWorkspace.name);
     setDescription(activeWorkspace.description ?? "");
+    setIconUrl(activeWorkspace.icon ?? "");
   }, [activeWorkspace]);
 
   async function save() {
@@ -26,7 +28,7 @@ export default function WorkspaceSettingsPage() {
     try {
       await apiFetch(`/api/workspaces/${activeWorkspace.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ name, description }),
+        body: JSON.stringify({ name, description: description || null, icon: iconUrl || null }),
       });
       await refresh();
     } finally {
@@ -45,8 +47,19 @@ export default function WorkspaceSettingsPage() {
 
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-6">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">General</h2>
-        <Input value={name} onChange={(event) => setName(event.target.value)} disabled={activeWorkspace.kind === "personal"} />
-        <Input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" />
+        <div className="space-y-3">
+          <Input value={name} onChange={(event) => setName(event.target.value)} disabled={activeWorkspace.kind === "personal"} placeholder="Workspace name" />
+          <Input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" />
+          <div>
+            <Input value={iconUrl} onChange={(event) => setIconUrl(event.target.value)} placeholder="Image URL (optional)" />
+            {iconUrl && (
+              <div className="mt-2 flex items-center gap-3">
+                <span className="text-xs text-slate-500">Preview:</span>
+                <img src={iconUrl} alt="Preview" className="size-8 rounded-md object-cover border border-slate-200" />
+              </div>
+            )}
+          </div>
+        </div>
         <Button onClick={() => void save()} disabled={saving}>{saving ? "Saving..." : "Save changes"}</Button>
       </section>
 

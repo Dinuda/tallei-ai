@@ -1,6 +1,121 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import { selectedLoopTrigger } from "../loop-engine/build-contract.js";
+import { getLoopWorkflow } from "../loop-executor/creator.js";
+import { resolveLoopRunAuth } from "./resolve-loop-run-auth.js";
 import { startWebhookLoopRun } from "./runtime.js";
+
+type WorkflowTriggerActivityView = {
+  mode: "event" | "schedule" | "none";
+  registration: {
+    toolkit: string;
+    triggerSlug: string;
+    triggerInstanceId: string;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+  schedule: {
+    cron: string;
+    timezone: string;
+    nextRunAt: string | null;
+    lastScheduledAt: string | null;
+  } | null;
+  recentEvents: Array<{
+    id: string;
+    externalEventId: string;
+    runId: string | null;
+    receivedAt: string;
+  }>;
+};
+
+function projectionRunId(projection: unknown): string {
+  if (!projection || typeof projection !== "object") return "";
+  if ("id" in projection && typeof (projection as { id?: unknown }).id === "string") {
+    return (projection as { id: string }).id;
+  }
+  if ("run" in projection) {
+    const run = (projection as { run?: { id?: unknown } }).run;
+    return run?.id != null ? String(run.id) : "";
+  }
+  return "";
+}
+
+export async function getWorkflowTriggerActivity(
+  auth: AuthContext,
+  workflowId: string,
+): Promise<WorkflowTriggerActivityView> {
+  const workflow = await getLoopWorkflow(auth, workflowId);
+  if (!workflow) throw new Error("Loop workflow not found");
+
+  const buildContract = workflow.runnableSpec?.buildContract
+    ?? workflow.runnableSpec?.noSlopSpec?.buildContract
+    ?? workflow.runnableSpec?.noSlopSpec?.specJson?.buildContract
+    ?? null;
+  const selected = buildContract ? selectedLoopTrigger(buildContract) : null;
+  const mode = selected?.mode === "event" ? "event" : selected?.mode === "schedule" ? "schedule" : "none";
+
+  const registrationResult = await pool.query<{
+    toolkit: string;
+    trigger_slug: string;
+    trigger_instance_id: string;
+    status: string;
+    created_at: string | Date;
+    updated_at: string | Date;
+  }>(
+    `SELECT toolkit, trigger_slug, trigger_instance_id, status, created_at, updated_at
+     FROM workflow_connector_triggers
+     WHERE workflow_id = $1 AND tenant_id = $2 AND user_id = $3
+     LIMIT 1`,
+    [workflowId, auth.tenantId, auth.userId],
+  );
+  const registrationRow = registrationResult.rows[0];
+  const registration = registrationRow ? {
+    toolkit: registrationRow.toolkit,
+    triggerSlug: registrationRow.trigger_slug,
+    triggerInstanceId: registrationRow.trigger_instance_id,
+    status: registrationRow.status,
+    createdAt: registrationRow.created_at instanceof Date ? registrationRow.created_at.toISOString() : registrationRow.created_at,
+    updatedAt: registrationRow.updated_at instanceof Date ? registrationRow.updated_at.toISOString() : registrationRow.updated_at,
+  } : null;
+
+  const eventsResult = registration
+    ? await pool.query<{
+        id: string;
+        external_event_id: string;
+        run_id: string | null;
+        received_at: string | Date;
+      }>(
+        `SELECT id, external_event_id, run_id, received_at
+         FROM workflow_connector_trigger_events
+         WHERE trigger_instance_id = $1
+         ORDER BY received_at DESC
+         LIMIT 25`,
+        [registration.triggerInstanceId],
+      )
+    : { rows: [] as Array<{ id: string; external_event_id: string; run_id: string | null; received_at: string | Date }> };
+
+  const schedule = selected?.mode === "schedule" || workflow.nextRunAt != null
+    ? {
+        cron: selected?.mode === "schedule" ? selected.cron : workflow.scheduleRrule.replace(/^CRON:/i, ""),
+        timezone: selected?.mode === "schedule" ? selected.timezone : "UTC",
+        nextRunAt: workflow.nextRunAt,
+        lastScheduledAt: workflow.lastScheduledAt,
+      }
+    : null;
+
+  return {
+    mode,
+    registration,
+    schedule,
+    recentEvents: eventsResult.rows.map((row) => ({
+      id: row.id,
+      externalEventId: row.external_event_id,
+      runId: row.run_id,
+      receivedAt: row.received_at instanceof Date ? row.received_at.toISOString() : row.received_at,
+    })),
+  };
+}
 
 type TriggerEnvelope = {
   id: string;
@@ -52,13 +167,11 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
   );
   if (!reserved.rowCount) return { ok: true, processed: true };
 
-  const auth: AuthContext = {
+  const auth = await resolveLoopRunAuth({
     tenantId: target.tenant_id,
     userId: target.user_id,
-    authMode: "internal",
-    plan: "pro",
-    scopes: ["loop:run"],
-  };
+    workflowId: target.workflow_id,
+  });
   try {
     const projection = await startWebhookLoopRun(auth, target.workflow_id, {
       id: event.id,
@@ -66,9 +179,7 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
       triggerSlug: event.metadata.trigger_slug,
       data: event.data,
     });
-    const runId = projection && typeof projection === "object" && "run" in projection
-      ? String((projection as { run?: { id?: unknown } }).run?.id ?? "")
-      : "";
+    const runId = projectionRunId(projection);
     if (runId) {
       await pool.query(
         `UPDATE workflow_connector_trigger_events SET run_id = $3 WHERE trigger_instance_id = $1 AND external_event_id = $2`,

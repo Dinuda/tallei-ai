@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { EditorialMetaTag } from "./editorial-run-ui";
+import { EditorialMetaTag } from "@/components/editorial-run-ui";
 
 type AgentSnapshot = {
   id?: string;

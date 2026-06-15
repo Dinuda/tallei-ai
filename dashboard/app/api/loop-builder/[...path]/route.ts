@@ -41,7 +41,7 @@ async function resolveBackendUserId(req: NextRequest): Promise<string | null> {
   return token && typeof token.backendId === "string" ? token.backendId : null;
 }
 
-async function proxy(req: NextRequest, method: "GET" | "POST"): Promise<Response> {
+async function proxy(req: NextRequest, method: "GET" | "POST" | "PATCH"): Promise<Response> {
   if (!SECRET) {
     return Response.json(
       { error: "Dashboard misconfigured: INTERNAL_API_SECRET is not set." },
@@ -66,7 +66,7 @@ async function proxy(req: NextRequest, method: "GET" | "POST"): Promise<Response
     };
 
     let body: string | undefined;
-    if (method === "POST") {
+    if (method === "POST" || method === "PATCH") {
       body = await req.text();
       headers["Content-Type"] = "application/json";
     }
@@ -101,3 +101,9 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   return proxy(req, "POST");
 }
+
+export async function PATCH(req: NextRequest) {
+  return proxy(req, "PATCH");
+}
+// trigger rebuild
+export const dynamic = 'force-dynamic';

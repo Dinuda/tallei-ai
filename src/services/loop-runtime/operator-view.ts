@@ -6,7 +6,7 @@ import {
   type OperatorInteractionKind,
 } from "../loop-engine/operator-interactions.js";
 
-export type OperatorBlock = {
+type OperatorBlock = {
   kind: OperatorInteractionKind;
   id: string;
   surface?: InputSurface;
@@ -18,7 +18,7 @@ export type OperatorBlock = {
   interaction: ActiveOperatorInteraction;
 };
 
-export type OperatorView = {
+type OperatorView = {
   interactionId: string | null;
   workspace: {
     title: string;

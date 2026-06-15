@@ -1490,16 +1490,69 @@ export async function removeResendConnector(auth: AuthContext, connectorId?: str
   );
 }
 
-export function verifyComposioWebhookSignature(rawBody: Buffer | undefined, signatureHeader: string | undefined): boolean {
-  if (!config.composioWebhookSecret) return true;
-  if (!rawBody || !signatureHeader) return false;
-  const expected = createHmac("sha256", config.composioWebhookSecret).update(rawBody).digest("hex");
-  const provided = signatureHeader.replace(/^sha256=/i, "").trim();
-  if (!provided) return false;
+export type ComposioWebhookSignatureHeaders = {
+  webhookId?: string;
+  webhookTimestamp?: string;
+  webhookSignature?: string;
+  legacySignature?: string;
+};
+
+const COMPOSIO_WEBHOOK_TOLERANCE_SEC = 300;
+
+function compareDigestStrings(expected: string, received: string): boolean {
   const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(provided, "utf8");
+  const b = Buffer.from(received, "utf8");
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+function verifyComposioSubscriptionWebhookSignature(
+  rawBody: Buffer,
+  headers: Required<Pick<ComposioWebhookSignatureHeaders, "webhookId" | "webhookTimestamp" | "webhookSignature">>,
+): boolean {
+  const timestamp = Number.parseInt(headers.webhookTimestamp, 10);
+  if (!Number.isFinite(timestamp)) return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSec - timestamp) > COMPOSIO_WEBHOOK_TOLERANCE_SEC) return false;
+
+  const signingString = `${headers.webhookId}.${headers.webhookTimestamp}.${rawBody.toString("utf8")}`;
+  const expected = createHmac("sha256", config.composioWebhookSecret).update(signingString).digest("base64");
+  const received = headers.webhookSignature.includes(",")
+    ? headers.webhookSignature.split(",", 2)[1]?.trim() ?? ""
+    : headers.webhookSignature.trim();
+  if (!received) return false;
+  return compareDigestStrings(expected, received);
+}
+
+function verifyLegacyComposioWebhookSignature(rawBody: Buffer, legacySignature: string): boolean {
+  const expected = createHmac("sha256", config.composioWebhookSecret).update(rawBody).digest("hex");
+  const provided = legacySignature.replace(/^sha256=/i, "").trim();
+  if (!provided) return false;
+  return compareDigestStrings(expected, provided);
+}
+
+export function verifyComposioWebhookSignature(
+  rawBody: Buffer | undefined,
+  headers: ComposioWebhookSignatureHeaders,
+): boolean {
+  if (!config.composioWebhookSecret) return true;
+  if (!rawBody) return false;
+
+  const webhookId = headers.webhookId?.trim();
+  const webhookTimestamp = headers.webhookTimestamp?.trim();
+  const webhookSignature = headers.webhookSignature?.trim();
+  if (webhookId && webhookTimestamp && webhookSignature) {
+    return verifyComposioSubscriptionWebhookSignature(rawBody, {
+      webhookId,
+      webhookTimestamp,
+      webhookSignature,
+    });
+  }
+
+  const legacySignature = headers.legacySignature?.trim();
+  if (legacySignature) return verifyLegacyComposioWebhookSignature(rawBody, legacySignature);
+
+  return false;
 }
 
 export async function handleComposioWebhook(payload: unknown): Promise<{ ok: true; processed: boolean }> {

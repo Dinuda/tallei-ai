@@ -17,6 +17,7 @@ import {
   refreshBuilderConnectorAvailability,
   resolveBuilderConnectorRequirement,
 } from "../../../services/loop-builder/connectors.js";
+import { saveBuilderArtifactBundle } from "../../../services/loop-builder/artifacts.js";
 import {
   dispatchWorkflowBuilderCommand,
   getWorkflowBuilderCommand,
@@ -24,12 +25,19 @@ import {
 } from "../../../services/loop-builder/dispatcher.js";
 import { loopBuilderOpenAiModel } from "../../../services/loop-builder/openai-chat.js";
 import {
+  emptyLoopBuilderUsage,
+  mergeLoopBuilderUsageTotals,
+  usageFromLanguageModelStep,
+} from "../../../services/loop-builder/progress.js";
+import {
   createWorkflowBuilderSession,
   findWorkflowBuilderSessionBySpec,
   listWorkflowBuilderMessages,
   normalizeWorkflowBuilderMessages,
   replaceWorkflowBuilderMessages,
   requireWorkflowBuilderSession,
+  saveWorkflowBuilderAnalyzerUsage,
+  updateWorkflowBuilderSession,
   type WorkflowBuilderSession,
 } from "../../../services/loop-builder/sessions.js";
 import { pool } from "../../../infrastructure/db/index.js";
@@ -48,14 +56,6 @@ router.use(workspaceMiddleware);
 const chatSchema = z.object({
   sessionId: z.string().uuid().optional(),
   messages: z.array(z.unknown()).min(1),
-});
-
-const promptCompatibilitySchema = z.object({
-  prompt: z.string().trim().min(1).max(10_000),
-  sessionId: z.string().uuid().optional(),
-  specId: z.string().uuid().optional(),
-  feedback: z.string().trim().min(1).max(5000).optional(),
-  priorProposal: z.unknown().optional(),
 });
 
 function messageText(message: UIMessage | undefined): string {
@@ -156,8 +156,43 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
         requirementId: z.string().min(1),
       }),
     }),
+    artifactSetup: tool({
+      description: "Render the in-chat email artifact composer for the pending artifact_contract requirement. User previews the minimal reply template, edits copy in the canvas, and approves. This is a UI interaction, not a builder command.",
+      inputSchema: z.object({
+        requirementId: z.string().min(1).default("artifact_contract"),
+        draftTemplates: z.array(z.object({
+          templateId: z.enum(["acknowledgment", "troubleshooting", "escalation", "resolution", "blank"]),
+          name: z.string().optional(),
+          props: z.object({
+            subject: z.string().optional(),
+            previewText: z.string().optional(),
+            greeting: z.string().optional(),
+            body: z.string().optional(),
+            signOff: z.string().optional(),
+            agentName: z.string().optional(),
+          }).optional(),
+        })).optional(),
+      }),
+    }),
+    requirementSetup: tool({
+      description: "Present structured this/that choices plus a custom input for a pending build-contract requirement that is not connector, schedule, grounding, or artifact. Use for stable_input, review_policy, and similar operational decisions. User selects an option and/or types their own guidance. This is a UI interaction, not a builder command.",
+      inputSchema: z.object({
+        requirementId: z.string().min(1),
+        question: z.string().min(1),
+        options: z.array(z.object({
+          id: z.string().min(1),
+          label: z.string().min(1),
+          value: z.string().min(1),
+          description: z.string().optional(),
+          icon: z.string().optional(),
+        })).min(2).max(8),
+        recommendedOptionIds: z.array(z.string().min(1)).max(8).default([]),
+        allowMultiple: z.boolean().default(false),
+        allowOther: z.boolean().default(true),
+      }),
+    }),
     interactivePrompt: tool({
-      description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command. Only set the 'icon' field when an option represents a known external service or app (e.g., HubSpot, Salesforce, Slack, Notion, Gmail). For action options like 'Approve spec', 'Refine the spec', 'Save workflow', 'Other', or 'I will connect manually', leave the 'icon' field empty.",
+      description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command. Only set the 'icon' field when an option represents a known external service or app (e.g., HubSpot, Salesforce, Slack, Notion, Gmail). For action options like 'Save loop', 'Refine the spec', 'Other', or 'I will connect manually', leave the 'icon' field empty.",
       inputSchema: z.object({
         question: z.string().min(1),
         options: z.array(z.object({
@@ -178,41 +213,23 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
       execute: (input) => runTool(auth, sessionId, "draftSpec", input),
     }),
     refineSpec: tool({
-      description: "Refine the current draft spec from user feedback. This invalidates approval and any generated graph.",
+      description: "Refine the current draft spec from user feedback. This invalidates approval.",
       inputSchema: z.object({ feedback: z.string().min(1) }),
       execute: (input) => runTool(auth, sessionId, "refineSpec", input),
-    }),
-    approveSpec: tool({
-      description: "Approve the current behavioral spec. Call when the user selects 'Approve spec' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
-      inputSchema: z.object({
-        specJson: z.unknown().optional(),
-        bodyMarkdown: z.string().optional(),
-      }),
-      execute: (input) => runTool(auth, sessionId, "approveSpec", { ...input, approved: true }),
     }),
     archiveSpec: tool({
       description: "Archive the current spec. Call when the user selects 'Archive and start over' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
       inputSchema: z.object({}),
       execute: (input) => runTool(auth, sessionId, "archiveSpec", { ...input, approved: true }),
     }),
-    generateWorkflowGraph: tool({
-      description: "Generate the executable workflow graph from the approved spec and persisted discovered contracts.",
-      inputSchema: z.object({}),
-      execute: (input) => runTool(auth, sessionId, "generateWorkflowGraph", input),
-    }),
-    refineWorkflowGraph: tool({
-      description: "Refine the current workflow graph from user feedback without changing builder or Composio sessions.",
-      inputSchema: z.object({ feedback: z.string().min(1) }),
-      execute: (input) => runTool(auth, sessionId, "refineWorkflowGraph", input),
-    }),
-    saveWorkflow: tool({
-      description: "Persist the generated workflow. Call when the user selects 'Save workflow' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
+    saveLoop: tool({
+      description: "Approve and persist the current behavioral spec as a runnable loop in one step. Call when the user selects 'Save loop' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation and do not call a separate approve step first.",
       inputSchema: z.object({
         cron: z.string().optional(),
         timezone: z.string().optional(),
         workspaceId: z.string().uuid().nullable().optional(),
       }),
-      execute: (input) => runTool(auth, sessionId, "saveWorkflow", { ...input, approved: true }),
+      execute: (input) => runTool(auth, sessionId, "saveLoop", { ...input, approved: true }),
     }),
     runVerification: tool({
       description: "Run the dedicated verification lifecycle for a saved workflow before activation.",
@@ -288,22 +305,21 @@ async function buildAnalyzerSystemPrompt(
     "- For a pending grounding requirement, never use interactivePrompt as the primary grounding UI when knowledgeBaseSetup is the correct tool.",
     "- Optional product/user/CRM data: offer only via knowledgeBaseSetup external toolkit checkboxes or interactivePrompt using connectedSearchToolkits from groundingContext. If a toolkit is wanted but not connected, offer connectorSetup or skip — never require pasted URLs or credentials.",
     "- User may choose no grounding via resolveBuildRequirement with { mode: 'none' } when allowNone is true.",
-    "After getAvailableTools, resolve every pending build-contract requirement one at a time. For a pending connector requirement, call connectorSetup and stop; never use interactivePrompt for connector setup and never offer connect later. For a pending trigger_schedule requirement, call scheduleSetup and stop. For a pending grounding requirement, call knowledgeBaseSetup and stop. Never invent event-driven execution unless an exact discovered trigger capability explicitly supports it. Never offer schedules more frequent than hourly. For other requirements, ask the user for the requirement's value, then call resolveBuildRequirement with a typed value matching its schema.",
-    "After scheduleSetup or knowledgeBaseSetup returns, pass its exact typed value to resolveBuildRequirement. Do not reinterpret the selected schedule or knowledge sources.",
+    "After getAvailableTools, resolve every pending build-contract requirement one at a time. For a pending connector requirement, call connectorSetup and stop; never use interactivePrompt for connector setup and never offer connect later. For a pending trigger_schedule requirement, call scheduleSetup and stop. For a pending grounding requirement, call knowledgeBaseSetup and stop. For a pending artifact_contract requirement, call artifactSetup with draftTemplates entries (acknowledgment, troubleshooting, escalation, resolution) that pre-fill subject/body copy for the minimal support-reply templates and stop; never use interactivePrompt or prose numbered options for artifact setup. For a pending stable_input, review_policy, or other generic build requirement, call requirementSetup and stop — never ask in prose with numbered or bulleted option lists. requirementSetup must offer 2-4 concrete options with short descriptions (e.g. simple rule, paste policy, use Tallei default) and allowOther true so the user can type custom guidance. Never invent event-driven execution unless an exact discovered trigger capability explicitly supports it. Never offer schedules more frequent than hourly.",
+    "After scheduleSetup, knowledgeBaseSetup, artifactSetup, or requirementSetup returns, pass its exact typed value to resolveBuildRequirement. Map requirementSetup answers to the requirement schema: for stable_input use { name, value } where value is the selected option value and/or otherText; for review_policy use { mode } inferred from the answer. Do not reinterpret the selected schedule, knowledge sources, artifact bundle, or operational policy.",
     "Never show schema validation errors, cron expressions, tool identifiers, or internal validation wording to the user. If a requested capability is unavailable, say that capability is currently limited or unsupported and offer the nearest supported choice through the appropriate UI tool.",
     "Never treat unrelated prose as a valid requirement answer. Never silently assume a connector, trigger, schedule, source, template, stable input, or review policy.",
     "The user may explicitly choose no source or no template only when the requirement allows it; persist that choice through resolveBuildRequirement.",
     "Always show build-contract warnings to the user, especially explicit ungrounded or no-template choices.",
     "Call draftSpec only after resolveBuildRequirement reports readyForSpecDraft true.",
     "Never call draftSpec before getAvailableTools. Never invent or search for tools outside getAvailableTools.",
-    "After calling draftSpec, explain the draft briefly and immediately call interactivePrompt in the same turn to present a choice to the user: 'Approve spec' (recommended, with value 'Approve the spec') and 'Refine the spec'. Do not wait for the user to manually type or request approval in prose.",
-    "When the user requests spec approval (such as selecting 'Approve spec'), call approveSpec. After approval succeeds, immediately call generateWorkflowGraph without asking for another approval.",
-    "If generateWorkflowGraph fails (e.g., times out) and the session is in the 'failed' phase, you can retry generateWorkflowGraph in a subsequent turn because the spec is still approved. Prefer retrying once before asking the user what to do.",
-    "Use refineSpec for feedback about the behavioral contract and refineWorkflowGraph for feedback about an existing graph.",
-    "After calling generateWorkflowGraph, explain the result briefly and immediately call interactivePrompt in the same turn to present the next steps: 'Save workflow' (recommended), 'Refine the graph', and 'Archive and start over'. Do not wait for prose feedback or wait for the user to explicitly request saving/archiving.",
-    "After saveWorkflow succeeds, explain that the workflow is unscheduled in verifying state and immediately present 'Run verification' via interactivePrompt.",
-    "After runVerification succeeds, present its evidence and failures. Only when status is awaiting_confirmation, present 'Confirm and activate' via interactivePrompt. Call confirmActivation only from that explicit selection.",
-    "Never output a bulleted, numbered, or formatted list of options or actions the user can take in your prose text response. If you have choices, next steps, or decisions to offer, you must present them via interactivePrompt.",
+    "After calling draftSpec, explain the draft briefly and immediately call interactivePrompt in the same turn to present a choice to the user: 'Save loop' (recommended, with value 'Save the loop'), 'Refine the spec', and 'Archive and start over'. Do not wait for the user to manually type or request saving in prose.",
+    "When the user selects 'Save loop', call saveLoop immediately. saveLoop approves and persists in one step — never call a separate approve tool first.",
+    "Use refineSpec for feedback about the behavioral contract.",
+    "After saveLoop succeeds, explain that the loop is unscheduled in verifying state and immediately present 'Run verification' via interactivePrompt.",
+    "After runVerification succeeds, summarize the dryRunLog steps and evidence. Distinguish critical failures (block activation) from optional warnings (loop may still activate). When status is awaiting_confirmation — including when only optional read probes warned — present 'Confirm and activate' via interactivePrompt. Call confirmActivation only from that explicit selection.",
+    "After confirmActivation succeeds, tell the user their loop is active. Direct them to use Open loop on the activation card to watch runs and approve actions on the run page. Mention Edit in builder if they want to refine the spec. Do not send them to loop settings as the primary next step.",
+    "Never output a bulleted, numbered, or formatted list of options or actions the user can take in your prose text response. If you have choices, next steps, or decisions to offer — including escalation rules, review policies, or stable inputs — you must present them via requirementSetup or interactivePrompt, never as prose lists above the text box.",
     "Keep visible rationale concise. Do not reveal hidden chain-of-thought.",
     `Current durable session projection:\n${JSON.stringify({
       phase: session.phase,
@@ -341,16 +357,6 @@ async function requireSessionForSpec(req: AuthRequest, specId: string) {
   return session;
 }
 
-function proposalSessionId(proposal: unknown): string | null {
-  if (!proposal || typeof proposal !== "object") return null;
-  const definition = (proposal as { definition?: unknown }).definition;
-  if (!definition || typeof definition !== "object") return null;
-  const builderMeta = (definition as { builderMeta?: unknown }).builderMeta;
-  if (!builderMeta || typeof builderMeta !== "object") return null;
-  const value = (builderMeta as { workflowBuilderSessionId?: unknown }).workflowBuilderSessionId;
-  return typeof value === "string" ? value : null;
-}
-
 router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = chatSchema.parse(req.body ?? {});
@@ -368,6 +374,7 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
       ? await requireWorkflowBuilderSession(req.authContext!, body.sessionId)
       : await createWorkflowBuilderSession(req.authContext!, text);
     const sessionId = session.id;
+    const analyzerUsageBase = session.analyzerUsage ?? emptyLoopBuilderUsage();
 
     // Persist the incoming messages immediately so the user's turns survive
     // page reloads or stream interruptions before onFinish runs.
@@ -378,18 +385,37 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
       apiKey: process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY,
     });
     const system = await buildAnalyzerSystemPrompt(req.authContext!, session);
-    const result = streamText({
-      model: openai(loopBuilderOpenAiModel()),
-      system,
-      messages: await convertToModelMessages(messages, { tools }),
-      tools,
-      stopWhen: stepCountIs(10),
-      onError: ({ error }) => console.error("Loop builder analyzer stream failed:", error),
-    });
+    const model = loopBuilderOpenAiModel();
     const stream = createUIMessageStream({
       originalMessages: messages,
       execute: async ({ writer }) => {
         writer.write({ type: "data-session", data: { sessionId }, transient: true });
+        let runningTurnUsage = emptyLoopBuilderUsage();
+        const result = streamText({
+          model: openai(model),
+          system,
+          messages: await convertToModelMessages(messages, { tools }),
+          tools,
+          stopWhen: stepCountIs(10),
+          onError: ({ error }) => console.error("Loop builder analyzer stream failed:", error),
+          onStepFinish: ({ usage }) => {
+            runningTurnUsage = mergeLoopBuilderUsageTotals(
+              runningTurnUsage,
+              usageFromLanguageModelStep(usage, model),
+            );
+            writer.write({
+              type: "data-usage",
+              data: mergeLoopBuilderUsageTotals(analyzerUsageBase, runningTurnUsage),
+              transient: true,
+            });
+          },
+          onFinish: async ({ totalUsage }) => {
+            const turnUsage = usageFromLanguageModelStep(totalUsage, model);
+            const sessionUsage = mergeLoopBuilderUsageTotals(analyzerUsageBase, turnUsage);
+            await saveWorkflowBuilderAnalyzerUsage(req.authContext!, sessionId, sessionUsage);
+            writer.write({ type: "data-usage", data: sessionUsage, transient: true });
+          },
+        });
         writer.merge(result.toUIMessageStream({ originalMessages: messages, sendReasoning: true }));
       },
       onFinish: async ({ messages: completedMessages }) => {
@@ -456,6 +482,35 @@ router.post("/sessions/:sessionId/connectors/resolve", requireScopes(["memory:wr
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to resolve connector requirement";
     res.status(error instanceof z.ZodError ? 400 : /not found|no connector requirement/i.test(message) ? 404 : 409).json({ error: message });
+  }
+});
+
+router.post("/sessions/:sessionId/artifacts/save", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    const body = z.object({
+      requirementId: z.string().min(1).default("artifact_contract"),
+      value: z.object({
+        mode: z.literal("supplied_template"),
+        template: z.string().min(1),
+      }),
+      messages: z.array(z.unknown()).optional(),
+    }).parse(req.body ?? {});
+    const result = await saveBuilderArtifactBundle(req.authContext!, sessionId, {
+      requirementId: body.requirementId,
+      value: body.value,
+    });
+    if (body.messages) {
+      await replaceWorkflowBuilderMessages(
+        req.authContext!,
+        sessionId,
+        await validateUIMessages({ messages: normalizeWorkflowBuilderMessages(body.messages) }),
+      );
+    }
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to save artifact templates";
+    res.status(error instanceof z.ZodError ? 400 : /not found|no build contract/i.test(message) ? 404 : 409).json({ error: message });
   }
 });
 
@@ -547,18 +602,6 @@ router.post("/specs/:specId/archive", requireScopes(["memory:write"]), async (re
   }
 });
 
-router.post("/specs/:specId/generate", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const specId = z.string().uuid().parse(req.params.specId);
-    const session = await requireSessionForSpec(req, specId);
-    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "generateWorkflowGraph", input: {} });
-    res.status(202).json(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to generate workflow graph";
-    res.status(error instanceof z.ZodError ? 400 : /required|not available/i.test(message) ? 409 : 500).json({ error: message });
-  }
-});
-
 router.get("/jobs/:jobId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const command = await getWorkflowBuilderCommand(req.authContext!, z.string().uuid().parse(req.params.jobId));
@@ -569,55 +612,21 @@ router.get("/jobs/:jobId", requireScopes(["memory:read"]), async (req: AuthReque
   }
 });
 
-router.post("/propose", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = promptCompatibilitySchema.parse(req.body ?? {});
-    const session = body.sessionId
-      ? await requireWorkflowBuilderSession(req.authContext!, body.sessionId)
-      : body.specId ? await requireSessionForSpec(req, body.specId) : null;
-    if (!session) throw new Error("A correlated workflow builder session is required");
-    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "generateWorkflowGraph", input: {} });
-    res.status(202).json(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to propose workflow";
-    res.status(error instanceof z.ZodError ? 400 : 409).json({ error: message });
-  }
-});
-
-router.post("/refine", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = promptCompatibilitySchema.parse(req.body ?? {});
-    const sessionId = body.sessionId ?? proposalSessionId(body.priorProposal);
-    if (!sessionId) throw new Error("A correlated workflow builder session is required");
-    const command = await dispatchWorkflowBuilderCommand({
-      auth: req.authContext!, sessionId, toolName: "refineWorkflowGraph",
-      input: { feedback: body.feedback ?? body.prompt },
-    });
-    res.status(202).json(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to refine workflow";
-    res.status(error instanceof z.ZodError ? 400 : 409).json({ error: message });
-  }
-});
-
 router.post("/save", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = z.object({
-      sessionId: z.string().uuid().optional(),
-      proposal: z.unknown(),
+      sessionId: z.string().uuid(),
       cron: z.string().optional(),
       timezone: z.string().optional(),
       workspaceId: z.string().uuid().nullable().optional(),
     }).parse(req.body ?? {});
-    const sessionId = body.sessionId ?? proposalSessionId(body.proposal);
-    if (!sessionId) throw new Error("A correlated workflow builder session is required");
     const command = await dispatchWorkflowBuilderCommand({
-      auth: req.authContext!, sessionId, toolName: "saveWorkflow",
+      auth: req.authContext!, sessionId: body.sessionId, toolName: "saveLoop",
       input: { cron: body.cron, timezone: body.timezone, workspaceId: body.workspaceId, approved: true },
     });
     res.status(202).json(command);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to save workflow";
+    const message = error instanceof Error ? error.message : "Failed to save loop";
     res.status(error instanceof z.ZodError ? 400 : 409).json({ error: message });
   }
 });
@@ -652,3 +661,26 @@ router.get("/specs/:specId", requireScopes(["memory:read"]), async (req: AuthReq
 });
 
 export default router;
+
+router.patch("/sessions/:sessionId", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    const body = z.object({ title: z.string().trim().min(1).max(120) }).parse(req.body ?? {});
+    const session = await requireWorkflowBuilderSession(req.authContext!, sessionId);
+    
+    // We update title, goal, and if currentProposal exists, we update its title too.
+    const patch: Parameters<typeof updateWorkflowBuilderSession>[2] = {
+      title: body.title,
+      goal: body.title,
+    };
+    if (session.currentProposal) {
+      patch.currentProposal = { ...session.currentProposal, title: body.title };
+    }
+    
+    const updated = await updateWorkflowBuilderSession(req.authContext!, sessionId, patch);
+    res.json({ session: updated });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to update builder session";
+    res.status(error instanceof z.ZodError ? 400 : 500).json({ error: message });
+  }
+});

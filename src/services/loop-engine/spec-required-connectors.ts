@@ -2,7 +2,7 @@ import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import type { DiscoveredToolContract } from "../tool-spec/discovery.js";
 import type { NoSlopSpec } from "./spec-contracts.js";
 
-export type SpecRequiredConnectorAction = {
+type SpecRequiredConnectorAction = {
   toolkit: string;
   actionSlug: string;
   risk: string;

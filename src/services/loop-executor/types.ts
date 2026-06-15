@@ -14,13 +14,13 @@ import { operatorInteractionPlanSchema } from "../loop-engine/operator-interacti
 import { loopBuildContractSchema } from "../loop-engine/build-contract.js";
 
 /** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
-export function normalizeOptionalString(value: unknown): unknown {
+function normalizeOptionalString(value: unknown): unknown {
   if (value === null || value === undefined) return undefined;
   if (typeof value === "string" && value.trim() === "") return undefined;
   return typeof value === "string" ? value.trim() : value;
 }
 
-export const optionalNonEmptyStringSchema = z.preprocess(
+const optionalNonEmptyStringSchema = z.preprocess(
   normalizeOptionalString,
   z.string().min(1).optional(),
 );
@@ -33,9 +33,9 @@ export const LOOP_ENGINE_VERSION = "loop_engine_v3";
 
 export const loopGateTypeSchema = z.string();
 export type LoopGateType = string;
-export const loopAgentGateSchema = z.object({ type: loopGateTypeSchema, question: z.string().min(1) });
+const loopAgentGateSchema = z.object({ type: loopGateTypeSchema, question: z.string().min(1) });
 
-export const loopAgentContractSchema = z.preprocess((val) => {
+const loopAgentContractSchema = z.preprocess((val) => {
   if (val && typeof val === "object" && !Array.isArray(val)) {
     const obj = val as Record<string, unknown>;
     if (obj.schema && typeof obj.schema === "object" && !Array.isArray(obj.schema)) {
@@ -48,9 +48,9 @@ export const loopAgentContractSchema = z.preprocess((val) => {
   return val;
 }, dataContractSchema);
 
-export type LoopAgentContract = z.infer<typeof loopAgentContractSchema>;
+type LoopAgentContract = z.infer<typeof loopAgentContractSchema>;
 
-export const agentHandoffBindingSchema = z.object({
+const agentHandoffBindingSchema = z.object({
   source: z.object({
     kind: z.enum(["agent_output", "operator_input", "stable_config", "artifact"]),
     agentId: z.string().min(1).optional(),
@@ -73,7 +73,7 @@ export const loopDeliveryRoutingSchema = z.object({
 export type LoopDeliveryRouting = z.infer<typeof loopDeliveryRoutingSchema>;
 
 /** Tool binding on an agent: catalog ref plus optional JSON config. */
-export const loopToolAssignmentSchema = z.object({
+const loopToolAssignmentSchema = z.object({
   ref: z.string().min(1),
   config: z.record(z.unknown()).optional(),
 });
@@ -99,30 +99,30 @@ export const loopRunAgentSchema = z.object({
 export type LoopRunAgent = z.infer<typeof loopRunAgentSchema>;
 
 /** CEO strategy heartbeat output (before human approval). */
-export const ceoStrategyOutputSchema = z.object({
+const ceoStrategyOutputSchema = z.object({
   strategyText: z.string().min(1),
   agents: z.array(loopRunAgentSchema).min(1).max(6),
 });
 
-export type CeoStrategyOutput = z.infer<typeof ceoStrategyOutputSchema>;
+type CeoStrategyOutput = z.infer<typeof ceoStrategyOutputSchema>;
 
 /** Declared artifact in a dynamic plan. */
-export const loopArtifactDefinitionSchema = z.object({
+const loopArtifactDefinitionSchema = z.object({
   id: z.string().min(1),
   kind: z.string().min(1),
   label: z.string().min(1),
 });
 
-export type LoopArtifactDefinition = z.infer<typeof loopArtifactDefinitionSchema>;
+type LoopArtifactDefinition = z.infer<typeof loopArtifactDefinitionSchema>;
 
 const LOOP_STAGE_APPROVAL_CHANNEL_VALUES = ["primary", "email", "gmail", "telegram", "whatsapp"] as const;
 
-export const loopStageApprovalChannelSchema = z.enum(LOOP_STAGE_APPROVAL_CHANNEL_VALUES);
+const loopStageApprovalChannelSchema = z.enum(LOOP_STAGE_APPROVAL_CHANNEL_VALUES);
 export type LoopStageApprovalChannel = z.infer<typeof loopStageApprovalChannelSchema>;
 
 const LOOP_STAGE_APPROVAL_CHANNEL_SET = new Set<LoopStageApprovalChannel>(LOOP_STAGE_APPROVAL_CHANNEL_VALUES);
 
-export function normalizeLoopStageApprovalChannel(value: string): LoopStageApprovalChannel | null {
+function normalizeLoopStageApprovalChannel(value: string): LoopStageApprovalChannel | null {
   const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
   if (!normalized) return null;
 
@@ -147,7 +147,7 @@ export const loopStageApprovalChannelInputSchema = z.preprocess((value) => {
   return normalizeLoopStageApprovalChannel(value) ?? value.trim().toLowerCase();
 }, loopStageApprovalChannelSchema);
 
-export const loopStageApprovalPolicySchema = z.object({
+const loopStageApprovalPolicySchema = z.object({
   required: z.boolean().default(false),
   mode: z.enum(["before", "after", "manual_gate"]).default("manual_gate"),
   channels: z.array(loopStageApprovalChannelInputSchema).min(1).default(["primary"]),
@@ -155,10 +155,10 @@ export const loopStageApprovalPolicySchema = z.object({
   artifactRef: z.string().min(1).optional(),
 });
 
-export type LoopStageApprovalPolicy = z.infer<typeof loopStageApprovalPolicySchema>;
+type LoopStageApprovalPolicy = z.infer<typeof loopStageApprovalPolicySchema>;
 
 /** Plan stage: run one agent. */
-export const loopAgentStageSchema = z.object({
+const loopAgentStageSchema = z.object({
   kind: z.literal("agent"),
   id: z.string().min(1),
   name: z.string().min(1),
@@ -169,7 +169,7 @@ export const loopAgentStageSchema = z.object({
 });
 
 /** Plan stage: pause for human approval on an artifact. */
-export const loopApprovalGateStageSchema = z.object({
+const loopApprovalGateStageSchema = z.object({
   kind: z.literal("approval_gate"),
   id: z.string().min(1),
   label: z.string().min(1),
@@ -184,7 +184,7 @@ export const loopApprovalGateStageSchema = z.object({
 });
 
 /** Plan stage: pause for structured operator input. */
-export const loopInputGateStageSchema = z.object({
+const loopInputGateStageSchema = z.object({
   kind: z.literal("input_gate"),
   id: z.string().min(1),
   label: z.string().min(1),
@@ -194,7 +194,7 @@ export const loopInputGateStageSchema = z.object({
 });
 
 /** Plan stage: execute a catalog external-action tool (e.g. broadcast). */
-export const loopExternalActionStageSchema = z.object({
+const loopExternalActionStageSchema = z.object({
   kind: z.literal("external_action"),
   id: z.string().min(1),
   label: z.string().min(1),
@@ -208,16 +208,16 @@ export const loopExternalActionStageSchema = z.object({
   }),
 });
 
-export const loopStageSchema = z.discriminatedUnion("kind", [
+const loopStageSchema = z.discriminatedUnion("kind", [
   loopAgentStageSchema,
   loopApprovalGateStageSchema,
   loopInputGateStageSchema,
   loopExternalActionStageSchema,
 ]);
 
-export type LoopStage = z.infer<typeof loopStageSchema>;
-export type LoopExternalActionStage = z.infer<typeof loopExternalActionStageSchema>;
-export type LoopInputGateStage = z.infer<typeof loopInputGateStageSchema>;
+type LoopStage = z.infer<typeof loopStageSchema>;
+type LoopExternalActionStage = z.infer<typeof loopExternalActionStageSchema>;
+type LoopInputGateStage = z.infer<typeof loopInputGateStageSchema>;
 
 /** Ordered stages and artifacts for plan-driven runs. */
 export const loopPlanSchema = z.object({
@@ -247,7 +247,7 @@ export const loopAgentGraphChildSchema = z.object({
   outputArtifactKind: z.string().min(1).optional(),
 });
 
-export type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;
+type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;
 
 /** Parent coordinator plus optional pre-defined children. */
 export const loopAgentGraphSchema = z.object({
@@ -333,7 +333,7 @@ export type LoopContactRow = z.infer<typeof loopContactRowSchema>;
 /**
  * Per-run executor state under `workflow_runs.metadata_json.loop_executor`.
  */
-export const loopExecutorRunMetaSchema = z.object({
+const loopExecutorRunMetaSchema = z.object({
   proposedRoster: z.array(loopRunAgentSchema).optional(),
   approvedRoster: z.array(loopRunAgentSchema).optional(),
   strategyReadyAt: z.string().optional(),
@@ -454,7 +454,7 @@ export const loopExecutorRunMetaSchema = z.object({
   rerunTaskSeq: z.number().optional(),
 });
 
-export type LoopExecutorRunMeta = z.infer<typeof loopExecutorRunMetaSchema>;
+type LoopExecutorRunMeta = z.infer<typeof loopExecutorRunMetaSchema>;
 
 /** API view of a saved loop workflow. */
 export interface LoopWorkflowView {
@@ -465,20 +465,34 @@ export interface LoopWorkflowView {
   scheduleRrule: string;
   nextRunAt: string | null;
   lastScheduledAt: string | null;
-  definition: LoopDefinition;
+  goal: string;
+  /** Legacy graph-based definition (loop_executor_v2). */
+  definition?: LoopDefinition;
+  /** Spec-driven runnable bundle (loop_spec_v1). */
+  runnableSpec?: import("../loop-runtime/spec-run-types.js").RunnableSpec;
+  definitionVersion: string;
+  latestRun?: {
+    id: string;
+    status: string;
+    triggerSource: "manual" | "schedule" | "event";
+    triggerLabel: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+  builderSessionId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 /** Runtime preset: optional fixed CEO roster for a domain workflow. */
-export interface LoopPreset {
+interface LoopPreset {
   id: string;
   label: string;
   buildRoster: (goal: string) => Promise<CeoStrategyOutput>;
 }
 
 /** Formats raw delivery body for a provider (e.g. email broadcast). */
-export interface DeliveryContentFormatter {
+interface DeliveryContentFormatter {
   sanitizeBody(raw: string): string;
   formatForDelivery(raw: string): { subject: string | null; text: string; html: string };
   formatForBroadcast(

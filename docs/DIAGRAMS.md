@@ -66,7 +66,7 @@ For the current end-to-end operational paths, see [Runtime Flows](./flows/README
     ┌────────────────────────────┐
     │  OpenAI API                │
     │  • text-embedding-3-small  │
-    │  • gpt-4o-mini (summary)   │
+    │  • gpt-gpt-5-nano (summary)   │
     │  • gpt-4 (extraction)      │
     └────────────────────────────┘
 ```
@@ -92,7 +92,7 @@ User saves: "I love React for UI and Python for backends"
    │     └─ OpenAI text-embedding-3-small
    ├─ 6. Store embedding in pgvector (50ms)
    ├─ 7. Summarize content (1000ms)
-   │     └─ OpenAI gpt-4o-mini
+   │     └─ OpenAI gpt-gpt-5-nano
    ├─ 8. Extract entities & relations (1500ms)
    │     ├─ Entities: ["React", "Python", "UI", "Backend"]
    │     ├─ Types: [technology, technology, concept, concept]

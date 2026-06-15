@@ -116,7 +116,7 @@ If a `memory_record` event explicitly describes a recurring workflow (has `outpu
 
 #### Path B: LLM Extraction
 
-Remaining events go through `gpt-4o-mini` (or configured model) with the `EPISODE_BUILDER_PROMPT`.
+Remaining events go through `gpt-gpt-5-nano` (or configured model) with the `EPISODE_BUILDER_PROMPT`.
 
 **Preprocessing:**
 1. **Time-gap chunking** — split events by 4-hour gaps into chronological chunks

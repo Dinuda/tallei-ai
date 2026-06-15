@@ -12,7 +12,7 @@ import type { RuntimeDefinition } from "./types.js";
 const ajv = new Ajv({ allErrors: true, strict: false, allowUnionTypes: true });
 addFormats(ajv);
 
-export type ConnectorActionContractSnapshot = {
+type ConnectorActionContractSnapshot = {
   toolRef: string;
   toolkit: string;
   actionSlug: string;
@@ -25,7 +25,7 @@ export type ConnectorActionContractSnapshot = {
   readiness: ConnectorActionReadinessContract;
 };
 
-export type ActionPayloadValidation = {
+type ActionPayloadValidation = {
   valid: boolean;
   errors: Array<{ path: string; message: string; keyword: string }>;
 };

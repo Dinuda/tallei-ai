@@ -28,12 +28,12 @@ export {
   type NoSlopSpecStatus,
 } from "./spec-contracts.js";
 
-export const ENGINE_MAX_AGENTS = 12;
-export const ENGINE_MAX_CRITIC_RETRIES = 2;
-export const ENGINE_MAX_AGENT_RETRIES = 2;
+const ENGINE_MAX_AGENTS = 12;
+const ENGINE_MAX_CRITIC_RETRIES = 2;
+const ENGINE_MAX_AGENT_RETRIES = 2;
 export const DESIGNER_MEMORY_TOP_K = 8;
 
-export const loopArchitectAgentSchema = z.object({
+const loopArchitectAgentSchema = z.object({
   nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
   id: z.string().min(1),
   name: z.string().min(1),
@@ -272,15 +272,15 @@ const loopArchitectOutputBaseSchema = z.object({
   suggestedChannels: z.array(z.string().min(1)).default(["primary"]),
 });
 
-export const loopArchitectOutputSchema = z.preprocess(
+const loopArchitectOutputSchema = z.preprocess(
   preprocessArchitectOutput,
   loopArchitectOutputBaseSchema,
 );
 
 export type LoopArchitectOutput = z.infer<typeof loopArchitectOutputSchema>;
-export type LoopArchitectAgent = z.infer<typeof loopArchitectAgentSchema>;
+type LoopArchitectAgent = z.infer<typeof loopArchitectAgentSchema>;
 
-export const workflowCriticResultSchema = z.object({
+const workflowCriticResultSchema = z.object({
   pass: z.boolean(),
   riskLevel: z.enum(["low", "medium", "high"]),
   issues: z.array(z.string()).default([]),
@@ -289,8 +289,8 @@ export const workflowCriticResultSchema = z.object({
 
 export type WorkflowCriticResult = z.infer<typeof workflowCriticResultSchema>;
 
-export const goalEvalStatusSchema = z.enum(["pass", "fail", "needs_input"]);
-export type GoalEvalStatus = z.infer<typeof goalEvalStatusSchema>;
+const goalEvalStatusSchema = z.enum(["pass", "fail", "needs_input"]);
+type GoalEvalStatus = z.infer<typeof goalEvalStatusSchema>;
 
 export const goalEvalResultSchema = z.object({
   status: goalEvalStatusSchema,
@@ -301,12 +301,12 @@ export const goalEvalResultSchema = z.object({
 
 export type GoalEvalResult = z.infer<typeof goalEvalResultSchema>;
 
-export function isEngineV3Definition(definition: LoopDefinition): boolean {
+function isEngineV3Definition(definition: LoopDefinition): boolean {
   return definition.engineVersion === LOOP_ENGINE_VERSION
     || definition.builderMeta?.engineVersion === LOOP_ENGINE_VERSION;
 }
 
-export function assertDeliveryRouting(delivery: z.infer<typeof loopDeliveryRoutingSchema>): void {
+function assertDeliveryRouting(delivery: z.infer<typeof loopDeliveryRoutingSchema>): void {
   const provider = delivery.provider.trim();
   if (!provider) throw new Error("Delivery routing error: provider is required");
   if (provider.toLowerCase() === "none") return;
@@ -319,7 +319,7 @@ function slugArtifactId(agentId: string): string {
   return `${agentId.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "").slice(0, 40) || "agent"}_output`;
 }
 
-export function architectOutputToAgentGraph(output: LoopArchitectOutput): z.infer<typeof loopAgentGraphSchema> {
+function architectOutputToAgentGraph(output: LoopArchitectOutput): z.infer<typeof loopAgentGraphSchema> {
   const goal = output.strategyText.split("\n")[0] ?? output.summary;
   return loopAgentGraphSchema.parse({
     parent: {

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { auth } from "../../../auth";
+import { auth } from "../../../../auth";
 import { getToken } from "next-auth/jwt";
 
 const SECRET = process.env.INTERNAL_API_SECRET!;

@@ -185,30 +185,34 @@ export function BuilderConnectorChecklist({
 
   if (completed) {
     return (
-      <div className="my-3 flex items-center gap-3 border border-[#d1d5db] bg-white px-4 py-3">
-        <span className="flex size-8 items-center justify-center bg-[#111827] text-white"><Check className="size-4" /></span>
+      <div className="my-3 flex items-center gap-3 border border-emerald-200 bg-emerald-50 px-4 py-3">
+        <span className="flex size-8 items-center justify-center bg-emerald-600 text-white">
+          <Check className="size-4" />
+        </span>
         <div>
-          <div className="text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>Apps connected</div>
-          <div className="text-xs text-[#6b7280]">The loop can use the required connected apps.</div>
+          <div className="text-sm font-semibold text-emerald-950" style={{ fontFamily: "var(--font-title)" }}>Apps connected</div>
+          <div className="text-xs text-emerald-700">The loop can use the required connected apps.</div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="w-full border border-[#d1d5db] bg-white">
-      <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-3">
+    <div className="w-full border border-indigo-200 bg-indigo-50/40">
+      <div className="border-b border-indigo-100 bg-white px-4 py-3">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
-            <span className="flex size-8 shrink-0 items-center justify-center bg-[#e5e7eb] text-[#6b7280]">
+            <span className="flex size-8 shrink-0 items-center justify-center bg-indigo-100 text-indigo-700">
               <ShieldCheck className="size-4" />
             </span>
             <div>
-              <div className="flex items-center gap-2 text-[14px] font-bold tracking-[-0.02em] text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>Connect required apps</div>
-              <p className="mt-0.5 text-[13px] text-[#6b7280]">Connect the apps this loop needs to work.</p>
+              <div className="flex items-center gap-2 text-[14px] font-bold tracking-[-0.02em] text-indigo-950" style={{ fontFamily: "var(--font-title)" }}>
+                Connect required apps
+              </div>
+              <p className="mt-0.5 text-[13px] text-indigo-900/70">Connect the apps this loop needs to work.</p>
             </div>
           </div>
-          <span className="border border-[#e5e7eb] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#6b7280]">
+          <span className="border border-indigo-200 bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
             {checklist?.apps.filter((app) => app.accountConnected).length ?? 0} of {checklist?.apps.length ?? 0} connected
           </span>
         </div>
@@ -216,7 +220,7 @@ export function BuilderConnectorChecklist({
 
       <div className="p-4">
         {!checklist && (
-          <div className="flex items-center gap-2 border border-dashed border-[#d1d5db] bg-[#fafafa] px-4 py-5 text-sm text-[#6b7280]">
+          <div className="flex items-center gap-2 border border-dashed border-indigo-200 bg-white px-4 py-5 text-sm text-indigo-900/70">
             <LoaderCircle className="size-4 animate-spin" /> Checking connected accounts...
           </div>
         )}
@@ -224,31 +228,35 @@ export function BuilderConnectorChecklist({
           const open = expanded.includes(app.toolkit);
           const busy = busyToolkit === app.toolkit;
           return (
-            <div className="border-b border-[#e5e7eb] bg-white last:border-b-0" key={app.toolkit}>
+            <div className="border-b border-indigo-100 bg-white last:border-b-0" key={app.toolkit}>
               <div className="flex w-full items-center gap-3 p-4 text-left">
-                <span className="flex size-11 shrink-0 items-center justify-center overflow-hidden border border-[#e5e7eb] bg-white">
+                <span className="flex size-11 shrink-0 items-center justify-center overflow-hidden border border-indigo-100 bg-white">
                   <img alt="" className="size-7 object-contain" src={app.logo || `https://logos.composio.dev/api/${app.toolkit}`} />
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>{app.name}</span>
+                    <span className="text-sm font-semibold text-indigo-950" style={{ fontFamily: "var(--font-title)" }}>{app.name}</span>
                     <span className={cn(
                       "border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-                      app.accountConnected ? "border-[#e5e7eb] bg-[#fafafa] text-[#6b7280]" : "border-[#e5e7eb] bg-[#fafafa] text-[#6b7280]"
+                      app.accountConnected
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : "border-amber-200 bg-amber-50 text-amber-700"
                     )}>
                       {statusLabel(app)}
                     </span>
                   </span>
-                  <span className="mt-1 block truncate text-xs text-[#6b7280]">{app.accountConnected ? "Ready to use" : "Connection required"}</span>
+                  <span className="mt-1 block truncate text-xs text-indigo-900/70">
+                    {app.accountConnected ? "Ready to use" : "Connection required"}
+                  </span>
                 </span>
                 {app.accountConnected && (
-                  <span className="flex size-8 items-center justify-center bg-[#111827] text-white">
+                  <span className="flex size-8 items-center justify-center bg-emerald-600 text-white">
                     <Check className="size-4" />
                   </span>
                 )}
                 {!app.accountConnected && (
                   <Button
-                    className="bg-[#111827] text-white hover:bg-[#374151]"
+                    className="bg-indigo-700 text-white hover:bg-indigo-800"
                     disabled={busy}
                     onClick={() => void connect(app.toolkit)}
                     size="sm"
@@ -259,7 +267,7 @@ export function BuilderConnectorChecklist({
                 )}
                 <button
                   aria-label={`${open ? "Hide" : "Show"} ${app.name} details`}
-                  className="flex size-8 items-center justify-center text-[#6b7280] transition-colors hover:bg-[#fafafa] hover:text-[#111827]"
+                  className="flex size-8 items-center justify-center text-indigo-900/70 transition-colors hover:bg-indigo-50 hover:text-indigo-950"
                   onClick={() => setExpanded((current) => current.includes(app.toolkit) ? current.filter((item) => item !== app.toolkit) : [...current, app.toolkit])}
                   type="button"
                 >
@@ -268,15 +276,17 @@ export function BuilderConnectorChecklist({
               </div>
 
               {open && (
-                <div className="border-t border-[#e5e7eb] bg-[#fafafa] px-4 py-4">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#6b7280]" style={{ fontFamily: "var(--font-title)" }}>What this loop can do with {app.name}</p>
+                <div className="border-t border-indigo-100 bg-indigo-50/60 px-4 py-4">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-indigo-700" style={{ fontFamily: "var(--font-title)" }}>
+                    What this loop can do with {app.name}
+                  </p>
                   <div className="mt-2 space-y-2">
                     {app.actions.map((action) => (
                       <div className="flex items-start gap-2 text-xs" key={action.slug}>
-                        <Check className="mt-0.5 size-3 text-[#6b7280]" />
+                        <Check className="mt-0.5 size-3 text-emerald-600" />
                         <div>
-                          <div className="font-medium text-[#111827]">{action.name}</div>
-                          <div className="text-[#6b7280]">{action.description}</div>
+                          <div className="font-medium text-indigo-950">{action.name}</div>
+                          <div className="text-indigo-900/70">{action.description}</div>
                         </div>
                       </div>
                     ))}
@@ -289,13 +299,13 @@ export function BuilderConnectorChecklist({
       </div>
 
       {fallbackUrl && (
-        <a className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[#111827] underline underline-offset-4" href={fallbackUrl} rel="noreferrer" target="_blank">
+        <a className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-indigo-700 underline underline-offset-4" href={fallbackUrl} rel="noreferrer" target="_blank">
           Open authorization <ExternalLink className="size-3" />
         </a>
       )}
       {error && <p className="mt-3 border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</p>}
       {busyToolkit === "confirm" && (
-        <div className="mt-4 flex items-center justify-end gap-2 text-xs text-[#6b7280]">
+        <div className="mt-4 flex items-center justify-end gap-2 text-xs text-indigo-900/70">
           <LoaderCircle className="size-4 animate-spin" /> Continuing...
         </div>
       )}

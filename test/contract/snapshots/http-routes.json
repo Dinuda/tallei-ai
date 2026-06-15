@@ -376,16 +376,6 @@
   },
   {
     "method": "POST",
-    "path": "/api/loop-builder/propose",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/refine",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
     "path": "/api/loop-builder/save",
     "source": "src/routes/loopBuilder.ts"
   },
@@ -402,6 +392,11 @@
   {
     "method": "POST",
     "path": "/api/loop-builder/sessions/:sessionId/connectors/resolve",
+    "source": "src/routes/loopBuilder.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/loop-builder/sessions/:sessionId/artifacts/save",
     "source": "src/routes/loopBuilder.ts"
   },
   {
@@ -427,11 +422,6 @@
   {
     "method": "POST",
     "path": "/api/loop-builder/specs/:specId/archive",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/specs/:specId/generate",
     "source": "src/routes/loopBuilder.ts"
   },
   {
@@ -690,6 +680,11 @@
     "source": "src/routes/workflows.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/workflows/loops/:workflowId/run/chat",
+    "source": "src/routes/workflows.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/workflows/loops/:workflowId/runs",
     "source": "src/routes/workflows.ts"
@@ -731,7 +726,17 @@
   },
   {
     "method": "POST",
+    "path": "/api/workflows/runs/:runId/retry",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "POST",
     "path": "/api/workflows/runs/:runId/interactions/:interactionId/commands",
+    "source": "src/routes/workflows.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/workflows/runs/:runId/messages",
     "source": "src/routes/workflows.ts"
   },
   {

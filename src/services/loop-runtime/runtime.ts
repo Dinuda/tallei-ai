@@ -2,6 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import {
+  createSpecLoopRun,
+  getSpecRunProjection,
+  isSpecDrivenWorkflow,
+  runSpecLoopHeadless,
+  startSpecManualLoopRun,
+} from "./spec-runner.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
 import { extractWebSearchSources } from "../loop-engine/contracts.js";
 import { selectedConnectorAccountId } from "../loop-engine/build-contract.js";
@@ -464,6 +471,9 @@ async function startLoopRun(input: {
 }
 
 export async function startManualLoopRun(auth: AuthContext, workflowId: string) {
+  if (await isSpecDrivenWorkflow(auth, workflowId)) {
+    return getSpecRunProjection(auth, (await startSpecManualLoopRun(auth, workflowId)).id);
+  }
   return startLoopRun({ auth, workflowId });
 }
 
@@ -472,6 +482,18 @@ export async function startWebhookLoopRun(
   workflowId: string,
   event: { id: string; type: string; triggerSlug: string; data: Record<string, unknown> },
 ) {
+  if (await isSpecDrivenWorkflow(auth, workflowId)) {
+    const run = await createSpecLoopRun(auth, workflowId, {
+      source: "event",
+      label: event.triggerSlug,
+      eventId: event.id,
+      triggerSlug: event.triggerSlug,
+    });
+    void runSpecLoopHeadless(auth, workflowId, run.id).catch((error) => {
+      console.error(`Spec webhook loop run failed for ${workflowId}:`, error);
+    });
+    return getSpecRunProjection(auth, run.id);
+  }
   return startLoopRun({
     auth,
     workflowId,
@@ -1845,7 +1867,7 @@ async function claimCommand(): Promise<CommandRow | null> {
   return result.rows[0] ?? null;
 }
 
-export async function dispatchLoopRuntimeCommands(limit = 10) {
+async function dispatchLoopRuntimeCommands(limit = 10) {
   await pool.query(
     `UPDATE loop_engine_step_attempts a
      SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
@@ -1954,7 +1976,7 @@ export async function listLoopRuntimeRuns(auth: AuthContext, workflowId: string)
   return result.rows;
 }
 
-export async function executeLoopRuntimeInteractionCommand(input: {
+async function executeLoopRuntimeInteractionCommand(input: {
   auth: AuthContext;
   runId: string;
   interactionId: string;
@@ -2094,7 +2116,7 @@ export async function executeLoopRuntimeInteractionCommand(input: {
   }
 }
 
-export async function submitLoopRuntimeInteractionInputs(input: {
+async function submitLoopRuntimeInteractionInputs(input: {
   auth: AuthContext;
   runId: string;
   interactionId: string;
@@ -2274,7 +2296,7 @@ export async function submitLoopRuntimeInteractionInputs(input: {
   }
 }
 
-export async function uploadLoopRuntimeInteractionContacts(input: {
+async function uploadLoopRuntimeInteractionContacts(input: {
   auth: AuthContext;
   runId: string;
   interactionId: string;
@@ -2367,7 +2389,7 @@ export async function uploadLoopRuntimeInteractionContacts(input: {
   }
 }
 
-export async function reviseLoopRuntimeInteraction(input: {
+async function reviseLoopRuntimeInteraction(input: {
   auth: AuthContext;
   runId: string;
   interactionId: string;

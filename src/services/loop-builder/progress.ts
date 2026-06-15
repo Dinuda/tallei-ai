@@ -62,12 +62,46 @@ export function estimateLoopBuilderCostUsd(model: string, promptTokens: number, 
       ? { input: 0.25, output: 2 }
       : normalized.includes("gpt-5")
         ? { input: 1.25, output: 10 }
-        : normalized.includes("gpt-4o-mini")
+        : normalized.includes("gpt-gpt-5-nano")
           ? { input: 0.15, output: 0.6 }
           : normalized.includes("gpt-4o")
             ? { input: 2.5, output: 10 }
             : { input: 0, output: 0 };
   return (promptTokens / 1_000_000) * pricing.input + (completionTokens / 1_000_000) * pricing.output;
+}
+
+export function mergeLoopBuilderUsageTotals(...usages: LoopBuilderUsage[]): LoopBuilderUsage {
+  return usages.reduce<LoopBuilderUsage>((acc, usage) => {
+    const models = { ...acc.models };
+    for (const [model, count] of Object.entries(usage.models ?? {})) {
+      models[model] = (models[model] ?? 0) + count;
+    }
+    return {
+      calls: acc.calls + usage.calls,
+      promptTokens: acc.promptTokens + usage.promptTokens,
+      completionTokens: acc.completionTokens + usage.completionTokens,
+      totalTokens: acc.totalTokens + usage.totalTokens,
+      estimatedCostUsd: Number((acc.estimatedCostUsd + usage.estimatedCostUsd).toFixed(8)),
+      models,
+    };
+  }, emptyLoopBuilderUsage());
+}
+
+export function usageFromLanguageModelStep(
+  usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number },
+  model: string,
+): LoopBuilderUsage {
+  const promptTokens = usage.promptTokens ?? 0;
+  const completionTokens = usage.completionTokens ?? 0;
+  const totalTokens = usage.totalTokens ?? promptTokens + completionTokens;
+  return {
+    calls: 1,
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    estimatedCostUsd: estimateLoopBuilderCostUsd(model, promptTokens, completionTokens),
+    models: { [model]: 1 },
+  };
 }
 
 export function emptyLoopBuilderUsage(): LoopBuilderUsage {

@@ -7,10 +7,33 @@ const { Pool } = pg;
 const POOL_STATEMENT_TIMEOUT_MS = 5000;
 const POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS = 5000;
 
+const TRANSIENT_POOL_ERROR =
+  /connection terminated|connection timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|Cannot use a pool after calling end/i;
+
+export function isTransientPoolError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (TRANSIENT_POOL_ERROR.test(error.message)) return true;
+  const cause = error.cause;
+  if (cause instanceof Error && TRANSIENT_POOL_ERROR.test(cause.message)) return true;
+  return false;
+}
+
+export async function poolQuery<T extends pg.QueryResultRow = pg.QueryResultRow>(
+  queryText: string,
+  values?: unknown[],
+): Promise<pg.QueryResult<T>> {
+  try {
+    return await pool.query<T>(queryText, values);
+  } catch (error) {
+    if (!isTransientPoolError(error)) throw error;
+    return pool.query<T>(queryText, values);
+  }
+}
+
 function createPool(connectionString: string): pg.Pool {
   const dbPool = new Pool({
     connectionString,
-    connectionTimeoutMillis: 2000,
+    connectionTimeoutMillis: 8000,
     query_timeout: 30000,
     max: 30,
     idleTimeoutMillis: 30000,
@@ -1079,6 +1102,7 @@ export async function initDb() {
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS current_proposal_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS error_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS analyzer_usage_json JSONB NOT NULL DEFAULT '{"calls":0,"promptTokens":0,"completionTokens":0,"totalTokens":0,"estimatedCostUsd":0,"models":{}}'::jsonb;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS transcript_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS draft_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS debate_json;
@@ -1135,6 +1159,7 @@ export async function initDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_workflow_verification_runs_scope
         ON workflow_verification_runs(tenant_id, user_id, workflow_id, updated_at DESC);
+      ALTER TABLE workflow_verification_runs ADD COLUMN IF NOT EXISTS warnings_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 
       CREATE TABLE IF NOT EXISTS workflow_connector_triggers (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1554,6 +1579,19 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_loop_engine_events_run_created
         ON loop_engine_events(run_id, created_at ASC, id ASC);
+
+      CREATE TABLE IF NOT EXISTS loop_run_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        sequence BIGSERIAL NOT NULL,
+        message_json JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(run_id, sequence)
+      );
+      CREATE INDEX IF NOT EXISTS idx_loop_run_messages_run
+        ON loop_run_messages(tenant_id, user_id, run_id, sequence);
 
       UPDATE workflows
       SET status = 'archived', updated_at = NOW()

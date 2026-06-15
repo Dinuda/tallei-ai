@@ -5,7 +5,7 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 - **MCP server** (Node.js/Express backend) — handles memory save/recall via vector search
 - **Next.js dashboard** — UI for managing memories and OAuth connector setup
 - **PostgreSQL + pgvector** — persistent vector store with mem0ai SDK
-- **OpenAI** — embeddings (text-embedding-3-small) and summarization (gpt-4o-mini)
+- **OpenAI** — embeddings (text-embedding-3-small) and summarization (gpt-gpt-5-nano)
 
 **Primary goal**: Make memory I/O blazingly fast so Claude's MCP tools never block.
 
@@ -19,7 +19,7 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 | `src/index.ts` | Express server entry point |
 | `src/mcp/server.ts` | MCP tool definitions + OAuth auth; token caching + scope checks |
 | `src/services/memory.ts` | Singleton Memory instance, fire-and-forget saves, recall cache |
-| `src/services/summarizer.ts` | OpenAI gpt-4o-mini summarization (title, key points, decisions) |
+| `src/services/summarizer.ts` | OpenAI gpt-gpt-5-nano summarization (title, key points, decisions) |
 | `src/services/auth.ts` | Google OAuth + session JWT for dashboard auth |
 | `src/routes/*.ts` | HTTP route handlers |
 | `src/db/index.ts` | PostgreSQL connection pool & schema init |

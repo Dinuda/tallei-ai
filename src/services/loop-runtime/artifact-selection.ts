@@ -1,4 +1,4 @@
-export type ArtifactSelectionRow = {
+type ArtifactSelectionRow = {
   artifact_key: string;
   kind: string;
   body: string;
@@ -8,7 +8,7 @@ export type ArtifactSelectionRow = {
   step_index?: number | null;
 };
 
-export type ArtifactEmailTemplate = {
+type ArtifactEmailTemplate = {
   html?: string;
   text?: string;
   subject?: string;
@@ -49,7 +49,7 @@ function compareArtifactsChronologically<T extends ArtifactSelectionRow>(left: T
   return left.artifact_key.localeCompare(right.artifact_key);
 }
 
-export function compareArtifactsForDisplay<T extends ArtifactSelectionRow>(left: T, right: T): number {
+function compareArtifactsForDisplay<T extends ArtifactSelectionRow>(left: T, right: T): number {
   const priorityDiff = artifactPriority(right) - artifactPriority(left);
   if (priorityDiff !== 0) return priorityDiff;
   const timeDiff = artifactTimestamp(right) - artifactTimestamp(left);
@@ -61,7 +61,7 @@ export function compareArtifactsForDisplay<T extends ArtifactSelectionRow>(left:
   return left.artifact_key.localeCompare(right.artifact_key);
 }
 
-export function readArtifactEmailTemplate(dataJson: unknown): ArtifactEmailTemplate | null {
+function readArtifactEmailTemplate(dataJson: unknown): ArtifactEmailTemplate | null {
   const root = asObject(dataJson);
   const template = asObject(root.emailTemplate);
   const html = textOrUndefined(template.html);
@@ -77,7 +77,7 @@ export function readArtifactEmailTemplate(dataJson: unknown): ArtifactEmailTempl
   };
 }
 
-export function hasDraftEmailContent<T extends Pick<ArtifactSelectionRow, "kind" | "data_json">>(artifact: T): boolean {
+function hasDraftEmailContent<T extends Pick<ArtifactSelectionRow, "kind" | "data_json">>(artifact: T): boolean {
   return artifact.kind === "canvas_email"
     || artifact.kind === "canvas_preview"
     || readArtifactEmailTemplate(artifact.data_json) !== null;

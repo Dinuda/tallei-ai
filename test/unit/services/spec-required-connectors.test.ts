@@ -9,8 +9,10 @@ import {
 } from "../../../src/services/loop-engine/spec-required-connectors.js";
 import { validateOutboundDeliveryPlan } from "../../../src/services/loop-engine/architect.js";
 import { compileLoopPlanningIR, loopPlanningIRSchema } from "../../../src/services/loop-engine/planning-ir.js";
-import { getStaticToolContract } from "../../../src/services/tool-spec/tool-contracts.js";
-import { buildComposioActionContract } from "../../../src/services/tool-spec/tool-contracts.js";
+import {
+  buildComposioActionContract,
+  getStaticToolContract,
+} from "../../../src/services/tool-spec/tool-contracts.js";
 
 const newsletterSpec = {
   purpose: "Produce and send a weekly AI-industry newsletter and schedule a follow-up meeting.",

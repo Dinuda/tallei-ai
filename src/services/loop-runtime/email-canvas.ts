@@ -125,7 +125,7 @@ type UnlayerRow = {
   values: Record<string, unknown>;
 };
 
-export type CanvasEmailDesign = {
+type CanvasEmailDesign = {
   counters: Record<string, number>;
   body: {
     id: string;

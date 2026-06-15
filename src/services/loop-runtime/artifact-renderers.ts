@@ -1,13 +1,13 @@
 import { buildCanvasEmailTemplate } from "./email-canvas.js";
 
-export type RenderedArtifact = {
+type RenderedArtifact = {
   kind: string;
   body: string;
   data: Record<string, unknown>;
   marksPreview?: boolean;
 };
 
-export type ArtifactRendererPlugin = {
+type ArtifactRendererPlugin = {
   id: string;
   mediaTypes: string[];
   render(value: string): RenderedArtifact;
@@ -15,7 +15,7 @@ export type ArtifactRendererPlugin = {
 
 const renderers = new Map<string, ArtifactRendererPlugin>();
 
-export function registerArtifactRenderer(plugin: ArtifactRendererPlugin): void {
+function registerArtifactRenderer(plugin: ArtifactRendererPlugin): void {
   renderers.set(plugin.id, plugin);
 }
 

@@ -8,7 +8,7 @@ const PRICING_BY_MODEL: Record<string, Pricing> = {
   "gpt-5-mini": { inputPerMillion: 0.25, outputPerMillion: 2 },
   "gpt-5": { inputPerMillion: 1.25, outputPerMillion: 10 },
   "gpt-4o": { inputPerMillion: 2.5, outputPerMillion: 10 },
-  "gpt-4o-mini": { inputPerMillion: 0.15, outputPerMillion: 0.6 },
+  "gpt-gpt-5-nano": { inputPerMillion: 0.15, outputPerMillion: 0.6 },
   "gpt-4.1": { inputPerMillion: 2, outputPerMillion: 8 },
   "gpt-4.1-mini": { inputPerMillion: 0.4, outputPerMillion: 1.6 },
   "gpt-4.1-nano": { inputPerMillion: 0.1, outputPerMillion: 0.4 },

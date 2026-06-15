@@ -4,7 +4,7 @@ import type { LoopContactRow } from "../loop-executor/types.js";
 import { stashDocument } from "../documents.js";
 import type { RuntimeContext } from "./types.js";
 
-export type ContactListDocumentRefs = {
+type ContactListDocumentRefs = {
   documentRef: string;
   lotRef?: string;
 };
