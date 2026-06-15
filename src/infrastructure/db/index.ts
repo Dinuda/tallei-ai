@@ -952,6 +952,10 @@ export async function initDb() {
         ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ;
       ALTER TABLE workflows
         ADD COLUMN IF NOT EXISTS last_scheduled_at TIMESTAMPTZ;
+      ALTER TABLE workflows DROP CONSTRAINT IF EXISTS workflows_status_check;
+      ALTER TABLE workflows
+        ADD CONSTRAINT workflows_status_check
+        CHECK (status IN ('verifying', 'active', 'paused', 'archived'));
     `);
 
     await client.query(`
@@ -978,12 +982,17 @@ export async function initDb() {
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS intent_analysis_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS resolved_intent_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS discovered_tool_contracts_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS build_contract_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS current_proposal_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS error_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS transcript_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS draft_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS debate_json;
+      ALTER TABLE workflow_builder_sessions DROP CONSTRAINT IF EXISTS workflow_builder_sessions_phase_check;
+      ALTER TABLE workflow_builder_sessions
+        ADD CONSTRAINT workflow_builder_sessions_phase_check
+        CHECK (phase IN ('new', 'analyzing', 'needs_clarification', 'resolving_requirements', 'intent_resolved', 'spec_drafted', 'spec_approved', 'graph_generated', 'saved', 'archived', 'failed'));
 
       CREATE TABLE IF NOT EXISTS workflow_builder_messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1016,6 +1025,48 @@ export async function initDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_commands_scope
         ON workflow_builder_commands(tenant_id, user_id, session_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS workflow_verification_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'running', 'awaiting_confirmation', 'failed', 'confirmed')),
+        evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        failures_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        confirmed_at TIMESTAMPTZ,
+        confirmed_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_verification_runs_scope
+        ON workflow_verification_runs(tenant_id, user_id, workflow_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS workflow_connector_triggers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        workflow_id UUID NOT NULL UNIQUE REFERENCES workflows(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        toolkit TEXT NOT NULL,
+        trigger_slug TEXT NOT NULL,
+        trigger_instance_id TEXT NOT NULL UNIQUE,
+        connected_account_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'failed')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_connector_triggers_scope
+        ON workflow_connector_triggers(tenant_id, user_id, workflow_id);
+
+      CREATE TABLE IF NOT EXISTS workflow_connector_trigger_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        trigger_instance_id TEXT NOT NULL REFERENCES workflow_connector_triggers(trigger_instance_id) ON DELETE CASCADE,
+        external_event_id TEXT NOT NULL,
+        run_id UUID,
+        received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(trigger_instance_id, external_event_id)
+      );
     `);
 
     await client.query(`
@@ -1645,6 +1696,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         provider TEXT NOT NULL,
         external_account_id TEXT NOT NULL,
+        display_label TEXT,
         status TEXT NOT NULL
           CHECK (status IN ('not_required', 'missing', 'auth_started', 'connected', 'expired', 'revoked', 'failed')),
         scopes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -1658,6 +1710,9 @@ export async function initDb() {
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_accounts_unique_external
         ON connector_accounts(tenant_id, user_id, provider, external_account_id);
+
+      ALTER TABLE connector_accounts
+      ADD COLUMN IF NOT EXISTS display_label TEXT;
     `);
 
     await client.query(`
@@ -1678,6 +1733,15 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_connector_auth_sessions_scope_created
         ON connector_auth_sessions(tenant_id, user_id, created_at DESC);
+
+      ALTER TABLE connector_auth_sessions
+        ADD COLUMN IF NOT EXISTS workflow_builder_session_id UUID REFERENCES workflow_builder_sessions(id) ON DELETE CASCADE;
+      ALTER TABLE connector_auth_sessions
+        ADD COLUMN IF NOT EXISTS build_requirement_id TEXT;
+      ALTER TABLE connector_auth_sessions
+        ADD COLUMN IF NOT EXISTS toolkit_identity TEXT;
+      CREATE INDEX IF NOT EXISTS idx_connector_auth_sessions_builder
+        ON connector_auth_sessions(tenant_id, user_id, workflow_builder_session_id, build_requirement_id, updated_at DESC);
     `);
 
     await client.query(`

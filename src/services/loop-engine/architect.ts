@@ -1048,6 +1048,7 @@ export async function designLoopFromIntent(input: DesignLoopInput): Promise<{
     connectorPolicy: compiled.compiled.connectorPolicy,
     inputRequirements: compiled.compiled.inputRequirements,
     operatorInteractionPlan: compiled.compiled.operatorInteractionPlan,
+    buildContract: input.noSlopSpec?.buildContract ?? input.noSlopSpec?.specJson.buildContract,
     engineVersion: LOOP_ENGINE_VERSION,
   });
 

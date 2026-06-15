@@ -2,7 +2,14 @@ import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import {
+  confirmWorkflowVerification,
+  initializeWorkflowVerification,
+  runWorkflowVerification,
+} from "../loop-executor/verification.js";
 import { discoverToolsForLoopBuild } from "../connectors/composio-discovery.js";
+import { listComposioTriggerTypes } from "../connectors/composio.js";
+import { refreshBuilderConnectorAvailability } from "./connectors.js";
 import {
   loopIntentAnalysisSchema,
   loopIntentContextSchema,
@@ -17,6 +24,12 @@ import {
 import { approveLoopSpec, archiveLoopSpec, draftLoopSpec, getLoopSpec, refineLoopSpec } from "./specs.js";
 import { refineLoopBuilderProposal, resolveLoopBuilderIntent, saveLoopBuilderProposal } from "./intent-resolver.js";
 import {
+  assertBuildContractReady,
+  deriveLoopBuildContract,
+  resolveBuildRequirement,
+  unresolvedBuildRequirements,
+} from "../loop-engine/build-contract.js";
+import {
   createWorkflowBuilderSession,
   requireWorkflowBuilderSession,
   updateWorkflowBuilderSession,
@@ -25,13 +38,17 @@ import {
 
 export type BuilderToolName =
   | "getAvailableTools"
+  | "resolveBuildRequirement"
+  | "refreshConnectorAvailability"
   | "draftSpec"
   | "refineSpec"
   | "approveSpec"
   | "archiveSpec"
   | "generateWorkflowGraph"
   | "refineWorkflowGraph"
-  | "saveWorkflow";
+  | "saveWorkflow"
+  | "runVerification"
+  | "confirmActivation";
 
 export type WorkflowBuilderCommandView = {
   jobId: string;
@@ -73,6 +90,8 @@ function iso(value: Date | string): string {
 function legacyKind(toolName: BuilderToolName): string {
   return ({
     getAvailableTools: "analyze-intent",
+    resolveBuildRequirement: "resolve-build-requirement",
+    refreshConnectorAvailability: "refresh-connector-availability",
     draftSpec: "draft-spec",
     refineSpec: "refine-spec",
     approveSpec: "approve-spec",
@@ -80,6 +99,8 @@ function legacyKind(toolName: BuilderToolName): string {
     generateWorkflowGraph: "propose",
     refineWorkflowGraph: "refine",
     saveWorkflow: "save",
+    runVerification: "run-verification",
+    confirmActivation: "confirm-activation",
   } satisfies Record<BuilderToolName, string>)[toolName];
 }
 
@@ -114,6 +135,38 @@ function requireApproval(input: Record<string, unknown>, tool: BuilderToolName):
   if (input.approved !== true) throw new Error(`${tool} requires explicit approval`);
 }
 
+function selectedToolContracts(session: Awaited<ReturnType<typeof requireWorkflowBuilderSession>>) {
+  const selected = new Set(session.buildContract?.requirements
+    .filter((entry) => entry.kind === "connector" && entry.status === "resolved")
+    .flatMap((entry) => {
+      const value = entry.value && typeof entry.value === "object" && !Array.isArray(entry.value)
+        ? entry.value as Record<string, unknown>
+        : {};
+      return Array.isArray(value.selections) ? value.selections.flatMap((selection) => {
+        const record = selection && typeof selection === "object" && !Array.isArray(selection)
+          ? selection as Record<string, unknown>
+          : {};
+        return Array.isArray(record.actionSlugs) ? record.actionSlugs.map(String) : [];
+      }) : [];
+    }) ?? []);
+  if (selected.size === 0) return session.discoveredToolContracts.filter((contract) => contract.provider !== "composio");
+  return session.discoveredToolContracts.filter((contract) =>
+    contract.provider !== "composio" || selected.has(String(contract.constraints.actionSlug ?? contract.name)));
+}
+
+async function deriveUnresolvedLegacyBuildContract(
+  auth: AuthContext,
+  session: Awaited<ReturnType<typeof requireWorkflowBuilderSession>>,
+) {
+  if (session.buildContract || !session.resolvedIntent) return session.buildContract;
+  const buildContract = deriveLoopBuildContract({
+    intentContext: session.resolvedIntent,
+    discoveredToolContracts: session.discoveredToolContracts,
+  });
+  await updateWorkflowBuilderSession(auth, session.id, { phase: "resolving_requirements", buildContract });
+  return buildContract;
+}
+
 async function execute(auth: AuthContext, sessionId: string, toolName: BuilderToolName, input: Record<string, unknown>) {
   let session = await requireWorkflowBuilderSession(auth, sessionId);
   switch (toolName) {
@@ -125,6 +178,10 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         : {};
       const resolvedIntentText = String(input.resolvedIntent ?? normalizedIntent.outcome ?? session.goal).trim();
       if (!resolvedIntentText) throw new Error("getAvailableTools requires a normalized resolved intent");
+      const selectedToolkits = Array.isArray(input.selectedToolkits)
+        ? [...new Set(input.selectedToolkits.map(String).map((value) => value.trim().toLowerCase()).filter(Boolean))]
+        : [];
+      if (selectedToolkits.length === 0) throw new Error("Select at least one app before discovering tools");
       const analysis = loopIntentAnalysisSchema.parse({
         normalizedIntent: {
           outcome: String(normalizedIntent.outcome ?? resolvedIntentText),
@@ -150,9 +207,11 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       const discovered = await discoverToolsForLoopBuild({
         auth,
         prompt: resolvedIntentText,
+        selectedToolkits,
         composioSessionId: session.composioSessionId,
         limit: 24,
       });
+      const discoveredTriggers = await listComposioTriggerTypes(selectedToolkits).catch(() => []);
       if (discovered.sessionId !== session.composioSessionId) {
         throw new Error("Composio discovery did not reuse the persisted builder session");
       }
@@ -160,11 +219,17 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         ...entry.contract,
         constraints: { ...entry.contract.constraints, connected: entry.connected },
       }));
+      const buildContract = deriveLoopBuildContract({
+        intentContext: resolvedIntent,
+        discoveredToolContracts: contracts,
+        discoveredTriggers,
+      });
       await updateWorkflowBuilderSession(auth, sessionId, {
-        phase: "intent_resolved",
+        phase: "resolving_requirements",
         intentAnalysis: analysis,
         resolvedIntent,
         discoveredToolContracts: contracts,
+        buildContract,
       });
       return {
         intentAnalysis: analysis,
@@ -176,12 +241,55 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
           connected: entry.connected,
           risk: entry.contract.constraints.risk ?? null,
         })),
+        buildContract,
+        unresolvedRequirements: unresolvedBuildRequirements(buildContract),
       };
+    }
+    case "resolveBuildRequirement": {
+      requirePhase(session.phase, ["resolving_requirements", "intent_resolved", "failed"], toolName);
+      if (!session.buildContract) throw new Error("The builder session has no build contract.");
+      let discoveredToolContracts = session.discoveredToolContracts;
+      const target = session.buildContract.requirements.find((entry) => entry.id === String(input.requirementId ?? ""));
+      if (target?.kind === "connector" && session.resolvedIntent) {
+        await refreshBuilderConnectorAvailability(auth, sessionId);
+        session = await requireWorkflowBuilderSession(auth, sessionId);
+        discoveredToolContracts = session.discoveredToolContracts;
+      }
+      if (!session.buildContract) throw new Error("The builder session has no build contract.");
+      const buildContract = resolveBuildRequirement({
+        contract: session.buildContract,
+        requirementId: String(input.requirementId ?? ""),
+        value: input.value,
+        discoveredToolContracts,
+      });
+      const unresolvedRequirements = unresolvedBuildRequirements(buildContract);
+      await updateWorkflowBuilderSession(auth, sessionId, {
+        phase: unresolvedRequirements.length === 0 ? "intent_resolved" : "resolving_requirements",
+        buildContract,
+        discoveredToolContracts,
+        error: null,
+      });
+      return {
+        buildContract,
+        unresolvedRequirements,
+        readyForSpecDraft: unresolvedRequirements.length === 0,
+      };
+    }
+    case "refreshConnectorAvailability": {
+      requirePhase(session.phase, ["resolving_requirements", "intent_resolved", "failed"], toolName);
+      return { checklist: await refreshBuilderConnectorAvailability(auth, sessionId) };
     }
     case "draftSpec": {
       requirePhase(session.phase, ["intent_resolved"], toolName);
       if (!session.resolvedIntent) throw new Error("Resolved intent is required before drafting");
-      const spec = await draftLoopSpec({ auth, prompt: session.goal, intentContext: session.resolvedIntent });
+      if (!session.buildContract) assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
+      assertBuildContractReady(session.buildContract);
+      const spec = await draftLoopSpec({
+        auth,
+        prompt: session.goal,
+        intentContext: session.resolvedIntent,
+        buildContract: session.buildContract,
+      });
       await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_drafted", spec });
       return { spec };
     }
@@ -218,11 +326,17 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       }
       requirePhase(session.phase, ["spec_approved"], toolName);
       if (!session.specId) throw new Error("Session has no approved spec");
+      assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
       const proposal = await resolveLoopBuilderIntent({
         auth, prompt: session.resolvedIntent?.resolvedIntent ?? session.goal, specId: session.specId,
-        discoveredToolContracts: session.discoveredToolContracts,
+        discoveredToolContracts: selectedToolContracts(session),
       });
-      proposal.definition.builderMeta = { ...proposal.definition.builderMeta, workflowBuilderSessionId: session.id };
+      proposal.definition.builderMeta = {
+        designedBy: "loop_architect",
+        preApproved: true,
+        ...proposal.definition.builderMeta,
+        workflowBuilderSessionId: session.id,
+      };
       await updateWorkflowBuilderSession(auth, sessionId, { phase: "graph_generated", currentProposal: proposal });
       return { proposal };
     }
@@ -231,9 +345,14 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       if (!session.currentProposal) throw new Error("Session has no workflow graph");
       const proposal = await refineLoopBuilderProposal({
         auth, prompt: session.goal, feedback: String(input.feedback ?? ""), priorProposal: session.currentProposal,
-        specId: session.specId ?? undefined, discoveredToolContracts: session.discoveredToolContracts,
+        specId: session.specId ?? undefined, discoveredToolContracts: selectedToolContracts(session),
       });
-      proposal.definition.builderMeta = { ...proposal.definition.builderMeta, workflowBuilderSessionId: session.id };
+      proposal.definition.builderMeta = {
+        designedBy: "loop_architect",
+        preApproved: true,
+        ...proposal.definition.builderMeta,
+        workflowBuilderSessionId: session.id,
+      };
       await updateWorkflowBuilderSession(auth, sessionId, { phase: "graph_generated", currentProposal: proposal });
       return { proposal };
     }
@@ -241,13 +360,38 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       requireApproval(input, toolName);
       requirePhase(session.phase, ["graph_generated", "saved"], toolName);
       if (!session.currentProposal) throw new Error("Session has no workflow graph");
+      if (!session.buildContract) assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
+      assertBuildContractReady(session.buildContract);
+      const scheduleRequirement = session.buildContract.requirements.find((entry) => entry.kind === "trigger_schedule");
+      const scheduleValue = scheduleRequirement?.value && typeof scheduleRequirement.value === "object" && !Array.isArray(scheduleRequirement.value)
+        ? scheduleRequirement.value as Record<string, unknown>
+        : {};
+      const eventDriven = scheduleValue.trigger === "event";
+      const approvedCron = eventDriven ? "0 9 * * *" : String(scheduleValue.cron ?? "");
+      const approvedTimezone = eventDriven ? "UTC" : String(scheduleValue.timezone ?? "");
+      if ((input.cron && input.cron !== approvedCron) || (input.timezone && input.timezone !== approvedTimezone)) {
+        throw new Error("Workflow schedule overrides must be resolved through the approved build contract.");
+      }
       const loop = await saveLoopBuilderProposal({
-        auth, proposal: session.currentProposal, cron: input.cron as string | undefined,
-        timezone: input.timezone as string | undefined, workspaceId: input.workspaceId as string | null | undefined,
+        auth, proposal: session.currentProposal, cron: approvedCron,
+        timezone: approvedTimezone, workspaceId: input.workspaceId as string | null | undefined,
+        initialStatus: "verifying",
       });
       const workflowId = String((loop as { id?: unknown }).id ?? "");
+      const verification = await initializeWorkflowVerification(auth, workflowId);
       await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", workflowId });
-      return { loop };
+      return { loop, verification };
+    }
+    case "runVerification": {
+      requirePhase(session.phase, ["saved"], toolName);
+      if (!session.workflowId) throw new Error("Session has no saved workflow.");
+      return { verification: await runWorkflowVerification(auth, session.workflowId) };
+    }
+    case "confirmActivation": {
+      requireApproval(input, toolName);
+      requirePhase(session.phase, ["saved"], toolName);
+      if (!session.workflowId) throw new Error("Session has no saved workflow.");
+      return { verification: await confirmWorkflowVerification(auth, session.workflowId) };
     }
   }
 }

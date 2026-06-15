@@ -12,6 +12,7 @@ import {
   type NoSlopSpecStatus,
 } from "../loop-engine/spec-contracts.js";
 import { loopIntentContextSchema, type LoopIntentContext } from "../loop-engine/intent-context.js";
+import { loopBuildContractSchema, type LoopBuildContract } from "../loop-engine/build-contract.js";
 import { normalizeProviderIdentity } from "../loop-engine/spec-required-connectors.js";
 import { listComposioToolkits } from "../connectors/composio.js";
 
@@ -114,6 +115,14 @@ export function renderSpecMarkdown(spec: NoSlopSpec): string {
     }
     for (const action of spec.connectorPolicy.allowedWriteActions) {
       lines.push(`- Write action: ${action.toolkit}/${action.actionSlug} (${action.risk}, pre-send approval required)`);
+    }
+  }
+
+  if (spec.buildContract) {
+    lines.push("", "## Approved Build Contract");
+    for (const requirement of spec.buildContract.requirements) {
+      lines.push(`- ${requirement.kind}: ${requirement.status}${requirement.provenance ? ` (${requirement.provenance.source})` : ""}`);
+      for (const warning of requirement.warnings) lines.push(`- Warning: ${warning}`);
     }
   }
 
@@ -448,11 +457,24 @@ export async function draftLoopSpec(input: {
   auth: AuthContext;
   prompt: string;
   intentContext?: LoopIntentContext;
+  buildContract: LoopBuildContract;
 }): Promise<LoopSpecView> {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error("Prompt is required");
   const intentContext = input.intentContext ? loopIntentContextSchema.parse(input.intentContext) : undefined;
-  const specJson = await generateSpecJson({ auth: input.auth, prompt, intentContext });
+  const buildContract = loopBuildContractSchema.parse(input.buildContract);
+  const generated = await generateSpecJson({ auth: input.auth, prompt, intentContext });
+  const scheduleValue = buildContract.requirements.find((entry) => entry.kind === "trigger_schedule")?.value;
+  const schedule = scheduleValue && typeof scheduleValue === "object" && !Array.isArray(scheduleValue)
+    ? scheduleValue as Record<string, unknown>
+    : null;
+  const specJson = noSlopSpecDraftSchema.parse({
+    ...generated,
+    ...(schedule && typeof schedule.cron === "string" && typeof schedule.timezone === "string"
+      ? { schedule: { description: `Approved schedule: ${schedule.cron} (${schedule.timezone})`, cron: schedule.cron, timezone: schedule.timezone } }
+      : {}),
+    buildContract,
+  });
   return persistGeneratedLoopSpec({ auth: input.auth, prompt, intentContext, specJson });
 }
 
@@ -525,12 +547,17 @@ export async function refineLoopSpec(input: {
   if (current.status === "approved") throw new Error("Approved loop specs cannot be refined");
   const feedback = input.feedback.trim();
   if (!feedback) throw new Error("Feedback is required");
-  const specJson = await generateSpecJson({
+  const generated = await generateSpecJson({
     auth: input.auth,
     prompt: current.sourcePrompt,
     intentContext: current.intentContext,
     feedback,
     currentSpec: current,
+  });
+  const specJson = noSlopSpecDraftSchema.parse({
+    ...generated,
+    ...(current.specJson.buildContract ? { schedule: current.specJson.schedule } : {}),
+    ...(current.specJson.buildContract ? { buildContract: current.specJson.buildContract } : {}),
   });
   const title = titleFromPurpose(specJson.purpose);
   const bodyMarkdown = renderSpecMarkdown(specJson);
@@ -560,7 +587,14 @@ export async function approveLoopSpec(input: {
   if (!current || current.status === "archived") throw new Error("Loop spec not found");
   if (current.status === "approved") return current;
   const rawSpec = normalizeSpecJson(input.specJson ?? current.specJson);
-  const parsedSpec = await hydrateLoopSpecJson(input.auth, rawSpec, {
+  const preserved = current.specJson.buildContract
+    ? {
+        ...readObject(rawSpec),
+        schedule: current.specJson.schedule,
+        buildContract: current.specJson.buildContract,
+      }
+    : rawSpec;
+  const parsedSpec = await hydrateLoopSpecJson(input.auth, preserved, {
     intent: current.intentContext?.resolvedIntent ?? current.sourcePrompt,
     validateSemantics: true,
   });
@@ -604,6 +638,7 @@ export function approvedSpecSnapshot(spec: LoopSpecView): NoSlopSpecSnapshot {
     bodyMarkdown: spec.bodyMarkdown,
     specJson: spec.specJson,
     ...(spec.intentContext ? { intentContext: spec.intentContext } : {}),
+    ...(spec.specJson.buildContract ? { buildContract: spec.specJson.buildContract } : {}),
     approvedAt: spec.approvedAt,
   });
 }

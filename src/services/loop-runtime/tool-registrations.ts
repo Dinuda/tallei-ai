@@ -2,6 +2,7 @@ import { readMemorySearchConfig, runExaWebSearch } from "../loop-executor/agent-
 import { registerToolHandler, type ToolHandlerContext } from "../loop-executor/tool-handlers.js";
 import { getLoopTool } from "../loop-executor/tool-catalog.js";
 import { runComposioToolkitPrompt } from "../connectors/composio.js";
+import { selectedConnectorAccountId } from "../loop-engine/build-contract.js";
 import { runCuratedMemorySearch } from "./curated-memory-search.js";
 
 registerToolHandler("internal.memory_search", async (ctx: ToolHandlerContext) => {
@@ -73,6 +74,7 @@ async function runConnectedAppSearch(ctx: ToolHandlerContext) {
   const result = await runComposioToolkitPrompt({
     auth: ctx.auth,
     toolkit,
+    connectorAccountId: selectedConnectorAccountId(ctx.definition?.buildContract, toolkit),
     prompt: task,
   });
   return {
@@ -81,7 +83,6 @@ async function runConnectedAppSearch(ctx: ToolHandlerContext) {
       provider: "composio",
       toolkit,
       connectorAccountId: result.accountId,
-      externalAccountId: result.externalAccountId,
     },
     shortCircuit: true,
   };

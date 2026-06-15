@@ -121,6 +121,7 @@ export async function saveLoopBuilderProposal(input: {
   cron?: string;
   timezone?: string;
   workspaceId?: string | null;
+  initialStatus?: "active" | "verifying";
 }) {
   const proposal = loopBuilderProposalSchema.parse(input.proposal);
   let definition = proposal.definition;
@@ -150,6 +151,8 @@ export async function saveLoopBuilderProposal(input: {
       operatorInteractionPlan: compiled.compiled.operatorInteractionPlan,
       connectorPolicy: compiled.compiled.connectorPolicy,
       builderMeta: {
+        designedBy: "loop_architect",
+        preApproved: true,
         ...definition.builderMeta,
         planningIR: planningIRResult.data as unknown as Record<string, unknown>,
       },
@@ -167,5 +170,6 @@ export async function saveLoopBuilderProposal(input: {
     },
     title: proposal.title,
     workspaceId: input.workspaceId ?? null,
+    initialStatus: input.initialStatus,
   });
 }

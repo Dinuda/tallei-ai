@@ -11,6 +11,7 @@ import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
 import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
 import { dataContractSchema, normalizeContractSchema } from "../loop-engine/data-contract.js";
 import { operatorInteractionPlanSchema } from "../loop-engine/operator-interactions.js";
+import { loopBuildContractSchema } from "../loop-engine/build-contract.js";
 
 /** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
 export function normalizeOptionalString(value: unknown): unknown {
@@ -294,6 +295,7 @@ export const loopDefinitionSchema = z.object({
   connectorPolicy: connectorPolicySchema.optional(),
   inputRequirements: z.array(inputRequirementSchema).default([]).optional(),
   operatorInteractionPlan: operatorInteractionPlanSchema.optional(),
+  buildContract: loopBuildContractSchema.optional(),
   engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
   agentGraph: loopAgentGraphSchema,
   plan: loopPlanSchema.optional(),
@@ -459,7 +461,7 @@ export interface LoopWorkflowView {
   id: string;
   workspaceId: string | null;
   title: string;
-  status: string;
+  status: "verifying" | "active" | "paused" | "archived";
   scheduleRrule: string;
   nextRunAt: string | null;
   lastScheduledAt: string | null;

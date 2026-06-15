@@ -13,7 +13,7 @@ import {
   lastAssistantMessageIsCompleteWithToolCalls,
   type UIMessage,
 } from "ai";
-import { Paperclip, Plus } from "lucide-react";
+import { Info, Paperclip, Plus } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
@@ -29,6 +29,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import {
   InteractivePromptMenu,
@@ -52,6 +57,9 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+import { BuilderConnectorChecklist } from "@/components/builder-connector-checklist";
+import { BuilderAppSelector, type AppSelectionOutput } from "@/components/builder-app-selector";
+import { BuilderScheduleSelector, type ScheduleSelectionOutput } from "@/components/builder-schedule-selector";
 
 const LoopSuggestionCards = dynamic(
   () => import("@/components/loop-suggestion-cards").then((mod) => mod.LoopSuggestionCards),
@@ -60,18 +68,32 @@ const LoopSuggestionCards = dynamic(
 
 
 export default function NewLoopBuilderPage() {
-  const sessionIdRef = useRef<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [dismissedPromptId, setDismissedPromptId] = useState<string | null>(null);
+  const [commands, setCommands] = useState<any[]>([]);
+
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+
   const transport = useMemo(() => new DefaultChatTransport({
     api: "/api/loop-builder/chat",
     body: () => ({ sessionId: sessionIdRef.current ?? undefined }),
   }), []);
 
+  const totalUsage = useMemo(() => commands.reduce((acc, command) => {
+    acc.promptTokens += command.usage?.promptTokens ?? 0;
+    acc.completionTokens += command.usage?.completionTokens ?? 0;
+    acc.totalTokens += command.usage?.totalTokens ?? 0;
+    acc.estimatedCostUsd += command.usage?.estimatedCostUsd ?? 0;
+    return acc;
+  }, { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedCostUsd: 0 }), [commands]);
+
   const refreshSession = useCallback(async (sessionId: string) => {
     const response = await fetch(`/api/loop-builder/sessions/${sessionId}`, { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error ?? "Failed to load builder session");
-    sessionIdRef.current = sessionId;
+    setSessionId(sessionId);
+    setCommands(payload.commands ?? []);
     return payload.messages as UIMessage[];
   }, []);
 
@@ -83,21 +105,32 @@ export default function NewLoopBuilderPage() {
     onData: (part) => {
       if (part.type !== "data-session") return;
       const nextId = (part.data as { sessionId?: string }).sessionId;
-      if (!nextId || nextId === sessionIdRef.current) return;
-      sessionIdRef.current = nextId;
+      if (!nextId || nextId === sessionId) return;
+      setSessionId(nextId);
       window.history.replaceState(null, "", `/dashboard/loops/new?session=${encodeURIComponent(nextId)}`);
     },
     onFinish: () => {
-      if (sessionIdRef.current) void refreshSession(sessionIdRef.current).then(setMessages);
+      if (sessionId) void refreshSession(sessionId).then(setMessages);
     },
   });
 
   useEffect(() => {
     const sessionId = new URLSearchParams(window.location.search).get("session");
-    if (sessionId) void refreshSession(sessionId).then(setMessages);
+    if (!sessionId) return;
+    const timer = window.setTimeout(() => {
+      refreshSession(sessionId)
+        .then(setMessages)
+        .catch((err) => {
+          console.error("[loop-builder] failed to load session:", err);
+        });
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [refreshSession, setMessages]);
 
   const activeInteractivePrompt = findActiveInteractivePrompt(messages);
+  const activeAppSelection = findActiveAppSelection(messages);
+  const activeConnectorSetup = findActiveConnectorSetup(messages);
+  const activeScheduleSetup = findActiveScheduleSetup(messages);
   const activePromptId = activeInteractivePrompt?.toolCallId ?? null;
   const showInteractivePrompt = activePromptId !== null && activePromptId !== dismissedPromptId;
   const submitComposerText = useCallback(async (text: string) => {
@@ -145,10 +178,6 @@ export default function NewLoopBuilderPage() {
     await sendMessage({ text: answerText });
   }, [activeInteractivePrompt, activePromptId, dismissedPromptId, messages, sendMessage, setMessages]);
 
-  useEffect(() => {
-    setDismissedPromptId(null);
-  }, [activePromptId]);
-
   return (
     <div className="relative flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-white">
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-0 h-[400px] bg-gradient-to-t from-slate-100 to-transparent" />
@@ -156,7 +185,7 @@ export default function NewLoopBuilderPage() {
         <Conversation>
             <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
               <ScrollOnToolComplete messages={messages} />
-              {messages.length === 0 && (
+              {messages.length === 0 && !sessionId && (
                 <LoopSuggestionCards
                   className="max-w-3xl"
                   onSelect={submitComposerText}
@@ -177,6 +206,24 @@ export default function NewLoopBuilderPage() {
                       }
                       if (isToolUIPart(part)) {
                         const toolName = getToolName(part);
+                        if (toolName === "appSelection") {
+                          if (part.state === "input-streaming" || part.state === "input-available") return null;
+                          const input = part.input && typeof part.input === "object" ? part.input as {
+                            question?: string;
+                            recommendedToolkitSlugs?: string[];
+                            allowMultiple?: boolean;
+                          } : {};
+                          const output = part.output && typeof part.output === "object" ? part.output as AppSelectionOutput : null;
+                          return output ? (
+                            <BuilderAppSelector
+                              allowMultiple={input.allowMultiple ?? true}
+                              completedOutput={output}
+                              key={index}
+                              question={input.question ?? "What app is where your customers reach out to you for support?"}
+                              recommendedToolkitSlugs={input.recommendedToolkitSlugs ?? []}
+                            />
+                          ) : null;
+                        }
                         if (toolName === "interactivePrompt") {
                           // Stream the prompt only in the composer input area.
                           // In the transcript, show only submitted/completed states.
@@ -192,6 +239,25 @@ export default function NewLoopBuilderPage() {
                             />
                           );
                         }
+                        if (toolName === "connectorSetup") {
+                          if (part.state === "input-streaming" || part.state === "input-available") return null;
+                          const input = part.input && typeof part.input === "object" ? part.input as { requirementId?: string } : {};
+                          return sessionId && input.requirementId
+                            ? <BuilderConnectorChecklist completed key={index} requirementId={input.requirementId} sessionId={sessionId} />
+                            : null;
+                        }
+                        if (toolName === "scheduleSetup") {
+                          if (part.state === "input-streaming" || part.state === "input-available") return null;
+                          const input = part.input && typeof part.input === "object" ? part.input as { requirementId?: string } : {};
+                          const output = part.output && typeof part.output === "object" ? part.output as ScheduleSelectionOutput : null;
+                          return sessionId && output ? <BuilderScheduleSelector
+                            completedOutput={output}
+                            key={index}
+                            requirementId={input.requirementId ?? "trigger_schedule"}
+                            sessionId={sessionId}
+                          /> : null;
+                        }
+                        if (toolName === "resolveBuildRequirement" || toolName === "refreshConnectorAvailability") return null;
                         if (part.state === "approval-requested" || part.state === "approval-responded" || part.state === "output-denied") {
                           return (
                             <Confirmation approval={part.approval} key={index} state={part.state}>
@@ -203,7 +269,7 @@ export default function NewLoopBuilderPage() {
                               <ConfirmationRejected>Rejected.</ConfirmationRejected>
                               <ConfirmationActions>
                                 <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: false })} variant="outline" className="border-[#d1d5db] text-[#6b7280] hover:bg-[#fafafa]">Reject</ConfirmationAction>
-                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: true })} className="border-[#92400e] bg-[#fffbeb] text-[#92400e] hover:bg-[#fef3c7]">Approve</ConfirmationAction>
+                                <ConfirmationAction onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: true })} className="bg-[#111827] text-white hover:opacity-85">Approve</ConfirmationAction>
                               </ConfirmationActions>
                             </Confirmation>
                           );
@@ -244,17 +310,72 @@ export default function NewLoopBuilderPage() {
         <div className="px-4 pb-4 pt-2">
           <div className="mx-auto max-w-3xl">
             <motion.div
-              className="relative overflow-hidden rounded-[24px] border border-[#e5e7eb] bg-white shadow-sm transition-colors focus-within:border-[#d1d5db]"
+              className="relative overflow-hidden border border-[#d1d5db] bg-white transition-colors focus-within:border-[#9ca3af]"
               layout
               transition={{ layout: { duration: 0.32, ease: [0.16, 1, 0.3, 1] } }}
             >
               <AnimatePresence initial={false} mode="popLayout">
-                {showInteractivePrompt ? (
+                {activeAppSelection ? (
+                  <motion.div
+                    key="app-selection"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <BuilderAppSelector
+                      allowMultiple={Boolean((activeAppSelection.input as { allowMultiple?: boolean } | undefined)?.allowMultiple ?? true)}
+                      onComplete={(output) => addToolOutput({
+                        tool: "appSelection",
+                        toolCallId: activeAppSelection.toolCallId,
+                        output,
+                      })}
+                      question={String((activeAppSelection.input as { question?: string } | undefined)?.question ?? "What app is where your customers reach out to you for support?")}
+                      recommendedToolkitSlugs={(activeAppSelection.input as { recommendedToolkitSlugs?: string[] } | undefined)?.recommendedToolkitSlugs ?? []}
+                    />
+                  </motion.div>
+                ) : activeConnectorSetup && sessionId ? (
+                  <motion.div
+                    key="connector-setup"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <BuilderConnectorChecklist
+                      onComplete={(output) => addToolOutput({
+                        tool: "connectorSetup",
+                        toolCallId: activeConnectorSetup.toolCallId,
+                        output,
+                      })}
+                      requirementId={String((activeConnectorSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "connector_selection")}
+                      sessionId={sessionId}
+                    />
+                  </motion.div>
+                ) : activeScheduleSetup && sessionId ? (
+                  <motion.div
+                    key="schedule-setup"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <BuilderScheduleSelector
+                      onComplete={(output) => addToolOutput({
+                        tool: "scheduleSetup",
+                        toolCallId: activeScheduleSetup.toolCallId,
+                        output,
+                      })}
+                      requirementId={String((activeScheduleSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "trigger_schedule")}
+                      sessionId={sessionId}
+                    />
+                  </motion.div>
+                ) : showInteractivePrompt ? (
                   <motion.div
                     key="interactive-prompt"
-                    animate={{ clipPath: "inset(0% 0% 0% 0% round 24px)", opacity: 1, y: 0 }}
-                    exit={{ clipPath: "inset(85% 0% 0% 0% round 24px)", opacity: 0, y: 20 }}
-                    initial={{ clipPath: "inset(85% 0% 0% 0% round 24px)", opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
                   >
                     <InteractivePromptTool
@@ -283,12 +404,12 @@ export default function NewLoopBuilderPage() {
                     <div className="absolute bottom-3 left-4 flex items-center gap-4 text-slate-400">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <button type="button" className="flex size-7 items-center justify-center rounded-full bg-slate-100 transition-colors hover:bg-slate-200">
+                          <button type="button" className="flex size-7 items-center justify-center bg-slate-100 transition-colors hover:bg-slate-200">
                             <Plus size={16} className="text-slate-600" />
                           </button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start" className="w-56 rounded-2xl p-2 shadow-lg">
-                          <DropdownMenuItem className="gap-3 rounded-xl px-3 py-2 text-[14px]">
+                        <DropdownMenuContent align="start" className="w-56 p-2 border border-[#d1d5db] bg-white">
+                          <DropdownMenuItem className="gap-3 px-3 py-2 text-[14px]">
                             <Paperclip size={18} className="text-slate-700" />
                             <span>Add photos & files</span>
                           </DropdownMenuItem>
@@ -297,7 +418,7 @@ export default function NewLoopBuilderPage() {
                     </div>
 
                     <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
-                      <PromptInputSubmit onStop={stop} status={status} className="rounded-full bg-indigo-900 text-white hover:bg-indigo-800" />
+                      <PromptInputSubmit onStop={stop} status={status} className="bg-[#111827] text-white hover:opacity-85" />
                     </PromptInputFooter>
                   </PromptInput>
                   </motion.div>
@@ -306,7 +427,39 @@ export default function NewLoopBuilderPage() {
             </motion.div>
           </div>
         </div>
-        <p className="pb-4 text-center text-[11px] text-[#999]">Tallei can make mistakes. Check important info.</p>
+        <div className="flex items-center justify-center gap-1 pb-4 text-center text-[11px] text-[#999]">
+          <p>Tallei can make mistakes. Check important info.</p>
+          <Popover>
+            <PopoverTrigger asChild>
+              <button type="button" className="ml-1 inline-flex items-center justify-center bg-slate-100 p-0.5 text-slate-500 hover:bg-slate-200 hover:text-slate-700">
+                <Info size={12} />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent side="top" align="center" className="w-64 p-3 border border-[#d1d5db]">
+              <div className="space-y-2">
+                <h4 className="font-medium leading-none text-slate-900">Live Token Usage</h4>
+                <div className="text-sm text-slate-500">
+                  <div className="flex justify-between">
+                    <span>Prompt:</span>
+                    <span className="font-medium text-slate-700">{totalUsage.promptTokens.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Completion:</span>
+                    <span className="font-medium text-slate-700">{totalUsage.completionTokens.toLocaleString()}</span>
+                  </div>
+                  <div className="mt-1 flex justify-between border-t pt-1">
+                    <span>Total:</span>
+                    <span className="font-medium text-slate-700">{totalUsage.totalTokens.toLocaleString()}</span>
+                  </div>
+                  <div className="mt-1 flex justify-between">
+                    <span>Cost:</span>
+                    <span className="font-medium text-slate-700">${totalUsage.estimatedCostUsd.toFixed(4)}</span>
+                  </div>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
       </div>
     </div>
   );
@@ -335,15 +488,15 @@ function InteractivePromptTool({
       <div className={cn(
         "w-full overflow-hidden bg-[#f9f8fc]",
         placement === "composer"
-          ? "rounded-none border-0 shadow-none"
-          : "my-3 rounded-2xl border border-[#e8e5f0] shadow-sm",
+          ? "border-0"
+          : "my-3 border border-[#e8e5f0]",
       )}>
         <div className="flex items-center gap-2 px-4 pb-2 pt-4 text-sm font-medium">
           <span>{input.question ?? "Analyzing your request"}</span>
           <span className="inline-flex gap-0.5">
-            <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" style={{ animationDelay: "0ms" }} />
-            <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" style={{ animationDelay: "150ms" }} />
-            <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" style={{ animationDelay: "300ms" }} />
+            <span className="size-1.5 animate-pulse bg-muted-foreground" style={{ animationDelay: "0ms" }} />
+            <span className="size-1.5 animate-pulse bg-muted-foreground" style={{ animationDelay: "150ms" }} />
+            <span className="size-1.5 animate-pulse bg-muted-foreground" style={{ animationDelay: "300ms" }} />
           </span>
         </div>
         {options.length > 0 && (
@@ -351,10 +504,10 @@ function InteractivePromptTool({
             {options.map((option, optionIndex) => (
               <div
                 key={option.id ?? `option-${optionIndex}`}
-                className="flex animate-in fade-in slide-in-from-bottom-1 items-start gap-3 rounded-lg px-2.5 py-2"
+                className="flex animate-in fade-in slide-in-from-bottom-1 items-start gap-3 px-2.5 py-2"
                 style={{ animationDuration: "300ms" }}
               >
-                <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#e8e5f0] bg-white overflow-hidden">
+                <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center border border-[#e8e5f0] bg-white overflow-hidden">
                   {option.icon ? (
                     <img
                       alt={option.label ?? ""}
@@ -371,11 +524,11 @@ function InteractivePromptTool({
                 <span className="text-sm text-muted-foreground">{option.label ?? ""}</span>
               </div>
             ))}
-            <div className="flex animate-pulse items-start gap-3 rounded-lg px-2.5 py-2">
-              <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#e8e5f0] bg-white text-[11px] text-[#8a86a0]/30">
-                <span className="h-4 w-4 rounded-full bg-[#e8e5f0]" />
+            <div className="flex animate-pulse items-start gap-3 px-2.5 py-2">
+              <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center border border-[#e8e5f0] bg-white text-[11px] text-[#8a86a0]/30">
+                <span className="h-4 w-4 bg-[#e8e5f0]" />
               </span>
-              <span className="h-4 w-32 rounded bg-[#e8e5f0]" />
+              <span className="h-4 w-32 bg-[#e8e5f0]" />
             </div>
           </div>
         )}
@@ -458,6 +611,49 @@ function findActiveInteractivePrompt(messages: UIMessage[]): ToolPart | null {
   return null;
 }
 
+function findActiveAppSelection(messages: UIMessage[]): ToolPart | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
+    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = message.parts[partIndex];
+      if (part && isToolUIPart(part) && getToolName(part) === "appSelection"
+        && (part.state === "input-streaming" || part.state === "input-available")) {
+        return part;
+      }
+    }
+  }
+  return null;
+}
+
+function findActiveConnectorSetup(messages: UIMessage[]): ToolPart | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
+    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = message.parts[partIndex];
+      if (part && isToolUIPart(part) && getToolName(part) === "connectorSetup"
+        && (part.state === "input-streaming" || part.state === "input-available")) {
+        return part;
+      }
+    }
+  }
+  return null;
+}
+
+function findActiveScheduleSetup(messages: UIMessage[]): ToolPart | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
+    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = message.parts[partIndex];
+      if (part && isToolUIPart(part) && getToolName(part) === "scheduleSetup"
+        && (part.state === "input-streaming" || part.state === "input-available")) return part;
+    }
+  }
+  return null;
+}
+
 function AvailableTools({ part }: { part: ToolPart }) {
   const output = part.output && typeof part.output === "object" ? part.output as { tools?: Array<{
     name?: string;
@@ -471,13 +667,13 @@ function AvailableTools({ part }: { part: ToolPart }) {
         ? <ToolHeader type={part.type} state={part.state} toolName={part.toolName} />
         : <ToolHeader type={part.type} state={part.state} />}
       <ToolContent>
-        <div className="space-y-2 p-3">
+        <div className="space-y-2">
           {(output.tools ?? []).length === 0 && <p className="text-sm text-muted-foreground">No external connector actions are required.</p>}
           {(output.tools ?? []).map((item, index) => (
-            <div className="rounded-md border p-3 text-sm" key={`${item.name}-${index}`}>
+            <div className="border border-[#e5e7eb] p-3 text-sm" key={`${item.name}-${index}`}>
               <div className="font-medium">{item.name ?? "Available tool"}</div>
               <div className="text-muted-foreground">{item.description}</div>
-              <div className="mt-1 text-xs uppercase tracking-wide text-muted-foreground">
+              <div className="mt-1 text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
                 {item.connected ? "Connected" : "Connection required"} · Risk: {item.risk ?? "unknown"}
               </div>
             </div>

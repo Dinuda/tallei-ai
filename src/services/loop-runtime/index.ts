@@ -11,6 +11,7 @@ export {
   saveCanvasEmailArtifact,
   startLoopRuntimeWorker,
   startManualLoopRun,
+  startWebhookLoopRun,
   stopLoopRuntimeWorker,
   submitLoopRuntimeInteractionInputs,
   uploadLoopRuntimeInteractionContacts,

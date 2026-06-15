@@ -20,7 +20,7 @@ export type ComposioSession = {
   client: Session<unknown, unknown, VercelProvider>;
 };
 
-const sessionCache = new Map<string, ComposioSession>();
+const sessionCache = new Map<string, { session: ComposioSession; cachedAt: number }>();
 const SESSION_TTL_MS = 60 * 60 * 1000;
 
 function getComposioEntityId(auth: AuthContext): string {
@@ -31,25 +31,31 @@ function isComposioConfigured(): boolean {
   return Boolean(config.composioApiKey && config.composioBaseUrl);
 }
 
-export async function createComposioSession(auth: AuthContext): Promise<ComposioSession> {
+export async function createComposioSession(
+  auth: AuthContext,
+  connectedAccounts?: Record<string, string>,
+): Promise<ComposioSession> {
   if (!isComposioConfigured()) {
     throw new Error("Composio is not configured");
   }
   const composio = getComposioVercelClient();
   const userId = getComposioEntityId(auth);
-  const session = await composio.create(userId);
+  const session = await composio.create(userId, connectedAccounts && Object.keys(connectedAccounts).length > 0
+    ? { connectedAccounts }
+    : undefined);
   const view: ComposioSession = {
     sessionId: session.sessionId,
     userId,
     client: session,
   };
-  sessionCache.set(session.sessionId, view);
+  sessionCache.set(session.sessionId, { session: view, cachedAt: Date.now() });
   return view;
 }
 
 export async function useComposioSession(sessionId: string): Promise<ComposioSession> {
   const cached = sessionCache.get(sessionId);
-  if (cached) return cached;
+  if (cached && Date.now() - cached.cachedAt < SESSION_TTL_MS) return cached.session;
+  sessionCache.delete(sessionId);
 
   if (!isComposioConfigured()) {
     throw new Error("Composio is not configured");
@@ -61,7 +67,7 @@ export async function useComposioSession(sessionId: string): Promise<ComposioSes
     userId: "unknown",
     client: session,
   };
-  sessionCache.set(session.sessionId, view);
+  sessionCache.set(session.sessionId, { session: view, cachedAt: Date.now() });
   return view;
 }
 
@@ -77,4 +83,8 @@ export async function getOrCreateComposioSession(
 
 export function clearSessionCache(): void {
   sessionCache.clear();
+}
+
+export function invalidateComposioSession(sessionId: string): void {
+  sessionCache.delete(sessionId);
 }

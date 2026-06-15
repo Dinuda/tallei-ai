@@ -29,6 +29,7 @@ export type DiscoveredTool = {
 export type DiscoverToolsInput = {
   auth: AuthContext;
   prompt: string;
+  selectedToolkits: string[];
   composioSessionId?: string | null;
   limit?: number;
 };
@@ -89,12 +90,23 @@ async function connectedActionSlugs(
 
 export async function discoverToolsForLoopBuild(input: DiscoverToolsInput): Promise<DiscoverToolsResult> {
   const limit = Math.max(1, Math.min(input.limit ?? 12, 50));
+  const selectedToolkits = new Set(input.selectedToolkits.map((toolkit) => toolkit.trim().toLowerCase()).filter(Boolean));
+  if (selectedToolkits.size === 0) throw new Error("Select at least one app before discovering tools");
   const session = await getOrCreateComposioSession(input.auth, input.composioSessionId);
   const [sessionSearchTools, connectedSlugs] = await Promise.all([
-    discoverViaSessionSearch(session.client, input.prompt),
+    discoverViaSessionSearch(
+      session.client,
+      `${input.prompt}\nUse only these user-selected apps: ${[...selectedToolkits].join(", ")}.`,
+    ),
     connectedActionSlugs(session.client),
   ]);
-  const merged = sessionSearchTools.map((entry) => {
+  const selectedTools = sessionSearchTools.filter((entry) =>
+    selectedToolkits.has(String(entry.contract.constraints.toolkit ?? "").trim().toLowerCase()),
+  );
+  if (selectedTools.length === 0) {
+    throw new Error(`No matching actions were found in the selected apps: ${[...selectedToolkits].join(", ")}`);
+  }
+  const merged = selectedTools.map((entry) => {
     const actionSlug = normalizeConnectedToolRef(String(entry.contract.constraints.actionSlug ?? ""));
     const connected = connectedSlugs.has(actionSlug);
     return {

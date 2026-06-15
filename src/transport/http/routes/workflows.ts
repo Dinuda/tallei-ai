@@ -7,9 +7,12 @@ import {
   createWorkspace,
   deleteLoopWorkflow,
   getLoopWorkflow,
+  getWorkflowVerification,
   listLoopWorkflows,
   listWorkspaces,
   loopDefinitionSchema,
+  runWorkflowVerification,
+  confirmWorkflowVerification,
 } from "../../../services/loop-executor/index.js";
 import {
   cancelLoopRuntimeRun,
@@ -144,6 +147,30 @@ router.get("/loops/:workflowId", requireScopes(["memory:read"]), getLoop);
 router.delete("/loops/:workflowId", requireScopes(["memory:write"]), deleteLoop);
 router.get("/loops/:workflowId/runs", requireScopes(["memory:read"]), listRuns);
 router.post("/loops/:workflowId/runs", requireScopes(["memory:write"]), startRun);
+router.get("/loops/:workflowId/verification", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { workflowId } = workflowIdSchema.parse(req.params);
+    res.json({ verification: await getWorkflowVerification(req.authContext!, workflowId) });
+  } catch (error) {
+    sendError(res, error, "Failed to read workflow verification");
+  }
+});
+router.post("/loops/:workflowId/verification/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { workflowId } = workflowIdSchema.parse(req.params);
+    res.json({ verification: await runWorkflowVerification(req.authContext!, workflowId) });
+  } catch (error) {
+    sendError(res, error, "Failed to run workflow verification");
+  }
+});
+router.post("/loops/:workflowId/verification/confirm", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { workflowId } = workflowIdSchema.parse(req.params);
+    res.json({ verification: await confirmWorkflowVerification(req.authContext!, workflowId) });
+  } catch (error) {
+    sendError(res, error, "Failed to confirm workflow verification");
+  }
+});
 
 router.get("/internal/loops", requireScopes(["memory:read"]), listLoops);
 router.post("/internal/loops", requireScopes(["memory:write"]), createLoop);

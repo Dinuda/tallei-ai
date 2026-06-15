@@ -15,15 +15,41 @@ import {
   upsertResendConnector,
   verifyComposioWebhookSignature,
 } from "../../../services/connectors/composio.js";
+import { pool } from "../../../infrastructure/db/index.js";
+import { handleComposioTriggerWebhook } from "../../../services/loop-runtime/composio-trigger.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
+
+router.post("/composio/webhook", async (req, res: Response) => {
+  try {
+    const signature = typeof req.headers["x-composio-signature"] === "string"
+      ? req.headers["x-composio-signature"]
+      : undefined;
+    const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody;
+    const isValid = verifyComposioWebhookSignature(rawBody, signature);
+    if (!isValid) {
+      res.status(401).json({ error: "Invalid webhook signature" });
+      return;
+    }
+
+    const authResult = await handleComposioWebhook(req.body);
+    const result = authResult.processed ? authResult : await handleComposioTriggerWebhook(req.body);
+    res.json(result);
+  } catch (error) {
+    console.error("Error handling composio webhook:", error);
+    res.status(500).json({ error: "Failed to handle composio webhook" });
+  }
+});
+
 router.use(authMiddleware);
 
 const createAuthSessionSchema = z.object({
   app_key: z.string().min(1).optional(),
   required_scopes: z.array(z.string()).optional().default([]),
   redirect_uri: z.string().url().optional(),
+  workflow_builder_session_id: z.string().uuid().optional(),
+  build_requirement_id: z.string().min(1).optional(),
 });
 
 const continueAuthSchema = z.object({
@@ -38,7 +64,9 @@ const saveResendSchema = z.object({
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const connectors = await listConnectorAccounts(req.authContext!);
-    res.json({ connectors });
+    res.json({
+      connectors: connectors.map(({ externalAccountId: _externalAccountId, ...connector }) => connector),
+    });
   } catch (error) {
     console.error("Error listing connectors:", error);
     res.status(500).json({ error: "Failed to list connectors" });
@@ -130,6 +158,17 @@ router.post("/:provider/auth-sessions", requireScopes(["memory:write"]), async (
   try {
     const provider = String(req.params.provider || "").trim();
     const body = createAuthSessionSchema.parse(req.body ?? {});
+    if (body.workflow_builder_session_id) {
+      const builder = await pool.query(
+        `SELECT 1 FROM workflow_builder_sessions
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3 LIMIT 1`,
+        [body.workflow_builder_session_id, req.authContext!.tenantId, req.authContext!.userId],
+      );
+      if (!builder.rows[0]) {
+        res.status(404).json({ error: "Workflow builder session not found" });
+        return;
+      }
+    }
 
     const session = await startConnectorAuth({
       auth: req.authContext!,
@@ -137,6 +176,8 @@ router.post("/:provider/auth-sessions", requireScopes(["memory:write"]), async (
       appKey: body.app_key ?? null,
       requiredScopes: body.required_scopes,
       redirectUri: body.redirect_uri ?? null,
+      workflowBuilderSessionId: body.workflow_builder_session_id ?? null,
+      buildRequirementId: body.build_requirement_id ?? null,
     });
 
     res.status(201).json({
@@ -214,26 +255,6 @@ router.delete("/:id", requireScopes(["memory:write"]), async (req: AuthRequest, 
     }
     console.error("Error removing connector account:", error);
     res.status(500).json({ error: "Failed to remove connector account" });
-  }
-});
-
-router.post("/composio/webhook", async (req, res: Response) => {
-  try {
-    const signature = typeof req.headers["x-composio-signature"] === "string"
-      ? req.headers["x-composio-signature"]
-      : undefined;
-    const rawBody = (req as typeof req & { rawBody?: Buffer }).rawBody;
-    const isValid = verifyComposioWebhookSignature(rawBody, signature);
-    if (!isValid) {
-      res.status(401).json({ error: "Invalid webhook signature" });
-      return;
-    }
-
-    const result = await handleComposioWebhook(req.body);
-    res.json(result);
-  } catch (error) {
-    console.error("Error handling composio webhook:", error);
-    res.status(500).json({ error: "Failed to handle composio webhook" });
   }
 });
 

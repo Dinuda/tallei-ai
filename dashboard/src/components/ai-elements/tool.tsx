@@ -25,7 +25,7 @@ export type ToolProps = ComponentProps<typeof Collapsible>;
 
 export const Tool = ({ className, ...props }: ToolProps) => (
   <Collapsible
-    className={cn("group not-prose mb-4 w-full rounded-xl border border-[#e5e7eb] bg-[#f9fafb] shadow-sm overflow-hidden", className)}
+    className={cn("group not-prose mb-4 w-full border border-[#d1d5db] bg-white overflow-hidden", className)}
     {...props}
   />
 );
@@ -65,7 +65,7 @@ const statusIcons: Record<ToolPart["state"], ReactNode> = {
 };
 
 export const getStatusBadge = (status: ToolPart["state"]) => (
-  <Badge className="gap-1.5 rounded-full text-xs" variant="secondary">
+  <Badge className="gap-1.5 text-xs border" variant="secondary">
     {statusIcons[status]}
     {statusLabels[status]}
   </Badge>
@@ -123,7 +123,7 @@ export const ToolInput = ({ className, input, ...props }: ToolInputProps) => {
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
         Parameters
       </h4>
-      <div className="rounded-md bg-muted/50">
+      <div className="bg-muted/50 border border-[#e5e7eb]">
         <CodeBlock code={JSON.stringify(input, null, 2) ?? ""} language="json" />
       </div>
     </div>
@@ -162,7 +162,7 @@ export const ToolOutput = ({
       </h4>
       <div
         className={cn(
-          "overflow-x-auto rounded-md text-xs [&_table]:w-full",
+          "overflow-x-auto text-xs [&_table]:w-full border border-[#e5e7eb]",
           errorText
             ? "bg-destructive/10 text-destructive"
             : "bg-muted/50 text-foreground"

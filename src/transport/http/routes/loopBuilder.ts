@@ -14,6 +14,10 @@ import {
 
 import { getLoopSpec, listLoopSpecs } from "../../../services/loop-builder/specs.js";
 import {
+  refreshBuilderConnectorAvailability,
+  resolveBuilderConnectorRequirement,
+} from "../../../services/loop-builder/connectors.js";
+import {
   dispatchWorkflowBuilderCommand,
   getWorkflowBuilderCommand,
   type BuilderToolName,
@@ -102,14 +106,43 @@ const normalizedIntentSchema = z.object({
 
 function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId: string) {
   return {
+    appSelection: tool({
+      description: "Show the live app catalogue so the user can explicitly choose which apps this loop may use. This is a UI interaction, not a builder command.",
+      inputSchema: z.object({
+        question: z.string().min(1).default("What app is where your customers reach out to you for support?"),
+        recommendedToolkitSlugs: z.array(z.string().min(1)).max(8).default([]),
+        allowMultiple: z.boolean().default(true),
+      }),
+    }),
     getAvailableTools: tool({
-      description: "Discover the exact available connector actions required by a clear, resolved workflow intent. Always call this before draftSpec.",
+      description: "Discover exact actions from the apps explicitly selected by the user. Always call appSelection first and pass its exact toolkit slugs.",
       inputSchema: z.object({
         normalizedIntent: normalizedIntentSchema,
         resolvedIntent: z.string().min(1),
         assumptions: z.array(z.string().min(1)).default([]),
+        selectedToolkits: z.array(z.string().min(1)).min(1),
       }),
       execute: (input) => runTool(auth, sessionId, "getAvailableTools", input),
+    }),
+    resolveBuildRequirement: tool({
+      description: "Validate and durably resolve exactly one pending build-contract requirement. Free-form prose is not accepted unless it matches the requirement's typed value schema.",
+      inputSchema: z.object({
+        requirementId: z.string().min(1),
+        value: z.unknown(),
+      }),
+      execute: (input) => runTool(auth, sessionId, "resolveBuildRequirement", input),
+    }),
+    connectorSetup: tool({
+      description: "Render the first-class inline connector checklist for the pending connector build requirement. This is a UI interaction, not a builder command.",
+      inputSchema: z.object({
+        requirementId: z.string().min(1),
+      }),
+    }),
+    scheduleSetup: tool({
+      description: "Render the first-class schedule chooser for the pending trigger requirement. It only offers schedules supported by the current platform. This is a UI interaction, not a builder command.",
+      inputSchema: z.object({
+        requirementId: z.string().min(1),
+      }),
     }),
     interactivePrompt: tool({
       description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command. Only set the 'icon' field when an option represents a known external service or app (e.g., HubSpot, Salesforce, Slack, Notion, Gmail). For action options like 'Approve spec', 'Refine the spec', 'Save workflow', 'Other', or 'I will connect manually', leave the 'icon' field empty.",
@@ -169,6 +202,16 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
       }),
       execute: (input) => runTool(auth, sessionId, "saveWorkflow", { ...input, approved: true }),
     }),
+    runVerification: tool({
+      description: "Run the dedicated verification lifecycle for a saved workflow before activation.",
+      inputSchema: z.object({}),
+      execute: (input) => runTool(auth, sessionId, "runVerification", input),
+    }),
+    confirmActivation: tool({
+      description: "Confirm successful verification evidence and activate the workflow schedule. Call only after the user explicitly selects activation.",
+      inputSchema: z.object({}),
+      execute: (input) => runTool(auth, sessionId, "confirmActivation", { ...input, approved: true }),
+    }),
   };
 }
 
@@ -182,14 +225,23 @@ function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
     "For options representing known services or integrations (e.g., HubSpot, Salesforce, Slack, Notion, Mailchimp), include the Composio icon key in the 'icon' field of each option. Common keys: hubspot, salesforce, pipedrive, zoho-crm, slack, notion, mailchimp, gmail, github, airtable, trello, asana, zendesk, stripe, google-sheets, google-docs.",
     "Only ask a normal assistant text question when it genuinely cannot be represented as useful choices.",
     "Never ask the user to paste API keys, passwords, or credentials. Offer account connection as an option instead.",
-    "Before calling getAvailableTools, if runtime inputs are needed (such as Mailchimp account connection, target audience/list, send time/timezone, or news sources/keywords to monitor), do not list them in prose text. Instead, gather them by presenting concrete choices using interactivePrompt. Each runtime input requirement or connection choice must be asked via interactivePrompt.",
-    "When the intent is clear, call getAvailableTools with a complete normalized resolved intent. After it succeeds, call draftSpec in the same turn.",
+    "When the intent is clear and the user has not selected apps yet, call appSelection and stop. Never infer or silently select an app from the workflow description.",
+    "After appSelection returns, call getAvailableTools with the complete normalized resolved intent and the exact selectedToolkits slugs from its output. Discover tools only from those apps.",
+    "After getAvailableTools, resolve every pending build-contract requirement one at a time. For a pending connector requirement, call connectorSetup and stop; never use interactivePrompt for connector setup and never offer connect later. For a pending trigger_schedule requirement, call scheduleSetup and stop. Never invent event-driven execution unless an exact discovered trigger capability explicitly supports it. Never offer schedules more frequent than hourly. For other requirements, ask the user for the requirement's value, then call resolveBuildRequirement with a typed value matching its schema.",
+    "After scheduleSetup returns, pass its exact typed value to resolveBuildRequirement. Do not reinterpret the selected schedule.",
+    "Never show schema validation errors, cron expressions, tool identifiers, or internal validation wording to the user. If a requested capability is unavailable, say that capability is currently limited or unsupported and offer the nearest supported choice through the appropriate UI tool.",
+    "Never treat unrelated prose as a valid requirement answer. Never silently assume a connector, trigger, schedule, source, template, stable input, or review policy.",
+    "The user may explicitly choose no source or no template only when the requirement allows it; persist that choice through resolveBuildRequirement.",
+    "Always show build-contract warnings to the user, especially explicit ungrounded or no-template choices.",
+    "Call draftSpec only after resolveBuildRequirement reports readyForSpecDraft true.",
     "Never call draftSpec before getAvailableTools. Never invent or search for tools outside getAvailableTools.",
     "After calling draftSpec, explain the draft briefly and immediately call interactivePrompt in the same turn to present a choice to the user: 'Approve spec' (recommended, with value 'Approve the spec') and 'Refine the spec'. Do not wait for the user to manually type or request approval in prose.",
     "When the user requests spec approval (such as selecting 'Approve spec'), call approveSpec. After approval succeeds, immediately call generateWorkflowGraph without asking for another approval.",
     "If generateWorkflowGraph fails (e.g., times out) and the session is in the 'failed' phase, you can retry generateWorkflowGraph in a subsequent turn because the spec is still approved. Prefer retrying once before asking the user what to do.",
     "Use refineSpec for feedback about the behavioral contract and refineWorkflowGraph for feedback about an existing graph.",
     "After calling generateWorkflowGraph, explain the result briefly and immediately call interactivePrompt in the same turn to present the next steps: 'Save workflow' (recommended), 'Refine the graph', and 'Archive and start over'. Do not wait for prose feedback or wait for the user to explicitly request saving/archiving.",
+    "After saveWorkflow succeeds, explain that the workflow is unscheduled in verifying state and immediately present 'Run verification' via interactivePrompt.",
+    "After runVerification succeeds, present its evidence and failures. Only when status is awaiting_confirmation, present 'Confirm and activate' via interactivePrompt. Call confirmActivation only from that explicit selection.",
     "Never output a bulleted, numbered, or formatted list of options or actions the user can take in your prose text response. If you have choices, next steps, or decisions to offer, you must present them via interactivePrompt.",
     "Keep visible rationale concise. Do not reveal hidden chain-of-thought.",
     `Current durable session projection:\n${JSON.stringify({
@@ -203,13 +255,20 @@ function analyzerSystemPrompt(session: WorkflowBuilderSession): string {
         connected: contract.constraints.connected ?? false,
         risk: contract.constraints.risk ?? null,
       })),
+      buildContract: session.buildContract ? {
+        ...session.buildContract,
+        requirements: session.buildContract.requirements.map((requirement) => ({
+          ...requirement,
+          validationErrors: [],
+        })),
+      } : null,
       specId: session.specId,
       proposal: session.currentProposal ? {
         title: session.currentProposal.title,
         summary: session.currentProposal.summary,
       } : null,
       workflowId: session.workflowId,
-      error: session.error,
+      error: null,
     })}`,
   ].join("\n\n");
 }
@@ -247,6 +306,11 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
       ? await requireWorkflowBuilderSession(req.authContext!, body.sessionId)
       : await createWorkflowBuilderSession(req.authContext!, text);
     const sessionId = session.id;
+
+    // Persist the incoming messages immediately so the user's turns survive
+    // page reloads or stream interruptions before onFinish runs.
+    await replaceWorkflowBuilderMessages(req.authContext!, sessionId, messages);
+
     const tools = analyzerTools(req.authContext!, sessionId);
     const openai = createOpenAI({
       apiKey: process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY,
@@ -281,7 +345,8 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
   try {
     const sessionId = z.string().uuid().parse(req.params.sessionId);
     const session = await requireWorkflowBuilderSession(req.authContext!, sessionId);
-    const messages = await validateUIMessages({ messages: await listWorkflowBuilderMessages(req.authContext!, sessionId) });
+    const rawMessages = await listWorkflowBuilderMessages(req.authContext!, sessionId);
+    const messages = rawMessages.length > 0 ? await validateUIMessages({ messages: rawMessages }) : [];
     const commandsResult = await pool.query(
       `SELECT id, tool_name, status, events_json, usage_json, error_text, created_at, updated_at
        FROM workflow_builder_commands
@@ -302,6 +367,39 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
     res.json({ session, messages, commands });
   } catch (error) {
     res.status(error instanceof z.ZodError ? 400 : 404).json({ error: error instanceof Error ? error.message : "Builder session not found" });
+  }
+});
+
+router.post("/sessions/:sessionId/connectors/refresh", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    res.json({ checklist: await refreshBuilderConnectorAvailability(req.authContext!, sessionId) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to refresh connector availability";
+    res.status(error instanceof z.ZodError ? 400 : /not found|no connector requirement/i.test(message) ? 404 : 409).json({ error: message });
+  }
+});
+
+router.post("/sessions/:sessionId/connectors/resolve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    res.json(await resolveBuilderConnectorRequirement(req.authContext!, sessionId));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to resolve connector requirement";
+    res.status(error instanceof z.ZodError ? 400 : /not found|no connector requirement/i.test(message) ? 404 : 409).json({ error: message });
+  }
+});
+
+router.get("/sessions/:sessionId/schedule-options", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    const session = await requireWorkflowBuilderSession(req.authContext!, sessionId);
+    const requirement = session.buildContract?.requirements.find((entry) => entry.kind === "trigger_schedule");
+    if (!requirement) throw new Error("This builder session has no trigger requirement.");
+    res.json({ requirementId: requirement.id, capabilities: requirement.triggerCapabilities ?? { minimumScheduleMinutes: 60, events: [] } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load schedule options";
+    res.status(error instanceof z.ZodError ? 400 : /not found|no trigger requirement/i.test(message) ? 404 : 409).json({ error: message });
   }
 });
 

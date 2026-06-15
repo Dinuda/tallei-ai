@@ -15,6 +15,12 @@ export {
 } from "./creator.js";
 export { assignLoopToWorkspace, createWorkspace, listWorkspaces } from "./workspace.js";
 export {
+  confirmWorkflowVerification,
+  getWorkflowVerification,
+  initializeWorkflowVerification,
+  runWorkflowVerification,
+} from "./verification.js";
+export {
   LOOP_DEFINITION_VERSION,
   LOOP_ENGINE_VERSION,
   loopAgentGraphSchema,

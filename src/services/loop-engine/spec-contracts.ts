@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { inputRequirementSchema, normalizeSpecInputRequirements } from "./input-surfaces.js";
 import { loopIntentContextSchema } from "./intent-context.js";
+import { loopBuildContractSchema } from "./build-contract.js";
 
 function filterEmptyStrings(arr: unknown): unknown {
   if (!Array.isArray(arr)) return arr;
@@ -150,6 +151,7 @@ const baseNoSlopSpecSchema = z.object({
     allowedWriteActions: [],
   }),
   inputRequirements: z.array(inputRequirementSchema).default([]),
+  buildContract: loopBuildContractSchema.optional(),
 });
 
 const approvedNoSlopSpecSchema = baseNoSlopSpecSchema;
@@ -181,6 +183,7 @@ export const noSlopSpecSnapshotSchema = z.object({
   bodyMarkdown: z.string().min(1),
   specJson: noSlopSpecDraftSchema,
   intentContext: loopIntentContextSchema.optional(),
+  buildContract: loopBuildContractSchema.optional(),
   approvedAt: z.string().min(1),
 });
 

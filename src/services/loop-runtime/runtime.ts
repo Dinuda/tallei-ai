@@ -4,6 +4,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { evaluateAgentGoal } from "../loop-engine/goal-eval.js";
 import { extractWebSearchSources } from "../loop-engine/contracts.js";
+import { selectedConnectorAccountId } from "../loop-engine/build-contract.js";
 import { contractMediaType, contractRenderer, contractVisibility } from "../loop-engine/data-contract.js";
 import {
   activeOperatorInteractionSchema,
@@ -411,7 +412,13 @@ async function enqueueCommand(input: {
   );
 }
 
-export async function startManualLoopRun(auth: AuthContext, workflowId: string) {
+async function startLoopRun(input: {
+  auth: AuthContext;
+  workflowId: string;
+  inputs?: Record<string, string>;
+  queuedEvent?: Record<string, unknown>;
+}) {
+  const { auth, workflowId } = input;
   const workflowResult = await pool.query<{ id: string; title: string; metadata_json: unknown }>(
     `SELECT id, title, metadata_json FROM workflows
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND status = 'active'
@@ -431,7 +438,7 @@ export async function startManualLoopRun(auth: AuthContext, workflowId: string) 
       `INSERT INTO loop_engine_runs
        (id, tenant_id, user_id, workflow_id, status, definition_snapshot, context_json)
        VALUES ($1, $2, $3, $4, 'queued', $5::jsonb, $6::jsonb)`,
-      [runId, auth.tenantId, auth.userId, workflowId, JSON.stringify(definition), JSON.stringify({ inputs: {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} })],
+      [runId, auth.tenantId, auth.userId, workflowId, JSON.stringify(definition), JSON.stringify({ inputs: input.inputs ?? {}, approvedMemories: [], approvedSources: {}, operatorRevisions: {} })],
     );
     await client.query(
       `INSERT INTO loop_engine_commands
@@ -442,7 +449,7 @@ export async function startManualLoopRun(auth: AuthContext, workflowId: string) 
     await client.query(
       `INSERT INTO loop_engine_events (tenant_id, user_id, run_id, event_type, payload_json)
        VALUES ($1, $2, $3, 'run_queued', $4::jsonb)`,
-      [auth.tenantId, auth.userId, runId, JSON.stringify({ workflowId, workflowTitle: workflow.title })],
+      [auth.tenantId, auth.userId, runId, JSON.stringify({ workflowId, workflowTitle: workflow.title, ...(input.queuedEvent ?? {}) })],
     );
     await client.query("COMMIT");
   } catch (error) {
@@ -453,6 +460,28 @@ export async function startManualLoopRun(auth: AuthContext, workflowId: string) 
   }
 
   return getLoopRuntimeProjection(auth, runId);
+}
+
+export async function startManualLoopRun(auth: AuthContext, workflowId: string) {
+  return startLoopRun({ auth, workflowId });
+}
+
+export async function startWebhookLoopRun(
+  auth: AuthContext,
+  workflowId: string,
+  event: { id: string; type: string; triggerSlug: string; data: Record<string, unknown> },
+) {
+  return startLoopRun({
+    auth,
+    workflowId,
+    inputs: {
+      trigger_payload: JSON.stringify(event.data),
+      trigger_event_id: event.id,
+      trigger_type: event.type,
+      trigger_slug: event.triggerSlug,
+    },
+    queuedEvent: { source: "connector_webhook", triggerEventId: event.id, triggerSlug: event.triggerSlug },
+  });
 }
 
 async function createAttempt(input: {
@@ -1190,6 +1219,7 @@ async function handleExecuteStep(command: CommandRow) {
         },
         toolkit: connectorAction.toolkit,
         actionSlug: connectorAction.actionSlug,
+        connectorAccountId: selectedConnectorAccountId(definition.buildContract, connectorAction.toolkit),
         payload,
         toolkitVersion: prepared.contract.toolkitVersion,
         idempotencyKey,
@@ -1535,6 +1565,7 @@ async function handleContinueAfterGate(command: CommandRow) {
         },
         toolkit: connectorAction.toolkit,
         actionSlug: connectorAction.actionSlug,
+        connectorAccountId: selectedConnectorAccountId(definition.buildContract, connectorAction.toolkit),
         payload,
         toolkitVersion: typeof contract.toolkitVersion === "string" ? contract.toolkitVersion : undefined,
         idempotencyKey,

@@ -24,7 +24,8 @@ type ConnectorAccount = {
   id: string;
   provider: string;
   appKey?: string | null;
-  externalAccountId: string;
+  displayLabel: string | null;
+  requiresLabel: boolean;
   status: string;
   scopes: string[];
   updatedAt: string;
@@ -571,7 +572,7 @@ export default function ConnectedAppsPage() {
                     <div className={styles.connectedInfo}>
                       <span className={styles.connectedName}>{app.name}</span>
                       <span className={styles.connectedId}>
-                        {account.externalAccountId}
+                        {account.displayLabel || "Connected account"}
                       </span>
                     </div>
                   </div>

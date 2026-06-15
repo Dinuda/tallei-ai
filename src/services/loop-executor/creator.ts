@@ -81,6 +81,7 @@ export function buildLoopDefinition(input: {
   connectorPolicy?: LoopDefinition["connectorPolicy"];
   inputRequirements?: LoopDefinition["inputRequirements"];
   operatorInteractionPlan?: LoopDefinition["operatorInteractionPlan"];
+  buildContract?: LoopDefinition["buildContract"];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
   builderMeta?: LoopDefinition["builderMeta"];
 }): LoopDefinition {
@@ -120,6 +121,7 @@ export function buildLoopDefinition(input: {
     ...(input.connectorPolicy ? { connectorPolicy: input.connectorPolicy } : {}),
     ...(input.inputRequirements?.length ? { inputRequirements: input.inputRequirements } : {}),
     ...(input.operatorInteractionPlan ? { operatorInteractionPlan: input.operatorInteractionPlan } : {}),
+    ...(input.buildContract ? { buildContract: input.buildContract } : {}),
     ...(input.engineVersion ? { engineVersion: input.engineVersion } : {}),
     agentGraph,
     ...(input.builderMeta ? { builderMeta: input.builderMeta } : {}),
@@ -138,6 +140,7 @@ export function buildLoopDefinitionFromCeoDesign(input: {
   connectorPolicy?: LoopDefinition["connectorPolicy"];
   inputRequirements?: LoopDefinition["inputRequirements"];
   operatorInteractionPlan?: LoopDefinition["operatorInteractionPlan"];
+  buildContract?: LoopDefinition["buildContract"];
   engineVersion?: typeof LOOP_ENGINE_VERSION;
 }): LoopDefinition {
   const allowedToolRefs = uniqueStrings(
@@ -154,6 +157,7 @@ export function buildLoopDefinitionFromCeoDesign(input: {
     connectorPolicy: input.connectorPolicy,
     inputRequirements: input.inputRequirements,
     operatorInteractionPlan: input.operatorInteractionPlan,
+    buildContract: input.buildContract,
     engineVersion: input.engineVersion,
     builderMeta: input.design.builderMeta,
   });
@@ -175,11 +179,14 @@ function mapLoopWorkflowRow(row: {
     ? row.metadata_json as Record<string, unknown>
     : {};
   const definition = loopDefinitionSchema.parse(metadata.loopDefinition);
+  if (!["verifying", "active", "paused", "archived"].includes(row.status)) {
+    throw new Error(`Unsupported workflow status: ${row.status}`);
+  }
   return {
     id: row.id,
     workspaceId: row.workspace_id,
     title: row.title,
-    status: row.status,
+    status: row.status as LoopWorkflowView["status"],
     scheduleRrule: row.schedule_rrule,
     nextRunAt: row.next_run_at,
     lastScheduledAt: row.last_scheduled_at,
@@ -194,6 +201,7 @@ export async function createLoopWorkflow(input: {
   workspaceId?: string | null;
   definition: LoopDefinition;
   title?: string;
+  initialStatus?: "active" | "verifying";
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
   const parsed = loopDefinitionSchema.parse(input.definition);
@@ -212,12 +220,13 @@ export async function createLoopWorkflow(input: {
     .update(`${LOOP_DEFINITION_VERSION}:${definition.goal}:${definition.schedule.cron}`)
     .digest("hex")
     .slice(0, 24);
-  const nextRunAt = nextCronRunAt(definition.schedule.cron).toISOString();
+  const initialStatus = input.initialStatus ?? "active";
+  const nextRunAt = initialStatus === "active" ? nextCronRunAt(definition.schedule.cron).toISOString() : null;
 
   await pool.query(
     `INSERT INTO workflows
      (id, tenant_id, user_id, workspace_id, title, fingerprint, instruction, schedule_rrule, status, requires_connector, connector_provider, connector_scope_keys, metadata_json, definition_version, next_run_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', FALSE, NULL, '[]'::jsonb, $9::jsonb, $10, $11::timestamptz)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, NULL, '[]'::jsonb, $10::jsonb, $11, $12::timestamptz)`,
     [
       workflowId,
       input.auth.tenantId,
@@ -227,6 +236,7 @@ export async function createLoopWorkflow(input: {
       fingerprint,
       definition.goal,
       definition.schedule.cron,
+      initialStatus,
       JSON.stringify({
         source: "internal_loop_creator_v2",
         loopDefinition: definition,
@@ -340,7 +350,7 @@ export async function listLoopWorkflows(auth: AuthContext): Promise<LoopWorkflow
      WHERE tenant_id = $1
        AND user_id = $2
        AND definition_version = $3
-       AND status = 'active'
+       AND status IN ('verifying', 'active')
      ORDER BY updated_at DESC
      LIMIT 50`,
     [auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION]
@@ -357,7 +367,7 @@ export async function deleteLoopWorkflow(auth: AuthContext, workflowId: string):
        AND tenant_id = $2
        AND user_id = $3
        AND definition_version = $4
-       AND status = 'active'
+       AND status IN ('verifying', 'active')
      RETURNING id`,
     [workflowId, auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION],
   );

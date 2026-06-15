@@ -70,7 +70,7 @@ export default function ConnectorSessionPage({ params }: { params: Promise<{ id:
 
       {error ? <p className="mt-4 text-sm text-rose-600">{error}</p> : null}
 
-      <section className="mt-6 rounded-xl border border-slate-200 bg-white p-4">
+      <section className="mt-6 border border-slate-200 bg-white p-4">
         {!session ? (
           <p className="text-sm text-slate-500">Loading setup session...</p>
         ) : (
@@ -86,7 +86,7 @@ export default function ConnectorSessionPage({ params }: { params: Promise<{ id:
                 href={session.setupUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-900 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                className="inline-flex h-9 items-center gap-2 bg-[#111827] px-3 text-sm font-medium text-white hover:opacity-85"
               >
                 Open setup <ExternalLink size={14} />
               </a>
@@ -94,14 +94,14 @@ export default function ConnectorSessionPage({ params }: { params: Promise<{ id:
                 type="button"
                 onClick={() => void continueSession()}
                 disabled={busy}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                className="inline-flex h-9 items-center gap-2 border border-slate-200 px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
                 <Check size={15} /> Continue
               </button>
               <button
                 type="button"
                 onClick={() => void load().catch((e) => setError(e instanceof Error ? e.message : "Failed to refresh"))}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 px-3 text-sm text-slate-700 hover:bg-slate-50"
+                className="inline-flex h-9 items-center gap-2 border border-slate-200 px-3 text-sm text-slate-700 hover:bg-slate-50"
               >
                 <RefreshCw size={15} /> Refresh
               </button>

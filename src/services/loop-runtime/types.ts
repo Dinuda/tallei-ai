@@ -157,7 +157,7 @@ export const runtimeDefinitionSchema = loopDefinitionSchema.superRefine((definit
     if (approvalContract && !hasApprovedWrite) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require an approved connector policy action" });
     }
-    if (hasApprovedWrite && !definition.operatorInteractionPlan.interactions.some((item) =>
+    if (hasApprovedWrite && !definition.operatorInteractionPlan?.interactions.some((item) =>
       item.kind === "confirm_action" && item.actionNodeId === agent.id)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External-effect tools require a typed confirmation interaction" });
     }

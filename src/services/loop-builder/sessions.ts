@@ -8,11 +8,13 @@ import type { LoopIntentAnalysis, LoopIntentContext } from "../loop-engine/inten
 import type { ToolContract } from "../tool-spec/types.js";
 import type { LoopBuilderProposal } from "./intent-resolver.js";
 import type { LoopSpecView } from "./specs.js";
+import type { LoopBuildContract } from "../loop-engine/build-contract.js";
 
 export type WorkflowBuilderPhase =
   | "new"
   | "analyzing"
   | "needs_clarification"
+  | "resolving_requirements"
   | "intent_resolved"
   | "spec_drafted"
   | "spec_approved"
@@ -33,6 +35,7 @@ export type WorkflowBuilderSession = {
   intentAnalysis: LoopIntentAnalysis | null;
   resolvedIntent: LoopIntentContext | null;
   discoveredToolContracts: ToolContract[];
+  buildContract: LoopBuildContract | null;
   currentProposal: LoopBuilderProposal | null;
   error: { message: string } | null;
   revision: number;
@@ -52,6 +55,7 @@ type SessionRow = {
   intent_analysis_json: LoopIntentAnalysis | null;
   resolved_intent_json: LoopIntentContext | null;
   discovered_tool_contracts_json: ToolContract[];
+  build_contract_json: LoopBuildContract | null;
   current_proposal_json: LoopBuilderProposal | null;
   error_json: { message: string } | null;
   revision: number;
@@ -77,6 +81,7 @@ function mapSession(row: SessionRow): WorkflowBuilderSession {
     intentAnalysis: row.intent_analysis_json,
     resolvedIntent: row.resolved_intent_json,
     discoveredToolContracts: row.discovered_tool_contracts_json ?? [],
+    buildContract: row.build_contract_json,
     currentProposal: row.current_proposal_json,
     error: row.error_json,
     revision: row.revision,
@@ -86,7 +91,7 @@ function mapSession(row: SessionRow): WorkflowBuilderSession {
 }
 
 const SESSION_COLUMNS = `id, phase, title, goal, composio_session_id, workflow_run_id, spec_id, workflow_id,
-  intent_analysis_json, resolved_intent_json, discovered_tool_contracts_json, current_proposal_json,
+  intent_analysis_json, resolved_intent_json, discovered_tool_contracts_json, build_contract_json, current_proposal_json,
   error_json, revision, created_at, updated_at`;
 
 export async function createWorkflowBuilderSession(auth: AuthContext, goal: string): Promise<WorkflowBuilderSession> {
@@ -138,12 +143,14 @@ export async function updateWorkflowBuilderSession(
   sessionId: string,
   patch: {
     phase?: WorkflowBuilderPhase;
+    composioSessionId?: string;
     workflowRunId?: string | null;
     spec?: LoopSpecView | null;
     workflowId?: string | null;
     intentAnalysis?: LoopIntentAnalysis | null;
     resolvedIntent?: LoopIntentContext | null;
     discoveredToolContracts?: ToolContract[];
+    buildContract?: LoopBuildContract | null;
     currentProposal?: LoopBuilderProposal | null;
     error?: { message: string } | null;
   },
@@ -151,26 +158,30 @@ export async function updateWorkflowBuilderSession(
   const result = await pool.query<SessionRow>(
     `UPDATE workflow_builder_sessions
      SET phase = COALESCE($4, phase),
-         workflow_run_id = CASE WHEN $5::boolean THEN $6 ELSE workflow_run_id END,
-         spec_id = CASE WHEN $7::boolean THEN $8::uuid ELSE spec_id END,
-         workflow_id = CASE WHEN $9::boolean THEN $10::uuid ELSE workflow_id END,
-         intent_analysis_json = CASE WHEN $11::boolean THEN $12::jsonb ELSE intent_analysis_json END,
-         resolved_intent_json = CASE WHEN $13::boolean THEN $14::jsonb ELSE resolved_intent_json END,
-         discovered_tool_contracts_json = CASE WHEN $15::boolean THEN $16::jsonb ELSE discovered_tool_contracts_json END,
-         current_proposal_json = CASE WHEN $17::boolean THEN $18::jsonb ELSE current_proposal_json END,
-         error_json = CASE WHEN $19::boolean THEN $20::jsonb ELSE error_json END,
+         composio_session_id = CASE WHEN $5::boolean THEN $6 ELSE composio_session_id END,
+         workflow_run_id = CASE WHEN $7::boolean THEN $8 ELSE workflow_run_id END,
+         spec_id = CASE WHEN $9::boolean THEN $10::uuid ELSE spec_id END,
+         workflow_id = CASE WHEN $11::boolean THEN $12::uuid ELSE workflow_id END,
+         intent_analysis_json = CASE WHEN $13::boolean THEN $14::jsonb ELSE intent_analysis_json END,
+         resolved_intent_json = CASE WHEN $15::boolean THEN $16::jsonb ELSE resolved_intent_json END,
+         discovered_tool_contracts_json = CASE WHEN $17::boolean THEN $18::jsonb ELSE discovered_tool_contracts_json END,
+         build_contract_json = CASE WHEN $19::boolean THEN $20::jsonb ELSE build_contract_json END,
+         current_proposal_json = CASE WHEN $21::boolean THEN $22::jsonb ELSE current_proposal_json END,
+         error_json = CASE WHEN $23::boolean THEN $24::jsonb ELSE error_json END,
          revision = revision + 1,
          updated_at = NOW()
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3
      RETURNING ${SESSION_COLUMNS}`,
     [
       sessionId, auth.tenantId, auth.userId, patch.phase ?? null,
+      "composioSessionId" in patch, patch.composioSessionId ?? null,
       "workflowRunId" in patch, patch.workflowRunId ?? null,
       "spec" in patch, patch.spec?.id ?? null,
       "workflowId" in patch, patch.workflowId ?? null,
       "intentAnalysis" in patch, patch.intentAnalysis ? JSON.stringify(patch.intentAnalysis) : null,
       "resolvedIntent" in patch, patch.resolvedIntent ? JSON.stringify(patch.resolvedIntent) : null,
       "discoveredToolContracts" in patch, JSON.stringify(patch.discoveredToolContracts ?? []),
+      "buildContract" in patch, patch.buildContract ? JSON.stringify(patch.buildContract) : null,
       "currentProposal" in patch, patch.currentProposal ? JSON.stringify(patch.currentProposal) : null,
       "error" in patch, patch.error ? JSON.stringify(patch.error) : null,
     ],

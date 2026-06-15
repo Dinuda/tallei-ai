@@ -23,11 +23,18 @@ export interface ConnectorAccountView {
   id: string;
   provider: string;
   appKey: string | null;
+  /** Server-only provider account ID. Never return this field from browser-facing routes. */
   externalAccountId: string;
+  displayLabel: string | null;
+  requiresLabel: boolean;
   status: ConnectorSetupState;
   scopes: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ConnectorAccountOption extends ConnectorAccountView {
+  toolkit: string;
 }
 
 export interface ResendConnectorSetupView {
@@ -62,6 +69,14 @@ export interface ComposioToolSearchResult extends ComposioActionView {
   toolkitName: string;
   tags: string[];
 }
+
+export type ComposioTriggerTypeView = {
+  toolkit: string;
+  slug: string;
+  name: string;
+  description: string;
+  type: "webhook" | "poll";
+};
 
 export interface ConnectorActionResult {
   ok: boolean;
@@ -247,31 +262,17 @@ export async function resolveComposioToolVersion(actionSlug: string): Promise<st
   return (await resolveComposioToolExecutionMetadata(actionSlug)).version;
 }
 
-async function createComposioConnectLink(input: {
-  auth: AuthContext;
-  authConfigId: string;
-  redirectUri: string | null;
-}): Promise<{ id: string | null; redirectUrl: string | null }> {
-  const composio = getComposioVercelClient();
-  const request = await composio.connectedAccounts.link(
-    getComposioEntityId(input.auth),
-    input.authConfigId,
-    { allowMultiple: true, ...(input.redirectUri ? { callbackUrl: input.redirectUri } : {}) }
-  );
-  return {
-    id: typeof request.id === "string" && request.id.length > 0 ? request.id : null,
-    redirectUrl: typeof request.redirectUrl === "string" && request.redirectUrl.length > 0 ? request.redirectUrl : null,
-  };
-}
-
 async function createComposioToolkitAuthorizeLink(input: {
   auth: AuthContext;
   toolkitSlug: string;
+  preferredAuthConfigId?: string | null;
   redirectUri?: string | null;
 }): Promise<{ id: string | null; redirectUrl: string | null }> {
   const composio = getComposioVercelClient();
   const authConfigs = await composio.authConfigs.list({ toolkit: input.toolkitSlug });
-  let authConfigId = authConfigs.items.find((ac) => ac.status === "ENABLED")?.id;
+  const enabledAuthConfigs = authConfigs.items.filter((authConfig) => authConfig.status === "ENABLED");
+  let authConfigId = enabledAuthConfigs.find((authConfig) => authConfig.id === input.preferredAuthConfigId)?.id
+    ?? enabledAuthConfigs[0]?.id;
   if (!authConfigId) {
     try {
       const toolkit = await composio.toolkits.get(input.toolkitSlug);
@@ -554,6 +555,8 @@ async function startComposioAuthSession(input: {
   appKey: string;
   redirectUri?: string | null;
   requiredScopes: string[];
+  workflowBuilderSessionId?: string | null;
+  buildRequirementId?: string | null;
 }): Promise<{ sessionId: string; setupUrl: string; expiresAt: string }> {
     const sessionId = randomUUID();
     const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
@@ -561,11 +564,23 @@ async function startComposioAuthSession(input: {
     if (!appKey) throw new Error("Connector toolkit is required to start Composio auth");
     let setupUrl: string | null = null;
     let externalSessionId: string | null = null;
+    let existingConnectedAccountIds: string[] = [];
     if (isComposioConfigured()) {
       try {
-        const request = config.composioAuthConfigId
-          ? await createComposioConnectLink({ auth: input.auth, authConfigId: config.composioAuthConfigId, redirectUri: input.redirectUri ?? null })
-          : await createComposioToolkitAuthorizeLink({ auth: input.auth, toolkitSlug: appKey, redirectUri: input.redirectUri ?? null });
+        const composio = getComposioVercelClient();
+        const existing = await composio.connectedAccounts.list({
+          userIds: [getComposioEntityId(input.auth)],
+          toolkitSlugs: [appKey],
+        });
+        existingConnectedAccountIds = (Array.isArray(existing.items) ? existing.items : [])
+          .filter((account) => ["active", "connected", "enabled"].includes(String(account.status ?? "").toLowerCase()))
+          .flatMap((account) => typeof account.id === "string" ? [account.id] : []);
+        const request = await createComposioToolkitAuthorizeLink({
+          auth: input.auth,
+          toolkitSlug: appKey,
+          preferredAuthConfigId: config.composioAuthConfigId,
+          redirectUri: input.redirectUri ?? null,
+        });
         setupUrl = request.redirectUrl;
         externalSessionId = request.id;
       } catch (error) {
@@ -582,8 +597,9 @@ async function startComposioAuthSession(input: {
     if (!setupUrl) throw new Error(`Failed to create Composio connect link for app "${appKey}". Check Composio toolkit auth setup.`);
     await pool.query(
       `INSERT INTO connector_auth_sessions
-       (id, tenant_id, user_id, provider, status, setup_url, required_scopes, expires_at, metadata_json)
-       VALUES ($1, $2, $3, $4, 'auth_started', $5, $6::jsonb, $7::timestamptz, $8::jsonb)`,
+       (id, tenant_id, user_id, provider, status, setup_url, required_scopes, expires_at, metadata_json,
+        workflow_builder_session_id, build_requirement_id, toolkit_identity)
+       VALUES ($1, $2, $3, $4, 'auth_started', $5, $6::jsonb, $7::timestamptz, $8::jsonb, $9::uuid, $10, $11)`,
       [
         sessionId,
         input.auth.tenantId,
@@ -596,8 +612,11 @@ async function startComposioAuthSession(input: {
           redirectUri: input.redirectUri ?? null,
           adapter: "composio",
           appKey,
-          composio: { externalSessionId, configured: isComposioConfigured() },
+          composio: { externalSessionId, configured: isComposioConfigured(), existingConnectedAccountIds },
         }),
+        input.workflowBuilderSessionId ?? null,
+        input.buildRequirementId ?? null,
+        appKey,
       ]
     );
     return { sessionId, setupUrl, expiresAt };
@@ -621,25 +640,28 @@ function isNativeApiKeyConnector(metadata: Record<string, unknown>, externalAcco
 async function getConnectedConnectorAccount(input: {
   auth: AuthContext;
   toolkit: string;
+  connectorAccountId?: string;
 }): Promise<ConnectedConnectorAccount> {
   const toolkit = normalizeComposioAppKey(input.toolkit);
   const result = await pool.query<{
     id: string;
     provider: string;
     external_account_id: string;
+    display_label: string | null;
     status: ConnectorSetupState;
     scopes_json: unknown;
     metadata_json: unknown;
     created_at: string;
     updated_at: string;
   }>(
-    `SELECT id, provider, external_account_id, status, scopes_json, metadata_json, created_at, updated_at
+    `SELECT id, provider, external_account_id, display_label, status, scopes_json, metadata_json, created_at, updated_at
      FROM connector_accounts
      WHERE tenant_id = $1
        AND user_id = $2
        AND status = 'connected'
+       AND ($3::uuid IS NULL OR id = $3::uuid)
      ORDER BY updated_at DESC`,
-    [input.auth.tenantId, input.auth.userId],
+    [input.auth.tenantId, input.auth.userId, input.connectorAccountId ?? null],
   );
   for (const row of result.rows) {
     const scopes = Array.isArray(row.scopes_json)
@@ -651,15 +673,108 @@ async function getConnectedConnectorAccount(input: {
       id: row.id,
       provider: row.provider,
       appKey,
-      externalAccountId: row.external_account_id,
+      displayLabel: row.display_label,
+      requiresLabel: !row.display_label?.trim(),
       status: row.status,
       scopes,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       metadata: toObjectRecord(row.metadata_json),
+      externalAccountId: row.external_account_id,
     };
   }
   throw new Error(`Connect ${toolkit} before executing connector actions`);
+}
+
+export async function reconcileComposioConnectorAccounts(input: {
+  auth: AuthContext;
+  toolkits?: string[];
+}): Promise<ConnectorAccountOption[]> {
+  if (!isComposioConfigured()) {
+    return (await listConnectorAccounts(input.auth))
+      .filter((account) => account.appKey)
+      .map((account) => ({ ...account, toolkit: account.appKey! }));
+  }
+  const toolkits = [...new Set((input.toolkits ?? []).map(normalizeComposioAppKey).filter(Boolean))];
+  const composio = getComposioVercelClient();
+  const response = await composio.connectedAccounts.list({
+    userIds: [getComposioEntityId(input.auth)],
+    ...(toolkits.length > 0 ? { toolkitSlugs: toolkits } : {}),
+    limit: 100,
+  });
+  const providerAccounts = Array.isArray(response.items) ? response.items : [];
+  const providerAccountIds = providerAccounts.flatMap((account) =>
+    typeof account.id === "string" && account.id.trim() ? [account.id.trim()] : []);
+  if (toolkits.length > 0) {
+    await pool.query(
+      `UPDATE connector_accounts
+       SET status = 'revoked', updated_at = NOW()
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND provider = 'composio'
+         AND metadata_json->>'appKey' = ANY($3::text[])
+         AND NOT (external_account_id = ANY($4::text[]))`,
+      [input.auth.tenantId, input.auth.userId, toolkits, providerAccountIds],
+    );
+  }
+  for (const raw of providerAccounts) {
+    const row = raw as typeof raw & { toolkit?: { slug?: unknown } };
+    const toolkit = normalizeComposioAppKey(String(row.toolkit?.slug ?? ""));
+    const externalAccountId = typeof row.id === "string" ? row.id.trim() : "";
+    if (!toolkit || !externalAccountId) continue;
+    const statusText = String(row.status ?? "").toLowerCase();
+    const status: ConnectorSetupState = ["active", "connected", "enabled"].includes(statusText)
+      ? "connected"
+      : statusText === "expired"
+        ? "expired"
+        : statusText === "revoked" || statusText === "inactive"
+          ? "revoked"
+          : statusText === "failed"
+            ? "failed"
+            : "auth_started";
+    const providerLabel = typeof row.alias === "string" && row.alias.trim() ? row.alias.trim() : null;
+    await pool.query(
+      `INSERT INTO connector_accounts
+       (id, tenant_id, user_id, provider, external_account_id, display_label, status, scopes_json, metadata_json)
+       VALUES ($1, $2, $3, 'composio', $4, $5, $6, '[]'::jsonb, $7::jsonb)
+       ON CONFLICT (tenant_id, user_id, provider, external_account_id)
+       DO UPDATE SET
+         status = EXCLUDED.status,
+         display_label = COALESCE(connector_accounts.display_label, EXCLUDED.display_label),
+         metadata_json = COALESCE(connector_accounts.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json,
+         updated_at = NOW()`,
+      [
+        randomUUID(),
+        input.auth.tenantId,
+        input.auth.userId,
+        externalAccountId,
+        providerLabel,
+        status,
+        JSON.stringify({ adapter: "composio", appKey: toolkit, alias: row.alias ?? null, wordId: row.wordId ?? null }),
+      ],
+    );
+  }
+  return (await listConnectorAccounts(input.auth))
+    .filter((account) => account.appKey && (toolkits.length === 0 || toolkits.includes(account.appKey)))
+    .map((account) => ({ ...account, toolkit: account.appKey! }));
+}
+
+export async function renameConnectorAccount(input: {
+  auth: AuthContext;
+  accountId: string;
+  displayLabel: string;
+}): Promise<ConnectorAccountView> {
+  const result = await pool.query(
+    `UPDATE connector_accounts
+     SET display_label = $4, updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+     RETURNING id`,
+    [input.accountId, input.auth.tenantId, input.auth.userId, input.displayLabel.trim()],
+  );
+  if (!result.rows[0]) throw new Error("Connector account not found");
+  const account = (await listConnectorAccounts(input.auth)).find((entry) => entry.id === input.accountId);
+  if (!account) throw new Error("Connector account not found");
+  return account;
 }
 
 async function resolveComposioConnectedAccountId(input: {
@@ -687,6 +802,89 @@ async function resolveComposioConnectedAccountId(input: {
     console.warn("[connectors] failed to resolve composio connected account:", error);
     return undefined;
   }
+}
+
+export async function resolveConnectedComposioAccountIds(input: {
+  auth: AuthContext;
+  toolkits: string[];
+}): Promise<Record<string, string>> {
+  if (!isComposioConfigured()) return {};
+  const toolkits = [...new Set(input.toolkits.map(normalizeComposioAppKey).filter(Boolean))];
+  if (toolkits.length === 0) return {};
+  const composio = getComposioVercelClient();
+  const accounts = await composio.connectedAccounts.list({
+    userIds: [getComposioEntityId(input.auth)],
+    toolkitSlugs: toolkits,
+  });
+  const resolved: Record<string, string> = {};
+  for (const account of Array.isArray(accounts.items) ? accounts.items : []) {
+    if (!["active", "connected", "enabled"].includes(String(account.status ?? "").toLowerCase())) continue;
+    const id = typeof account.id === "string" ? account.id.trim() : "";
+    const row = account as typeof account & { toolkit?: { slug?: unknown }; toolkitSlug?: unknown; toolkit_slug?: unknown };
+    const toolkit = normalizeComposioAppKey(String(row.toolkit?.slug ?? row.toolkitSlug ?? row.toolkit_slug ?? ""));
+    if (id && toolkit && toolkits.includes(toolkit) && !isPlaceholderConnectedAccountId(id)) resolved[toolkit] = id;
+  }
+  return resolved;
+}
+
+export async function listComposioTriggerTypes(toolkits: string[]): Promise<ComposioTriggerTypeView[]> {
+  if (!isComposioConfigured()) return [];
+  const normalized = [...new Set(toolkits.map(normalizeComposioAppKey).filter(Boolean))];
+  if (normalized.length === 0) return [];
+  const composio = getComposioVercelClient() as unknown as {
+    client?: {
+      triggersTypes?: {
+        list?: (input: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+  };
+  const response = toObjectRecord(await composio.client?.triggersTypes?.list?.({
+    toolkit_slugs: normalized,
+    toolkit_versions: "latest",
+    limit: 1000,
+  }));
+  const items = Array.isArray(response.items) ? response.items : [];
+  return items.flatMap((item) => {
+    const row = toObjectRecord(item);
+    const toolkit = normalizeComposioAppKey(String(toObjectRecord(row.toolkit).slug ?? ""));
+    const slug = String(row.slug ?? "").trim();
+    const configSchema = toObjectRecord(row.config);
+    const required = Array.isArray(configSchema.required) ? configSchema.required : [];
+    const type = row.type === "webhook" ? "webhook" : row.type === "poll" ? "poll" : null;
+    if (!toolkit || !slug || !type || required.length > 0) return [];
+    return [{
+      toolkit,
+      slug,
+      name: String(row.name ?? slug),
+      description: String(row.description ?? "Run when this event occurs."),
+      type,
+    }];
+  });
+}
+
+export async function registerComposioTrigger(input: {
+  auth: AuthContext;
+  toolkit: string;
+  triggerSlug: string;
+}): Promise<{ triggerId: string; connectedAccountId: string }> {
+  const toolkit = normalizeComposioAppKey(input.toolkit);
+  const connectedAccountId = (await resolveConnectedComposioAccountIds({ auth: input.auth, toolkits: [toolkit] }))[toolkit];
+  if (!connectedAccountId) throw new Error(`Connect ${toolkit} before enabling its event trigger.`);
+  const composio = getComposioVercelClient() as unknown as {
+    client?: {
+      triggerInstances?: {
+        upsert?: (slug: string, input: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+  };
+  const response = toObjectRecord(await composio.client?.triggerInstances?.upsert?.(input.triggerSlug, {
+    connected_account_id: connectedAccountId,
+    toolkit_versions: "latest",
+    trigger_config: {},
+  }));
+  const triggerId = String(response.trigger_id ?? toObjectRecord(response.deprecated).uuid ?? "").trim();
+  if (!triggerId) throw new Error("Composio did not return a trigger ID.");
+  return { triggerId, connectedAccountId };
 }
 
 async function executeComposioActionDirect(input: {
@@ -719,13 +917,18 @@ export async function executeApprovedComposioAction(input: {
   auth: AuthContext;
   toolkit: string;
   actionSlug: string;
+  connectorAccountId?: string;
   payload: Record<string, unknown>;
   idempotencyKey: string;
   toolkitVersion?: string;
 }): Promise<ConnectorActionResult> {
   const toolkit = normalizeComposioAppKey(input.toolkit);
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
-  const account = await getConnectedConnectorAccount({ auth: input.auth, toolkit });
+  const account = await getConnectedConnectorAccount({
+    auth: input.auth,
+    toolkit,
+    connectorAccountId: input.connectorAccountId,
+  });
 
   const existing = await pool.query<{
     status: "started" | "completed" | "failed" | "skipped";
@@ -910,17 +1113,18 @@ export async function runComposioToolkitPrompt(input: {
   auth: AuthContext;
   toolkit: string;
   prompt: string;
+  connectorAccountId?: string;
 }): Promise<{ text: string; accountId: string; externalAccountId: string; toolkit: string }> {
   const toolkit = normalizeComposioAppKey(input.toolkit);
   if (!config.anthropicApiKey) throw new Error("ANTHROPIC_API_KEY is required for Composio loop tools");
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
   if (!process.env.ANTHROPIC_API_KEY) process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
 
-  const accounts = await listConnectorAccounts(input.auth);
-  const account = accounts.find((row) =>
-    row.status === "connected" && row.appKey?.trim().toLowerCase() === toolkit
-  );
-  if (!account) throw new Error(`Connect ${toolkit} to use this loop tool`);
+  const account = await getConnectedConnectorAccount({
+    auth: input.auth,
+    toolkit,
+    connectorAccountId: input.connectorAccountId,
+  });
 
   const composio = getComposioVercelClient();
   const session = await composio.create(getComposioEntityId(input.auth), {
@@ -970,6 +1174,8 @@ export async function startConnectorAuth(input: {
   requiredScopes: string[];
   appKey?: string | null;
   redirectUri?: string | null;
+  workflowBuilderSessionId?: string | null;
+  buildRequirementId?: string | null;
 }): Promise<{ sessionId: string; setupUrl: string; expiresAt: string }> {
   if (input.provider !== "composio") throw new Error("Composio is required for third-party workflow dependencies");
   const appKey = normalizeComposioAppKey(input.appKey ?? inferComposioAppKey(input.requiredScopes));
@@ -980,6 +1186,8 @@ export async function startConnectorAuth(input: {
     appKey,
     redirectUri: input.redirectUri,
     requiredScopes: input.requiredScopes,
+    workflowBuilderSessionId: input.workflowBuilderSessionId,
+    buildRequirementId: input.buildRequirementId,
   });
 }
 
@@ -1012,6 +1220,10 @@ export async function continueConnectorAuth(input: {
   }
   const sessionMetadata = toObjectRecord(session.metadata_json);
   const sessionAppKey = typeof sessionMetadata.appKey === "string" ? sessionMetadata.appKey.trim().toLowerCase() : null;
+  const composioSessionMetadata = toObjectRecord(sessionMetadata.composio);
+  const existingConnectedAccountIds = new Set(Array.isArray(composioSessionMetadata.existingConnectedAccountIds)
+    ? composioSessionMetadata.existingConnectedAccountIds.filter((value): value is string => typeof value === "string")
+    : []);
   let verifiedExternalAccountId = input.externalAccountId?.trim() || "";
   if (session.provider === "composio" && sessionAppKey && !verifiedExternalAccountId) {
     const composio = getComposioVercelClient();
@@ -1020,7 +1232,8 @@ export async function continueConnectorAuth(input: {
       toolkitSlugs: [normalizeComposioAppKey(sessionAppKey)],
     });
     const active = (Array.isArray(accounts.items) ? accounts.items : []).find((item) =>
-      ["active", "connected", "enabled"].includes(String(item.status ?? "").toLowerCase()),
+      ["active", "connected", "enabled"].includes(String(item.status ?? "").toLowerCase())
+      && !existingConnectedAccountIds.has(String(item.id ?? "")),
     );
     verifiedExternalAccountId = typeof active?.id === "string" ? active.id.trim() : "";
     if (!verifiedExternalAccountId) {
@@ -1030,6 +1243,13 @@ export async function continueConnectorAuth(input: {
       );
       return { status: "auth_started" };
     }
+  }
+  if (session.provider === "composio" && !verifiedExternalAccountId) {
+    await pool.query(
+      `UPDATE connector_auth_sessions SET status = 'auth_started', updated_at = NOW() WHERE id = $1`,
+      [session.id],
+    );
+    return { status: "auth_started" };
   }
   const accountId = randomUUID();
   const accountResult = await pool.query<{ id: string }>(
@@ -1048,7 +1268,7 @@ export async function continueConnectorAuth(input: {
       input.auth.tenantId,
       input.auth.userId,
       session.provider,
-      verifiedExternalAccountId || `acct_${session.id.slice(0, 8)}`,
+      verifiedExternalAccountId,
       JSON.stringify(input.scopes ?? []),
       JSON.stringify({ source: "manual_continue", adapter: "composio", ...(sessionAppKey ? { appKey: sessionAppKey } : {}) }),
     ]
@@ -1073,6 +1293,9 @@ export async function getConnectorAuthSession(input: {
   setupUrl: string;
   expiresAt: string;
   requiredScopes: string[];
+  workflowBuilderSessionId?: string;
+  buildRequirementId?: string;
+  toolkit?: string;
 }> {
   const result = await pool.query<{
     id: string;
@@ -1081,8 +1304,12 @@ export async function getConnectorAuthSession(input: {
     setup_url: string;
     expires_at: string;
     required_scopes: unknown;
+    workflow_builder_session_id: string | null;
+    build_requirement_id: string | null;
+    toolkit_identity: string | null;
   }>(
-    `SELECT id, provider, status, setup_url, expires_at, required_scopes
+    `SELECT id, provider, status, setup_url, expires_at, required_scopes,
+            workflow_builder_session_id, build_requirement_id, toolkit_identity
      FROM connector_auth_sessions
      WHERE id = $1
        AND tenant_id = $2
@@ -1099,6 +1326,9 @@ export async function getConnectorAuthSession(input: {
     setupUrl: row.setup_url,
     expiresAt: row.expires_at,
     requiredScopes: Array.isArray(row.required_scopes) ? row.required_scopes.filter((value): value is string => typeof value === "string") : [],
+    ...(row.workflow_builder_session_id ? { workflowBuilderSessionId: row.workflow_builder_session_id } : {}),
+    ...(row.build_requirement_id ? { buildRequirementId: row.build_requirement_id } : {}),
+    ...(row.toolkit_identity ? { toolkit: row.toolkit_identity } : {}),
   };
 }
 
@@ -1107,13 +1337,14 @@ export async function listConnectorAccounts(auth: AuthContext): Promise<Connecto
     id: string;
     provider: string;
     external_account_id: string;
+    display_label: string | null;
     status: ConnectorSetupState;
     scopes_json: unknown;
     metadata_json: unknown;
     created_at: string;
     updated_at: string;
   }>(
-    `SELECT id, provider, external_account_id, status, scopes_json, metadata_json, created_at, updated_at
+    `SELECT id, provider, external_account_id, display_label, status, scopes_json, metadata_json, created_at, updated_at
      FROM connector_accounts
      WHERE tenant_id = $1
        AND user_id = $2
@@ -1127,6 +1358,8 @@ export async function listConnectorAccounts(auth: AuthContext): Promise<Connecto
       provider: row.provider,
       appKey: resolveConnectorAppKey({ provider: row.provider, scopes, metadata: row.metadata_json }),
       externalAccountId: row.external_account_id,
+      displayLabel: row.display_label,
+      requiresLabel: !row.display_label?.trim(),
       status: row.status,
       scopes,
       createdAt: row.created_at,
