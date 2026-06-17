@@ -36,6 +36,34 @@ docker compose up -d
 
 This starts local Postgres at `localhost:5432` with default credentials from [`docker-compose.yml`](./docker-compose.yml).
 
+### Optional: Temporal (loop scheduling + execution)
+
+Loop cron scheduling and headless run execution use self-hosted Temporal. Start the Temporal profile:
+
+```bash
+docker compose --profile temporal up -d
+```
+
+This starts:
+- **Temporal Server** at `localhost:7233` (gRPC)
+- **Temporal Web UI** at http://localhost:8233
+- A dedicated Postgres instance for Temporal state (`temporal-db`)
+
+Add to `.env`:
+
+```bash
+TALLEI_TEMPORAL__ENABLED=true
+TALLEI_TEMPORAL__ADDRESS=localhost:7233
+TALLEI_TEMPORAL__NAMESPACE=default
+TALLEI_TEMPORAL__TASK_QUEUE=tallei-loops
+```
+
+Run the Temporal worker in a separate terminal (alongside `npm run dev`):
+
+```bash
+npm run temporal:worker
+```
+
 ## 4) Configure Environment
 
 Create backend env file:

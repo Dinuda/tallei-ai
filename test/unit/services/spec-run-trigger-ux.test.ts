@@ -5,7 +5,7 @@ import test from "node:test";
 const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
 const creatorPath = new URL("../../../src/services/loop-executor/creator.ts", import.meta.url);
 const runPagePath = new URL("../../../dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/page.tsx", import.meta.url);
-const activationCardPath = new URL("../../../dashboard/src/components/loop-activation-card.tsx", import.meta.url);
+const builderHeaderPath = new URL("../../../dashboard/src/components/loop-builder-header.tsx", import.meta.url);
 const developerPagePath = new URL("../../../dashboard/app/dashboard/loops/developer/page.tsx", import.meta.url);
 const workflowPagePath = new URL("../../../dashboard/app/dashboard/loops/[workflowId]/page.tsx", import.meta.url);
 const loopBuilderRoutePath = new URL("../../../src/transport/http/routes/loopBuilder.ts", import.meta.url);
@@ -52,16 +52,19 @@ test("run page uses the editorial run UI shell", async () => {
   assert.match(runPage, /editorial-run-ui|EditorialPanel|OperatorWorkspace/);
 });
 
-test("builder activation card opens run page and links back to builder", async () => {
-  const [builderPage, activationCard, route] = await Promise.all([
+test("builder header surfaces run navigation and status outside chat", async () => {
+  const [builderPage, header, route] = await Promise.all([
     readFile(new URL("../../../dashboard/app/dashboard/loops/new/page.tsx", import.meta.url), "utf8"),
-    readFile(activationCardPath, "utf8"),
+    readFile(new URL("../../../dashboard/src/components/loop-builder-header.tsx", import.meta.url), "utf8"),
     readFile(loopBuilderRoutePath, "utf8"),
   ]);
-  assert.match(builderPage, /LoopActivationCard/);
-  assert.match(activationCard, /resolveLoopRunNavigation/);
-  assert.match(activationCard, /Edit in builder/);
-  assert.match(route, /Open loop on the activation card/);
+  assert.doesNotMatch(builderPage, /LoopActivationCard/);
+  assert.match(header, /Show runs/);
+  assert.match(header, /verificationStatus/);
+  assert.doesNotMatch(header, /Listening for/);
+  assert.match(header, /rounded-none/);
+  assert.match(header, /loopRunHref/);
+  assert.match(route, /header status bar for runs and agent approvals/);
 });
 
 test("loop detail and live loops surface trigger run inbox copy", async () => {

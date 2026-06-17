@@ -7,6 +7,7 @@ import { ArtifactCanvasOverlay } from "@/components/artifact-canvas-overlay";
 import { EmailArtifactPreviewCard } from "@/components/email-artifact-preview-card";
 import { EmailArtifactStudio, updateArtifactToolOutput } from "@/components/email-artifact-studio";
 import type { BuilderDraftTemplate } from "@/lib/email-artifacts/builder-defaults";
+import { buildEmailArtifactTemplates, resolveBuilderDraftTemplates } from "@/lib/email-artifacts/build-template";
 import { templatesSignature } from "@/lib/email-artifacts/template-signature";
 import type {
   ArtifactSetupOutput,
@@ -76,6 +77,26 @@ export function BuilderArtifactEditor({
     setLoadingPreview(false);
   }, []);
 
+  const draftTemplatesKey = useMemo(
+    () => JSON.stringify(resolveBuilderDraftTemplates(draftTemplates as BuilderDraftTemplate[] | undefined)),
+    [draftTemplates],
+  );
+
+  useEffect(() => {
+    if (completedOutput?.templates?.length) return;
+    let cancelled = false;
+    const drafts = JSON.parse(draftTemplatesKey) as BuilderDraftTemplate[];
+    void buildEmailArtifactTemplates(drafts)
+      .then((built) => {
+        if (cancelled) return;
+        handleTemplatesChange(built);
+      })
+      .catch(() => {
+        if (!cancelled) setLoadingPreview(false);
+      });
+    return () => { cancelled = true; };
+  }, [completedOutput?.templates?.length, draftTemplatesKey, handleTemplatesChange]);
+
   const handleClose = useCallback(() => setOpen(false), []);
 
   const handleComplete = useCallback((output: ArtifactSetupOutput) => {
@@ -96,6 +117,7 @@ export function BuilderArtifactEditor({
           <EmailArtifactStudio
             completedOutput={completedOutput}
             draftTemplates={draftTemplates as BuilderDraftTemplate[] | undefined}
+            initialTemplates={previewTemplates}
             key={toolCallId ?? requirementId}
             messages={messages}
             onClose={handleClose}

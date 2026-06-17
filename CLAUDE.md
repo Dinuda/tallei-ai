@@ -213,19 +213,16 @@ Look at `src/services/memory.ts` cache validity:
 
 ---
 
-## Agentic Loop Engine (`loop_engine_v3`)
+## Loop Engine (spec-driven + Temporal)
 
-Preset-free loop design + gated execution. New loops are designed by `src/services/loop-engine/architect.ts` (LLM at temperature 0.3, enforcing critic with ≤2 retries) and run by `src/services/loop-engine/controller.ts`.
+Loops are saved as `loop_spec_v1` runnable specs from the builder. Headless execution and cron scheduling run through **self-hosted Temporal** (`src/temporal/`) when `TALLEI_TEMPORAL__ENABLED=true`:
 
-| Path | Purpose |
-|------|---------|
-| `src/services/loop-engine/architect.ts` | Dynamic roster design: per-agent goal, one tool, typed contracts, delivery routing |
-| `src/services/loop-engine/controller.ts` | Goal-evaluated agent steps, typed artifact handoffs, gate dispatch |
-| `src/services/loop-engine/gates.ts` | Human gates: memory_confirmation, missing_input, draft_review, pre_send |
-| `src/services/loop-engine/delivery-router.ts` | Provider dispatch: `internal.resend_broadcast` vs `composio.gmail.send_email` |
-| `src/services/loop-engine/recall.ts` | Multi-facet semantic recall for designer (scored, ID-preserving) |
+- `loopRunWorkflow` activity wraps `executeSpecRunHeadless`
+- `upsertLoopSchedule` registers Temporal Schedules on loop activation
+- Local dev: `docker compose --profile temporal up -d` + `npm run temporal:worker`
+- Developer dashboard: **DEVELOPER → Workflows** (`/dashboard/developer/workflows`)
 
-Definitions carry `engineVersion: "loop_engine_v3"` and `delivery: { provider, target }`. Legacy preset/classifier paths in `ceo-designer.ts` are deprecated — builder entry re-exports the architect.
+The legacy graph runtime (`loop_engine_v3`, `runtime.ts`) has been removed. Interactive run chat still streams directly via `streamSpecRunChat` (not Temporal).
 
 ---
 

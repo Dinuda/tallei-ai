@@ -95,6 +95,7 @@ import {
   selectPreferredArtifact,
 } from "@/lib/loop-artifact-selection";
 import type { CanvasEmailTemplate } from "./components/canvas-email-editor";
+import { SpecRunPage } from "./components/spec-run-page";
 
 type UsageSummary = {
   calls: number;
@@ -2097,6 +2098,17 @@ export default function StableLoopRunPage() {
           {error ?? "Job not found"}
         </p>
       </main>
+    );
+  }
+
+  if (isSpecDrivenRun(run)) {
+    return (
+      <SpecRunPage
+        workflowId={workflowId}
+        runId={runId}
+        run={run}
+        onRefresh={load}
+      />
     );
   }
 

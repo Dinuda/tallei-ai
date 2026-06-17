@@ -4,8 +4,9 @@ import Image from "next/image";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
-import { Code2, Menu, Sparkles, X, Pencil, Settings } from "lucide-react";
+import { useEffect, useState, Suspense } from "react";
+import { Code2, Menu, Sparkles, Workflow, X, Settings } from "lucide-react";
+import { LoopBuilderHeader } from "@/components/loop-builder-header";
 import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -15,8 +16,6 @@ import { cn } from "@/lib/utils";
 import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
-import { useSearchParams } from "next/navigation";
-import { Suspense, useRef } from "react";
 
 /* Suppress known React DevTools false-positive in React 19 / Next.js 16 */
 if (typeof window !== "undefined" && window.console && window.console.error) {
@@ -144,6 +143,7 @@ const NAV: NavSection[] = [
     items: [
       { id: "cleanup", label: "Memory Cleanup", href: "/dashboard/memory-cleanup", icon: ICONS.cleanup },
       { id: "live-loops", label: "Live Loops", href: "/dashboard/loops/developer", icon: <Code2 size={15} aria-hidden /> },
+      { id: "workflows", label: "Workflows", href: "/dashboard/developer/workflows", icon: <Workflow size={15} aria-hidden /> },
       { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
       { id: "integrations", label: "Integrations", href: "/dashboard/developer/integrations", icon: ICONS.integrations },
     ],
@@ -210,103 +210,6 @@ function NavSectionContent({ pathname, onNavigate }: { pathname: string; onNavig
   );
 }
 
-function LoopBuilderTitle() {
-  const searchParams = useSearchParams();
-  const sessionId = searchParams?.get("session");
-  const [title, setTitle] = useState("Create a loop");
-  const [isEditing, setIsEditing] = useState(false);
-  const [draftTitle, setDraftTitle] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (!sessionId) {
-      setTitle("Create a loop");
-      return;
-    }
-    fetch(`/api/loop-builder/sessions/${sessionId}`)
-      .then((res) => {
-        if (!res.ok) throw new Error("Failed to load");
-        return res.json();
-      })
-      .then((data) => {
-        const t = data?.session?.currentProposal?.title || data?.session?.goal || "Draft loop";
-        setTitle(t);
-      })
-      .catch((err) => {
-        console.error(err);
-        setTitle("Draft loop");
-      });
-  }, [sessionId]);
-
-  const handleEditStart = () => {
-    if (!sessionId) return;
-    setDraftTitle(title);
-    setIsEditing(true);
-    setTimeout(() => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }, 0);
-  };
-
-  const handleSave = async () => {
-    if (!sessionId) return;
-    const trimmed = draftTitle.trim();
-    if (!trimmed || trimmed === title) {
-      setIsEditing(false);
-      return;
-    }
-    setTitle(trimmed);
-    setIsEditing(false);
-    try {
-      const res = await fetch(`/api/loop-builder/sessions/${sessionId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: trimmed }),
-      });
-      if (!res.ok) {
-        throw new Error("Failed to save title");
-      }
-    } catch (err) {
-      console.error(err);
-      // fallback to original if failed
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      handleSave();
-    } else if (e.key === "Escape") {
-      setIsEditing(false);
-    }
-  };
-
-  return (
-    <div className="absolute left-[248px] hidden h-14 flex-col justify-center border-l border-slate-200 pl-6 md:flex">
-      <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
-      {isEditing ? (
-        <input
-          ref={inputRef}
-          value={draftTitle}
-          onChange={(e) => setDraftTitle(e.target.value)}
-          onBlur={handleSave}
-          onKeyDown={handleKeyDown}
-          className="text-sm font-semibold leading-none text-slate-900 border border-slate-300 rounded px-1 -ml-1 outline-none focus:ring-2 focus:ring-slate-400 w-[400px]"
-        />
-      ) : (
-        <div 
-          className="flex items-center gap-2 group cursor-pointer hover:opacity-80 transition-opacity"
-          onClick={handleEditStart}
-        >
-          <div className="text-sm font-semibold leading-none text-slate-900 line-clamp-1 max-w-[400px]" title={title}>
-            {title}
-          </div>
-          {sessionId && <Pencil size={12} className="text-slate-400" />}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? "";
   const { data: session } = useSession();
@@ -362,7 +265,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </a>
       <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="flex h-14 w-full items-center justify-between px-4 sm:px-6">
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <Button
               type="button"
               variant="ghost"
@@ -373,17 +276,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             >
               {mobileOpen ? <X size={16} /> : <Menu size={16} />}
             </Button>
-            <Link href="/dashboard" className="flex items-center">
+            <Link href="/dashboard" className="flex shrink-0 items-center">
               <Image src="/tallei.svg" alt="Tallei" width={79} height={32} className="h-8 w-auto" />
             </Link>
             {pathname === "/dashboard/loops/new" ? (
               <Suspense fallback={
-                <div className="absolute left-[248px] hidden h-14 flex-col justify-center border-l border-slate-200 pl-6 md:flex">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
-                  <div className="text-sm font-semibold leading-none text-slate-900">Create a loop</div>
+                <div className="ml-4 hidden min-w-0 flex-1 items-center gap-4 border-l border-slate-200 pl-6 md:flex">
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
+                    <div className="text-sm font-semibold leading-none text-slate-900">Create a loop</div>
+                  </div>
                 </div>
               }>
-                <LoopBuilderTitle />
+                <LoopBuilderHeader />
               </Suspense>
             ) : null}
           </div>

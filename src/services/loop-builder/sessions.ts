@@ -296,3 +296,30 @@ export function normalizeWorkflowBuilderMessages(messages: unknown[]): UIMessage
     )
   );
 }
+
+function stripOpenAiStoredItemIds(part: UIMessage["parts"][number]): UIMessage["parts"][number] {
+  const cloned = { ...part } as Record<string, unknown>;
+  for (const key of ["providerOptions", "providerMetadata"] as const) {
+    const wrapper = cloned[key];
+    if (!wrapper || typeof wrapper !== "object") continue;
+    const record = { ...(wrapper as Record<string, unknown>) };
+    const openai = record.openai;
+    if (!openai || typeof openai !== "object") continue;
+    const { itemId, ...rest } = openai as Record<string, unknown>;
+    if (itemId == null) continue;
+    if (Object.keys(rest).length > 0) record.openai = rest;
+    else delete record.openai;
+    cloned[key] = record;
+  }
+  return cloned as UIMessage["parts"][number];
+}
+
+/** Remove OpenAI Responses item ids before replaying history to a fresh request. */
+export function sanitizeLoopBuilderChatMessages(messages: UIMessage[]): UIMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    parts: message.parts
+      .map(stripOpenAiStoredItemIds)
+      .filter((part) => part.type !== "reasoning" || part.text.trim().length > 0),
+  }));
+}

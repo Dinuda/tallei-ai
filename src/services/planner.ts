@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 
 import { config } from "../config/index.js";
+import { createLoopChatOpenAiSdk } from "./llm/loop-chat-client.js";
 
 export type PlannerMode = "interview" | "finalize";
 
@@ -319,10 +320,7 @@ let plannerClient: OpenAI | null = null;
 
 function getPlannerClient(): OpenAI {
   if (plannerClient) return plannerClient;
-  if (!config.openaiApiKey) {
-    throw new Error("TALLEI_LLM__OPENAI_API_KEY is required for orchestration planner");
-  }
-  plannerClient = new OpenAI({ apiKey: config.openaiApiKey });
+  plannerClient = createLoopChatOpenAiSdk();
   return plannerClient;
 }
 

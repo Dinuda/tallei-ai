@@ -7,7 +7,12 @@ import { searchLearnedToolSpecs } from "../tool-spec/learned-catalog.js";
 import { buildComposioActionContract, hasExactComposioActionSchemas, parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import type { ToolContract } from "../tool-spec/types.js";
 import type { ConnectorActionReadinessContract } from "../tool-spec/action-readiness.js";
-import type { RuntimeDefinition } from "./types.js";
+
+type ConnectorDefinitionContext = {
+  builderMeta?: {
+    discoveredToolContracts?: Array<Record<string, unknown>>;
+  };
+};
 
 const ajv = new Ajv({ allErrors: true, strict: false, allowUnionTypes: true });
 addFormats(ajv);
@@ -333,7 +338,7 @@ export function resolveConnectorOutputForValidation(
   return sanitizeComposioProviderOutput(result.actionOutputData ?? result.output ?? {});
 }
 
-function contractFromDefinition(definition: RuntimeDefinition, toolRef: string): ToolContract | null {
+function contractFromDefinition(definition: ConnectorDefinitionContext, toolRef: string): ToolContract | null {
   const normalized = toolRef.toLowerCase();
   for (const raw of definition.builderMeta?.discoveredToolContracts ?? []) {
     const contract = raw as unknown as ToolContract;
@@ -343,7 +348,7 @@ function contractFromDefinition(definition: RuntimeDefinition, toolRef: string):
 }
 
 export async function resolveConnectorActionContract(input: {
-  definition: RuntimeDefinition;
+  definition: ConnectorDefinitionContext;
   toolRef: string;
 }): Promise<ConnectorActionContractSnapshot> {
   const parsed = parseConnectorActionToolRef(input.toolRef);

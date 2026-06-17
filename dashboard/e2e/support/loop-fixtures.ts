@@ -1,3 +1,6 @@
+# Legacy graph-operator e2e scenarios below target the removed loop_engine_v3 runtime.
+# Spec-driven runs use /dashboard/loops/:workflowId/runs/:runId (SpecRunPage) instead.
+
 import { createHash, randomUUID } from "crypto";
 import path from "node:path";
 

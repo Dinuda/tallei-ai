@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { UIMessage } from "ai";
 
-import { normalizeWorkflowBuilderMessages } from "../../../src/services/loop-builder/sessions.js";
+import { normalizeWorkflowBuilderMessages, sanitizeLoopBuilderChatMessages } from "../../../src/services/loop-builder/sessions.js";
 
 test("workflow builder messages discard empty interrupted-stream artifacts", () => {
   const messages = [
@@ -16,4 +16,35 @@ test("workflow builder messages discard empty interrupted-stream artifacts", () 
     normalizeWorkflowBuilderMessages(messages).map((message) => message.id),
     ["user-1", "assistant-1"],
   );
+});
+
+test("sanitizeLoopBuilderChatMessages strips OpenAI item ids from replayed history", () => {
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "reasoning",
+          text: "Planning connector setup",
+          providerOptions: { openai: { itemId: "rs_123", reasoningEncryptedContent: "enc" } },
+        },
+        {
+          type: "tool-connectorSetup",
+          toolCallId: "call_1",
+          state: "output-available",
+          input: { requirementId: "connector" },
+          output: { ok: true },
+          providerMetadata: { openai: { itemId: "fc_456" } },
+        } as UIMessage["parts"][number],
+      ],
+    },
+  ] satisfies UIMessage[];
+
+  const sanitized = sanitizeLoopBuilderChatMessages(messages);
+  const reasoning = sanitized[0]?.parts[0];
+  const toolPart = sanitized[0]?.parts[1] as { providerMetadata?: { openai?: { itemId?: string } } };
+  assert.equal((reasoning as { providerOptions?: { openai?: { itemId?: string } } }).providerOptions?.openai?.itemId, undefined);
+  assert.equal(toolPart.providerMetadata?.openai?.itemId, undefined);
+  assert.equal((reasoning as { providerOptions?: { openai?: { reasoningEncryptedContent?: string } } }).providerOptions?.openai?.reasoningEncryptedContent, "enc");
 });

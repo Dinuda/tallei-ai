@@ -9,6 +9,7 @@ import {
   readStringEnv,
   requireEnv,
 } from "./schema.js";
+import { coerceChatModelForLocalMode, resolveChatModelForCompatibleProvider } from "../services/llm/chat-model-routing.js";
 
 function resolveEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
@@ -41,6 +42,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const publicBaseUrl = normalizeBaseUrl(configuredPublicBaseUrl);
   const qdrantTimeoutMsOverride = readOptionalIntEnv(e, "TALLEI_QDRANT__TIMEOUT_MS");
   const qdrantTimeoutSecondsLegacy = readOptionalIntEnv(e, "QDRANT_TIMEOUT_SECONDS"); // legacy only; no TALLEI_ form
+  const defaultOllamaModel = readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen3:14b");
+  const defaultOpenCodeModel = readStringEnv(e, "TALLEI_LLM__OPENCODE_MODEL", "deepseek-v4-flash");
+  const llmProvider = readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google" | "opencode";
+
+  function readResolvedChatModel(key: string, productionDefault: string): string {
+    const cloudDefault = llmProvider === "opencode" ? defaultOpenCodeModel : productionDefault;
+    const fallback = localModelMode ? defaultOllamaModel : cloudDefault;
+    const raw = readStringEnv(e, key, fallback);
+    if (localModelMode) {
+      return coerceChatModelForLocalMode(raw, localModelMode, defaultOllamaModel);
+    }
+    if (llmProvider === "opencode") {
+      return resolveChatModelForCompatibleProvider(raw, defaultOpenCodeModel);
+    }
+    return raw;
+  }
+
+  function readResolvedOptionalChatModel(key: string): string {
+    const raw = readStringEnv(e, key, "").trim();
+    if (!raw) return "";
+    if (localModelMode) {
+      return coerceChatModelForLocalMode(raw, localModelMode, defaultOllamaModel);
+    }
+    if (llmProvider === "opencode") {
+      return resolveChatModelForCompatibleProvider(raw, defaultOpenCodeModel);
+    }
+    return raw;
+  }
 
   return {
     port,
@@ -149,10 +178,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     embeddingModel: readStringEnv(e, "TALLEI_EMBED__MODEL", defaultEmbeddingModel),
     googleEmbeddingModel: readStringEnv(e, "TALLEI_EMBED__GOOGLE_MODEL", "gemini-embedding-001"),
     embeddingDims: readIntEnv(e, "TALLEI_EMBED__DIMS", defaultEmbeddingDims),
-    llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google",
-    openaiModel: readStringEnv(e, "TALLEI_LLM__CHAT_MODEL", "gpt-gpt-5-nano"),
+    llmProvider,
+    openaiModel: readResolvedChatModel("TALLEI_LLM__CHAT_MODEL", "gpt-gpt-5-nano"),
     googleModel: readStringEnv(e, "TALLEI_LLM__GOOGLE_MODEL", "gemini-2.0-flash"),
-    importMemoryExtractModel: readStringEnv(e, "TALLEI_IMPORT__MEMORY_EXTRACT_MODEL", "gpt-5-nano"),
+    importMemoryExtractModel: readResolvedChatModel("TALLEI_IMPORT__MEMORY_EXTRACT_MODEL", "gpt-5-nano"),
     importKeepHighThreshold: readFloatEnv(e, "TALLEI_IMPORT__KEEP_HIGH_THRESHOLD", 0.45),
     importKeepWeakThreshold: readFloatEnv(e, "TALLEI_IMPORT__KEEP_WEAK_THRESHOLD", 0.35),
     importMaxExtractConversations: readIntEnv(e, "TALLEI_IMPORT__MAX_EXTRACT_CONVERSATIONS", 120),
@@ -182,16 +211,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     vertexSearchDataStore: readStringEnv(e, "TALLEI_VERTEX_SEARCH__DATA_STORE"),
     vertexSearchServingConfig: readStringEnv(e, "TALLEI_VERTEX_SEARCH__SERVING_CONFIG"),
     agentEngineIssuer: readStringEnv(e, "TALLEI_AGENT_ENGINE__ISSUER", "tallei-agent-engine"),
-    intentClassifierModel: readStringEnv(e, "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
-    plannerModel: readStringEnv(e, "TALLEI_PLANNER__MODEL", "gpt-gpt-5-nano"),
+    intentClassifierModel: readResolvedChatModel("TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
+    plannerModel: readResolvedChatModel("TALLEI_PLANNER__MODEL", "gpt-gpt-5-nano"),
     plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
     plannerWebSearchBudget: readIntEnv(e, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
     plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000),
-    loopMinerModel: readStringEnv(e, "TALLEI_LOOP_MINER__MODEL", "gpt-gpt-5-nano"),
-    loopMinerEpisodeModel: readStringEnv(e, "TALLEI_LOOP_MINER__EPISODE_MODEL"),
-    loopMinerDetectorModel: readStringEnv(e, "TALLEI_LOOP_MINER__DETECTOR_MODEL"),
-    loopMinerEvaluatorModel: readStringEnv(e, "TALLEI_LOOP_MINER__EVALUATOR_MODEL"),
-    loopMinerDnaModel: readStringEnv(e, "TALLEI_LOOP_MINER__DNA_MODEL"),
+    loopMinerModel: readResolvedChatModel("TALLEI_LOOP_MINER__MODEL", "gpt-gpt-5-nano"),
+    loopMinerEpisodeModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__EPISODE_MODEL"),
+    loopMinerDetectorModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__DETECTOR_MODEL"),
+    loopMinerEvaluatorModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__EVALUATOR_MODEL"),
+    loopMinerDnaModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__DNA_MODEL"),
     loopMinerPromptBudgetTokens: readIntEnv(e, "TALLEI_LOOP_MINER__PROMPT_BUDGET_TOKENS", 4000),
     loopMinerEventSummaryCharCap: readIntEnv(e, "TALLEI_LOOP_MINER__EVENT_SUMMARY_CHAR_CAP", 900),
     loopMinerTranscriptSnippetsMax: readIntEnv(e, "TALLEI_LOOP_MINER__TRANSCRIPT_SNIPPETS_MAX", 2),
@@ -208,7 +237,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     prettyLogsEnabled: readBooleanEnv(e, "TALLEI_OBS__PRETTY_LOGS", nodeEnv === "development"),
     vertexSearchVerboseLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__VERTEX_SEARCH_VERBOSE", false),
     ollamaBaseUrl: readStringEnv(e, "TALLEI_LLM__OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-    ollamaModel: readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen2.5:7b"),
+    ollamaModel: defaultOllamaModel,
+    opencodeBaseUrl: readStringEnv(e, "TALLEI_LLM__OPENCODE_BASE_URL", "https://opencode.ai/zen/go/v1"),
+    opencodeModel: defaultOpenCodeModel,
+    opencodeApiKey: readStringEnv(e, "TALLEI_LLM__OPENCODE_API_KEY") || readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
     kmsKeyId: readStringEnv(e, "TALLEI_AUTH__KMS_KEY_ID", "local-dev"),
     uploadthingToken: readStringEnv(e, "TALLEI_STORAGE__UPLOADTHING_TOKEN"),
@@ -297,6 +329,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       : "internal" as const,
     loopExecutorHeartbeatPollMs: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_POLL_MS", 2_000),
     loopExecutorHeartbeatBatchSize: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_BATCH_SIZE", 4),
+    temporalEnabled: readBooleanEnv(e, "TALLEI_TEMPORAL__ENABLED", false),
+    temporalAddress: readStringEnv(e, "TALLEI_TEMPORAL__ADDRESS", "localhost:7233"),
+    temporalNamespace: readStringEnv(e, "TALLEI_TEMPORAL__NAMESPACE", "default"),
+    temporalTaskQueue: readStringEnv(e, "TALLEI_TEMPORAL__TASK_QUEUE", "tallei-loops"),
     loopExecutorNewsletterLiveWebSearchEnabled: readBooleanEnv(e, "TALLEI_LOOP_EXECUTOR__NEWSLETTER_LIVE_WEB_SEARCH_ENABLED", nodeEnv === "production"),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,

@@ -1,6 +1,7 @@
 // @ts-nocheck
 import OpenAI from "openai";
 
+import { createLoopChatOpenAiSdk, resolveConfiguredChatModel } from "../llm/loop-chat-client.js";
 import { openAiTemperatureParam } from "../llm/openai-chat-params.js";
 
 let cachedClient = null;
@@ -34,23 +35,13 @@ function normalizeTextContent(value) {
         .join("")
         .trim();
 }
-function readLoopExecutorOpenAiApiKey() {
-    const key = process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY || "";
-    if (!key)
-        throw new Error("Loop executor requires OPENAI_API_KEY (or TALLEI_LLM__OPENAI_API_KEY).");
-    return key;
-}
 function loopExecutorOpenAiModel() {
-    const raw = (process.env.TALLEI_LOOP_EXECUTOR__OPENAI_MODEL
-        || process.env.TALLEI_LLM__CHAT_MODEL
-        || "gpt-gpt-5-nano").trim();
-    const normalized = raw.startsWith("openai/") ? raw.slice("openai/".length) : raw;
-    return /^gpt-/i.test(normalized) ? normalized : "gpt-gpt-5-nano";
+    return resolveConfiguredChatModel(process.env.TALLEI_LOOP_EXECUTOR__OPENAI_MODEL);
 }
 function openAiClient() {
     if (cachedClient)
         return cachedClient;
-    cachedClient = new OpenAI({ apiKey: readLoopExecutorOpenAiApiKey() });
+    cachedClient = createLoopChatOpenAiSdk();
     return cachedClient;
 }
 export async function loopExecutorOpenAiChat(input) {

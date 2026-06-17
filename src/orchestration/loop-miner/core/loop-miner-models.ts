@@ -11,10 +11,10 @@ function resolveConfiguredModel(model: string): string {
 export function loopMinerModelForPhase(phase: LoopMinerPhase): string {
   if (phase === "episode" && config.loopMinerEpisodeModel.trim()) return resolveConfiguredModel(config.loopMinerEpisodeModel);
   if (phase === "detector") {
-    const detectorModel = config.loopMinerDetectorModel.trim() || config.loopMinerModel.trim() || "gpt-gpt-5-nano";
+    const detectorModel = config.loopMinerDetectorModel.trim() || config.loopMinerModel.trim();
     return resolveConfiguredModel(detectorModel);
   }
   if (phase === "evaluator" && config.loopMinerEvaluatorModel.trim()) return resolveConfiguredModel(config.loopMinerEvaluatorModel);
   if (phase === "dna" && config.loopMinerDnaModel.trim()) return resolveConfiguredModel(config.loopMinerDnaModel);
-  return resolveConfiguredModel(config.loopMinerModel.trim() || "gpt-gpt-5-nano");
+  return resolveConfiguredModel(config.loopMinerModel.trim());
 }

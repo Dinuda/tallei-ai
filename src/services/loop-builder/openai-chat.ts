@@ -1,5 +1,7 @@
 import OpenAI from "openai";
 
+import { config } from "../../config/index.js";
+import { createLoopChatOpenAiSdk, resolveConfiguredChatModel } from "../llm/loop-chat-client.js";
 import { openAiTemperatureParam } from "../llm/openai-chat-params.js";
 import { estimateLoopBuilderCostUsd, reportLoopBuilderProgress } from "./progress.js";
 
@@ -66,26 +68,31 @@ function normalizeTextContent(value: unknown): string {
     .trim();
 }
 
-function readOpenAiApiKey(): string {
-  const key = process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY || "";
-  if (!key) throw new Error("Loop builder requires OPENAI_API_KEY (or TALLEI_LLM__OPENAI_API_KEY).");
-  return key;
+export function loopBuilderOpenAiModel(): string {
+  const model = resolveConfiguredChatModel(process.env.TALLEI_LOOP_BUILDER__OPENAI_MODEL);
+  if (!config.localModelMode && /^gpt-gpt-5-nano$/i.test(model)) return "gpt-4o";
+  return model;
 }
 
-export function loopBuilderOpenAiModel(): string {
-  const raw = (
-    process.env.TALLEI_LOOP_BUILDER__OPENAI_MODEL
-    || process.env.TALLEI_LLM__CHAT_MODEL
-    || "gpt-4o"
-  ).trim();
-  const normalized = raw.startsWith("openai/") ? raw.slice("openai/".length) : raw;
-  if (/^gpt-gpt-5-nano$/i.test(normalized)) return "gpt-4o";
-  return /^gpt-/i.test(normalized) ? normalized : "gpt-4o";
+/** Provider options for streamed chat (analyzer + spec runs) on reasoning models. */
+export function loopBuilderStreamProviderOptions(model = loopBuilderOpenAiModel()) {
+  if (!isLoopBuilderReasoningModel(model)) return undefined;
+  const reasoningEffort = loopBuilderOpenAiReasoningEffort();
+  return {
+    openai: {
+      // Loop builder replays the full client message history each turn without
+      // previous_response_id chaining. store=true would emit item_reference
+      // payloads OpenAI cannot resolve on a fresh request.
+      store: false as const,
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      reasoningSummary: "auto" as const,
+    },
+  };
 }
 
 function openAiClient(): OpenAI {
   if (cachedClient) return cachedClient;
-  cachedClient = new OpenAI({ apiKey: readOpenAiApiKey() });
+  cachedClient = createLoopChatOpenAiSdk();
   return cachedClient;
 }
 
@@ -224,7 +231,7 @@ export async function loopBuilderOpenAiChat(input: {
         model: result.model,
         promptTokens,
         completionTokens,
-        totalTokens: result.usage.totalTokens ?? promptTokens + completionTokens,
+        totalTokens: promptTokens + completionTokens,
         estimatedCostUsd: estimateLoopBuilderCostUsd(result.model, promptTokens, completionTokens),
         details: {
           finishReason: result.finishReason,
@@ -259,7 +266,7 @@ export async function loopBuilderOpenAiChat(input: {
         model: result.model,
         promptTokens,
         completionTokens,
-        totalTokens: result.usage.totalTokens ?? promptTokens + completionTokens,
+        totalTokens: promptTokens + completionTokens,
         estimatedCostUsd: estimateLoopBuilderCostUsd(result.model, promptTokens, completionTokens),
         details: {
           finishReason: result.finishReason,

@@ -20,8 +20,6 @@ import {
 } from "./spec-run-types.js";
 import type { ToolContract } from "../tool-spec/types.js";
 
-import "./tool-registrations.js";
-
 function contractToolkit(contract: ToolContract): string {
   const configured = contract.constraints.toolkit;
   if (typeof configured === "string" && configured.trim()) return configured.trim().toLowerCase();

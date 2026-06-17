@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { nanoid } from "nanoid";
 import {
   ArrowUp,
   Check,
@@ -18,8 +17,12 @@ import { EmailArtifactCanvas } from "@/components/email-artifact-canvas";
 import { EmailArtifactEditorPanel } from "@/components/email-artifact-editor-panel";
 import { cn } from "@/lib/utils";
 import {
+  buildEmailArtifactTemplates,
+  renderEmailArtifactTemplate,
+  resolveBuilderDraftTemplates,
+} from "@/lib/email-artifacts/build-template";
+import {
   BUILDER_ARTIFACT_DESIGN_ID,
-  BUILDER_DEFAULT_TEMPLATES,
   type BuilderDraftTemplate,
 } from "@/lib/email-artifacts/builder-defaults";
 import { copyTemplateBundle, downloadTemplateHtml } from "@/lib/email-artifacts/export";
@@ -29,53 +32,10 @@ import {
 } from "@/lib/email-artifacts/persist";
 import { templatesSignature } from "@/lib/email-artifacts/template-signature";
 import { defaultEditorContent } from "@/lib/email-artifacts/render-design";
-import {
-  normalizeEmailTemplateProps,
-  templateTypeLabel,
-} from "@/lib/email-artifacts/templates";
 import type {
   ArtifactSetupOutput,
   EmailArtifactTemplate,
-  EmailTemplateProps,
 } from "@/lib/email-artifacts/types";
-
-async function renderArtifactTemplate(template: {
-  reactEmailSource: string;
-  editorContent?: string;
-}): Promise<{ html: string; text: string }> {
-  const props = JSON.parse(template.reactEmailSource) as EmailTemplateProps;
-  const response = await fetch("/api/loop-builder/render-email-artifact", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      designId: BUILDER_ARTIFACT_DESIGN_ID,
-      ...props,
-      editorContent: template.editorContent,
-    }),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(typeof payload.error === "string" ? payload.error : "Could not render template");
-  }
-  return payload as { html: string; text: string };
-}
-
-async function buildTemplate(draft: BuilderDraftTemplate): Promise<EmailArtifactTemplate> {
-  const props = normalizeEmailTemplateProps(draft.props ?? {});
-  const reactEmailSource = JSON.stringify(props);
-  const rendered = await renderArtifactTemplate({ reactEmailSource });
-  return {
-    id: nanoid(8),
-    name: draft.name ?? templateTypeLabel(draft.templateId),
-    templateId: draft.templateId,
-    designId: BUILDER_ARTIFACT_DESIGN_ID,
-    reactEmailSource,
-    subject: props.subject,
-    previewText: props.previewText,
-    html: rendered.html,
-    text: rendered.text,
-  };
-}
 
 export function updateArtifactToolOutput(
   messages: UIMessage[],
@@ -96,6 +56,7 @@ export function updateArtifactToolOutput(
 export function EmailArtifactStudio({
   completedOutput,
   draftTemplates,
+  initialTemplates,
   messages,
   onClose,
   onComplete,
@@ -107,6 +68,7 @@ export function EmailArtifactStudio({
 }: {
   completedOutput?: ArtifactSetupOutput | null;
   draftTemplates?: BuilderDraftTemplate[];
+  initialTemplates?: EmailArtifactTemplate[];
   messages?: UIMessage[];
   onClose?: () => void;
   onComplete?: (output: ArtifactSetupOutput) => void;
@@ -117,10 +79,12 @@ export function EmailArtifactStudio({
   toolCallId?: string;
 }) {
   const approved = Boolean(completedOutput);
-  const [templates, setTemplates] = useState<EmailArtifactTemplate[]>([]);
+  const [templates, setTemplates] = useState<EmailArtifactTemplate[]>(() => initialTemplates ?? []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
-  const [loading, setLoading] = useState(!completedOutput?.templates?.length);
+  const [loading, setLoading] = useState(
+    () => !completedOutput?.templates?.length && !initialTemplates?.length,
+  );
   const [rendering, setRendering] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [persisting, setPersisting] = useState(false);
@@ -153,7 +117,7 @@ export function EmailArtifactStudio({
   }, []);
 
   const seedDraftsKey = useMemo(
-    () => JSON.stringify(draftTemplates?.length ? draftTemplates : BUILDER_DEFAULT_TEMPLATES),
+    () => JSON.stringify(resolveBuilderDraftTemplates(draftTemplates)),
     [draftTemplates],
   );
 
@@ -206,9 +170,14 @@ export function EmailArtifactStudio({
   }, [applyTemplates, completedSignature, completedTemplates, notifyTemplatesChange]);
 
   useEffect(() => {
-    if (completedTemplates?.length) return;
+    if (completedTemplates?.length || !initialTemplates?.length) return;
+    applyTemplates(initialTemplates);
+  }, [applyTemplates, completedTemplates?.length, initialTemplates]);
+
+  useEffect(() => {
+    if (completedTemplates?.length || initialTemplates?.length) return;
     let cancelled = false;
-    void Promise.all(seedDrafts.map((draft) => buildTemplate(draft)))
+    void buildEmailArtifactTemplates(seedDrafts)
       .then((built) => {
         if (cancelled) return;
         applyTemplates(built);
@@ -221,14 +190,14 @@ export function EmailArtifactStudio({
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [applyTemplates, completedTemplates?.length, notifyTemplatesChange, seedDrafts]);
+  }, [applyTemplates, completedTemplates?.length, initialTemplates?.length, notifyTemplatesChange, seedDrafts]);
 
   const saveEditedTemplate = useCallback(async (html: string) => {
     if (!selected) return;
     setRendering(true);
     setError(null);
     try {
-      const rendered = await renderArtifactTemplate({
+      const rendered = await renderEmailArtifactTemplate({
         reactEmailSource: selected.reactEmailSource,
         editorContent: html,
       });

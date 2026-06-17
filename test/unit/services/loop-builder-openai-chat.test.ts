@@ -12,6 +12,17 @@ test("isLoopBuilderReasoningModel detects gpt-5 and o-series models", async () =
   assert.equal(isLoopBuilderReasoningModel("gpt-4o"), false);
 });
 
+test("loopBuilderStreamProviderOptions enables reasoning summary for reasoning models", async () => {
+  const { loopBuilderStreamProviderOptions } = await import("../../../src/services/loop-builder/openai-chat.js");
+  assert.deepEqual(loopBuilderStreamProviderOptions("gpt-5.1"), {
+    openai: {
+      store: false,
+      reasoningEffort: "minimal",
+      reasoningSummary: "auto",
+    },
+  });
+  assert.equal(loopBuilderStreamProviderOptions("gpt-4o"), undefined);
+});
 test("loopBuilderOpenAiReasoningEffort defaults to minimal and can be disabled", async () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
   delete process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;

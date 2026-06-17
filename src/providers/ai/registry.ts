@@ -16,6 +16,7 @@ import { isRetriableProviderError } from "./errors.js";
 import { GoogleGenAI } from "@google/genai";
 import { GoogleProvider } from "./google-provider.js";
 import { OllamaProvider } from "./ollama-provider.js";
+import { OpenCodeProvider } from "./opencode-provider.js";
 import { OpenAiProvider } from "./openai-provider.js";
 import type {
   AiProviderName,
@@ -66,14 +67,16 @@ function buildRetryPolicy(base: RetryPolicy | undefined): RetryPolicy | undefine
   };
 }
 
-function requireOpenAiKeyIfNeeded(providerNames: readonly AiProviderName[]): string {
-  if (!providerNames.includes("openai")) {
-    return config.openaiApiKey;
-  }
-  if (!config.openaiApiKey) {
+function requireOpenAiKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("openai") && !config.openaiApiKey) {
     throw new Error("OPENAI_API_KEY is required when provider is openai");
   }
-  return config.openaiApiKey;
+}
+
+function requireOpenCodeKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("opencode") && !config.opencodeApiKey) {
+    throw new Error("TALLEI_LLM__OPENCODE_API_KEY (or TALLEI_LLM__OPENAI_API_KEY) is required when TALLEI_LLM__PROVIDER=opencode");
+  }
 }
 
 export class ProviderRegistry {
@@ -96,6 +99,7 @@ export class ProviderRegistry {
 
   chatModelName(): string {
     if (this.chatProviderName === "ollama") return config.ollamaModel;
+    if (this.chatProviderName === "opencode") return config.opencodeModel;
     if (this.chatProviderName === "google") return config.googleModel;
     return config.openaiModel;
   }
@@ -146,11 +150,12 @@ export class ProviderRegistry {
 
   private initializeProviders(options: RegistryOptions): void {
     const requiredNames: AiProviderName[] = [options.chatProviderName, options.embeddingProviderName];
-    const openAiKey = requireOpenAiKeyIfNeeded(requiredNames);
+    requireOpenAiKeyIfNeeded(requiredNames);
+    requireOpenCodeKeyIfNeeded(requiredNames);
 
     if (requiredNames.includes("openai")) {
       const openAiProvider = new OpenAiProvider({
-        client: new OpenAI({ apiKey: openAiKey }),
+        client: new OpenAI({ apiKey: config.openaiApiKey }),
         defaultChatModel: config.openaiModel,
         defaultEmbeddingModel: config.embeddingModel,
         defaultEmbeddingDimensions: config.embeddingDims,
@@ -159,6 +164,14 @@ export class ProviderRegistry {
         logger: createLogger({ baseFields: { component: "openai_provider" } }),
       });
       this.providers.set(openAiProvider.name, openAiProvider);
+    }
+
+    if (requiredNames.includes("opencode")) {
+      const openCodeProvider = new OpenCodeProvider({
+        client: new OpenAI({ baseURL: config.opencodeBaseUrl, apiKey: config.opencodeApiKey }),
+        defaultChatModel: config.opencodeModel,
+      });
+      this.providers.set(openCodeProvider.name, openCodeProvider);
     }
 
     if (requiredNames.includes("ollama")) {

@@ -4,7 +4,6 @@ import test from "node:test";
 
 const routePath = new URL("../../../src/transport/http/routes/loopBuilder.ts", import.meta.url);
 const dispatcherPath = new URL("../../../src/services/loop-builder/dispatcher.ts", import.meta.url);
-const architectPath = new URL("../../../src/services/loop-engine/architect.ts", import.meta.url);
 const builderPagePath = new URL("../../../dashboard/app/dashboard/loops/new/page.tsx", import.meta.url);
 const creatorPath = new URL("../../../src/services/loop-executor/creator.ts", import.meta.url);
 const verificationPath = new URL("../../../src/services/loop-executor/verification.ts", import.meta.url);
@@ -110,14 +109,17 @@ test("free text resolves a dismissed interactive prompt before continuing", asyn
   assert.match(builderPage, /await sendMessage\(\)/);
 });
 
-test("workflow architect consumes persisted contracts without Composio discovery", async () => {
-  const architect = await readFile(architectPath, "utf8");
+test("spec drafting consumes persisted build contract without Composio discovery", async () => {
+  const [specs, dispatcher] = await Promise.all([
+    readFile(specsPath, "utf8"),
+    readFile(dispatcherPath, "utf8"),
+  ]);
 
-  assert.doesNotMatch(architect, /discoverToolsForLoopBuild/);
-  assert.doesNotMatch(architect, /mergeDiscoveredTools/);
-  assert.match(architect, /input\.discoveredToolContracts \?\? \[\]/);
-  assert.match(architect, /requires persisted connector contracts discovered before drafting/);
-  assert.match(architect, /buildContract: input\.noSlopSpec\?\.buildContract \?\? input\.noSlopSpec\?\.specJson\.buildContract/);
+  assert.doesNotMatch(specs, /discoverToolsForLoopBuild/);
+  assert.match(specs, /loopBuildContractSchema\.parse\(input\.buildContract\)/);
+  assert.match(specs, /buildContract,/);
+  assert.match(dispatcher, /ensureDraftedSpec/);
+  assert.match(dispatcher, /draftLoopSpec\(/);
 });
 
 test("builder-created workflows remain unscheduled until verification is confirmed", async () => {
@@ -198,9 +200,11 @@ test("event choices come from discovered connector triggers and scheduled fallba
   assert.doesNotMatch(scheduleSelector, /every 1 minute|every 5 minutes/i);
   assert.match(scheduleSelector, /Real-time triggers are not available/);
   assert.doesNotMatch(scheduleSelector, /Validation error/);
-  assert.match(verification, /registerComposioTrigger/);
+  assert.match(verification, /DELETE FROM workflow_connector_triggers/);
+  assert.match(verification, /trigger_instance_id = \$1 AND workflow_id <> \$2/);
   assert.match(verification, /selectedTrigger\?\.mode === "event" \? null/);
-  assert.match(triggerWebhook, /startWebhookLoopRun/);
+  assert.match(triggerWebhook, /createSpecLoopRun/);
+  assert.match(triggerWebhook, /startLoopRunWorkflow/);
   assert.match(triggerWebhook, /workflow_connector_trigger_events/);
   assert.match(connectorRoute, /handleComposioTriggerWebhook/);
   assert.ok(connectorRoute.indexOf('router.post("/composio/webhook"') < connectorRoute.indexOf("router.use(authMiddleware)"));
@@ -213,11 +217,17 @@ test("spec save approves and persists in one saveLoop step", async () => {
   ]);
 
   assert.doesNotMatch(route, /approveSpec:\s*tool\(/);
-  assert.match(route, /saveLoop approves and persists in one step/);
-  assert.match(route, /'Save loop' \(recommended/);
+  assert.doesNotMatch(route, /draftSpec:\s*tool\(/);
+  assert.match(route, /saveLoop with preview true/);
+  assert.match(route, /I'm happy with this/);
+  assert.match(route, /Activate.*I'll do more changes/);
+  assert.match(dispatcher, /input\.preview === true/);
+  assert.match(dispatcher, /ensureDraftedSpec/);
+  assert.match(dispatcher, /runWorkflowVerification/);
   assert.match(dispatcher, /spec\.status !== "approved"/);
   assert.match(dispatcher, /approveLoopSpec\(/);
-  assert.match(dispatcher, /\["spec_drafted", "spec_approved", "saved", "failed"\]/);
+  assert.match(dispatcher, /\["intent_resolved", "spec_drafted", "spec_approved", "saved", "failed"\]/);
+  assert.match(dispatcher, /\["saved", "failed"\]/);
   assert.match(dispatcher, /isRecoverableBuilderError/);
 });
 

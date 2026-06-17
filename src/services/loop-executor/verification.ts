@@ -16,7 +16,9 @@ import {
 } from "../loop-runtime/connector-action-payload.js";
 import { nextCronRunAt } from "./cron.js";
 import { parseRunnableSpec, type RunnableSpec } from "../loop-runtime/spec-run-types.js";
-import { loopDefinitionSchema } from "./types.js";
+import { scheduleTriggerLabel } from "../loop-runtime/spec-runner.js";
+import { isTemporalEnabled } from "../../temporal/client.js";
+import { upsertLoopSchedule } from "../../temporal/schedules.js";
 import { deriveVerificationScope, deriveGroundingVerificationTargets, VERIFICATION_RUNTIME_TRANSPARENCY_NOTES, type VerificationTarget } from "./verification-scope.js";
 import { createLiveVerificationSpecCache, resolveLiveVerificationContract } from "./verification-spec.js";
 import {
@@ -207,9 +209,7 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
       if (!workflowBuildContract) throw new Error("Runnable spec is missing build contract metadata.");
       assertBuildContractReady(workflowBuildContract);
     } else {
-      const definition = loopDefinitionSchema.parse(metadata.loopDefinition);
-      assertBuildContractReady(definition.buildContract);
-      workflowBuildContract = definition.buildContract;
+      throw new Error("Workflow is missing a runnable spec. Re-save from the loop builder.");
     }
   } catch (error) {
     definitionFailure = `Workflow build contract verification failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -551,6 +551,15 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
 
 export async function confirmWorkflowVerification(auth: AuthContext, workflowId: string): Promise<WorkflowVerificationView> {
   const verification = await getWorkflowVerification(auth, workflowId);
+  const workflowStatus = await pool.query<{ status: string }>(
+    `SELECT status FROM workflows
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+     LIMIT 1`,
+    [workflowId, auth.tenantId, auth.userId],
+  );
+  if (workflowStatus.rows[0]?.status === "active") {
+    return verification ?? (await getWorkflowVerification(auth, workflowId))!;
+  }
   if (!verification || verification.status !== "awaiting_confirmation") {
     throw new Error("Successful verification evidence must be awaiting confirmation before activation.");
   }
@@ -566,9 +575,12 @@ export async function confirmWorkflowVerification(auth: AuthContext, workflowId:
     ? snapshot.metadata_json as Record<string, unknown>
     : {};
   const runnableSpec = parseRunnableSpec(metadata);
-  const buildContract = runnableSpec
-    ? (runnableSpec.buildContract ?? runnableSpec.noSlopSpec.buildContract ?? runnableSpec.noSlopSpec.specJson.buildContract)
-    : loopDefinitionSchema.parse(metadata.loopDefinition).buildContract;
+  if (!runnableSpec) {
+    throw new Error("Workflow is missing a runnable spec. Re-save from the loop builder.");
+  }
+  const buildContract = runnableSpec.buildContract
+    ?? runnableSpec.noSlopSpec.buildContract
+    ?? runnableSpec.noSlopSpec.specJson.buildContract;
   const selectedTrigger = buildContract ? selectedLoopTrigger(buildContract) : null;
   const registeredTrigger = selectedTrigger?.mode === "event"
     ? await registerComposioTrigger({ auth, toolkit: selectedTrigger.toolkit, triggerSlug: selectedTrigger.triggerSlug })
@@ -585,6 +597,24 @@ export async function confirmWorkflowVerification(auth: AuthContext, workflowId:
     );
     if (!workflow.rows[0]) throw new Error("Workflow is not awaiting verification.");
     if (registeredTrigger && selectedTrigger?.mode === "event") {
+      const conflictingTrigger = await client.query<{ workflow_id: string; status: string }>(
+        `SELECT wct.workflow_id, w.status
+         FROM workflow_connector_triggers wct
+         JOIN workflows w ON w.id = wct.workflow_id
+         WHERE wct.trigger_instance_id = $1
+           AND wct.workflow_id <> $2
+           AND w.tenant_id = $3
+           AND w.user_id = $4`,
+        [registeredTrigger.triggerId, workflowId, auth.tenantId, auth.userId],
+      );
+      if (conflictingTrigger.rows.some((row) => row.status === "active")) {
+        throw new Error("This event trigger is already assigned to another active loop. Archive that loop before activating this one.");
+      }
+      await client.query(
+        `DELETE FROM workflow_connector_triggers
+         WHERE trigger_instance_id = $1 AND workflow_id <> $2`,
+        [registeredTrigger.triggerId, workflowId],
+      );
       await client.query(
         `INSERT INTO workflow_connector_triggers
          (workflow_id, tenant_id, user_id, toolkit, trigger_slug, trigger_instance_id, connected_account_id)
@@ -619,5 +649,17 @@ export async function confirmWorkflowVerification(auth: AuthContext, workflowId:
   } finally {
     client.release();
   }
+
+  if (selectedTrigger?.mode === "schedule" && isTemporalEnabled()) {
+    await upsertLoopSchedule({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      workflowId,
+      cron: selectedTrigger.cron,
+      timezone: selectedTrigger.timezone,
+      label: scheduleTriggerLabel(selectedTrigger.cron),
+    });
+  }
+
   return (await getWorkflowVerification(auth, workflowId))!;
 }

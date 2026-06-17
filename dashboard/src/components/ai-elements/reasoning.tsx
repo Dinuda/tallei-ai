@@ -50,6 +50,8 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   duration?: number;
+  /** When true, collapse automatically after streaming ends. Enabled by default. */
+  autoClose?: boolean;
 };
 
 const AUTO_CLOSE_DELAY = 1000;
@@ -63,6 +65,7 @@ export const Reasoning = memo(
     defaultOpen,
     onOpenChange,
     duration: durationProp,
+    autoClose = true,
     children,
     ...props
   }: ReasoningProps) => {
@@ -88,6 +91,7 @@ export const Reasoning = memo(
     useEffect(() => {
       if (isStreaming) {
         hasEverStreamedRef.current = true;
+        setHasAutoClosed(false);
         if (startTimeRef.current === null) {
           startTimeRef.current = Date.now();
         }
@@ -107,6 +111,7 @@ export const Reasoning = memo(
     // Auto-close when streaming ends (once only, and only if it ever streamed)
     useEffect(() => {
       if (
+        autoClose &&
         hasEverStreamedRef.current &&
         !isStreaming &&
         isOpen &&
@@ -119,7 +124,7 @@ export const Reasoning = memo(
 
         return () => clearTimeout(timer);
       }
-    }, [isStreaming, isOpen, setIsOpen, hasAutoClosed]);
+    }, [autoClose, isStreaming, isOpen, setIsOpen, hasAutoClosed]);
 
     const handleOpenChange = useCallback(
       (newOpen: boolean) => {
@@ -207,18 +212,29 @@ export type ReasoningContentProps = ComponentProps<
 const streamdownPlugins = { cjk, code, math, mermaid };
 
 export const ReasoningContent = memo(
-  ({ className, children, ...props }: ReasoningContentProps) => (
-    <CollapsibleContent
-      className={cn(
-        "mt-4 text-sm",
-        "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
-        className
-      )}
-      {...props}
-    >
-      <Streamdown plugins={streamdownPlugins}>{children}</Streamdown>
-    </CollapsibleContent>
-  )
+  ({ className, children, ...props }: ReasoningContentProps) => {
+    const { isStreaming } = useReasoning();
+    const text = children.trim();
+    // Trigger already shows "Thinking..." while streaming; avoid a duplicate line.
+    if (!text && isStreaming) return null;
+
+    return (
+      <CollapsibleContent
+        className={cn(
+          "mt-4 text-sm",
+          "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+          className
+        )}
+        {...props}
+      >
+        {text ? (
+          <Streamdown plugins={streamdownPlugins}>{children}</Streamdown>
+        ) : (
+          <p className="text-muted-foreground italic">No thinking details were returned for this step.</p>
+        )}
+      </CollapsibleContent>
+    );
+  }
 );
 
 Reasoning.displayName = "Reasoning";

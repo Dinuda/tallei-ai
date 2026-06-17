@@ -168,6 +168,28 @@ async function deriveUnresolvedLegacyBuildContract(
   return buildContract;
 }
 
+async function ensureDraftedSpec(
+  auth: AuthContext,
+  sessionId: string,
+  session: Awaited<ReturnType<typeof requireWorkflowBuilderSession>>,
+) {
+  if (session.specId) {
+    const existing = await getLoopSpec(auth, session.specId);
+    if (existing && existing.status !== "archived") return existing;
+  }
+  if (!session.resolvedIntent) throw new Error("Resolved intent is required before drafting");
+  if (!session.buildContract) assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
+  assertBuildContractReady(session.buildContract);
+  const spec = await draftLoopSpec({
+    auth,
+    prompt: session.goal,
+    intentContext: session.resolvedIntent,
+    buildContract: session.buildContract,
+  });
+  await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_drafted", spec, error: null });
+  return spec;
+}
+
 async function execute(auth: AuthContext, sessionId: string, toolName: BuilderToolName, input: Record<string, unknown>) {
   let session = await requireWorkflowBuilderSession(auth, sessionId);
   switch (toolName) {
@@ -281,18 +303,8 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       return { checklist: await refreshBuilderConnectorAvailability(auth, sessionId) };
     }
     case "draftSpec": {
-      requirePhase(session.phase, ["intent_resolved"], toolName);
-      if (!session.resolvedIntent) throw new Error("Resolved intent is required before drafting");
-      if (!session.buildContract) assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
-      assertBuildContractReady(session.buildContract);
-      const spec = await draftLoopSpec({
-        auth,
-        prompt: session.goal,
-        intentContext: session.resolvedIntent,
-        buildContract: session.buildContract,
-      });
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_drafted", spec });
-      return { spec };
+      requirePhase(session.phase, ["intent_resolved", "spec_drafted", "failed"], toolName);
+      return { spec: await ensureDraftedSpec(auth, sessionId, session) };
     }
     case "refineSpec": {
       requirePhase(session.phase, ["spec_drafted", "spec_approved", "saved"], toolName);
@@ -317,21 +329,32 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       return { ok: true };
     }
     case "saveLoop": {
-      requireApproval(input, toolName);
-      requirePhase(session.phase, ["spec_drafted", "spec_approved", "saved", "failed"], toolName);
-      if (!session.specId) throw new Error("Session has no spec to save");
+      const preview = input.preview === true;
+      if (!preview) requireApproval(input, toolName);
+      requirePhase(session.phase, ["intent_resolved", "spec_drafted", "spec_approved", "saved", "failed"], toolName);
+
+      if (preview) {
+        return { spec: await ensureDraftedSpec(auth, sessionId, session), preview: true };
+      }
+
       if (session.phase === "saved" && session.workflowId) {
         return {
           workflowId: session.workflowId,
           loop: { id: session.workflowId },
-          verification: await initializeWorkflowVerification(auth, session.workflowId),
+          verification: await runWorkflowVerification(auth, session.workflowId),
         };
       }
+
       await updateWorkflowBuilderSession(auth, sessionId, { error: null });
+      session = await requireWorkflowBuilderSession(auth, sessionId);
       if (!session.buildContract) assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
       assertBuildContractReady(session.buildContract);
-      let spec = await getLoopSpec(auth, session.specId);
-      if (!spec) throw new Error("Loop spec not found");
+      let spec = session.specId ? await getLoopSpec(auth, session.specId) : null;
+      if (!spec) {
+        spec = await ensureDraftedSpec(auth, sessionId, session);
+        session = await requireWorkflowBuilderSession(auth, sessionId);
+      }
+      if (!session.specId) throw new Error("Session has no spec to save");
       if (spec.status !== "approved") {
         spec = await approveLoopSpec({
           auth,
@@ -361,8 +384,9 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         initialStatus: "verifying",
       });
       const workflowId = String((loop as { id?: unknown }).id ?? "");
-      const verification = await initializeWorkflowVerification(auth, workflowId);
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", workflowId });
+      await initializeWorkflowVerification(auth, workflowId);
+      const verification = await runWorkflowVerification(auth, workflowId);
+      await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", workflowId, error: null });
       return { loop, verification, workflowId };
     }
     case "runVerification": {
@@ -374,9 +398,11 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
     }
     case "confirmActivation": {
       requireApproval(input, toolName);
-      requirePhase(session.phase, ["saved"], toolName);
+      requirePhase(session.phase, ["saved", "failed"], toolName);
       if (!session.workflowId) throw new Error("Session has no saved workflow.");
-      return { verification: await confirmWorkflowVerification(auth, session.workflowId) };
+      const verification = await confirmWorkflowVerification(auth, session.workflowId);
+      await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", error: null });
+      return { verification };
     }
   }
 }
@@ -396,11 +422,11 @@ async function runCommand(auth: AuthContext, commandId: string, sessionId: strin
         };
         events.push(next);
         if (event.model) usage.models[event.model] = (usage.models[event.model] ?? 0) + 1;
-        if (event.promptTokens != null || event.completionTokens != null || event.totalTokens != null) {
+        if (event.promptTokens != null || event.completionTokens != null) {
           usage.calls += 1;
           usage.promptTokens += event.promptTokens ?? 0;
           usage.completionTokens += event.completionTokens ?? 0;
-          usage.totalTokens += event.totalTokens ?? 0;
+          usage.totalTokens = usage.promptTokens + usage.completionTokens;
           usage.estimatedCostUsd = Number((usage.estimatedCostUsd + (event.estimatedCostUsd ?? 0)).toFixed(8));
         }
         void pool.query(

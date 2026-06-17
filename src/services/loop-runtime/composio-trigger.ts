@@ -3,7 +3,8 @@ import { pool } from "../../infrastructure/db/index.js";
 import { selectedLoopTrigger } from "../loop-engine/build-contract.js";
 import { getLoopWorkflow } from "../loop-executor/creator.js";
 import { resolveLoopRunAuth } from "./resolve-loop-run-auth.js";
-import { startWebhookLoopRun } from "./runtime.js";
+import { createSpecLoopRun } from "./spec-runner.js";
+import { startLoopRunWorkflow } from "../../temporal/start-loop-run.js";
 
 type WorkflowTriggerActivityView = {
   mode: "event" | "schedule" | "none";
@@ -28,18 +29,6 @@ type WorkflowTriggerActivityView = {
     receivedAt: string;
   }>;
 };
-
-function projectionRunId(projection: unknown): string {
-  if (!projection || typeof projection !== "object") return "";
-  if ("id" in projection && typeof (projection as { id?: unknown }).id === "string") {
-    return (projection as { id: string }).id;
-  }
-  if ("run" in projection) {
-    const run = (projection as { run?: { id?: unknown } }).run;
-    return run?.id != null ? String(run.id) : "";
-  }
-  return "";
-}
 
 export async function getWorkflowTriggerActivity(
   auth: AuthContext,
@@ -173,13 +162,26 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
     workflowId: target.workflow_id,
   });
   try {
-    const projection = await startWebhookLoopRun(auth, target.workflow_id, {
-      id: event.id,
-      type: event.type,
+    const triggerLabel = event.metadata.trigger_slug;
+    const run = await createSpecLoopRun(auth, target.workflow_id, {
+      source: "event",
+      label: triggerLabel,
+      eventId: event.id,
       triggerSlug: event.metadata.trigger_slug,
-      data: event.data,
     });
-    const runId = projectionRunId(projection);
+    await startLoopRunWorkflow({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      workflowId: target.workflow_id,
+      runId: run.id,
+      trigger: {
+        source: "event",
+        label: triggerLabel,
+        eventId: event.id,
+        triggerSlug: event.metadata.trigger_slug,
+      },
+    });
+    const runId = run.id;
     if (runId) {
       await pool.query(
         `UPDATE workflow_connector_trigger_events SET run_id = $3 WHERE trigger_instance_id = $1 AND external_event_id = $2`,

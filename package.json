@@ -20,7 +20,8 @@
     "baseline:metrics": "node scripts/baseline-metrics.mjs",
     "setup:claude": "node scripts/setup-claude-mcp.mjs",
     "setup:chatgpt": "node scripts/setup-chatgpt-actions.mjs",
-    "sync:composio-catalog": "node scripts/sync-composio-catalog.mjs"
+    "sync:composio-catalog": "node scripts/sync-composio-catalog.mjs",
+    "temporal:worker": "tsx src/temporal/worker.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.78",
@@ -38,6 +39,10 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@qdrant/js-client-rest": "^1.17.0",
     "@supabase/supabase-js": "^2.103.3",
+    "@temporalio/activity": "^1.18.1",
+    "@temporalio/client": "^1.18.1",
+    "@temporalio/worker": "^1.18.1",
+    "@temporalio/workflow": "^1.18.1",
     "@workflow/world-postgres": "^4.1.1",
     "ai": "^6.0.184",
     "ajv": "^8.20.0",

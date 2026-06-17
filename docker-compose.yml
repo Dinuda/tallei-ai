@@ -10,5 +10,37 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  temporal-db:
+    profiles: ["temporal"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    profiles: ["temporal"]
+    image: temporalio/auto-setup:1.26.2
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-db
+
 volumes:
   pgdata:
+  temporal_pgdata:

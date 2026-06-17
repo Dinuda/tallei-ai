@@ -71,7 +71,7 @@ export function estimateLoopBuilderCostUsd(model: string, promptTokens: number, 
 }
 
 export function mergeLoopBuilderUsageTotals(...usages: LoopBuilderUsage[]): LoopBuilderUsage {
-  return usages.reduce<LoopBuilderUsage>((acc, usage) => {
+  const merged = usages.reduce<LoopBuilderUsage>((acc, usage) => {
     const models = { ...acc.models };
     for (const [model, count] of Object.entries(usage.models ?? {})) {
       models[model] = (models[model] ?? 0) + count;
@@ -80,11 +80,13 @@ export function mergeLoopBuilderUsageTotals(...usages: LoopBuilderUsage[]): Loop
       calls: acc.calls + usage.calls,
       promptTokens: acc.promptTokens + usage.promptTokens,
       completionTokens: acc.completionTokens + usage.completionTokens,
-      totalTokens: acc.totalTokens + usage.totalTokens,
+      totalTokens: 0,
       estimatedCostUsd: Number((acc.estimatedCostUsd + usage.estimatedCostUsd).toFixed(8)),
       models,
     };
   }, emptyLoopBuilderUsage());
+  merged.totalTokens = merged.promptTokens + merged.completionTokens;
+  return merged;
 }
 
 export function usageFromLanguageModelStep(
@@ -93,12 +95,11 @@ export function usageFromLanguageModelStep(
 ): LoopBuilderUsage {
   const promptTokens = usage.promptTokens ?? 0;
   const completionTokens = usage.completionTokens ?? 0;
-  const totalTokens = usage.totalTokens ?? promptTokens + completionTokens;
   return {
     calls: 1,
     promptTokens,
     completionTokens,
-    totalTokens,
+    totalTokens: promptTokens + completionTokens,
     estimatedCostUsd: estimateLoopBuilderCostUsd(model, promptTokens, completionTokens),
     models: { [model]: 1 },
   };

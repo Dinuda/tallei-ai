@@ -1,5 +1,6 @@
 export type { AiProvider } from "./ai-provider.js";
 export { mapProviderError, isRetriableProviderError } from "./errors.js";
+export { OpenCodeProvider } from "./opencode-provider.js";
 export { OllamaProvider } from "./ollama-provider.js";
 export { OpenAiProvider } from "./openai-provider.js";
 export { ProviderRegistry, aiProviderRegistry } from "./registry.js";

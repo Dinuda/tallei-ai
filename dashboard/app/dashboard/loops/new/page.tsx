@@ -64,7 +64,7 @@ import { BuilderKnowledgeBaseSelector, type KnowledgeBaseSelectionOutput } from 
 import { BuilderArtifactEditor, type ArtifactSetupOutput, updateArtifactToolOutput } from "@/components/builder-artifact-editor";
 import { BuilderRequirementSelector, type RequirementSetupOutput } from "@/components/builder-requirement-selector";
 import type { EmailTemplateId, EmailTemplateProps } from "@/lib/email-artifacts/types";
-import { LoopActivationCard } from "@/components/loop-activation-card";
+import { notifyLoopBuilderSessionUpdated } from "@/components/loop-builder-header";
 import {
   emptyBuilderLiveUsage,
   normalizeBuilderLiveUsage,
@@ -90,15 +90,12 @@ export default function NewLoopBuilderPage() {
     } | null;
     discoveredToolContracts?: Array<{ toolRef?: string; name?: string; constraints?: { connected?: boolean } }>;
   } | null>(null);
-  const [workflowMeta, setWorkflowMeta] = useState<{
-    latestRun?: { id: string } | null;
-    status?: string;
-  } | null>(null);
   const [recalledPreferences, setRecalledPreferences] = useState<Array<{ id: string; text: string; category?: string | null }>>([]);
   const [dismissedPromptId, setDismissedPromptId] = useState<string | null>(null);
   const [dismissedSetupId, setDismissedSetupId] = useState<string | null>(null);
   const [commands, setCommands] = useState<any[]>([]);
   const [analyzerUsage, setAnalyzerUsage] = useState(emptyBuilderLiveUsage);
+  const [liveUsageFromStream, setLiveUsageFromStream] = useState<ReturnType<typeof emptyBuilderLiveUsage> | null>(null);
 
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
@@ -112,7 +109,7 @@ export default function NewLoopBuilderPage() {
     ...commands.map((command) => normalizeBuilderLiveUsage(command.usage)),
   ), [commands]);
 
-  const liveUsage = useMemo(
+  const savedUsage = useMemo(
     () => sumBuilderLiveUsage(commandUsage, analyzerUsage),
     [analyzerUsage, commandUsage],
   );
@@ -128,17 +125,7 @@ export default function NewLoopBuilderPage() {
     setAnalyzerUsage(normalizeBuilderLiveUsage(payload.session?.analyzerUsage));
     setBuilderSession(payload.session ?? null);
     setRecalledPreferences(Array.isArray(payload.recalledPreferences) ? payload.recalledPreferences : []);
-    const workflowId = payload.session?.workflowId as string | null | undefined;
-    if (workflowId) {
-      const workflowResponse = await fetch(`/api/workflows/internal/loops/${workflowId}`, { cache: "no-store" });
-      const workflowPayload = await workflowResponse.json().catch(() => ({}));
-      if (workflowResponse.ok) {
-        const loop = (workflowPayload as { loop?: { latestRun?: { id: string } | null; status?: string } }).loop;
-        setWorkflowMeta({ latestRun: loop?.latestRun ?? null, status: loop?.status });
-      }
-    } else {
-      setWorkflowMeta(null);
-    }
+    notifyLoopBuilderSessionUpdated(sessionId);
     return payload.messages as UIMessage[];
   }, []);
 
@@ -148,8 +135,8 @@ export default function NewLoopBuilderPage() {
       lastAssistantMessageIsCompleteWithApprovalResponses({ messages: currentMessages })
       || lastAssistantMessageIsCompleteWithToolCalls({ messages: currentMessages }),
     onData: (part) => {
-      if (part.type === "data-usage") {
-        setAnalyzerUsage(normalizeBuilderLiveUsage(part.data));
+      if (part.type === "data-usage" && "data" in part) {
+        setLiveUsageFromStream(normalizeBuilderLiveUsage(part.data));
         return;
       }
       if (part.type !== "data-session") return;
@@ -159,10 +146,15 @@ export default function NewLoopBuilderPage() {
       window.history.replaceState(null, "", `/dashboard/loops/new?session=${encodeURIComponent(nextId)}`);
     },
     onFinish: () => {
+      setLiveUsageFromStream(null);
       const id = sessionIdRef.current;
       if (id) void refreshSession(id).then(setMessages);
     },
   });
+
+  const liveUsage = (status === "streaming" || status === "submitted") && liveUsageFromStream
+    ? liveUsageFromStream
+    : savedUsage;
 
   useEffect(() => {
     const sessionId = new URLSearchParams(window.location.search).get("session");
@@ -176,6 +168,42 @@ export default function NewLoopBuilderPage() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [refreshSession, setMessages]);
+
+  // Fallback: refresh command usage from the DB while long-running builder tools execute.
+  useEffect(() => {
+    if (status !== "streaming" && status !== "submitted") return;
+    const id = sessionIdRef.current;
+    if (!id) return;
+
+    let cancelled = false;
+    const pollCommands = async () => {
+      try {
+        const response = await fetch(`/api/loop-builder/sessions/${id}`, { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || cancelled) return;
+        if (Array.isArray(payload.commands)) {
+          setCommands(payload.commands);
+          const polledUsage = sumBuilderLiveUsage(
+            normalizeBuilderLiveUsage(payload.session?.analyzerUsage),
+            ...payload.commands.map((command: { usage?: unknown }) => normalizeBuilderLiveUsage(command.usage)),
+          );
+          setLiveUsageFromStream((current) => {
+            if (!current || polledUsage.totalTokens >= current.totalTokens) return polledUsage;
+            return current;
+          });
+        }
+      } catch {
+        // Best-effort live usage refresh.
+      }
+    };
+
+    void pollCommands();
+    const interval = window.setInterval(() => void pollCommands(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [status]);
 
   const activeInteractivePrompt = findActiveInteractivePrompt(messages);
   const activeAppSelection = findActiveAppSelection(messages);
@@ -203,24 +231,6 @@ export default function NewLoopBuilderPage() {
     }
     return toolkits;
   }, [builderSession]);
-  const activationTriggerSummary = useMemo(() => {
-    const scheduleReq = builderSession?.buildContract?.requirements?.find((entry) => entry.kind === "trigger_schedule");
-    const value = scheduleReq?.value && typeof scheduleReq.value === "object" && !Array.isArray(scheduleReq.value)
-      ? scheduleReq.value as Record<string, unknown>
-      : null;
-    if (value?.trigger === "event") {
-      const slug = typeof value.triggerSlug === "string" ? value.triggerSlug : "integration event";
-      return `Listening for ${slug}. New runs open on the run page automatically.`;
-    }
-    if (value?.trigger === "schedule" || value?.cron) {
-      return "Scheduled runs open on the run page automatically.";
-    }
-    return "Runs open on the run page automatically when your loop executes.";
-  }, [builderSession]);
-  const showActivationCard = Boolean(
-    builderSession?.workflowId
-    && (builderSession.phase === "saved" || workflowMeta?.status === "active" || workflowMeta?.status === "verifying"),
-  );
   const activePromptId = activeInteractivePrompt?.toolCallId ?? null;
   const activeSetupId = activeRequirementSetup?.toolCallId ?? null;
   const showInteractivePrompt = activePromptId !== null && activePromptId !== dismissedPromptId;
@@ -329,8 +339,14 @@ export default function NewLoopBuilderPage() {
                     {message.parts.map((part, index) => {
                       if (part.type === "text") return <MessageResponse key={index}>{part.text}</MessageResponse>;
                       if (isReasoningUIPart(part)) {
+                        const reasoningText = part.text?.trim() ?? "";
+                        if (!reasoningText && part.state !== "streaming") return null;
                         return (
-                          <Reasoning isStreaming={part.state === "streaming"} defaultOpen key={`reasoning-${index}`}>
+                          <Reasoning
+                            isStreaming={part.state === "streaming"}
+                            defaultOpen={part.state === "streaming"}
+                            key={`reasoning-${index}`}
+                          >
                             <ReasoningTrigger />
                             <ReasoningContent>{part.text}</ReasoningContent>
                           </Reasoning>
@@ -486,15 +502,6 @@ export default function NewLoopBuilderPage() {
                   </MessageContent>
                 </Message>
               ))}
-              {showActivationCard && builderSession?.workflowId && sessionId ? (
-                <LoopActivationCard
-                  workflowId={builderSession.workflowId}
-                  sessionId={sessionId}
-                  phase={workflowMeta?.status === "active" ? "active" : workflowMeta?.status === "verifying" ? "verifying" : builderSession.phase}
-                  triggerSummary={activationTriggerSummary}
-                  latestRun={workflowMeta?.latestRun ?? null}
-                />
-              ) : null}
               {error && <p className="text-sm text-destructive">{error.message}</p>}
             </ConversationContent>
             <ConversationScrollButton />

@@ -7,11 +7,8 @@ import {
   specSemanticPipeline,
   supplementDiscoveryQueriesFromSpec,
 } from "../../../src/services/loop-engine/spec-required-connectors.js";
-import { validateOutboundDeliveryPlan } from "../../../src/services/loop-engine/architect.js";
-import { compileLoopPlanningIR, loopPlanningIRSchema } from "../../../src/services/loop-engine/planning-ir.js";
 import {
   buildComposioActionContract,
-  getStaticToolContract,
 } from "../../../src/services/tool-spec/tool-contracts.js";
 
 const newsletterSpec = {
@@ -82,79 +79,6 @@ test("specSemanticPipeline preserves reviewed agent order through selectedAction
   assert.deepEqual(pipeline.map((step) => step.downstream), ["Analysis Agent", "Content Agent", "selectedActions"]);
 });
 
-test("planning compiler accepts contacts_csv array binding to calendar attendees", () => {
-  const calendar = buildComposioActionContract({
-    toolkit: "googlecalendar",
-    actionSlug: "GOOGLECALENDAR_CREATE_EVENT",
-    risk: "write",
-    inputSchema: {
-      type: "object",
-      properties: {
-        summary: { type: "string" },
-        start: { type: "string" },
-        attendees: { type: "array", items: { type: "string" } },
-      },
-      required: ["summary", "start", "attendees"],
-    },
-    outputSchema: { type: "object", properties: { id: { type: "string" } } },
-  });
-  const plan = loopPlanningIRSchema.parse({
-    version: "v2",
-    title: "Weekly brief",
-    summary: "Schedule follow-up.",
-    strategy: "Write and schedule.",
-    schedule: { cron: "0 9 * * 5", timezone: "UTC" },
-    requiredValues: [{
-      key: "calendarInviteAttendees",
-      label: "Attendees",
-      description: "Attendee list.",
-      lifecycle: "runtime_input",
-      timing: "before_action",
-      sensitivity: "private",
-      surface: "input.contacts_csv",
-      valueType: "array",
-      sourceKind: "operator_input",
-      status: "resolved",
-      stableScalar: null,
-    }],
-    semanticAgents: [{
-      id: "writer",
-      name: "Writer",
-      responsibility: "Write invite summary.",
-      task: "Write.",
-      toolRef: "internal.llm_only",
-      inputBindings: [],
-      outputArtifact: {
-        id: "draft",
-        description: "Draft",
-        representation: "json",
-        visibility: "internal",
-        rendererRef: null,
-        reviewMode: "none",
-        editable: false,
-        fields: [{ path: "/subject", type: "string", required: true }],
-      },
-    }],
-    selectedActions: [{
-      id: "schedule",
-      contractRef: calendar.toolRef,
-      purpose: "Create invite.",
-      annotation: { effect: "write_external", confidence: "high", approvalRequired: true },
-      bindings: [
-        { source: { kind: "agent_output", nodeId: "writer", path: "/subject" }, targetPath: "/summary", required: true, valuePolicy: "derivable", provenance: "agent_output" },
-        { source: { kind: "required_value", key: "calendarInviteAttendees", path: "/" }, targetPath: "/attendees", required: true, valuePolicy: "passthrough", provenance: "operator_input" },
-        { source: { kind: "required_value", key: "calendarInviteAttendees", path: "/" }, targetPath: "/start", required: true, valuePolicy: "passthrough", provenance: "operator_input" },
-      ],
-    }],
-    unresolvedIssues: [],
-  });
-  const compiled = compileLoopPlanningIR({
-    planningIR: plan,
-    contracts: [getStaticToolContract("internal.llm_only")!, calendar],
-  });
-  assert.equal(compiled.ok, true);
-});
-
 test("prioritizeDiscoveredConnectors keeps only spec-required toolkits when present", () => {
   const gmail = buildComposioActionContract({
     toolkit: "gmail",
@@ -208,99 +132,4 @@ test("prioritizeDiscoveredConnectors orders any preferred available provider fir
     { contract: preferred, connected: false, source: "composio_search" },
   ], [], "customer-io");
   assert.deepEqual(prioritized.map((entry) => entry.contract.toolRef), [preferred.toolRef, alternative.toolRef]);
-});
-
-test("outbound delivery rejects an alternative provider action", () => {
-  const alternative = buildComposioActionContract({
-    toolkit: "provider_y",
-    actionSlug: "PROVIDER_Y_SEND",
-    risk: "send",
-    inputSchema: { type: "object", properties: { body: { type: "string" } }, required: ["body"] },
-    outputSchema: { type: "object", properties: { id: { type: "string" } } },
-  });
-  const issues = validateOutboundDeliveryPlan({
-    provider: "provider_x",
-    connectorContracts: [alternative],
-    planningIR: loopPlanningIRSchema.parse({
-      version: "v2",
-      title: "Newsletter",
-      summary: "Send newsletter.",
-      strategy: "Compose and send.",
-      schedule: { cron: "0 9 * * 5", timezone: "UTC" },
-      requiredValues: [],
-      semanticAgents: [],
-      selectedActions: [],
-      unresolvedIssues: [],
-    }),
-  });
-  assert.deepEqual(issues.map((issue) => issue.code), ["required_external_capability_undiscovered"]);
-});
-
-test("outbound delivery requires matching-provider lineage from the final semantic artifact", () => {
-  const send = buildComposioActionContract({
-    toolkit: "provider_x",
-    actionSlug: "PROVIDER_X_SEND",
-    risk: "send",
-    inputSchema: { type: "object", properties: { body: { type: "string" } }, required: ["body"] },
-    outputSchema: { type: "object", properties: { id: { type: "string" } } },
-  });
-  const base = {
-    version: "v2" as const,
-    title: "Newsletter",
-    summary: "Send newsletter.",
-    strategy: "Compose and send.",
-    schedule: { cron: "0 9 * * 5", timezone: "UTC" },
-    requiredValues: [],
-    semanticAgents: [{
-      id: "composer",
-      name: "Composer",
-      responsibility: "Compose newsletter.",
-      task: "Compose.",
-      toolRef: "internal.llm_only",
-      inputBindings: [],
-      outputArtifact: {
-        id: "draft",
-        description: "Draft",
-        representation: "text" as const,
-        visibility: "internal" as const,
-        rendererRef: null,
-        reviewMode: "none" as const,
-        editable: false,
-        fields: [],
-      },
-    }],
-    selectedActions: [{
-      id: "send",
-      contractRef: send.toolRef,
-      purpose: "Send newsletter.",
-      annotation: { effect: "write_external" as const, confidence: "high" as const, approvalRequired: true },
-      bindings: [],
-    }],
-    unresolvedIssues: [],
-  };
-  const missing = validateOutboundDeliveryPlan({
-    provider: "provider_x",
-    connectorContracts: [send],
-    planningIR: loopPlanningIRSchema.parse(base),
-  });
-  assert.deepEqual(missing.map((issue) => issue.code), ["external_delivery_missing_lineage"]);
-
-  const valid = validateOutboundDeliveryPlan({
-    provider: "provider_x",
-    connectorContracts: [send],
-    planningIR: loopPlanningIRSchema.parse({
-      ...base,
-      selectedActions: [{
-        ...base.selectedActions[0],
-        bindings: [{
-          source: { kind: "agent_output", nodeId: "composer", path: "/text" },
-          targetPath: "/body",
-          required: true,
-          valuePolicy: "derivable",
-          provenance: "agent_output",
-        }],
-      }],
-    }),
-  });
-  assert.deepEqual(valid, []);
 });

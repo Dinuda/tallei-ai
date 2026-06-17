@@ -1185,6 +1185,8 @@ export async function initDb() {
         received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(trigger_instance_id, external_event_id)
       );
+      ALTER TABLE workflow_connector_trigger_events
+        ADD COLUMN IF NOT EXISTS payload_json JSONB;
     `);
 
     await client.query(`
@@ -1646,6 +1648,21 @@ export async function initDb() {
       ALTER TABLE loop_engine_commands
         ADD CONSTRAINT loop_engine_commands_command_type_check
         CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_interaction', 'finalize_run', 'retry_step'));
+
+      UPDATE workflows
+      SET status = 'archived', updated_at = NOW()
+      WHERE definition_version <> 'loop_spec_v1'
+        AND status IN ('verifying', 'active');
+
+      UPDATE loop_engine_runs
+      SET status = 'cancelled',
+          error_json = COALESCE(error_json, '{}'::jsonb) || '{"message":"Graph runtime removed; run cancelled."}'::jsonb,
+          finished_at = COALESCE(finished_at, NOW()),
+          updated_at = NOW()
+      WHERE status NOT IN ('succeeded', 'failed', 'cancelled')
+        AND workflow_id IN (
+          SELECT id FROM workflows WHERE definition_version <> 'loop_spec_v1'
+        );
     `);
 
     await client.query(`

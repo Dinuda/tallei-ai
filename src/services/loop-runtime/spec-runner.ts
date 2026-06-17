@@ -1,5 +1,4 @@
 import { randomUUID } from "crypto";
-import { createOpenAI } from "@ai-sdk/openai";
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -13,13 +12,16 @@ import type { Response } from "express";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { loopBuilderOpenAiModel } from "../loop-builder/openai-chat.js";
+import { loopBuilderOpenAiModel, loopBuilderStreamProviderOptions } from "../loop-builder/openai-chat.js";
+import { sanitizeLoopBuilderChatMessages } from "../loop-builder/sessions.js";
+import { resolveLoopChatLanguageModel } from "../llm/loop-chat-client.js";
 import { getLoopWorkflow } from "../loop-executor/creator.js";
 import { listLoopRunMessages, normalizeRunMessages, replaceLoopRunMessages } from "./run-messages.js";
 import { buildSpecRunSystemPrompt } from "./spec-run-prompt.js";
 import { loadWorkflowWorkspaceId, withWorkflowWorkspaceAuth } from "./resolve-loop-run-auth.js";
 import { buildSpecRunTools } from "./spec-run-tools.js";
 import { parseRunnableSpec, type RunnableSpec } from "./spec-run-types.js";
+import { startLoopRunWorkflow, cancelLoopRunWorkflow } from "../../temporal/start-loop-run.js";
 
 export type SpecRunTriggerSource = "manual" | "schedule" | "event";
 
@@ -265,16 +267,16 @@ async function executeSpecRun(input: ExecuteSpecRunInput): Promise<void> {
     },
   });
 
-  const openai = createOpenAI({
-    apiKey: process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY,
-  });
-
   const system = buildSpecRunSystemPrompt(spec);
+  const modelId = loopBuilderOpenAiModel();
+  const model = resolveLoopChatLanguageModel(modelId);
+  const apiMessages = sanitizeLoopBuilderChatMessages(input.messages);
   const result = streamText({
-    model: openai(loopBuilderOpenAiModel()),
+    model,
     system,
-    messages: await convertToModelMessages(input.messages, { tools }),
+    messages: await convertToModelMessages(apiMessages, { tools }),
     tools,
+    providerOptions: loopBuilderStreamProviderOptions(modelId),
     stopWhen: stepCountIs(12),
     onError: ({ error }) => console.error("Spec loop run stream failed:", error),
   });
@@ -334,11 +336,11 @@ export async function streamSpecRunChat(input: {
   });
 }
 
-export async function runSpecLoopHeadless(auth: AuthContext, workflowId: string, runId?: string): Promise<SpecRunProjection> {
-  const projection = runId
-    ? await getSpecRunProjection(auth, runId)
-    : await createSpecLoopRun(auth, workflowId, { source: "schedule", label: "Scheduled" });
-
+export async function executeSpecRunHeadless(
+  auth: AuthContext,
+  workflowId: string,
+  runId: string,
+): Promise<void> {
   const { spec } = await loadRunnableSpec(auth, workflowId);
   const initialMessages: UIMessage[] = [{
     id: randomUUID(),
@@ -350,16 +352,23 @@ export async function runSpecLoopHeadless(auth: AuthContext, workflowId: string,
     await executeSpecRun({
       auth,
       workflowId,
-      runId: projection.id,
+      runId,
       messages: initialMessages,
       mode: "headless",
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await setRunStatus(projection.id, "failed", { error: message });
+    await setRunStatus(runId, "failed", { error: message });
     throw error;
   }
+}
 
+export async function runSpecLoopHeadless(auth: AuthContext, workflowId: string, runId?: string): Promise<SpecRunProjection> {
+  const projection = runId
+    ? await getSpecRunProjection(auth, runId)
+    : await createSpecLoopRun(auth, workflowId, { source: "schedule", label: "Scheduled" });
+
+  await executeSpecRunHeadless(auth, workflowId, projection.id);
   return getSpecRunProjection(auth, projection.id);
 }
 
@@ -368,7 +377,37 @@ export async function getSpecRunMessages(auth: AuthContext, runId: string): Prom
 }
 
 export async function startSpecManualLoopRun(auth: AuthContext, workflowId: string): Promise<SpecRunProjection> {
-  return createSpecLoopRun(auth, workflowId, { source: "manual", label: "Manual" });
+  const run = await createSpecLoopRun(auth, workflowId, { source: "manual", label: "Manual" });
+  await startLoopRunWorkflow({
+    tenantId: auth.tenantId,
+    userId: auth.userId,
+    workflowId,
+    runId: run.id,
+    trigger: { source: "manual", label: "Manual" },
+  });
+  return run;
+}
+
+export async function cancelSpecLoopRun(auth: AuthContext, runId: string): Promise<SpecRunProjection> {
+  const projection = await getSpecRunProjection(auth, runId);
+  if (projection.status === "succeeded" || projection.status === "failed" || projection.status === "cancelled") {
+    return projection;
+  }
+
+  await pool.query(
+    `UPDATE loop_engine_runs
+     SET status = 'cancelled', finished_at = COALESCE(finished_at, NOW()), updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+    [runId, auth.tenantId, auth.userId],
+  );
+
+  await cancelLoopRunWorkflow({
+    tenantId: auth.tenantId,
+    workflowId: projection.workflowId,
+    runId,
+  });
+
+  return getSpecRunProjection(auth, runId);
 }
 
 export async function retrySpecLoopRun(auth: AuthContext, runId: string): Promise<SpecRunProjection> {
@@ -392,8 +431,15 @@ export async function retrySpecLoopRun(auth: AuthContext, runId: string): Promis
   );
   await replaceLoopRunMessages(hydratedAuth, runId, []);
 
-  void runSpecLoopHeadless(hydratedAuth, projection.workflowId, runId).catch((error) => {
-    console.error(`Spec loop retry failed for ${runId}:`, error);
+  await startLoopRunWorkflow({
+    tenantId: hydratedAuth.tenantId,
+    userId: hydratedAuth.userId,
+    workflowId: projection.workflowId,
+    runId,
+    trigger: {
+      source: projection.triggerSource,
+      label: projection.triggerLabel ?? "Retry",
+    },
   });
 
   return getSpecRunProjection(hydratedAuth, runId);

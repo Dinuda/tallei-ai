@@ -1,6 +1,5 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
-import { createOpenAI } from "@ai-sdk/openai";
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -23,17 +22,20 @@ import {
   getWorkflowBuilderCommand,
   type BuilderToolName,
 } from "../../../services/loop-builder/dispatcher.js";
-import { loopBuilderOpenAiModel } from "../../../services/loop-builder/openai-chat.js";
+import { loopBuilderOpenAiModel, loopBuilderStreamProviderOptions } from "../../../services/loop-builder/openai-chat.js";
+import { resolveLoopChatLanguageModel } from "../../../services/llm/loop-chat-client.js";
 import {
   emptyLoopBuilderUsage,
   mergeLoopBuilderUsageTotals,
   usageFromLanguageModelStep,
+  type LoopBuilderUsage,
 } from "../../../services/loop-builder/progress.js";
 import {
   createWorkflowBuilderSession,
   findWorkflowBuilderSessionBySpec,
   listWorkflowBuilderMessages,
   normalizeWorkflowBuilderMessages,
+  sanitizeLoopBuilderChatMessages,
   replaceWorkflowBuilderMessages,
   requireWorkflowBuilderSession,
   saveWorkflowBuilderAnalyzerUsage,
@@ -88,14 +90,31 @@ async function waitForCommand(
   throw new Error("Builder command timed out");
 }
 
+async function loadSessionCommandUsage(
+  auth: NonNullable<AuthRequest["authContext"]>,
+  sessionId: string,
+): Promise<LoopBuilderUsage> {
+  const result = await pool.query<{ usage_json: LoopBuilderUsage | null }>(
+    `SELECT usage_json
+     FROM workflow_builder_commands
+     WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3`,
+    [sessionId, auth.tenantId, auth.userId],
+  );
+  return mergeLoopBuilderUsageTotals(
+    emptyLoopBuilderUsage(),
+    ...result.rows.map((row) => row.usage_json ?? emptyLoopBuilderUsage()),
+  );
+}
+
 async function runTool(
   auth: NonNullable<AuthRequest["authContext"]>,
   sessionId: string,
   toolName: BuilderToolName,
   input: Record<string, unknown>,
+  onProgress?: (command: Awaited<ReturnType<typeof getWorkflowBuilderCommand>>) => void | Promise<void>,
 ) {
   const command = await dispatchWorkflowBuilderCommand({ auth, sessionId, toolName, input });
-  const completed = await waitForCommand(auth, command.jobId);
+  const completed = await waitForCommand(auth, command.jobId, onProgress);
   if (completed.status !== "completed") {
     throw new Error(completed.error ?? `${toolName} failed`);
   }
@@ -110,7 +129,13 @@ const normalizedIntentSchema = z.object({
   runtimeInputs: z.array(z.string().min(1)).default([]),
 });
 
-function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId: string) {
+function analyzerTools(
+  auth: NonNullable<AuthRequest["authContext"]>,
+  sessionId: string,
+  onCommandProgress?: () => void | Promise<void>,
+) {
+  const run = (toolName: BuilderToolName, input: Record<string, unknown>) =>
+    runTool(auth, sessionId, toolName, input, () => onCommandProgress?.());
   return {
     appSelection: tool({
       description: "Show the live app catalogue so the user can explicitly choose which apps this loop may use. This is a UI interaction, not a builder command.",
@@ -128,7 +153,7 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
         assumptions: z.array(z.string().min(1)).default([]),
         selectedToolkits: z.array(z.string().min(1)).min(1),
       }),
-      execute: (input) => runTool(auth, sessionId, "getAvailableTools", input),
+      execute: (input) => run("getAvailableTools", input),
     }),
     resolveBuildRequirement: tool({
       description: "Validate and durably resolve exactly one pending build-contract requirement. Free-form prose is not accepted unless it matches the requirement's typed value schema.",
@@ -136,7 +161,7 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
         requirementId: z.string().min(1),
         value: z.unknown(),
       }),
-      execute: (input) => runTool(auth, sessionId, "resolveBuildRequirement", input),
+      execute: (input) => run("resolveBuildRequirement", input),
     }),
     connectorSetup: tool({
       description: "Render the first-class inline connector checklist for the pending connector build requirement. This is a UI interaction, not a builder command.",
@@ -207,39 +232,39 @@ function analyzerTools(auth: NonNullable<AuthRequest["authContext"]>, sessionId:
         allowOther: z.boolean().default(true),
       }),
     }),
-    draftSpec: tool({
-      description: "Create and persist the behavioral loop spec after getAvailableTools has completed.",
-      inputSchema: z.object({}),
-      execute: (input) => runTool(auth, sessionId, "draftSpec", input),
-    }),
     refineSpec: tool({
       description: "Refine the current draft spec from user feedback. This invalidates approval.",
       inputSchema: z.object({ feedback: z.string().min(1) }),
-      execute: (input) => runTool(auth, sessionId, "refineSpec", input),
+      execute: (input) => run("refineSpec", input),
     }),
     archiveSpec: tool({
       description: "Archive the current spec. Call when the user selects 'Archive and start over' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
       inputSchema: z.object({}),
-      execute: (input) => runTool(auth, sessionId, "archiveSpec", { ...input, approved: true }),
+      execute: (input) => run("archiveSpec", { ...input, approved: true }),
     }),
     saveLoop: tool({
-      description: "Approve and persist the current behavioral spec as a runnable loop in one step. Call when the user selects 'Save loop' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation and do not call a separate approve step first.",
+      description: "Draft, save, and verify the loop. Call with preview true after requirements are ready to show the behavioral spec. Call without preview when the user selects they are happy with the spec — that approves, persists, and runs verification in one step.",
       inputSchema: z.object({
+        preview: z.boolean().optional(),
         cron: z.string().optional(),
         timezone: z.string().optional(),
         workspaceId: z.string().uuid().nullable().optional(),
       }),
-      execute: (input) => runTool(auth, sessionId, "saveLoop", { ...input, approved: true }),
+      execute: (input) => {
+        if (input.preview) return run("saveLoop", { preview: true });
+        const { preview: _preview, ...rest } = input;
+        return run("saveLoop", { ...rest, approved: true });
+      },
     }),
     runVerification: tool({
       description: "Run the dedicated verification lifecycle for a saved workflow before activation.",
       inputSchema: z.object({}),
-      execute: (input) => runTool(auth, sessionId, "runVerification", input),
+      execute: (input) => run("runVerification", input),
     }),
     confirmActivation: tool({
       description: "Confirm successful verification evidence and activate the workflow schedule. Call only after the user explicitly selects activation.",
       inputSchema: z.object({}),
-      execute: (input) => runTool(auth, sessionId, "confirmActivation", { ...input, approved: true }),
+      execute: (input) => run("confirmActivation", { ...input, approved: true }),
     }),
   };
 }
@@ -311,14 +336,12 @@ async function buildAnalyzerSystemPrompt(
     "Never treat unrelated prose as a valid requirement answer. Never silently assume a connector, trigger, schedule, source, template, stable input, or review policy.",
     "The user may explicitly choose no source or no template only when the requirement allows it; persist that choice through resolveBuildRequirement.",
     "Always show build-contract warnings to the user, especially explicit ungrounded or no-template choices.",
-    "Call draftSpec only after resolveBuildRequirement reports readyForSpecDraft true.",
-    "Never call draftSpec before getAvailableTools. Never invent or search for tools outside getAvailableTools.",
-    "After calling draftSpec, explain the draft briefly and immediately call interactivePrompt in the same turn to present a choice to the user: 'Save loop' (recommended, with value 'Save the loop'), 'Refine the spec', and 'Archive and start over'. Do not wait for the user to manually type or request saving in prose.",
-    "When the user selects 'Save loop', call saveLoop immediately. saveLoop approves and persists in one step — never call a separate approve tool first.",
-    "Use refineSpec for feedback about the behavioral contract.",
-    "After saveLoop succeeds, explain that the loop is unscheduled in verifying state and immediately present 'Run verification' via interactivePrompt.",
-    "After runVerification succeeds, summarize the dryRunLog steps and evidence. Distinguish critical failures (block activation) from optional warnings (loop may still activate). When status is awaiting_confirmation — including when only optional read probes warned — present 'Confirm and activate' via interactivePrompt. Call confirmActivation only from that explicit selection.",
-    "After confirmActivation succeeds, tell the user their loop is active. Direct them to use Open loop on the activation card to watch runs and approve actions on the run page. Mention Edit in builder if they want to refine the spec. Do not send them to loop settings as the primary next step.",
+    "Call saveLoop with preview true only after resolveBuildRequirement reports readyForSpecDraft true. Never call saveLoop preview before getAvailableTools. Never invent or search for tools outside getAvailableTools.",
+    "After saveLoop preview returns the spec, explain the draft briefly and immediately call interactivePrompt in the same turn: 'I'm happy with this' (recommended), 'I want more changes', and 'Start over'. Do not wait for the user to manually type approval in prose.",
+    "When the user selects 'I'm happy with this', call saveLoop without preview. It approves, persists, and runs verification in one step — never call a separate draft or verify step first.",
+    "Use refineSpec when the user selects 'I want more changes' or gives behavioral feedback.",
+    "After saveLoop completes verification, summarize the dryRunLog steps and evidence. Distinguish critical failures (block activation) from optional warnings (loop may still activate). When status is awaiting_confirmation — including when only optional read probes warned — present 'Activate' (recommended) and 'I'll do more changes' via interactivePrompt. Call confirmActivation only from Activate.",
+    "After confirmActivation succeeds, tell the user their loop is live. Point them to the header status bar for runs and agent approvals. Mention they can keep refining in the builder if needed.",
     "Never output a bulleted, numbered, or formatted list of options or actions the user can take in your prose text response. If you have choices, next steps, or decisions to offer — including escalation rules, review policies, or stable inputs — you must present them via requirementSetup or interactivePrompt, never as prose lists above the text box.",
     "Keep visible rationale concise. Do not reveal hidden chain-of-thought.",
     `Current durable session projection:\n${JSON.stringify({
@@ -380,22 +403,31 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
     // page reloads or stream interruptions before onFinish runs.
     await replaceWorkflowBuilderMessages(req.authContext!, sessionId, messages);
 
-    const tools = analyzerTools(req.authContext!, sessionId);
-    const openai = createOpenAI({
-      apiKey: process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY,
-    });
     const system = await buildAnalyzerSystemPrompt(req.authContext!, session);
-    const model = loopBuilderOpenAiModel();
+    const modelId = loopBuilderOpenAiModel();
+    const model = resolveLoopChatLanguageModel(modelId);
+    let completedTurnUsage = emptyLoopBuilderUsage();
     const stream = createUIMessageStream({
       originalMessages: messages,
       execute: async ({ writer }) => {
         writer.write({ type: "data-session", data: { sessionId }, transient: true });
         let runningTurnUsage = emptyLoopBuilderUsage();
+        const emitLiveUsage = async () => {
+          const commandUsage = await loadSessionCommandUsage(req.authContext!, sessionId);
+          writer.write({
+            type: "data-usage",
+            data: mergeLoopBuilderUsageTotals(analyzerUsageBase, runningTurnUsage, commandUsage),
+            transient: true,
+          });
+        };
+        const tools = analyzerTools(req.authContext!, sessionId, () => emitLiveUsage());
+        const apiMessages = sanitizeLoopBuilderChatMessages(messages);
         const result = streamText({
-          model: openai(model),
+          model,
           system,
-          messages: await convertToModelMessages(messages, { tools }),
+          messages: await convertToModelMessages(apiMessages, { tools }),
           tools,
+          providerOptions: loopBuilderStreamProviderOptions(modelId),
           stopWhen: stepCountIs(10),
           onError: ({ error }) => console.error("Loop builder analyzer stream failed:", error),
           onStepFinish: ({ usage }) => {
@@ -403,23 +435,42 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
               runningTurnUsage,
               usageFromLanguageModelStep(usage, model),
             );
-            writer.write({
-              type: "data-usage",
-              data: mergeLoopBuilderUsageTotals(analyzerUsageBase, runningTurnUsage),
-              transient: true,
-            });
+            void emitLiveUsage();
           },
-          onFinish: async ({ totalUsage }) => {
-            const turnUsage = usageFromLanguageModelStep(totalUsage, model);
-            const sessionUsage = mergeLoopBuilderUsageTotals(analyzerUsageBase, turnUsage);
-            await saveWorkflowBuilderAnalyzerUsage(req.authContext!, sessionId, sessionUsage);
-            writer.write({ type: "data-usage", data: sessionUsage, transient: true });
+          onFinish: ({ totalUsage }) => {
+            completedTurnUsage = usageFromLanguageModelStep(totalUsage, model);
+            const sessionUsage = mergeLoopBuilderUsageTotals(analyzerUsageBase, completedTurnUsage);
+            void (async () => {
+              const commandUsage = await loadSessionCommandUsage(req.authContext!, sessionId);
+              writer.write({
+                type: "data-usage",
+                data: mergeLoopBuilderUsageTotals(sessionUsage, commandUsage),
+                transient: true,
+              });
+              await saveWorkflowBuilderAnalyzerUsage(req.authContext!, sessionId, sessionUsage);
+            })();
           },
         });
         writer.merge(result.toUIMessageStream({ originalMessages: messages, sendReasoning: true }));
       },
       onFinish: async ({ messages: completedMessages }) => {
-        await replaceWorkflowBuilderMessages(req.authContext!, sessionId, completedMessages);
+        const patchedMessages = completedMessages.map((message, index) => {
+          if (index !== completedMessages.length - 1 || message.role !== "assistant") return message;
+          if (completedTurnUsage.promptTokens === 0 && completedTurnUsage.completionTokens === 0) return message;
+          return {
+            ...message,
+            metadata: {
+              ...(message.metadata ?? {}),
+              usage: {
+                promptTokens: completedTurnUsage.promptTokens,
+                completionTokens: completedTurnUsage.completionTokens,
+                totalTokens: completedTurnUsage.promptTokens + completedTurnUsage.completionTokens,
+                estimatedCostUsd: completedTurnUsage.estimatedCostUsd,
+              },
+            },
+          };
+        });
+        await replaceWorkflowBuilderMessages(req.authContext!, sessionId, patchedMessages);
       },
       onError: (error) => error instanceof Error ? error.message : String(error),
     });
@@ -556,7 +607,7 @@ router.post("/intent/analyze", requireScopes(["memory:read"]), async (req: AuthR
 router.post("/specs/draft", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const body = z.object({ sessionId: z.string().uuid() }).parse(req.body ?? {});
-    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: body.sessionId, toolName: "draftSpec", input: {} });
+    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: body.sessionId, toolName: "saveLoop", input: { preview: true } });
     res.status(202).json(command);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to draft loop spec";

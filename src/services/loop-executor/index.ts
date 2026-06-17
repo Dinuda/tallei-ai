@@ -1,12 +1,11 @@
 /**
  * Stable loop authoring surface.
  *
- * Execution moved to services/loop-runtime. Legacy executor, approval,
- * delivery, preset, and scheduler modules are intentionally not exported.
+ * Execution is handled by spec-runner + Temporal workers.
  */
 
 export {
-  createLoopWorkflow,
+  createLoopFromRunnableSpec,
   deleteLoopWorkflow,
   getLoopWorkflow,
   listLoopWorkflows,
@@ -17,4 +16,3 @@ export {
   getWorkflowVerification,
   runWorkflowVerification,
 } from "./verification.js";
-export { loopDefinitionSchema } from "./types.js";
