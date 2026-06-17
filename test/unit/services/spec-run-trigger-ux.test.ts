@@ -42,14 +42,26 @@ test("spec run editorial projection exposes steps and artifacts for the run page
   );
   assert.match(projection, /getSpecRunEditorialProjection/);
   assert.match(projection, /workflow_title: specRun\.workflowTitle/);
-  assert.match(projection, /steps: \[step\]/);
+  assert.match(projection, /buildSpecAgentSteps/);
   assert.match(projection, /artifacts: finalArtifact \? \[finalArtifact\] : \[\]/);
   assert.match(workflows, /getSpecRunEditorialProjection/);
 });
 
-test("run page uses the editorial run UI shell", async () => {
+test("legacy run page uses the editorial run UI shell", async () => {
   const runPage = await readFile(runPagePath, "utf8");
   assert.match(runPage, /editorial-run-ui|EditorialPanel|OperatorWorkspace/);
+});
+
+test("spec run page uses builder chat with agent sidebar", async () => {
+  const specRunPage = await readFile(
+    new URL("../../../dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/components/spec-run-page.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(specRunPage, /Conversation/);
+  assert.match(specRunPage, /ChildAgentRow/);
+  assert.match(specRunPage, /ParentAgentRow/);
+  assert.match(specRunPage, /PromptInput/);
+  assert.match(specRunPage, /Confirmation/);
 });
 
 test("builder header surfaces run navigation and status outside chat", async () => {

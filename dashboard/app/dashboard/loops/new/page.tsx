@@ -65,6 +65,7 @@ import { BuilderArtifactEditor, type ArtifactSetupOutput, updateArtifactToolOutp
 import { BuilderRequirementSelector, type RequirementSetupOutput } from "@/components/builder-requirement-selector";
 import type { EmailTemplateId, EmailTemplateProps } from "@/lib/email-artifacts/types";
 import { notifyLoopBuilderSessionUpdated } from "@/components/loop-builder-header";
+import { dedupeChatMessagesById } from "@/lib/chat-messages";
 import {
   emptyBuilderLiveUsage,
   normalizeBuilderLiveUsage,
@@ -148,9 +149,23 @@ export default function NewLoopBuilderPage() {
     onFinish: () => {
       setLiveUsageFromStream(null);
       const id = sessionIdRef.current;
-      if (id) void refreshSession(id).then(setMessages);
+      if (id) {
+        void refreshSession(id).then((loaded) => setMessages(dedupeChatMessagesById(loaded)));
+      }
     },
   });
+
+  const applyChatMessages = useCallback(
+    (value: UIMessage[] | ((prev: UIMessage[]) => UIMessage[])) => {
+      setMessages((prev) => {
+        const next = typeof value === "function" ? value(prev) : value;
+        return dedupeChatMessagesById(next);
+      });
+    },
+    [setMessages],
+  );
+
+  const transcriptMessages = useMemo(() => dedupeChatMessagesById(messages), [messages]);
 
   const liveUsage = (status === "streaming" || status === "submitted") && liveUsageFromStream
     ? liveUsageFromStream
@@ -161,13 +176,13 @@ export default function NewLoopBuilderPage() {
     if (!sessionId) return;
     const timer = window.setTimeout(() => {
       refreshSession(sessionId)
-        .then(setMessages)
+        .then((loaded) => applyChatMessages(loaded))
         .catch((err) => {
           console.error("[loop-builder] failed to load session:", err);
         });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [refreshSession, setMessages]);
+  }, [applyChatMessages, refreshSession]);
 
   // Fallback: refresh command usage from the DB while long-running builder tools execute.
   useEffect(() => {
@@ -266,7 +281,7 @@ export default function NewLoopBuilderPage() {
               }
             : message
         );
-        setMessages([
+        applyChatMessages([
           ...answeredMessages,
           {
             id: crypto.randomUUID(),
@@ -304,7 +319,7 @@ export default function NewLoopBuilderPage() {
               }
             : message
         );
-        setMessages([
+        applyChatMessages([
           ...answeredPromptMessages,
           {
             id: crypto.randomUUID(),
@@ -318,7 +333,7 @@ export default function NewLoopBuilderPage() {
     }
 
     await sendMessage({ text: answerText });
-  }, [activeInteractivePrompt, activePromptId, activeRequirementSetup, activeSetupId, dismissedPromptId, dismissedSetupId, messages, sendMessage, setMessages]);
+  }, [activeInteractivePrompt, activePromptId, activeRequirementSetup, activeSetupId, applyChatMessages, dismissedPromptId, dismissedSetupId, messages, sendMessage]);
 
   return (
     <div className="relative flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-white">
@@ -326,14 +341,14 @@ export default function NewLoopBuilderPage() {
       <div className="relative z-10 flex h-full flex-col overflow-hidden">
         <Conversation>
             <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
-              <ScrollOnToolComplete messages={messages} />
-              {messages.length === 0 && !sessionId && (
+              <ScrollOnToolComplete messages={transcriptMessages} />
+              {transcriptMessages.length === 0 && !sessionId && (
                 <LoopSuggestionCards
                   className="max-w-3xl"
                   onSelect={submitComposerText}
                 />
               )}
-              {messages.map((message) => (
+              {transcriptMessages.map((message) => (
                 <Message from={message.role} key={message.id}>
                   <MessageContent>
                     {message.parts.map((part, index) => {
@@ -425,7 +440,7 @@ export default function NewLoopBuilderPage() {
                             completedOutput={output}
                             key={index}
                             messages={messages}
-                            onSave={(next) => setMessages((current) => updateArtifactToolOutput(current, part.toolCallId, next))}
+                            onSave={(next) => applyChatMessages((current) => updateArtifactToolOutput(current, part.toolCallId, next))}
                             requirementId={input.requirementId ?? "artifact_contract"}
                             sessionId={sessionId ?? undefined}
                             toolCallId={part.toolCallId}
@@ -586,6 +601,7 @@ export default function NewLoopBuilderPage() {
                           props?: Partial<EmailTemplateProps>;
                         }>;
                       } | undefined)?.draftTemplates}
+                      inputReady={activeArtifactSetup.state === "input-available"}
                       onComplete={(output) => addToolOutput({
                         tool: "artifactSetup",
                         toolCallId: activeArtifactSetup.toolCallId,

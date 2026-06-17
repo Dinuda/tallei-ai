@@ -18,6 +18,7 @@ import { EmailArtifactEditorPanel } from "@/components/email-artifact-editor-pan
 import { cn } from "@/lib/utils";
 import {
   buildEmailArtifactTemplates,
+  draftTemplatesSignature,
   renderEmailArtifactTemplate,
   resolveBuilderDraftTemplates,
 } from "@/lib/email-artifacts/build-template";
@@ -57,6 +58,7 @@ export function EmailArtifactStudio({
   completedOutput,
   draftTemplates,
   initialTemplates,
+  inputReady = true,
   messages,
   onClose,
   onComplete,
@@ -69,6 +71,7 @@ export function EmailArtifactStudio({
   completedOutput?: ArtifactSetupOutput | null;
   draftTemplates?: BuilderDraftTemplate[];
   initialTemplates?: EmailArtifactTemplate[];
+  inputReady?: boolean;
   messages?: UIMessage[];
   onClose?: () => void;
   onComplete?: (output: ArtifactSetupOutput) => void;
@@ -83,7 +86,7 @@ export function EmailArtifactStudio({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [loading, setLoading] = useState(
-    () => !completedOutput?.templates?.length && !initialTemplates?.length,
+    () => !completedOutput?.templates?.length && initialTemplates === undefined,
   );
   const [rendering, setRendering] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -92,6 +95,7 @@ export function EmailArtifactStudio({
   const [error, setError] = useState<string | null>(null);
 
   const templatesSignatureRef = useRef("");
+  const lastBuiltDraftSignatureRef = useRef("");
   const onTemplatesChangeRef = useRef(onTemplatesChange);
   onTemplatesChangeRef.current = onTemplatesChange;
 
@@ -117,13 +121,13 @@ export function EmailArtifactStudio({
   }, []);
 
   const seedDraftsKey = useMemo(
-    () => JSON.stringify(resolveBuilderDraftTemplates(draftTemplates)),
+    () => draftTemplatesSignature(draftTemplates),
     [draftTemplates],
   );
 
   const seedDrafts = useMemo(
-    (): BuilderDraftTemplate[] => JSON.parse(seedDraftsKey) as BuilderDraftTemplate[],
-    [seedDraftsKey],
+    (): BuilderDraftTemplate[] => resolveBuilderDraftTemplates(draftTemplates),
+    [draftTemplates],
   );
 
   const completedTemplates = completedOutput?.templates;
@@ -170,16 +174,34 @@ export function EmailArtifactStudio({
   }, [applyTemplates, completedSignature, completedTemplates, notifyTemplatesChange]);
 
   useEffect(() => {
-    if (completedTemplates?.length || !initialTemplates?.length) return;
-    applyTemplates(initialTemplates);
+    if (completedTemplates?.length || initialTemplates === undefined) return;
+    if (initialTemplates.length > 0) {
+      applyTemplates(initialTemplates);
+    } else {
+      setLoading(true);
+    }
   }, [applyTemplates, completedTemplates?.length, initialTemplates]);
 
   useEffect(() => {
-    if (completedTemplates?.length || initialTemplates?.length) return;
+    if (completedTemplates?.length || initialTemplates !== undefined) return;
+    if (!inputReady) return;
+    if (lastBuiltDraftSignatureRef.current === seedDraftsKey) return;
+
     let cancelled = false;
-    void buildEmailArtifactTemplates(seedDrafts)
+    const accumulated: EmailArtifactTemplate[] = [];
+
+    void buildEmailArtifactTemplates(seedDrafts, {
+      onTemplate: (template, index) => {
+        if (cancelled) return;
+        accumulated[index] = template;
+        const partial = accumulated.filter((entry): entry is EmailArtifactTemplate => Boolean(entry));
+        applyTemplates(partial);
+        notifyTemplatesChange(partial);
+      },
+    })
       .then((built) => {
         if (cancelled) return;
+        lastBuiltDraftSignatureRef.current = seedDraftsKey;
         applyTemplates(built);
         notifyTemplatesChange(built);
       })
@@ -190,7 +212,15 @@ export function EmailArtifactStudio({
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [applyTemplates, completedTemplates?.length, initialTemplates?.length, notifyTemplatesChange, seedDrafts]);
+  }, [
+    applyTemplates,
+    completedTemplates?.length,
+    initialTemplates,
+    inputReady,
+    notifyTemplatesChange,
+    seedDrafts,
+    seedDraftsKey,
+  ]);
 
   const saveEditedTemplate = useCallback(async (html: string) => {
     if (!selected) return;

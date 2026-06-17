@@ -1,6 +1,6 @@
 "use client";
 
-import { LoaderCircle } from "lucide-react";
+import { ArrowUp, LoaderCircle } from "lucide-react";
 
 import {
   ChatArtifactScrollFade,
@@ -17,16 +17,21 @@ import { cn } from "@/lib/utils";
 
 export function EmailArtifactPreviewCard({
   approved,
+  approving,
   loading,
+  onApprove,
   onOpen,
   templates,
 }: {
   approved?: boolean;
+  approving?: boolean;
   loading?: boolean;
+  onApprove?: () => void;
   onOpen: () => void;
   templates: EmailArtifactTemplate[];
 }) {
   const featured = featuredTemplate(templates);
+  const showApprove = !approved && onApprove && templates.length > 0 && !loading;
 
   return (
     <div
@@ -100,6 +105,23 @@ export function EmailArtifactPreviewCard({
         </div>
         {!loading && featured ? <ChatArtifactScrollFade /> : null}
       </button>
+
+      {showApprove ? (
+        <div className="flex items-center justify-end border-t border-[#ececec] px-4 py-3">
+          <button
+            className="inline-flex size-9 items-center justify-center rounded-full bg-[#111827] text-white hover:opacity-90 disabled:opacity-50"
+            disabled={approving}
+            onClick={(event) => {
+              event.stopPropagation();
+              onApprove();
+            }}
+            title="Looks good — proceed"
+            type="button"
+          >
+            {approving ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

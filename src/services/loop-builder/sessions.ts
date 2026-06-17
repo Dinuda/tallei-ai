@@ -286,7 +286,7 @@ export async function listWorkflowBuilderMessages(auth: AuthContext, sessionId: 
 }
 
 export function normalizeWorkflowBuilderMessages(messages: unknown[]): UIMessage[] {
-  return messages.filter((message): message is UIMessage =>
+  const normalized = messages.filter((message): message is UIMessage =>
     Boolean(
       message
       && typeof message === "object"
@@ -295,6 +295,13 @@ export function normalizeWorkflowBuilderMessages(messages: unknown[]): UIMessage
       && message.parts.length > 0,
     )
   );
+
+  const seen = new Set<string>();
+  return normalized.filter((message) => {
+    if (seen.has(message.id)) return false;
+    seen.add(message.id);
+    return true;
+  });
 }
 
 function stripOpenAiStoredItemIds(part: UIMessage["parts"][number]): UIMessage["parts"][number] {

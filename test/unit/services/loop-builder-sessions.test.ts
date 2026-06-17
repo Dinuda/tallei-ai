@@ -18,6 +18,23 @@ test("workflow builder messages discard empty interrupted-stream artifacts", () 
   );
 });
 
+test("workflow builder messages dedupe repeated message ids", () => {
+  const duplicateAssistant = {
+    id: "e29DJwYIhuWVY4yS",
+    role: "assistant",
+    parts: [{ type: "text", text: "First copy" }],
+  } satisfies UIMessage;
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+    duplicateAssistant,
+    { ...duplicateAssistant, parts: [{ type: "text", text: "Second copy" }] },
+  ] satisfies UIMessage[];
+
+  const normalized = normalizeWorkflowBuilderMessages(messages);
+  assert.equal(normalized.length, 2);
+  assert.equal(normalized[1]?.parts[0]?.type === "text" ? normalized[1].parts[0].text : "", "First copy");
+});
+
 test("sanitizeLoopBuilderChatMessages strips OpenAI item ids from replayed history", () => {
   const messages = [
     {

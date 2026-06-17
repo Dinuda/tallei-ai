@@ -27,7 +27,132 @@ function mapSpecStepStatus(runStatus: string): string {
   return runStatus;
 }
 
-function buildSpecRunnerStep(input: {
+function slugifyAgentId(name: string, index: number): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  return slug || `agent_${index}`;
+}
+
+function inferAgentToolRefs(agent: { name?: string; goal?: string }): Array<{ ref: string }> {
+  const source = `${agent.name ?? ""} ${agent.goal ?? ""}`.toLowerCase();
+  if (source.includes("memory") || source.includes("search") || source.includes("recall")) {
+    return [{ ref: "internal.memory_search" }];
+  }
+  if (source.includes("draft") || source.includes("reply") || source.includes("email") || source.includes("gmail")) {
+    return [{ ref: "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT" }];
+  }
+  return [{ ref: "internal.llm_only" }];
+}
+
+function partToolName(part: { type?: string }): string | null {
+  if (typeof part.type === "string" && part.type.startsWith("tool-")) {
+    return part.type.slice("tool-".length);
+  }
+  return null;
+}
+
+function partState(part: { state?: string }): string | null {
+  return typeof part.state === "string" ? part.state : null;
+}
+
+function inferActiveAgentIndex(messages: UIMessage[], runStatus: string, agentCount: number): number {
+  if (agentCount === 0) return 0;
+  if (runStatus === "succeeded") return agentCount;
+
+  let hasAssistantOutput = false;
+  let sawSearchMemory = false;
+  let sawWriteAction = false;
+  let pendingApproval = false;
+  let sawFinalize = false;
+
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts) {
+      if (part.type === "text" && "text" in part && String(part.text ?? "").trim()) {
+        hasAssistantOutput = true;
+      }
+      const tool = partToolName(part as { type?: string });
+      const state = partState(part as { state?: string });
+      if (!tool) continue;
+      if (tool === "finalizeRun" && state === "output-available") sawFinalize = true;
+      if (tool === "searchMemory" && state === "output-available") sawSearchMemory = true;
+      if (tool.startsWith("action_") && state === "output-available") sawWriteAction = true;
+      if (state === "approval-requested" || state === "approval-responded") pendingApproval = true;
+    }
+  }
+
+  if (sawFinalize) return agentCount;
+  if (pendingApproval || runStatus === "waiting_for_approval") {
+    return Math.min(agentCount, Math.max(1, agentCount - 1));
+  }
+  if (sawWriteAction) return Math.min(agentCount, Math.max(1, agentCount - 1));
+  if (sawSearchMemory || hasAssistantOutput) return Math.min(agentCount, 1);
+  return 0;
+}
+
+function mapAgentStepStatus(index: number, activeIndex: number, runStatus: string): string {
+  if (runStatus === "failed" || runStatus === "cancelled") {
+    if (index < activeIndex) return "succeeded";
+    if (index === activeIndex) return "failed";
+    return "queued";
+  }
+  if (index < activeIndex) return "succeeded";
+  if (index === activeIndex) {
+    if (runStatus === "waiting_for_approval") return "waiting_for_gate";
+    if (runStatus === "running" || runStatus === "queued") return "running";
+    if (runStatus === "succeeded") return "succeeded";
+    return "running";
+  }
+  return "queued";
+}
+
+function buildSpecAgentSteps(input: {
+  runId: string;
+  spec: RunnableSpec;
+  runStatus: string;
+  messages: UIMessage[];
+  outputText: string;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}) {
+  const agents = input.spec.noSlopSpec.specJson.agents;
+  if (agents.length === 0) {
+    return [buildLegacySpecRunnerStep(input)];
+  }
+
+  const activeIndex = inferActiveAgentIndex(input.messages, input.runStatus, agents.length);
+  return agents.map((agent, index) => {
+    const agentId = slugifyAgentId(agent.name, index);
+    const status = mapAgentStepStatus(index, activeIndex, input.runStatus);
+    const isLast = index === agents.length - 1;
+    return {
+      id: `${input.runId}:${agentId}`,
+      step_index: index,
+      agent_id: agentId,
+      agent_snapshot: {
+        id: agentId,
+        name: agent.name,
+        task: agent.goal,
+        tools: inferAgentToolRefs(agent),
+      },
+      attempt: 1,
+      status: mapSpecStepStatus(status === "waiting_for_gate" ? "waiting_for_approval" : status),
+      created_at: input.createdAt,
+      started_at: index <= activeIndex ? input.startedAt : null,
+      finished_at: index < activeIndex || (input.runStatus === "succeeded" && isLast)
+        ? input.finishedAt
+        : null,
+      output_json: {
+        text: isLast ? input.outputText : "",
+        data: { engine: "loop_spec_v1", agentIndex: index },
+      },
+      error_json: index === activeIndex && input.error ? { message: input.error } : {},
+    };
+  });
+}
+
+function buildLegacySpecRunnerStep(input: {
   runId: string;
   spec: RunnableSpec;
   runStatus: string;
@@ -106,19 +231,22 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
 
   const assistantText = extractAssistantText(messages);
   const outputText = specRun.summary?.trim() || assistantText;
-  const step = buildSpecRunnerStep({
+  const steps = buildSpecAgentSteps({
     runId: specRun.id,
     spec: specRun.runnableSpec,
     runStatus: specRun.status,
+    messages,
     outputText,
     error: specRun.error,
     createdAt: specRun.createdAt,
     startedAt: specRun.startedAt,
     finishedAt: specRun.finishedAt,
   });
+  const specAgents = specRun.runnableSpec.noSlopSpec.specJson.agents;
+  const finalStepId = steps[steps.length - 1]?.id ?? `${specRun.id}:spec-runner`;
   const finalArtifact = buildFinalArtifact({
     runId: specRun.id,
-    stepId: step.id,
+    stepId: finalStepId,
     body: outputText,
     createdAt: specRun.finishedAt ?? specRun.updatedAt,
   });
@@ -133,19 +261,26 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
     updated_at: specRun.updatedAt,
     started_at: specRun.startedAt,
     finished_at: specRun.finishedAt,
-    current_step_index: specRun.status === "succeeded" || specRun.status === "failed" ? 0 : 0,
+    current_step_index: steps.findIndex((step) => step.status === "running" || step.status === "waiting_for_interaction") ?? 0,
     definition: {
       goal: specRun.runnableSpec.goal,
       agentGraph: {
         parent: {
           name: "Tallei Orchestrator",
-          task: "Coordinates this loop run.",
+          task: "Coordinates agents for this loop run.",
         },
-        children: [{
-          id: "spec_runner",
-          name: "Loop runner",
-          task: specRun.runnableSpec.goal,
-        }],
+        children: specAgents.length > 0
+          ? specAgents.map((agent, index) => ({
+              id: slugifyAgentId(agent.name, index),
+              name: agent.name,
+              task: agent.goal,
+              tools: inferAgentToolRefs(agent),
+            }))
+          : [{
+              id: "spec_runner",
+              name: "Loop runner",
+              task: specRun.runnableSpec.goal,
+            }],
       },
     },
     context: {
@@ -157,7 +292,7 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
       summary: specRun.summary,
       builderSessionId: specRun.builderSessionId,
     },
-    steps: [step],
+    steps,
     interactions: [],
     artifacts: finalArtifact ? [finalArtifact] : [],
     events: eventsResult.rows.map((row) => ({

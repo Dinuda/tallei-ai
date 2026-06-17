@@ -11,25 +11,59 @@ import {
 } from "@/lib/email-artifacts/templates";
 import type { EmailArtifactTemplate, EmailTemplateProps } from "@/lib/email-artifacts/types";
 
+const renderCache = new Map<string, { html: string; text: string }>();
+const renderInflight = new Map<string, Promise<{ html: string; text: string }>>();
+
+function renderCacheKey(template: { reactEmailSource: string; editorContent?: string }): string {
+  return `${template.reactEmailSource}\0${template.editorContent ?? ""}`;
+}
+
+export function draftTemplatesSignature(draftTemplates?: BuilderDraftTemplate[]): string {
+  const drafts = resolveBuilderDraftTemplates(draftTemplates);
+  return JSON.stringify(drafts.map((draft) => ({
+    templateId: draft.templateId,
+    name: draft.name,
+    props: draft.props,
+  })));
+}
+
 export async function renderEmailArtifactTemplate(template: {
   reactEmailSource: string;
   editorContent?: string;
 }): Promise<{ html: string; text: string }> {
-  const props = JSON.parse(template.reactEmailSource) as EmailTemplateProps;
-  const response = await fetch("/api/loop-builder/render-email-artifact", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      designId: BUILDER_ARTIFACT_DESIGN_ID,
-      ...props,
-      editorContent: template.editorContent,
-    }),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(typeof payload.error === "string" ? payload.error : "Could not render template");
+  const cacheKey = renderCacheKey(template);
+  const cached = renderCache.get(cacheKey);
+  if (cached) return cached;
+
+  const inflight = renderInflight.get(cacheKey);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    const props = JSON.parse(template.reactEmailSource) as EmailTemplateProps;
+    const response = await fetch("/api/loop-builder/render-email-artifact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        designId: BUILDER_ARTIFACT_DESIGN_ID,
+        ...props,
+        editorContent: template.editorContent,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(typeof payload.error === "string" ? payload.error : "Could not render template");
+    }
+    const result = payload as { html: string; text: string };
+    renderCache.set(cacheKey, result);
+    return result;
+  })();
+
+  renderInflight.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    renderInflight.delete(cacheKey);
   }
-  return payload as { html: string; text: string };
 }
 
 export async function buildEmailArtifactTemplate(
@@ -57,9 +91,20 @@ export function resolveBuilderDraftTemplates(
   return draftTemplates?.length ? draftTemplates : BUILDER_DEFAULT_TEMPLATES;
 }
 
+export type BuildEmailArtifactTemplatesOptions = {
+  onTemplate?: (template: EmailArtifactTemplate, index: number, total: number) => void;
+};
+
 export async function buildEmailArtifactTemplates(
   draftTemplates?: BuilderDraftTemplate[],
+  options?: BuildEmailArtifactTemplatesOptions,
 ): Promise<EmailArtifactTemplate[]> {
   const drafts = resolveBuilderDraftTemplates(draftTemplates);
-  return Promise.all(drafts.map((draft) => buildEmailArtifactTemplate(draft)));
+  const built: EmailArtifactTemplate[] = [];
+  for (let index = 0; index < drafts.length; index += 1) {
+    const template = await buildEmailArtifactTemplate(drafts[index]);
+    built.push(template);
+    options?.onTemplate?.(template, index, drafts.length);
+  }
+  return built;
 }

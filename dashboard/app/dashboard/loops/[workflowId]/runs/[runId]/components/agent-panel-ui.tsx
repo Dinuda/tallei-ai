@@ -303,10 +303,17 @@ export function ParentAgentRow({
   onHire: () => void;
 }) {
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
-      className="relative flex w-full items-start gap-3 border-b border-[#e5e7eb] bg-white px-5 py-4 pr-10 text-left transition-colors hover:bg-[#fafafa]"
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      className="relative flex w-full cursor-pointer items-start gap-3 border-b border-[#e5e7eb] bg-white px-5 py-4 pr-10 text-left transition-colors hover:bg-[#fafafa]"
     >
       <AgentIconBox
         Icon={GitBranch}
@@ -353,7 +360,7 @@ export function ParentAgentRow({
       >
         <Info className="size-3.5" />
       </button>
-    </button>
+    </div>
   );
 }
 
@@ -397,11 +404,18 @@ export function ChildAgentRow({
   const isRunning = phase === "current_running" || phase === "running";
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
       className={cn(
-        "relative flex w-full items-start gap-3 border-b border-[#e5e7eb] px-5 py-3.5 pr-10 text-left transition-colors last:border-b-0",
+        "relative flex w-full cursor-pointer items-start gap-3 border-b border-[#e5e7eb] px-5 py-3.5 pr-10 text-left transition-colors last:border-b-0",
         isCurrent && phase === "current_gate" && "bg-[#fffbeb] ring-2 ring-inset ring-[#f9a8d4]",
         isCurrent && phase === "current_running" && "bg-[#eff6ff] ring-2 ring-inset ring-[#f9a8d4]",
         isCurrent && phase !== "current_gate" && phase !== "current_running" && "bg-[#f8fbff] ring-2 ring-inset ring-[#f9a8d4]",
@@ -473,7 +487,7 @@ export function ChildAgentRow({
           </button>
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
