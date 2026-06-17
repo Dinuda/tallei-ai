@@ -364,7 +364,12 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         });
         await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_approved", spec });
       }
-      const scheduleRequirement = session.buildContract.requirements.find((entry) => entry.kind === "trigger_schedule");
+      let buildContract = session.buildContract;
+      if (!buildContract) {
+        buildContract = await deriveUnresolvedLegacyBuildContract(auth, session);
+      }
+      assertBuildContractReady(buildContract);
+      const scheduleRequirement = buildContract.requirements.find((entry) => entry.kind === "trigger_schedule");
       const scheduleValue = scheduleRequirement?.value && typeof scheduleRequirement.value === "object" && !Array.isArray(scheduleRequirement.value)
         ? scheduleRequirement.value as Record<string, unknown>
         : {};
@@ -376,7 +381,7 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         auth,
         specSnapshot: snapshot,
         discoveredToolContracts: selectedToolContracts(session),
-        buildContract: session.buildContract,
+        buildContract,
         cron: approvedCron,
         timezone: approvedTimezone,
         workspaceId: input.workspaceId as string | null | undefined,
@@ -384,9 +389,9 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         initialStatus: "verifying",
       });
       const workflowId = String((loop as { id?: unknown }).id ?? "");
+      await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", workflowId, error: null });
       await initializeWorkflowVerification(auth, workflowId);
       const verification = await runWorkflowVerification(auth, workflowId);
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", workflowId, error: null });
       return { loop, verification, workflowId };
     }
     case "runVerification": {

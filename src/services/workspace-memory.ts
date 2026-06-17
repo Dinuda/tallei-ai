@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "crypto";
 
 import type { AuthContext } from "../domain/auth/index.js";
+import { config } from "../config/index.js";
 import { encryptMemoryContent, decryptMemoryContent } from "../infrastructure/crypto/memory-crypto.js";
 import { embedText } from "../infrastructure/cache/embedding-cache.js";
 import { WorkspaceMemoryRepository } from "../infrastructure/repositories/workspace-memory.repository.js";
 import { VectorRepository } from "../infrastructure/repositories/vector.repository.js";
 import { requireWorkspaceId } from "./workspace/context.js";
+import { noteVectorFailure, shouldBypassVector } from "./memory.js";
 
 const workspaceMemoryRepository = new WorkspaceMemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -43,6 +45,8 @@ function mapRow(row: {
   };
 }
 
+export { noteVectorFailure } from "./memory.js";
+
 export async function saveWorkspaceMemory(auth: AuthContext, input: {
   text: string;
   source?: string;
@@ -57,15 +61,7 @@ export async function saveWorkspaceMemory(auth: AuthContext, input: {
   const id = randomUUID();
   const contentCiphertext = encryptMemoryContent(text);
   const contentHash = createHash("sha256").update(text).digest("hex");
-  const embedding = await embedText(text);
-  const { pointId } = await vectorRepository.upsertWorkspaceMemoryVector({
-    auth,
-    workspaceId,
-    memoryId: id,
-    vector: embedding,
-    source: input.source ?? "manual",
-    createdAt: new Date().toISOString(),
-  });
+  const placeholderPointId = `pending:${id}`;
 
   const row = await workspaceMemoryRepository.create({
     auth,
@@ -76,10 +72,28 @@ export async function saveWorkspaceMemory(auth: AuthContext, input: {
     source: input.source ?? "manual",
     sourceRef: input.sourceRef ?? null,
     summaryJson: { preview: text.slice(0, 240) },
-    qdrantPointId: pointId,
+    qdrantPointId: placeholderPointId,
     memoryType: input.memoryType,
     category: input.category,
   });
+
+  void (async () => {
+    if (shouldBypassVector() || !config.qdrantUrl) return;
+    try {
+      const embedding = await embedText(text);
+      const { pointId } = await vectorRepository.upsertWorkspaceMemoryVector({
+        auth,
+        workspaceId,
+        memoryId: id,
+        vector: embedding,
+        source: input.source ?? "manual",
+        createdAt: new Date().toISOString(),
+      });
+      await workspaceMemoryRepository.updateQdrantPointId(auth, workspaceId, id, pointId);
+    } catch (error) {
+      noteVectorFailure(error, "workspace_memory_save");
+    }
+  })();
 
   return mapRow(row);
 }

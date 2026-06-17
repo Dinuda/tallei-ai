@@ -117,4 +117,13 @@ export class WorkspaceMemoryRepository {
     );
     return Boolean(result.rowCount);
   }
+
+  async updateQdrantPointId(auth: AuthContext, workspaceId: string, id: string, qdrantPointId: string): Promise<void> {
+    await pool.query(
+      `UPDATE workspace_memory_records
+       SET qdrant_point_id = $4, updated_at = NOW()
+       WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3`,
+      [id, auth.tenantId, workspaceId, qdrantPointId],
+    );
+  }
 }

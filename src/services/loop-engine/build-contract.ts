@@ -475,6 +475,56 @@ export function selectedConnectorAccountId(
   return ids[0];
 }
 
+export type ReviewPolicyMode = "draft_only" | "approve_each_action" | "approve_batch";
+
+export function selectedReviewPolicy(contract: LoopBuildContract | null | undefined): ReviewPolicyMode | null {
+  if (!contract) return null;
+  const requirement = contract.requirements.find((entry) => entry.kind === "review_policy" && entry.status === "resolved");
+  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+    ? requirement.value as Record<string, unknown>
+    : {};
+  const mode = value.mode;
+  if (mode === "draft_only" || mode === "approve_each_action" || mode === "approve_batch") {
+    return mode;
+  }
+  return null;
+}
+
+export function selectedStableInputs(contract: LoopBuildContract | null | undefined): Record<string, string> {
+  if (!contract) return {};
+  const inputs: Record<string, string> = {};
+  for (const requirement of contract.requirements) {
+    if (requirement.kind !== "stable_input" || requirement.status !== "resolved") continue;
+    const value = requirement.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+      ? requirement.value as Record<string, unknown>
+      : {};
+    const name = typeof value.name === "string" ? value.name : "";
+    const resolved = typeof value.value === "string" ? value.value : String(value.value ?? "");
+    if (name) inputs[name] = resolved;
+  }
+  return inputs;
+}
+
+export function selectedConnectorActionSlugs(contract: LoopBuildContract | null | undefined): string[] {
+  if (!contract) return [];
+  const requirement = contract.requirements.find((entry) => entry.kind === "connector" && entry.status === "resolved");
+  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+    ? requirement.value as Record<string, unknown>
+    : {};
+  const selections = Array.isArray(value.selections) ? value.selections : [];
+  const slugs = new Set<string>();
+  for (const selection of selections) {
+    const record = selection && typeof selection === "object" && !Array.isArray(selection)
+      ? selection as Record<string, unknown>
+      : {};
+    const actionSlugs = Array.isArray(record.actionSlugs) ? record.actionSlugs.map(String) : [];
+    for (const slug of actionSlugs) {
+      if (slug.trim()) slugs.add(slug);
+    }
+  }
+  return [...slugs];
+}
+
 export type GroundingSourceRef =
   | { type: "tallei_memory" }
   | { type: "workspace_memory" }

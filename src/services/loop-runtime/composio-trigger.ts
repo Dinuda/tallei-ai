@@ -148,11 +148,13 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
   const target = mapping.rows[0];
   if (!target) return { ok: true, processed: false };
 
+  const payloadJson = JSON.stringify({ data: event.data, metadata: event.metadata });
+
   const reserved = await pool.query(
-    `INSERT INTO workflow_connector_trigger_events (trigger_instance_id, external_event_id)
-     VALUES ($1, $2)
+    `INSERT INTO workflow_connector_trigger_events (trigger_instance_id, external_event_id, payload_json)
+     VALUES ($1, $2, $3::jsonb)
      ON CONFLICT (trigger_instance_id, external_event_id) DO NOTHING`,
-    [event.metadata.trigger_id, event.id],
+    [event.metadata.trigger_id, event.id, payloadJson],
   );
   if (!reserved.rowCount) return { ok: true, processed: true };
 
@@ -168,6 +170,7 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
       label: triggerLabel,
       eventId: event.id,
       triggerSlug: event.metadata.trigger_slug,
+      triggerInstanceId: event.metadata.trigger_id,
     });
     await startLoopRunWorkflow({
       tenantId: auth.tenantId,
@@ -179,6 +182,7 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
         label: triggerLabel,
         eventId: event.id,
         triggerSlug: event.metadata.trigger_slug,
+        triggerInstanceId: event.metadata.trigger_id,
       },
     });
     const runId = run.id;

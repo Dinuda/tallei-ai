@@ -226,7 +226,21 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
      ORDER BY updated_at DESC LIMIT 1`,
     [workflowId, auth.tenantId, auth.userId],
   );
-  const session = sessionResult.rows[0];
+  let session = sessionResult.rows[0];
+  if (!session && runnableSpec?.builderSessionId) {
+    const byId = await pool.query<{
+      discovered_tool_contracts_json: ToolContract[];
+      build_contract_json: LoopBuildContract | null;
+      composio_session_id: string | null;
+    }>(
+      `SELECT discovered_tool_contracts_json, build_contract_json, composio_session_id
+       FROM workflow_builder_sessions
+       WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+       LIMIT 1`,
+      [runnableSpec.builderSessionId, auth.tenantId, auth.userId],
+    );
+    session = byId.rows[0];
+  }
   const buildContract = workflowBuildContract ?? session?.build_contract_json ?? null;
   const scope = buildContract
     ? [
@@ -236,30 +250,36 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
     : [];
 
   let visibilityFailure: string | null = null;
-  let refreshedContracts = session?.discovered_tool_contracts_json ?? [];
-  if (scope.length > 0 && session && buildContract) {
+  let refreshedContracts = session?.discovered_tool_contracts_json
+    ?? (runnableSpec?.discoveredToolContracts as ToolContract[] | undefined)
+    ?? [];
+  if (scope.length > 0 && buildContract && refreshedContracts.length > 0) {
     try {
       const refreshed = await resolveConnectorAvailability({
         auth,
         contracts: refreshedContracts,
-        previousComposioSessionId: session.composio_session_id,
+        previousComposioSessionId: session?.composio_session_id ?? null,
         selectedAccountIdsByToolkit: Object.fromEntries(
           [...new Set(scope.map((target) => target.toolkit))]
             .map((toolkit) => [toolkit, selectedConnectorAccountIds(buildContract, toolkit)]),
         ),
       });
       refreshedContracts = refreshed.contracts;
-      await pool.query(
-        `UPDATE workflow_builder_sessions
-         SET composio_session_id = $4, discovered_tool_contracts_json = $5::jsonb, updated_at = NOW()
-         WHERE workflow_id = $1 AND tenant_id = $2 AND user_id = $3`,
-        [workflowId, auth.tenantId, auth.userId, refreshed.snapshot.composioSessionId, JSON.stringify(refreshed.contracts)],
-      );
+      if (session) {
+        await pool.query(
+          `UPDATE workflow_builder_sessions
+           SET composio_session_id = $4, discovered_tool_contracts_json = $5::jsonb, updated_at = NOW()
+           WHERE workflow_id = $1 AND tenant_id = $2 AND user_id = $3`,
+          [workflowId, auth.tenantId, auth.userId, refreshed.snapshot.composioSessionId, JSON.stringify(refreshed.contracts)],
+        );
+      }
     } catch (error) {
       visibilityFailure = `Connector visibility check failed: ${error instanceof Error ? error.message : String(error)}`;
     }
-  } else if (scope.length > 0 && !session) {
-    visibilityFailure = "Connector visibility check failed: the workflow has no correlated builder session.";
+  } else if (scope.length > 0 && !buildContract) {
+    visibilityFailure = "Connector visibility check failed: build contract is missing.";
+  } else if (scope.length > 0 && refreshedContracts.length === 0) {
+    visibilityFailure = "Connector visibility check failed: no discovered connector contracts are available.";
   }
 
   await pool.query(`UPDATE workflow_verification_runs SET status = 'running', updated_at = NOW() WHERE id = $1`, [verification.id]);

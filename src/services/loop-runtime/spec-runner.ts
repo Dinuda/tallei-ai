@@ -22,6 +22,8 @@ import { loadWorkflowWorkspaceId, withWorkflowWorkspaceAuth } from "./resolve-lo
 import { buildSpecRunTools } from "./spec-run-tools.js";
 import { parseRunnableSpec, type RunnableSpec } from "./spec-run-types.js";
 import { startLoopRunWorkflow, cancelLoopRunWorkflow } from "../../temporal/start-loop-run.js";
+import { buildRunSeedMessage, projectRunContext, type RunContext } from "./build-run-context.js";
+import { loadTriggerPayloadForRun } from "./trigger-payload.js";
 
 export type SpecRunTriggerSource = "manual" | "schedule" | "event";
 
@@ -30,6 +32,7 @@ export type SpecRunTrigger = {
   label?: string;
   eventId?: string;
   triggerSlug?: string;
+  triggerInstanceId?: string;
 };
 
 type SpecRunProjection = {
@@ -49,7 +52,7 @@ type SpecRunProjection = {
   updatedAt: string;
 };
 
-function parseTriggerFromContext(context: Record<string, unknown>): { source: SpecRunTriggerSource; label: string | null } {
+function parseTriggerFromContext(context: Record<string, unknown>): SpecRunTrigger {
   const trigger = context.trigger && typeof context.trigger === "object" && !Array.isArray(context.trigger)
     ? context.trigger as Record<string, unknown>
     : null;
@@ -57,10 +60,13 @@ function parseTriggerFromContext(context: Record<string, unknown>): { source: Sp
   if (source === "manual" || source === "schedule" || source === "event") {
     return {
       source,
-      label: typeof trigger?.label === "string" ? trigger.label : null,
+      label: typeof trigger?.label === "string" ? trigger.label : undefined,
+      eventId: typeof trigger?.eventId === "string" ? trigger.eventId : undefined,
+      triggerSlug: typeof trigger?.triggerSlug === "string" ? trigger.triggerSlug : undefined,
+      triggerInstanceId: typeof trigger?.triggerInstanceId === "string" ? trigger.triggerInstanceId : undefined,
     };
   }
-  return { source: "manual", label: null };
+  return { source: "manual", label: "Manual" };
 }
 
 async function loadRunnableSpec(auth: AuthContext, workflowId: string): Promise<{ spec: RunnableSpec; title: string }> {
@@ -166,7 +172,7 @@ export async function getSpecRunProjection(auth: AuthContext, runId: string): Pr
     ? "waiting_for_approval"
     : row.status as SpecRunProjection["status"];
 
-  const { source: triggerSource, label: triggerLabel } = parseTriggerFromContext(context);
+  const trigger = parseTriggerFromContext(context);
   const builderSessionId = await findBuilderSessionIdForWorkflow(auth, row.workflow_id);
 
   return {
@@ -177,8 +183,8 @@ export async function getSpecRunProjection(auth: AuthContext, runId: string): Pr
     runnableSpec,
     summary: typeof context.summary === "string" ? context.summary : null,
     error: typeof errorJson.message === "string" ? errorJson.message : null,
-    triggerSource,
-    triggerLabel,
+    triggerSource: trigger.source,
+    triggerLabel: trigger.label ?? null,
     builderSessionId,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -239,12 +245,46 @@ type ExecuteSpecRunInput = {
   messages: UIMessage[];
   mode: "headless" | "stream";
   res?: Response;
+  runContext?: RunContext;
 };
+
+async function resolveRunContext(input: {
+  auth: AuthContext;
+  workflowId: string;
+  runId: string;
+  spec: RunnableSpec;
+}): Promise<RunContext> {
+  const result = await pool.query<{ context_json: unknown }>(
+    `SELECT context_json FROM loop_engine_runs WHERE id = $1 LIMIT 1`,
+    [input.runId],
+  );
+  const context = result.rows[0]?.context_json && typeof result.rows[0].context_json === "object" && !Array.isArray(result.rows[0].context_json)
+    ? result.rows[0].context_json as Record<string, unknown>
+    : {};
+  const trigger = parseTriggerFromContext(context);
+  const triggerPayload = await loadTriggerPayloadForRun({
+    runId: input.runId,
+    triggerInstanceId: trigger.triggerInstanceId,
+    externalEventId: trigger.eventId,
+  });
+  return projectRunContext({
+    spec: input.spec,
+    workflowId: input.workflowId,
+    trigger,
+    triggerPayload,
+  });
+}
 
 async function executeSpecRun(input: ExecuteSpecRunInput): Promise<void> {
   const { spec, title } = await loadRunnableSpec(input.auth, input.workflowId);
   const workspaceId = await loadWorkflowWorkspaceId(input.auth.tenantId, input.auth.userId, input.workflowId);
   const auth = withWorkflowWorkspaceAuth(input.auth, workspaceId);
+  const runContext = input.runContext ?? await resolveRunContext({
+    auth,
+    workflowId: input.workflowId,
+    runId: input.runId,
+    spec,
+  });
 
   await pool.query(
     `UPDATE loop_engine_runs SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW() WHERE id = $1`,
@@ -257,6 +297,7 @@ async function executeSpecRun(input: ExecuteSpecRunInput): Promise<void> {
     runId: input.runId,
     workflowId: input.workflowId,
     workflowTitle: title,
+    runContext,
     onFinalize: async (summary) => {
       await setRunStatus(input.runId, "succeeded", { summary });
       await pool.query(
@@ -267,7 +308,7 @@ async function executeSpecRun(input: ExecuteSpecRunInput): Promise<void> {
     },
   });
 
-  const system = buildSpecRunSystemPrompt(spec);
+  const system = buildSpecRunSystemPrompt(spec, runContext);
   const modelId = loopBuilderOpenAiModel();
   const model = resolveLoopChatLanguageModel(modelId);
   const apiMessages = sanitizeLoopBuilderChatMessages(input.messages);
@@ -342,19 +383,28 @@ export async function executeSpecRunHeadless(
   runId: string,
 ): Promise<void> {
   const { spec } = await loadRunnableSpec(auth, workflowId);
+  const workspaceId = await loadWorkflowWorkspaceId(auth.tenantId, auth.userId, workflowId);
+  const hydratedAuth = withWorkflowWorkspaceAuth(auth, workspaceId);
+  const runContext = await resolveRunContext({
+    auth: hydratedAuth,
+    workflowId,
+    runId,
+    spec,
+  });
   const initialMessages: UIMessage[] = [{
     id: randomUUID(),
     role: "user",
-    parts: [{ type: "text", text: `Execute the loop: ${spec.goal}` }],
+    parts: [{ type: "text", text: buildRunSeedMessage(runContext, spec) }],
   }];
 
   try {
     await executeSpecRun({
-      auth,
+      auth: hydratedAuth,
       workflowId,
       runId,
       messages: initialMessages,
       mode: "headless",
+      runContext,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -1,4 +1,5 @@
 import type { AuthContext } from "../../domain/auth/index.js";
+import { pool } from "../../infrastructure/db/index.js";
 import { createLoopFromRunnableSpec } from "../loop-executor/creator.js";
 import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { normalizeDesignCron } from "../loop-executor/cron.js";
@@ -27,6 +28,7 @@ export async function saveLoopFromSpec(input: {
   const buildContract = input.buildContract;
   const cron = normalizeDesignCron(input.cron, snapshot.specJson.purpose);
   const artifacts = selectedArtifactContract(buildContract);
+  const resolvedWorkspaceId = input.workspaceId ?? input.auth.workspaceId ?? null;
   const runnableSpec = {
     version: "v1" as const,
     goal: snapshot.specJson.purpose,
@@ -36,14 +38,23 @@ export async function saveLoopFromSpec(input: {
     schedule: { cron, timezone: input.timezone },
     buildContract,
     ...(artifacts ? { artifacts } : {}),
-    workspaceId: input.workspaceId ?? null,
+    workspaceId: resolvedWorkspaceId,
     ...(input.builderSessionId ? { builderSessionId: input.builderSessionId } : {}),
   };
-  return createLoopFromRunnableSpec({
+  const loop = await createLoopFromRunnableSpec({
     auth: input.auth,
     spec: runnableSpec,
     title: snapshot.title,
-    workspaceId: input.workspaceId ?? null,
+    workspaceId: resolvedWorkspaceId,
     initialStatus: input.initialStatus ?? "verifying",
   });
+  if (input.builderSessionId) {
+    await pool.query(
+      `UPDATE workflow_builder_sessions
+       SET workflow_id = $4, updated_at = NOW()
+       WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+      [input.builderSessionId, input.auth.tenantId, input.auth.userId, loop.id],
+    );
+  }
+  return loop;
 }
