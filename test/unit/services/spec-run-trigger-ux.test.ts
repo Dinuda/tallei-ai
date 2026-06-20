@@ -67,6 +67,14 @@ test("spec run page uses builder-style chat transcript with universal renderer",
   assert.match(specRunPage, /buildSequentialStepTranscript/);
   assert.match(specRunPage, /hydrateMessagesFromSteps/);
   assert.match(specRunPage, /shouldAutoStartRunStream/);
+  assert.match(specRunPage, /SpecRunDetailsDialog/);
+  assert.match(specRunPage, /View spec/);
+  assert.match(specRunPage, /latestAttemptPerStep\(run\.steps\)/);
+  assert.match(specRunPage, /Referenced spec/);
+  assert.match(specRunPage, /Runner flow/);
+  assert.match(specRunPage, /Artifact role:/);
+  assert.match(specRunPage, /Renderer:/);
+  assert.match(specRunPage, /handoff binding/);
   assert.match(specRunPage, /continueRunStream/);
   assert.match(specRunPage, /interactions\/\$\{interactionId\}\/commands/);
   assert.doesNotMatch(specRunPage, /OperatorWorkspace/);

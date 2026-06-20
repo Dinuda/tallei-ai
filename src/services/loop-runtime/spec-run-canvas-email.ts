@@ -74,6 +74,7 @@ export async function saveCanvasEmailArtifact(input: {
       input.artifactKey,
       emailTemplate.html,
       JSON.stringify({
+        renderer: "canvas.email",
         renderTarget: "canvas.email",
         emailTemplate,
       }),

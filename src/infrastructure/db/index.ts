@@ -1678,7 +1678,7 @@ export async function initDb() {
 
       UPDATE workflows
       SET status = 'archived', updated_at = NOW()
-      WHERE definition_version <> 'loop_spec_v1'
+      WHERE definition_version <> 'loop_executor_v2'
         AND status IN ('verifying', 'active');
 
       UPDATE loop_engine_runs
@@ -1688,7 +1688,7 @@ export async function initDb() {
           updated_at = NOW()
       WHERE status NOT IN ('succeeded', 'failed', 'cancelled')
         AND workflow_id IN (
-          SELECT id FROM workflows WHERE definition_version <> 'loop_spec_v1'
+          SELECT id FROM workflows WHERE definition_version <> 'loop_executor_v2'
         );
     `);
 

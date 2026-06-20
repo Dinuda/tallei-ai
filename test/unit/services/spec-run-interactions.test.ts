@@ -48,6 +48,32 @@ test("buildOperatorViewFromInteraction exposes draft review workspace", () => {
   assert.equal(view?.meta?.canvasArtifactKey, "action_gmail_GMAIL_CREATE_EMAIL_DRAFT:canvas.email");
 });
 
+test("buildOperatorViewFromInteraction does not infer email renderer without explicit render config", () => {
+  const view = buildOperatorViewFromInteraction({
+    id: "ix-preview",
+    run_id: "run-1",
+    step_attempt_id: "step-1",
+    interaction_kind: "review_artifact",
+    status: "pending",
+    question: "Review output",
+    payload_json: {
+      gateType: "draft_review",
+      toolKey: "classifier_output",
+      deferred: {
+        actionLabel: "Classify ticket",
+        payload: { subject: "site down", priority: "high" },
+      },
+    },
+    decision_json: {},
+  }, { name: "Classifier" });
+
+  assert.ok(view);
+  assert.equal(view?.blocks[0]?.surface, "review.preview");
+  assert.equal(view?.blocks[0]?.props, undefined);
+  assert.equal(view?.meta?.canvasArtifactKey, undefined);
+  assert.equal(view?.meta?.renderTarget, undefined);
+});
+
 test("buildOperatorViewFromInteraction preserves explicit builder-style interaction surfaces", () => {
   const view = buildOperatorViewFromInteraction({
     id: "ix-input",

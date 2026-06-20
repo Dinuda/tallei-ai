@@ -370,6 +370,25 @@ function semanticErrors(requirement: BuildRequirement, value: unknown, contracts
   return [];
 }
 
+export function artifactContractValueIsComplete(value: unknown): boolean {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const mode = record.mode;
+  if (mode === "none") return true;
+  if (mode === "approved_generated_structure") {
+    return typeof record.structure === "string" && record.structure.trim().length > 0;
+  }
+  if (mode !== "supplied_template" || typeof record.template !== "string" || record.template.trim().length === 0) {
+    return false;
+  }
+  try {
+    const bundle = JSON.parse(record.template) as { templates?: Array<{ html?: string }> };
+    const templates = Array.isArray(bundle.templates) ? bundle.templates : [];
+    return templates.some((entry) => typeof entry.html === "string" && entry.html.trim().length > 0);
+  } catch {
+    return false;
+  }
+}
+
 export function resolveBuildRequirement(input: {
   contract: LoopBuildContract;
   requirementId: string;
@@ -381,6 +400,16 @@ export function resolveBuildRequirement(input: {
   const target = parsed.requirements.find((entry) => entry.id === input.requirementId);
   if (!target) throw new Error(`Unknown build requirement: ${input.requirementId}`);
 
+  const now = input.now ?? new Date().toISOString();
+  if (
+    target.kind === "artifact_contract"
+    && target.status === "resolved"
+    && artifactContractValueIsComplete(target.value)
+    && !artifactContractValueIsComplete(input.value)
+  ) {
+    return loopBuildContractSchema.parse({ ...parsed, updatedAt: now });
+  }
+
   const ajv = new Ajv({ allErrors: true, strict: false });
   const validator = ajv.compile(target.valueSchema);
   const valid = validator(input.value);
@@ -388,7 +417,6 @@ export function resolveBuildRequirement(input: {
     ...(valid ? [] : (ajv.errorsText(validator.errors, { separator: "; " }) ? [ajv.errorsText(validator.errors, { separator: "; " })] : ["Value does not match the required schema."])),
     ...semanticErrors(target, input.value, input.discoveredToolContracts),
   ];
-  const now = input.now ?? new Date().toISOString();
   let requirements = parsed.requirements.map((entry): BuildRequirement => {
     if (entry.id !== target.id) return entry;
     if (errors.length > 0) return { ...entry, status: "invalid", value: input.value, validationErrors: errors };

@@ -1,13 +1,10 @@
+import { randomUUID } from "crypto";
+
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { ZodError } from "zod";
-import { loopBuilderOpenAiChat, loopBuilderOpenAiReasoningEffort } from "./openai-chat.js";
 import { reportLoopBuilderProgress } from "./progress.js";
 import { enrichSpecAgentsWithPersonas } from "./agent-persona-enrichment.js";
-import {
-  availableToolsForSpecDraft,
-  type SpecAvailableTool,
-} from "./spec-available-tools.js";
+import { compileRunnerSpecFromBuildContract } from "./runner-spec-compiler.js";
 import {
   noSlopSpecDraftSchema,
   noSlopSpecSchema,
@@ -113,19 +110,10 @@ export function renderSpecMarkdown(spec: NoSlopSpec): string {
     lines.push(`Description: ${spec.delivery.description}`);
   }
 
-  const hasConnectorActions = spec.connectorPolicy.allowedReadActions.length > 0
-    || spec.connectorPolicy.allowedWriteActions.length > 0;
-  if (hasConnectorActions || spec.delivery.provider !== "none") {
+  if (spec.delivery.provider !== "none") {
     lines.push("", "## Connector Policy");
-    if (spec.connectorPolicy.allowedWriteActions.length === 0 && spec.delivery.provider !== "none") {
-      lines.push("- Send actions are bound from Connected Apps when the spec is approved.");
-    }
-    for (const action of spec.connectorPolicy.allowedReadActions) {
-      lines.push(`- Read action: ${action.toolkit}/${action.actionSlug} (${action.risk})`);
-    }
-    for (const action of spec.connectorPolicy.allowedWriteActions) {
-      lines.push(`- Write action: ${action.toolkit}/${action.actionSlug} (${action.risk}, pre-send approval required)`);
-    }
+    lines.push("- Runtime actions are bound from the approved Connected Apps configuration.");
+    lines.push("- Mutating delivery actions require the configured operator approval before execution.");
   }
 
   if (spec.buildContract) {
@@ -151,6 +139,66 @@ export function renderSpecMarkdown(spec: NoSlopSpec): string {
   }
 
   return lines.join("\n");
+}
+
+export async function compileEnrichedRuntimeSpecSnapshot(input: {
+  auth: AuthContext;
+  prompt: string;
+  intentContext?: LoopIntentContext;
+  buildContract: LoopBuildContract;
+  discoveredToolContracts?: ToolContract[];
+}): Promise<NoSlopSpecSnapshot> {
+  const snapshot = compileRuntimeSpecSnapshot({
+    prompt: input.prompt,
+    intentContext: input.intentContext,
+    buildContract: input.buildContract,
+    discoveredToolContracts: input.discoveredToolContracts,
+  });
+  const enrichedSpecJson = await enrichSpecAgentsWithPersonas({
+    auth: input.auth,
+    specId: snapshot.id,
+    specJson: snapshot.specJson,
+  });
+  return noSlopSpecSnapshotSchema.parse({
+    ...snapshot,
+    bodyMarkdown: renderSpecMarkdown(enrichedSpecJson),
+    specJson: enrichedSpecJson,
+  });
+}
+
+export function compileRuntimeSpecSnapshot(input: {
+  prompt: string;
+  intentContext?: LoopIntentContext;
+  buildContract: LoopBuildContract;
+  discoveredToolContracts?: ToolContract[];
+}): NoSlopSpecSnapshot {
+  const prompt = input.prompt.trim();
+  if (!prompt) throw new Error("Prompt is required");
+  const intentContext = input.intentContext ? loopIntentContextSchema.parse(input.intentContext) : undefined;
+  const buildContract = loopBuildContractSchema.parse(input.buildContract);
+  reportLoopBuilderProgress({
+    stage: "agent_spawn",
+    message: "Building runtime agent contract from approved configuration…",
+    status: "running",
+  });
+  const specJson = normalizeGeneratedSpec(compileRunnerSpecFromBuildContract({
+    prompt,
+    intentContext,
+    buildContract,
+    discoveredToolContracts: input.discoveredToolContracts ?? [],
+  }));
+  const title = titleFromPurpose(specJson.purpose);
+  return noSlopSpecSnapshotSchema.parse({
+    id: randomUUID(),
+    slug: `${slugify(title)}-${Date.now().toString(36)}`,
+    version: 1,
+    title,
+    bodyMarkdown: renderSpecMarkdown(specJson),
+    specJson,
+    ...(intentContext ? { intentContext } : {}),
+    buildContract,
+    approvedAt: new Date().toISOString(),
+  });
 }
 
 function renderIntentContextMarkdown(intentContext?: LoopIntentContext): string {
@@ -309,245 +357,6 @@ function normalizeSpecJson(input: unknown): unknown {
   }
 }
 
-function formatAvailableToolsForPrompt(tools: SpecAvailableTool[]): string {
-  return tools.map((tool) => `- ${tool.toolRef} (${tool.effect}): ${tool.name} — ${tool.description}`).join("\n");
-}
-
-function specSystemPrompt(): string {
-  return [
-    "You draft human-reviewed no-slop specs for recurring Tallei agent loops.",
-    "Return JSON only. Do not return markdown.",
-    "The spec is the behavioral source of truth a user approves before agents are generated.",
-    "Write precise goals, guardrails, success criteria, and failure modes.",
-    "Use a multi-agent architecture: split the loop into specialized agents where each agent owns a distinct slice of work and the tools needed for that slice.",
-    "Each agent MUST declare a tools[] array with the exact tool refs it owns from the available tools list provided in the user message.",
-    "Assign read/search tools to research or intake agents; assign write/send/draft tools to the agent that produces or delivers the outcome.",
-    "Each mutating tool ref (write_external / send / draft / create) must appear in exactly one agent's tools array.",
-    "Read tools and internal search tools may be shared across agents when both need the same retrieval capability.",
-    "Agents with no connector work may use tools: [\"internal.llm_only\"] or an empty tools array.",
-    "Agents describe outcome-producing responsibilities only. Do not create agents whose job is collecting runtime inputs, preparing approval checkpoints, or presenting send packages.",
-    "Keep connector/tool ref strings in agents[].tools only. Do not mention tool refs, tool names, or connector actions inside agent goals, guardrails, doneWhen, or failureModes.",
-    "Tools are capabilities, not storage destinations. Never say work is saved, stored, or written to a search/retrieval tool.",
-    "delivery.provider MUST be \"none\" unless the user explicitly names a delivery channel or connected app.",
-    "Default to delivery.provider none unless the user explicitly asks the loop to send, post, publish, create, update, or delete through a connected app.",
-    "Do not invent connector action inputs. Exact required inputs are resolved from the selected action schema at runtime.",
-    "If outbound delivery is requested, describe the desired delivery behavior in delivery.description and set delivery.provider to the requested provider name when known.",
-    "An explicitly named available provider is authoritative. Preserve that provider in delivery.provider; never substitute a different provider.",
-    "Connector bindings are system-owned. Always leave connectorPolicy.allowedReadActions and connectorPolicy.allowedWriteActions empty.",
-    "Declare inputRequirements for runtime checkpoints only — never block build-time generation.",
-    "inputRequirements[].surface MUST be one of: input.text, input.markdown, input.contacts_csv, input.audience_id, input.file, review.draft, review.email, confirm.send. Never invent types like input.boolean.",
-    "Use the user's requested input names and surfaces. Do not translate connector fields into recipient or audience aliases.",
-    "Declare run_start content inputs only when the user explicitly requests or provides content that must be collected at runtime.",
-    "Use a 5-field cron only when cadence is clear; otherwise describe the schedule in schedule.description and omit schedule.cron entirely.",
-    "schedule.timezone must be a valid IANA timezone such as UTC when provided; omit schedule.timezone if unknown (defaults to UTC).",
-    "STRICT JSON: never use empty strings for optional fields. Omit optional keys entirely instead of setting them to \"\".",
-    "Required string fields (purpose, schedule.description, agent.name, agent.goal) must be non-empty.",
-    "",
-    "JSON shape:",
-    JSON.stringify({
-      purpose: "One sentence describing the recurring outcome.",
-      agents: [
-        {
-          name: "Research Agent",
-          goal: "Concrete success condition.",
-          tools: ["internal.web_search", "composio.crm.action.READ_TICKETS"],
-          guardrails: ["Constraint this agent must obey."],
-          doneWhen: ["Observable completion condition."],
-          failureModes: ["When to pause or stop."],
-        },
-        {
-          name: "Draft Agent",
-          goal: "Another concrete success condition.",
-          tools: ["composio.mail.action.CREATE_DRAFT"],
-          guardrails: [],
-          doneWhen: ["Draft ready for review."],
-          failureModes: [],
-        },
-      ],
-      guardrails: ["Global behavioral constraint."],
-      successCriteria: ["End-to-end success criterion."],
-      failureModes: ["End-to-end failure mode."],
-      schedule: { description: "Weekly on Friday morning", cron: "0 9 * * 5", timezone: "UTC" },
-      delivery: { provider: "none", description: "Dashboard only; no outbound delivery." },
-      connectorPolicy: {
-        allowedReadActions: [],
-        allowedWriteActions: [],
-      },
-      inputRequirements: [],
-    }, null, 2),
-  ].join("\n");
-}
-
-const SPEC_GENERATION_MAX_RETRIES = 2;
-
-class SpecSemanticError extends Error {
-  constructor(readonly issues: string[]) {
-    super(issues.join("; "));
-  }
-}
-
-function formatSpecValidationIssues(error: ZodError): string[] {
-  return error.issues.map((issue) => {
-    const path = issue.path.length > 0 ? issue.path.join(".") : "root";
-    return `${path}: ${issue.message}`;
-  });
-}
-
-function parsePreparedSpecJson(prepared: unknown): NoSlopSpec {
-  return normalizeGeneratedSpec(noSlopSpecDraftSchema.parse(prepared));
-}
-
-function stripModelExecutionBindings(rawSpec: unknown): unknown {
-  const root = readObject(rawSpec);
-  const connectorPolicy = readObject(root.connectorPolicy);
-  const delivery = readObject(root.delivery);
-  const provider = typeof delivery.provider === "string" ? delivery.provider.trim() : "none";
-  return {
-    ...root,
-    delivery: {
-      ...delivery,
-      provider: provider || "none",
-    },
-    connectorPolicy: {
-      ...connectorPolicy,
-      allowedReadActions: [],
-      allowedWriteActions: [],
-    },
-  };
-}
-
-async function prepareGeneratedLoopSpec(input: {
-  prompt: string;
-  intentContext?: LoopIntentContext;
-  rawSpec: unknown;
-}): Promise<NoSlopSpec> {
-  const expectedProvider = await explicitAvailableProvider(
-    [input.prompt, input.intentContext?.resolvedIntent].filter(Boolean).join("\n"),
-  );
-  const behavioralSpec = normalizeBehavioralSpec(noSlopSpecDraftSchema.parse(input.rawSpec));
-  const semanticIssues = specSemanticIssues(behavioralSpec, expectedProvider);
-  if (semanticIssues.length > 0) throw new SpecSemanticError(semanticIssues);
-  return parsePreparedSpecJson(stripModelExecutionBindings(behavioralSpec));
-}
-
-async function generateSpecJson(input: {
-  auth: AuthContext;
-  prompt: string;
-  intentContext?: LoopIntentContext;
-  feedback?: string;
-  currentSpec?: LoopSpecView;
-  buildContract?: LoopBuildContract;
-  discoveredToolContracts?: ToolContract[];
-}): Promise<NoSlopSpec> {
-  let validationFixes: string[] = [];
-  let lastError: unknown = null;
-  const expectedProvider = await explicitAvailableProvider(
-    [input.prompt, input.intentContext?.resolvedIntent].filter(Boolean).join("\n"),
-  );
-  const availableTools = input.buildContract
-    ? availableToolsForSpecDraft(input.buildContract, input.discoveredToolContracts ?? [])
-    : [];
-
-  for (let attempt = 0; attempt <= SPEC_GENERATION_MAX_RETRIES; attempt += 1) {
-    const sections = [
-      `User loop request:\n${input.prompt}`,
-      input.intentContext ? `Resolved intent decisions (authoritative over conflicting raw request wording):\n${input.intentContext.resolvedIntent}` : null,
-      input.currentSpec ? `Current spec markdown:\n${input.currentSpec.bodyMarkdown}` : null,
-      input.feedback ? `Requested refinement:\n${input.feedback}` : null,
-      availableTools.length > 0
-        ? `Available tools for agents[].tools (use exact toolRef values; assign each write tool to exactly one agent):\n${formatAvailableToolsForPrompt(availableTools)}`
-        : null,
-      expectedProvider ? `Explicitly requested available provider (must be preserved exactly in delivery.provider):\n${expectedProvider}` : null,
-      validationFixes.length > 0
-        ? `Required fixes from schema validation (address all):\n${validationFixes.map((fix) => `- ${fix}`).join("\n")}`
-        : null,
-    ].filter(Boolean).join("\n\n");
-
-    try {
-      reportLoopBuilderProgress({
-        stage: "spec_generation",
-        message: attempt === 0 ? "Drafting behavioral spec" : "Retrying behavioral spec draft",
-        status: "running",
-        details: {
-          attempt: attempt + 1,
-          maxAttempts: SPEC_GENERATION_MAX_RETRIES + 1,
-          availableToolCount: availableTools.length,
-        },
-      });
-      const response = await loopBuilderOpenAiChat({
-        responseFormat: "json_object",
-        temperature: 0.2,
-        maxTokens: 4096,
-        exactMaxTokens: true,
-        emptyResponseRetryMaxTokens: 8192,
-        reasoningEffort: loopBuilderOpenAiReasoningEffort(),
-        messages: [
-          { role: "system", content: specSystemPrompt() },
-          { role: "user", content: sections },
-        ],
-      });
-
-      let rawSpec: unknown;
-      try {
-        rawSpec = JSON.parse(response.text);
-      } catch (parseError) {
-        throw new Error(`Failed to parse spec LLM response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}\n\nResponse text (first 500 chars):\n${response.text.slice(0, 500)}`);
-      }
-
-      const behavioralSpec = normalizeBehavioralSpec(noSlopSpecDraftSchema.parse(rawSpec));
-      const semanticIssues = specSemanticIssues(behavioralSpec, expectedProvider);
-      if (semanticIssues.length > 0) throw new SpecSemanticError(semanticIssues);
-      const withoutBindings = stripModelExecutionBindings(behavioralSpec);
-      const prepared = parsePreparedSpecJson(withoutBindings);
-      reportLoopBuilderProgress({
-        stage: "spec_generation",
-        message: "Behavioral spec draft ready",
-        status: "completed",
-        details: {
-          attempt: attempt + 1,
-          agentCount: prepared.agents.length,
-          hasSchedule: Boolean(prepared.schedule?.description),
-        },
-      });
-      return prepared;
-    } catch (error) {
-      lastError = error;
-      if (error instanceof ZodError && attempt < SPEC_GENERATION_MAX_RETRIES) {
-        validationFixes = formatSpecValidationIssues(error);
-        reportLoopBuilderProgress({
-          stage: "spec_generation",
-          message: "Retrying spec draft after validation issues",
-          status: "running",
-          details: { attempt: attempt + 1, issues: validationFixes },
-        });
-        continue;
-      }
-      if (error instanceof SpecSemanticError && attempt < SPEC_GENERATION_MAX_RETRIES) {
-        validationFixes = error.issues;
-        reportLoopBuilderProgress({
-          stage: "spec_generation",
-          message: "Retrying spec draft after semantic issues",
-          status: "running",
-          details: { attempt: attempt + 1, issues: validationFixes },
-        });
-        continue;
-      }
-      reportLoopBuilderProgress({
-        stage: "spec_generation",
-        message: "Spec draft failed",
-        status: "failed",
-        details: {
-          attempt: attempt + 1,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      });
-      throw error;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error("Spec generation failed");
-}
-
 export async function draftLoopSpec(input: {
   auth: AuthContext;
   prompt: string;
@@ -559,23 +368,16 @@ export async function draftLoopSpec(input: {
   if (!prompt) throw new Error("Prompt is required");
   const intentContext = input.intentContext ? loopIntentContextSchema.parse(input.intentContext) : undefined;
   const buildContract = loopBuildContractSchema.parse(input.buildContract);
-  const generated = await generateSpecJson({
-    auth: input.auth,
+  reportLoopBuilderProgress({
+    stage: "agent_spawn",
+    message: "Building runner contract from approved configuration…",
+    status: "running",
+  });
+  const specJson = compileRunnerSpecFromBuildContract({
     prompt,
     intentContext,
     buildContract,
     discoveredToolContracts: input.discoveredToolContracts ?? [],
-  });
-  const scheduleValue = buildContract.requirements.find((entry) => entry.kind === "trigger_schedule")?.value;
-  const schedule = scheduleValue && typeof scheduleValue === "object" && !Array.isArray(scheduleValue)
-    ? scheduleValue as Record<string, unknown>
-    : null;
-  const specJson = noSlopSpecDraftSchema.parse({
-    ...generated,
-    ...(schedule && typeof schedule.cron === "string" && typeof schedule.timezone === "string"
-      ? { schedule: { description: `Approved schedule: ${schedule.cron} (${schedule.timezone})`, cron: schedule.cron, timezone: schedule.timezone } }
-      : {}),
-    buildContract,
   });
   return persistGeneratedLoopSpec({ auth: input.auth, prompt, intentContext, specJson });
 }
@@ -589,7 +391,7 @@ async function persistGeneratedLoopSpec(input: {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error("Prompt is required");
   const intentContext = input.intentContext ? loopIntentContextSchema.parse(input.intentContext) : undefined;
-  const specJson = parsePreparedSpecJson(input.specJson);
+  const specJson = normalizeGeneratedSpec(noSlopSpecDraftSchema.parse(input.specJson));
   const title = titleFromPurpose(specJson.purpose);
   const slug = slugify(title);
   const bodyMarkdown = renderSpecMarkdown(specJson);
@@ -660,25 +462,25 @@ export async function refineLoopSpec(input: {
   auth: AuthContext;
   specId: string;
   feedback: string;
+  discoveredToolContracts?: ToolContract[];
 }): Promise<LoopSpecView> {
   const current = await getLoopSpec(input.auth, input.specId);
   if (!current || current.status === "archived") throw new Error("Loop spec not found");
   if (current.status === "approved") throw new Error("Approved loop specs cannot be refined");
   const feedback = input.feedback.trim();
   if (!feedback) throw new Error("Feedback is required");
-  const generated = await generateSpecJson({
-    auth: input.auth,
+  if (!current.specJson.buildContract) throw new Error("Loop spec has no build contract to recompile");
+  reportLoopBuilderProgress({
+    stage: "agent_spawn",
+    message: "Rebuilding runner contract from approved configuration…",
+    status: "running",
+  });
+  const specJson = compileRunnerSpecFromBuildContract({
     prompt: current.sourcePrompt,
     intentContext: current.intentContext,
-    feedback,
-    currentSpec: current,
     buildContract: current.specJson.buildContract,
-    discoveredToolContracts: [],
-  });
-  const specJson = noSlopSpecDraftSchema.parse({
-    ...generated,
-    ...(current.specJson.buildContract ? { schedule: current.specJson.schedule } : {}),
-    ...(current.specJson.buildContract ? { buildContract: current.specJson.buildContract } : {}),
+    discoveredToolContracts: input.discoveredToolContracts ?? [],
+    feedback,
   });
   const enrichedSpecJson = await enrichSpecAgentsWithPersonas({
     auth: input.auth,

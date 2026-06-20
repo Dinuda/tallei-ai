@@ -6,25 +6,54 @@ import {
   type GroundingSourceRef,
   type ReviewPolicyMode,
 } from "../loop-engine/build-contract.js";
+import type { DataContract } from "../loop-engine/data-contract.js";
 import type { InputRequirement, InputSurface } from "../loop-engine/input-surfaces.js";
 import type { AgentPersona, NoSlopSpecAgent } from "../loop-engine/spec-contracts.js";
-import { slugifyAgentId } from "../loop-builder/agent-personas.js";
 import type { ToolContract, ToolRenderTarget } from "../tool-spec/types.js";
 import {
-  discoveredContractsFromRunnable,
-  type RunnableSpec,
+  discoveredContractsFromDefinition,
+  type SpecRunDefinition,
 } from "./spec-run-types.js";
 
 export type RunPlanAgent = {
   id: string;
   index: number;
+  nodeKind?: "agent" | "transform" | "operator_input" | "action" | "checkpoint";
   name: string;
   goal: string;
   guardrails: string[];
   doneWhen: string[];
+  doneCriteria: string[];
   failureModes: string[];
   toolRefs: string[];
+  inputContract: {
+    description: string;
+    schema: Record<string, unknown>;
+  };
+  outputContract: DataContract;
+  handoffBindings: AgentHandoffBinding[];
+  gate?: {
+    type: string;
+    question: string;
+  };
+  artifactRole?: "source_evidence" | "draft_body" | "final_preview" | "delivery";
+  outputArtifactId: string;
+  outputArtifactKind: string;
   persona?: AgentPersona;
+};
+
+export type AgentHandoffBinding = {
+  source: {
+    kind: "agent_output" | "operator_input" | "stable_config" | "artifact";
+    agentId?: string;
+    key?: string;
+    path: string;
+  };
+  targetPath: string;
+  required: boolean;
+  valuePolicy?: "derivable" | "passthrough";
+  provenance?: "agent_output" | "operator_input" | "stable_config" | "artifact" | "connector_output";
+  transformation?: "direct" | "merge" | "transform";
 };
 
 export type RunPlanTool = {
@@ -95,19 +124,23 @@ function compileTool(contract: ToolContract): RunPlanTool {
   };
 }
 
-function selectedContracts(spec: RunnableSpec): ToolContract[] {
-  const contract = spec.buildContract ?? spec.noSlopSpec.buildContract ?? spec.noSlopSpec.specJson.buildContract;
-  const discovered = discoveredContractsFromRunnable(spec);
+type PlanAgentSource = SpecRunDefinition["agentGraph"]["children"][number];
+
+function selectedContracts(definition: SpecRunDefinition): ToolContract[] {
+  const contract = definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract;
+  const discovered = discoveredContractsFromDefinition(definition);
+  if (!contract) return [];
   const selectedSlugs = new Set(
-    contract ? selectedConnectorActionSlugs(contract).map((slug) => slug.toUpperCase()) : [],
+    selectedConnectorActionSlugs(contract).map((slug) => slug.toUpperCase()),
   );
-  if (selectedSlugs.size === 0) return discovered;
+  if (selectedSlugs.size === 0) return [];
   return discovered.filter((toolContract) => {
-    if (toolContract.provider !== "composio") return true;
+    if (toolContract.provider !== "composio") return false;
     return selectedSlugs.has(contractActionSlug(toolContract).toUpperCase());
   });
 }
 
+// TODO: move this to a config file
 const INTERNAL_TOOL_REFS = new Set([
   "internal.llm_only",
   "internal.memory_search",
@@ -116,10 +149,13 @@ const INTERNAL_TOOL_REFS = new Set([
 
 /** Resolve tool refs from the approved spec only — no keyword inference. */
 export function declaredAgentToolRefs(
-  agent: NoSlopSpecAgent,
+  agent: NoSlopSpecAgent | PlanAgentSource,
   planTools: RunPlanTool[],
 ): string[] {
-  const declared = (agent.tools ?? []).map((ref) => ref.trim()).filter(Boolean);
+  const declared = (agent.tools ?? [])
+    .map((tool) => typeof tool === "string" ? tool : tool.ref)
+    .map((ref) => ref.trim())
+    .filter(Boolean);
   const planRefs = new Set(planTools.map((tool) => tool.toolRef));
   const refs = new Set<string>();
 
@@ -140,27 +176,47 @@ export function declaredAgentToolRefs(
   return [...refs];
 }
 
-function inferredReviewSurfaces(spec: RunnableSpec, writeTools: RunPlanTool[]): InputSurface[] {
+function declaredReviewSurfaces(definition: SpecRunDefinition): InputSurface[] {
   const surfaces = new Set<InputSurface>();
-  for (const req of spec.noSlopSpec.specJson.inputRequirements) {
+  for (const req of definition.inputRequirements ?? []) {
     if (req.surface.startsWith("review.") || req.surface.startsWith("confirm.")) {
       surfaces.add(req.surface);
     }
   }
-  for (const tool of writeTools) {
-    if (tool.renderTargets.includes("canvas.email")) surfaces.add("review.email");
-    else if (tool.renderTargets.includes("canvas.preview")) surfaces.add("review.preview");
-    else if (tool.requiresApproval) surfaces.add("confirm.send");
-  }
-  if ((spec.artifacts?.templates.length ?? 0) > 0) surfaces.add("review.email");
-  if (spec.artifacts?.structure) surfaces.add("review.draft");
   return [...surfaces];
 }
 
-export function compileSpecRunPlan(spec: RunnableSpec): CompiledSpecRunPlan {
-  const buildContract = spec.buildContract ?? spec.noSlopSpec.buildContract ?? spec.noSlopSpec.specJson.buildContract;
+function slugArtifactId(agentId: string): string {
+  return `${agentId.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "").slice(0, 40) || "agent"}_output`;
+}
+
+function outputArtifactKind(contract: DataContract): string {
+  if (contract.renderer === "canvas.preview") return "canvas_preview";
+  if (contract.renderer === "canvas.email") return "canvas_email";
+  return "structured_output";
+}
+
+function defaultInputContract(agent: NoSlopSpecAgent | PlanAgentSource): RunPlanAgent["inputContract"] {
+  return {
+    description: `Runtime input for ${agent.name}.`,
+    schema: { type: "object", properties: {}, additionalProperties: true },
+  };
+}
+
+function defaultOutputContract(agent: NoSlopSpecAgent | PlanAgentSource): DataContract {
+  const fallbackDescription = agent.goal ?? ("task" in agent ? agent.task : agent.name);
+  return {
+    description: ("doneWhen" in agent ? agent.doneWhen?.[0] : agent.doneCriteria?.[0]) ?? fallbackDescription,
+    schema: { type: "object", properties: {}, additionalProperties: true },
+    representation: "text",
+    mediaType: "text/plain",
+  };
+}
+
+export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecRunPlan {
+  const buildContract = definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract;
   const reviewPolicy = buildContract ? selectedReviewPolicy(buildContract) : null;
-  const contracts = selectedContracts(spec);
+  const contracts = selectedContracts(definition);
   const readTools = contracts
     .filter((contract) => contract.effect === "read_external")
     .map(compileTool);
@@ -173,26 +229,41 @@ export function compileSpecRunPlan(spec: RunnableSpec): CompiledSpecRunPlan {
     .map(compileTool);
   const allTools = [...readTools, ...writeTools];
   const externalDataToolkits = buildContract ? selectedExternalDataToolkits(buildContract) : [];
-  const agents = spec.noSlopSpec.specJson.agents.map((agent, index): RunPlanAgent => ({
-    id: slugifyAgentId(agent.name, index),
-    index,
-    name: agent.name,
-    goal: agent.goal,
-    guardrails: agent.guardrails,
-    doneWhen: agent.doneWhen,
-    failureModes: agent.failureModes,
-    toolRefs: declaredAgentToolRefs(agent, allTools),
-    persona: agent.persona,
+  const agents = (definition.agentGraph?.children ?? []).map((agent, index): RunPlanAgent => ({
+    ...(() => {
+      const id = agent.id;
+      const outputContract = agent.outputContract ?? defaultOutputContract(agent);
+      return {
+        id,
+        index,
+        nodeKind: agent.nodeKind,
+        name: agent.name,
+        goal: agent.goal ?? agent.task,
+        guardrails: agent.guardrails ?? [],
+        doneWhen: agent.doneCriteria ?? [],
+        doneCriteria: agent.doneCriteria ?? [],
+        failureModes: agent.failureModes ?? [],
+        toolRefs: declaredAgentToolRefs(agent, allTools),
+        inputContract: agent.inputContract ?? defaultInputContract(agent),
+        outputContract,
+        handoffBindings: agent.handoffBindings,
+        gate: agent.gate,
+        artifactRole: agent.artifactRole,
+        outputArtifactId: agent.outputArtifactId ?? slugArtifactId(id),
+        outputArtifactKind: agent.outputArtifactKind ?? outputArtifactKind(outputContract),
+        persona: agent.persona,
+      };
+    })(),
   }));
 
   return {
     agents,
-    inputRequirements: spec.noSlopSpec.specJson.inputRequirements,
+    inputRequirements: definition.inputRequirements ?? [],
     grounding: buildContract ? selectedGroundingSources(buildContract) : [],
     externalDataToolkits,
     reviewPolicy,
     readTools,
     writeTools,
-    reviewSurfaces: inferredReviewSurfaces(spec, writeTools),
+    reviewSurfaces: declaredReviewSurfaces(definition),
   };
 }

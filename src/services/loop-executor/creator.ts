@@ -4,13 +4,13 @@ import { pool } from "../../infrastructure/db/index.js";
 import { deleteLoopSchedule } from "../../temporal/schedules.js";
 import { isTemporalEnabled } from "../../temporal/client.js";
 import { nextCronRunAt, normalizeDesignCron } from "./cron.js";
+import { parseLoopDefinition } from "../loop-runtime/spec-run-types.js";
 import {
-  LOOP_SPEC_DEFINITION_VERSION,
-  parseRunnableSpec,
-  runnableSpecSchema,
-  type RunnableSpec,
-} from "../loop-runtime/spec-run-types.js";
-import type { LoopWorkflowView } from "./types.js";
+  LOOP_DEFINITION_VERSION,
+  loopDefinitionSchema,
+  type LoopDefinition,
+  type LoopWorkflowView,
+} from "./types.js";
 import { findBuilderSessionIdForWorkflow } from "../loop-runtime/spec-runner.js";
 
 export async function requireLoopAdmin(_auth: AuthContext): Promise<void> {
@@ -36,10 +36,8 @@ function mapLoopWorkflowRow(row: {
     throw new Error(`Unsupported workflow status: ${row.status}`);
   }
 
-  const runnableSpec = parseRunnableSpec(metadata);
-  if (!runnableSpec) {
-    throw new Error("Legacy graph-based loops are no longer supported. Re-save from the loop builder.");
-  }
+  const definition = parseLoopDefinition(metadata);
+  if (!definition) throw new Error("Workflow is missing a loop definition.");
 
   return {
     id: row.id,
@@ -49,9 +47,9 @@ function mapLoopWorkflowRow(row: {
     scheduleRrule: row.schedule_rrule,
     nextRunAt: row.next_run_at,
     lastScheduledAt: row.last_scheduled_at,
-    goal: runnableSpec.goal,
-    runnableSpec,
-    definitionVersion: LOOP_SPEC_DEFINITION_VERSION,
+    goal: definition.goal,
+    definition,
+    definitionVersion: row.definition_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -104,20 +102,21 @@ async function attachWorkflowRunMeta(auth: AuthContext, workflow: LoopWorkflowVi
   };
 }
 
-export async function createLoopFromRunnableSpec(input: {
+export async function createLoopFromDefinition(input: {
   auth: AuthContext;
-  spec: RunnableSpec;
+  definition: LoopDefinition;
   title?: string;
   workspaceId?: string | null;
   initialStatus?: "active" | "verifying";
+  provenance?: Record<string, unknown>;
 }): Promise<LoopWorkflowView> {
   await requireLoopAdmin(input.auth);
-  const parsed = runnableSpecSchema.parse(input.spec);
+  const parsed = loopDefinitionSchema.parse(input.definition);
   const workflowId = randomUUID();
-  const title = input.title?.trim() || parsed.title;
+  const title = input.title?.trim() || parsed.builderMeta?.noSlopSpec?.title || "Untitled loop";
   const cron = normalizeDesignCron(parsed.schedule.cron, parsed.goal);
   const fingerprint = createHash("sha256")
-    .update(`${LOOP_SPEC_DEFINITION_VERSION}:${parsed.goal}:${cron}`)
+    .update(`${LOOP_DEFINITION_VERSION}:${parsed.goal}:${cron}:${title}`)
     .digest("hex")
     .slice(0, 24);
   const initialStatus = input.initialStatus ?? "verifying";
@@ -131,23 +130,23 @@ export async function createLoopFromRunnableSpec(input: {
       workflowId,
       input.auth.tenantId,
       input.auth.userId,
-      input.workspaceId ?? parsed.workspaceId ?? input.auth.workspaceId ?? null,
+      input.workspaceId ?? input.auth.workspaceId ?? null,
       title,
       fingerprint,
       parsed.goal,
       cron,
       initialStatus,
       JSON.stringify({
-        source: "loop_spec_v1",
-        runnableSpec: parsed,
+        loopDefinition: parsed,
+        ...(input.provenance ? { provenance: input.provenance } : {}),
       }),
-      LOOP_SPEC_DEFINITION_VERSION,
+      LOOP_DEFINITION_VERSION,
       nextRunAt,
     ],
   );
 
   const created = await getLoopWorkflow(input.auth, workflowId);
-  if (!created) throw new Error("Failed to create spec-driven loop workflow");
+  if (!created) throw new Error("Failed to create definition-driven loop workflow");
   return created;
 }
 
@@ -173,7 +172,7 @@ export async function getLoopWorkflow(auth: AuthContext, workflowId: string): Pr
        AND user_id = $3
        AND definition_version = $4
      LIMIT 1`,
-    [workflowId, auth.tenantId, auth.userId, LOOP_SPEC_DEFINITION_VERSION],
+    [workflowId, auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION],
   );
   const row = result.rows[0];
   if (!row) return null;
@@ -206,8 +205,8 @@ export async function listLoopWorkflows(auth: AuthContext): Promise<LoopWorkflow
      ORDER BY updated_at DESC
      LIMIT 50`,
     workspaceId
-      ? [auth.tenantId, auth.userId, LOOP_SPEC_DEFINITION_VERSION, workspaceId]
-      : [auth.tenantId, auth.userId, LOOP_SPEC_DEFINITION_VERSION],
+      ? [auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION, workspaceId]
+      : [auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION],
   );
   const workflows = result.rows.map(mapLoopWorkflowRow);
   return Promise.all(workflows.map((workflow) => attachWorkflowRunMeta(auth, workflow)));
@@ -224,7 +223,7 @@ export async function deleteLoopWorkflow(auth: AuthContext, workflowId: string):
        AND definition_version = $4
        AND status IN ('verifying', 'active')
      RETURNING id`,
-    [workflowId, auth.tenantId, auth.userId, LOOP_SPEC_DEFINITION_VERSION],
+    [workflowId, auth.tenantId, auth.userId, LOOP_DEFINITION_VERSION],
   );
   if (!result.rowCount) {
     throw new Error("Loop workflow not found");

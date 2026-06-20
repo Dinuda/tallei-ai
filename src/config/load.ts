@@ -15,6 +15,15 @@ function resolveEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
+/** OpenCode Go (/zen/go/v1) is Anthropic-format; loop builder uses OpenAI chat completions on /zen/v1. */
+function normalizeOpenCodeBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  if (trimmed.endsWith("/zen/go/v1") || trimmed.endsWith("/zen/go")) {
+    return trimmed.replace(/\/zen\/go(?:\/v1)?$/, "/zen/v1");
+  }
+  return trimmed || "https://opencode.ai/zen/v1";
+}
+
 
 export type ImportExtractMode = "heuristic" | "llm";
 
@@ -238,7 +247,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     vertexSearchVerboseLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__VERTEX_SEARCH_VERBOSE", false),
     ollamaBaseUrl: readStringEnv(e, "TALLEI_LLM__OLLAMA_BASE_URL", "http://localhost:11434/v1"),
     ollamaModel: defaultOllamaModel,
-    opencodeBaseUrl: readStringEnv(e, "TALLEI_LLM__OPENCODE_BASE_URL", "https://opencode.ai/zen/go/v1"),
+    opencodeBaseUrl: normalizeOpenCodeBaseUrl(
+      readStringEnv(e, "TALLEI_LLM__OPENCODE_BASE_URL", "https://opencode.ai/zen/v1"),
+    ),
     opencodeModel: defaultOpenCodeModel,
     opencodeApiKey: readStringEnv(e, "TALLEI_LLM__OPENCODE_API_KEY") || readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),

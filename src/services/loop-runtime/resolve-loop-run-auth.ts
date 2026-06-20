@@ -1,14 +1,13 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { parseRunnableSpec } from "./spec-run-types.js";
 
 export async function loadWorkflowWorkspaceId(
   tenantId: string,
   userId: string,
   workflowId: string,
 ): Promise<string | null> {
-  const result = await pool.query<{ workspace_id: string | null; metadata_json: unknown }>(
-    `SELECT workspace_id, metadata_json
+  const result = await pool.query<{ workspace_id: string | null }>(
+    `SELECT workspace_id
      FROM workflows
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3
      LIMIT 1`,
@@ -16,9 +15,7 @@ export async function loadWorkflowWorkspaceId(
   );
   const row = result.rows[0];
   if (!row) return null;
-  if (row.workspace_id) return row.workspace_id;
-  const runnableSpec = parseRunnableSpec(row.metadata_json);
-  return runnableSpec?.workspaceId ?? null;
+  return row.workspace_id ?? null;
 }
 
 export async function resolveLoopRunAuth(input: {

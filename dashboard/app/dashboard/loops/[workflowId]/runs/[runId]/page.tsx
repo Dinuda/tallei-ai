@@ -217,7 +217,7 @@ type RunProjection = {
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "blocked"]);
 
 function isSpecDrivenRun(run: RunProjection | null | undefined): boolean {
-  return run?.context?.engine === "loop_spec_v1";
+  return run?.context?.engine === "loop_executor_v2";
 }
 
 function isSpecRunnerStep(step: StepAttempt): boolean {

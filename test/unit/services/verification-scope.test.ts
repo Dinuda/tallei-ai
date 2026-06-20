@@ -105,35 +105,55 @@ test("gmail drafts-only scope marks create/get draft critical and contacts optio
   ]);
   const scope = deriveVerificationScope({
     buildContract,
-    runnableSpec: {
-      version: "v1",
+    definition: {
+      definitionVersion: "loop_executor_v2",
       goal: "Draft Gmail replies for support tickets",
-      title: "Support drafts",
-      noSlopSpec: {
-        id: "spec-1",
-        title: "Support drafts",
-        bodyMarkdown: "",
-        specJson: {
-          purpose: "Draft Gmail replies for support tickets without sending",
-          delivery: { provider: "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT", description: "Create drafts only" },
-          schedule: { cron: "0 9 * * *", timezone: "UTC" },
-          agents: [{
-            name: "Reply drafter",
-            goal: "Create Gmail drafts with approved templates",
-            guardrails: [],
-            doneWhen: ["Draft created"],
-            failureModes: [],
-          }],
-          successCriteria: ["Draft exists"],
-          buildContract,
-        },
-        approvedAt: "2026-06-15T00:00:00.000Z",
-        buildContract,
-      },
-      discoveredToolContracts: [],
       schedule: { cron: "0 9 * * *", timezone: "UTC" },
-      buildContract,
-    },
+      schedulerTarget: "internal",
+      allowedIntegrations: ["internal"],
+      ceo: { name: "CEO", task: "Draft Gmail replies for support tickets", policy: "Draft Gmail replies for support tickets" },
+      draftPolicy: { requireDraftBeforeExternalAction: true, approvalRequiredFor: ["publish", "send", "external_action"] },
+      deliveryType: "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
+      agentGraph: {
+        parent: { id: "root", name: "CEO", task: "Draft Gmail replies for support tickets", policy: "Draft Gmail replies for support tickets" },
+        children: [{
+          id: "reply-drafter",
+          name: "Reply drafter",
+          task: "Create Gmail drafts with approved templates",
+          goal: "Create Gmail drafts with approved templates",
+          tools: [],
+          doneCriteria: ["Draft created"],
+        }],
+      },
+      builderMeta: {
+        designedBy: "loop_architect",
+        preApproved: true,
+        noSlopSpec: {
+          id: "spec-1",
+          title: "Support drafts",
+          bodyMarkdown: "",
+          approvedAt: "2026-06-15T00:00:00.000Z",
+          specJson: {
+            purpose: "Draft Gmail replies for support tickets without sending",
+            delivery: { provider: "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT", description: "Create drafts only" },
+            schedule: { description: "Hourly" },
+            agents: [{
+              name: "Reply drafter",
+              goal: "Create Gmail drafts with approved templates",
+              guardrails: [],
+              doneWhen: ["Draft created"],
+              failureModes: [],
+            }],
+            successCriteria: ["Draft exists"],
+            failureModes: [],
+            guardrails: [],
+            connectorPolicy: { allowedReadActions: [], allowedWriteActions: [] },
+            inputRequirements: [],
+          },
+        },
+        discoveredToolContracts: [],
+      },
+    } as any,
   });
 
   const bySlug = new Map(scope.map((target) => [target.actionSlug, target]));

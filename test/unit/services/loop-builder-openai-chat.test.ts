@@ -31,6 +31,37 @@ test("loopBuilderStreamProviderOptions enables reasoning summary for reasoning m
     else process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT = previous;
   }
 });
+test("loopBuilderStreamProviderOptions enables thinking for OpenCode chat completions models", async () => {
+  const previousProvider = process.env.TALLEI_LLM__PROVIDER;
+  const previousEffort = process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT;
+  process.env.TALLEI_LLM__PROVIDER = "opencode";
+  delete process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT;
+  const { loopBuilderStreamProviderOptions } = await import(
+    "../../../src/services/loop-builder/openai-chat.js?t=opencode-thinking"
+  );
+
+  try {
+    assert.deepEqual(loopBuilderStreamProviderOptions("deepseek-v4-flash"), {
+      opencode: {
+        thinking: { type: "enabled" },
+        reasoningEffort: "low",
+      },
+    });
+    assert.equal(loopBuilderStreamProviderOptions("gpt-5.1")?.openai?.reasoningSummary, "auto");
+  } finally {
+    if (previousProvider === undefined) delete process.env.TALLEI_LLM__PROVIDER;
+    else process.env.TALLEI_LLM__PROVIDER = previousProvider;
+    if (previousEffort === undefined) delete process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT;
+    else process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT = previousEffort;
+  }
+});
+
+test("loop builder completion token defaults are 10k with 16k retry", async () => {
+  const mod = await import("../../../src/services/loop-builder/openai-chat.js?t=token-defaults");
+  assert.equal(mod.LOOP_BUILDER_DEFAULT_MAX_COMPLETION_TOKENS, 10_000);
+  assert.equal(mod.LOOP_BUILDER_RETRY_MAX_COMPLETION_TOKENS, 16_000);
+});
+
 test("loopBuilderOpenAiReasoningEffort defaults to minimal and can be disabled", async () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
   delete process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;

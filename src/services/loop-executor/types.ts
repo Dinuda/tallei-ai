@@ -6,7 +6,7 @@
  */
 
 import { z } from "zod";
-import { connectorPolicySchema, noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
+import { agentPersonaSchema, connectorPolicySchema, noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
 import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
 import { dataContractSchema, normalizeContractSchema } from "../loop-engine/data-contract.js";
@@ -238,13 +238,22 @@ export const loopAgentGraphChildSchema = z.object({
   task: z.string().min(1),
   goal: z.string().min(1).optional(),
   tools: z.array(loopToolAssignmentSchema).default([]),
+  guardrails: z.array(z.string().min(1)).default([]).optional(),
+  failureModes: z.array(z.string().min(1)).default([]).optional(),
   doneCriteria: z.array(z.string().min(1)).default([]).optional(),
   inputContract: loopAgentContractSchema.optional(),
   outputContract: loopAgentContractSchema.optional(),
   handoffBindings: z.array(agentHandoffBindingSchema).default([]),
   gate: loopAgentGateSchema.optional(),
+  artifactRole: z.enum([
+    "source_evidence",
+    "draft_body",
+    "final_preview",
+    "delivery",
+  ]).optional(),
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
+  persona: agentPersonaSchema.optional(),
 });
 
 type LoopAgentGraphChild = z.infer<typeof loopAgentGraphChildSchema>;
@@ -466,10 +475,8 @@ export interface LoopWorkflowView {
   nextRunAt: string | null;
   lastScheduledAt: string | null;
   goal: string;
-  /** Legacy graph-based definition (loop_executor_v2). */
+  /** Persisted loop definition. */
   definition?: LoopDefinition;
-  /** Spec-driven runnable bundle (loop_spec_v1). */
-  runnableSpec?: import("../loop-runtime/spec-run-types.js").RunnableSpec;
   definitionVersion: string;
   latestRun?: {
     id: string;

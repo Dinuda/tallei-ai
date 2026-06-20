@@ -6,7 +6,6 @@ import {
   loadPendingInteractionForRun,
   mapInteractionKindForUi,
 } from "./spec-run-interactions.js";
-import { toolDisplayName } from "./spec-run-tool-tracker.js";
 
 type StepRow = {
   id: string;
@@ -56,6 +55,34 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function titleCase(value: string): string {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function humanizeActionSlug(slug: string): string {
+  return titleCase(slug.replace(/^GMAIL_|^SLACK_|^NOTION_/i, ""));
+}
+
+function toolDisplayName(toolKey: string): string {
+  if (toolKey === "getTriggerPayload") return "Trigger Payload";
+  if (toolKey === "searchMemory") return "Memory Search";
+  if (toolKey === "searchWeb") return "Web Search";
+  if (toolKey === "finalizeRun") return "Complete Run";
+  if (toolKey.startsWith("search_")) {
+    const toolkit = toolKey.slice("search_".length).replace(/_/g, " ");
+    return `${titleCase(toolkit)} Search`;
+  }
+  if (toolKey.startsWith("action_")) {
+    const parts = toolKey.split("_");
+    return humanizeActionSlug(parts.slice(2).join("_"));
+  }
+  return titleCase(toolKey);
 }
 
 function mapStepStatus(status: string): string {
@@ -155,6 +182,15 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
         name: typeof snapshot.name === "string" ? snapshot.name : toolDisplayName(row.agent_id),
         task: typeof snapshot.task === "string" ? snapshot.task : "",
         tools: Array.isArray(snapshot.tools) ? snapshot.tools : [],
+        inputContract: asRecord(snapshot.inputContract),
+        outputContract: asRecord(snapshot.outputContract),
+        handoffBindings: Array.isArray(snapshot.handoffBindings) ? snapshot.handoffBindings : [],
+        doneCriteria: Array.isArray(snapshot.doneCriteria) ? snapshot.doneCriteria : [],
+        gate: asRecord(snapshot.gate),
+        artifactRole: typeof snapshot.artifactRole === "string" ? snapshot.artifactRole : undefined,
+        renderer: typeof snapshot.renderer === "string" ? snapshot.renderer : undefined,
+        outputArtifactId: typeof snapshot.outputArtifactId === "string" ? snapshot.outputArtifactId : undefined,
+        outputArtifactKind: typeof snapshot.outputArtifactKind === "string" ? snapshot.outputArtifactKind : undefined,
         ...(typeof personaRaw.displayName === "string" ? {
           persona: {
             displayName: personaRaw.displayName,
@@ -221,6 +257,12 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
   const currentStepIndex = steps.findIndex((step) =>
     step.status === "running" || step.status === "waiting_for_interaction");
 
+  const noSlop = specRun.loopDefinition.builderMeta?.noSlopSpec?.specJson;
+  const buildContract = specRun.loopDefinition.buildContract
+    ?? specRun.loopDefinition.builderMeta?.noSlopSpec?.buildContract
+    ?? noSlop?.buildContract
+    ?? null;
+
   return {
     id: specRun.id,
     workflow_id: specRun.workflowId,
@@ -232,23 +274,30 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
     started_at: specRun.startedAt,
     finished_at: specRun.finishedAt,
     current_step_index: currentStepIndex >= 0 ? currentStepIndex : Math.max(0, steps.length - 1),
+    spec: {
+      version: specRun.loopDefinition.definitionVersion,
+      title: specRun.workflowTitle,
+      goal: specRun.loopDefinition.goal,
+      schedule: specRun.loopDefinition.schedule,
+      triggerSource: specRun.triggerSource,
+      triggerLabel: specRun.triggerLabel,
+      builderSessionId: specRun.builderSessionId,
+      buildContract,
+      noSlopSpec: noSlop ?? null,
+      artifacts: [],
+    },
     definition: {
-      goal: specRun.runnableSpec.goal,
+      ...specRun.loopDefinition,
       agentGraph: {
-        parent: {
-          name: "Tallei Orchestrator",
-          task: "Coordinates agents for this loop run.",
-        },
-        children: steps.map((step) => ({
-          id: step.agent_id,
-          name: step.agent_snapshot.name ?? step.agent_id,
-          task: step.agent_snapshot.task ?? "",
-          tools: step.agent_snapshot.tools ?? [],
+        ...specRun.loopDefinition.agentGraph,
+        children: specRun.loopDefinition.agentGraph.children.map((child) => ({
+          ...child,
+          renderer: child.outputContract?.renderer,
         })),
       },
     },
     context: {
-      engine: "loop_spec_v1",
+      engine: "loop_executor_v2",
       trigger: {
         source: specRun.triggerSource,
         label: specRun.triggerLabel,

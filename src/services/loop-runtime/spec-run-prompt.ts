@@ -1,24 +1,25 @@
 import type { RunContext } from "./build-run-context.js";
-import type { RunnableSpec } from "./spec-run-types.js";
+import type { SpecRunDefinition } from "./spec-run-types.js";
 import {
   selectedArtifactContract,
   selectedExternalDataToolkits,
   selectedGroundingSources,
 } from "../loop-engine/build-contract.js";
 
-export function buildSpecRunSystemPrompt(spec: RunnableSpec, runContext?: RunContext): string {
-  const contract = spec.buildContract ?? spec.noSlopSpec.buildContract ?? spec.noSlopSpec.specJson.buildContract;
+export function buildSpecRunSystemPrompt(definition: SpecRunDefinition, runContext?: RunContext): string {
+  const noSlop = definition.builderMeta?.noSlopSpec?.specJson;
+  const contract = definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? noSlop?.buildContract;
   const grounding = contract ? selectedGroundingSources(contract) : [];
   const externalToolkits = contract ? selectedExternalDataToolkits(contract) : [];
-  const artifacts = spec.artifacts ?? (contract ? selectedArtifactContract(contract) : null);
+  const artifacts = contract ? selectedArtifactContract(contract) : null;
 
-  const agentLines = spec.noSlopSpec.specJson.agents.map((agent, index) => [
+  const agentLines = (definition.agentGraph?.children ?? []).map((agent, index) => [
     `### ${index + 1}. ${agent.name}`,
-    `Goal: ${agent.goal}`,
-    ...(agent.tools.length > 0 ? [`Tools: ${agent.tools.join(", ")}`] : []),
-    ...agent.guardrails.map((g) => `- Guardrail: ${g}`),
-    ...agent.doneWhen.map((d) => `- Done when: ${d}`),
-    ...agent.failureModes.map((f) => `- Failure mode: ${f}`),
+    `Goal: ${agent.goal ?? agent.task}`,
+    ...(agent.tools.length > 0 ? [`Tools: ${agent.tools.map((tool) => tool.ref).join(", ")}`] : []),
+    ...(agent.guardrails ?? []).map((g) => `- Guardrail: ${g}`),
+    ...(agent.doneCriteria ?? []).map((d) => `- Done when: ${d}`),
+    ...(agent.failureModes ?? []).map((f) => `- Failure mode: ${f}`),
   ].join("\n")).join("\n\n");
 
   const runtimePolicyLines: string[] = [];
@@ -66,16 +67,18 @@ export function buildSpecRunSystemPrompt(spec: RunnableSpec, runContext?: RunCon
     "When all agents are complete and delivery is done (or not applicable), call finalizeRun with a concise summary.",
     "",
     "## Purpose",
-    spec.noSlopSpec.specJson.purpose,
+    definition.goal,
     "",
     "## Success criteria",
-    ...spec.noSlopSpec.specJson.successCriteria.map((c) => `- ${c}`),
+    ...(noSlop?.successCriteria ?? (definition.agentGraph?.children ?? []).flatMap((agent) => agent.doneCriteria ?? [])).map((c) => `- ${c}`),
     "",
     "## Agents (execute in order)",
     agentLines,
     "",
     "## Delivery",
-    `${spec.noSlopSpec.specJson.delivery.provider}: ${spec.noSlopSpec.specJson.delivery.description}`,
+    noSlop?.delivery
+      ? `${noSlop.delivery.provider}: ${noSlop.delivery.description}`
+      : definition.delivery?.provider ?? definition.deliveryType ?? "Dashboard only",
     "",
     ...runtimePolicyLines,
     ...reviewLines,
@@ -103,6 +106,6 @@ export function buildSpecRunSystemPrompt(spec: RunnableSpec, runContext?: RunCon
       "",
     ] : []),
     "## Schedule context",
-    `${spec.schedule.cron} (${spec.schedule.timezone})`,
+    `${definition.schedule.cron} (${definition.schedule.timezone})`,
   ].filter(Boolean).join("\n");
 }

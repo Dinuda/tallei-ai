@@ -10,6 +10,16 @@ export type SpecRunStep = {
   agent_snapshot: {
     name?: string;
     task?: string;
+    tools?: unknown[];
+    inputContract?: Record<string, unknown>;
+    outputContract?: Record<string, unknown>;
+    handoffBindings?: unknown[];
+    doneCriteria?: unknown[];
+    gate?: Record<string, unknown>;
+    artifactRole?: string;
+    renderer?: string;
+    outputArtifactId?: string;
+    outputArtifactKind?: string;
     persona?: {
       displayName: string;
       roleKey: string;
@@ -126,9 +136,33 @@ function formatEmailDrafts(value: unknown): string {
   return sections.join("\n\n---\n\n");
 }
 
+function formatClassifiedEmails(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0) return "";
+  const sections = value.map((email, index) => {
+    if (!email || typeof email !== "object" || Array.isArray(email)) return "";
+    const record = email as Record<string, unknown>;
+    const subject = readStringField(record, "subject") || `Email ${index + 1}`;
+    const senderName = readStringField(record, "senderName");
+    const senderEmail = readStringField(record, "senderEmail");
+    const priority = readStringField(record, "priority");
+    const reasoning = readStringField(record, "reasoning") || readStringField(record, "rationale");
+    const lines = [`**${subject}**`];
+    const sender = [senderName, senderEmail].filter(Boolean).join(" <");
+    if (senderName && senderEmail) lines.push(`From: ${sender}>`);
+    else if (senderName || senderEmail) lines.push(`From: ${senderName || senderEmail}`);
+    if (priority) lines.push(`Priority: ${priority}`);
+    if (reasoning) lines.push(reasoning);
+    return lines.join("\n");
+  }).filter(Boolean);
+  return sections.join("\n\n");
+}
+
 function formatStructuredData(data: Record<string, unknown>): string {
   const emailDrafts = formatEmailDrafts(data.emailDrafts);
   if (emailDrafts) return emailDrafts;
+
+  const classifiedEmails = formatClassifiedEmails(data.emails);
+  if (classifiedEmails) return classifiedEmails;
 
   for (const field of DISPLAY_STRING_FIELDS) {
     const value = readStringField(data, field);
@@ -313,8 +347,21 @@ export function formatInteractionDecision(interaction: SpecRunInteraction): stri
     ? interaction.payload_json.gateType
     : interaction.interaction_kind;
   const decision = interaction.decision_json ?? {};
+  const output = decision.output && typeof decision.output === "object" && !Array.isArray(decision.output)
+    ? decision.output as Record<string, unknown>
+    : {};
+  const connectorOutput = output.output && typeof output.output === "object" && !Array.isArray(output.output)
+    ? output.output as Record<string, unknown>
+    : null;
 
   if (interaction.status === "approved") {
+    if (output.ok === true && connectorOutput) {
+      const message = typeof connectorOutput.message === "string" ? connectorOutput.message.trim() : "";
+      const id = typeof connectorOutput.id === "string" ? connectorOutput.id.trim() : "";
+      if (message) return `Connector action completed: ${message}`;
+      if (id) return `Connector action completed. ID: ${id}`;
+      return "Connector action completed successfully.";
+    }
     if (gateType === "draft_review" || gateType === "review_artifact") return "Approved the draft";
     if (gateType === "pre_send") return "Approved send";
     return "Approved";
@@ -349,24 +396,6 @@ export type SpecRunArtifact = {
   invalidated_at?: string | null;
 };
 
-function readArtifactEmailTemplate(dataJson: Record<string, unknown> | undefined) {
-  const template = dataJson?.emailTemplate;
-  if (!template || typeof template !== "object" || Array.isArray(template)) return null;
-  const record = template as Record<string, unknown>;
-  const subject = readStringField(record, "subject");
-  const text = readStringField(record, "text");
-  const html = readStringField(record, "html");
-  const preview = readStringField(record, "preview");
-  if (!subject && !text && !html && !preview) return null;
-  return { subject, text, html, preview };
-}
-
-function hasEmailArtifactContent(artifact: SpecRunArtifact): boolean {
-  if (artifact.invalidated_at) return false;
-  if (artifact.kind === "canvas_email" || artifact.kind === "canvas_preview") return true;
-  return readArtifactEmailTemplate(artifact.data_json) !== null;
-}
-
 export function resolveCanvasArtifactKey(input: {
   operatorView: OperatorView | null;
   pendingInteraction: SpecRunInteraction | null;
@@ -388,18 +417,14 @@ export function resolveDisplayArtifact(input: {
   if (artifacts.length === 0) return null;
 
   const canvasKey = resolveCanvasArtifactKey(input);
-  if (canvasKey) {
-    return artifacts.find((artifact) => artifact.artifact_key === canvasKey) ?? null;
-  }
+  if (!canvasKey || !input.pendingInteraction) return null;
 
-  const emailArtifacts = artifacts.filter(hasEmailArtifactContent);
-  const pool = emailArtifacts.length > 0 ? emailArtifacts : artifacts;
-  return [...pool].sort((left, right) => {
-    const leftTime = Date.parse(left.created_at ?? "") || 0;
-    const rightTime = Date.parse(right.created_at ?? "") || 0;
-    if (rightTime !== leftTime) return rightTime - leftTime;
-    return right.artifact_key.localeCompare(left.artifact_key);
-  })[0] ?? null;
+  const artifact = artifacts.find((entry) => entry.artifact_key === canvasKey) ?? null;
+  if (!artifact) return null;
+  if (artifact.step_attempt_id && artifact.step_attempt_id !== input.pendingInteraction.step_attempt_id) {
+    return null;
+  }
+  return artifact;
 }
 
 export function resolveActiveGate(input: {
@@ -418,6 +443,9 @@ export function resolveActiveGate(input: {
   }
 
   const step = input.steps.find((entry) => entry.id === input.pendingInteraction!.step_attempt_id) ?? null;
+  if (!step) {
+    return { show: false, step: null, interaction: input.pendingInteraction, operatorView: input.operatorView };
+  }
   return {
     show: true,
     step,

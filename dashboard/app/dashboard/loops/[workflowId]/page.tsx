@@ -50,20 +50,6 @@ type LoopWorkflow = {
   builderSessionId?: string | null;
   latestRun?: { id: string } | null;
   definitionVersion?: string;
-  runnableSpec?: {
-    goal: string;
-    schedule?: { cron?: string; timezone?: string };
-    noSlopSpec?: {
-      specJson?: {
-        agents?: Array<{
-          name: string;
-          goal: string;
-          tools?: string[];
-          persona?: AgentPersonaUi;
-        }>;
-      };
-    };
-  };
   definition?: {
     goal: string;
     schedule?: { cron?: string; timezone?: string };
@@ -100,7 +86,6 @@ type TriggerActivity = {
 
 function loopGoal(workflow: LoopWorkflow): string {
   return workflow.goal
-    ?? workflow.runnableSpec?.goal
     ?? workflow.definition?.goal
     ?? workflow.title;
 }
@@ -108,11 +93,9 @@ function loopGoal(workflow: LoopWorkflow): string {
 function loopSchedule(workflow: LoopWorkflow): { cron: string; timezone: string } {
   return {
     cron: workflow.definition?.schedule?.cron
-      ?? workflow.runnableSpec?.schedule?.cron
       ?? workflow.scheduleRrule
       ?? "",
     timezone: workflow.definition?.schedule?.timezone
-      ?? workflow.runnableSpec?.schedule?.timezone
       ?? "UTC",
   };
 }
@@ -129,16 +112,7 @@ function loopAgents(workflow: LoopWorkflow): LoopAgent[] {
     }));
   }
 
-  const specAgents = workflow.runnableSpec?.noSlopSpec?.specJson?.agents;
-  if (!specAgents?.length) return [];
-
-  return specAgents.map((agent, index) => ({
-    id: `spec-agent-${index}`,
-    name: agent.name,
-    task: agent.goal,
-    toolRefs: agent.tools ?? [],
-    persona: agent.persona,
-  }));
+  return [];
 }
 
 function formatDate(value: string | null): string {

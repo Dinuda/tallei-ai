@@ -18,9 +18,11 @@ import { math } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
 import type { UIMessage } from "ai";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
+import type { ComponentProps, HTMLAttributes } from "react";
 import {
+  Children,
   createContext,
+  isValidElement,
   memo,
   useCallback,
   useContext,
@@ -119,8 +121,7 @@ interface MessageBranchContextType {
   totalBranches: number;
   goToPrevious: () => void;
   goToNext: () => void;
-  branches: ReactElement[];
-  setBranches: (branches: ReactElement[]) => void;
+  setTotalBranches: (totalBranches: number) => void;
 }
 
 const MessageBranchContext = createContext<MessageBranchContextType | null>(
@@ -151,7 +152,7 @@ export const MessageBranch = ({
   ...props
 }: MessageBranchProps) => {
   const [currentBranch, setCurrentBranch] = useState(defaultBranch);
-  const [branches, setBranches] = useState<ReactElement[]>([]);
+  const [totalBranches, setTotalBranches] = useState(0);
 
   const handleBranchChange = useCallback(
     (newBranch: number) => {
@@ -163,26 +164,25 @@ export const MessageBranch = ({
 
   const goToPrevious = useCallback(() => {
     const newBranch =
-      currentBranch > 0 ? currentBranch - 1 : branches.length - 1;
+      currentBranch > 0 ? currentBranch - 1 : totalBranches - 1;
     handleBranchChange(newBranch);
-  }, [currentBranch, branches.length, handleBranchChange]);
+  }, [currentBranch, handleBranchChange, totalBranches]);
 
   const goToNext = useCallback(() => {
     const newBranch =
-      currentBranch < branches.length - 1 ? currentBranch + 1 : 0;
+      currentBranch < totalBranches - 1 ? currentBranch + 1 : 0;
     handleBranchChange(newBranch);
-  }, [currentBranch, branches.length, handleBranchChange]);
+  }, [currentBranch, handleBranchChange, totalBranches]);
 
   const contextValue = useMemo<MessageBranchContextType>(
     () => ({
-      branches,
       currentBranch,
       goToNext,
       goToPrevious,
-      setBranches,
-      totalBranches: branches.length,
+      setTotalBranches,
+      totalBranches,
     }),
-    [branches, currentBranch, goToNext, goToPrevious]
+    [currentBranch, goToNext, goToPrevious, totalBranches]
   );
 
   return (
@@ -201,18 +201,15 @@ export const MessageBranchContent = ({
   children,
   ...props
 }: MessageBranchContentProps) => {
-  const { currentBranch, setBranches, branches } = useMessageBranch();
+  const { currentBranch, setTotalBranches } = useMessageBranch();
   const childrenArray = useMemo(
-    () => (Array.isArray(children) ? children : [children]),
+    () => Children.toArray(children).filter(isValidElement),
     [children]
   );
 
-  // Use useEffect to update branches when they change
   useEffect(() => {
-    if (branches.length !== childrenArray.length) {
-      setBranches(childrenArray);
-    }
-  }, [childrenArray, branches, setBranches]);
+    setTotalBranches(childrenArray.length);
+  }, [childrenArray.length, setTotalBranches]);
 
   return childrenArray.map((branch, index) => (
     <div
@@ -324,22 +321,30 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
-function useAnimationFrameText(value: MessageResponseProps["children"]) {
+function useAnimationFrameText(
+  value: MessageResponseProps["children"],
+  isAnimating?: boolean,
+) {
   const isText = typeof value === "string";
   const [displayText, setDisplayText] = useState(isText ? value : "");
-  const latestTextRef = useRef(displayText);
+  const latestTextRef = useRef(isText ? value : "");
   const frameRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!isText) return;
     latestTextRef.current = value;
-    if (frameRef.current !== null) return;
+    if (isAnimating) {
+      return;
+    }
 
-    frameRef.current = window.requestAnimationFrame(() => {
+    const flush = () => {
       frameRef.current = null;
-      setDisplayText(latestTextRef.current);
-    });
-  }, [isText, value]);
+      setDisplayText((current) => (current === latestTextRef.current ? current : latestTextRef.current));
+    };
+
+    if (frameRef.current !== null) return;
+    frameRef.current = window.requestAnimationFrame(flush);
+  }, [isAnimating, isText, value]);
 
   useEffect(() => () => {
     if (frameRef.current !== null) {
@@ -347,12 +352,13 @@ function useAnimationFrameText(value: MessageResponseProps["children"]) {
     }
   }, []);
 
+  if (isAnimating && isText) return value;
   return isText ? displayText : value;
 }
 
 export const MessageResponse = memo(
-  ({ children, className, ...props }: MessageResponseProps) => {
-    const displayedChildren = useAnimationFrameText(children);
+  ({ children, className, isAnimating, ...props }: MessageResponseProps & { isAnimating?: boolean }) => {
+    const displayedChildren = useAnimationFrameText(children, isAnimating);
     return (
       <Streamdown
         className={cn(
@@ -367,8 +373,9 @@ export const MessageResponse = memo(
     );
   },
   (prevProps, nextProps) =>
-    prevProps.children === nextProps.children &&
-    nextProps.isAnimating === prevProps.isAnimating
+  !nextProps.isAnimating
+  && prevProps.children === nextProps.children
+  && nextProps.isAnimating === prevProps.isAnimating
 );
 
 MessageResponse.displayName = "MessageResponse";

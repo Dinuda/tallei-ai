@@ -7,13 +7,12 @@ import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
   getToolName,
-  isReasoningUIPart,
   isToolUIPart,
   lastAssistantMessageIsCompleteWithApprovalResponses,
   lastAssistantMessageIsCompleteWithToolCalls,
   type UIMessage,
 } from "ai";
-import { Info, Paperclip, Plus, Activity } from "lucide-react";
+import { Paperclip, Plus, Activity } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
@@ -34,8 +33,15 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Message, MessageContent } from "@/components/ai-elements/message";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import { TranscriptMessageContent, CollapsibleTool } from "@/components/ai-elements/transcript-message";
+import { TranscriptThinkingIndicator } from "@/components/ai-elements/transcript-thinking";
+import {
+  filterBuilderTranscriptMessages,
+  isBuilderToolInputReady,
+  shouldRenderBuilderTranscriptText,
+  shouldShowBuilderThinking,
+} from "@/lib/loop-builder-transcript";
 import {
   InteractivePromptMenu,
   type InteractivePromptAnswer,
@@ -75,6 +81,18 @@ import {
   normalizeBuilderLiveUsage,
   sumBuilderLiveUsage,
 } from "@/lib/loop-builder-usage";
+import {
+  detectBuilderRecoveryState,
+  findRunningBuilderCommand,
+  builderRunningCommandLabel,
+  hydrateBuilderMessagesFromCommands,
+  latestUserPromptText,
+  persistBuilderMessages,
+  type BuilderCommandSnapshot,
+  type BuilderRecoveryState,
+} from "@/lib/builder-session-recovery";
+
+type BuilderCommandUiSnapshot = BuilderCommandSnapshot & { usage?: unknown };
 
 const LoopSuggestionCards = dynamic(
   () => import("@/components/loop-suggestion-cards").then((mod) => mod.LoopSuggestionCards),
@@ -92,15 +110,69 @@ function lastSpecDraftSpawnPartIndex(parts: UIMessage["parts"]): number {
   return lastIndex;
 }
 
+function summarizeToolOutputForAutoSend(output: unknown): unknown {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return output;
+  const record = output as Record<string, unknown>;
+  return {
+    answerText: typeof record.answerText === "string" ? record.answerText : undefined,
+    requirementId: typeof record.requirementId === "string" ? record.requirementId : undefined,
+    mode: typeof record.mode === "string" ? record.mode : undefined,
+    selectedToolkits: Array.isArray(record.selectedToolkits)
+      ? record.selectedToolkits.map((entry) => (
+        entry && typeof entry === "object"
+          ? (entry as { slug?: unknown }).slug
+          : entry
+      ))
+      : undefined,
+    templates: Array.isArray(record.templates)
+      ? record.templates.map((entry) => (
+        entry && typeof entry === "object"
+          ? (entry as { id?: unknown; templateId?: unknown }).id ?? (entry as { templateId?: unknown }).templateId
+          : entry
+      ))
+      : undefined,
+    valueMode: record.value && typeof record.value === "object" && !Array.isArray(record.value)
+      ? (record.value as { mode?: unknown }).mode
+      : undefined,
+    artifactPersisted: record.artifactPersisted === true ? true : undefined,
+  };
+}
+
+function builderAutoSendSignature(messages: UIMessage[]): string | null {
+  const message = messages[messages.length - 1];
+  if (!message || message.role !== "assistant") return null;
+
+  const lastStepStartIndex = message.parts.reduce(
+    (lastIndex, part, index) => (part.type === "step-start" ? index : lastIndex),
+    -1,
+  );
+  const toolParts = message.parts.slice(lastStepStartIndex + 1).filter(isToolUIPart);
+  if (toolParts.length === 0) return null;
+
+  return JSON.stringify({
+    messageId: message.id,
+    tools: toolParts.map((part) => ({
+      toolCallId: part.toolCallId,
+      toolName: getToolName(part),
+      state: part.state,
+      approvalId: "approval" in part ? part.approval?.id : undefined,
+      errorText: "errorText" in part ? part.errorText : undefined,
+      output: "output" in part ? summarizeToolOutputForAutoSend(part.output) : undefined,
+    })),
+  });
+}
 
 export default function NewLoopBuilderPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [builderSession, setBuilderSession] = useState<{
     phase?: string;
     workflowId?: string | null;
+    error?: { message?: string } | null;
     buildContract?: {
       requirements?: Array<{
         kind?: string;
+        required?: boolean;
+        status?: string;
         value?: unknown;
       }>;
     } | null;
@@ -109,12 +181,24 @@ export default function NewLoopBuilderPage() {
   const [recalledPreferences, setRecalledPreferences] = useState<Array<{ id: string; text: string; category?: string | null }>>([]);
   const [dismissedPromptId, setDismissedPromptId] = useState<string | null>(null);
   const [dismissedSetupId, setDismissedSetupId] = useState<string | null>(null);
-  const [commands, setCommands] = useState<any[]>([]);
+  const [commands, setCommands] = useState<BuilderCommandUiSnapshot[]>([]);
+  const [recoveryState, setRecoveryState] = useState<BuilderRecoveryState>({ kind: "idle" });
   const [analyzerUsage, setAnalyzerUsage] = useState(emptyBuilderLiveUsage);
   const [liveUsageFromStream, setLiveUsageFromStream] = useState<ReturnType<typeof emptyBuilderLiveUsage> | null>(null);
+  const [appSelectionUiReady, setAppSelectionUiReady] = useState(false);
+  const [composerText, setComposerText] = useState("");
 
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  const transcriptMessagesRef = useRef<UIMessage[]>([]);
+  const recoveryPrefillKeyRef = useRef<string | null>(null);
+  const autoSendSignatureRef = useRef<string | null>(null);
+  const skipPersistRef = useRef(true);
+  const hydratingRef = useRef(false);
+  const applyChatMessagesRef = useRef<
+    (value: UIMessage[] | ((prev: UIMessage[]) => UIMessage[])) => void
+  >(() => undefined);
+  const syncSessionAfterTurnRef = useRef<(sessionId: string) => Promise<void>>(async () => undefined);
 
   const transport = useMemo(() => new DefaultChatTransport({
     api: "/api/loop-builder/chat",
@@ -132,24 +216,67 @@ export default function NewLoopBuilderPage() {
 
 
 
-  const refreshSession = useCallback(async (sessionId: string) => {
+  const fetchSessionPayload = useCallback(async (sessionId: string) => {
     const response = await fetch(`/api/loop-builder/sessions/${sessionId}`, { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error ?? "Failed to load builder session");
+    return payload;
+  }, []);
+
+  const applySessionPayload = useCallback((sessionId: string, payload: {
+    commands?: unknown[];
+    session?: {
+      phase?: string;
+      workflowId?: string | null;
+      error?: { message?: string } | null;
+      buildContract?: {
+        requirements?: Array<{
+          kind?: string;
+          required?: boolean;
+          status?: string;
+          value?: unknown;
+        }>;
+      } | null;
+      discoveredToolContracts?: Array<{ toolRef?: string; name?: string; constraints?: { connected?: boolean } }>;
+      analyzerUsage?: unknown;
+    } | null;
+    recalledPreferences?: unknown;
+    messages?: UIMessage[];
+  }) => {
     setSessionId(sessionId);
-    setCommands(payload.commands ?? []);
+    setCommands((payload.commands ?? []) as BuilderCommandUiSnapshot[]);
     setAnalyzerUsage(normalizeBuilderLiveUsage(payload.session?.analyzerUsage));
     setBuilderSession(payload.session ?? null);
-    setRecalledPreferences(Array.isArray(payload.recalledPreferences) ? payload.recalledPreferences : []);
+    setRecalledPreferences(Array.isArray(payload.recalledPreferences) ? payload.recalledPreferences as Array<{ id: string; text: string; category?: string | null }> : []);
     notifyLoopBuilderSessionUpdated(sessionId);
-    return payload.messages as UIMessage[];
   }, []);
+
+  const hydrateSessionMessages = useCallback((payload: {
+    messages?: UIMessage[];
+    commands?: unknown[];
+  }) => hydrateBuilderMessagesFromCommands(
+    payload.messages as UIMessage[],
+    (payload.commands ?? []) as Parameters<typeof hydrateBuilderMessagesFromCommands>[1],
+  ), []);
+
+  const refreshSession = useCallback(async (sessionId: string) => {
+    const payload = await fetchSessionPayload(sessionId);
+    applySessionPayload(sessionId, payload);
+    return hydrateSessionMessages(payload);
+  }, [applySessionPayload, fetchSessionPayload, hydrateSessionMessages]);
 
   const { messages, sendMessage, setMessages, status, error, stop, addToolApprovalResponse, addToolOutput } = useChat({
     transport,
-    sendAutomaticallyWhen: ({ messages: currentMessages }) =>
-      lastAssistantMessageIsCompleteWithApprovalResponses({ messages: currentMessages })
-      || lastAssistantMessageIsCompleteWithToolCalls({ messages: currentMessages }),
+    sendAutomaticallyWhen: ({ messages: currentMessages }) => {
+      const shouldAutoSend = lastAssistantMessageIsCompleteWithApprovalResponses({ messages: currentMessages })
+        || lastAssistantMessageIsCompleteWithToolCalls({ messages: currentMessages });
+      if (!shouldAutoSend) return false;
+
+      const signature = builderAutoSendSignature(currentMessages);
+      if (!signature || autoSendSignatureRef.current === signature) return false;
+      autoSendSignatureRef.current = signature;
+      return true;
+    },
     onData: (part) => {
       if (part.type === "data-usage" && "data" in part) {
         setLiveUsageFromStream(normalizeBuilderLiveUsage(part.data));
@@ -164,9 +291,12 @@ export default function NewLoopBuilderPage() {
     onFinish: () => {
       setLiveUsageFromStream(null);
       const id = sessionIdRef.current;
-      if (id) {
-        void refreshSession(id).then((loaded) => setMessages(dedupeChatMessagesById(loaded)));
-      }
+      if (!id) return;
+      skipPersistRef.current = true;
+      void syncSessionAfterTurnRef.current(id)
+        .catch((err) => {
+          console.error("[loop-builder] failed to refresh session after turn:", err);
+        });
     },
   });
 
@@ -174,13 +304,57 @@ export default function NewLoopBuilderPage() {
     (value: UIMessage[] | ((prev: UIMessage[]) => UIMessage[])) => {
       setMessages((prev) => {
         const next = typeof value === "function" ? value(prev) : value;
+        if (next === prev) return prev;
         return dedupeChatMessagesById(next);
       });
     },
     [setMessages],
   );
+  applyChatMessagesRef.current = applyChatMessages;
 
-  const transcriptMessages = useMemo(() => dedupeChatMessagesById(messages), [messages]);
+  const syncSessionAfterTurn = useCallback(async (sessionId: string) => {
+    const mergeCommandsIntoLiveMessages = (commands: unknown[]) => {
+      applyChatMessagesRef.current((prev) => hydrateBuilderMessagesFromCommands(
+        prev,
+        commands as Parameters<typeof hydrateBuilderMessagesFromCommands>[1],
+      ));
+    };
+
+    const loadAndApply = async () => {
+      const payload = await fetchSessionPayload(sessionId);
+      applySessionPayload(sessionId, payload);
+      return payload;
+    };
+
+    const payload = await loadAndApply();
+    mergeCommandsIntoLiveMessages(payload.commands ?? []);
+
+    // Backend command persistence can trail stream end — re-fetch commands once.
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    const freshPayload = await loadAndApply();
+    if (JSON.stringify(freshPayload.commands) !== JSON.stringify(payload.commands)) {
+      mergeCommandsIntoLiveMessages(freshPayload.commands ?? []);
+    }
+
+    window.setTimeout(() => {
+      skipPersistRef.current = false;
+    }, 0);
+  }, [applySessionPayload, fetchSessionPayload]);
+  syncSessionAfterTurnRef.current = syncSessionAfterTurn;
+
+  const transcriptMessages = useMemo(
+    () => filterBuilderTranscriptMessages(messages),
+    [messages],
+  );
+
+  const latestAssistantMessageId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.role === "assistant") return message.id;
+    }
+    return null;
+  }, [messages]);
+  transcriptMessagesRef.current = transcriptMessages;
 
   const liveUsage = (status === "streaming" || status === "submitted") && liveUsageFromStream
     ? liveUsageFromStream
@@ -189,51 +363,85 @@ export default function NewLoopBuilderPage() {
   useEffect(() => {
     const sessionId = new URLSearchParams(window.location.search).get("session");
     if (!sessionId) return;
+    hydratingRef.current = true;
     const timer = window.setTimeout(() => {
       refreshSession(sessionId)
-        .then((loaded) => applyChatMessages(loaded))
+        .then((loaded) => {
+          skipPersistRef.current = true;
+          applyChatMessages(loaded);
+        })
         .catch((err) => {
           console.error("[loop-builder] failed to load session:", err);
+        })
+        .finally(() => {
+          hydratingRef.current = false;
+          window.setTimeout(() => {
+            skipPersistRef.current = false;
+          }, 0);
         });
     }, 0);
     return () => window.clearTimeout(timer);
   }, [applyChatMessages, refreshSession]);
 
-  // Fallback: refresh command usage from the DB while long-running builder tools execute.
   useEffect(() => {
-    if (status !== "streaming" && status !== "submitted") return;
-    const id = sessionIdRef.current;
-    if (!id) return;
+    if (!sessionId) return;
 
-    let cancelled = false;
-    const pollCommands = async () => {
-      try {
-        const response = await fetch(`/api/loop-builder/sessions/${id}`, { cache: "no-store" });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || cancelled) return;
-        if (Array.isArray(payload.commands)) {
-          setCommands(payload.commands);
-          const polledUsage = sumBuilderLiveUsage(
-            normalizeBuilderLiveUsage(payload.session?.analyzerUsage),
-            ...payload.commands.map((command: { usage?: unknown }) => normalizeBuilderLiveUsage(command.usage)),
-          );
-          setLiveUsageFromStream((current) => {
-            if (!current || polledUsage.totalTokens >= current.totalTokens) return polledUsage;
-            return current;
-          });
-        }
-      } catch {
-        // Best-effort live usage refresh.
-      }
+    const persistOnExit = () => {
+      const id = sessionIdRef.current;
+      const snapshot = transcriptMessagesRef.current;
+      if (!id || skipPersistRef.current || hydratingRef.current || snapshot.length === 0) return;
+      void persistBuilderMessages(id, snapshot, { keepalive: true }).catch((error) => {
+        console.error("[loop-builder] failed to persist messages on exit:", error);
+      });
     };
 
-    void pollCommands();
-    const interval = window.setInterval(() => void pollCommands(), 1500);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") persistOnExit();
+    };
+
+    window.addEventListener("pagehide", persistOnExit);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      cancelled = true;
-      window.clearInterval(interval);
+      window.removeEventListener("pagehide", persistOnExit);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      persistOnExit();
     };
-  }, [status]);
+  }, [sessionId]);
+
+  useEffect(() => {
+    const next = detectBuilderRecoveryState({
+      messages: transcriptMessages,
+      commands,
+      chatStatus: status,
+      sessionPhase: builderSession?.phase,
+      sessionError: builderSession?.error?.message ?? null,
+      buildContract: builderSession?.buildContract ?? null,
+    });
+    setRecoveryState((prev) => (
+      prev.kind === next.kind
+      && ("message" in prev ? prev.message : undefined) === ("message" in next ? next.message : undefined)
+      && ("commandId" in prev ? prev.commandId : undefined) === ("commandId" in next ? next.commandId : undefined)
+      && ("toolName" in prev ? prev.toolName : undefined) === ("toolName" in next ? next.toolName : undefined)
+        ? prev
+        : next
+    ));
+  }, [builderSession?.buildContract, builderSession?.phase, builderSession?.error?.message, commands, status, transcriptMessages]);
+
+  useEffect(() => {
+    if (recoveryState.kind !== "interrupted") {
+      recoveryPrefillKeyRef.current = null;
+      return;
+    }
+
+    const prompt = latestUserPromptText(messages);
+    if (!prompt) return;
+    const key = `${messages.at(-1)?.id ?? "tail"}:${prompt}`;
+    if (recoveryPrefillKeyRef.current === key) return;
+    if (composerText.trim()) return;
+
+    recoveryPrefillKeyRef.current = key;
+    setComposerText(prompt);
+  }, [composerText, messages, recoveryState.kind]);
 
   const activeInteractivePrompt = findActiveInteractivePrompt(messages);
   const activeAppSelection = findActiveAppSelection(messages);
@@ -242,6 +450,22 @@ export default function NewLoopBuilderPage() {
   const activeKnowledgeBaseSetup = findActiveKnowledgeBaseSetup(messages);
   const activeArtifactSetup = findActiveArtifactSetup(messages);
   const activeRequirementSetup = findActiveRequirementSetup(messages);
+
+  const artifactDraftTemplates = useMemo(
+    () => (activeArtifactSetup?.input as {
+      draftTemplates?: Array<{
+        templateId: EmailTemplateId;
+        name?: string;
+        props?: Partial<EmailTemplateProps>;
+      }>;
+    } | undefined)?.draftTemplates,
+    [activeArtifactSetup?.input],
+  );
+
+  useEffect(() => {
+    setAppSelectionUiReady(false);
+  }, [activeAppSelection?.toolCallId]);
+
   const connectedSearchToolkits = useMemo(() => {
     const contracts = builderSession?.discoveredToolContracts ?? [];
     const seen = new Set<string>();
@@ -265,6 +489,30 @@ export default function NewLoopBuilderPage() {
   const activeSetupId = activeRequirementSetup?.toolCallId ?? null;
   const showInteractivePrompt = activePromptId !== null && activePromptId !== dismissedPromptId;
   const showRequirementSetup = activeSetupId !== null && activeSetupId !== dismissedSetupId;
+  const composerInteractiveReady = status === "ready";
+  const runningBackendCommand = useMemo(
+    () => findRunningBuilderCommand(commands),
+    [commands],
+  );
+  const backendCommandRunning = recoveryState.kind === "running" || Boolean(runningBackendCommand);
+  const backendBusyLabel = builderRunningCommandLabel(runningBackendCommand);
+  const chatTurnInFlight = status === "streaming" || status === "submitted";
+  const composerBusy = chatTurnInFlight || backendCommandRunning;
+  const hasComposerGate = composerInteractiveReady && Boolean(
+    activeAppSelection
+    || (activeConnectorSetup && sessionId)
+    || activeKnowledgeBaseSetup
+    || activeArtifactSetup
+    || (activeScheduleSetup && sessionId)
+    || showRequirementSetup
+    || showInteractivePrompt,
+  );
+  const showBuilderThinking = useMemo(
+    () => shouldShowBuilderThinking({ status, messages, hasComposerGate }),
+    [hasComposerGate, messages, status],
+  );
+  const showComposerDots = composerBusy;
+  const showTranscriptDots = showBuilderThinking && !composerBusy;
   const submitComposerText = useCallback(async (text: string) => {
     const answerText = text.trim();
     if (!answerText) return;
@@ -357,6 +605,7 @@ export default function NewLoopBuilderPage() {
         <Conversation>
             <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
               <ScrollOnToolComplete messages={transcriptMessages} />
+
               {transcriptMessages.length === 0 && !sessionId && (
                 <LoopSuggestionCards
                   className="max-w-3xl"
@@ -365,11 +614,20 @@ export default function NewLoopBuilderPage() {
               )}
               {transcriptMessages.map((message) => {
                 const specDraftSpawnPartIndex = lastSpecDraftSpawnPartIndex(message.parts);
+                const assistantStreamActive = (status === "streaming" || status === "submitted")
+                  && message.role === "assistant"
+                  && message.id === latestAssistantMessageId;
                 return (
                 <Message from={message.role} key={message.id}>
                   <MessageContent>
                     <TranscriptMessageContent
                       message={message}
+                      expandReasoning={message.role === "assistant"}
+                      isStreaming={assistantStreamActive}
+                      shouldRenderText={(ctx) => shouldRenderBuilderTranscriptText({
+                        ...ctx,
+                        isStreaming: assistantStreamActive,
+                      })}
                       renderTool={(part, toolName, index) => {
                         if (toolName === "appSelection") {
                           if (part.state === "input-streaming" || part.state === "input-available") return null;
@@ -518,7 +776,13 @@ export default function NewLoopBuilderPage() {
                           return null;
                         }
                         if (isSpecDraftSpawnTool(toolName, part) && index === specDraftSpawnPartIndex) {
-                          return <BuilderAgentSpawnPanel key={index} part={part} commands={commands} />;
+                          return (
+                            <BuilderAgentSpawnPanel
+                              commands={commands}
+                              key={index}
+                              part={part}
+                            />
+                          );
                         }
                         if (isSpecDraftSpawnTool(toolName, part)) {
                           return null;
@@ -530,7 +794,27 @@ export default function NewLoopBuilderPage() {
                 </Message>
               );
               })}
-              {error && <p className="text-sm text-destructive">{error.message}</p>}
+              {showTranscriptDots ? (
+                <Message from="assistant">
+                  <MessageContent>
+                    <TranscriptThinkingIndicator />
+                  </MessageContent>
+                </Message>
+              ) : null}
+              {(recoveryState.kind === "failed" || recoveryState.kind === "interrupted") ? (
+                <Message from="assistant">
+                  <MessageContent>
+                    <MessageResponse>{recoveryState.message}</MessageResponse>
+                  </MessageContent>
+                </Message>
+              ) : null}
+              {error ? (
+                <Message from="assistant">
+                  <MessageContent>
+                    <MessageResponse>{error.message}</MessageResponse>
+                  </MessageContent>
+                </Message>
+              ) : null}
             </ConversationContent>
             <ConversationScrollButton />
           </Conversation>
@@ -538,11 +822,9 @@ export default function NewLoopBuilderPage() {
           <div className="mx-auto max-w-3xl">
             <motion.div
               className="relative overflow-hidden border border-[#d1d5db] bg-white transition-colors focus-within:border-[#9ca3af]"
-              layout
-              transition={{ layout: { duration: 0.32, ease: [0.16, 1, 0.3, 1] } }}
             >
               <AnimatePresence initial={false} mode="popLayout">
-                {activeAppSelection ? (
+                {composerInteractiveReady && activeAppSelection ? (
                   <motion.div
                     key="app-selection"
                     animate={{ opacity: 1, y: 0 }}
@@ -550,18 +832,26 @@ export default function NewLoopBuilderPage() {
                     initial={{ opacity: 0, y: 20 }}
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
                   >
-                    <BuilderAppSelector
-                      allowMultiple={Boolean((activeAppSelection.input as { allowMultiple?: boolean } | undefined)?.allowMultiple ?? true)}
-                      onComplete={(output) => addToolOutput({
-                        tool: "appSelection",
-                        toolCallId: activeAppSelection.toolCallId,
-                        output,
-                      })}
-                      question={String((activeAppSelection.input as { question?: string } | undefined)?.question ?? "What app is where your customers reach out to you for support?")}
-                      recommendedToolkitSlugs={(activeAppSelection.input as { recommendedToolkitSlugs?: string[] } | undefined)?.recommendedToolkitSlugs ?? []}
-                    />
+                    {!appSelectionUiReady ? (
+                      <div className="px-4 py-5 flex min-h-[56px] items-center">
+                        <TranscriptThinkingIndicator variant="shimmer" label="Loading app options…" />
+                      </div>
+                    ) : null}
+                    <div className={appSelectionUiReady ? undefined : "hidden"} aria-hidden={!appSelectionUiReady}>
+                      <BuilderAppSelector
+                        allowMultiple={Boolean((activeAppSelection.input as { allowMultiple?: boolean } | undefined)?.allowMultiple ?? true)}
+                        onComplete={(output) => addToolOutput({
+                          tool: "appSelection",
+                          toolCallId: activeAppSelection.toolCallId,
+                          output,
+                        })}
+                        onReadyChange={setAppSelectionUiReady}
+                        question={String((activeAppSelection.input as { question?: string } | undefined)?.question ?? "What app is where your customers reach out to you for support?")}
+                        recommendedToolkitSlugs={(activeAppSelection.input as { recommendedToolkitSlugs?: string[] } | undefined)?.recommendedToolkitSlugs ?? []}
+                      />
+                    </div>
                   </motion.div>
-                ) : activeConnectorSetup && sessionId ? (
+                ) : composerInteractiveReady && activeConnectorSetup && sessionId ? (
                   <motion.div
                     key="connector-setup"
                     animate={{ opacity: 1, y: 0 }}
@@ -579,7 +869,7 @@ export default function NewLoopBuilderPage() {
                       sessionId={sessionId}
                     />
                   </motion.div>
-                ) : activeKnowledgeBaseSetup ? (
+                ) : composerInteractiveReady && activeKnowledgeBaseSetup ? (
                   <motion.div
                     key="knowledge-base-setup"
                     animate={{ opacity: 1, y: 0 }}
@@ -598,7 +888,7 @@ export default function NewLoopBuilderPage() {
                       requirementId={String((activeKnowledgeBaseSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "grounding")}
                     />
                   </motion.div>
-                ) : activeArtifactSetup ? (
+                ) : composerInteractiveReady && activeArtifactSetup ? (
                   <motion.div
                     key="artifact-setup"
                     animate={{ opacity: 1, y: 0 }}
@@ -607,13 +897,7 @@ export default function NewLoopBuilderPage() {
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
                   >
                     <BuilderArtifactEditor
-                      draftTemplates={(activeArtifactSetup.input as {
-                        draftTemplates?: Array<{
-                          templateId: EmailTemplateId;
-                          name?: string;
-                          props?: Partial<EmailTemplateProps>;
-                        }>;
-                      } | undefined)?.draftTemplates}
+                      draftTemplates={artifactDraftTemplates}
                       inputReady={activeArtifactSetup.state === "input-available"}
                       onComplete={(output) => addToolOutput({
                         tool: "artifactSetup",
@@ -624,7 +908,7 @@ export default function NewLoopBuilderPage() {
                       sessionId={sessionId ?? undefined}
                     />
                   </motion.div>
-                ) : activeScheduleSetup && sessionId ? (
+                ) : composerInteractiveReady && activeScheduleSetup && sessionId ? (
                   <motion.div
                     key="schedule-setup"
                     animate={{ opacity: 1, y: 0 }}
@@ -658,7 +942,7 @@ export default function NewLoopBuilderPage() {
                       subtitle={(activeScheduleSetup.input as { subtitle?: string } | undefined)?.subtitle}
                     />
                   </motion.div>
-                ) : showRequirementSetup ? (
+                ) : composerInteractiveReady && showRequirementSetup ? (
                   <motion.div
                     key="requirement-setup"
                     animate={{ opacity: 1, y: 0 }}
@@ -678,7 +962,7 @@ export default function NewLoopBuilderPage() {
                       placement="composer"
                     />
                   </motion.div>
-                ) : showInteractivePrompt ? (
+                ) : composerInteractiveReady && showInteractivePrompt ? (
                   <motion.div
                     key="interactive-prompt"
                     animate={{ opacity: 1, y: 0 }}
@@ -698,6 +982,22 @@ export default function NewLoopBuilderPage() {
                       placement="composer"
                     />
                   </motion.div>
+                ) : showComposerDots ? (
+                  <motion.div
+                    key="composer-busy"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    initial={{ opacity: 0, y: 10 }}
+                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <div
+                      aria-label={backendCommandRunning ? backendBusyLabel : "Thinking"}
+                      className="flex min-h-[56px] items-center px-4 py-5"
+                      role="status"
+                    >
+                      <TranscriptThinkingIndicator />
+                    </div>
+                  </motion.div>
                 ) : (
                   <motion.div
                     key="prompt-input"
@@ -706,8 +1006,19 @@ export default function NewLoopBuilderPage() {
                     initial={{ opacity: 0, y: 10 }}
                     transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                   >
-                  <PromptInput className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0" onSubmit={({ text }) => submitComposerText(text)}>
-                    <PromptInputTextarea placeholder="Describe the loop, answer a clarification, or request a refinement..." className="min-h-0 pr-12 pb-2" />
+                  <PromptInput
+                    className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0"
+                    onSubmit={async ({ text }) => {
+                      await submitComposerText(text);
+                      setComposerText("");
+                    }}
+                  >
+                    <PromptInputTextarea
+                      className="min-h-0 pr-12 pb-2"
+                      onChange={(event) => setComposerText(event.currentTarget.value)}
+                      placeholder="Describe the loop, answer a clarification, or request a refinement..."
+                      value={composerText}
+                    />
 
                     <div className="absolute bottom-3 left-4 flex items-center gap-2 text-slate-400">
                       <DropdownMenu>
@@ -873,7 +1184,7 @@ function InteractivePromptTool({
 
 function ScrollOnToolComplete({ messages }: { messages: UIMessage[] }) {
   const { scrollToBottom, isAtBottom } = useStickToBottomContext();
-  const lastCompletedRef = useRef<string | null>(null);
+  const completedToolIdsRef = useRef<Set<string>>(new Set());
   const lastMessageIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -886,12 +1197,10 @@ function ScrollOnToolComplete({ messages }: { messages: UIMessage[] }) {
       shouldScroll = true;
     }
 
-    const completedTool = messages
-      .flatMap((message) => message.parts)
-      .find((part) => isToolUIPart(part) && part.state === "output-available" && "toolCallId" in part && part.toolCallId !== lastCompletedRef.current);
-
-    if (completedTool && "toolCallId" in completedTool) {
-      lastCompletedRef.current = completedTool.toolCallId;
+    for (const part of messages.flatMap((message) => message.parts)) {
+      if (!isToolUIPart(part) || part.state !== "output-available" || !("toolCallId" in part)) continue;
+      if (completedToolIdsRef.current.has(part.toolCallId)) continue;
+      completedToolIdsRef.current.add(part.toolCallId);
       shouldScroll = true;
     }
 
@@ -913,7 +1222,7 @@ function findActiveInteractivePrompt(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "interactivePrompt"
-        && (part.state === "input-streaming" || part.state === "input-available")) {
+        && isBuilderToolInputReady(part)) {
         return part;
       }
     }
@@ -928,7 +1237,7 @@ function findActiveAppSelection(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "appSelection"
-        && (part.state === "input-streaming" || part.state === "input-available")) {
+        && isBuilderToolInputReady(part)) {
         return part;
       }
     }
@@ -943,7 +1252,7 @@ function findActiveConnectorSetup(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "connectorSetup"
-        && (part.state === "input-streaming" || part.state === "input-available")) {
+        && isBuilderToolInputReady(part)) {
         return part;
       }
     }
@@ -958,7 +1267,7 @@ function findActiveKnowledgeBaseSetup(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "knowledgeBaseSetup"
-        && (part.state === "input-streaming" || part.state === "input-available")) return part;
+        && isBuilderToolInputReady(part)) return part;
     }
   }
   return null;
@@ -971,7 +1280,7 @@ function findActiveScheduleSetup(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "scheduleSetup"
-        && (part.state === "input-streaming" || part.state === "input-available")) return part;
+        && isBuilderToolInputReady(part)) return part;
     }
   }
   return null;
@@ -984,7 +1293,7 @@ function findActiveArtifactSetup(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "artifactSetup"
-        && (part.state === "input-streaming" || part.state === "input-available")) return part;
+        && isBuilderToolInputReady(part)) return part;
     }
   }
   return null;
@@ -997,7 +1306,7 @@ function findActiveRequirementSetup(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "requirementSetup"
-        && (part.state === "input-streaming" || part.state === "input-available")) return part;
+        && isBuilderToolInputReady(part)) return part;
     }
   }
   return null;

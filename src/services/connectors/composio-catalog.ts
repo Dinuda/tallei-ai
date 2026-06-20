@@ -244,7 +244,7 @@ export async function loadCatalogManifest(apiVersion = DEFAULT_API_VERSION): Pro
 
 let toolsIndexPromise: Promise<ComposioToolIndexEntry[]> | null = null;
 let toolsIndexTimestamp = 0;
-const TOOLS_INDEX_TTL_MS = 5 * 60 * 1000;
+const TOOLS_INDEX_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export async function loadToolsIndex(apiVersion = DEFAULT_API_VERSION): Promise<ComposioToolIndexEntry[]> {
   if (toolsIndexPromise && Date.now() - toolsIndexTimestamp < TOOLS_INDEX_TTL_MS) {

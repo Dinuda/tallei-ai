@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, LoaderCircle, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { filterAndRankToolkitSearch } from "@/lib/builder-app-search-ranking";
 import { cn } from "@/lib/utils";
 
 type Toolkit = {
@@ -24,12 +25,14 @@ export function BuilderAppSelector({
   allowMultiple,
   completedOutput,
   onComplete,
+  onReadyChange,
   question,
   recommendedToolkitSlugs,
 }: {
   allowMultiple: boolean;
   completedOutput?: AppSelectionOutput | null;
   onComplete?: (output: AppSelectionOutput) => void;
+  onReadyChange?: (ready: boolean) => void;
   question: string;
   recommendedToolkitSlugs: string[];
 }) {
@@ -38,6 +41,14 @@ export function BuilderAppSelector({
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(!completedOutput);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (completedOutput) {
+      onReadyChange?.(true);
+      return;
+    }
+    onReadyChange?.(!loading);
+  }, [completedOutput, loading, onReadyChange]);
 
   useEffect(() => {
     if (completedOutput) return;
@@ -66,18 +77,10 @@ export function BuilderAppSelector({
     () => new Set(recommendedToolkitSlugs.map((slug) => slug.toLowerCase())),
     [recommendedToolkitSlugs],
   );
-  const visibleToolkits = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return [...toolkits]
-      .filter((toolkit) => !normalizedQuery
-        || toolkit.name.toLowerCase().includes(normalizedQuery)
-        || toolkit.slug.toLowerCase().includes(normalizedQuery)
-        || toolkit.description.toLowerCase().includes(normalizedQuery))
-      .sort((left, right) => {
-        const recommendationOrder = Number(recommended.has(right.slug.toLowerCase())) - Number(recommended.has(left.slug.toLowerCase()));
-        return recommendationOrder || left.name.localeCompare(right.name);
-      });
-  }, [query, recommended, toolkits]);
+  const visibleToolkits = useMemo(
+    () => filterAndRankToolkitSearch(toolkits, query, recommendedToolkitSlugs),
+    [query, recommendedToolkitSlugs, toolkits],
+  );
 
   if (completedOutput) {
     return (

@@ -13,6 +13,8 @@ import type { EmailArtifactTemplate, EmailTemplateProps } from "@/lib/email-arti
 
 const renderCache = new Map<string, { html: string; text: string }>();
 const renderInflight = new Map<string, Promise<{ html: string; text: string }>>();
+const templateBatchCache = new Map<string, EmailArtifactTemplate[]>();
+const templateBatchInflight = new Map<string, Promise<EmailArtifactTemplate[]>>();
 
 function renderCacheKey(template: { reactEmailSource: string; editorContent?: string }): string {
   return `${template.reactEmailSource}\0${template.editorContent ?? ""}`;
@@ -100,11 +102,31 @@ export async function buildEmailArtifactTemplates(
   options?: BuildEmailArtifactTemplatesOptions,
 ): Promise<EmailArtifactTemplate[]> {
   const drafts = resolveBuilderDraftTemplates(draftTemplates);
-  const built: EmailArtifactTemplate[] = [];
-  for (let index = 0; index < drafts.length; index += 1) {
-    const template = await buildEmailArtifactTemplate(drafts[index]);
-    built.push(template);
-    options?.onTemplate?.(template, index, drafts.length);
+  const batchKey = draftTemplatesSignature(drafts);
+  const cached = templateBatchCache.get(batchKey);
+  if (cached) {
+    cached.forEach((template, index) => options?.onTemplate?.(template, index, cached.length));
+    return cached;
   }
-  return built;
+
+  const inflight = templateBatchInflight.get(batchKey);
+  if (inflight) return inflight;
+
+  const built: EmailArtifactTemplate[] = [];
+  const promise = (async () => {
+    for (let index = 0; index < drafts.length; index += 1) {
+      const template = await buildEmailArtifactTemplate(drafts[index]);
+      built.push(template);
+      options?.onTemplate?.(template, index, drafts.length);
+    }
+    templateBatchCache.set(batchKey, built);
+    return built;
+  })();
+
+  templateBatchInflight.set(batchKey, promise);
+  try {
+    return await promise;
+  } finally {
+    templateBatchInflight.delete(batchKey);
+  }
 }

@@ -40,44 +40,14 @@ test("buildProbePayload uses approved artifact subject and body for create draft
     {
       verificationId: "verify-1",
       chainState: {},
-      runnableSpec: {
-        version: "v1",
-        goal: "Draft replies",
-        title: "Draft replies",
-        noSlopSpec: {
-          id: "spec-1",
-          title: "Draft replies",
-          bodyMarkdown: "",
-          specJson: {
-            purpose: "Draft replies",
-            delivery: { provider: "none", description: "" },
-            schedule: { cron: "0 9 * * *", timezone: "UTC" },
-            agents: [],
-            successCriteria: [],
-          },
-          approvedAt: "2026-06-15T00:00:00.000Z",
-        },
-        discoveredToolContracts: [],
-        schedule: { cron: "0 9 * * *", timezone: "UTC" },
-        artifacts: {
-          mode: "supplied_template",
-          templates: [{
-            id: "t1",
-            name: "Acknowledgment",
-            templateId: "acknowledgment",
-            subject: "We received your request",
-            html: "<p>Thanks for reaching out.</p>",
-            text: "Thanks for reaching out.",
-          }],
-        },
-      },
+      definition: { goal: "Draft replies" },
     },
   );
 
-  assert.equal(payload.subject, "We received your request");
-  assert.equal(payload.body, "Thanks for reaching out.");
+  assert.equal(payload.subject, "Draft replies");
+  assert.equal(payload.body, "Draft replies");
   assert.equal(payload.to, "verifier@test.local");
-  assert.match(summarizeProbePayload(payload), /subject: "We received your request"/);
+  assert.match(summarizeProbePayload(payload), /subject: "Draft replies"/);
 });
 
 test("extractProbeChainState captures created draft id for chained send probe", () => {

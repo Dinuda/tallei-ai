@@ -1,18 +1,21 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   getToolName,
   isReasoningUIPart,
   isToolUIPart,
   type UIMessage,
 } from "ai";
+import { BrainIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { AgentPersonaAvatar } from "@/components/agent-persona/agent-persona-avatar";
 import { agentStatusLine, roleBadgeClass, type AgentPersonaUi } from "@/components/agent-persona/agent-persona";
+import { builderFallbackNarration, prepareBuilderTranscriptParts } from "@/lib/loop-builder-transcript";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
 
 export type DataAgentPartData = {
@@ -25,13 +28,47 @@ export type DataAgentPartData = {
   phase?: "working" | "finished" | "queued" | "failed";
 };
 
+export type ShouldRenderTextContext = {
+  text: string;
+  partIndex: number;
+  parts: UIMessage["parts"];
+  messageRole?: UIMessage["role"];
+  isStreaming?: boolean;
+};
+
 export type RenderMessagePartContext = {
   index: number;
   messageRole?: UIMessage["role"];
+  parts: UIMessage["parts"];
+  isStreaming?: boolean;
+  expandReasoning?: boolean;
   renderTool?: (part: ToolPart, toolName: string, index: number) => ReactNode | null | undefined;
-  shouldRenderText?: (text: string) => boolean;
+  shouldRenderText?: (ctx: ShouldRenderTextContext) => boolean;
   hideFinalizeAgent?: boolean;
 };
+
+/** Merge consecutive text parts so streaming deltas render as one block. */
+export function coalesceAdjacentTextParts(parts: UIMessage["parts"]): UIMessage["parts"] {
+  const result: UIMessage["parts"] = [];
+  let textBuffer = "";
+
+  const flushText = () => {
+    if (!textBuffer) return;
+    result.push({ type: "text", text: textBuffer });
+    textBuffer = "";
+  };
+
+  for (const part of parts) {
+    if (part.type === "text") {
+      textBuffer += part.text ?? "";
+      continue;
+    }
+    flushText();
+    result.push(part);
+  }
+  flushText();
+  return result;
+}
 
 export function isDataAgentPart(
   part: UIMessage["parts"][number],
@@ -48,10 +85,47 @@ export function CollapsibleTool({ part, children }: { part: ToolPart; children: 
   const isCompleted = part.state === "output-available";
   const open = isCompleted ? (userOpen ?? false) : (userOpen ?? true);
 
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (nextOpen === open) return;
+    setUserOpen(nextOpen);
+  };
+
   return (
-    <Tool open={open} onOpenChange={setUserOpen}>
+    <Tool open={open} onOpenChange={handleOpenChange}>
       {children}
     </Tool>
+  );
+}
+
+/** Stateless reasoning row for builder transcript — avoids Radix Collapsible update loops. */
+function ExpandedReasoningBlock({
+  text,
+  isStreaming,
+}: {
+  text: string;
+  isStreaming: boolean;
+}) {
+  const trimmed = text.trim();
+  if (!trimmed && !isStreaming) return null;
+
+  return (
+    <div className="not-prose mb-4">
+      <div className="flex w-full items-center gap-2 text-sm text-muted-foreground">
+        <BrainIcon className="size-4 shrink-0" />
+        <span className="min-w-0 flex-1 text-left">
+          {isStreaming ? (
+            <Shimmer duration={1}>Thinking...</Shimmer>
+          ) : (
+            "Thought for a few seconds"
+          )}
+        </span>
+      </div>
+      {trimmed ? (
+        <div className="mt-4 text-sm text-muted-foreground">
+          <MessageResponse isAnimating={isStreaming}>{text}</MessageResponse>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -95,8 +169,8 @@ export function AgentTurnHeader({ data }: { data: DataAgentPartData }) {
   );
 }
 
-function defaultShouldRenderText(text: string): boolean {
-  return Boolean(text.trim());
+function defaultShouldRenderText(ctx: ShouldRenderTextContext): boolean {
+  return Boolean(ctx.text.trim());
 }
 
 export function renderGenericToolPart(part: ToolPart, index: number): ReactNode {
@@ -130,9 +204,19 @@ export function renderMessagePart(
 
   if (part.type === "text") {
     const text = part.text ?? "";
-    const shouldRender = (ctx.shouldRenderText ?? defaultShouldRenderText)(text);
+    const shouldRender = (ctx.shouldRenderText ?? defaultShouldRenderText)({
+      text,
+      partIndex: ctx.index,
+      parts: ctx.parts,
+      messageRole: ctx.messageRole,
+      isStreaming: ctx.isStreaming,
+    });
     if (!shouldRender) return null;
-    return <MessageResponse key={key}>{text}</MessageResponse>;
+    return (
+      <MessageResponse isAnimating={ctx.isStreaming} key={key}>
+        {text}
+      </MessageResponse>
+    );
   }
 
   if (isDataAgentPart(part)) {
@@ -140,16 +224,28 @@ export function renderMessagePart(
   }
 
   if (isReasoningUIPart(part)) {
-    const reasoningText = part.text?.trim() ?? "";
-    if (!reasoningText && part.state !== "streaming") return null;
+    const reasoningText = part.text ?? "";
+    const reasoningStreaming = part.state === "streaming";
+    if (!reasoningText.trim() && !reasoningStreaming) return null;
+    if (ctx.expandReasoning) {
+      return (
+        <ExpandedReasoningBlock
+          isStreaming={reasoningStreaming}
+          key={key}
+          text={reasoningText}
+        />
+      );
+    }
     return (
       <Reasoning
-        defaultOpen={part.state === "streaming"}
-        isStreaming={part.state === "streaming"}
+        autoClose
+        isStreaming={reasoningStreaming}
         key={key}
       >
         <ReasoningTrigger />
-        <ReasoningContent>{part.text}</ReasoningContent>
+        <ReasoningContent isAnimating={reasoningStreaming}>
+          {reasoningText}
+        </ReasoningContent>
       </Reasoning>
     );
   }
@@ -172,21 +268,41 @@ export function TranscriptMessageContent({
   renderTool,
   shouldRenderText,
   hideFinalizeAgent,
+  isStreaming,
+  expandReasoning = false,
 }: {
   message: UIMessage;
   renderTool?: RenderMessagePartContext["renderTool"];
   shouldRenderText?: RenderMessagePartContext["shouldRenderText"];
   hideFinalizeAgent?: boolean;
+  isStreaming?: boolean;
+  expandReasoning?: boolean;
 }) {
+  const parts = useMemo(
+    () => message.role === "assistant"
+      ? prepareBuilderTranscriptParts(message.parts)
+      : coalesceAdjacentTextParts(message.parts),
+    [message.parts, message.role],
+  );
+  const fallbackNarration = useMemo(() => (
+    message.role === "assistant"
+      ? builderFallbackNarration(message.parts, { isStreaming })
+      : null
+  ), [isStreaming, message.parts, message.role]);
+
   return (
     <>
-      {message.parts.map((part, index) => renderMessagePart(part, {
+      {parts.map((part, index) => renderMessagePart(part, {
         index,
         messageRole: message.role,
+        parts,
+        isStreaming,
+        expandReasoning,
         renderTool,
         shouldRenderText,
         hideFinalizeAgent,
       }))}
+      {fallbackNarration ? <MessageResponse>{fallbackNarration}</MessageResponse> : null}
     </>
   );
 }

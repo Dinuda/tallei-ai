@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { dataContractSchema, normalizeContractSchema } from "./data-contract.js";
 import { inputRequirementSchema, normalizeSpecInputRequirements } from "./input-surfaces.js";
 import { loopIntentContextSchema } from "./intent-context.js";
 import { loopBuildContractSchema } from "./build-contract.js";
@@ -63,13 +64,74 @@ export const agentPersonaSchema = z.object({
   avatarSeed: z.string().min(1).trim(),
 });
 
+function parseJsonObjectField(value: unknown, fallback: Record<string, unknown> = {}): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeAgentContract(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const contract = { ...(value as Record<string, unknown>) };
+  contract.schema = normalizeContractSchema(parseJsonObjectField(contract.schema));
+  if (contract.mediaType === null) delete contract.mediaType;
+  if (contract.visibility === null) delete contract.visibility;
+  if (contract.renderer === null) delete contract.renderer;
+  return contract;
+}
+
+const noSlopSpecAgentInputContractSchema = z.object({
+  description: z.string().min(1),
+  schema: z.record(z.unknown()).default({}),
+});
+
+const noSlopSpecAgentHandoffBindingSchema = z.object({
+  source: z.object({
+    kind: z.enum(["agent_output", "operator_input", "stable_config", "artifact"]),
+    agentId: z.string().min(1).optional(),
+    key: z.string().min(1).optional(),
+    path: z.string().min(1).default("/"),
+  }),
+  targetPath: z.string().min(1),
+  required: z.boolean().default(true),
+  valuePolicy: z.enum(["derivable", "passthrough"]).optional(),
+  provenance: z.enum(["agent_output", "operator_input", "stable_config", "artifact", "connector_output"]).optional(),
+  transformation: z.enum(["direct", "merge", "transform"]).default("direct").optional(),
+});
+
+const noSlopSpecAgentGateSchema = z.object({
+  type: z.string().min(1),
+  question: z.string().min(1),
+});
+
 export const noSlopSpecAgentSchema = z.object({
+  nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
   name: z.string().min(1).trim(),
   goal: z.string().min(1).trim(),
   tools: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   guardrails: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   doneWhen: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
+  doneCriteria: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).optional(),
   failureModes: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
+  inputContract: z.preprocess(normalizeAgentContract, noSlopSpecAgentInputContractSchema).optional(),
+  outputContract: z.preprocess(normalizeAgentContract, dataContractSchema).optional(),
+  handoffBindings: z.array(noSlopSpecAgentHandoffBindingSchema).default([]),
+  gate: noSlopSpecAgentGateSchema.optional(),
+  artifactRole: z.enum([
+    "source_evidence",
+    "draft_body",
+    "final_preview",
+    "delivery",
+  ]).optional(),
   persona: agentPersonaSchema.optional(),
 });
 

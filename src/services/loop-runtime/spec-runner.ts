@@ -9,10 +9,11 @@ import type { Response } from "express";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { getLoopWorkflow } from "../loop-executor/creator.js";
+import { createLoopFromDefinition, getLoopWorkflow } from "../loop-executor/creator.js";
+import { LOOP_DEFINITION_VERSION } from "../loop-executor/types.js";
 import { listLoopRunMessages, mergeRunChatMessages, normalizeRunMessages, replaceLoopRunMessages } from "./run-messages.js";
 import { loadWorkflowWorkspaceId, withWorkflowWorkspaceAuth } from "./resolve-loop-run-auth.js";
-import { parseRunnableSpec, type RunnableSpec } from "./spec-run-types.js";
+import { parseLoopDefinitionSnapshot, type SpecRunDefinition } from "./spec-run-types.js";
 import { startLoopRunWorkflow, cancelLoopRunWorkflow } from "../../temporal/start-loop-run.js";
 import { buildRunSeedMessage, projectRunContext, type RunContext } from "./build-run-context.js";
 import { loadTriggerPayloadForRun } from "./trigger-payload.js";
@@ -38,7 +39,7 @@ type SpecRunProjection = {
   workflowId: string;
   workflowTitle: string;
   status: "queued" | "running" | "waiting_for_approval" | "succeeded" | "failed" | "cancelled";
-  runnableSpec: RunnableSpec;
+  loopDefinition: SpecRunDefinition;
   summary: string | null;
   error: string | null;
   triggerSource: SpecRunTriggerSource;
@@ -67,10 +68,10 @@ function parseTriggerFromContext(context: Record<string, unknown>): SpecRunTrigg
   return { source: "manual", label: "Manual" };
 }
 
-async function loadRunnableSpec(auth: AuthContext, workflowId: string): Promise<{ spec: RunnableSpec; title: string }> {
+async function loadLoopDefinition(auth: AuthContext, workflowId: string): Promise<{ spec: SpecRunDefinition; title: string }> {
   const loop = await getLoopWorkflow(auth, workflowId);
-  if (!loop?.runnableSpec) throw new Error("This workflow does not have a runnable spec. Re-save from the loop builder.");
-  return { spec: loop.runnableSpec, title: loop.title };
+  if (!loop?.definition) throw new Error("This workflow does not have a loop definition.");
+  return { spec: loop.definition, title: loop.title };
 }
 
 export async function findBuilderSessionIdForWorkflow(
@@ -92,12 +93,12 @@ export async function createSpecLoopRun(
   workflowId: string,
   trigger?: SpecRunTrigger,
 ): Promise<SpecRunProjection> {
-  const { spec, title } = await loadRunnableSpec(auth, workflowId);
+  const { spec, title } = await loadLoopDefinition(auth, workflowId);
   const runId = randomUUID();
   const now = new Date().toISOString();
   const resolvedTrigger: SpecRunTrigger = trigger ?? { source: "manual", label: "Manual" };
   const contextJson = {
-    engine: "loop_spec_v1",
+    engine: LOOP_DEFINITION_VERSION,
     trigger: resolvedTrigger,
   };
 
@@ -110,7 +111,7 @@ export async function createSpecLoopRun(
       auth.tenantId,
       auth.userId,
       workflowId,
-      JSON.stringify({ engine: "loop_spec_v1", goal: spec.goal }),
+      JSON.stringify(spec),
       JSON.stringify(contextJson),
       now,
     ],
@@ -124,7 +125,7 @@ export async function createSpecLoopRun(
     [auth.tenantId, auth.userId, runId, JSON.stringify({
       workflowId,
       workflowTitle: title,
-      engine: "loop_spec_v1",
+      engine: LOOP_DEFINITION_VERSION,
       trigger: resolvedTrigger,
     })],
   );
@@ -145,10 +146,9 @@ export async function getSpecRunProjection(auth: AuthContext, runId: string): Pr
     created_at: string;
     updated_at: string;
     title: string;
-    metadata_json: unknown;
   }>(
     `SELECT r.id, r.workflow_id, r.status, r.definition_snapshot, r.context_json, r.error_json,
-            r.started_at, r.finished_at, r.created_at, r.updated_at, w.title, w.metadata_json
+            r.started_at, r.finished_at, r.created_at, r.updated_at, w.title
      FROM loop_engine_runs r
      JOIN workflows w ON w.id = r.workflow_id
      WHERE r.id = $1 AND r.tenant_id = $2 AND r.user_id = $3
@@ -158,8 +158,8 @@ export async function getSpecRunProjection(auth: AuthContext, runId: string): Pr
   const row = result.rows[0];
   if (!row) throw new Error("Run not found");
 
-  const runnableSpec = parseRunnableSpec(row.metadata_json);
-  if (!runnableSpec) throw new Error("Run workflow is missing runnable spec metadata");
+  const loopDefinition = parseLoopDefinitionSnapshot(row.definition_snapshot);
+  if (!loopDefinition) throw new Error("Run is missing loop definition metadata");
 
   const context = row.context_json && typeof row.context_json === "object" && !Array.isArray(row.context_json)
     ? row.context_json as Record<string, unknown>
@@ -180,7 +180,7 @@ export async function getSpecRunProjection(auth: AuthContext, runId: string): Pr
     workflowId: row.workflow_id,
     workflowTitle: row.title,
     status: mappedStatus,
-    runnableSpec,
+    loopDefinition,
     summary: typeof context.summary === "string" ? context.summary : null,
     error: typeof errorJson.message === "string" ? errorJson.message : null,
     triggerSource: trigger.source,
@@ -230,7 +230,7 @@ async function resolveRunContext(input: {
   auth: AuthContext;
   workflowId: string;
   runId: string;
-  spec: RunnableSpec;
+  spec: SpecRunDefinition;
 }): Promise<RunContext> {
   const result = await pool.query<{ context_json: unknown }>(
     `SELECT context_json FROM loop_engine_runs WHERE id = $1 LIMIT 1`,
@@ -260,7 +260,9 @@ export async function streamSpecRunChat(input: {
   messages: UIMessage[];
   res: Response;
 }): Promise<void> {
-  const { spec, title } = await loadRunnableSpec(input.auth, input.workflowId);
+  const projection = await getSpecRunProjection(input.auth, input.runId);
+  const spec = projection.loopDefinition;
+  const title = projection.workflowTitle;
   const workspaceId = await loadWorkflowWorkspaceId(input.auth.tenantId, input.auth.userId, input.workflowId);
   const hydratedAuth = withWorkflowWorkspaceAuth(input.auth, workspaceId);
   const runContext = await resolveRunContext({
@@ -326,7 +328,9 @@ export async function executeSpecRunHeadless(
   workflowId: string,
   runId: string,
 ): Promise<void> {
-  const { spec, title } = await loadRunnableSpec(auth, workflowId);
+  const projection = await getSpecRunProjection(auth, runId);
+  const spec = projection.loopDefinition;
+  const title = projection.workflowTitle;
   const workspaceId = await loadWorkflowWorkspaceId(auth.tenantId, auth.userId, workflowId);
   const hydratedAuth = withWorkflowWorkspaceAuth(auth, workspaceId);
   const runContext = await resolveRunContext({
@@ -441,7 +445,7 @@ export async function retrySpecLoopRun(auth: AuthContext, runId: string): Promis
   await materializeSpecRunAgentSteps({
     auth: hydratedAuth,
     runId,
-    spec: projection.runnableSpec,
+    spec: projection.loopDefinition,
   });
   await replaceLoopRunMessages(hydratedAuth, runId, []);
   await enqueueLoopRunCommand({
@@ -466,9 +470,38 @@ export async function retrySpecLoopRun(auth: AuthContext, runId: string): Promis
   return getSpecRunProjection(hydratedAuth, runId);
 }
 
+export async function saveSpecRunAsLoop(input: {
+  auth: AuthContext;
+  runId: string;
+  title?: string;
+  definition?: unknown;
+}): Promise<{ loop: Awaited<ReturnType<typeof createLoopFromDefinition>> }> {
+  const projection = await getSpecRunProjection(input.auth, input.runId);
+  const definition = input.definition === undefined
+    ? projection.loopDefinition
+    : parseLoopDefinitionSnapshot(input.definition);
+  if (!definition) throw new Error("Edited run definition is invalid.");
+  const workspaceId = await loadWorkflowWorkspaceId(input.auth.tenantId, input.auth.userId, projection.workflowId);
+  const loop = await createLoopFromDefinition({
+    auth: input.auth,
+    definition,
+    title: input.title ?? `${projection.workflowTitle} copy`,
+    workspaceId,
+    initialStatus: "verifying",
+    provenance: {
+      source: "run_snapshot",
+      sourceWorkflowId: projection.workflowId,
+      sourceRunId: projection.id,
+      sourceBuilderSessionId: projection.builderSessionId,
+      savedAt: new Date().toISOString(),
+    },
+  });
+  return { loop };
+}
+
 export async function isSpecDrivenWorkflow(auth: AuthContext, workflowId: string): Promise<boolean> {
   const loop = await getLoopWorkflow(auth, workflowId);
-  return Boolean(loop?.runnableSpec);
+  return Boolean(loop?.definition);
 }
 
 export function scheduleTriggerLabel(scheduleRrule: string): string {

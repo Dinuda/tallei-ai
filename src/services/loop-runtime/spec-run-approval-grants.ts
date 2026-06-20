@@ -30,10 +30,6 @@ export function actionRefsForTool(tool: RunPlanTool): string[] {
   ]);
 }
 
-export function authorizedActionRefsForWriteTools(tools: RunPlanTool[]): string[] {
-  return unique(tools.flatMap(actionRefsForTool));
-}
-
 export async function storeSpecRunApprovalGrant(input: {
   auth: AuthContext;
   runId: string;

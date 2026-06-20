@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { UIMessage } from "ai";
+import { getToolName, isToolUIPart, type UIMessage } from "ai";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
@@ -321,12 +321,49 @@ function stripOpenAiStoredItemIds(part: UIMessage["parts"][number]): UIMessage["
   return cloned as UIMessage["parts"][number];
 }
 
+function slimArtifactTemplateRecord(template: unknown): unknown {
+  if (!template || typeof template !== "object") return template;
+  const { html: _html, text: _text, editorContent: _editorContent, ...rest } = template as Record<string, unknown>;
+  return rest;
+}
+
+function slimArtifactSetupOutputForChat(output: Record<string, unknown>): Record<string, unknown> {
+  const templates = Array.isArray(output.templates)
+    ? output.templates.map(slimArtifactTemplateRecord)
+    : output.templates;
+  let value = output.value;
+  let artifactPersisted = output.artifactPersisted === true;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const valueRecord = value as Record<string, unknown>;
+    if (typeof valueRecord.template === "string") {
+      artifactPersisted = true;
+      value = { mode: valueRecord.mode ?? "supplied_template" };
+    }
+  }
+  return {
+    ...output,
+    templates,
+    value,
+    ...(artifactPersisted ? { artifactPersisted: true } : {}),
+  };
+}
+
+function slimArtifactToolParts(part: UIMessage["parts"][number]): UIMessage["parts"][number] {
+  if (!isToolUIPart(part) || getToolName(part) !== "artifactSetup") return part;
+  if (part.state !== "output-available" || !part.output || typeof part.output !== "object") return part;
+  return {
+    ...part,
+    output: slimArtifactSetupOutputForChat(part.output as Record<string, unknown>),
+  };
+}
+
 /** Remove OpenAI Responses item ids before replaying history to a fresh request. */
 export function sanitizeLoopBuilderChatMessages(messages: UIMessage[]): UIMessage[] {
   return messages.map((message) => ({
     ...message,
     parts: message.parts
       .map(stripOpenAiStoredItemIds)
+      .map(slimArtifactToolParts)
       .filter((part) => part.type !== "reasoning" || part.text.trim().length > 0),
   }));
 }

@@ -10,7 +10,7 @@ import {
   type ReviewPolicyMode,
 } from "../loop-engine/build-contract.js";
 import type { SpecRunTrigger } from "./spec-runner.js";
-import type { RunnableSpec } from "./spec-run-types.js";
+import type { SpecRunDefinition } from "./spec-run-types.js";
 import type { StoredTriggerPayload } from "./trigger-payload.js";
 import { normalizeGmailTriggerPayload } from "./trigger-normalizers/gmail.js";
 
@@ -57,8 +57,8 @@ export type RunContext = {
   hasTriggerPayload: boolean;
 };
 
-function resolveBuildContract(spec: RunnableSpec) {
-  return spec.buildContract ?? spec.noSlopSpec.buildContract ?? spec.noSlopSpec.specJson.buildContract ?? null;
+function resolveBuildContract(definition: SpecRunDefinition) {
+  return definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract ?? null;
 }
 
 function applyTicketContentMode(ticket: RunContextTicket, mode: string): RunContextTicket {
@@ -125,15 +125,16 @@ function ticketFromTriggerPayload(
 }
 
 export function projectRunContext(input: {
-  spec: RunnableSpec;
+  spec: SpecRunDefinition;
   workflowId: string;
   trigger: SpecRunTrigger;
   triggerPayload?: StoredTriggerPayload | null;
 }): RunContext {
-  const contract = resolveBuildContract(input.spec);
+  const definition = input.spec;
+  const contract = resolveBuildContract(definition);
   const stableInputs = contract ? selectedStableInputs(contract) : {};
   const loopTrigger = contract ? selectedLoopTrigger(contract) : null;
-  const artifacts = input.spec.artifacts ?? (contract ? selectedArtifactContract(contract) : null);
+  const artifacts = contract ? selectedArtifactContract(contract) : null;
   const connectorSlugs = contract ? selectedConnectorActionSlugs(contract) : [];
 
   const toolkits = new Set<string>();
@@ -184,7 +185,8 @@ export function projectRunContext(input: {
   };
 }
 
-export function buildRunSeedMessage(runContext: RunContext, spec: RunnableSpec): string {
+export function buildRunSeedMessage(runContext: RunContext, spec: SpecRunDefinition): string {
+  const definition = spec;
   if (runContext.hasTriggerPayload && runContext.ticket) {
     const lines = [
       `Event: ${runContext.trigger.slug ?? runContext.trigger.label ?? "connector event"}`,
@@ -208,12 +210,12 @@ export function buildRunSeedMessage(runContext: RunContext, spec: RunnableSpec):
     return lines.join("\n");
   }
 
-  const failureModes = spec.noSlopSpec.specJson.agents.flatMap((agent) => agent.failureModes);
+  const failureModes = definition.agentGraph?.children?.flatMap((agent) => agent.failureModes ?? []) ?? [];
   const noTicketHint = failureModes.find((mode) => /no new ticket/i.test(mode))
-    ?? spec.noSlopSpec.specJson.failureModes.find((mode) => /no new ticket/i.test(mode))
+    ?? definition.builderMeta?.noSlopSpec?.specJson.failureModes.find((mode) => /no new ticket/i.test(mode))
     ?? "No new tickets found.";
   return [
-    `Execute the loop: ${spec.goal}`,
+    `Execute the loop: ${definition.goal}`,
     "",
     `No trigger payload is available for this run (source=${runContext.trigger.source}).`,
     `If you cannot retrieve ticket data via connector read tools, report failure mode: ${noTicketHint}`,

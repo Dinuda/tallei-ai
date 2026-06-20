@@ -1,18 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSpecRunTools } from "../../../src/services/loop-runtime/spec-run-tools.js";
+import { compileSpecRunPlan } from "../../../src/services/loop-runtime/spec-run-plan.js";
 import { buildSpecRunSystemPrompt } from "../../../src/services/loop-runtime/spec-run-prompt.js";
 import { projectRunContext } from "../../../src/services/loop-runtime/build-run-context.js";
 import { gmailTriggerDedupeKey } from "../../../src/services/loop-runtime/trigger-normalizers/gmail.js";
-import type { RunnableSpec } from "../../../src/services/loop-runtime/spec-run-types.js";
-import type { AuthContext } from "../../../src/domain/auth/index.js";
-
-const auth = {
-  tenantId: "11111111-1111-4111-8111-111111111111",
-  userId: "22222222-2222-4222-8222-222222222222",
-  workspaceId: "33333333-3333-4333-8333-333333333333",
-} satisfies AuthContext;
 
 const buildContract = {
   version: "v1" as const,
@@ -72,11 +64,16 @@ const buildContract = {
   ],
 };
 
-const spec: RunnableSpec = {
+const spec = {
   version: "v1",
   goal: "Support loop",
   title: "Support",
   schedule: { cron: "0 9 * * *", timezone: "UTC" },
+  definitionVersion: "loop_executor_v2",
+  schedulerTarget: "internal",
+  allowedIntegrations: ["internal"],
+  ceo: { name: "CEO", task: "Support loop", policy: "Support loop" },
+  draftPolicy: { requireDraftBeforeExternalAction: true, approvalRequiredFor: ["publish", "send", "external_action"] },
   buildContract,
   discoveredToolContracts: [
     {
@@ -128,6 +125,85 @@ const spec: RunnableSpec = {
       source: "composio_sdk",
     },
   ],
+  builderMeta: {
+    designedBy: "loop_architect",
+    preApproved: true,
+    discoveredToolContracts: [
+      {
+        toolRef: "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
+        provider: "composio",
+        name: "Create draft",
+        description: "Create draft",
+        skillTags: [],
+        effect: "write_external",
+        resources: [],
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: { type: "object" },
+        executionMode: "approval_executed",
+        approval: { required: true },
+        renderRecommendations: [],
+        constraints: { toolkit: "gmail", actionSlug: "GMAIL_CREATE_EMAIL_DRAFT", connected: true },
+        source: "composio_sdk",
+      },
+      {
+        toolRef: "composio.gmail.action.GMAIL_SEND_DRAFT",
+        provider: "composio",
+        name: "Send draft",
+        description: "Send draft",
+        skillTags: [],
+        effect: "write_external",
+        resources: [],
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: { type: "object" },
+        executionMode: "approval_executed",
+        approval: { required: true },
+        renderRecommendations: [],
+        constraints: { toolkit: "gmail", actionSlug: "GMAIL_SEND_DRAFT", connected: true },
+        source: "composio_sdk",
+      },
+      {
+        toolRef: "composio.gmail.action.GMAIL_LIST_THREADS",
+        provider: "composio",
+        name: "List threads",
+        description: "List threads",
+        skillTags: [],
+        effect: "read_external",
+        resources: [],
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: { type: "object" },
+        executionMode: "short_circuit",
+        approval: { required: false },
+        renderRecommendations: [],
+        constraints: { toolkit: "gmail", actionSlug: "GMAIL_LIST_THREADS", connected: true },
+        source: "composio_sdk",
+      },
+    ],
+  },
+  agentGraph: {
+    parent: { id: "orchestrator", name: "Orchestrator", task: "Support loop", policy: "Support loop" },
+    children: [
+      {
+        id: "context-reader",
+        name: "Context Reader",
+        goal: "Read context, search history, and collect source facts.",
+        task: "Read context, search history, and collect source facts.",
+        tools: ["internal.memory_search", "composio.crm.search", "composio.mail.action.GMAIL_FETCH_MESSAGE_BY_THREAD_ID"],
+        guardrails: [],
+        doneCriteria: ["Ticket context is ready."],
+        failureModes: [],
+      },
+      {
+        id: "draft-writer",
+        name: "Draft Writer",
+        goal: "Draft reply, create the draft artifact, and request approval for writes.",
+        task: "Draft reply, create the draft artifact, and request approval for writes.",
+        tools: ["composio.mail.action.GMAIL_CREATE_EMAIL_DRAFT", "composio.mail.action.GMAIL_SEND_DRAFT"],
+        guardrails: ["Do not send directly."],
+        doneCriteria: ["Draft is ready for review."],
+        failureModes: [],
+      },
+    ],
+  },
   noSlopSpec: {
     id: "spec-id",
     slug: "support",
@@ -149,54 +225,20 @@ const spec: RunnableSpec = {
       buildContract,
     },
   },
-};
+} as any;
 
-test("buildSpecRunTools exposes connector_selection read and write actions", () => {
-  const { tools } = buildSpecRunTools({
-    auth,
-    spec,
-    runId: "run-1",
-    workflowId: "wf-1",
-    workflowTitle: "Support",
-  });
-  assert.ok(tools.action_gmail_GMAIL_CREATE_EMAIL_DRAFT);
-  assert.ok(tools.action_gmail_GMAIL_LIST_THREADS);
+test("compileSpecRunPlan exposes only build-contract selected connector actions", () => {
+  const plan = compileSpecRunPlan(spec);
+
+  assert.ok(plan.writeTools.some((tool) => tool.actionSlug === "GMAIL_CREATE_EMAIL_DRAFT"));
+  assert.ok(plan.readTools.some((tool) => tool.actionSlug === "GMAIL_LIST_THREADS"));
 });
 
 test("draft_only review policy hides send actions", () => {
-  const { tools } = buildSpecRunTools({
-    auth,
-    spec,
-    runId: "run-1",
-    workflowId: "wf-1",
-    workflowTitle: "Support",
-  });
-  assert.ok(tools.action_gmail_GMAIL_CREATE_EMAIL_DRAFT);
-  assert.equal(tools.action_gmail_GMAIL_SEND_DRAFT, undefined);
-});
+  const plan = compileSpecRunPlan(spec);
 
-test("event run with payload exposes getTriggerTicket tool", () => {
-  const runContext = projectRunContext({
-    spec,
-    workflowId: "wf-1",
-    trigger: { source: "event", triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE" },
-    triggerPayload: {
-      data: { subject: "Hi", body: "Help", from: "a@b.com" },
-      metadata: { trigger_slug: "GMAIL_NEW_GMAIL_MESSAGE", trigger_id: "ti-1" },
-      triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE",
-      triggerInstanceId: "ti-1",
-      externalEventId: "evt-1",
-    },
-  });
-  const { tools } = buildSpecRunTools({
-    auth,
-    spec,
-    runId: "run-1",
-    workflowId: "wf-1",
-    workflowTitle: "Support",
-    runContext,
-  });
-  assert.ok(tools.getTriggerTicket);
+  assert.ok(plan.writeTools.some((tool) => tool.actionSlug === "GMAIL_CREATE_EMAIL_DRAFT"));
+  assert.equal(plan.writeTools.some((tool) => tool.actionSlug === "GMAIL_SEND_DRAFT"), false);
 });
 
 test("buildSpecRunSystemPrompt includes runtime policies for event runs", () => {

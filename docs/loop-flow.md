@@ -207,18 +207,18 @@ queued ──► running ──► succeeded
 
 **Headless execution path:**
 1. `createSpecLoopRun` inserts a `loop_engine_runs` row with status `queued`, publishes `run_queued` event
-2. A user message is injected: `"Execute the loop: {spec.goal}"`
-3. `executeSpecRun` is called:
+2. Approved spec agents are materialized as `loop_engine_step_attempts`
+3. `executeAgenticSpecRun` runs one agent step at a time:
    - Sets status to `running`
-   - Calls `buildSpecRunTools()` to create the tool registry
-   - Calls `buildSpecRunSystemPrompt()` to assemble instructions
-   - Creates `streamText()` with the AI SDK, bound to 12 max steps
-   - In headless mode, silently consumes the stream
-   - On completion, persists messages and sets status to `succeeded`
+   - Compiles the spec plan and builds tools for the active agent only
+   - Streams a `data-agent` header before model output so UI transcript blocks have a stable anchor
+   - Pauses on `requestInput`, `requestReview`, or `requestApproval`
+   - Persists structured step outputs via `finalizeAgent`
+   - On the last agent, `finalizeRun` can complete the run summary
 
 **Streaming (interactive) path:**
 1. Route `POST /loops/:workflowId/run/chat` in `workflows.ts` receives `{ runId, messages }`
-2. Calls `streamSpecRunChat()` which validates messages, persists them, then calls `executeSpecRun` in stream mode
+2. Calls `streamSpecRunChat()` which validates messages, persists them, then calls the agentic spec runner in stream mode
 3. The response is streamed back via `pipeUIMessageStreamToResponse`
 
 **Retry path:**
@@ -227,17 +227,22 @@ queued ──► running ──► succeeded
 
 ### 2.4 Tools Available to the LLM
 
-**File:** `src/services/loop-runtime/spec-run-tools.ts`
+**File:** `src/services/loop-runtime/spec-run-agent-tools.ts`
 
 | Tool | Trigger | Executes |
 |------|---------|----------|
-| `searchMemory` | LLM on any turn | `runGroundedKnowledgeSearch` (Tallei memory + workspace memory) |
-| `searchWeb` | LLM on any turn | `runExaWebSearch` (Exa public web search) |
-| `finalizeRun` | LLM when goal achieved | Persists to workspace memory, marks run `succeeded` |
-| `search_{toolkit}` | LLM per external toolkit | `runComposioToolkitPrompt` (HubSpot, Salesforce, etc.) |
-| `action_{toolkit}_{action}` | LLM for write actions | `executeApprovedComposioAction` (needs user approval) |
+| `getTriggerPayload` | Any active agent | Returns normalized trigger, ticket, and customer context |
+| `searchMemory` | Agent with `internal.memory_search` ref | `runGroundedKnowledgeSearch` (Tallei memory + workspace memory) |
+| `searchWeb` | Agent with `internal.web_search` ref | `runExaWebSearch` (Exa public web search) |
+| `search_{toolkit}` | Agent with toolkit search ref | `runComposioToolkitPrompt` (HubSpot, Salesforce, etc.) |
+| `action_{toolkit}_{action}` | Agent with connector read ref | Approved read-only Composio action |
+| `requestInput` | Missing operator-only input | Creates a first-class input interaction and pauses |
+| `requestReview` | Draft/artifact review | Creates an editable review interaction and pauses |
+| `requestApproval` | Mutating connector action | Creates an approval interaction, then executes only after exact action approval |
+| `finalizeAgent` | Agent step complete | Persists structured handoff output |
+| `finalizeRun` | Last agent when goal achieved | Persists run summary and optional workspace memory |
 
-The LLM is prompted with a system prompt built from the spec's agents, guardrails, success criteria, and delivery config.
+Build-spec refs such as `internal.memory_search` and `composio.*` are authorization identifiers. The LLM must call only the concrete tool names exposed for the current agent invocation.
 
 ### 2.5 Run Projection
 

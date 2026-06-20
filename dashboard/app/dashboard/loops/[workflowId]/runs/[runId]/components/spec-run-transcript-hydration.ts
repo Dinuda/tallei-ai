@@ -5,6 +5,7 @@ import type { DataAgentPartData } from "@/components/ai-elements/transcript-mess
 
 import {
   formatAgentStructuredOutput,
+  formatInteractionDecision,
   formatStepOutput,
   latestAttemptPerStep,
   resolveStepDisplayText,
@@ -289,6 +290,19 @@ function bodyHasContent(parts: UIMessage["parts"]): boolean {
   });
 }
 
+function bodyHasText(parts: UIMessage["parts"]): boolean {
+  return parts.some((part) => part.type === "text" && part.text.trim().length > 0);
+}
+
+function appendMissingVisibleText(
+  body: UIMessage["parts"],
+  fallbackParts: UIMessage["parts"],
+): UIMessage["parts"] {
+  if (bodyHasText(body)) return body;
+  const fallbackText = fallbackParts.filter((part) => part.type === "text" && part.text.trim());
+  return fallbackText.length > 0 ? [...body, ...fallbackText] : body;
+}
+
 function hydratedBodyForStep(input: {
   step: SpecRunStep;
   totalAgents: number;
@@ -304,6 +318,17 @@ function hydratedBodyForStep(input: {
     input.messages,
   );
   return hydrated ? stripHeaderParts(hydrated.parts) : [];
+}
+
+function interactionDecisionParts(
+  step: SpecRunStep,
+  interactions: SpecRunInteraction[],
+): UIMessage["parts"] {
+  return interactions
+    .filter((interaction) => interaction.step_attempt_id === step.id)
+    .map(formatInteractionDecision)
+    .filter((text): text is string => Boolean(text))
+    .map((text) => ({ type: "text", text }));
 }
 
 /** Group streamed assistant message parts by step index (latest message wins per step). */
@@ -400,10 +425,11 @@ export function buildSequentialStepTranscript(input: {
       steps: latestSteps,
       messages: visibleMessages,
     });
+    const decisionBody = interactionDecisionParts(step, input.interactions);
 
     let body: UIMessage["parts"] = [];
     if (showArtifact) {
-      body = streamedTools;
+      body = [...streamedTools, ...decisionBody];
     } else if (isLive) {
       // Once a finalize/gate tool appears, preceding prose is just scratchpad
       // narration. Keep the run fast and live, but stop showing that prose.
@@ -411,17 +437,21 @@ export function buildSequentialStepTranscript(input: {
         ? toolParts(streamBody, { includeFinalize: true })
         : streamBody;
       if (!bodyHasContent(body) && bodyHasContent(hydratedBody)) body = hydratedBody;
+      body = [...body, ...decisionBody];
     } else if (hasFinalizeOutput) {
       body = [
         ...streamedTools,
         ...streamBody.filter(isFinalizeAgentPart),
+        ...decisionBody,
       ];
     } else {
       body = [
         ...streamedTools,
         ...hydratedBody,
+        ...decisionBody,
       ];
     }
+    body = appendMissingVisibleText(body, [...decisionBody, ...hydratedBody]);
 
     blocks.push({
       step,

@@ -8,7 +8,7 @@ import {
 } from "ai";
 import { AnimatePresence, motion } from "motion/react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { CheckCircle2, FileText, Loader2, Workflow } from "lucide-react";
 
 import {
   InteractivePromptMenu,
@@ -34,6 +34,13 @@ import { type ToolPart } from "@/components/ai-elements/tool";
 import { dedupeChatMessagesById } from "@/lib/chat-messages";
 import type { OperatorView } from "@/lib/operator-view-types";
 import { ArtifactRenderer } from "@/components/renderers";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 import { InboundEmailTriggerCard } from "./inbound-email-trigger-card";
 import {
@@ -45,6 +52,7 @@ import {
 import {
   buildGatePromptOptions,
   formatAgentStructuredOutput,
+  latestAttemptPerStep,
   resolveActiveGate,
   resolveDisplayArtifact,
   toArtifactRecord,
@@ -59,6 +67,23 @@ type SpecRunProjection = {
   workflow_title: string;
   status: string;
   error_json?: { message?: string };
+  spec?: Record<string, unknown>;
+  definition?: {
+    goal?: string;
+    agentGraph?: {
+      parent?: {
+        name?: string;
+        task?: string;
+      };
+      children?: Array<{
+        id?: string;
+        name?: string;
+        task?: string;
+        tools?: unknown[];
+      }>;
+    };
+  };
+  context?: Record<string, unknown>;
   steps: SpecRunStep[];
   interactions?: SpecRunInteraction[];
   artifacts?: SpecRunArtifact[];
@@ -122,6 +147,22 @@ function isTriggerSeedMessage(message: UIMessage, index: number): boolean {
   return Boolean(parseTriggerSummary(readMessageText(message)));
 }
 
+function hasAgentPart(message: UIMessage): boolean {
+  return message.parts.some((part) => part.type === "data-agent");
+}
+
+function hasVisibleText(message: UIMessage): boolean {
+  return message.parts.some((part) => part.type === "text" && part.text.trim());
+}
+
+function isLooseTranscriptMessage(message: UIMessage, index: number): boolean {
+  if (isTriggerSeedMessage(message, index)) return false;
+  if (message.role === "user") return hasVisibleText(message);
+  if (message.role !== "assistant") return false;
+  if (hasAgentPart(message)) return false;
+  return hasVisibleText(message);
+}
+
 function ScrollOnUpdate() {
   const { scrollToBottom, isAtBottom } = useStickToBottomContext();
   useEffect(() => {
@@ -158,8 +199,23 @@ function CompletedGateSummary({ toolName, part }: { toolName: string; part: Tool
   const input = part.input && typeof part.input === "object" && !Array.isArray(part.input)
     ? part.input as Record<string, unknown>
     : {};
+  const output = part.output && typeof part.output === "object" && !Array.isArray(part.output)
+    ? part.output as Record<string, unknown>
+    : {};
+  const connectorOutput = output.output && typeof output.output === "object" && !Array.isArray(output.output)
+    ? output.output as Record<string, unknown>
+    : null;
   const rationale = typeof input.rationale === "string" ? input.rationale.trim() : "";
-  const label = toolName === "requestReview"
+  const connectorMessage = connectorOutput
+    ? typeof connectorOutput.message === "string"
+      ? connectorOutput.message
+      : typeof connectorOutput.id === "string"
+        ? `Connector action completed. ID: ${connectorOutput.id}`
+        : "Connector action completed successfully."
+    : "";
+  const label = toolName === "requestApproval" && output.ok === true && connectorOutput
+    ? "Connector action completed"
+    : toolName === "requestReview"
     ? "Draft review completed"
     : toolName === "requestApproval"
       ? "Approval completed"
@@ -171,7 +227,33 @@ function CompletedGateSummary({ toolName, part }: { toolName: string; part: Tool
         <CheckCircle2 className="size-4 text-[#16a34a]" />
         {label}
       </div>
+      {connectorMessage ? <p className="mt-1.5 leading-5 text-[#6b7280]">{connectorMessage}</p> : null}
       {rationale ? <p className="mt-1.5 leading-5 text-[#6b7280]">{rationale}</p> : null}
+    </div>
+  );
+}
+
+function SearchToolSummary({ part, toolName }: { part: ToolPart; toolName: string }) {
+  const input = part.input && typeof part.input === "object" && !Array.isArray(part.input)
+    ? part.input as Record<string, unknown>
+    : {};
+  const output = part.output && typeof part.output === "object" && !Array.isArray(part.output)
+    ? part.output as Record<string, unknown>
+    : {};
+  const query = typeof input.query === "string" ? input.query.trim() : "";
+  const sources = Array.isArray(output.sources) ? output.sources : [];
+  const reused = output.reused === true;
+  const label = toolName === "searchWeb" ? "Web search" : "Memory search";
+  const sourceLabel = sources.length === 1 ? "1 source" : `${sources.length} sources`;
+
+  return (
+    <div className="rounded-md border border-[#e5e7eb] bg-[#fafafa] px-4 py-3 text-[13px] text-[#374151]">
+      <div className="flex flex-wrap items-center gap-2 font-medium text-[#111827]">
+        <CheckCircle2 className="size-4 text-[#16a34a]" />
+        <span>{label} completed</span>
+        <span className="text-[#6b7280]">· {reused ? "reused" : sourceLabel}</span>
+      </div>
+      {query ? <p className="mt-1.5 leading-5 text-[#6b7280]">{query}</p> : null}
     </div>
   );
 }
@@ -192,6 +274,153 @@ function mapGateAnswer(answer: InteractivePromptAnswer) {
   return { command: "submit_input" as const, value: { channel: "dashboard", text: answer.answerText } };
 }
 
+type GateCommand = ReturnType<typeof mapGateAnswer>;
+
+function optimisticInteractionStatus(command: GateCommand["command"]): SpecRunInteraction["status"] {
+  if (command === "approve") return "approved";
+  if (command === "submit_input") return "submitted";
+  return "rejected";
+}
+
+function optimisticDecision(mapped: GateCommand): Record<string, unknown> {
+  if (mapped.command === "submit_input") return { input: mapped.value, channel: mapped.value.channel };
+  if (mapped.command === "revise") {
+    return {
+      command: "revise",
+      reason: typeof mapped.value.feedback === "string" ? mapped.value.feedback : "Operator requested changes.",
+      channel: mapped.value.channel,
+    };
+  }
+  if (mapped.command === "reject") {
+    return {
+      command: "reject",
+      reason: typeof mapped.value.reason === "string" ? mapped.value.reason : "Rejected by operator",
+    };
+  }
+  return { output: { ok: true, approved: true, value: mapped.value }, channel: mapped.value.channel };
+}
+
+function toolRefLabel(tool: unknown): string {
+  if (typeof tool === "string") return tool;
+  if (tool && typeof tool === "object" && !Array.isArray(tool)) {
+    const record = tool as Record<string, unknown>;
+    if (typeof record.ref === "string") return record.ref;
+    if (typeof record.name === "string") return record.name;
+  }
+  return "";
+}
+
+function SpecRunDetailsDialog({
+  open,
+  onOpenChange,
+  run,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  run: SpecRunProjection;
+}) {
+  const flow = latestAttemptPerStep(run.steps);
+  const specJson = JSON.stringify({
+    spec: run.spec ?? null,
+    definition: run.definition ?? null,
+    context: run.context ?? null,
+  }, null, 2);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        showCloseButton
+        className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-0 overflow-hidden rounded-lg border border-[#d1d5db] bg-white p-0 text-[#111827] sm:!max-w-[1040px]"
+      >
+        <DialogHeader className="border-b border-[#e5e7eb] px-6 py-4">
+          <DialogTitle className="flex items-center gap-2 text-[16px] font-semibold">
+            <FileText className="size-4" />
+            Run spec
+          </DialogTitle>
+          <DialogDescription className="text-[13px] text-[#6b7280]">
+            Referenced spec snapshot and the agent flow materialized for this run.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid min-h-0 flex-1 gap-0 overflow-hidden md:grid-cols-[360px_1fr]">
+          <section className="min-h-0 overflow-y-auto border-b border-[#e5e7eb] p-5 md:border-b-0 md:border-r">
+            <div className="mb-4 flex items-center gap-2 text-[13px] font-semibold uppercase tracking-[0.08em] text-[#6b7280]">
+              <Workflow className="size-4" />
+              Runner flow
+            </div>
+            <div className="space-y-3">
+              {flow.map((step) => {
+                const tools = Array.isArray(step.agent_snapshot.tools)
+                  ? step.agent_snapshot.tools.map(toolRefLabel).filter(Boolean)
+                  : [];
+                const renderer = typeof step.agent_snapshot.renderer === "string"
+                  ? step.agent_snapshot.renderer
+                  : typeof step.agent_snapshot.outputContract?.renderer === "string"
+                    ? step.agent_snapshot.outputContract.renderer
+                    : "";
+                const gate = step.agent_snapshot.gate && Object.keys(step.agent_snapshot.gate).length > 0
+                  ? step.agent_snapshot.gate
+                  : null;
+                return (
+                  <div key={`${step.id}-${step.attempt}`} className="border border-[#d1d5db] bg-[#fafafa] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-[14px] font-semibold text-[#111827]">
+                          {step.agent_snapshot.name || step.agent_id}
+                        </p>
+                        <p className="text-[12px] text-[#6b7280]">Agent {step.step_index + 1} · attempt {step.attempt}</p>
+                      </div>
+                      <span className="shrink-0 border border-[#d1d5db] bg-white px-2 py-1 text-[11px] font-medium uppercase text-[#4b5563]">
+                        {step.status}
+                      </span>
+                    </div>
+                    {step.agent_snapshot.task ? (
+                      <p className="mt-2 text-[13px] leading-5 text-[#374151]">{step.agent_snapshot.task}</p>
+                    ) : null}
+                    <div className="mt-3 grid gap-2 text-[12px] text-[#4b5563]">
+                      {renderer ? <p>Renderer: <span className="font-medium text-[#111827]">{renderer}</span></p> : null}
+                      {step.agent_snapshot.artifactRole ? (
+                        <p>Artifact role: <span className="font-medium text-[#111827]">{step.agent_snapshot.artifactRole}</span></p>
+                      ) : null}
+                      {gate ? (
+                        <p>Gate: <span className="font-medium text-[#111827]">{String(gate.type ?? "configured")}</span></p>
+                      ) : null}
+                      {Array.isArray(step.agent_snapshot.handoffBindings) && step.agent_snapshot.handoffBindings.length > 0 ? (
+                        <p>{step.agent_snapshot.handoffBindings.length} handoff binding{step.agent_snapshot.handoffBindings.length === 1 ? "" : "s"}</p>
+                      ) : null}
+                    </div>
+                    {tools.length ? (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {tools.map((tool) => (
+                          <span key={tool} className="border border-[#d1d5db] bg-white px-2 py-1 text-[11px] text-[#4b5563]">
+                            {tool}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+              {flow.length === 0 ? (
+                <p className="text-[13px] text-[#6b7280]">No runner steps have been materialized yet.</p>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="min-h-0 overflow-hidden p-5">
+            <div className="mb-4 text-[13px] font-semibold uppercase tracking-[0.08em] text-[#6b7280]">
+              Referenced spec
+            </div>
+            <pre className="h-full min-h-[360px] overflow-auto border border-[#d1d5db] bg-[#0f172a] p-4 text-[12px] leading-5 text-[#e5e7eb]">
+              {specJson}
+            </pre>
+          </section>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function SpecRunPage({
   workflowId,
   runId,
@@ -207,6 +436,7 @@ export function SpecRunPage({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submittedAnswer, setSubmittedAnswer] = useState<InteractivePromptAnswer | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const canvasFlushRef = useRef<(() => Promise<void>) | null>(null);
   const autoStartAttemptedRef = useRef(false);
 
@@ -338,6 +568,10 @@ export function SpecRunPage({
     ),
     [messages, run.interactions, run.steps],
   );
+  const looseTranscriptMessages = useMemo(
+    () => transcriptMessages.filter(isLooseTranscriptMessage),
+    [transcriptMessages],
+  );
 
   useEffect(() => {
     autoStartAttemptedRef.current = false;
@@ -392,6 +626,11 @@ export function SpecRunPage({
     && (run.status === "running" || chatStatus === "submitted");
 
   const renderRunTool = useCallback((part: ToolPart, toolName: string, index: number): ReactNode | null | undefined => {
+    if (toolName === "searchMemory" || toolName === "searchWeb") {
+      if (part.state === "input-streaming" || part.state === "input-available") return null;
+      if (part.state === "output-available") return <SearchToolSummary key={index} part={part} toolName={toolName} />;
+      return null;
+    }
     if (toolName === "finalizeAgent") {
       if (part.state === "input-streaming" || part.state === "input-available") return null;
       if (part.state === "output-available") {
@@ -401,17 +640,17 @@ export function SpecRunPage({
     if (GATE_TOOL_NAMES.includes(toolName)) {
       // Hide while streaming input — gate composer handles the active state.
       if (part.state === "input-streaming" || part.state === "input-available") return null;
+      const errorText = (part as { errorText?: string }).errorText;
+      if (errorText || part.state === "output-error") {
+        return (
+          <div key={index} className="rounded-md border border-[#fecaca] bg-[#fef2f2] px-3 py-2 text-[12px] text-[#991b1b]">
+            {errorText || "Connector action failed."}
+          </div>
+        );
+      }
       if (part.state === "output-available") {
         // If the tool result carries an error (e.g. validation failure), show a compact
         // red pill instead of the raw CollapsibleTool JSON dump.
-        const errorText = (part as { errorText?: string }).errorText;
-        if (errorText) {
-          return (
-            <div key={index} className="rounded-md border border-[#fecaca] bg-[#fef2f2] px-3 py-2 text-[12px] text-[#991b1b]">
-              {errorText}
-            </div>
-          );
-        }
         return <CompletedGateSummary key={index} part={part} toolName={toolName} />;
       }
       // Any other state (e.g. error state from AI SDK) — suppress rather than show raw JSON.
@@ -450,7 +689,13 @@ export function SpecRunPage({
         ...prev,
         status: "running",
         interactions: (prev.interactions ?? []).map((entry) =>
-          entry.id === interactionId ? { ...entry, status: "approved" } : entry
+          entry.id === interactionId
+            ? {
+              ...entry,
+              status: optimisticInteractionStatus(mapped.command),
+              decision_json: optimisticDecision(mapped),
+            }
+            : entry
         ),
       }));
       setSubmittedAnswer(answer);
@@ -485,27 +730,42 @@ export function SpecRunPage({
     if (!value || busy) return;
     const normalized = value.toLowerCase();
     if (pendingInteraction) {
+      let mapped: GateCommand;
       if (/^(approve|approved|yes|send|approve and send)$/i.test(value)) {
-        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+        mapped = {
           command: "approve",
           value: { channel: "dashboard", approvalIntent: "approve_and_send", text: value },
-        });
+        };
       } else if (/^(reject|cancel|stop)$/i.test(value)) {
-        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+        mapped = {
           command: "reject",
           value: { channel: "dashboard", reason: "Rejected by operator" },
-        });
+        };
       } else if (gate.operatorView?.actions.some((action) => action.command === "submit_input")) {
-        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+        mapped = {
           command: "submit_input",
           value: { channel: "dashboard", text: value },
-        });
+        };
       } else {
-        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+        mapped = {
           command: "revise",
           value: { channel: "dashboard", feedback: value },
-        });
+        };
       }
+      await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, mapped);
+      setRun((prev) => ({
+        ...prev,
+        status: "running",
+        interactions: (prev.interactions ?? []).map((entry) =>
+          entry.id === pendingInteraction.id
+            ? {
+              ...entry,
+              status: optimisticInteractionStatus(mapped.command),
+              decision_json: optimisticDecision(mapped),
+            }
+            : entry
+        ),
+      }));
       await continueRunStream();
       return;
     }
@@ -528,8 +788,19 @@ export function SpecRunPage({
     <main className="relative flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden bg-white text-[#111827]">
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-0 h-[400px] bg-gradient-to-t from-slate-100 to-transparent" />
       <div className="relative z-10 flex h-full flex-col overflow-hidden">
+        <div className="absolute right-4 top-4 z-30">
+          <button
+            type="button"
+            onClick={() => setDetailsOpen(true)}
+            className="inline-flex items-center gap-2 border border-[#d1d5db] bg-white px-3 py-2 text-[13px] font-medium text-[#374151] shadow-sm transition-colors hover:bg-[#f9fafb]"
+          >
+            <FileText className="size-4" />
+            View spec
+          </button>
+        </div>
+        <SpecRunDetailsDialog open={detailsOpen} onOpenChange={setDetailsOpen} run={run} />
         <Conversation>
-          <ConversationContent className={`mx-auto max-w-3xl gap-8 p-4 transition-[padding-bottom] ${showGateComposer ? "pb-[560px]" : "pb-40"}`}>
+          <ConversationContent className={`mx-auto max-w-3xl gap-8 px-4 pb-40 pt-16 transition-[padding-bottom] ${showGateComposer ? "pb-[560px]" : "pb-40"}`}>
             <ScrollOnUpdate />
 
             {(error || run.error_json?.message) ? (
@@ -555,7 +826,7 @@ export function SpecRunPage({
                     <TranscriptMessageContent
                       message={block.message}
                       renderTool={renderRunTool}
-                      shouldRenderText={shouldRenderAssistantText}
+                      shouldRenderText={({ text }) => shouldRenderAssistantText(text)}
                     />
                   </MessageContent>
                 </Message>
@@ -582,6 +853,18 @@ export function SpecRunPage({
                   </Message>
                 ) : null}
               </div>
+            ))}
+
+            {looseTranscriptMessages.map((message) => (
+              <Message key={message.id} from={message.role === "user" ? "user" : "assistant"}>
+                <MessageContent className="w-full">
+                  <TranscriptMessageContent
+                    message={message}
+                    renderTool={renderRunTool}
+                    shouldRenderText={message.role === "assistant" ? ({ text }) => shouldRenderAssistantText(text) : undefined}
+                  />
+                </MessageContent>
+              </Message>
             ))}
 
             {showWorking ? (

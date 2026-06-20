@@ -15,6 +15,11 @@ import { VercelProvider } from "@composio/vercel";
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { ToolContract } from "../tool-spec/types.js";
 import {
+  buildCapabilityQueries,
+  interleaveDiscoveredTools,
+  orderedSearchActionSlugs,
+} from "./composio-discovery-ranking.js";
+import {
   getCatalogContracts,
 } from "./composio-catalog.js";
 import { getOrCreateComposioSession } from "./composio-session.js";
@@ -34,6 +39,8 @@ export type DiscoverToolsInput = {
   auth: AuthContext;
   prompt: string;
   selectedToolkits: string[];
+  capabilityQueries?: string[];
+  toolCategories?: string[];
   composioSessionId?: string | null;
   limit?: number;
 };
@@ -51,32 +58,28 @@ function normalizeConnectedToolRef(name: string): string {
 async function discoverViaSessionSearch(
   session: Session<unknown, unknown, VercelProvider>,
   prompt: string,
+  capabilityQuery: string,
 ): Promise<DiscoveredTool[]> {
   const response = await session.search({ query: prompt });
   if (!response.success || !Array.isArray(response.results)) return [];
 
-  const slugs = new Set<string>();
-  for (const result of response.results) {
-    for (const slug of [...(result.primaryToolSlugs ?? []), ...(result.relatedToolSlugs ?? [])]) {
-      slugs.add(slug.toUpperCase());
-    }
-  }
-  if (slugs.size === 0) return [];
+  const orderedSlugs = orderedSearchActionSlugs(response.results);
+  if (orderedSlugs.length === 0) return [];
 
-  const catalogContracts = await getCatalogContracts({ slugs: [...slugs] });
+  const catalogContracts = await getCatalogContracts({ slugs: orderedSlugs });
   const catalogBySlug = new Map(
     catalogContracts.map((c) => [String(c.constraints.actionSlug ?? "").toUpperCase(), c]),
   );
 
   const discovered: DiscoveredTool[] = [];
-  for (const slug of slugs) {
+  for (const slug of orderedSlugs) {
     const contract = catalogBySlug.get(slug);
     if (contract) {
       discovered.push({
         contract,
         connected: false,
         source: "session_search",
-        capabilityQueries: [prompt],
+        capabilityQueries: [capabilityQuery],
       });
       continue;
     }
@@ -90,6 +93,13 @@ async function connectedActionSlugs(
 ): Promise<Set<string>> {
   const vercelTools = await session.tools();
   return new Set(Object.keys(vercelTools ?? {}).map(normalizeConnectedToolRef));
+}
+
+function toolkitFor(contract: ToolContract): string {
+  const configured = contract.constraints.toolkit;
+  if (typeof configured === "string" && configured.trim()) return configured.trim().toLowerCase();
+  const match = contract.toolRef.match(/^composio\.([^.]+)\./i);
+  return match?.[1]?.toLowerCase() ?? "";
 }
 
 export async function discoverToolsForLoopBuild(input: DiscoverToolsInput): Promise<DiscoverToolsResult> {
@@ -117,16 +127,26 @@ export async function discoverToolsForLoopBuild(input: DiscoverToolsInput): Prom
 
   const composioToolkitSet = new Set(composioToolkits);
   const session = await getOrCreateComposioSession(input.auth, input.composioSessionId);
-  const [sessionSearchTools, connectedSlugs] = await Promise.all([
-    discoverViaSessionSearch(
-      session.client,
-      `${input.prompt}\nUse only these user-selected apps: ${[...composioToolkitSet].join(", ")}.`,
-    ),
+  const capabilityQueries = buildCapabilityQueries({
+    prompt: input.prompt,
+    capabilityQueries: input.capabilityQueries,
+    toolCategories: input.toolCategories,
+  });
+  const perQueryLimit = Math.max(3, Math.ceil(limit / capabilityQueries.length));
+  const toolkitScope = [...composioToolkitSet].join(", ");
+
+  const resultSets = await Promise.all(capabilityQueries.map(async (capabilityQuery) => {
+    const searchPrompt = `${capabilityQuery}\nUse only these user-selected apps: ${toolkitScope}. Return the single most specific action for this capability first.`;
+    const tools = await discoverViaSessionSearch(session.client, searchPrompt, capabilityQuery);
+    return tools
+      .filter((entry) => composioToolkitSet.has(toolkitFor(entry.contract)))
+      .slice(0, perQueryLimit);
+  }));
+
+  const [connectedSlugs] = await Promise.all([
     connectedActionSlugs(session.client),
   ]);
-  const selectedTools = sessionSearchTools.filter((entry) =>
-    composioToolkitSet.has(String(entry.contract.constraints.toolkit ?? "").trim().toLowerCase()),
-  );
+  const selectedTools = interleaveDiscoveredTools(resultSets, limit);
   if (selectedTools.length === 0 && platformTools.length === 0) {
     throw new Error(`No matching actions were found in the selected apps: ${[...composioToolkitSet, ...platformManagedToolkits].join(", ")}`);
   }
@@ -148,3 +168,5 @@ export async function discoverToolsForLoopBuild(input: DiscoverToolsInput): Prom
     tools: [...platformTools, ...merged].slice(0, limit),
   };
 }
+
+export { buildCapabilityQueries, interleaveDiscoveredTools, orderedSearchActionSlugs } from "./composio-discovery-ranking.js";

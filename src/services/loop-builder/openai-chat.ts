@@ -2,8 +2,15 @@ import OpenAI from "openai";
 
 import { config } from "../../config/index.js";
 import { createLoopChatOpenAiSdk, resolveConfiguredChatModel } from "../llm/loop-chat-client.js";
+import { isOpenCodeZenChatCompletionsModel } from "../llm/chat-model-routing.js";
 import { openAiTemperatureParam } from "../llm/openai-chat-params.js";
 import { estimateLoopBuilderCostUsd, reportLoopBuilderProgress } from "./progress.js";
+
+/** Default completion budget for loop-builder LLM calls (spec draft, etc.). */
+export const LOOP_BUILDER_DEFAULT_MAX_COMPLETION_TOKENS = 10_000;
+
+/** Retry budget when the first completion hits the token limit. */
+export const LOOP_BUILDER_RETRY_MAX_COMPLETION_TOKENS = 16_000;
 
 type LoopBuilderReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -57,7 +64,7 @@ function readLoopBuilderMinCompletionTokens(): number {
 }
 
 function completionTokenBudget(model: string, requested?: number): number {
-  const fallback = requested ?? 4096;
+  const fallback = requested ?? LOOP_BUILDER_DEFAULT_MAX_COMPLETION_TOKENS;
   return isLoopBuilderReasoningModel(model)
     ? Math.max(fallback, readLoopBuilderMinCompletionTokens())
     : fallback;
@@ -81,20 +88,44 @@ export function loopBuilderOpenAiModel(): string {
   return model;
 }
 
+function loopBuilderOpenCodeThinkingEffort(): string | null {
+  const raw = (process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT ?? "low").trim().toLowerCase();
+  if (!raw || raw === "false" || raw === "0" || raw === "off" || raw === "none" || raw === "disabled") {
+    return null;
+  }
+  return raw;
+}
+
 /** Provider options for streamed chat (analyzer + spec runs) on reasoning models. */
 export function loopBuilderStreamProviderOptions(model = loopBuilderOpenAiModel()) {
-  if (!isLoopBuilderReasoningModel(model)) return undefined;
-  const reasoningEffort = loopBuilderOpenAiReasoningEffort();
-  return {
-    openai: {
-      // Loop builder replays the full client message history each turn without
-      // previous_response_id chaining. store=true would emit item_reference
-      // payloads OpenAI cannot resolve on a fresh request.
-      store: false as const,
-      ...(reasoningEffort ? { reasoningEffort } : {}),
-      reasoningSummary: "auto" as const,
-    },
-  };
+  if (isLoopBuilderReasoningModel(model)) {
+    const reasoningEffort = loopBuilderOpenAiReasoningEffort();
+    return {
+      openai: {
+        // Loop builder replays the full client message history each turn without
+        // previous_response_id chaining. store=true would emit item_reference
+        // payloads OpenAI cannot resolve on a fresh request.
+        store: false as const,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        reasoningSummary: "auto" as const,
+      },
+    };
+  }
+
+  // OpenCode Zen chat models (DeepSeek, Kimi, GLM) expose thinking via reasoning_content
+  // when thinking mode is enabled — same Reasoning UI path as OpenAI reasoningSummary.
+  if (config.llmProvider === "opencode" && isOpenCodeZenChatCompletionsModel(model)) {
+    const reasoningEffort = loopBuilderOpenCodeThinkingEffort();
+    if (!reasoningEffort) return undefined;
+    return {
+      opencode: {
+        thinking: { type: "enabled" },
+        reasoningEffort,
+      },
+    };
+  }
+
+  return undefined;
 }
 
 function openAiClient(): OpenAI {
@@ -184,7 +215,7 @@ export async function loopBuilderOpenAiChat(input: {
   const useCompletionTokensParam = isGpt5Model(model);
   const timeoutMs = input.timeoutMs ?? loopBuilderOpenAiTimeoutMs();
   const baseMaxCompletionTokens = input.exactMaxTokens
-    ? input.maxTokens ?? 4096
+    ? input.maxTokens ?? LOOP_BUILDER_DEFAULT_MAX_COMPLETION_TOKENS
     : completionTokenBudget(model, input.maxTokens);
   const configuredReasoningEffort = input.reasoningEffort === undefined
     ? loopBuilderOpenAiReasoningEffort()
@@ -248,8 +279,8 @@ export async function loopBuilderOpenAiChat(input: {
   const attempts: Array<{ reasoningEffort: LoopBuilderReasoningEffort | null; maxCompletionTokens: number }> = [
     { reasoningEffort: configuredReasoningEffort, maxCompletionTokens: baseMaxCompletionTokens },
   ];
-  if (isLoopBuilderReasoningModel(model) && input.retryEmptyResponses !== false) {
-    if (configuredReasoningEffort && configuredReasoningEffort !== "minimal") {
+  if (input.retryEmptyResponses !== false) {
+    if (isLoopBuilderReasoningModel(model) && configuredReasoningEffort && configuredReasoningEffort !== "minimal") {
       attempts.push({ reasoningEffort: "minimal", maxCompletionTokens: baseMaxCompletionTokens });
     }
     attempts.push({

@@ -14,9 +14,9 @@ test("spec-run editorial projection loads persisted step attempts", async () => 
   assert.doesNotMatch(source, /inferAgentToolRefs/);
 });
 
-test("spec-run editorial projection derives agentGraph children from runtime steps", async () => {
+test("spec-run editorial projection exposes run definition agentGraph children", async () => {
   const source = await readFile(projectionPath, "utf8");
-  assert.match(source, /children: steps\.map/);
+  assert.match(source, /specRun\.loopDefinition\.agentGraph\.children\.map/);
 });
 
 test("spec-run editorial projection preserves persona on agent snapshots", async () => {
@@ -24,4 +24,22 @@ test("spec-run editorial projection preserves persona on agent snapshots", async
   assert.match(source, /snapshot\.persona/);
   assert.match(source, /displayName/);
   assert.match(source, /avatarSeed/);
+});
+
+test("spec-run editorial projection exposes referenced run definition snapshot", async () => {
+  const source = await readFile(projectionPath, "utf8");
+  assert.match(source, /spec: \{/);
+  assert.match(source, /noSlopSpec: noSlop \?\? null/);
+  assert.match(source, /buildContract/);
+  assert.match(source, /definition: \{/);
+  assert.match(source, /specRun\.loopDefinition/);
+  assert.match(source, /builderSessionId: specRun\.builderSessionId/);
+});
+
+test("spec-run editorial projection exposes runner contract metadata", async () => {
+  const source = await readFile(projectionPath, "utf8");
+  assert.match(source, /inputContract: asRecord\(snapshot\.inputContract\)/);
+  assert.match(source, /outputContract: asRecord\(snapshot\.outputContract\)/);
+  assert.match(source, /handoffBindings: Array\.isArray\(snapshot\.handoffBindings\)/);
+  assert.match(source, /renderer: typeof snapshot\.renderer === "string"/);
 });

@@ -76,6 +76,7 @@ function artifactBodyFromSurface(surface: InputSurface, artifactData: Record<str
       body: html,
       kind: "canvas_email",
       dataJson: {
+        renderer: "canvas.email",
         renderTarget: "canvas.email",
         emailTemplate: {
           design: asRecord(emailTemplate.design),
@@ -97,6 +98,7 @@ function artifactBodyFromSurface(surface: InputSurface, artifactData: Record<str
         : JSON.stringify(artifactData, null, 2),
     kind: surface === "review.preview" ? "preview" : "markdown",
     dataJson: {
+      ...(renderTargetForSurface(surface) ? { renderer: renderTargetForSurface(surface) } : {}),
       renderTarget: renderTargetForSurface(surface) ?? surface,
       data: artifactData,
     },
@@ -175,6 +177,7 @@ export async function createSpecRunReviewInteraction(input: {
   artifactKey: string;
   artifactData: Record<string, unknown>;
   rationale?: string;
+  configuredGate?: boolean;
 }): Promise<string> {
   const surface = inputSurfaceSchema.parse(input.surface);
   if (!surface.startsWith("review.") && surface !== "confirm.send") {
@@ -222,7 +225,9 @@ export async function createSpecRunReviewInteraction(input: {
       renderTarget,
       agentOutput: input.rationale,
       nextAgentName: input.agentName,
+      ...(input.configuredGate ? { configuredGate: true } : {}),
     },
+    ...(input.configuredGate ? { configuredGate: true } : {}),
   };
 
   const artifact = artifactBodyFromSurface(surface, input.artifactData);

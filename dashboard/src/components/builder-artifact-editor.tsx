@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { UIMessage } from "ai";
 
 import { ArtifactCanvasOverlay } from "@/components/artifact-canvas-overlay";
 import { EmailArtifactPreviewCard } from "@/components/email-artifact-preview-card";
-import { EmailArtifactStudio, updateArtifactToolOutput } from "@/components/email-artifact-studio";
+import { EmailArtifactStudio } from "@/components/email-artifact-studio";
 import type { BuilderDraftTemplate } from "@/lib/email-artifacts/builder-defaults";
 import { BUILDER_ARTIFACT_DESIGN_ID } from "@/lib/email-artifacts/builder-defaults";
 import {
@@ -67,29 +67,14 @@ export function BuilderArtifactEditor({
   const previewSignatureRef = useRef(
     completedOutput?.templates?.length ? templatesSignature(completedOutput.templates) : "",
   );
-  const lastBuiltDraftSignatureRef = useRef("");
-
-  const completedSignature = useMemo(
-    () => (completedOutput?.templates?.length ? templatesSignature(completedOutput.templates) : null),
-    [completedOutput?.templates],
-  );
-
-  const resolvedDrafts = useMemo(
-    () => resolveBuilderDraftTemplates(draftTemplates as BuilderDraftTemplate[] | undefined),
-    [draftTemplates],
-  );
-  const draftSignature = useMemo(
-    () => draftTemplatesSignature(resolvedDrafts),
-    [resolvedDrafts],
-  );
-
-  useEffect(() => {
-    if (!completedOutput?.templates?.length || !completedSignature) return;
-    if (previewSignatureRef.current === completedSignature) return;
-    previewSignatureRef.current = completedSignature;
-    setPreviewTemplates(completedOutput.templates);
-    setLoadingPreview(false);
-  }, [completedOutput?.templates, completedSignature]);
+  const draftInputRef = useRef<{ signature: string; drafts: BuilderDraftTemplate[] } | null>(null);
+  const draftSignature = draftTemplatesSignature(draftTemplates as BuilderDraftTemplate[] | undefined);
+  if (draftInputRef.current?.signature !== draftSignature) {
+    draftInputRef.current = {
+      signature: draftSignature,
+      drafts: resolveBuilderDraftTemplates(draftTemplates as BuilderDraftTemplate[] | undefined),
+    };
+  }
 
   const handleTemplatesChange = useCallback((templates: EmailArtifactTemplate[]) => {
     const signature = templatesSignature(templates);
@@ -102,22 +87,19 @@ export function BuilderArtifactEditor({
   useEffect(() => {
     if (completedOutput?.templates?.length) return;
     if (!inputReady) return;
-    if (lastBuiltDraftSignatureRef.current === draftSignature) return;
 
     let cancelled = false;
     const accumulated: EmailArtifactTemplate[] = [];
 
-    void buildEmailArtifactTemplates(resolvedDrafts, {
+    void buildEmailArtifactTemplates(draftInputRef.current?.drafts, {
       onTemplate: (template, index) => {
         if (cancelled) return;
         accumulated[index] = template;
-        setPreviewTemplates(accumulated.filter((entry): entry is EmailArtifactTemplate => Boolean(entry)));
-        if (index === 0) setLoadingPreview(false);
+        handleTemplatesChange(accumulated.filter((entry): entry is EmailArtifactTemplate => Boolean(entry)));
       },
     })
       .then((built) => {
         if (cancelled) return;
-        lastBuiltDraftSignatureRef.current = draftSignature;
         handleTemplatesChange(built);
       })
       .catch(() => {
@@ -130,8 +112,12 @@ export function BuilderArtifactEditor({
     draftSignature,
     handleTemplatesChange,
     inputReady,
-    resolvedDrafts,
   ]);
+
+  const displayTemplates = completedOutput?.templates ?? previewTemplates;
+  const displayLoading = !completedOutput?.templates?.length
+    && loadingPreview
+    && previewTemplates.length === 0;
 
   const handleClose = useCallback(() => setOpen(false), []);
 
@@ -144,10 +130,10 @@ export function BuilderArtifactEditor({
     if (!onComplete) return;
     setApproving(true);
     try {
-      if (previewTemplates.length === 0 || previewTemplates.some((template) => !template.html.trim())) {
+      if (displayTemplates.length === 0 || displayTemplates.some((template) => !template.html.trim())) {
         throw new Error("All reply templates must be rendered before proceeding.");
       }
-      const output = buildArtifactOutput(previewTemplates, BUILDER_ARTIFACT_DESIGN_ID, requirementId);
+      const output = buildArtifactOutput(displayTemplates, BUILDER_ARTIFACT_DESIGN_ID, requirementId);
       if (sessionId) await persistArtifactBundle(sessionId, output);
       onComplete(output);
     } catch {
@@ -155,24 +141,24 @@ export function BuilderArtifactEditor({
     } finally {
       setApproving(false);
     }
-  }, [onComplete, previewTemplates, requirementId, sessionId]);
+  }, [displayTemplates, onComplete, requirementId, sessionId]);
 
   return (
     <>
       <EmailArtifactPreviewCard
         approved={approved}
         approving={approving}
-        loading={loadingPreview && previewTemplates.length === 0}
+        loading={displayLoading}
         onApprove={onComplete && !approved ? () => void handleProceed() : undefined}
         onOpen={() => setOpen(true)}
-        templates={previewTemplates}
+        templates={displayTemplates}
       />
       {open ? (
         <ArtifactCanvasOverlay onClose={handleClose} open title="Reply templates">
           <EmailArtifactStudio
             completedOutput={completedOutput}
             draftTemplates={draftTemplates as BuilderDraftTemplate[] | undefined}
-            initialTemplates={previewTemplates}
+            initialTemplates={displayTemplates}
             inputReady={inputReady}
             key={toolCallId ?? requirementId}
             messages={messages}

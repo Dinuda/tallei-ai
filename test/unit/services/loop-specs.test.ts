@@ -54,6 +54,18 @@ test("spec markdown preserves behavioral delivery without injecting action slugs
   assert.doesNotMatch(markdown, /GMAIL_SEND/);
 });
 
+test("spec markdown hides implementation connector actions from approval copy", () => {
+  const markdown = renderSpecMarkdown(noSlopSpecSchema.parse({
+    ...behavior,
+    connectorPolicy: {
+      allowedReadActions: [],
+      allowedWriteActions: [{ toolkit: "gmail", actionSlug: "GMAIL_CREATE_EMAIL_DRAFT", risk: "write" }],
+    },
+  }));
+  assert.match(markdown, /Runtime actions are bound from the approved Connected Apps configuration/);
+  assert.doesNotMatch(markdown, /GMAIL_CREATE_EMAIL_DRAFT/);
+});
+
 test("approved snapshots retain reviewed intent context", () => {
   const specJson = noSlopSpecSchema.parse(behavior);
   const snapshot = noSlopSpecSnapshotSchema.parse({

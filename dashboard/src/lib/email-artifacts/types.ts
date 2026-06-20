@@ -41,6 +41,8 @@ export type ArtifactSetupOutput = {
   answerText: string;
   requirementId: string;
   mode: "supplied_template" | "approved_generated_structure" | "none";
+  /** Set when the full rendered bundle was persisted server-side during approval. */
+  artifactPersisted?: boolean;
   templates?: EmailArtifactTemplate[];
   structure?: string;
   value: {

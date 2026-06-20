@@ -381,6 +381,10 @@ export const CodeBlockContent = ({
   showLineNumbers?: boolean;
 }) => {
   const normalizedCode = typeof code === "string" ? code : "";
+  const tokenKey = useMemo(
+    () => getTokensCacheKey(normalizedCode, language),
+    [normalizedCode, language]
+  );
   // Memoized raw tokens for immediate display
   const rawTokens = useMemo(() => createRawTokens(normalizedCode), [normalizedCode]);
 
@@ -391,32 +395,40 @@ export const CodeBlockContent = ({
   );
 
   // Async highlighting result (populated after shiki loads)
-  const [asyncTokens, setAsyncTokens] = useState<TokenizedCode | null>(null);
-  const asyncKeyRef = useRef({ code: normalizedCode, language });
-
-  // Invalidate stale async tokens synchronously during render
-  if (
-    asyncKeyRef.current.code !== normalizedCode ||
-    asyncKeyRef.current.language !== language
-  ) {
-    asyncKeyRef.current = { code: normalizedCode, language };
-    setAsyncTokens(null);
-  }
+  const [asyncTokenState, setAsyncTokenState] = useState<{
+    key: string;
+    tokens: TokenizedCode;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    highlightCode(normalizedCode, language, (result) => {
+    const cached = highlightCode(normalizedCode, language, (result) => {
       if (!cancelled) {
-        setAsyncTokens(result);
+        setAsyncTokenState({ key: tokenKey, tokens: result });
       }
     });
+
+    if (cached) {
+      setAsyncTokenState((current) => (
+        current?.key === tokenKey && current.tokens === cached
+          ? current
+          : { key: tokenKey, tokens: cached }
+      ));
+    } else {
+      setAsyncTokenState((current) => (
+        current?.key === tokenKey ? current : null
+      ));
+    }
 
     return () => {
       cancelled = true;
     };
-  }, [normalizedCode, language]);
+  }, [normalizedCode, language, tokenKey]);
 
+  const asyncTokens = asyncTokenState?.key === tokenKey
+    ? asyncTokenState.tokens
+    : null;
   const tokenized = asyncTokens ?? syncTokens;
 
   return (

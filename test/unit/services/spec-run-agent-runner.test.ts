@@ -6,7 +6,6 @@ const runnerPath = new URL("../../../src/services/loop-runtime/spec-run-agent-ru
 const toolsPath = new URL("../../../src/services/loop-runtime/spec-run-agent-tools.ts", import.meta.url);
 const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
 const interactionsPath = new URL("../../../src/services/loop-runtime/spec-run-interactions.ts", import.meta.url);
-const legacyToolsPath = new URL("../../../src/services/loop-runtime/spec-run-tools.ts", import.meta.url);
 
 test("spec run entry points use the agent orchestrator, streaming writer, and trigger-derived seed context", async () => {
   const source = await readFile(specRunnerPath, "utf8");
@@ -35,9 +34,31 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(runner, /type: "data-agent"/);
   assert.match(runner, /persona/);
   assert.match(runner, /phase: "working"/);
+  assert.match(runner, /availableToolNames: Object\.keys\(tools\)/);
+  assert.match(runner, /resolvedHandoff/);
+  assert.match(runner, /validateContractData/);
+  assert.match(runner, /createConfiguredGateIfNeeded/);
+  assert.match(runner, /persistAgentOutputArtifact/);
+  assert.match(runner, /structuredOutput/);
+  assert.match(runner, /authorization identifiers, not callable tool names/);
+  assert.match(runner, /Never call build-spec refs directly/);
   assert.match(runner, /NEVER call requestInput for searchMemory queries/);
+  assert.match(runner, /Never write that a review was submitted, approval is pending, or the run is paused/);
+  assert.match(runner, /assertNoFakeOperatorGate/);
+  assert.match(runner, /claimsOperatorGateWithoutInteraction/);
+  assert.match(runner, /prose does not create prompt suggestions/);
+  assert.doesNotMatch(runner, /Allowed direct tools \(call without any gate\): searchMemory, searchWeb/);
   assert.match(tools, /tool_spawned/);
   assert.match(tools, /stepAttemptId: input\.stepAttemptId/);
+  assert.match(tools, /agentWriteTools/);
+  assert.match(tools, /validateConnectorActionPayload/);
+  assert.match(tools, /normalizeConnectorPayloadForSchema/);
+  assert.match(tools, /resolvedHandoff/);
+  assert.match(tools, /isRedundantTriggerReadTool/);
+  assert.match(tools, /const searchCache = new Map<string, unknown>\(\)/);
+  assert.match(tools, /cachedSearch\(`memory:\$\{query\.trim\(\)\.toLowerCase\(\)\}`/);
+  assert.match(tools, /if \(agentWriteTools\(input\.plan, input\.agent\)\.length > 0\)/);
+  assert.match(tools, /GMAIL_FETCH_MESSAGE_BY_THREAD_ID/);
   assert.doesNotMatch(runner, /buildTrackedSpecRunTools/);
 });
 
@@ -46,7 +67,7 @@ test("run creation and retry materialize approved agents before async execution 
 
   assert.match(source, /materializeSpecRunAgentSteps/);
   assert.match(source, /createSpecLoopRun[\s\S]*await materializeSpecRunAgentSteps\(\{ auth, runId, spec \}\)/);
-  assert.match(source, /retrySpecLoopRun[\s\S]*await materializeSpecRunAgentSteps\(\{\s*auth: hydratedAuth,\s*runId,\s*spec: projection\.runnableSpec,/);
+  assert.match(source, /retrySpecLoopRun[\s\S]*await materializeSpecRunAgentSteps\(\{\s*auth: hydratedAuth,\s*runId,\s*spec: projection\.loopDefinition,/);
   assert.match(source, /await materializeSpecRunAgentSteps[\s\S]*await startLoopRunWorkflow/);
 });
 
@@ -73,15 +94,11 @@ test("operator decisions resume, revise, or reject through engine state", async 
   assert.match(source, /const storeApprovalGrant = async \(authorizedActionRefs: string\[\]\)/);
   assert.match(source, /await storeApprovalGrant\(deferredActionRefs\(\)\)/);
   assert.doesNotMatch(source, /authorizedActionRefsForWriteTools\(plan\.writeTools\)/);
+  assert.doesNotMatch(source, /tryAutoExecuteDraftAfterReviewApproval/);
   assert.match(source, /enqueueLoopRunCommand/);
   assert.match(source, /resumeRunAfterApproval/);
   assert.match(source, /finalizeInteractionResume/);
   assert.match(source, /shouldResumeViaStream/);
-});
-
-test("legacy direct connector write tools fail closed without the approval wrapper", async () => {
-  const source = await readFile(legacyToolsPath, "utf8");
-
-  assert.match(source, /if \(write\) \{\s*throw new Error\(`Action \$\{actionSlug\} requires operator approval before execution\.`\);/);
-  assert.match(source, /deferredWrites\[toolKey\]/);
+  assert.match(source, /patchMessagesWithToolResult\(messages, "requestApproval", output\)/);
+  assert.match(source, /patchMessagesWithToolResult\(patchedApproval, toolKey, output\)/);
 });

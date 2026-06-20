@@ -39,9 +39,9 @@ export async function getWorkflowTriggerActivity(
   const workflow = await getLoopWorkflow(auth, workflowId);
   if (!workflow) throw new Error("Loop workflow not found");
 
-  const buildContract = workflow.runnableSpec?.buildContract
-    ?? workflow.runnableSpec?.noSlopSpec?.buildContract
-    ?? workflow.runnableSpec?.noSlopSpec?.specJson?.buildContract
+  const buildContract = workflow.definition?.buildContract
+    ?? workflow.definition?.builderMeta?.noSlopSpec?.buildContract
+    ?? workflow.definition?.builderMeta?.noSlopSpec?.specJson?.buildContract
     ?? null;
   const selected = buildContract ? selectedLoopTrigger(buildContract) : null;
   const mode = selected?.mode === "event" ? "event" : selected?.mode === "schedule" ? "schedule" : "none";

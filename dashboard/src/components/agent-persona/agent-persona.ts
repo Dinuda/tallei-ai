@@ -49,3 +49,28 @@ export function toolRefToLabel(toolRef: string): string {
 export function toolRefsToLabels(toolRefs: string[]): string[] {
   return [...new Set(toolRefs.map(toolRefToLabel))];
 }
+
+export function personaFromSpecAgent(
+  agent: { name?: string; goal?: string; persona?: Partial<AgentPersonaUi> },
+  index: number,
+): AgentPersonaUi {
+  if (agent.persona?.displayName && agent.persona.roleKey && agent.persona.roleLabel && agent.persona.avatarSeed) {
+    return {
+      displayName: agent.persona.displayName,
+      roleKey: agent.persona.roleKey,
+      roleLabel: agent.persona.roleLabel,
+      avatarSeed: agent.persona.avatarSeed,
+      ...(agent.persona.avatarUrl ? { avatarUrl: agent.persona.avatarUrl } : {}),
+    };
+  }
+
+  const name = agent.name?.trim() || `Specialist ${index + 1}`;
+  const seed = `builder-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${index}`;
+  return {
+    displayName: name,
+    roleKey: "generalist",
+    roleLabel: name,
+    avatarSeed: seed,
+    avatarUrl: dicebearDylanUrl(seed),
+  };
+}

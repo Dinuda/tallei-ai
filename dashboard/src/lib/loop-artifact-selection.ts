@@ -31,12 +31,14 @@ function artifactTimestamp(artifact: Pick<ArtifactSelectionRow, "created_at">): 
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
-function artifactPriority(artifact: Pick<ArtifactSelectionRow, "kind" | "data_json">): number {
-  const template = readArtifactEmailTemplate(artifact.data_json);
-  if (artifact.kind === "canvas_preview") return 3;
-  if (artifact.kind === "canvas_email") return 2;
-  if (template) return 1;
-  return 0;
+function declaredRenderer(dataJson: unknown): string | null {
+  const root = asObject(dataJson);
+  const renderer = textOrUndefined(root.renderer) ?? textOrUndefined(root.renderTarget);
+  return renderer ?? null;
+}
+
+function artifactPriority(artifact: Pick<ArtifactSelectionRow, "data_json">): number {
+  return declaredRenderer(artifact.data_json) ? 1 : 0;
 }
 
 function compareArtifactsChronologically<T extends ArtifactSelectionRow>(left: T, right: T): number {
@@ -77,10 +79,8 @@ export function readArtifactEmailTemplate(dataJson: unknown): ArtifactEmailTempl
   };
 }
 
-export function hasDraftEmailContent<T extends Pick<ArtifactSelectionRow, "kind" | "data_json">>(artifact: T): boolean {
-  return artifact.kind === "canvas_email"
-    || artifact.kind === "canvas_preview"
-    || readArtifactEmailTemplate(artifact.data_json) !== null;
+export function hasDeclaredRenderer<T extends Pick<ArtifactSelectionRow, "data_json">>(artifact: T): boolean {
+  return declaredRenderer(artifact.data_json) !== null;
 }
 
 export function selectLatestArtifactsByKey<T extends ArtifactSelectionRow>(artifacts: T[]): T[] {
@@ -92,7 +92,7 @@ export function selectLatestArtifactsByKey<T extends ArtifactSelectionRow>(artif
 }
 
 export function selectPreferredArtifact<T extends ArtifactSelectionRow>(artifacts: T[]): T | null {
-  const preferred = artifacts.filter((artifact) => hasDraftEmailContent(artifact));
+  const preferred = artifacts.filter((artifact) => hasDeclaredRenderer(artifact));
   const pool = preferred.length > 0 ? preferred : artifacts;
   return [...pool].sort(compareArtifactsForDisplay)[0] ?? null;
 }

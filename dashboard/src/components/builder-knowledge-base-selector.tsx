@@ -115,7 +115,7 @@ export function BuilderKnowledgeBaseSelector({
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
   const [selectedExternalToolkits, setSelectedExternalToolkits] = useState<string[]>([]);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
-  const [connectorToolkits, setConnectorToolkits] = useState<ConnectedSearchToolkit[]>(connectedSearchToolkits);
+  const [fallbackConnectorToolkits, setFallbackConnectorToolkits] = useState<ConnectedSearchToolkit[]>([]);
 
   useEffect(() => {
     if (completedOutput) return;
@@ -130,10 +130,7 @@ export function BuilderKnowledgeBaseSelector({
   }, [completedOutput]);
 
   useEffect(() => {
-    if (connectedSearchToolkits.length > 0) {
-      setConnectorToolkits(connectedSearchToolkits);
-      return;
-    }
+    if (connectedSearchToolkits.length > 0) return;
     if (completedOutput) return;
     void apiFetch("/api/connectors", { cache: "no-store" })
       .then(async (response) => {
@@ -146,7 +143,7 @@ export function BuilderKnowledgeBaseSelector({
             .map((account) => account.toolkit!.toLowerCase()),
         );
         if (connected.size === 0) return;
-        setConnectorToolkits((current) => {
+        setFallbackConnectorToolkits((current) => {
           if (current.length > 0) return current;
           return [...connected].map((toolkit) => ({
             toolkit,
@@ -199,6 +196,9 @@ export function BuilderKnowledgeBaseSelector({
     onComplete?.(buildOutput(requirementId, true, true, knowledgeBases, [], []));
   }
 
+  const connectorToolkits = connectedSearchToolkits.length > 0
+    ? connectedSearchToolkits
+    : fallbackConnectorToolkits;
   const availableExternalToolkits = connectorToolkits.filter((entry) => entry.connected);
 
   return (

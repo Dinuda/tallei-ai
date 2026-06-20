@@ -19,6 +19,7 @@ import {
   getWorkflowTriggerActivity,
   listSpecLoopRuns,
   retrySpecLoopRun,
+  saveSpecRunAsLoop,
   saveCanvasEmailArtifact,
   startSpecManualLoopRun,
   streamSpecRunChat,
@@ -52,6 +53,10 @@ const canvasEmailSaveSchema = z.object({
 const interactionCommandSchema = z.object({
   command: z.enum(["approve", "reject", "revise", "submit_input"]),
   value: z.record(z.unknown()).optional(),
+});
+const saveRunAsLoopSchema = z.object({
+  title: z.string().trim().min(1).max(160).optional(),
+  definition: z.unknown().optional(),
 });
 
 const createWorkspaceSchema = z.object({
@@ -264,6 +269,21 @@ router.post("/runs/:runId/retry", requireScopes(["memory:write"]), async (req: A
     res.status(202).json({ run: await getSpecRunEditorialProjection(req.authContext!, runId) });
   } catch (error) {
     sendError(res, error, "Failed to retry run");
+  }
+});
+
+router.post("/runs/:runId/save-as-loop", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const body = saveRunAsLoopSchema.parse(req.body ?? {});
+    res.status(201).json(await saveSpecRunAsLoop({
+      auth: req.authContext!,
+      runId,
+      title: body.title,
+      definition: body.definition,
+    }));
+  } catch (error) {
+    sendError(res, error, "Failed to save run as loop");
   }
 });
 

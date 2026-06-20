@@ -7,7 +7,7 @@ import {
   selectPreferredArtifact,
 } from "../../../src/services/loop-runtime/artifact-selection.js";
 
-test("prefers the reviewed newsletter draft over later research artifacts", () => {
+test("prefers the configured rendered artifact over later research artifacts", () => {
   const artifacts = [
     {
       artifact_key: "web_research_output",
@@ -23,6 +23,7 @@ test("prefers the reviewed newsletter draft over later research artifacts", () =
       kind: "structured_output",
       body: "Here's the newsletter draft body.",
       data_json: {
+        renderer: "canvas.email",
         emailTemplate: {
           html: "<p>Here's the newsletter draft body.</p>",
           text: "Here's the newsletter draft body.",

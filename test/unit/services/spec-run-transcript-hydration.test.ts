@@ -32,6 +32,8 @@ test("agent turns are built from persisted steps instead of chat-only hydration"
   assert.match(hydration, /toolParts/);
   assert.match(hydration, /hasFinalizeOutput/);
   assert.match(hydration, /showArtifact/);
+  assert.match(hydration, /appendMissingVisibleText/);
+  assert.match(hydration, /bodyHasText/);
   assert.match(specRunPage, /buildSequentialStepTranscript/);
   assert.match(specRunPage, /stepTranscript\.map/);
 });
@@ -42,6 +44,9 @@ test("step display resolves handoff and finalize agent outputs", async () => {
   assert.match(utils, /resolvePriorAgentHandoff/);
   assert.match(utils, /priorOutputs/);
   assert.match(utils, /resolveFinalizeAgent/);
+  assert.match(utils, /formatClassifiedEmails/);
+  assert.match(utils, /data\.emails/);
+  assert.match(utils, /if \(!step\)[\s\S]*show: false/);
 });
 
 test("editorial projection parses structured JSON stored in step text", async () => {

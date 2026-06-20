@@ -121,7 +121,7 @@ export const dataContractSchema = z.object({
   }
 });
 
-type DataContract = z.infer<typeof dataContractSchema>;
+export type DataContract = z.infer<typeof dataContractSchema>;
 
 export function contractMediaType(contract: Pick<DataContract, "representation" | "mediaType"> | undefined) {
   return contract?.mediaType ?? (contract?.representation === "json" ? "application/json" : "text/plain");

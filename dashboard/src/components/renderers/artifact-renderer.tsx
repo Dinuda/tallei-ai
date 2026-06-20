@@ -17,8 +17,13 @@ import {
   inferArtifactDisplayTitle,
 } from "./editorial-artifact-ui";
 
+function artifactRendererKey(artifact: ArtifactRendererProps["artifact"]): string {
+  const configured = artifact.data_json?.renderTarget ?? artifact.data_json?.renderer;
+  return typeof configured === "string" && configured.trim() ? configured.trim() : artifact.kind;
+}
+
 export function ArtifactRenderer(props: ArtifactRendererProps) {
-  const def = getRenderer(props.artifact.kind);
+  const def = getRenderer(artifactRendererKey(props.artifact));
 
   if (def?.displayMode === "dialog") {
     return <DialogRenderer def={def} {...props} />;

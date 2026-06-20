@@ -1,9 +1,14 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 import OpenAI from "openai";
 
 import { config } from "../../config/index.js";
-import { coerceChatModelForLocalMode, resolveChatModelForCompatibleProvider } from "./chat-model-routing.js";
+import {
+  coerceChatModelForLocalMode,
+  isOpenCodeZenChatCompletionsModel,
+  resolveChatModelForCompatibleProvider,
+} from "./chat-model-routing.js";
 import { isLoopBuilderReasoningModel } from "../loop-builder/openai-chat.js";
 
 export function isLocalLoopChatMode(): boolean {
@@ -56,15 +61,35 @@ export function createLoopChatOpenAiSdk(): OpenAI {
   return new OpenAI({ apiKey });
 }
 
+function requireOpenCodeApiKey(): string {
+  if (!config.opencodeApiKey) {
+    throw new Error("TALLEI_LLM__OPENCODE_API_KEY is required when TALLEI_LLM__PROVIDER=opencode");
+  }
+  return config.opencodeApiKey;
+}
+
+function createOpenCodeZenChatCompletionsProvider() {
+  return createOpenAICompatible({
+    name: "opencode",
+    baseURL: config.opencodeBaseUrl,
+    apiKey: requireOpenCodeApiKey(),
+    includeUsage: true,
+  });
+}
+
+function createOpenCodeZenResponsesProvider() {
+  return createOpenAI({
+    baseURL: config.opencodeBaseUrl,
+    apiKey: requireOpenCodeApiKey(),
+  });
+}
+
 export function createLoopChatAiSdkProvider() {
   if (config.localModelMode) {
     return createOpenAI({ baseURL: config.ollamaBaseUrl, apiKey: "ollama" });
   }
   if (isOpenCodeLoopChatMode()) {
-    if (!config.opencodeApiKey) {
-      throw new Error("TALLEI_LLM__OPENCODE_API_KEY is required when TALLEI_LLM__PROVIDER=opencode");
-    }
-    return createOpenAI({ baseURL: config.opencodeBaseUrl, apiKey: config.opencodeApiKey });
+    return createOpenCodeZenResponsesProvider();
   }
   const apiKey = process.env.TALLEI_LLM__OPENAI_API_KEY || process.env.OPENAI_API_KEY || "";
   if (!apiKey) {
@@ -73,10 +98,16 @@ export function createLoopChatAiSdkProvider() {
   return createOpenAI({ apiKey });
 }
 
-/** Loop builder + spec-run streaming: chat completions for Ollama/OpenCode; Responses API for hosted reasoning models. */
+/** Loop builder + spec-run streaming: chat completions for Ollama/OpenCode Zen; Responses API for hosted reasoning models. */
 export function resolveLoopChatLanguageModel(modelId: string): LanguageModel {
+  if (isOpenCodeLoopChatMode()) {
+    if (isOpenCodeZenChatCompletionsModel(modelId)) {
+      return createOpenCodeZenChatCompletionsProvider().chatModel(modelId);
+    }
+    return createOpenCodeZenResponsesProvider()(modelId);
+  }
   const provider = createLoopChatAiSdkProvider();
-  if (config.localModelMode || isOpenCodeLoopChatMode() || !isLoopBuilderReasoningModel(modelId)) {
+  if (config.localModelMode || !isLoopBuilderReasoningModel(modelId)) {
     return provider.chat(modelId);
   }
   return provider(modelId);

@@ -12,6 +12,7 @@ export function buildArtifactOutput(
     answerText: `Approved ${countLabel} (${designName} design)`,
     requirementId,
     mode: "supplied_template",
+    artifactPersisted: true,
     templates,
     value: { mode: "supplied_template", template: JSON.stringify({ designId, templates }) },
   };

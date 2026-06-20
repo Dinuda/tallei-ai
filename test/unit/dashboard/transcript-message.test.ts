@@ -11,6 +11,8 @@ test("transcript message renderer handles text, reasoning, tools, and agent pers
   const source = await readFile(transcriptPath, "utf8");
   assert.match(source, /renderMessagePart/);
   assert.match(source, /TranscriptMessageContent/);
+  assert.match(source, /coalesceAdjacentTextParts/);
+  assert.match(source, /ExpandedReasoningBlock|expandReasoning/);
   assert.match(source, /AgentTurnHeader/);
   assert.match(source, /AgentPersonaAvatar/);
   assert.match(source, /isDataAgentPart/);
@@ -31,4 +33,13 @@ test("message response batches streamed text to animation frames", async () => {
   assert.match(source, /useAnimationFrameText/);
   assert.match(source, /requestAnimationFrame/);
   assert.match(source, /cancelAnimationFrame/);
+});
+
+test("code block highlighter does not set state during render", async () => {
+  const source = await readFile(
+    new URL("../../../dashboard/src/components/ai-elements/code-block.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /asyncTokenState/);
+  assert.doesNotMatch(source, /if\s*\([^)]*asyncKeyRef[\s\S]*?setAsyncTokens/);
 });

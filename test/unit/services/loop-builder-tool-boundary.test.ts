@@ -109,20 +109,24 @@ test("free text resolves a dismissed interactive prompt before continuing", asyn
   assert.match(builderPage, /await sendMessage\(\)/);
 });
 
-test("spec drafting consumes persisted build contract without Composio discovery", async () => {
-  const [specs, dispatcher] = await Promise.all([
+test("runtime save compiles runner contract from persisted build contract without LLM", async () => {
+  const [specs, dispatcher, compiler] = await Promise.all([
     readFile(specsPath, "utf8"),
     readFile(dispatcherPath, "utf8"),
+    readFile(new URL("../../../src/services/loop-builder/runner-spec-compiler.ts", import.meta.url), "utf8"),
   ]);
 
   assert.doesNotMatch(specs, /discoverToolsForLoopBuild/);
-  assert.match(specs, /loopBuildContractSchema\.parse\(input\.buildContract\)/);
-  assert.match(specs, /buildContract,/);
-  assert.match(specs, /exactMaxTokens:\s*true/);
-  assert.match(specs, /emptyResponseRetryMaxTokens:\s*8192/);
-  assert.match(specs, /reportLoopBuilderProgress\(\{\s*stage:\s*"spec_generation"/);
-  assert.match(dispatcher, /ensureDraftedSpec/);
-  assert.match(dispatcher, /draftLoopSpec\(/);
+  assert.doesNotMatch(specs, /generateSpecJson/);
+  assert.doesNotMatch(specs, /loopBuilderOpenAiChat/);
+  assert.doesNotMatch(specs, /spec_generation/);
+  assert.match(specs, /compileRunnerSpecFromBuildContract/);
+  assert.match(specs, /compileRuntimeSpecSnapshot/);
+  assert.match(compiler, /outputContract/);
+  assert.match(dispatcher, /compileRuntimeSpecSnapshot/);
+  assert.match(dispatcher, /compileEnrichedRuntimeSpecSnapshot/);
+  assert.doesNotMatch(dispatcher, /ensureDraftedSpec/);
+  assert.doesNotMatch(dispatcher, /draftLoopSpec\(/);
 });
 
 test("builder-created workflows remain unscheduled until verification is confirmed", async () => {
@@ -145,21 +149,25 @@ test("builder-created workflows remain unscheduled until verification is confirm
 });
 
 test("artifact contract uses the in-chat artifact composer", async () => {
-  const [route, builderPage, artifactStudio, builderArtifactEditor] = await Promise.all([
+  const [route, builderPage, artifactStudio, builderArtifactEditor, spawnPanel] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(builderPagePath, "utf8"),
     readFile(artifactStudioPath, "utf8"),
     readFile(builderArtifactEditorPath, "utf8"),
+    readFile(new URL("../../../dashboard/src/components/agent-persona/builder-agent-spawn-panel.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(route, /artifactSetup:\s*tool\(/);
   assert.match(route, /call artifactSetup with draftTemplates entries/);
-  assert.match(route, /dryRunLog steps and evidence/);
+  assert.match(route, /artifactPersisted true/);
+  assert.match(route, /Do not call resolveBuildRequirement for artifact_contract/);
+  assert.match(route, /verification and builder test run status/);
   assert.match(builderPage, /BuilderArtifactEditor/);
   assert.match(builderPage, /findActiveArtifactSetup/);
   assert.match(builderPage, /updateArtifactToolOutput/);
   assert.match(builderArtifactEditor, /EmailArtifactPreviewCard/);
   assert.match(artifactStudio, /Looks good — proceed/);
+  assert.doesNotMatch(spawnPanel, /View technical spec/);
   assert.match(artifactStudio, /persistArtifactBundle/);
   assert.match(artifactStudio, /EmailArtifactCanvas/);
   assert.match(artifactStudio, /EmailArtifactEditorPanel/);
@@ -216,7 +224,7 @@ test("event choices come from discovered connector triggers and scheduled fallba
   assert.ok(connectorRoute.indexOf('router.post("/composio/webhook"') < connectorRoute.indexOf("router.use(authMiddleware)"));
 });
 
-test("spec save approves and persists in one saveLoop step", async () => {
+test("runtime save persists workflow and starts a safe builder test run", async () => {
   const [route, dispatcher] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
@@ -224,23 +232,26 @@ test("spec save approves and persists in one saveLoop step", async () => {
 
   assert.doesNotMatch(route, /approveSpec:\s*tool\(/);
   assert.doesNotMatch(route, /draftSpec:\s*tool\(/);
-  assert.match(route, /saveLoop with preview true/);
-  assert.match(route, /I'm happy with this/);
+  assert.doesNotMatch(route, /refineSpec:\s*tool\(/);
+  assert.doesNotMatch(route, /archiveSpec:\s*tool\(/);
+  assert.doesNotMatch(route, /saveLoop with preview true/);
+  assert.match(route, /Save and test loop/);
   assert.match(route, /Activate.*I'll do more changes/);
-  assert.match(dispatcher, /input\.preview === true/);
-  assert.match(dispatcher, /ensureDraftedSpec/);
+  assert.match(dispatcher, /compileRuntimeSnapshotForSession/);
+  assert.match(dispatcher, /runSavedWorkflowTestRun/);
+  assert.match(dispatcher, /createSpecLoopRun/);
+  assert.match(dispatcher, /runSpecLoopHeadless/);
   assert.match(dispatcher, /runWorkflowVerification/);
-  assert.match(dispatcher, /spec\.status !== "approved"/);
-  assert.match(dispatcher, /approveLoopSpec\(/);
-  assert.match(dispatcher, /\["intent_resolved", "spec_drafted", "spec_approved", "saved", "failed"\]/);
+  assert.doesNotMatch(dispatcher, /spec\.status !== "approved"/);
+  assert.doesNotMatch(dispatcher, /approveLoopSpec\(/);
+  assert.match(dispatcher, /\["intent_resolved", "saved", "failed"\]/);
   assert.match(dispatcher, /\["saved", "failed"\]/);
   assert.match(dispatcher, /isRecoverableBuilderError/);
 });
 
-test("spec refinement and approval preserve the resolved build contract", async () => {
+test("legacy persisted specs still preserve the resolved build contract", async () => {
   const specs = await readFile(specsPath, "utf8");
 
-  assert.match(specs, /current\.specJson\.buildContract \? \{ schedule: current\.specJson\.schedule \}/);
-  assert.match(specs, /buildContract: current\.specJson\.buildContract/);
+  assert.match(specs, /compileRunnerSpecFromBuildContract\(\{[\s\S]*buildContract: current\.specJson\.buildContract/);
   assert.match(specs, /spec\.specJson\.buildContract \? \{ buildContract: spec\.specJson\.buildContract \}/);
 });

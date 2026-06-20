@@ -1,11 +1,12 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { createLoopFromRunnableSpec } from "../loop-executor/creator.js";
+import { createLoopFromDefinition } from "../loop-executor/creator.js";
 import { noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
 import { normalizeDesignCron } from "../loop-executor/cron.js";
 import { selectedArtifactContract } from "../loop-engine/build-contract.js";
 import type { ToolContract } from "../tool-spec/types.js";
 import type { LoopBuildContract } from "../loop-engine/build-contract.js";
+import { definitionFromApprovedSpec } from "../loop-runtime/spec-run-types.js";
 
 export type LoopBuilderProposal = {
   title: string;
@@ -29,21 +30,19 @@ export async function saveLoopFromSpec(input: {
   const cron = normalizeDesignCron(input.cron, snapshot.specJson.purpose);
   const artifacts = selectedArtifactContract(buildContract);
   const resolvedWorkspaceId = input.workspaceId ?? input.auth.workspaceId ?? null;
-  const runnableSpec = {
-    version: "v1" as const,
-    goal: snapshot.specJson.purpose,
-    title: snapshot.title,
-    noSlopSpec: snapshot,
-    discoveredToolContracts: input.discoveredToolContracts as unknown as Array<Record<string, unknown>>,
-    schedule: { cron, timezone: input.timezone },
+  const definition = definitionFromApprovedSpec({
+    snapshot,
     buildContract,
+    discoveredToolContracts: input.discoveredToolContracts,
     ...(artifacts ? { artifacts } : {}),
+    cron,
+    timezone: input.timezone,
     workspaceId: resolvedWorkspaceId,
     ...(input.builderSessionId ? { builderSessionId: input.builderSessionId } : {}),
-  };
-  const loop = await createLoopFromRunnableSpec({
+  });
+  const loop = await createLoopFromDefinition({
     auth: input.auth,
-    spec: runnableSpec,
+    definition,
     title: snapshot.title,
     workspaceId: resolvedWorkspaceId,
     initialStatus: input.initialStatus ?? "verifying",

@@ -1,7 +1,7 @@
 import { pool } from "../../infrastructure/db/index.js";
 import { resolveLoopRunAuth } from "./resolve-loop-run-auth.js";
 import { nextCronRunAt } from "../loop-executor/cron.js";
-import { LOOP_SPEC_DEFINITION_VERSION } from "./spec-run-types.js";
+import { LOOP_DEFINITION_VERSION } from "../loop-executor/types.js";
 import { createSpecLoopRun, runSpecLoopHeadless, scheduleTriggerLabel } from "./spec-runner.js";
 
 let timer: NodeJS.Timeout | null = null;
@@ -26,7 +26,7 @@ async function tickSpecScheduledRuns(): Promise<void> {
        ORDER BY next_run_at ASC
        LIMIT 10
        FOR UPDATE SKIP LOCKED`,
-      [LOOP_SPEC_DEFINITION_VERSION],
+      [LOOP_DEFINITION_VERSION],
     );
 
     for (const row of due.rows) {

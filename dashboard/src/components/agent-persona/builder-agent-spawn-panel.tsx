@@ -2,13 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
-import { Loader2, Users, XCircle } from "lucide-react";
+import { CalendarClock, Loader2, Send, Users, XCircle } from "lucide-react";
 
 import type { ToolPart } from "@/components/ai-elements/tool";
 import { cn } from "@/lib/utils";
 import { AgentPersonaCard } from "./agent-persona-card";
 import type { AgentPersonaUi } from "./agent-persona";
-import { toolRefsToLabels } from "./agent-persona";
+import { personaFromSpecAgent, toolRefsToLabels } from "./agent-persona";
 
 type SpawnAgentDetails = {
   agentIndex?: number;
@@ -20,6 +20,7 @@ type BuilderCommand = {
   toolName?: string;
   status?: string;
   error?: string;
+  result?: Record<string, unknown>;
   events?: Array<{
     stage?: string;
     message?: string;
@@ -35,26 +36,31 @@ type SpecAgent = {
   persona?: AgentPersonaUi;
 };
 
+type SpecJson = {
+  purpose?: string;
+  schedule?: { description?: string; cron?: string; timezone?: string };
+  delivery?: { provider?: string; description?: string };
+  agents?: SpecAgent[];
+};
+
 type SaveLoopOutput = {
   spec?: {
-    specJson?: {
-      purpose?: string;
-      agents?: SpecAgent[];
-    };
+    title?: string;
+    specJson?: SpecJson;
   };
   preview?: boolean;
 };
 
-function readLatestSpawnCommand(commands: BuilderCommand[]): BuilderCommand | null {
-  const relevantTools = new Set(["saveLoop", "refineSpec", "draftSpec"]);
-  return [...commands]
-    .reverse()
-    .find((command) => relevantTools.has(command.toolName ?? "") && ["running", "failed", "rejected"].includes(command.status ?? ""))
-    ?? null;
+function readLatestSaveLoopCommand(commands: BuilderCommand[]): BuilderCommand | null {
+  for (let index = commands.length - 1; index >= 0; index -= 1) {
+    const command = commands[index];
+    if (command?.toolName === "saveLoop") return command;
+  }
+  return null;
 }
 
 function readSpawnEvents(commands: BuilderCommand[]): SpawnAgentDetails[] {
-  const command = readLatestSpawnCommand(commands);
+  const command = readLatestSaveLoopCommand(commands);
   if (!command?.events) return [];
 
   const byIndex = new Map<number, SpawnAgentDetails>();
@@ -69,17 +75,42 @@ function readSpawnEvents(commands: BuilderCommand[]): SpawnAgentDetails[] {
     .map(([, details]) => details);
 }
 
-function readOutputAgents(output: unknown): { purpose: string; agents: Array<{ goal: string; persona: AgentPersonaUi; actions: string[] }> } {
-  const payload = output as SaveLoopOutput;
-  const purpose = payload.spec?.specJson?.purpose ?? "";
-  const agents = (payload.spec?.specJson?.agents ?? [])
-    .filter((agent): agent is SpecAgent & { persona: AgentPersonaUi } => Boolean(agent.persona?.displayName))
-    .map((agent) => ({
-      goal: agent.goal ?? "",
-      persona: agent.persona,
-      actions: toolRefsToLabels(agent.tools ?? []),
-    }));
-  return { purpose, agents };
+function readSaveLoopPayload(part: ToolPart, commands: BuilderCommand[]): SaveLoopOutput | null {
+  const output = part.output as SaveLoopOutput | undefined;
+  if (output?.spec?.specJson) return output;
+
+  const command = readLatestSaveLoopCommand(commands);
+  const result = command?.result as SaveLoopOutput | undefined;
+  if (result?.spec?.specJson) return result;
+  return output ?? null;
+}
+
+function readOutputAgents(payload: SaveLoopOutput | null): {
+  title: string;
+  purpose: string;
+  scheduleLabel: string | null;
+  deliveryLabel: string | null;
+  agents: Array<{ goal: string; persona: AgentPersonaUi; actions: string[] }>;
+} {
+  const specJson = payload?.spec?.specJson;
+  const purpose = specJson?.purpose?.trim() ?? "";
+  const title = payload?.spec?.title?.trim() || "Your loop";
+  const scheduleLabel = specJson?.schedule?.description?.trim()
+    ?? (specJson?.schedule?.cron && specJson.schedule.timezone
+      ? `${specJson.schedule.cron} (${specJson.schedule.timezone})`
+      : null);
+  const deliveryLabel = specJson?.delivery?.description?.trim()
+    ?? (specJson?.delivery?.provider && specJson.delivery.provider !== "none"
+      ? `Delivery via ${specJson.delivery.provider}`
+      : null);
+
+  const agents = (specJson?.agents ?? []).map((agent, index) => ({
+    goal: agent.goal?.trim() ?? "",
+    persona: personaFromSpecAgent(agent, index),
+    actions: toolRefsToLabels(agent.tools ?? []),
+  }));
+
+  return { title, purpose, scheduleLabel, deliveryLabel, agents };
 }
 
 type BuilderAgentSpawnPanelProps = {
@@ -93,29 +124,35 @@ function readToolRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-/** Spec draft only — not save/verify (saveLoop without preview). */
+/** Runtime agent compilation for save/test. */
 export function isSpecDraftSpawnTool(toolName: string, part: ToolPart): boolean {
-  if (toolName === "refineSpec" || toolName === "draftSpec") return true;
   if (toolName !== "saveLoop") return false;
 
   const input = readToolRecord(part.input);
-  if (input.preview === true) return true;
+  if (input.preview === true) return false;
 
   const output = readToolRecord(part.output);
-  if (output.preview === true && output.spec) return true;
+  if (output.spec) return true;
 
-  return false;
+  return part.state !== "output-available";
 }
 
 export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPanelProps) {
   const isComplete = part.state === "output-available";
-  const outputData = isComplete ? readOutputAgents(part.output) : null;
+  const saveLoopPayload = useMemo(
+    () => (isComplete ? readSaveLoopPayload(part, commands) : null),
+    [commands, isComplete, part],
+  );
+  const outputData = useMemo(
+    () => (saveLoopPayload ? readOutputAgents(saveLoopPayload) : null),
+    [saveLoopPayload],
+  );
   const liveSpawnEvents = useMemo(() => readSpawnEvents(commands), [commands]);
-  const latestCommand = useMemo(() => readLatestSpawnCommand(commands), [commands]);
+  const latestCommand = useMemo(() => readLatestSaveLoopCommand(commands), [commands]);
   const isFailed = !isComplete && (
     part.state === "output-error" || latestCommand?.status === "failed" || latestCommand?.status === "rejected"
   );
-  const errorText = part.errorText ?? latestCommand?.error ?? "The spec draft did not complete. Please try again.";
+  const errorText = part.errorText ?? latestCommand?.error ?? "The runtime agent contract did not complete. Please try again.";
   const latestProgressMessage = latestCommand?.events?.at(-1)?.message;
   const [revealedCount, setRevealedCount] = useState(0);
 
@@ -123,10 +160,11 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
     ? outputData?.agents ?? []
     : liveSpawnEvents
       .filter((event) => event.persona)
-      .map((event) => ({
+      .map((event, index) => ({
         goal: "",
         persona: event.persona!,
         actions: event.inferredActions ?? [],
+        index,
       }));
 
   useEffect(() => {
@@ -145,59 +183,75 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
     : agentsToShow.slice(0, Math.min(revealedCount, agentsToShow.length));
 
   return (
-    <div className="my-2 overflow-hidden rounded-md border border-[#d1d5db] bg-[#fafafa]">
-      <div className="flex items-center gap-2 border-b border-[#e5e7eb] bg-white px-3 py-2">
-        {isFailed ? <XCircle size={14} className="text-[#dc2626]" /> : <Users size={14} className="text-[#7eb71b]" />}
-        <span className="text-sm font-medium text-[#111827]">
-          {isFailed ? "Specialist agents did not finish" : isComplete ? "Specialist agents ready" : "Spawning specialist agents"}
-        </span>
-        {!isComplete && !isFailed ? <Loader2 size={14} className="ml-auto animate-spin text-[#9ca3af]" /> : null}
+    <div className="my-2 overflow-hidden rounded-lg border border-[#cce89e] bg-[#f8fdf2] shadow-sm">
+      <div className="flex items-center gap-2 border-b border-[#e4f5c6] bg-white px-4 py-3">
+        {isFailed ? <XCircle size={16} className="text-[#dc2626]" /> : <Users size={16} className="text-[#7eb71b]" />}
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-[#182506]" style={{ fontFamily: "var(--font-title)" }}>
+            {isFailed ? "Specialist agents did not finish" : isComplete ? "Specialist agents ready" : "Finalizing specialist agents"}
+          </div>
+          {isComplete && outputData?.title ? (
+            <div className="truncate text-xs text-[#7a9a4a]">{outputData.title}</div>
+          ) : null}
+        </div>
+        {!isComplete && !isFailed ? <Loader2 size={16} className="animate-spin text-[#7a9a4a]" /> : null}
       </div>
 
-      <div className="space-y-2 p-3">
+      <div className="space-y-3 p-4">
+        {isComplete && (outputData?.scheduleLabel || outputData?.deliveryLabel) ? (
+          <div className="flex flex-wrap gap-2">
+            {outputData.scheduleLabel ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-[#e4f5c6] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3d5c18]">
+                <CalendarClock size={12} className="text-[#7eb71b]" />
+                {outputData.scheduleLabel}
+              </span>
+            ) : null}
+            {outputData.deliveryLabel ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-[#e4f5c6] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3d5c18]">
+                <Send size={12} className="text-[#7eb71b]" />
+                {outputData.deliveryLabel}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
         {outputData?.purpose ? (
-          <p className="text-sm text-[#3d5c18]">{outputData.purpose}</p>
+          <p className="text-sm leading-relaxed text-[#3d5c18]">{outputData.purpose}</p>
         ) : null}
 
         {isFailed ? (
-          <div className="rounded border border-[#fecaca] bg-[#fef2f2] p-2 text-sm text-[#991b1b]">
+          <div className="rounded-md border border-[#fecaca] bg-[#fef2f2] p-3 text-sm text-[#991b1b]">
             {errorText}
           </div>
         ) : null}
 
         {visibleAgents.length === 0 && !isComplete && !isFailed ? (
-          <p className="text-sm text-[#6b7280]">{latestProgressMessage ?? "Drafting agent roster…"}</p>
+          <p className="text-sm text-[#7a9a4a]">{latestProgressMessage ?? "Assigning agent personas…"}</p>
         ) : null}
 
-        {visibleAgents.map((agent, index) => (
-          <motion.div
-            key={`${agent.persona.avatarSeed}-${index}`}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-          >
-            <AgentPersonaCard
-              persona={agent.persona}
-              goal={agent.goal || undefined}
-              actions={agent.actions}
-              index={index}
-              phase={isComplete ? "queued" : "working"}
-            />
-          </motion.div>
-        ))}
+        {visibleAgents.length > 0 ? (
+          <div className={cn("grid gap-3", visibleAgents.length > 1 && "sm:grid-cols-1")}>
+            {visibleAgents.map((agent, index) => (
+              <motion.div
+                key={`${agent.persona.avatarSeed}-${index}`}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <AgentPersonaCard
+                  persona={agent.persona}
+                  goal={agent.goal || undefined}
+                  actions={agent.actions}
+                  index={index}
+                  phase={isComplete ? "queued" : "working"}
+                />
+              </motion.div>
+            ))}
+          </div>
+        ) : null}
 
-        {isComplete && part.output ? (
-          <details className="pt-1">
-            <summary className="cursor-pointer text-xs font-medium text-[#6b7280] hover:text-[#374151]">
-              View technical spec
-            </summary>
-            <pre className={cn(
-              "mt-2 max-h-64 overflow-auto rounded border border-[#e5e7eb] bg-white p-2 text-[11px] text-[#374151]",
-            )}
-            >
-              {JSON.stringify((part.output as SaveLoopOutput).spec?.specJson ?? part.output, null, 2)}
-            </pre>
-          </details>
+        {isComplete && visibleAgents.length === 0 ? (
+          <p className="text-sm text-[#7a9a4a]">No specialist agents were compiled for this loop.</p>
         ) : null}
       </div>
     </div>

@@ -5,7 +5,7 @@
  */
 
 export {
-  createLoopFromRunnableSpec,
+  createLoopFromDefinition,
   deleteLoopWorkflow,
   getLoopWorkflow,
   listLoopWorkflows,

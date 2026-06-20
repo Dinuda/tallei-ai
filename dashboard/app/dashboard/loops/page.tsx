@@ -80,7 +80,6 @@ type Loop = {
   createdAt?: string;
   updatedAt: string;
   definitionVersion?: string;
-  runnableSpec?: { goal?: string };
   definition?: {
     goal: string;
     engineVersion?: string;
@@ -222,7 +221,7 @@ function mapDatabaseLoopToInsight(loop: Loop): LoopInsight {
   return {
     id: loop.id,
     name: loop.title,
-    description: loop.goal || loop.runnableSpec?.goal || loop.definition?.goal || loop.title,
+    description: loop.goal || loop.definition?.goal || loop.title,
     workspaceId: null,
     primarySourceFile: "workflow",
     frequency,

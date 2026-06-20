@@ -29,7 +29,7 @@ function normalizeChatText(value: unknown): string {
   return "";
 }
 
-/** OpenCode Go — OpenAI-compatible chat completions at opencode.ai/zen/go/v1 */
+/** OpenCode Zen — OpenAI-compatible chat completions at opencode.ai/zen/v1 */
 export class OpenCodeProvider implements AiProvider {
   readonly name = "opencode" as const;
 

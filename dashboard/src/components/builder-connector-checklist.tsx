@@ -78,7 +78,7 @@ export function BuilderConnectorChecklist({
   sessionId: string;
   requirementId: string;
   completed?: boolean;
-  onComplete?: (output: { answerText: string; requirementId: string }) => void;
+  onComplete?: (output: { answerText: string; requirementId: string; value: { selections: Array<{ toolkit: string; accounts: Array<{ id: string }>; actionSlugs: string[] }> } }) => void;
 }) {
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [busyToolkit, setBusyToolkit] = useState<string | null>(null);
@@ -227,10 +227,17 @@ export function BuilderConnectorChecklist({
     setError(null);
     setBusyToolkit("confirm");
     try {
-      const response = await fetch(`/api/loop-builder/sessions/${sessionId}/connectors/resolve`, { method: "POST" });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Connected apps are not ready");
-      onComplete?.({ answerText: "Use selected connected apps", requirementId });
+      const latest = await refresh();
+      if (!latest || !latest.complete) throw new Error("Connected apps are not ready");
+      const selections = latest.apps.map((app) => ({
+        toolkit: app.toolkit,
+        accounts: app.accounts
+          .filter((account) => app.selectedAccountIds.includes(account.id))
+          .map((account) => ({ id: account.id })),
+        actionSlugs: app.actions.map((action) => action.slug),
+      }));
+      const value = { selections };
+      onComplete?.({ answerText: "Use selected connected apps", requirementId, value });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "We could not finish setting up the connected apps.");
       await refresh().catch(() => undefined);

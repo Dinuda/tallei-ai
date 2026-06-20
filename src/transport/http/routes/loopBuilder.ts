@@ -21,6 +21,7 @@ import { saveBuilderArtifactBundle } from "../../../services/loop-builder/artifa
 import {
   dispatchWorkflowBuilderCommand,
   getWorkflowBuilderCommand,
+  retryFailedBuilderCommand,
   type BuilderToolName,
 } from "../../../services/loop-builder/dispatcher.js";
 import { loopBuilderOpenAiModel, loopBuilderStreamProviderOptions } from "../../../services/loop-builder/openai-chat.js";
@@ -33,7 +34,6 @@ import {
 } from "../../../services/loop-builder/progress.js";
 import {
   createWorkflowBuilderSession,
-  findWorkflowBuilderSessionBySpec,
   listWorkflowBuilderMessages,
   normalizeWorkflowBuilderMessages,
   sanitizeLoopBuilderChatMessages,
@@ -139,7 +139,7 @@ function analyzerTools(
     runTool(auth, sessionId, toolName, input, () => onCommandProgress?.());
   return {
     appSelection: tool({
-      description: "Show the live app catalogue so the user can explicitly choose which apps this loop may use. This is a UI interaction, not a builder command.",
+      description: "Show the live app catalogue so the user can explicitly choose which apps this loop may use. Pass recommendedToolkitSlugs with 1-3 exact Composio toolkit slugs most likely needed for the user's intent, ordered most likely first (e.g. gmail for email support, slack for chat support). This is a UI interaction, not a builder command.",
       inputSchema: z.object({
         question: z.string().min(1).default("What app is where your customers reach out to you for support?"),
         recommendedToolkitSlugs: z.array(z.string().min(1)).max(8).default([]),
@@ -147,12 +147,13 @@ function analyzerTools(
       }),
     }),
     getAvailableTools: tool({
-      description: "Discover exact actions from the apps explicitly selected by the user. Always call appSelection first and pass its exact toolkit slugs.",
+      description: "Discover exact actions from the apps explicitly selected by the user. Always call appSelection first and pass its exact toolkit slugs. Include capabilityQueries with one focused query per distinct external action the loop needs, ordered most essential first (e.g. 'fetch unread customer support emails', 'send reply email to customer'). Each query must describe a single specific action.",
       inputSchema: z.object({
         normalizedIntent: normalizedIntentSchema,
         resolvedIntent: z.string().min(1),
         assumptions: z.array(z.string().min(1)).default([]),
         selectedToolkits: z.array(z.string().min(1)).min(1),
+        capabilityQueries: z.array(z.string().min(1)).max(8).default([]),
       }),
       execute: (input) => run("getAvailableTools", input),
     }),
@@ -232,7 +233,7 @@ function analyzerTools(
       }),
     }),
     interactivePrompt: tool({
-      description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command. Only set the 'icon' field when an option represents a known external service or app (e.g., HubSpot, Salesforce, Slack, Notion, Gmail). For action options like 'Save loop', 'Refine the spec', 'Other', or 'I will connect manually', leave the 'icon' field empty.",
+      description: "Present a structured option menu to the user when clarification can be answered with choices. This is a UI interaction, not a builder command. Only set the 'icon' field when an option represents a known external service or app (e.g., HubSpot, Salesforce, Slack, Notion, Gmail). For action options like 'Save loop', 'Make changes', 'Other', or 'I will connect manually', leave the 'icon' field empty.",
       inputSchema: z.object({
         question: z.string().min(1),
         options: z.array(z.object({
@@ -247,28 +248,15 @@ function analyzerTools(
         allowOther: z.boolean().default(true),
       }),
     }),
-    refineSpec: tool({
-      description: "Refine the current draft spec from user feedback. This invalidates approval.",
-      inputSchema: z.object({ feedback: z.string().min(1) }),
-      execute: (input) => run("refineSpec", input),
-    }),
-    archiveSpec: tool({
-      description: "Archive the current spec. Call when the user selects 'Archive and start over' from the interactive prompt. The interactive prompt selection itself is the user's approval; do not require an additional confirmation.",
-      inputSchema: z.object({}),
-      execute: (input) => run("archiveSpec", { ...input, approved: true }),
-    }),
     saveLoop: tool({
-      description: "Draft, save, and verify the loop. Call with preview true after requirements are ready to show the behavioral spec. Call without preview when the user selects they are happy with the spec — that approves, persists, and runs verification in one step.",
+      description: "Compile the config-driven runtime agent contract, save the loop, initialize verification, and start a safe builder test run. Call only after requirements are ready and the user confirms they want to save.",
       inputSchema: z.object({
-        preview: z.boolean().optional(),
         cron: z.string().optional(),
         timezone: z.string().optional(),
         workspaceId: z.string().uuid().nullable().optional(),
       }),
       execute: (input) => {
-        if (input.preview) return run("saveLoop", { preview: true });
-        const { preview: _preview, ...rest } = input;
-        return run("saveLoop", { ...rest, approved: true });
+        return run("saveLoop", { ...input, approved: true });
       },
     }),
     runVerification: tool({
@@ -336,8 +324,8 @@ async function buildAnalyzerSystemPrompt(
     "For options representing known services or integrations (e.g., HubSpot, Salesforce, Slack, Notion, Mailchimp), include the Composio icon key in the 'icon' field of each option. Common keys: hubspot, salesforce, pipedrive, zoho-crm, slack, notion, mailchimp, gmail, github, airtable, trello, asana, zendesk, stripe, google-sheets, google-docs.",
     "Only ask a normal assistant text question when it genuinely cannot be represented as useful choices.",
     "Never ask the user to paste API keys, passwords, or credentials. Offer account connection as an option instead.",
-    "When the intent is clear and the user has not selected apps yet, call appSelection and stop. Never infer or silently select an app from the workflow description.",
-    "After appSelection returns, call getAvailableTools with the complete normalized resolved intent and the exact selectedToolkits slugs from its output. Discover tools only from those apps.",
+    "When the intent is clear and the user has not selected apps yet, call appSelection and stop. Never infer or silently select an app from the workflow description. In appSelection, pass recommendedToolkitSlugs with the 1-3 most likely Composio toolkit slugs for the user's intent, ordered most likely first.",
+    "After appSelection returns, call getAvailableTools with the complete normalized resolved intent, the exact selectedToolkits slugs from its output, and capabilityQueries: one specific query per distinct external action the loop needs (e.g. 'list unread support emails', 'send customer reply email'), ordered from most essential to supporting. Each capability query must target a single action, not a broad category. Discover tools only from those apps.",
     "Grounding and knowledge sources playbook:",
     "- Built-in sources (no URLs): tallei_memory and workspace_memory are always available. Workspace memory includes prior loop run outputs and preferences in the active workspace.",
     "- When the user mentions internal knowledge, memory, docs, knowledge bases, company info, or FAQs, call knowledgeBaseSetup immediately and stop. Never ask for URLs, document names, or KB identifiers in prose.",
@@ -353,17 +341,19 @@ async function buildAnalyzerSystemPrompt(
     "- Always set allowOther true so the user can choose Tell Tallei what to do differently for custom timing.",
     "- Use a concrete question and optional subtitle tied to the workflow (e.g. weekly newsletter timing), not generic hourly/daily-only wording.",
     "- Never ask schedule timing in prose or numbered lists outside scheduleSetup.",
-    "After scheduleSetup, knowledgeBaseSetup, artifactSetup, or requirementSetup returns, pass its exact typed value to resolveBuildRequirement. Map requirementSetup answers to the requirement schema: for stable_input use { name, value } where value is the selected option value and/or otherText; for review_policy use { mode } inferred from the answer. For scheduleSetup with a selected preset, pass { trigger: 'schedule', cron, timezone } or { trigger: 'event', toolkit, triggerSlug } from the tool output value. If scheduleSetup returns customScheduleText, translate it into a valid schedule at least 1 hour apart, then resolve — never reject reasonable custom timing without offering the nearest valid option.",
+    "After scheduleSetup, knowledgeBaseSetup, or requirementSetup returns, pass its exact typed value to resolveBuildRequirement. Map requirementSetup answers to the requirement schema: for stable_input use { name, value } where value is the selected option value and/or otherText; for review_policy use { mode } inferred from the answer. For scheduleSetup with a selected preset, pass { trigger: 'schedule', cron, timezone } or { trigger: 'event', toolkit, triggerSlug } from the tool output value. If scheduleSetup returns customScheduleText, translate it into a valid schedule at least 1 hour apart, then resolve — never reject reasonable custom timing without offering the nearest valid option.",
+    "artifact_contract handoff: when artifactSetup returns with artifactPersisted true, the approved template bundle is already durably resolved server-side. Do not call resolveBuildRequirement for artifact_contract in that case — continue to the next pending requirement or the save prompt. Never reconstruct or simplify the template JSON yourself.",
     "Do not reinterpret the selected schedule, knowledge sources, artifact bundle, or operational policy except when converting customScheduleText into cron.",
     "Never show schema validation errors, cron expressions, tool identifiers, or internal validation wording to the user. If a requested capability is unavailable, say that capability is currently limited or unsupported and offer the nearest supported choice through the appropriate UI tool.",
     "Never treat unrelated prose as a valid requirement answer. Never silently assume a connector, trigger, schedule, source, template, stable input, or review policy.",
     "The user may explicitly choose no source or no template only when the requirement allows it; persist that choice through resolveBuildRequirement.",
     "Always show build-contract warnings to the user, especially explicit ungrounded or no-template choices.",
-    "Call saveLoop with preview true only after resolveBuildRequirement reports readyForSpecDraft true. Never call saveLoop preview before getAvailableTools. Never invent or search for tools outside getAvailableTools.",
-    "After saveLoop preview returns the spec, explain the draft briefly and immediately call interactivePrompt in the same turn: 'I'm happy with this' (recommended), 'I want more changes', and 'Start over'. Do not wait for the user to manually type approval in prose.",
-    "When the user selects 'I'm happy with this', call saveLoop without preview. It approves, persists, and runs verification in one step — never call a separate draft or verify step first.",
-    "Use refineSpec when the user selects 'I want more changes' or gives behavioral feedback.",
-    "After saveLoop completes verification, summarize the dryRunLog steps and evidence. Distinguish critical failures (block activation) from optional warnings (loop may still activate). When status is awaiting_confirmation — including when only optional read probes warned — present 'Activate' (recommended) and 'I'll do more changes' via interactivePrompt. Call confirmActivation only from Activate.",
+    "After resolveBuildRequirement reports readyForSpecDraft true, summarize the resolved configuration briefly and immediately call interactivePrompt in the same turn: 'Save and test loop' (recommended), 'I want more changes', and 'Start over'. Do not call a separate draft, preview, approve, or refine step.",
+    "When the user selects 'Save and test loop', call saveLoop. It compiles the runtime agent contract, persists the workflow, initializes verification, and starts a safe builder test run in one step.",
+    "If saveLoop fails with a timeout, 502, 503, 504, or backend connectivity error, explain transparently that this is a temporary backend infrastructure issue — not caused by the user's configuration. When buildContract requirements are all resolved, reassure them every setup choice is already persisted in this builder session and offer retry/reload options through chat.",
+    "If saveLoop fails with runtime contract validation, do not call it infrastructure. Explain in chat that the builder needs to recompile from the approved choices and offer retry or more changes; never expose raw schema paths, tool identifiers, or internal validation wording to the user.",
+    "When the user selects 'I want more changes' or gives behavioral feedback, resolve the changed build requirement directly, then offer 'Save and test loop' again. Never call a spec refinement tool.",
+    "After saveLoop completes, summarize the verification and builder test run status. Distinguish critical failures (block activation) from optional warnings (loop may still activate). When verification status is awaiting_confirmation — including when only optional read probes warned — present 'Activate' (recommended) and 'I'll do more changes' via interactivePrompt. Call confirmActivation only from Activate.",
     "After confirmActivation succeeds, tell the user their loop is live. Point them to the header status bar for runs and agent approvals. Mention they can keep refining in the builder if needed.",
     "Never output a bulleted, numbered, or formatted list of options or actions the user can take in your prose text response. If you have choices, next steps, or decisions to offer — including escalation rules, review policies, or stable inputs — you must present them via requirementSetup or interactivePrompt, never as prose lists above the text box.",
     "Keep visible rationale concise. Do not reveal hidden chain-of-thought.",
@@ -395,12 +385,6 @@ async function buildAnalyzerSystemPrompt(
       groundingContext,
     })}`,
   ].join("\n\n");
-}
-
-async function requireSessionForSpec(req: AuthRequest, specId: string) {
-  const session = await findWorkflowBuilderSessionBySpec(req.authContext!, specId);
-  if (!session) throw new Error("A workflow builder session correlated to this spec is required");
-  return session;
 }
 
 router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
@@ -456,12 +440,12 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
           onStepFinish: ({ usage }) => {
             runningTurnUsage = mergeLoopBuilderUsageTotals(
               runningTurnUsage,
-              usageFromLanguageModelStep(usage, model),
+              usageFromLanguageModelStep(usage, modelId),
             );
             void emitLiveUsage();
           },
           onFinish: ({ totalUsage }) => {
-            completedTurnUsage = usageFromLanguageModelStep(totalUsage, model);
+            completedTurnUsage = usageFromLanguageModelStep(totalUsage, modelId);
             const sessionUsage = mergeLoopBuilderUsageTotals(analyzerUsageBase, completedTurnUsage);
             void (async () => {
               const commandUsage = await loadSessionCommandUsage(req.authContext!, sessionId);
@@ -504,6 +488,35 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
   }
 });
 
+router.put("/sessions/:sessionId/messages", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    const body = z.object({ messages: z.array(z.unknown()) }).parse(req.body ?? {});
+    await requireWorkflowBuilderSession(req.authContext!, sessionId);
+    await replaceWorkflowBuilderMessages(
+      req.authContext!,
+      sessionId,
+      await validateUIMessages({ messages: normalizeWorkflowBuilderMessages(body.messages) }),
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to save builder messages";
+    res.status(error instanceof z.ZodError ? 400 : /not found/i.test(message) ? 404 : 409).json({ error: message });
+  }
+});
+
+router.post("/sessions/:sessionId/retry-command", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = z.string().uuid().parse(req.params.sessionId);
+    const body = z.object({ commandId: z.string().uuid().optional() }).parse(req.body ?? {});
+    const command = await retryFailedBuilderCommand(req.authContext!, sessionId, body.commandId);
+    res.status(202).json({ jobId: command.jobId, ...command });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to retry builder command";
+    res.status(error instanceof z.ZodError ? 400 : /not found|no failed/i.test(message) ? 404 : 409).json({ error: message });
+  }
+});
+
 router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = z.string().uuid().parse(req.params.sessionId);
@@ -523,6 +536,7 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
       status: row.status,
       events: row.events_json ?? [],
       usage: row.usage_json ?? {},
+      result: row.result_json ?? undefined,
       error: row.error_text,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -628,52 +642,19 @@ router.post("/intent/analyze", requireScopes(["memory:read"]), async (req: AuthR
 });
 
 router.post("/specs/draft", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = z.object({ sessionId: z.string().uuid() }).parse(req.body ?? {});
-    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: body.sessionId, toolName: "saveLoop", input: { preview: true } });
-    res.status(202).json(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to draft loop spec";
-    res.status(error instanceof z.ZodError ? 409 : /not available|required/i.test(message) ? 409 : 500).json({ error: message });
-  }
+  res.status(410).json({ error: "Spec drafts are no longer used. Use /api/loop-builder/save to compile, save, and test the runtime agent contract." });
 });
 
 router.post("/specs/:specId/refine", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const specId = z.string().uuid().parse(req.params.specId);
-    const body = z.object({ feedback: z.string().trim().min(1).max(5000) }).parse(req.body ?? {});
-    const session = await requireSessionForSpec(req, specId);
-    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "refineSpec", input: body });
-    res.status(202).json(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to refine loop spec";
-    res.status(error instanceof z.ZodError ? 400 : /required|not available/i.test(message) ? 409 : 500).json({ error: message });
-  }
+  res.status(410).json({ error: "Spec refinement is no longer used. Update the resolved builder requirements, then save and test the runtime agent contract." });
 });
 
 router.post("/specs/:specId/approve", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const specId = z.string().uuid().parse(req.params.specId);
-    const body = z.object({ bodyMarkdown: z.string().optional(), specJson: z.unknown().optional() }).parse(req.body ?? {});
-    const session = await requireSessionForSpec(req, specId);
-    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "approveSpec", input: { ...body, approved: true } });
-    res.status(202).json(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to approve loop spec";
-    res.status(error instanceof z.ZodError ? 400 : /required|not available/i.test(message) ? 409 : 500).json({ error: message });
-  }
+  res.status(410).json({ error: "Spec approval is no longer used. Saving the loop compiles and persists the runtime agent contract directly." });
 });
 
 router.post("/specs/:specId/archive", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const specId = z.string().uuid().parse(req.params.specId);
-    const session = await requireSessionForSpec(req, specId);
-    const command = await dispatchWorkflowBuilderCommand({ auth: req.authContext!, sessionId: session.id, toolName: "archiveSpec", input: { approved: true } });
-    res.status(202).json(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to archive loop spec";
-    res.status(/required|not available/i.test(message) ? 409 : 500).json({ error: message });
-  }
+  res.status(410).json({ error: "Spec archival is no longer part of the builder flow. Start over from the builder session instead." });
 });
 
 router.get("/jobs/:jobId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {

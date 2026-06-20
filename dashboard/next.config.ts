@@ -36,6 +36,9 @@ const nextConfig: NextConfig = {
   output: "standalone",
   allowedDevOrigins,
   outputFileTracingRoot: projectRoot,
+  experimental: {
+    externalDir: true,
+  },
   turbopack: {
     root: projectRoot,
   },

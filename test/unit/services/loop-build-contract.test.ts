@@ -349,6 +349,42 @@ test("grounding rejects unknown externalDataToolkits", () => {
   assert.match(grounding.validationErrors.join(" "), /salesforce/i);
 });
 
+test("resolveBuildRequirement ignores incomplete artifact re-resolve when already resolved", () => {
+  const contract = deriveLoopBuildContract({ intentContext: intent, discoveredToolContracts: [] });
+  const fullValue = {
+    mode: "supplied_template",
+    template: JSON.stringify({
+      designId: "minimal",
+      templates: [{
+        id: "t1",
+        name: "Acknowledgment",
+        subject: "We received your request",
+        html: "<p>Thanks</p>",
+      }],
+    }),
+  };
+  const resolved = resolveBuildRequirement({
+    contract,
+    requirementId: "artifact_contract",
+    value: fullValue,
+    discoveredToolContracts: [],
+  });
+  assert.equal(resolved.requirements.find((entry) => entry.id === "artifact_contract")?.status, "resolved");
+
+  const replayed = resolveBuildRequirement({
+    contract: resolved,
+    requirementId: "artifact_contract",
+    value: {
+      mode: "supplied_template",
+      template: JSON.stringify({ designId: "minimal", templates: [{ id: "t1" }] }),
+    },
+    discoveredToolContracts: [],
+  });
+  const artifact = replayed.requirements.find((entry) => entry.id === "artifact_contract")!;
+  assert.equal(artifact.status, "resolved");
+  assert.equal(artifact.validationErrors.length, 0);
+});
+
 test("selectedArtifactContract parses rendered template bundle from artifact_contract", () => {
   const contract = deriveLoopBuildContract({ intentContext: intent, discoveredToolContracts: [] });
   const resolved = resolveBuildRequirement({

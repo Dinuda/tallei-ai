@@ -2,8 +2,8 @@ import type { LoopBuildContract, GroundingSourceRef } from "../loop-engine/build
 import { selectedGroundingSources, selectedLoopTrigger } from "../loop-engine/build-contract.js";
 import { deriveRequiredConnectorActionsFromSpec } from "../loop-engine/spec-required-connectors.js";
 import type { NoSlopSpec } from "../loop-engine/spec-contracts.js";
+import type { LoopDefinition } from "./types.js";
 import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
-import type { RunnableSpec } from "../loop-runtime/spec-run-types.js";
 
 type VerificationTargetRole = "critical" | "optional";
 type VerificationProbeKind = "dry_run" | "visibility_only" | "trigger_check" | "grounding_probe";
@@ -119,22 +119,46 @@ function classifyTarget(
   return { ...target, actionSlug: slug, role: "optional", probeKind: "visibility_only" };
 }
 
+function definitionSpecBody(definition: LoopDefinition): Pick<NoSlopSpec, "purpose" | "delivery" | "agents"> {
+  const noSlop = definition.builderMeta?.noSlopSpec?.specJson;
+  if (noSlop) {
+    return {
+      purpose: noSlop.purpose,
+      delivery: noSlop.delivery,
+      agents: noSlop.agents,
+    };
+  }
+  return {
+    purpose: definition.goal,
+    delivery: {
+      provider: definition.delivery?.provider ?? definition.deliveryType ?? "none",
+      description: definition.delivery?.provider ?? "Dashboard only",
+    },
+    agents: (definition.agentGraph?.children ?? []).map((agent) => ({
+      name: agent.name,
+      goal: agent.goal ?? agent.task,
+      tools: [],
+      guardrails: agent.guardrails ?? [],
+      doneWhen: agent.doneCriteria ?? [],
+      failureModes: agent.failureModes ?? [],
+      handoffBindings: [],
+    })),
+  };
+}
+
 export function deriveVerificationScope(input: {
-  runnableSpec?: RunnableSpec | null;
+  definition: LoopDefinition;
   buildContract: LoopBuildContract;
 }): VerificationTarget[] {
-  const specBody = input.runnableSpec?.noSlopSpec.specJson ?? {
-    purpose: input.runnableSpec?.goal ?? "",
-    delivery: { provider: "none", description: "" },
-    agents: [],
-  };
+  const specBody = definitionSpecBody(input.definition);
 
   const requiredActions = deriveRequiredConnectorActionsFromSpec(specBody);
   const requiredSlugs = new Set(
     requiredActions.map((action) => `${action.toolkit.toLowerCase()}:${normalizeActionSlug(action.actionSlug)}`),
   );
   for (const agent of specBody.agents ?? []) {
-    const goal = `${agent.goal} ${agent.doneWhen.join(" ")}`.toLowerCase();
+    const doneWhen = "doneWhen" in agent && Array.isArray(agent.doneWhen) ? agent.doneWhen : [];
+    const goal = `${agent.goal} ${doneWhen.join(" ")}`.toLowerCase();
     if (/\b(draft|create|send|reply|email)\b/.test(goal)) {
       // Agent goals mentioning outbound email keep create/send actions critical when selected.
       for (const target of selectedConnectorSlugs(input.buildContract)) {

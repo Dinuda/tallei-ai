@@ -1,3 +1,24 @@
+/** OpenCode Zen models that use `/chat/completions` (not `/responses` or Anthropic `/messages`). */
+const OPENCODE_ZEN_CHAT_COMPLETIONS_PREFIXES = [
+  "deepseek-",
+  "minimax-",
+  "glm-",
+  "kimi-",
+  "grok-build-",
+  "big-pickle",
+  "mimo-",
+  "north-mini-code",
+  "nemotron-",
+] as const;
+
+export function isOpenCodeZenChatCompletionsModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return false;
+  return OPENCODE_ZEN_CHAT_COMPLETIONS_PREFIXES.some(
+    (prefix) => normalized === prefix || normalized.startsWith(prefix),
+  );
+}
+
 export function looksLikeHostedOpenAiModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   if (!normalized) return false;

@@ -65,3 +65,38 @@ test("sanitizeLoopBuilderChatMessages strips OpenAI item ids from replayed histo
   assert.equal(toolPart.providerMetadata?.openai?.itemId, undefined);
   assert.equal((reasoning as { providerOptions?: { openai?: { reasoningEncryptedContent?: string } } }).providerOptions?.openai?.reasoningEncryptedContent, "enc");
 });
+
+test("sanitizeLoopBuilderChatMessages slims persisted artifact outputs for analyzer replay", () => {
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-artifactSetup",
+      toolCallId: "tool-1",
+      state: "output-available",
+      input: { requirementId: "artifact_contract" },
+      output: {
+        requirementId: "artifact_contract",
+        mode: "supplied_template",
+        templates: [{ id: "t1", name: "Ack", html: "<p>Hi</p>", subject: "Re: ticket" }],
+        value: {
+          mode: "supplied_template",
+          template: JSON.stringify({
+            designId: "minimal",
+            templates: [{ id: "t1", html: "<p>Hi</p>" }],
+          }),
+        },
+      },
+    } as UIMessage["parts"][number]],
+  }] satisfies UIMessage[];
+
+  const sanitized = sanitizeLoopBuilderChatMessages(messages);
+  const output = sanitized[0]?.parts[0] && "output" in sanitized[0].parts[0]
+    ? sanitized[0].parts[0].output as Record<string, unknown>
+    : null;
+  const template = Array.isArray(output?.templates) ? output.templates[0] as Record<string, unknown> : null;
+
+  assert.equal(template?.html, undefined);
+  assert.equal(output?.artifactPersisted, true);
+  assert.deepEqual(output?.value, { mode: "supplied_template" });
+});

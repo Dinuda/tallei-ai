@@ -11,7 +11,6 @@ import {
   projectRunContext,
 } from "../../../src/services/loop-runtime/build-run-context.js";
 import { normalizeGmailTriggerPayload } from "../../../src/services/loop-runtime/trigger-normalizers/gmail.js";
-import type { RunnableSpec } from "../../../src/services/loop-runtime/spec-run-types.js";
 
 const buildContract = {
   version: "v1" as const,
@@ -155,7 +154,7 @@ const baseSpec = {
       text: "Hi {{customer_name}}",
     }],
   },
-} satisfies RunnableSpec;
+} as any;
 
 test("normalizeGmailTriggerPayload maps common fields", () => {
   const normalized = normalizeGmailTriggerPayload({

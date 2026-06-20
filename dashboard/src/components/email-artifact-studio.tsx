@@ -95,40 +95,42 @@ export function EmailArtifactStudio({
   const [error, setError] = useState<string | null>(null);
 
   const templatesSignatureRef = useRef("");
-  const lastBuiltDraftSignatureRef = useRef("");
+  const notifiedTemplatesSignatureRef = useRef("");
+  const lastInitialSignatureRef = useRef<string | null>(null);
+  const draftInputRef = useRef<{ signature: string; drafts: BuilderDraftTemplate[] } | null>(null);
   const onTemplatesChangeRef = useRef(onTemplatesChange);
   onTemplatesChangeRef.current = onTemplatesChange;
 
   const notifyTemplatesChange = useCallback((next: EmailArtifactTemplate[]) => {
     const signature = templatesSignature(next);
-    if (templatesSignatureRef.current === signature) return;
-    templatesSignatureRef.current = signature;
+    if (notifiedTemplatesSignatureRef.current === signature) return;
+    notifiedTemplatesSignatureRef.current = signature;
     onTemplatesChangeRef.current?.(next);
   }, []);
 
   const applyTemplates = useCallback((next: EmailArtifactTemplate[], preferredId?: string | null) => {
     const signature = templatesSignature(next);
-    if (templatesSignatureRef.current !== signature) {
+    const changed = templatesSignatureRef.current !== signature;
+    if (changed) {
       templatesSignatureRef.current = signature;
       setTemplates(next);
+      setLoading(false);
     }
+    if (!changed && !preferredId) return;
     setSelectedId((current) => {
       if (preferredId && next.some((template) => template.id === preferredId)) return preferredId;
       if (current && next.some((template) => template.id === current)) return current;
       return next[0]?.id ?? null;
     });
-    setLoading(false);
   }, []);
 
-  const seedDraftsKey = useMemo(
-    () => draftTemplatesSignature(draftTemplates),
-    [draftTemplates],
-  );
-
-  const seedDrafts = useMemo(
-    (): BuilderDraftTemplate[] => resolveBuilderDraftTemplates(draftTemplates),
-    [draftTemplates],
-  );
+  const seedDraftsKey = draftTemplatesSignature(draftTemplates);
+  if (draftInputRef.current?.signature !== seedDraftsKey) {
+    draftInputRef.current = {
+      signature: seedDraftsKey,
+      drafts: resolveBuilderDraftTemplates(draftTemplates),
+    };
+  }
 
   const completedTemplates = completedOutput?.templates;
   const completedSignature = useMemo(
@@ -162,6 +164,11 @@ export function EmailArtifactStudio({
     }
   }, [messages, onSave, sessionId, toolCallId]);
 
+  const initialTemplatesSignature = useMemo(
+    () => (initialTemplates?.length ? templatesSignature(initialTemplates) : null),
+    [initialTemplates],
+  );
+
   useEffect(() => {
     if (!completedTemplates?.length || !completedSignature) return;
     if (templatesSignatureRef.current === completedSignature) return;
@@ -170,27 +177,27 @@ export function EmailArtifactStudio({
       designId: BUILDER_ARTIFACT_DESIGN_ID,
     }));
     applyTemplates(normalized);
-    notifyTemplatesChange(normalized);
-  }, [applyTemplates, completedSignature, completedTemplates, notifyTemplatesChange]);
+  }, [applyTemplates, completedSignature, completedTemplates]);
 
   useEffect(() => {
     if (completedTemplates?.length || initialTemplates === undefined) return;
-    if (initialTemplates.length > 0) {
-      applyTemplates(initialTemplates);
-    } else {
-      setLoading(true);
+    if (!initialTemplates.length) {
+      setLoading((current) => (current ? current : true));
+      return;
     }
-  }, [applyTemplates, completedTemplates?.length, initialTemplates]);
+    if (lastInitialSignatureRef.current === initialTemplatesSignature) return;
+    lastInitialSignatureRef.current = initialTemplatesSignature;
+    applyTemplates(initialTemplates);
+  }, [applyTemplates, completedTemplates?.length, initialTemplates, initialTemplatesSignature]);
 
   useEffect(() => {
     if (completedTemplates?.length || initialTemplates !== undefined) return;
     if (!inputReady) return;
-    if (lastBuiltDraftSignatureRef.current === seedDraftsKey) return;
 
     let cancelled = false;
     const accumulated: EmailArtifactTemplate[] = [];
 
-    void buildEmailArtifactTemplates(seedDrafts, {
+    void buildEmailArtifactTemplates(draftInputRef.current?.drafts, {
       onTemplate: (template, index) => {
         if (cancelled) return;
         accumulated[index] = template;
@@ -201,7 +208,6 @@ export function EmailArtifactStudio({
     })
       .then((built) => {
         if (cancelled) return;
-        lastBuiltDraftSignatureRef.current = seedDraftsKey;
         applyTemplates(built);
         notifyTemplatesChange(built);
       })
@@ -218,7 +224,6 @@ export function EmailArtifactStudio({
     initialTemplates,
     inputReady,
     notifyTemplatesChange,
-    seedDrafts,
     seedDraftsKey,
   ]);
 

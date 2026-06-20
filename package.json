@@ -26,6 +26,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.78",
     "@ai-sdk/openai": "^3.0.71",
+    "@ai-sdk/openai-compatible": "^2.0.51",
     "@anthropic-ai/sdk": "^0.40.1",
     "@azure/identity": "^4.13.1",
     "@azure/search-documents": "^12.2.0",

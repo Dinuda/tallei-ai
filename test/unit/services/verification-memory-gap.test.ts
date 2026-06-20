@@ -8,14 +8,12 @@ const verificationPath = new URL("../../../src/services/loop-executor/verificati
 const composioTriggerPath = new URL("../../../src/services/loop-runtime/composio-trigger.ts", import.meta.url);
 const specSchedulerPath = new URL("../../../src/services/loop-runtime/spec-scheduler.ts", import.meta.url);
 const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
-const specRunToolsPath = new URL("../../../src/services/loop-runtime/spec-run-tools.ts", import.meta.url);
 
 test("resolveLoopRunAuth loads workflow workspace into auth", async () => {
   const source = await readFile(resolveAuthPath, "utf8");
   assert.match(source, /export async function resolveLoopRunAuth/);
   assert.match(source, /loadWorkflowWorkspaceId/);
-  assert.match(source, /workspace_id, metadata_json/);
-  assert.match(source, /runnableSpec\?\.workspaceId/);
+  assert.match(source, /SELECT workspace_id/);
 });
 
 test("triggered spec runs hydrate workspace auth", async () => {

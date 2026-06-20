@@ -2,12 +2,11 @@ import {
   normalizeConnectorPayloadForSchema,
 } from "../loop-runtime/connector-action-payload.js";
 import type { ToolContract } from "../tool-spec/types.js";
-import type { RunnableSpec } from "../loop-runtime/spec-run-types.js";
 import type { VerificationTarget } from "./verification-scope.js";
 
 type VerificationProbeContext = {
   verificationId: string;
-  runnableSpec?: RunnableSpec | null;
+  definition?: { goal?: string } | null;
   chainState: Record<string, unknown>;
 };
 
@@ -29,24 +28,18 @@ function schemaRequired(schema: Record<string, unknown>): string[] {
     : [];
 }
 
-function pickArtifactEmail(spec?: RunnableSpec | null): { subject: string; body: string } {
-  const template = spec?.artifacts?.templates?.[0];
-  if (template) {
-    return {
-      subject: template.subject,
-      body: template.text?.trim() || template.html,
-    };
-  }
+function pickArtifactEmail(definition?: { goal?: string } | null): { subject: string; body: string } {
+  const subject = definition?.goal?.trim();
   return {
-    subject: "[Tallei verify] Dry-run probe",
-    body: "This is an automated verification message from Tallei. No action is required.",
+    subject: subject || "[Tallei verify] Dry-run probe",
+    body: subject || "This is an automated verification message from Tallei. No action is required.",
   };
 }
 
 function fillDefaultForProperty(key: string, propSchema: Record<string, unknown>, context: VerificationProbeContext): unknown {
   const lowerKey = key.toLowerCase();
   const propType = typeof propSchema.type === "string" ? propSchema.type : null;
-  const email = pickArtifactEmail(context.runnableSpec);
+  const email = pickArtifactEmail(context.definition);
 
   if (lowerKey.includes("draft") && lowerKey.includes("id")) {
     const draftId = context.chainState.createdDraftId;
@@ -92,7 +85,7 @@ export function buildProbePayload(
   }
 
   if (slug.includes("CREATE") && (slug.includes("DRAFT") || slug.includes("EMAIL"))) {
-    const email = pickArtifactEmail(context.runnableSpec);
+    const email = pickArtifactEmail(context.definition);
     for (const [key, propSchema] of Object.entries(properties)) {
       const lowerKey = key.toLowerCase();
       if (lowerKey.includes("subject")) payload[key] = email.subject;

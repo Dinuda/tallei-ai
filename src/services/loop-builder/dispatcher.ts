@@ -7,6 +7,7 @@ import {
   initializeWorkflowVerification,
   runWorkflowVerification,
 } from "../loop-executor/verification.js";
+import { createSpecLoopRun, runSpecLoopHeadless } from "../loop-runtime/index.js";
 import { discoverToolsForLoopBuild } from "../connectors/composio-discovery.js";
 import { listComposioTriggerTypes } from "../connectors/composio.js";
 import { normalizeDiscoveredToolContracts } from "../connectors/platform-integrations.js";
@@ -22,7 +23,7 @@ import {
   type LoopBuilderProgressEvent,
   type LoopBuilderUsage,
 } from "./progress.js";
-import { approveLoopSpec, archiveLoopSpec, draftLoopSpec, getLoopSpec, refineLoopSpec, approvedSpecSnapshot } from "./specs.js";
+import { compileEnrichedRuntimeSpecSnapshot, compileRuntimeSpecSnapshot } from "./specs.js";
 import { saveLoopFromSpec } from "./intent-resolver.js";
 import {
   assertBuildContractReady,
@@ -42,10 +43,6 @@ export type BuilderToolName =
   | "getAvailableTools"
   | "resolveBuildRequirement"
   | "refreshConnectorAvailability"
-  | "draftSpec"
-  | "refineSpec"
-  | "approveSpec"
-  | "archiveSpec"
   | "saveLoop"
   | "runVerification"
   | "confirmActivation";
@@ -92,10 +89,6 @@ function legacyKind(toolName: BuilderToolName): string {
     getAvailableTools: "analyze-intent",
     resolveBuildRequirement: "resolve-build-requirement",
     refreshConnectorAvailability: "refresh-connector-availability",
-    draftSpec: "draft-spec",
-    refineSpec: "refine-spec",
-    approveSpec: "approve-spec",
-    archiveSpec: "archive-spec",
     saveLoop: "save",
     runVerification: "run-verification",
     confirmActivation: "confirm-activation",
@@ -169,27 +162,55 @@ async function deriveUnresolvedLegacyBuildContract(
   return buildContract;
 }
 
-async function ensureDraftedSpec(
+async function compileRuntimeSnapshotForSession(
   auth: AuthContext,
   sessionId: string,
   session: Awaited<ReturnType<typeof requireWorkflowBuilderSession>>,
 ) {
-  if (session.specId) {
-    const existing = await getLoopSpec(auth, session.specId);
-    if (existing && existing.status !== "archived") return existing;
-  }
-  if (!session.resolvedIntent) throw new Error("Resolved intent is required before drafting");
-  if (!session.buildContract) assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
-  assertBuildContractReady(session.buildContract);
-  const spec = await draftLoopSpec({
-    auth,
+  if (!session.resolvedIntent) throw new Error("Resolved intent is required before compiling the runtime contract");
+  const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
+  assertBuildContractReady(buildContract);
+  const snapshot = compileRuntimeSpecSnapshot({
     prompt: session.goal,
     intentContext: session.resolvedIntent,
-    buildContract: session.buildContract,
+    buildContract,
     discoveredToolContracts: session.discoveredToolContracts,
   });
-  await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_drafted", spec, error: null });
-  return spec;
+  await updateWorkflowBuilderSession(auth, sessionId, { error: null });
+  return snapshot;
+}
+
+type BuilderTestRunResult = {
+  id: string;
+  workflowId: string;
+  status: string;
+  triggerLabel: string | null;
+  error: string | null;
+};
+
+async function runSavedWorkflowTestRun(auth: AuthContext, workflowId: string): Promise<BuilderTestRunResult> {
+  const queued = await createSpecLoopRun(auth, workflowId, {
+    source: "manual",
+    label: "Builder verification test",
+  });
+  try {
+    const completed = await runSpecLoopHeadless(auth, workflowId, queued.id);
+    return {
+      id: completed.id,
+      workflowId: completed.workflowId,
+      status: completed.status,
+      triggerLabel: completed.triggerLabel,
+      error: completed.error,
+    };
+  } catch (error) {
+    return {
+      id: queued.id,
+      workflowId,
+      status: "failed",
+      triggerLabel: queued.triggerLabel,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 async function execute(auth: AuthContext, sessionId: string, toolName: BuilderToolName, input: Record<string, unknown>) {
@@ -233,6 +254,12 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         auth,
         prompt: resolvedIntentText,
         selectedToolkits,
+        capabilityQueries: Array.isArray(input.capabilityQueries)
+          ? input.capabilityQueries.map(String).filter(Boolean)
+          : [],
+        toolCategories: Array.isArray(normalizedIntent.toolCategories)
+          ? normalizedIntent.toolCategories.map(String).filter(Boolean)
+          : [],
         composioSessionId: session.composioSessionId,
         limit: 24,
       });
@@ -304,73 +331,46 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       requirePhase(session.phase, ["resolving_requirements", "intent_resolved", "failed"], toolName);
       return { checklist: await refreshBuilderConnectorAvailability(auth, sessionId) };
     }
-    case "draftSpec": {
-      requirePhase(session.phase, ["intent_resolved", "spec_drafted", "failed"], toolName);
-      return { spec: await ensureDraftedSpec(auth, sessionId, session) };
-    }
-    case "refineSpec": {
-      requirePhase(session.phase, ["spec_drafted", "spec_approved", "saved"], toolName);
-      if (!session.specId) throw new Error("Session has no spec");
-      const spec = await refineLoopSpec({ auth, specId: session.specId, feedback: String(input.feedback ?? "") });
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_drafted", spec, currentProposal: null, workflowId: null });
-      return { spec };
-    }
-    case "approveSpec": {
-      requireApproval(input, toolName);
-      requirePhase(session.phase, ["spec_drafted", "spec_approved", "failed"], toolName);
-      if (!session.specId) throw new Error("Session has no spec");
-      const spec = await approveLoopSpec({ auth, specId: session.specId, specJson: input.specJson, bodyMarkdown: input.bodyMarkdown as string | undefined });
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_approved", spec, error: null });
-      return { spec };
-    }
-    case "archiveSpec": {
-      requireApproval(input, toolName);
-      if (!session.specId) throw new Error("Session has no spec");
-      await archiveLoopSpec(auth, session.specId);
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "archived" });
-      return { ok: true };
-    }
     case "saveLoop": {
       const preview = input.preview === true;
       if (!preview) requireApproval(input, toolName);
-      requirePhase(session.phase, ["intent_resolved", "spec_drafted", "spec_approved", "saved", "failed"], toolName);
+      requirePhase(session.phase, ["intent_resolved", "saved", "failed"], toolName);
 
       if (preview) {
-        return { spec: await ensureDraftedSpec(auth, sessionId, session), preview: true };
+        return { spec: await compileRuntimeSnapshotForSession(auth, sessionId, session), preview: true };
       }
 
       if (session.phase === "saved" && session.workflowId) {
+        const testRun = await runSavedWorkflowTestRun(auth, session.workflowId);
+        const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
+        const spec = await compileEnrichedRuntimeSpecSnapshot({
+          auth,
+          prompt: session.goal,
+          intentContext: session.resolvedIntent ?? undefined,
+          buildContract,
+          discoveredToolContracts: session.discoveredToolContracts,
+        });
         return {
           workflowId: session.workflowId,
           loop: { id: session.workflowId },
           verification: await runWorkflowVerification(auth, session.workflowId),
+          testRun,
+          spec,
         };
       }
 
       await updateWorkflowBuilderSession(auth, sessionId, { error: null });
       session = await requireWorkflowBuilderSession(auth, sessionId);
-      if (!session.buildContract) assertBuildContractReady(await deriveUnresolvedLegacyBuildContract(auth, session));
-      assertBuildContractReady(session.buildContract);
-      let spec = session.specId ? await getLoopSpec(auth, session.specId) : null;
-      if (!spec) {
-        spec = await ensureDraftedSpec(auth, sessionId, session);
-        session = await requireWorkflowBuilderSession(auth, sessionId);
-      }
-      if (!session.specId) throw new Error("Session has no spec to save");
-      if (spec.status !== "approved") {
-        spec = await approveLoopSpec({
-          auth,
-          specId: session.specId,
-          specJson: input.specJson,
-          bodyMarkdown: input.bodyMarkdown as string | undefined,
-        });
-        await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_approved", spec });
-      }
-      let buildContract = session.buildContract;
-      if (!buildContract) {
-        buildContract = await deriveUnresolvedLegacyBuildContract(auth, session);
-      }
+      if (!session.resolvedIntent) throw new Error("Resolved intent is required before saving");
+      const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
       assertBuildContractReady(buildContract);
+      const snapshot = await compileEnrichedRuntimeSpecSnapshot({
+        auth,
+        prompt: session.goal,
+        intentContext: session.resolvedIntent,
+        buildContract,
+        discoveredToolContracts: session.discoveredToolContracts,
+      });
       const scheduleRequirement = buildContract.requirements.find((entry) => entry.kind === "trigger_schedule");
       const scheduleValue = scheduleRequirement?.value && typeof scheduleRequirement.value === "object" && !Array.isArray(scheduleRequirement.value)
         ? scheduleRequirement.value as Record<string, unknown>
@@ -378,7 +378,6 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       const eventDriven = scheduleValue.trigger === "event";
       const approvedCron = eventDriven ? "0 9 * * *" : String(scheduleValue.cron ?? "0 9 * * 1");
       const approvedTimezone = eventDriven ? "UTC" : String(scheduleValue.timezone ?? "UTC");
-      const snapshot = approvedSpecSnapshot(spec);
       const loop = await saveLoopFromSpec({
         auth,
         specSnapshot: snapshot,
@@ -396,7 +395,8 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       void runWorkflowVerification(auth, workflowId).catch((error) => {
         console.error("[saveLoop] background verification failed:", error instanceof Error ? error.message : String(error));
       });
-      return { loop, verification, workflowId };
+      const testRun = await runSavedWorkflowTestRun(auth, workflowId);
+      return { loop, verification, workflowId, spec: snapshot, testRun };
     }
     case "runVerification": {
       if (!session.workflowId) {
@@ -494,4 +494,44 @@ export async function getWorkflowBuilderCommand(auth: AuthContext, commandId: st
     [commandId, auth.tenantId, auth.userId],
   );
   return result.rows[0] ? mapCommand(result.rows[0]) : null;
+}
+
+export async function retryFailedBuilderCommand(
+  auth: AuthContext,
+  sessionId: string,
+  commandId?: string,
+): Promise<WorkflowBuilderCommandView> {
+  const session = await requireWorkflowBuilderSession(auth, sessionId);
+  const result = commandId
+    ? await pool.query<{ id: string; tool_name: BuilderToolName; input_json: Record<string, unknown>; status: string }>(
+      `SELECT id, tool_name, input_json, status
+       FROM workflow_builder_commands
+       WHERE id = $1 AND session_id = $2 AND tenant_id = $3 AND user_id = $4
+       LIMIT 1`,
+      [commandId, sessionId, auth.tenantId, auth.userId],
+    )
+    : await pool.query<{ id: string; tool_name: BuilderToolName; input_json: Record<string, unknown>; status: string }>(
+      `SELECT id, tool_name, input_json, status
+       FROM workflow_builder_commands
+       WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3 AND status IN ('failed', 'rejected')
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [sessionId, auth.tenantId, auth.userId],
+    );
+  const row = result.rows[0];
+  if (!row) throw new Error("No failed builder command is available to retry");
+
+  if (session.phase === "failed") {
+    await updateWorkflowBuilderSession(auth, sessionId, {
+      phase: "intent_resolved",
+      error: null,
+    });
+  }
+
+  return dispatchWorkflowBuilderCommand({
+    auth,
+    sessionId,
+    toolName: row.tool_name,
+    input: row.input_json ?? {},
+  });
 }

@@ -7,6 +7,7 @@ This guide documents the production deployment for this repository using two Clo
 
 ## Read This First
 
+- **Target migration (minimal stack):** [minimal-stack-migration.md](../minimal-stack-migration.md)
 - Full deployment sequence: [flow.md](./flow.md)
 - Domain and DNS details: [dns.md](./dns.md)
 - Failure playbook: [troubleshooting.md](./troubleshooting.md)

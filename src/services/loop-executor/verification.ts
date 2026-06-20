@@ -15,7 +15,8 @@ import {
   validateConnectorActionOutput,
 } from "../loop-runtime/connector-action-payload.js";
 import { nextCronRunAt } from "./cron.js";
-import { parseRunnableSpec, type RunnableSpec } from "../loop-runtime/spec-run-types.js";
+import { parseLoopDefinition } from "../loop-runtime/spec-run-types.js";
+import type { LoopDefinition } from "./types.js";
 import { scheduleTriggerLabel } from "../loop-runtime/spec-runner.js";
 import { isTemporalEnabled } from "../../temporal/client.js";
 import { upsertLoopSchedule } from "../../temporal/schedules.js";
@@ -135,12 +136,12 @@ async function runDryRunProbe(input: {
   target: VerificationTarget;
   contract: ToolContract;
   buildContract: LoopBuildContract;
-  runnableSpec: RunnableSpec | null;
+  definition: LoopDefinition;
   chainState: Record<string, unknown>;
 }): Promise<{ ok: boolean; detail: string; payloadSummary: string; chainPatch: Record<string, unknown> }> {
   const payload = buildProbePayload(input.contract, input.target, {
     verificationId: input.verificationId,
-    runnableSpec: input.runnableSpec,
+    definition: input.definition,
     chainState: input.chainState,
   });
   const payloadSummary = summarizeProbePayload(payload);
@@ -195,22 +196,23 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
 
   let definitionFailure: string | null = null;
   let workflowBuildContract: LoopBuildContract | null = null;
-  let runnableSpec: RunnableSpec | null = null;
+  let definition: LoopDefinition | null = null;
+  let builderSessionId: string | null = null;
+  let definitionDiscoveredToolContracts: ToolContract[] = [];
   try {
     const metadata = workflow.rows[0].metadata_json && typeof workflow.rows[0].metadata_json === "object" && !Array.isArray(workflow.rows[0].metadata_json)
       ? workflow.rows[0].metadata_json as Record<string, unknown>
       : {};
-    runnableSpec = parseRunnableSpec(metadata);
-    if (runnableSpec) {
-      workflowBuildContract = runnableSpec.buildContract
-        ?? runnableSpec.noSlopSpec.buildContract
-        ?? runnableSpec.noSlopSpec.specJson.buildContract
-        ?? null;
-      if (!workflowBuildContract) throw new Error("Runnable spec is missing build contract metadata.");
-      assertBuildContractReady(workflowBuildContract);
-    } else {
-      throw new Error("Workflow is missing a runnable spec. Re-save from the loop builder.");
-    }
+    definition = parseLoopDefinition(metadata);
+    if (!definition) throw new Error("Workflow is missing a loop definition. Re-save from the loop builder.");
+    workflowBuildContract = definition.buildContract
+      ?? definition.builderMeta?.noSlopSpec?.buildContract
+      ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract
+      ?? null;
+    builderSessionId = definition.builderMeta?.workflowBuilderSessionId ?? null;
+    definitionDiscoveredToolContracts = (definition.builderMeta?.discoveredToolContracts ?? []) as unknown as ToolContract[];
+    if (!workflowBuildContract) throw new Error("Loop definition is missing build contract metadata.");
+    assertBuildContractReady(workflowBuildContract);
   } catch (error) {
     definitionFailure = `Workflow build contract verification failed: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -227,7 +229,7 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
     [workflowId, auth.tenantId, auth.userId],
   );
   let session = sessionResult.rows[0];
-  if (!session && runnableSpec?.builderSessionId) {
+  if (!session && builderSessionId) {
     const byId = await pool.query<{
       discovered_tool_contracts_json: ToolContract[];
       build_contract_json: LoopBuildContract | null;
@@ -237,21 +239,21 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
        FROM workflow_builder_sessions
        WHERE id = $1 AND tenant_id = $2 AND user_id = $3
        LIMIT 1`,
-      [runnableSpec.builderSessionId, auth.tenantId, auth.userId],
+      [builderSessionId, auth.tenantId, auth.userId],
     );
     session = byId.rows[0];
   }
   const buildContract = workflowBuildContract ?? session?.build_contract_json ?? null;
-  const scope = buildContract
+  const scope = buildContract && definition
     ? [
-      ...deriveVerificationScope({ runnableSpec, buildContract }),
-      ...deriveGroundingVerificationTargets(buildContract),
-    ]
+        ...deriveVerificationScope({ definition, buildContract }),
+        ...deriveGroundingVerificationTargets(buildContract),
+      ]
     : [];
 
   let visibilityFailure: string | null = null;
   let refreshedContracts = session?.discovered_tool_contracts_json
-    ?? (runnableSpec?.discoveredToolContracts as ToolContract[] | undefined)
+    ?? definitionDiscoveredToolContracts
     ?? [];
   if (scope.length > 0 && buildContract && refreshedContracts.length > 0) {
     try {
@@ -501,7 +503,7 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
         target,
         contract: liveContract,
         buildContract,
-        runnableSpec,
+        definition: definition!,
         chainState,
       });
       Object.assign(chainState, probe.chainPatch);
@@ -594,13 +596,11 @@ export async function confirmWorkflowVerification(auth: AuthContext, workflowId:
   const metadata = snapshot.metadata_json && typeof snapshot.metadata_json === "object" && !Array.isArray(snapshot.metadata_json)
     ? snapshot.metadata_json as Record<string, unknown>
     : {};
-  const runnableSpec = parseRunnableSpec(metadata);
-  if (!runnableSpec) {
-    throw new Error("Workflow is missing a runnable spec. Re-save from the loop builder.");
-  }
-  const buildContract = runnableSpec.buildContract
-    ?? runnableSpec.noSlopSpec.buildContract
-    ?? runnableSpec.noSlopSpec.specJson.buildContract;
+  const definition = parseLoopDefinition(metadata);
+  const buildContract = definition?.buildContract
+    ?? definition?.builderMeta?.noSlopSpec?.buildContract
+    ?? definition?.builderMeta?.noSlopSpec?.specJson.buildContract;
+  if (!buildContract) throw new Error("Workflow is missing a loop build contract. Re-save from the loop builder.");
   const selectedTrigger = buildContract ? selectedLoopTrigger(buildContract) : null;
   const registeredTrigger = selectedTrigger?.mode === "event"
     ? await registerComposioTrigger({ auth, toolkit: selectedTrigger.toolkit, triggerSlug: selectedTrigger.triggerSlug })
