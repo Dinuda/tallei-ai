@@ -1,219 +1,132 @@
-import type { UIMessage } from "ai";
-
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { listLoopRunMessages } from "./run-messages.js";
 import { getSpecRunProjection } from "./spec-runner.js";
-import type { RunnableSpec } from "./spec-run-types.js";
+import {
+  buildOperatorViewFromInteraction,
+  loadPendingInteractionForRun,
+  mapInteractionKindForUi,
+} from "./spec-run-interactions.js";
+import { toolDisplayName } from "./spec-run-tool-tracker.js";
 
-function extractAssistantText(messages: UIMessage[]): string {
-  const chunks: string[] = [];
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    for (const part of message.parts) {
-      if (part.type === "text" && part.text.trim()) chunks.push(part.text.trim());
-    }
-  }
-  return chunks.join("\n\n");
-}
+type StepRow = {
+  id: string;
+  step_index: number;
+  agent_id: string;
+  agent_snapshot: unknown;
+  attempt: number;
+  status: string;
+  input_json: unknown;
+  output_json: unknown;
+  error_json: unknown;
+  created_at: string | Date;
+  started_at: string | Date | null;
+  finished_at: string | Date | null;
+};
 
-function mapSpecStepStatus(runStatus: string): string {
-  if (runStatus === "waiting_for_approval") return "waiting_for_interaction";
-  if (runStatus === "queued") return "queued";
-  if (runStatus === "running") return "running";
-  if (runStatus === "failed") return "failed";
-  if (runStatus === "cancelled") return "cancelled";
-  if (runStatus === "succeeded") return "succeeded";
-  return runStatus;
-}
+type InteractionRow = {
+  id: string;
+  step_attempt_id: string;
+  interaction_kind: string;
+  status: string;
+  question: string;
+  payload_json: unknown;
+  decision_json: unknown;
+  created_at: string | Date;
+  completed_at: string | Date | null;
+};
 
-function slugifyAgentId(name: string, index: number): string {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-  return slug || `agent_${index}`;
-}
-
-function inferAgentToolRefs(agent: { name?: string; goal?: string }): Array<{ ref: string }> {
-  const source = `${agent.name ?? ""} ${agent.goal ?? ""}`.toLowerCase();
-  if (source.includes("memory") || source.includes("search") || source.includes("recall")) {
-    return [{ ref: "internal.memory_search" }];
-  }
-  if (source.includes("draft") || source.includes("reply") || source.includes("email") || source.includes("gmail")) {
-    return [{ ref: "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT" }];
-  }
-  return [{ ref: "internal.llm_only" }];
-}
-
-function partToolName(part: { type?: string }): string | null {
-  if (typeof part.type === "string" && part.type.startsWith("tool-")) {
-    return part.type.slice("tool-".length);
-  }
-  return null;
-}
-
-function partState(part: { state?: string }): string | null {
-  return typeof part.state === "string" ? part.state : null;
-}
-
-function inferActiveAgentIndex(messages: UIMessage[], runStatus: string, agentCount: number): number {
-  if (agentCount === 0) return 0;
-  if (runStatus === "succeeded") return agentCount;
-
-  let hasAssistantOutput = false;
-  let sawSearchMemory = false;
-  let sawWriteAction = false;
-  let pendingApproval = false;
-  let sawFinalize = false;
-
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    for (const part of message.parts) {
-      if (part.type === "text" && "text" in part && String(part.text ?? "").trim()) {
-        hasAssistantOutput = true;
-      }
-      const tool = partToolName(part as { type?: string });
-      const state = partState(part as { state?: string });
-      if (!tool) continue;
-      if (tool === "finalizeRun" && state === "output-available") sawFinalize = true;
-      if (tool === "searchMemory" && state === "output-available") sawSearchMemory = true;
-      if (tool.startsWith("action_") && state === "output-available") sawWriteAction = true;
-      if (state === "approval-requested" || state === "approval-responded") pendingApproval = true;
-    }
-  }
-
-  if (sawFinalize) return agentCount;
-  if (pendingApproval || runStatus === "waiting_for_approval") {
-    return Math.min(agentCount, Math.max(1, agentCount - 1));
-  }
-  if (sawWriteAction) return Math.min(agentCount, Math.max(1, agentCount - 1));
-  if (sawSearchMemory || hasAssistantOutput) return Math.min(agentCount, 1);
-  return 0;
-}
-
-function mapAgentStepStatus(index: number, activeIndex: number, runStatus: string): string {
-  if (runStatus === "failed" || runStatus === "cancelled") {
-    if (index < activeIndex) return "succeeded";
-    if (index === activeIndex) return "failed";
-    return "queued";
-  }
-  if (index < activeIndex) return "succeeded";
-  if (index === activeIndex) {
-    if (runStatus === "waiting_for_approval") return "waiting_for_gate";
-    if (runStatus === "running" || runStatus === "queued") return "running";
-    if (runStatus === "succeeded") return "succeeded";
-    return "running";
-  }
-  return "queued";
-}
-
-function buildSpecAgentSteps(input: {
-  runId: string;
-  spec: RunnableSpec;
-  runStatus: string;
-  messages: UIMessage[];
-  outputText: string;
-  error: string | null;
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-}) {
-  const agents = input.spec.noSlopSpec.specJson.agents;
-  if (agents.length === 0) {
-    return [buildLegacySpecRunnerStep(input)];
-  }
-
-  const activeIndex = inferActiveAgentIndex(input.messages, input.runStatus, agents.length);
-  return agents.map((agent, index) => {
-    const agentId = slugifyAgentId(agent.name, index);
-    const status = mapAgentStepStatus(index, activeIndex, input.runStatus);
-    const isLast = index === agents.length - 1;
-    return {
-      id: `${input.runId}:${agentId}`,
-      step_index: index,
-      agent_id: agentId,
-      agent_snapshot: {
-        id: agentId,
-        name: agent.name,
-        task: agent.goal,
-        tools: inferAgentToolRefs(agent),
-      },
-      attempt: 1,
-      status: mapSpecStepStatus(status === "waiting_for_gate" ? "waiting_for_approval" : status),
-      created_at: input.createdAt,
-      started_at: index <= activeIndex ? input.startedAt : null,
-      finished_at: index < activeIndex || (input.runStatus === "succeeded" && isLast)
-        ? input.finishedAt
-        : null,
-      output_json: {
-        text: isLast ? input.outputText : "",
-        data: { engine: "loop_spec_v1", agentIndex: index },
-      },
-      error_json: index === activeIndex && input.error ? { message: input.error } : {},
-    };
-  });
-}
-
-function buildLegacySpecRunnerStep(input: {
-  runId: string;
-  spec: RunnableSpec;
-  runStatus: string;
-  outputText: string;
-  error: string | null;
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-}) {
-  const stepId = `${input.runId}:spec-runner`;
-  return {
-    id: stepId,
-    step_index: 0,
-    agent_id: "spec_runner",
-    agent_snapshot: {
-      id: "spec_runner",
-      name: "Loop runner",
-      task: input.spec.goal,
-    },
-    attempt: 1,
-    status: mapSpecStepStatus(input.runStatus),
-    created_at: input.createdAt,
-    started_at: input.startedAt,
-    finished_at: input.finishedAt,
-    output_json: {
-      text: input.outputText,
-      data: { engine: "loop_spec_v1" },
-    },
-    error_json: input.error ? { message: input.error } : {},
-  };
-}
-
-function buildFinalArtifact(input: {
-  runId: string;
-  stepId: string;
+type ArtifactRow = {
+  id: string;
+  step_attempt_id: string | null;
+  artifact_key: string;
+  version: number;
+  kind: string;
   body: string;
-  createdAt: string;
-}) {
-  if (!input.body.trim()) return null;
-  return {
-    id: `${input.runId}:final-result`,
-    step_attempt_id: input.stepId,
-    artifact_key: "final.result",
-    version: 1,
-    kind: "structured_output",
-    body: input.body,
-    created_at: input.createdAt,
-    data_json: {
-      artifactEnvelope: {
-        visibility: "operator" as const,
-        renderer: "markdown",
-      },
-    },
-    invalidated_at: null,
-  };
+  data_json: unknown;
+  created_at: string | Date;
+  invalidated_at: string | Date | null;
+};
+
+function iso(value: string | Date | null | undefined): string | null {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function mapStepStatus(status: string): string {
+  if (status === "waiting_for_interaction") return "waiting_for_interaction";
+  return status;
+}
+
+function stepOutputText(outputJson: unknown): string {
+  const output = asRecord(outputJson);
+  const rawText = typeof output.text === "string" ? output.text.trim() : "";
+  if (rawText.startsWith("{") || rawText.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(rawText) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const merged = { ...asRecord(output.data), ...parsed as Record<string, unknown> };
+        const fromMerged = formatRecordOutput(merged);
+        if (fromMerged) return fromMerged;
+      }
+    } catch {
+      // Fall through to plain-text handling.
+    }
+  }
+  if (rawText && !rawText.startsWith("{") && !rawText.startsWith("[")) {
+    return rawText;
+  }
+  return formatRecordOutput(asRecord(output.data));
+}
+
+function formatRecordOutput(data: Record<string, unknown>): string {
+  if (data.approved === true && typeof data.interactionKind === "string") {
+    const extraKeys = Object.keys(data).filter((key) => !["approved", "interactionKind", "ok", "value"].includes(key));
+    if (extraKeys.length === 0) return "";
+  }
+  for (const field of ["text", "summary", "body", "rationale", "agentOutput", "message", "reply", "draft", "analysis", "findings", "recommendedTemplate", "customerHistory"]) {
+    const value = data[field];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  const priority = typeof data.priority === "string" ? data.priority.trim() : "";
+  const rationale = typeof data.rationale === "string" ? data.rationale.trim() : "";
+  if (priority) return rationale ? `Priority: ${priority}\n\n${rationale}` : `Priority: ${priority}`;
+  if (data.ok === true && data.output) return "Connector action completed successfully.";
+  return "";
 }
 
 export async function getSpecRunEditorialProjection(auth: AuthContext, runId: string) {
   const specRun = await getSpecRunProjection(auth, runId);
-  const [messages, eventsResult] = await Promise.all([
-    listLoopRunMessages(auth, runId),
+
+  const [stepsResult, interactionsResult, artifactsResult, eventsResult, pendingInteraction] = await Promise.all([
+    pool.query<StepRow>(
+      `SELECT id, step_index, agent_id, agent_snapshot, attempt, status, input_json, output_json, error_json,
+              created_at, started_at, finished_at
+       FROM loop_engine_step_attempts
+       WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
+       ORDER BY step_index ASC, attempt ASC`,
+      [runId, auth.tenantId, auth.userId],
+    ),
+    pool.query<InteractionRow>(
+      `SELECT id, step_attempt_id, interaction_kind, status, question, payload_json, decision_json,
+              created_at, completed_at
+       FROM loop_engine_interactions
+       WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
+       ORDER BY created_at ASC`,
+      [runId, auth.tenantId, auth.userId],
+    ),
+    pool.query<ArtifactRow>(
+      `SELECT id, step_attempt_id, artifact_key, version, kind, body, data_json, created_at, invalidated_at
+       FROM loop_engine_artifacts
+       WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
+       ORDER BY created_at ASC`,
+      [runId, auth.tenantId, auth.userId],
+    ),
     pool.query<{
       id: string;
       created_at: string | Date;
@@ -227,29 +140,86 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
        ORDER BY created_at ASC, id ASC`,
       [runId],
     ),
+    loadPendingInteractionForRun(auth, runId),
   ]);
 
-  const assistantText = extractAssistantText(messages);
-  const outputText = specRun.summary?.trim() || assistantText;
-  const steps = buildSpecAgentSteps({
-    runId: specRun.id,
-    spec: specRun.runnableSpec,
-    runStatus: specRun.status,
-    messages,
-    outputText,
-    error: specRun.error,
-    createdAt: specRun.createdAt,
-    startedAt: specRun.startedAt,
-    finishedAt: specRun.finishedAt,
+  const steps = stepsResult.rows.map((row) => {
+    const snapshot = asRecord(row.agent_snapshot);
+    const personaRaw = asRecord(snapshot.persona);
+    return {
+      id: row.id,
+      step_index: row.step_index,
+      agent_id: row.agent_id,
+      agent_snapshot: {
+        id: typeof snapshot.id === "string" ? snapshot.id : row.agent_id,
+        name: typeof snapshot.name === "string" ? snapshot.name : toolDisplayName(row.agent_id),
+        task: typeof snapshot.task === "string" ? snapshot.task : "",
+        tools: Array.isArray(snapshot.tools) ? snapshot.tools : [],
+        ...(typeof personaRaw.displayName === "string" ? {
+          persona: {
+            displayName: personaRaw.displayName,
+            roleKey: personaRaw.roleKey,
+            roleLabel: typeof personaRaw.roleLabel === "string" ? personaRaw.roleLabel : "",
+            avatarSeed: typeof personaRaw.avatarSeed === "string" ? personaRaw.avatarSeed : "",
+            avatarUrl: typeof personaRaw.avatarUrl === "string" ? personaRaw.avatarUrl : "",
+          },
+        } : {}),
+      },
+      attempt: row.attempt,
+      status: mapStepStatus(row.status),
+      created_at: iso(row.created_at) ?? specRun.createdAt,
+      started_at: iso(row.started_at),
+      finished_at: iso(row.finished_at),
+      input_json: asRecord(row.input_json),
+      output_json: {
+        text: stepOutputText(row.output_json),
+        data: asRecord(asRecord(row.output_json).data),
+      },
+      error_json: asRecord(row.error_json),
+    };
   });
-  const specAgents = specRun.runnableSpec.noSlopSpec.specJson.agents;
-  const finalStepId = steps[steps.length - 1]?.id ?? `${specRun.id}:spec-runner`;
-  const finalArtifact = buildFinalArtifact({
-    runId: specRun.id,
-    stepId: finalStepId,
-    body: outputText,
-    createdAt: specRun.finishedAt ?? specRun.updatedAt,
-  });
+
+  const interactions = interactionsResult.rows.map((row) => ({
+    id: row.id,
+    step_attempt_id: row.step_attempt_id,
+    interaction_kind: mapInteractionKindForUi({
+      ...row,
+      decision_json: row.decision_json,
+      run_id: runId,
+    }),
+    status: row.status,
+    question: row.question,
+    payload_json: asRecord(row.payload_json),
+    decision_json: asRecord(row.decision_json),
+    created_at: iso(row.created_at) ?? specRun.createdAt,
+    completed_at: iso(row.completed_at),
+  }));
+
+  const artifacts = artifactsResult.rows
+    .filter((row) => !row.invalidated_at)
+    .map((row) => ({
+      id: row.id,
+      step_attempt_id: row.step_attempt_id,
+      artifact_key: row.artifact_key,
+      version: row.version,
+      kind: row.kind,
+      body: row.body,
+      created_at: iso(row.created_at) ?? specRun.createdAt,
+      data_json: asRecord(row.data_json),
+      invalidated_at: iso(row.invalidated_at),
+    }));
+
+  const pendingStep = pendingInteraction
+    ? steps.find((step) => step.id === pendingInteraction.step_attempt_id)
+    : null;
+  const operatorView = pendingInteraction
+    ? buildOperatorViewFromInteraction(pendingInteraction, {
+      name: pendingStep?.agent_snapshot?.name,
+    })
+    : null;
+
+  const currentStepIndex = steps.findIndex((step) =>
+    step.status === "running" || step.status === "waiting_for_interaction");
 
   return {
     id: specRun.id,
@@ -261,7 +231,7 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
     updated_at: specRun.updatedAt,
     started_at: specRun.startedAt,
     finished_at: specRun.finishedAt,
-    current_step_index: steps.findIndex((step) => step.status === "running" || step.status === "waiting_for_interaction") ?? 0,
+    current_step_index: currentStepIndex >= 0 ? currentStepIndex : Math.max(0, steps.length - 1),
     definition: {
       goal: specRun.runnableSpec.goal,
       agentGraph: {
@@ -269,18 +239,12 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
           name: "Tallei Orchestrator",
           task: "Coordinates agents for this loop run.",
         },
-        children: specAgents.length > 0
-          ? specAgents.map((agent, index) => ({
-              id: slugifyAgentId(agent.name, index),
-              name: agent.name,
-              task: agent.goal,
-              tools: inferAgentToolRefs(agent),
-            }))
-          : [{
-              id: "spec_runner",
-              name: "Loop runner",
-              task: specRun.runnableSpec.goal,
-            }],
+        children: steps.map((step) => ({
+          id: step.agent_id,
+          name: step.agent_snapshot.name ?? step.agent_id,
+          task: step.agent_snapshot.task ?? "",
+          tools: step.agent_snapshot.tools ?? [],
+        })),
       },
     },
     context: {
@@ -293,17 +257,15 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
       builderSessionId: specRun.builderSessionId,
     },
     steps,
-    interactions: [],
-    artifacts: finalArtifact ? [finalArtifact] : [],
+    interactions,
+    artifacts,
     events: eventsResult.rows.map((row) => ({
       id: row.id,
-      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      created_at: iso(row.created_at) ?? specRun.createdAt,
       event_type: row.event_type,
       step_attempt_id: row.step_attempt_id,
-      payload_json: row.payload_json && typeof row.payload_json === "object" && !Array.isArray(row.payload_json)
-        ? row.payload_json as Record<string, unknown>
-        : {},
+      payload_json: asRecord(row.payload_json),
     })),
-    operatorView: null,
+    operatorView,
   };
 }

@@ -2,9 +2,11 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { selectedLoopTrigger } from "../loop-engine/build-contract.js";
 import { getLoopWorkflow } from "../loop-executor/creator.js";
+import { enqueueLoopRunCommand } from "./spec-run-commands.js";
 import { resolveLoopRunAuth } from "./resolve-loop-run-auth.js";
 import { createSpecLoopRun } from "./spec-runner.js";
 import { startLoopRunWorkflow } from "../../temporal/start-loop-run.js";
+import { gmailTriggerDedupeKey } from "./trigger-normalizers/gmail.js";
 
 type WorkflowTriggerActivityView = {
   mode: "event" | "schedule" | "none";
@@ -134,7 +136,34 @@ function parseTriggerEnvelope(payload: unknown): TriggerEnvelope | null {
   return { id, type, data, metadata: { trigger_id: triggerId, trigger_slug: triggerSlug } };
 }
 
-export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ ok: true; processed: boolean }> {
+function triggerDedupeKey(event: TriggerEnvelope): string | null {
+  if (event.metadata.trigger_slug.includes("GMAIL")) {
+    return gmailTriggerDedupeKey(event.data);
+  }
+  return null;
+}
+
+async function findReservedTriggerEvent(input: {
+  triggerInstanceId: string;
+  externalEventId: string;
+  dedupeKey: string | null;
+}): Promise<{ run_id: string | null } | null> {
+  const result = await pool.query<{ run_id: string | null }>(
+    `SELECT run_id
+     FROM workflow_connector_trigger_events
+     WHERE trigger_instance_id = $1
+       AND (
+         external_event_id = $2
+         OR ($3::text IS NOT NULL AND dedupe_key = $3)
+       )
+     ORDER BY received_at ASC
+     LIMIT 1`,
+    [input.triggerInstanceId, input.externalEventId, input.dedupeKey],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ ok: true; processed: boolean; runId?: string | null }> {
   const event = parseTriggerEnvelope(payload);
   if (!event) return { ok: true, processed: false };
 
@@ -149,14 +178,22 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
   if (!target) return { ok: true, processed: false };
 
   const payloadJson = JSON.stringify({ data: event.data, metadata: event.metadata });
+  const dedupeKey = triggerDedupeKey(event);
 
   const reserved = await pool.query(
-    `INSERT INTO workflow_connector_trigger_events (trigger_instance_id, external_event_id, payload_json)
-     VALUES ($1, $2, $3::jsonb)
-     ON CONFLICT (trigger_instance_id, external_event_id) DO NOTHING`,
-    [event.metadata.trigger_id, event.id, payloadJson],
+    `INSERT INTO workflow_connector_trigger_events (trigger_instance_id, external_event_id, dedupe_key, payload_json)
+     VALUES ($1, $2, $3, $4::jsonb)
+     ON CONFLICT DO NOTHING`,
+    [event.metadata.trigger_id, event.id, dedupeKey, payloadJson],
   );
-  if (!reserved.rowCount) return { ok: true, processed: true };
+  if (!reserved.rowCount) {
+    const existing = await findReservedTriggerEvent({
+      triggerInstanceId: event.metadata.trigger_id,
+      externalEventId: event.id,
+      dedupeKey,
+    });
+    return { ok: true, processed: true, runId: existing?.run_id ?? null };
+  }
 
   const auth = await resolveLoopRunAuth({
     tenantId: target.tenant_id,
@@ -171,6 +208,13 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
       eventId: event.id,
       triggerSlug: event.metadata.trigger_slug,
       triggerInstanceId: event.metadata.trigger_id,
+    });
+    await enqueueLoopRunCommand({
+      auth,
+      runId: run.id,
+      commandType: "start_run",
+      idempotencyKey: `spec-run:${run.id}:start`,
+      payload: { trigger: run.triggerLabel ?? triggerLabel },
     });
     await startLoopRunWorkflow({
       tenantId: auth.tenantId,
@@ -192,7 +236,7 @@ export async function handleComposioTriggerWebhook(payload: unknown): Promise<{ 
         [event.metadata.trigger_id, event.id, runId],
       );
     }
-    return { ok: true, processed: true };
+    return { ok: true, processed: true, runId };
   } catch (error) {
     await pool.query(
       `DELETE FROM workflow_connector_trigger_events WHERE trigger_instance_id = $1 AND external_event_id = $2`,

@@ -17,6 +17,7 @@ import {
 } from "../../../services/connectors/composio.js";
 import { pool } from "../../../infrastructure/db/index.js";
 import { handleComposioTriggerWebhook } from "../../../services/loop-runtime/composio-trigger.js";
+import { mergeToolkitCatalog } from "../../../services/connectors/platform-integrations.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
@@ -79,11 +80,11 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
 
 router.get("/composio/toolkits", requireScopes(["memory:read"]), async (_req: AuthRequest, res: Response) => {
   try {
-    const toolkits = await listComposioToolkits();
+    const toolkits = mergeToolkitCatalog(await listComposioToolkits());
     res.json({ toolkits });
   } catch (error) {
     console.error("Error listing Composio toolkits:", error);
-    res.json({ toolkits: [] });
+    res.json({ toolkits: mergeToolkitCatalog([]) });
   }
 });
 
@@ -198,7 +199,7 @@ router.post("/:provider/auth-sessions", requireScopes(["memory:write"]), async (
       res.status(400).json({ error: error.message });
       return;
     }
-    if (error instanceof Error && /(Failed to start Resend auth|Failed to create Composio connect link|auth config|toolkit)/i.test(error.message)) {
+    if (error instanceof Error && /(Connect Resend with your API key|Connect resend with your API key|Failed to start Resend auth|Failed to create Composio connect link|auth config|toolkit|managed by Tallei|does not require a Composio connection|API key instead of OAuth)/i.test(error.message)) {
       res.status(400).json({ error: error.message });
       return;
     }

@@ -18,11 +18,11 @@ test("spec runs persist trigger provenance in context and projection", async () 
   assert.match(specRunner, /trigger: resolvedTrigger/);
 });
 
-test("headless spec runs persist full ui message stream", async () => {
+test("headless spec runs execute through the agent orchestrator", async () => {
   const specRunner = await readFile(specRunnerPath, "utf8");
-  assert.match(specRunner, /async function executeSpecRun/);
-  assert.match(specRunner, /replaceLoopRunMessages\(input\.auth, input\.runId, completedMessages\)/);
-  assert.doesNotMatch(specRunner, /await result\.consumeStream\(\)/);
+  assert.match(specRunner, /executeAgenticSpecRun/);
+  assert.match(specRunner, /triggerSeedMessages/);
+  assert.match(specRunner, /existingMessages\.length > 0/);
 });
 
 test("workflow list attaches latestRun metadata", async () => {
@@ -42,9 +42,10 @@ test("spec run editorial projection exposes steps and artifacts for the run page
   );
   assert.match(projection, /getSpecRunEditorialProjection/);
   assert.match(projection, /workflow_title: specRun\.workflowTitle/);
-  assert.match(projection, /buildSpecAgentSteps/);
-  assert.match(projection, /artifacts: finalArtifact \? \[finalArtifact\] : \[\]/);
+  assert.match(projection, /loop_engine_step_attempts/);
+  assert.match(projection, /operatorView/);
   assert.match(workflows, /getSpecRunEditorialProjection/);
+  assert.match(workflows, /interactions\/:interactionId\/commands/);
 });
 
 test("legacy run page uses the editorial run UI shell", async () => {
@@ -52,16 +53,47 @@ test("legacy run page uses the editorial run UI shell", async () => {
   assert.match(runPage, /editorial-run-ui|EditorialPanel|OperatorWorkspace/);
 });
 
-test("spec run page uses builder chat with agent sidebar", async () => {
+test("spec run page uses builder-style chat transcript with universal renderer", async () => {
   const specRunPage = await readFile(
     new URL("../../../dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/components/spec-run-page.tsx", import.meta.url),
     "utf8",
   );
   assert.match(specRunPage, /Conversation/);
-  assert.match(specRunPage, /ChildAgentRow/);
-  assert.match(specRunPage, /ParentAgentRow/);
-  assert.match(specRunPage, /PromptInput/);
-  assert.match(specRunPage, /Confirmation/);
+  assert.match(specRunPage, /InteractivePromptMenu/);
+  assert.match(specRunPage, /TranscriptMessageContent/);
+  assert.match(specRunPage, /resolveActiveGate/);
+  assert.match(specRunPage, /ArtifactRenderer/);
+  assert.match(specRunPage, /findActiveToolPart/);
+  assert.match(specRunPage, /buildSequentialStepTranscript/);
+  assert.match(specRunPage, /hydrateMessagesFromSteps/);
+  assert.match(specRunPage, /shouldAutoStartRunStream/);
+  assert.match(specRunPage, /continueRunStream/);
+  assert.match(specRunPage, /interactions\/\$\{interactionId\}\/commands/);
+  assert.doesNotMatch(specRunPage, /OperatorWorkspace/);
+  assert.doesNotMatch(specRunPage, /ChildAgentRow/);
+  assert.doesNotMatch(specRunPage, /SpecRunContinuousThread/);
+  assert.doesNotMatch(specRunPage, /EmailDraftCard/);
+});
+
+test("spec run gate opens from pending interaction and surfaces produced artifacts", async () => {
+  const [specRunPage, utils] = await Promise.all([
+    readFile(
+      new URL("../../../dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/components/spec-run-page.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/components/spec-run-view-utils.ts", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.match(utils, /resolveDisplayArtifact/);
+  assert.match(utils, /!input\.pendingInteraction \|\| !input\.operatorView/);
+  assert.match(specRunPage, /resolveActiveGate/);
+  assert.match(specRunPage, /ArtifactRenderer/);
+  assert.match(specRunPage, /artifactStepAttemptId/);
+  assert.match(specRunPage, /displayArtifact\?\.step_attempt_id/);
+  assert.match(specRunPage, /InboundEmailTriggerCard/);
+  assert.match(specRunPage, /gate\.show/);
 });
 
 test("builder header surfaces run navigation and status outside chat", async () => {

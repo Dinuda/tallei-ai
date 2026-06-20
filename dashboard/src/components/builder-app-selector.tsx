@@ -12,6 +12,7 @@ type Toolkit = {
   description: string;
   logo: string;
   category?: string;
+  platformManaged?: boolean;
 };
 
 export type AppSelectionOutput = {
@@ -119,7 +120,7 @@ export function BuilderAppSelector({
     <div className="w-full border border-slate-200 bg-slate-50/50">
       <div className="border-b border-slate-100 bg-white px-4 py-3">
         <h2 className="text-[14px] font-bold tracking-[-0.02em] text-slate-900" style={{ fontFamily: "var(--font-title)" }}>{question}</h2>
-        <p className="mt-0.5 text-[13px] text-slate-500">Choose the apps you already use. You can connect an account next.</p>
+        <p className="mt-0.5 text-[13px] text-slate-500">Choose the apps this loop needs. Platform apps are ready immediately; other apps connect next.</p>
       </div>
 
       <div className="px-4 py-3">
@@ -150,9 +151,12 @@ export function BuilderAppSelector({
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2 text-sm font-medium text-slate-900">
                     {toolkit.name}
+                    {toolkit.platformManaged && <span className="border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Platform</span>}
                     {recommended.has(toolkit.slug.toLowerCase()) && <span className="border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">Suggested</span>}
                   </span>
-                  <span className="mt-0.5 block truncate text-xs text-slate-500">{toolkit.description || "Connect this app to your loop"}</span>
+                  <span className="mt-0.5 block truncate text-xs text-slate-500">
+                    {toolkit.description || (toolkit.platformManaged ? "Ready to use — no account connection required" : "Connect this app to your loop")}
+                  </span>
                 </span>
                 <span className={cn("flex size-5 shrink-0 items-center justify-center border", isSelected ? "bg-slate-600 text-white border-slate-600" : "border-slate-300")}>{isSelected && <Check className="size-3" />}</span>
               </button>

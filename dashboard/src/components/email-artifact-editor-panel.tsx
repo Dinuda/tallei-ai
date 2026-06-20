@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { LoaderCircle } from "lucide-react";
 
 import "@react-email/editor/themes/default.css";
@@ -28,6 +28,8 @@ export function EmailArtifactEditorPanel({
   onCancel,
   saving,
   templateName,
+  hideSaveButton = false,
+  exportRef,
 }: {
   content: string;
   editorKey: string;
@@ -35,6 +37,8 @@ export function EmailArtifactEditorPanel({
   onCancel?: () => void;
   saving?: boolean;
   templateName?: string;
+  hideSaveButton?: boolean;
+  exportRef?: MutableRefObject<(() => Promise<string>) | null>;
 }) {
   const editorRef = useRef<EmailEditorRef>(null);
   const [ready, setReady] = useState(false);
@@ -43,6 +47,14 @@ export function EmailArtifactEditorPanel({
     if (!editorRef.current) return "";
     return editorRef.current.getEmailHTML();
   }, []);
+
+  useEffect(() => {
+    if (!exportRef) return;
+    exportRef.current = exportHtml;
+    return () => {
+      exportRef.current = null;
+    };
+  }, [exportHtml, exportRef]);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#e5e7eb] bg-white shadow-sm">
@@ -63,16 +75,18 @@ export function EmailArtifactEditorPanel({
               Preview
             </button>
           ) : null}
-          <button
-            className="rounded-md bg-[#111827] px-3 py-1.5 text-[12px] text-white hover:opacity-85 disabled:opacity-50"
-            disabled={!ready || saving}
-            onClick={() => {
-              void exportHtml().then((html) => onSave(html));
-            }}
-            type="button"
-          >
-            {saving ? <LoaderCircle className="inline size-3.5 animate-spin" /> : "Save changes"}
-          </button>
+          {!hideSaveButton ? (
+            <button
+              className="rounded-md bg-[#111827] px-3 py-1.5 text-[12px] text-white hover:opacity-85 disabled:opacity-50"
+              disabled={!ready || saving}
+              onClick={() => {
+                void exportHtml().then((html) => onSave(html));
+              }}
+              type="button"
+            >
+              {saving ? <LoaderCircle className="inline size-3.5 animate-spin" /> : "Save changes"}
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto bg-white p-2 [&_.ProseMirror]:min-h-[360px]">

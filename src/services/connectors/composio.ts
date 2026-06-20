@@ -1,14 +1,15 @@
 import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 import { anthropic } from "@ai-sdk/anthropic";
-import { Composio } from "@composio/core";
+import { AuthScheme, Composio } from "@composio/core";
 import { VercelProvider } from "@composio/vercel";
 import { generateText, stepCountIs } from "ai";
 
 import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
-import { encryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
+import { decryptMemoryContent, encryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../../infrastructure/db/index.js";
 import type { ConnectorActionRisk } from "../loop-engine/spec-contracts.js";
+import { isPlatformManagedToolkit } from "./platform-integrations.js";
 
 export type ConnectorSetupState =
   | "not_required"
@@ -184,6 +185,13 @@ function normalizeComposioAppKey(appKey: string | null | undefined): string {
   return key;
 }
 
+/** Composio toolkits that require a user-provided API key instead of OAuth or managed auth. */
+const NATIVE_API_KEY_COMPOSIO_TOOLKITS = new Set(["resend"]);
+
+export function isNativeApiKeyComposioToolkit(toolkit: string): boolean {
+  return NATIVE_API_KEY_COMPOSIO_TOOLKITS.has(normalizeComposioAppKey(toolkit));
+}
+
 export function filterComposioToolkitActions(actions: ComposioActionView[]): ComposioActionView[] {
   return actions;
 }
@@ -264,31 +272,155 @@ export async function resolveComposioToolVersion(actionSlug: string): Promise<st
   return (await resolveComposioToolExecutionMetadata(actionSlug)).version;
 }
 
+async function ensureComposioToolkitAuthConfig(
+  toolkitSlug: string,
+  preferredAuthConfigId?: string | null,
+): Promise<string> {
+  const composio = getComposioVercelClient();
+  const normalized = normalizeComposioAppKey(toolkitSlug);
+  const authConfigs = await composio.authConfigs.list({ toolkit: normalized });
+  const enabledAuthConfigs = authConfigs.items.filter((authConfig) => authConfig.status === "ENABLED");
+  const existing = enabledAuthConfigs.find((authConfig) => authConfig.id === preferredAuthConfigId)?.id
+    ?? enabledAuthConfigs[0]?.id;
+  if (existing) return existing;
+
+  const toolkit = await composio.toolkits.get(normalized);
+  if (isNativeApiKeyComposioToolkit(normalized)) {
+    const created = await composio.authConfigs.create(normalized, {
+      type: "use_custom_auth",
+      name: `${toolkit.name} API Key`,
+      authScheme: "API_KEY",
+      credentials: {},
+    });
+    return created.id;
+  }
+
+  try {
+    const created = await composio.authConfigs.create(normalized, {
+      type: "use_composio_managed_auth",
+      name: `${toolkit.name} Auth Config`,
+    });
+    return created.id;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`No enabled auth config found for toolkit "${normalized}" and failed to create one. Please set up an auth config in the Composio dashboard. ${msg}`);
+  }
+}
+
+async function upsertLocalComposioConnectorAccount(input: {
+  auth: AuthContext;
+  toolkit: string;
+  externalAccountId: string;
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO connector_accounts
+     (id, tenant_id, user_id, workspace_id, provider, external_account_id, status, scopes_json, metadata_json)
+     VALUES ($1, $2, $3, $8, 'composio', $4, 'connected', '[]'::jsonb, $5::jsonb)
+     ON CONFLICT (tenant_id, user_id, provider, external_account_id)
+     DO UPDATE SET
+       status = 'connected',
+       metadata_json = COALESCE(connector_accounts.metadata_json, '{}'::jsonb) || EXCLUDED.metadata_json,
+       workspace_id = COALESCE(connector_accounts.workspace_id, EXCLUDED.workspace_id),
+       updated_at = NOW()`,
+    [
+      randomUUID(),
+      input.auth.tenantId,
+      input.auth.userId,
+      input.externalAccountId,
+      JSON.stringify({ adapter: "composio", appKey: input.toolkit, authMode: "api_key" }),
+      input.auth.workspaceId ?? null,
+    ],
+  );
+}
+
+async function syncComposioApiKeyConnectedAccount(input: {
+  auth: AuthContext;
+  toolkit: string;
+  apiKey: string;
+}): Promise<string | null> {
+  if (!isComposioConfigured()) return null;
+  const toolkit = normalizeComposioAppKey(input.toolkit);
+  if (!isNativeApiKeyComposioToolkit(toolkit)) return null;
+
+  const authConfigId = await ensureComposioToolkitAuthConfig(toolkit);
+  const composio = getComposioVercelClient();
+  const userId = getComposioEntityId(input.auth);
+  const existing = await composio.connectedAccounts.list({
+    userIds: [userId],
+    toolkitSlugs: [toolkit],
+  });
+  const active = (Array.isArray(existing.items) ? existing.items : []).find((item) =>
+    ["active", "connected", "enabled"].includes(String(item.status ?? "").toLowerCase()),
+  );
+  const activeId = typeof active?.id === "string" ? active.id.trim() : "";
+  if (activeId) {
+    await upsertLocalComposioConnectorAccount({ auth: input.auth, toolkit, externalAccountId: activeId });
+    return activeId;
+  }
+
+  const request = await composio.connectedAccounts.initiate(userId, authConfigId, {
+    allowMultiple: true,
+    config: AuthScheme.APIKey({ api_key: input.apiKey }),
+  });
+  let connectedAccountId = typeof request.id === "string" ? request.id.trim() : "";
+  if (connectedAccountId && request.status !== "ACTIVE" && typeof request.waitForConnection === "function") {
+    const connected = await request.waitForConnection(15_000);
+    connectedAccountId = typeof connected.id === "string" ? connected.id.trim() : connectedAccountId;
+  }
+  if (!connectedAccountId) return null;
+  await upsertLocalComposioConnectorAccount({ auth: input.auth, toolkit, externalAccountId: connectedAccountId });
+  return connectedAccountId;
+}
+
+async function syncStoredNativeApiKeyToolkitToComposio(input: {
+  auth: AuthContext;
+  toolkit: string;
+}): Promise<void> {
+  const toolkit = normalizeComposioAppKey(input.toolkit);
+  if (!isNativeApiKeyComposioToolkit(toolkit) || !isComposioConfigured()) return;
+
+  const composio = getComposioVercelClient();
+  const userId = getComposioEntityId(input.auth);
+  const existing = await composio.connectedAccounts.list({
+    userIds: [userId],
+    toolkitSlugs: [toolkit],
+  });
+  const hasActive = (Array.isArray(existing.items) ? existing.items : []).some((item) =>
+    ["active", "connected", "enabled"].includes(String(item.status ?? "").toLowerCase()),
+  );
+  if (hasActive) return;
+
+  const provider = toolkit === "resend" ? "resend" : toolkit;
+  const result = await pool.query<{ metadata_json: unknown }>(
+    `SELECT metadata_json
+     FROM connector_accounts
+     WHERE tenant_id = $1
+       AND user_id = $2
+       AND provider = $3
+       AND status = 'connected'
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [input.auth.tenantId, input.auth.userId, provider],
+  );
+  const metadata = toObjectRecord(result.rows[0]?.metadata_json);
+  const ciphertext = typeof metadata.apiKeyCiphertext === "string" ? metadata.apiKeyCiphertext : "";
+  if (!ciphertext) return;
+  const apiKey = decryptMemoryContent(ciphertext);
+  await syncComposioApiKeyConnectedAccount({ auth: input.auth, toolkit, apiKey });
+}
+
 async function createComposioToolkitAuthorizeLink(input: {
   auth: AuthContext;
   toolkitSlug: string;
   preferredAuthConfigId?: string | null;
   redirectUri?: string | null;
 }): Promise<{ id: string | null; redirectUrl: string | null }> {
-  const composio = getComposioVercelClient();
-  const authConfigs = await composio.authConfigs.list({ toolkit: input.toolkitSlug });
-  const enabledAuthConfigs = authConfigs.items.filter((authConfig) => authConfig.status === "ENABLED");
-  let authConfigId = enabledAuthConfigs.find((authConfig) => authConfig.id === input.preferredAuthConfigId)?.id
-    ?? enabledAuthConfigs[0]?.id;
-  if (!authConfigId) {
-    try {
-      const toolkit = await composio.toolkits.get(input.toolkitSlug);
-      const created = await composio.authConfigs.create(input.toolkitSlug, {
-        type: "use_composio_managed_auth",
-        name: `${toolkit.name} Auth Config`,
-      });
-      authConfigId = created.id;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`No enabled auth config found for toolkit "${input.toolkitSlug}" and failed to create one. Please set up an auth config in the Composio dashboard. ${msg}`);
-    }
+  const normalized = normalizeComposioAppKey(input.toolkitSlug);
+  if (isNativeApiKeyComposioToolkit(normalized)) {
+    throw new Error(`Connect ${normalized} with your API key instead of OAuth. Paste your ${normalized} API key in the connection dialog.`);
   }
-
+  const authConfigId = await ensureComposioToolkitAuthConfig(normalized, input.preferredAuthConfigId);
+  const composio = getComposioVercelClient();
   const request = await composio.connectedAccounts.link(
     getComposioEntityId(input.auth),
     authConfigId,
@@ -588,7 +720,7 @@ async function startComposioAuthSession(input: {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (appKey === "resend") {
-          throw new Error(`Failed to start Resend auth in Composio. Ensure a Resend auth config exists in Composio for this project and uses your Resend API key auth. Underlying error: ${message}`);
+          throw new Error("Connect Resend with your API key instead of OAuth. Paste your Resend API key in the connection dialog.");
         }
         if (config.composioStrictMode) throw error;
         console.warn("[connectors] composio auth link fallback:", error);
@@ -698,6 +830,11 @@ export async function reconcileComposioConnectorAccounts(input: {
       .map((account) => ({ ...account, toolkit: account.appKey! }));
   }
   const toolkits = [...new Set((input.toolkits ?? []).map(normalizeComposioAppKey).filter(Boolean))];
+  if (toolkits.includes("resend")) {
+    await syncStoredNativeApiKeyToolkitToComposio({ auth: input.auth, toolkit: "resend" }).catch((error) => {
+      console.warn("[connectors] resend composio sync skipped:", error);
+    });
+  }
   const composio = getComposioVercelClient();
   const response = await composio.connectedAccounts.list({
     userIds: [getComposioEntityId(input.auth)],
@@ -1184,6 +1321,12 @@ export async function startConnectorAuth(input: {
   if (input.provider !== "composio") throw new Error("Composio is required for third-party workflow dependencies");
   const appKey = normalizeComposioAppKey(input.appKey ?? inferComposioAppKey(input.requiredScopes));
   if (!appKey) throw new Error("Connector toolkit is required to start Composio auth");
+  if (isPlatformManagedToolkit(appKey)) {
+    throw new Error(`"${appKey}" is managed by Tallei and does not require a Composio connection.`);
+  }
+  if (isNativeApiKeyComposioToolkit(appKey)) {
+    throw new Error(`Connect ${appKey} with your API key instead of OAuth. Paste your ${appKey} API key in the connection dialog.`);
+  }
   return startComposioAuthSession({
     auth: input.auth,
     providerKey: input.provider,
@@ -1465,6 +1608,13 @@ export async function upsertResendConnector(input: {
       }),
     ]
   );
+  await syncComposioApiKeyConnectedAccount({
+    auth: input.auth,
+    toolkit: "resend",
+    apiKey: trimmed,
+  }).catch((error) => {
+    console.warn("[connectors] resend composio sync failed:", error);
+  });
   return getResendConnectorSetup(input.auth);
 }
 

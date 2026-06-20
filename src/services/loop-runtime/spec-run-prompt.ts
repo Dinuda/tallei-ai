@@ -15,6 +15,7 @@ export function buildSpecRunSystemPrompt(spec: RunnableSpec, runContext?: RunCon
   const agentLines = spec.noSlopSpec.specJson.agents.map((agent, index) => [
     `### ${index + 1}. ${agent.name}`,
     `Goal: ${agent.goal}`,
+    ...(agent.tools.length > 0 ? [`Tools: ${agent.tools.join(", ")}`] : []),
     ...agent.guardrails.map((g) => `- Guardrail: ${g}`),
     ...agent.doneWhen.map((d) => `- Done when: ${d}`),
     ...agent.failureModes.map((f) => `- Failure mode: ${f}`),

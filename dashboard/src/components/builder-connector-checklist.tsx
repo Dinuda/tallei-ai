@@ -41,6 +41,17 @@ type PendingAuth = {
   requirementId: string;
 };
 
+type ResendSetupPayload = {
+  provider: "resend";
+  status: "connected" | "missing";
+  portalUrl: string;
+  apiKeysUrl: string;
+  docsUrl: string;
+  steps: string[];
+};
+
+const NATIVE_API_KEY_TOOLKITS = new Set(["resend"]);
+
 const pendingKey = (sessionId: string) => `loop-builder-connector-auth:${sessionId}`;
 
 function readPending(sessionId: string): PendingAuth | null {
@@ -74,6 +85,10 @@ export function BuilderConnectorChecklist({
   const [expanded, setExpanded] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
+  const [resendModalOpen, setResendModalOpen] = useState(false);
+  const [resendSetup, setResendSetup] = useState<ResendSetupPayload | null>(null);
+  const [resendApiKey, setResendApiKey] = useState("");
+  const [resendLabel, setResendLabel] = useState("");
   const resolvingRef = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -132,6 +147,22 @@ export function BuilderConnectorChecklist({
   async function connect(toolkit: string) {
     setError(null);
     setBusyToolkit(toolkit);
+    if (NATIVE_API_KEY_TOOLKITS.has(toolkit)) {
+      try {
+        const response = await fetch("/api/connectors/resend", { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error ?? "Failed to load Resend setup");
+        setResendSetup(payload as ResendSetupPayload);
+        setResendApiKey("");
+        setResendLabel("");
+        setResendModalOpen(true);
+        setBusyToolkit(null);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "We could not open the Resend connection dialog.");
+        setBusyToolkit(null);
+      }
+      return;
+    }
     const completionUrl = new URL("/connect/complete", window.location.origin);
     completionUrl.searchParams.set("builder_session", sessionId);
     completionUrl.searchParams.set("requirement", requirementId);
@@ -156,6 +187,36 @@ export function BuilderConnectorChecklist({
       if (!popup) setFallbackUrl(payload.setup_url);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "We could not open the connection. Please try again.");
+      setBusyToolkit(null);
+    }
+  }
+
+  async function saveResendConnector() {
+    if (!resendApiKey.trim()) {
+      setError("Resend API key is required");
+      return;
+    }
+    setError(null);
+    setBusyToolkit("resend");
+    try {
+      const response = await fetch("/api/connectors/resend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key: resendApiKey.trim(),
+          ...(resendLabel.trim().length > 0 ? { label: resendLabel.trim() } : {}),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Failed to connect Resend");
+      setResendSetup(payload as ResendSetupPayload);
+      setResendModalOpen(false);
+      setResendApiKey("");
+      setResendLabel("");
+      await refresh();
+      setBusyToolkit(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "We could not connect Resend.");
       setBusyToolkit(null);
     }
   }
@@ -220,6 +281,16 @@ export function BuilderConnectorChecklist({
 
       <div className="p-4">
         {!checklist && (
+          <div className="flex items-center gap-2 border border-dashed border-indigo-200 bg-white px-4 py-5 text-sm text-indigo-900/70">
+            <LoaderCircle className="size-4 animate-spin" /> Checking connected accounts...
+          </div>
+        )}
+        {checklist?.complete && checklist.apps.length === 0 && (
+          <div className="flex items-center gap-2 border border-emerald-200 bg-emerald-50 px-4 py-5 text-sm text-emerald-800">
+            <LoaderCircle className="size-4 animate-spin" /> Platform apps are ready — continuing...
+          </div>
+        )}
+        {checklist && !checklist.complete && checklist.apps.length === 0 && (
           <div className="flex items-center gap-2 border border-dashed border-indigo-200 bg-white px-4 py-5 text-sm text-indigo-900/70">
             <LoaderCircle className="size-4 animate-spin" /> Checking connected accounts...
           </div>
@@ -304,6 +375,49 @@ export function BuilderConnectorChecklist({
         </a>
       )}
       {error && <p className="mt-3 border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</p>}
+      {resendModalOpen && resendSetup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setResendModalOpen(false)}>
+          <div className="w-full max-w-md border border-indigo-200 bg-white p-5 shadow-xl" onClick={(event) => event.stopPropagation()}>
+            <div className="mb-4">
+              <h3 className="text-base font-bold text-indigo-950" style={{ fontFamily: "var(--font-title)" }}>Connect Resend</h3>
+              <p className="mt-1 text-sm text-indigo-900/70">Resend uses your own API key — not OAuth.</p>
+            </div>
+            <ol className="mb-4 list-decimal space-y-1 pl-5 text-xs text-indigo-900/80">
+              {resendSetup.steps.map((step, index) => (
+                <li key={index}>{step}</li>
+              ))}
+            </ol>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <a className="border border-indigo-200 px-2 py-1 text-xs text-indigo-700 underline" href={resendSetup.portalUrl} rel="noreferrer" target="_blank">Resend dashboard</a>
+              <a className="border border-indigo-200 px-2 py-1 text-xs text-indigo-700 underline" href={resendSetup.apiKeysUrl} rel="noreferrer" target="_blank">Create API key</a>
+            </div>
+            <label className="mb-3 block text-xs font-medium text-indigo-950" htmlFor="builder-resend-label">Label (optional)</label>
+            <input
+              className="mb-3 w-full border border-indigo-200 px-3 py-2 text-sm"
+              id="builder-resend-label"
+              onChange={(event) => setResendLabel(event.target.value)}
+              placeholder="Marketing account"
+              value={resendLabel}
+            />
+            <label className="mb-1 block text-xs font-medium text-indigo-950" htmlFor="builder-resend-api-key">API key</label>
+            <input
+              autoComplete="off"
+              className="mb-4 w-full border border-indigo-200 px-3 py-2 text-sm"
+              id="builder-resend-api-key"
+              onChange={(event) => setResendApiKey(event.target.value)}
+              placeholder="re_..."
+              type="password"
+              value={resendApiKey}
+            />
+            <div className="flex justify-end gap-2">
+              <Button onClick={() => setResendModalOpen(false)} size="sm" style={{ borderRadius: 0 }} variant="outline">Cancel</Button>
+              <Button className="bg-indigo-700 text-white hover:bg-indigo-800" disabled={busyToolkit === "resend"} onClick={() => void saveResendConnector()} size="sm" style={{ borderRadius: 0 }}>
+                {busyToolkit === "resend" ? <LoaderCircle className="size-4 animate-spin" /> : "Save and connect"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       {busyToolkit === "confirm" && (
         <div className="mt-4 flex items-center justify-end gap-2 text-xs text-indigo-900/70">
           <LoaderCircle className="size-4 animate-spin" /> Continuing...

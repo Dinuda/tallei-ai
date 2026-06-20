@@ -1,94 +1,105 @@
 "use client";
 
-import dynamic from "next/dynamic";
-import { useEffect, useRef, useState, type ComponentType } from "react";
-import { Loader2, Save } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { Loader2 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { EmailArtifactEditorPanel } from "@/components/email-artifact-editor-panel";
+import { renderEmailArtifactTemplate } from "@/lib/email-artifacts/build-template";
+import {
+  canvasEmailSavePayload,
+  inferReactEmailSource,
+  resolveCanvasEmailEditorContent,
+  type CanvasEmailTemplateData,
+} from "@/lib/email-artifacts/from-canvas-artifact";
 
-const EmailEditor = dynamic(() => import("react-email-editor").then((mod) => mod.default), {
-  ssr: false,
-  loading: () => (
-    <div className="grid min-h-[420px] place-items-center rounded-2xl border bg-slate-50 text-sm text-slate-500">
-      <Loader2 className="mr-2 inline size-4 animate-spin" />
-      Loading email canvas...
-    </div>
-  ),
-}) as ComponentType<Record<string, unknown>>;
+export type CanvasEmailTemplate = CanvasEmailTemplateData;
 
-type EditorRef = {
-  editor?: {
-    loadDesign: (design: unknown) => void;
-    exportHtml: (callback: (data: { design: unknown; html: string }) => void) => void;
-  };
-};
-
-export type CanvasEmailTemplate = {
-  design: unknown;
-  html: string;
-  text?: string;
-  subject?: string;
-  preview?: string;
-  updatedAt?: string;
-  source?: string;
-  finalUse?: boolean;
-};
+export type CanvasEmailFlushRef = MutableRefObject<(() => Promise<void>) | null>;
 
 export function CanvasEmailEditor({
   artifactKey,
   template,
   saving,
   onSave,
+  hideSaveButton = false,
+  flushRef,
 }: {
   artifactKey: string;
   template: CanvasEmailTemplate;
   saving: boolean;
-  onSave: (input: { design: unknown; html: string; text?: string; subject?: string; preview?: string }) => Promise<void>;
+  onSave: (input: {
+    design: unknown;
+    html: string;
+    text?: string;
+    subject?: string;
+    preview?: string;
+    reactEmailSource?: string;
+    editorContent?: string;
+  }) => Promise<void>;
+  hideSaveButton?: boolean;
+  flushRef?: CanvasEmailFlushRef;
 }) {
-  const editorRef = useRef<EditorRef | null>(null);
-  const [ready, setReady] = useState(false);
+  const reactEmailSource = useMemo(() => inferReactEmailSource(template), [template]);
+  const initialEditorContent = useMemo(() => resolveCanvasEmailEditorContent(template), [template]);
+  const [editorContent, setEditorContent] = useState(initialEditorContent);
   const [subject, setSubject] = useState(template.subject ?? "Email draft");
-  const [preview, setPreview] = useState(template.preview ?? "");
+  const [preview, setPreview] = useState(template.preview ?? template.subject ?? "");
+  const [rendering, setRendering] = useState(false);
+  const exportHtmlRef = useRef<(() => Promise<string>) | null>(null);
 
   useEffect(() => {
+    setEditorContent(resolveCanvasEmailEditorContent(template));
     setSubject(template.subject ?? "Email draft");
-    setPreview(template.preview ?? "");
-    if (ready && template.design) {
-      editorRef.current?.editor?.loadDesign(template.design);
-    }
-  }, [ready, template]);
+    setPreview(template.preview ?? template.subject ?? "");
+  }, [template]);
 
-  const save = async () => {
-    const editor = editorRef.current?.editor;
-    if (!editor) return;
-    await new Promise<void>((resolve, reject) => {
-      editor.exportHtml((data) => {
-        void onSave({
-          design: data.design,
-          html: data.html,
-          text: template.text,
-          subject,
-          preview,
-        }).then(resolve).catch(reject);
+  const save = useCallback(async (html: string) => {
+    setRendering(true);
+    try {
+      const rendered = await renderEmailArtifactTemplate({
+        reactEmailSource,
+        editorContent: html,
       });
-    });
-  };
+      await onSave(canvasEmailSavePayload({
+        template,
+        editorContent: html,
+        rendered,
+        subject,
+        preview,
+      }));
+      setEditorContent(html);
+    } finally {
+      setRendering(false);
+    }
+  }, [onSave, preview, reactEmailSource, subject, template]);
+
+  const flushSave = useCallback(async () => {
+    const exportHtml = exportHtmlRef.current;
+    if (!exportHtml) return;
+    const html = await exportHtml();
+    if (!html.trim()) return;
+    await save(html);
+  }, [save]);
+
+  useEffect(() => {
+    if (!flushRef) return;
+    flushRef.current = flushSave;
+    return () => {
+      flushRef.current = null;
+    };
+  }, [flushRef, flushSave]);
+
+  const busy = saving || rendering;
 
   return (
     <div className="space-y-4">
-      <div className="rounded-2xl border border-sky-100 bg-sky-50 p-4">
-        <p className="text-xs font-bold uppercase tracking-wide text-sky-700">Canvas email</p>
-        <p className="mt-1 text-sm text-slate-600">
-          Editing artifact <span className="font-mono">{artifactKey}</span>. Saving creates a new artifact version and does not advance the run.
-        </p>
-      </div>
       <div className="grid gap-3 md:grid-cols-2">
         <label className="text-sm font-semibold text-slate-700">
           Subject
           <input
             value={subject}
             onChange={(event) => setSubject(event.target.value)}
-            className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-normal outline-none focus:border-sky-400"
+            className="mt-1 w-full border border-[#d1d5db] bg-white px-3 py-2 text-sm font-normal outline-none focus:border-[#9ca3af] focus:ring-2 focus:ring-[#111827]/10"
           />
         </label>
         <label className="text-sm font-semibold text-slate-700">
@@ -96,29 +107,27 @@ export function CanvasEmailEditor({
           <input
             value={preview}
             onChange={(event) => setPreview(event.target.value)}
-            className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-normal outline-none focus:border-sky-400"
+            className="mt-1 w-full border border-[#d1d5db] bg-white px-3 py-2 text-sm font-normal outline-none focus:border-[#9ca3af] focus:ring-2 focus:ring-[#111827]/10"
           />
         </label>
       </div>
-      <div className="overflow-hidden rounded-2xl border">
-        <EmailEditor
-          ref={editorRef}
-          minHeight="620px"
-          onReady={() => {
-            setReady(true);
-            if (template.design) editorRef.current?.editor?.loadDesign(template.design);
-          }}
+      <div className="min-h-[520px]">
+        <EmailArtifactEditorPanel
+          content={editorContent}
+          editorKey={`${artifactKey}:${initialEditorContent.slice(0, 32)}`}
+          exportRef={exportHtmlRef}
+          hideSaveButton={hideSaveButton}
+          onSave={save}
+          saving={busy}
+          templateName={subject}
         />
       </div>
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs text-slate-500">
-          Last source: {template.source ?? "runtime"}{template.updatedAt ? ` at ${new Date(template.updatedAt).toLocaleString()}` : ""}
-        </p>
-        <Button onClick={() => void save()} disabled={saving || !ready} className="rounded-lg bg-[#0077b6] font-bold hover:bg-[#00689f]">
-          {saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-          Save canvas
-        </Button>
-      </div>
+      {busy ? (
+        <div className="flex items-center gap-2 text-[13px] text-[#6b7280]">
+          <Loader2 className="size-4 animate-spin" />
+          Saving email draft…
+        </div>
+      ) : null}
     </div>
   );
 }

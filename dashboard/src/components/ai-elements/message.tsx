@@ -26,6 +26,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { Streamdown } from "streamdown";
@@ -323,17 +324,48 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
+function useAnimationFrameText(value: MessageResponseProps["children"]) {
+  const isText = typeof value === "string";
+  const [displayText, setDisplayText] = useState(isText ? value : "");
+  const latestTextRef = useRef(displayText);
+  const frameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isText) return;
+    latestTextRef.current = value;
+    if (frameRef.current !== null) return;
+
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      setDisplayText(latestTextRef.current);
+    });
+  }, [isText, value]);
+
+  useEffect(() => () => {
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+    }
+  }, []);
+
+  return isText ? displayText : value;
+}
+
 export const MessageResponse = memo(
-  ({ className, ...props }: MessageResponseProps) => (
-    <Streamdown
-      className={cn(
-        "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-        className
-      )}
-      plugins={streamdownPlugins}
-      {...props}
-    />
-  ),
+  ({ children, className, ...props }: MessageResponseProps) => {
+    const displayedChildren = useAnimationFrameText(children);
+    return (
+      <Streamdown
+        className={cn(
+          "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+          className
+        )}
+        plugins={streamdownPlugins}
+        {...props}
+      >
+        {displayedChildren}
+      </Streamdown>
+    );
+  },
   (prevProps, nextProps) =>
     prevProps.children === nextProps.children &&
     nextProps.isAnimating === prevProps.isAnimating

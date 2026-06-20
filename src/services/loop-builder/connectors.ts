@@ -3,6 +3,10 @@ import {
   resolveConnectorAvailability,
   type ConnectorAvailabilitySnapshot,
 } from "../connectors/availability.js";
+import {
+  composioConnectorContracts,
+  normalizeDiscoveredToolContracts,
+} from "../connectors/platform-integrations.js";
 import { resolveBuildRequirement, unresolvedBuildRequirements } from "../loop-engine/build-contract.js";
 import { requireWorkflowBuilderSession, updateWorkflowBuilderSession, phaseAfterRequirementsResolved } from "./sessions.js";
 
@@ -38,9 +42,42 @@ export async function refreshBuilderConnectorAvailability(
   const session = await requireWorkflowBuilderSession(auth, sessionId);
   const requirement = session.buildContract?.requirements.find((entry) => entry.kind === "connector");
   if (!requirement || !session.buildContract) throw new Error("This builder session has no connector requirement.");
+  const normalizedContracts = normalizeDiscoveredToolContracts(session.discoveredToolContracts);
+  const composioContracts = composioConnectorContracts(normalizedContracts);
+
+  if (composioContracts.length === 0) {
+    const now = new Date().toISOString();
+    const buildContract = {
+      ...session.buildContract,
+      requirements: session.buildContract.requirements.map((entry) => entry.id === requirement.id
+        ? {
+          ...entry,
+          status: "resolved" as const,
+          value: { selections: [] },
+          provenance: { source: "legacy" as const, resolvedAt: now },
+          validationErrors: [],
+          warnings: ["No third-party app connections are required for this loop."],
+        }
+        : entry),
+      updatedAt: now,
+    };
+    await updateWorkflowBuilderSession(auth, sessionId, {
+      discoveredToolContracts: normalizedContracts,
+      buildContract,
+      error: null,
+    });
+    return {
+      checkedAt: now,
+      composioSessionId: session.composioSessionId ?? "",
+      apps: [],
+      requirementId: requirement.id,
+      complete: true,
+    };
+  }
+
   const refreshed = await resolveConnectorAvailability({
     auth,
-    contracts: session.discoveredToolContracts,
+    contracts: normalizedContracts,
     previousComposioSessionId: session.composioSessionId,
     selectedAccountIdsByToolkit: selectedAccountIdsByToolkit(session),
   });
@@ -65,12 +102,22 @@ export async function resolveBuilderConnectorRequirement(
   sessionId: string,
 ): Promise<{ checklist: BuilderConnectorChecklist; readyForSpecDraft: boolean }> {
   const checklist = await refreshBuilderConnectorAvailability(auth, sessionId);
+  const session = await requireWorkflowBuilderSession(auth, sessionId);
+  if (!session.buildContract) throw new Error("This builder session has no build contract.");
+
+  if (checklist.complete && checklist.apps.length === 0) {
+    const unresolved = unresolvedBuildRequirements(session.buildContract);
+    await updateWorkflowBuilderSession(auth, sessionId, {
+      phase: phaseAfterRequirementsResolved(session.phase, unresolved.length),
+      error: null,
+    });
+    return { checklist, readyForSpecDraft: unresolved.length === 0 };
+  }
+
   if (!checklist.complete) {
     const pending = checklist.apps.filter((app) => !app.accountConnected);
     throw new Error(`Required apps are not connected: ${pending.map((app) => app.name).join(", ")}`);
   }
-  const session = await requireWorkflowBuilderSession(auth, sessionId);
-  if (!session.buildContract) throw new Error("This builder session has no build contract.");
   const value = {
     selections: checklist.apps.map((app) => ({
       toolkit: app.toolkit,

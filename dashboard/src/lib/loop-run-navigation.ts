@@ -29,14 +29,7 @@ export async function resolveLoopRunNavigation(workflowId: string, latestRun?: L
     const run = payload.runs[0] as LoopRunSummary;
     return loopRunHref(workflowId, run.id);
   }
-  const createResponse = await fetch(`/api/workflows/internal/loops/${workflowId}/runs`, { method: "POST" });
-  const createPayload = await createResponse.json().catch(() => ({}));
-  if (!createResponse.ok) {
-    throw new Error((createPayload as { error?: string }).error ?? "Failed to open loop run");
-  }
-  const runId = String((createPayload as { run?: { id?: string } }).run?.id ?? "");
-  if (!runId) throw new Error("Failed to open loop run");
-  return loopRunHref(workflowId, runId);
+  return loopSettingsHref(workflowId);
 }
 
 export function triggerSourceLabel(source?: string, label?: string | null): string {

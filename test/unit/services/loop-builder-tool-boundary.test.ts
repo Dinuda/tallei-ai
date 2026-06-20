@@ -57,7 +57,7 @@ test("users select available apps before exact tool discovery", async () => {
   assert.match(route, /Never infer or silently select an app/);
   assert.match(route, /selectedToolkits:\s*z\.array/);
   assert.match(dispatcher, /Select at least one app before discovering tools/);
-  assert.match(discovery, /selectedToolkits\.has/);
+  assert.match(discovery, /composioToolkitSet\.has/);
   assert.match(builderPage, /BuilderAppSelector/);
   assert.match(appSelector, /\/api\/connectors\/composio\/toolkits/);
   assert.match(appSelector, /Use selected apps/);
@@ -118,6 +118,9 @@ test("spec drafting consumes persisted build contract without Composio discovery
   assert.doesNotMatch(specs, /discoverToolsForLoopBuild/);
   assert.match(specs, /loopBuildContractSchema\.parse\(input\.buildContract\)/);
   assert.match(specs, /buildContract,/);
+  assert.match(specs, /exactMaxTokens:\s*true/);
+  assert.match(specs, /emptyResponseRetryMaxTokens:\s*8192/);
+  assert.match(specs, /reportLoopBuilderProgress\(\{\s*stage:\s*"spec_generation"/);
   assert.match(dispatcher, /ensureDraftedSpec/);
   assert.match(dispatcher, /draftLoopSpec\(/);
 });
@@ -194,11 +197,14 @@ test("event choices come from discovered connector triggers and scheduled fallba
 
   assert.match(dispatcher, /listComposioTriggerTypes/);
   assert.match(route, /scheduleSetup:\s*tool\(/);
+  assert.match(route, /Schedule playbook for trigger_schedule/);
+  assert.match(route, /Tell Tallei what to do differently/);
   assert.match(route, /Never invent event-driven execution unless an exact discovered trigger capability/);
-  assert.match(scheduleSelector, /Run every hour/);
-  assert.match(scheduleSelector, /Run daily/);
+  assert.match(scheduleSelector, /Every hour/);
+  assert.match(scheduleSelector, /Weekly on Monday/);
+  assert.match(scheduleSelector, /InteractivePromptMenu/);
   assert.doesNotMatch(scheduleSelector, /every 1 minute|every 5 minutes/i);
-  assert.match(scheduleSelector, /Real-time triggers are not available/);
+  assert.doesNotMatch(scheduleSelector, /Real-time triggers are not available/);
   assert.doesNotMatch(scheduleSelector, /Validation error/);
   assert.match(verification, /DELETE FROM workflow_connector_triggers/);
   assert.match(verification, /trigger_instance_id = \$1 AND workflow_id <> \$2/);

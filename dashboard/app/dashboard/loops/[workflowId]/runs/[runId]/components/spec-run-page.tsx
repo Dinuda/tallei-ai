@@ -1,23 +1,19 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
-  getToolName,
-  isReasoningUIPart,
-  isToolUIPart,
-  lastAssistantMessageIsCompleteWithApprovalResponses,
-  lastAssistantMessageIsCompleteWithToolCalls,
   type UIMessage,
 } from "ai";
-import { motion } from "motion/react";
-import { Bot, ChevronRight, Loader2, RefreshCw, X } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
+import { CheckCircle2, Loader2 } from "lucide-react";
 
-import { cn } from "@/lib/utils";
-import { dedupeChatMessagesById } from "@/lib/chat-messages";
+import {
+  InteractivePromptMenu,
+  type InteractivePromptAnswer,
+} from "@/components/ai-elements/interactive-prompt-menu";
 import {
   Conversation,
   ConversationContent,
@@ -25,34 +21,37 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import {
-  Confirmation,
-  ConfirmationAction,
-  ConfirmationActions,
-  ConfirmationAccepted,
-  ConfirmationRejected,
-  ConfirmationRequest,
-  ConfirmationTitle,
-} from "@/components/ai-elements/confirmation";
-import {
   PromptInput,
   PromptInputFooter,
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
-import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
-import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
-import { EditorialMetaTag } from "./editorial-run-ui";
 import {
-  ChildAgentRow,
-  ChildAgentsHeader,
-  ChildAgentsShell,
-  ParentAgentRow,
-  formatSupervisorDisplayName,
-  formatWorkerDisplayName,
-  resolveStepToolRefs,
-  type ParentRunPhase,
-  type StepRowPhase,
-} from "./agent-panel-ui";
+  findActiveToolPart,
+  TranscriptMessageContent,
+} from "@/components/ai-elements/transcript-message";
+import { type ToolPart } from "@/components/ai-elements/tool";
+import { dedupeChatMessagesById } from "@/lib/chat-messages";
+import type { OperatorView } from "@/lib/operator-view-types";
+import { ArtifactRenderer } from "@/components/renderers";
+
+import { InboundEmailTriggerCard } from "./inbound-email-trigger-card";
+import {
+  buildSequentialStepTranscript,
+  hydrateMessagesFromSteps,
+  readMessageText,
+  shouldAutoStartRunStream,
+} from "./spec-run-transcript-hydration";
+import {
+  buildGatePromptOptions,
+  formatAgentStructuredOutput,
+  resolveActiveGate,
+  resolveDisplayArtifact,
+  toArtifactRecord,
+  type SpecRunArtifact,
+  type SpecRunInteraction,
+  type SpecRunStep,
+} from "./spec-run-view-utils";
 
 type SpecRunProjection = {
   id: string;
@@ -60,257 +59,137 @@ type SpecRunProjection = {
   workflow_title: string;
   status: string;
   error_json?: { message?: string };
-  definition?: {
-    goal?: string;
-    agentGraph?: {
-      parent?: { name?: string; task?: string };
-      children?: Array<{ id: string; name?: string; task?: string; tools?: Array<{ ref: string }> }>;
-    };
-  };
-  steps: Array<{
-    id: string;
-    step_index: number;
-    agent_id: string;
-    agent_snapshot: { id?: string; name?: string; task?: string; tools?: Array<{ ref: string }> };
-    attempt: number;
-    status: string;
-  }>;
+  steps: SpecRunStep[];
+  interactions?: SpecRunInteraction[];
+  artifacts?: SpecRunArtifact[];
+  operatorView?: OperatorView | null;
 };
 
-const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "blocked", "waiting_for_interaction"]);
+const ACTIVE_STATUSES = new Set(["running", "queued", "waiting_for_interaction", "waiting_for_approval"]);
+const GATE_TOOL_NAMES = ["requestReview", "requestApproval", "requestInput"];
 
-function statusLabel(status: string): string {
-  if (status === "waiting_for_interaction" || status === "waiting_for_approval") {
-    return "Paused · Needs approval";
+type TriggerSummary = {
+  event: string;
+  subject: string;
+  customerName: string;
+  customerEmail: string;
+  bodyPreview: string;
+};
+
+function parseTriggerSummary(text: string): TriggerSummary | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const event = trimmed.match(/^Event:\s*(.+)$/m)?.[1]?.trim() ?? "";
+  const subject = trimmed.match(/-\s*Subject:\s*(.+)$/m)?.[1]?.trim() ?? "";
+  const customerName = trimmed.match(/-\s*Name:\s*(.+)$/m)?.[1]?.trim() ?? "";
+  const customerEmail = trimmed.match(/-\s*Email:\s*(.+)$/m)?.[1]?.trim() ?? "";
+  const rawBody = trimmed.match(/-\s*Body:\s*([\s\S]*?)(?:\n-\s*Thread ID:|\n\nCustomer|\nCustomer\s*\()/)?.[1]?.trim() ?? "";
+  const bodyPreview = rawBody
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 600);
+  if (!event && !subject && !customerEmail) return null;
+  return { event, subject, customerName, customerEmail, bodyPreview };
+}
+
+function parseJsonRecord(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
   }
-  return status.replace(/_/g, " ");
 }
 
-function RunStatusPill({ status }: { status: string }) {
-  const tone = status === "succeeded"
-    ? "border-[#86c8a8] bg-[#edf8f2] text-[#166534]"
-    : status === "failed" || status === "blocked" || status === "cancelled"
-      ? "border-[#d9a3a3] bg-[#fdf2f2] text-[#991b1b]"
-      : status === "waiting_for_interaction" || status === "waiting_for_approval"
-        ? "border-[#9bb8d9] bg-[#edf3fb] text-[#1e4070]"
-        : status === "running"
-          ? "border-[#b8c9dc] bg-[#f0f4f9] text-[#334155]"
-          : "border-[#e5e7eb] bg-[#fafafa] text-[#6b7280]";
-  return (
-    <span
-      className={cn("inline-flex items-center border px-2.5 py-1 text-[11px] font-semibold tracking-wide uppercase", tone)}
-      style={{ fontFamily: "var(--font-fustat)" }}
-    >
-      {statusLabel(status)}
-    </span>
-  );
+function shouldRenderAssistantText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (parseJsonRecord(trimmed)) return false;
+  if (/"emailDrafts"\s*:/.test(trimmed)) return false;
+  return true;
 }
 
-function resolveCurrentStep(
-  steps: SpecRunProjection["steps"],
-  runStatus: string,
-): SpecRunProjection["steps"][number] | null {
-  const gateStep = steps.find((step) => step.status === "waiting_for_interaction" || step.status === "waiting_for_gate");
-  if (gateStep) return gateStep;
-  const runningStep = steps.find((step) => step.status === "running");
-  if (runningStep) return runningStep;
-  if (runStatus === "succeeded") return steps[steps.length - 1] ?? null;
-  return steps.find((step) => step.status !== "succeeded" && step.status !== "cancelled") ?? steps[0] ?? null;
+function isTriggerSeedMessage(message: UIMessage, index: number): boolean {
+  if (index !== 0 || message.role !== "user") return false;
+  return Boolean(parseTriggerSummary(readMessageText(message)));
 }
 
-function resolveStepRowPhase(
-  step: SpecRunProjection["steps"][number],
-  currentStep: SpecRunProjection["steps"][number] | null,
-  runStatus: string,
-): StepRowPhase {
-  const isCurrent = currentStep?.id === step.id;
-  if (isCurrent && (step.status === "waiting_for_interaction" || step.status === "waiting_for_gate")) {
-    return "current_gate";
-  }
-  if (isCurrent && step.status === "running") return "current_running";
-  if (step.status === "running") return "running";
-  if (step.status === "failed" || step.status === "cancelled") return "failed";
-  if (step.status === "succeeded" || step.status === "approved") return "done";
-  if (currentStep && step.step_index > currentStep.step_index) return "queued";
-  if (runStatus === "running" && isCurrent) return "current_running";
-  return "queued";
-}
-
-function resolveParentRunPhase(
-  runStatus: string,
-  pendingApproval: boolean,
-): ParentRunPhase {
-  if (pendingApproval || runStatus === "waiting_for_interaction" || runStatus === "waiting_for_approval") {
-    return "paused";
-  }
-  if (runStatus === "failed" || runStatus === "blocked" || runStatus === "cancelled") return "blocked";
-  if (runStatus === "running" || runStatus === "queued") return "running";
-  if (runStatus === "succeeded") return "done";
-  return "idle";
-}
-
-function EditorialSidebarPanel({
-  title,
-  icon: Icon,
-  meta,
-  children,
-}: {
-  title: string;
-  icon?: React.ComponentType<{ className?: string }>;
-  meta?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="border border-[#d1d5db] bg-white">
-      <header className="flex items-center justify-between border-b border-[#e5e7eb] bg-[#fafafa] px-5 py-3.5">
-        <h2
-          className="flex items-center gap-2 text-[14px] font-bold tracking-[-0.02em] text-[#111827]"
-          style={{ fontFamily: "var(--font-title)" }}
-        >
-          {Icon ? <Icon className="size-4 text-[#6b7280]" /> : null}
-          {title}
-        </h2>
-        {meta}
-      </header>
-      {children}
-    </section>
-  );
-}
-
-function ScrollOnToolComplete({ messages }: { messages: UIMessage[] }) {
+function ScrollOnUpdate() {
   const { scrollToBottom, isAtBottom } = useStickToBottomContext();
-  const lastCompletedRef = useRef<string | null>(null);
-
   useEffect(() => {
-    const completedTool = messages
-      .flatMap((message) => message.parts)
-      .find((part) => isToolUIPart(part) && part.state === "output-available" && "toolCallId" in part && part.toolCallId !== lastCompletedRef.current);
-
-    if (completedTool && "toolCallId" in completedTool) {
-      lastCompletedRef.current = completedTool.toolCallId;
-      if (isAtBottom) {
-        void scrollToBottom({
-          animation: { damping: 0.8, stiffness: 0.04, mass: 1.5 },
-          preserveScrollPosition: true,
-        });
-      }
-    }
-  }, [messages, scrollToBottom, isAtBottom]);
-
+    if (!isAtBottom) return;
+    void scrollToBottom({ animation: { damping: 0.85, stiffness: 0.05, mass: 1.2 } });
+  }, [isAtBottom, scrollToBottom]);
   return null;
 }
 
-function CollapsibleTool({ part, children }: { part: ToolPart; children: React.ReactNode }) {
-  const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined);
-  const isCompleted = part.state === "output-available";
-  const open = isCompleted ? (userOpen ?? false) : (userOpen ?? true);
-
+function TriggerCard({ summary }: { summary: TriggerSummary }) {
   return (
-    <Tool open={open} onOpenChange={setUserOpen}>
-      {children}
-    </Tool>
+    <Message from="user" className="max-w-[760px]">
+      <MessageContent className="w-full border-0 bg-transparent p-0 shadow-none">
+        <InboundEmailTriggerCard summary={summary} />
+      </MessageContent>
+    </Message>
   );
 }
 
-function SpecRunChatTranscript({
-  messages,
-  error,
-  addToolApprovalResponse,
-}: {
-  messages: UIMessage[];
-  error: Error | undefined;
-  addToolApprovalResponse: (input: { id: string; approved: boolean }) => void;
-}) {
-  const transcriptMessages = useMemo(() => dedupeChatMessagesById(messages), [messages]);
+function FinalizeAgentOutput({ part }: { part: ToolPart }) {
+  const input = part.input && typeof part.input === "object" && !Array.isArray(part.input)
+    ? part.input as Record<string, unknown>
+    : {};
+  const text = formatAgentStructuredOutput(input.output);
+  if (!text) return null;
+  return (
+    <div className="mt-1">
+      <MessageResponse>{text}</MessageResponse>
+    </div>
+  );
+}
+
+function CompletedGateSummary({ toolName, part }: { toolName: string; part: ToolPart }) {
+  const input = part.input && typeof part.input === "object" && !Array.isArray(part.input)
+    ? part.input as Record<string, unknown>
+    : {};
+  const rationale = typeof input.rationale === "string" ? input.rationale.trim() : "";
+  const label = toolName === "requestReview"
+    ? "Draft review completed"
+    : toolName === "requestApproval"
+      ? "Approval completed"
+      : "Input received";
 
   return (
-    <>
-      <ScrollOnToolComplete messages={transcriptMessages} />
-      {transcriptMessages.length === 0 ? (
-        <div className="flex min-h-[280px] flex-col items-center justify-center gap-3 py-16 text-center text-sm text-[#9ca3af]">
-          <Bot className="size-8 text-[#cbd5e1]" />
-          <p>The loop runner will stream agent progress here.</p>
-        </div>
-      ) : null}
-      {transcriptMessages.map((message) => (
-        <Message from={message.role} key={message.id}>
-          <MessageContent>
-            {message.parts.map((part, index) => {
-              if (part.type === "text") {
-                return <MessageResponse key={index}>{part.text}</MessageResponse>;
-              }
-              if (isReasoningUIPart(part)) {
-                const reasoningText = part.text?.trim() ?? "";
-                if (!reasoningText && part.state !== "streaming") return null;
-                return (
-                  <Reasoning
-                    isStreaming={part.state === "streaming"}
-                    defaultOpen={part.state === "streaming"}
-                    key={`reasoning-${index}`}
-                  >
-                    <ReasoningTrigger />
-                    <ReasoningContent>{part.text}</ReasoningContent>
-                  </Reasoning>
-                );
-              }
-              if (isToolUIPart(part)) {
-                const toolName = getToolName(part);
-                if (part.state === "approval-requested" || part.state === "approval-responded" || part.state === "output-denied") {
-                  return (
-                    <Confirmation approval={part.approval} key={index} state={part.state}>
-                      <ConfirmationTitle>Approve <strong>{toolName}</strong>?</ConfirmationTitle>
-                      <ConfirmationRequest>
-                        <p className="text-sm text-muted-foreground">This connector action requires your approval before execution.</p>
-                      </ConfirmationRequest>
-                      <ConfirmationAccepted>Approved.</ConfirmationAccepted>
-                      <ConfirmationRejected>Rejected.</ConfirmationRejected>
-                      <ConfirmationActions>
-                        <ConfirmationAction
-                          onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: false })}
-                          variant="outline"
-                          className="border-[#d1d5db] text-[#6b7280] hover:bg-[#fafafa]"
-                        >
-                          Reject
-                        </ConfirmationAction>
-                        <ConfirmationAction
-                          onClick={() => addToolApprovalResponse({ id: part.approval!.id, approved: true })}
-                          className="bg-[#111827] text-white hover:opacity-85"
-                        >
-                          Approve
-                        </ConfirmationAction>
-                      </ConfirmationActions>
-                    </Confirmation>
-                  );
-                }
-                return (
-                  <CollapsibleTool key={index} part={part}>
-                    {part.type === "dynamic-tool"
-                      ? <ToolHeader type={part.type} state={part.state} toolName={part.toolName} />
-                      : <ToolHeader type={part.type} state={part.state} />}
-                    <ToolContent
-                      className={cn(
-                        "transition-all",
-                        part.state !== "output-available" && [
-                          "max-h-[360px] overflow-hidden",
-                          "[mask-image:linear-gradient(to_bottom,black_85%,transparent_100%)]",
-                          "[-webkit-mask-image:linear-gradient(to_bottom,black_85%,transparent_100%)]",
-                        ],
-                      )}
-                    >
-                      <ToolInput input={part.input} />
-                      <ToolOutput output={part.output} errorText={part.errorText} />
-                    </ToolContent>
-                  </CollapsibleTool>
-                );
-              }
-              return null;
-            })}
-          </MessageContent>
-        </Message>
-      ))}
-      {error ? <p className="text-sm text-destructive">{error.message}</p> : null}
-    </>
+    <div className="rounded-md border border-[#e5e7eb] bg-[#fafafa] px-4 py-3 text-[13px] text-[#374151]">
+      <div className="flex items-center gap-2 font-medium text-[#111827]">
+        <CheckCircle2 className="size-4 text-[#16a34a]" />
+        {label}
+      </div>
+      {rationale ? <p className="mt-1.5 leading-5 text-[#6b7280]">{rationale}</p> : null}
+    </div>
   );
+}
+
+function mapGateAnswer(answer: InteractivePromptAnswer) {
+  const optionId = answer.selectedOptionIds[0];
+  if (optionId === "approve") {
+    return {
+      command: "approve" as const,
+      value: { channel: "dashboard", approvalIntent: "approve_and_send" },
+    };
+  }
+  if (optionId === "reject") return { command: "reject" as const, value: { reason: "Rejected by operator" } };
+  if (optionId === "revise") {
+    const feedback = answer.otherText?.trim() || answer.answerText || "Operator requested changes.";
+    return { command: "revise" as const, value: { feedback, channel: "dashboard" } };
+  }
+  return { command: "submit_input" as const, value: { channel: "dashboard", text: answer.answerText } };
 }
 
 export function SpecRunPage({
@@ -324,286 +203,457 @@ export function SpecRunPage({
   run: SpecRunProjection;
   onRefresh: () => Promise<void>;
 }) {
-  const [run, setRun] = useState<SpecRunProjection>(initialRun);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [run, setRun] = useState(initialRun);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
-
-  const refreshRun = useCallback(async () => {
-    const response = await fetch(`/api/workflows/runs/${runId}`, { cache: "no-store" });
-    const payload = await response.json().catch(() => ({}));
-    if (response.ok && payload.run) {
-      setRun(payload.run as SpecRunProjection);
-    }
-    await onRefresh();
-  }, [onRefresh, runId]);
+  const [submittedAnswer, setSubmittedAnswer] = useState<InteractivePromptAnswer | null>(null);
+  const canvasFlushRef = useRef<(() => Promise<void>) | null>(null);
+  const autoStartAttemptedRef = useRef(false);
 
   useEffect(() => {
     setRun(initialRun);
   }, [initialRun]);
 
-  const { messages, sendMessage, status: chatStatus, setMessages, addToolApprovalResponse, stop, error: chatError } = useChat({
+  const refreshRun = useCallback(async () => {
+    const response = await fetch(`/api/workflows/runs/${runId}`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok && payload.run) setRun(payload.run as SpecRunProjection);
+    await onRefresh();
+  }, [onRefresh, runId]);
+
+  const { messages, sendMessage, setMessages, status: chatStatus, stop } = useChat({
     id: runId,
     transport: new DefaultChatTransport({
       api: `/api/workflows/loops/${workflowId}/run/chat`,
-      prepareSendMessagesRequest: ({ messages: chatMessages, id }) => ({
-        body: {
-          runId: id,
-          messages: chatMessages,
-        },
-      }),
+      prepareSendMessagesRequest: async ({ messages: chatMessages, id }) => {
+        const response = await fetch(`/api/workflows/runs/${id}/messages`, { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        const serverMessages = Array.isArray(payload.messages)
+          ? dedupeChatMessagesById(payload.messages as UIMessage[])
+          : dedupeChatMessagesById(chatMessages);
+        const serverIds = new Set(serverMessages.map((message) => message.id));
+        const trailingClient = chatMessages.filter((message) => !serverIds.has(message.id));
+        return {
+          body: {
+            runId: id,
+            messages: dedupeChatMessagesById([...serverMessages, ...trailingClient]),
+          },
+        };
+      },
     }),
-    sendAutomaticallyWhen: ({ messages: currentMessages }) =>
-      lastAssistantMessageIsCompleteWithApprovalResponses({ messages: currentMessages })
-      || lastAssistantMessageIsCompleteWithToolCalls({ messages: currentMessages }),
     onFinish: () => {
+      // Refresh run state + reload messages from server (server dedupes by step index on save).
       void refreshRun();
+      void refreshMessages();
     },
   });
+
+  const refreshMessages = useCallback(async () => {
+    const response = await fetch(`/api/workflows/runs/${runId}/messages`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok && Array.isArray(payload.messages)) {
+      setMessages(dedupeChatMessagesById(payload.messages as UIMessage[]));
+    }
+  }, [runId, setMessages]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      try {
-        const response = await fetch(`/api/workflows/runs/${runId}/messages`, { cache: "no-store" });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || cancelled) return;
-        if (Array.isArray(payload.messages)) {
-          setMessages(dedupeChatMessagesById(payload.messages));
-        }
-      } catch {
-        // Best-effort message hydration.
+      const response = await fetch(`/api/workflows/runs/${runId}/messages`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!cancelled && response.ok && Array.isArray(payload.messages)) {
+        setMessages(dedupeChatMessagesById(payload.messages as UIMessage[]));
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [runId, setMessages]);
 
   useEffect(() => {
-    if (terminalStatuses.has(run.status) && chatStatus !== "streaming" && chatStatus !== "submitted") return;
-    const timer = window.setInterval(() => void refreshRun(), 3_000);
+    // Only poll while the run is live or a stream is in flight.
+    if (!ACTIVE_STATUSES.has(run.status) && chatStatus !== "streaming" && chatStatus !== "submitted") return;
+    // Don't poll during streaming — refreshMessages during streaming can overwrite in-flight
+    // messages and cause visual flicker.  onFinish does the authoritative reload.
+    if (chatStatus === "streaming" || chatStatus === "submitted") return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        await refreshRun();
+        await refreshMessages();
+      })();
+    }, 2_500);
     return () => window.clearInterval(timer);
-  }, [run.status, chatStatus, refreshRun]);
+  }, [run.status, chatStatus, refreshMessages, refreshRun]);
 
-  const post = useCallback(async (path: string) => {
-    setBusy(path);
+  const post = useCallback(async (path: string, body?: Record<string, unknown>) => {
+    setBusy(true);
     setError(null);
     try {
-      const response = await fetch(path, { method: "POST" });
+      const response = await fetch(path, {
+        method: "POST",
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error ?? "Command failed");
+      if (!response.ok) throw new Error(payload.error ?? "Request failed");
+      if (payload.run) setRun(payload.run as SpecRunProjection);
       await refreshRun();
-    } catch (commandError) {
-      setError(commandError instanceof Error ? commandError.message : "Command failed");
+      await refreshMessages();
+      return payload;
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Request failed");
+      throw requestError;
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
-  }, [refreshRun]);
+  }, [refreshMessages, refreshRun]);
 
-  const latestSteps = useMemo(
-    () => [...run.steps].sort((a, b) => a.step_index - b.step_index),
-    [run.steps],
+  const continueRunStream = useCallback(async () => {
+    await sendMessage({ text: "Continue" });
+  }, [sendMessage]);
+
+  const pendingInteraction = useMemo(
+    () => run.interactions?.find((interaction) => interaction.status === "pending") ?? null,
+    [run.interactions],
   );
 
-  const pendingApproval = useMemo(
-    () => messages.some((message) =>
-      message.parts.some((part) => isToolUIPart(part) && part.state === "approval-requested"),
-    ),
+  const gate = useMemo(
+    () => resolveActiveGate({
+      runStatus: run.status,
+      steps: run.steps,
+      pendingInteraction,
+      operatorView: run.operatorView ?? null,
+    }),
+    [pendingInteraction, run.operatorView, run.status, run.steps],
+  );
+
+  const activeGateTool = useMemo(
+    () => findActiveToolPart(messages, GATE_TOOL_NAMES),
     [messages],
   );
 
-  const currentStep = useMemo(
-    () => resolveCurrentStep(latestSteps, run.status),
-    [latestSteps, run.status],
+  const transcriptMessages = useMemo(
+    () => hydrateMessagesFromSteps(
+      dedupeChatMessagesById(messages),
+      run.steps,
+      run.interactions ?? [],
+    ),
+    [messages, run.interactions, run.steps],
   );
 
-  const parentRunPhase = useMemo(
-    () => resolveParentRunPhase(run.status, pendingApproval),
-    [pendingApproval, run.status],
+  useEffect(() => {
+    autoStartAttemptedRef.current = false;
+  }, [runId]);
+
+  useEffect(() => {
+    if (autoStartAttemptedRef.current) return;
+    if (!shouldAutoStartRunStream({
+      runStatus: run.status,
+      messages,
+      pendingInteraction: Boolean(pendingInteraction),
+      chatStatus,
+    })) {
+      return;
+    }
+    autoStartAttemptedRef.current = true;
+    void sendMessage({ text: "Continue" });
+  }, [chatStatus, messages, pendingInteraction, run.status, sendMessage]);
+
+  const displayArtifact = useMemo(
+    () => resolveDisplayArtifact({
+      artifacts: run.artifacts,
+      operatorView: gate.operatorView,
+      pendingInteraction,
+    }),
+    [gate.operatorView, pendingInteraction, run.artifacts],
   );
 
-  const doneSteps = latestSteps.filter((step) => step.status === "succeeded").length;
-  const parentName = formatSupervisorDisplayName(run.definition?.agentGraph?.parent?.name ?? "Tallei Agent");
-  const workerNames = latestSteps.map((step) => step.agent_snapshot?.name ?? step.agent_id);
-  const roster = workerNames.length > 0
-    ? `Queue: ${workerNames.map(formatWorkerDisplayName).join(" → ")}.`
-    : "Queue: waiting for agents.";
-  const statusLine = pendingApproval
-    ? "Paused — approve the pending connector action in chat to continue."
-    : parentRunPhase === "running"
-      ? `Live: ${doneSteps} of ${latestSteps.length} agents complete.`
-      : parentRunPhase === "done"
-        ? `All ${latestSteps.length} agents finished.`
-        : parentRunPhase === "blocked"
-          ? "Run blocked or failed — retry when ready."
-          : "Spinning up the agent queue.";
+  const canvasArtifact = displayArtifact;
+  const artifactStepAttemptId = displayArtifact?.step_attempt_id ?? pendingInteraction?.step_attempt_id ?? null;
 
-  const terminal = terminalStatuses.has(run.status);
-  const canSend = !terminal && chatStatus !== "streaming" && chatStatus !== "submitted";
+  const stepTranscript = useMemo(
+    () => buildSequentialStepTranscript({
+      steps: run.steps,
+      messages,
+      interactions: run.interactions ?? [],
+      chatStatus,
+      pendingInteractionStepAttemptId: artifactStepAttemptId,
+    }),
+    [artifactStepAttemptId, chatStatus, messages, run.interactions, run.steps],
+  );
+
+  useEffect(() => {
+    if (!gate.show) setSubmittedAnswer(null);
+  }, [gate.show, gate.interaction?.id]);
+
+  // Show the working indicator only in the pre-stream gap (run is active but no tokens yet).
+  // Don't show it while streaming — real content is already visible then.
+  const showWorking = !gate.show
+    && !activeGateTool
+    && chatStatus !== "streaming"
+    && (run.status === "running" || chatStatus === "submitted");
+
+  const renderRunTool = useCallback((part: ToolPart, toolName: string, index: number): ReactNode | null | undefined => {
+    if (toolName === "finalizeAgent") {
+      if (part.state === "input-streaming" || part.state === "input-available") return null;
+      if (part.state === "output-available") {
+        return <FinalizeAgentOutput key={index} part={part} />;
+      }
+    }
+    if (GATE_TOOL_NAMES.includes(toolName)) {
+      // Hide while streaming input — gate composer handles the active state.
+      if (part.state === "input-streaming" || part.state === "input-available") return null;
+      if (part.state === "output-available") {
+        // If the tool result carries an error (e.g. validation failure), show a compact
+        // red pill instead of the raw CollapsibleTool JSON dump.
+        const errorText = (part as { errorText?: string }).errorText;
+        if (errorText) {
+          return (
+            <div key={index} className="rounded-md border border-[#fecaca] bg-[#fef2f2] px-3 py-2 text-[12px] text-[#991b1b]">
+              {errorText}
+            </div>
+          );
+        }
+        return <CompletedGateSummary key={index} part={part} toolName={toolName} />;
+      }
+      // Any other state (e.g. error state from AI SDK) — suppress rather than show raw JSON.
+      return null;
+    }
+    return undefined;
+  }, []);
+
+  async function handleGateSubmit(answer: InteractivePromptAnswer) {
+    if (!gate.interaction) return;
+    const mapped = mapGateAnswer(answer);
+    const interactionId = gate.interaction.id;
+    setBusy(true);
+    setError(null);
+    try {
+      if (mapped.command === "approve" && canvasArtifact && canvasFlushRef.current) {
+        try {
+          await canvasFlushRef.current();
+        } catch {
+          // Proceed even if draft save fails.
+        }
+      }
+      const response = await fetch(
+        `/api/workflows/runs/${runId}/interactions/${interactionId}/commands`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(mapped),
+        },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "Failed to submit review decision");
+
+      // Optimistically resolve the gate — don't wait for refreshRun to dismiss it.
+      setRun((prev) => ({
+        ...prev,
+        status: "running",
+        interactions: (prev.interactions ?? []).map((entry) =>
+          entry.id === interactionId ? { ...entry, status: "approved" } : entry
+        ),
+      }));
+      setSubmittedAnswer(answer);
+      setBusy(false);
+
+      // Kick off the stream immediately. onFinish will refresh run/messages.
+      if (payload.resumeViaStream !== false) {
+        void sendMessage({ text: "Continue" });
+      } else {
+        // Headless path — refresh to pick up completed state.
+        void refreshRun();
+      }
+    } catch (requestError) {
+      setSubmittedAnswer(null);
+      setError(requestError instanceof Error ? requestError.message : "Failed to submit review decision");
+      setBusy(false);
+    }
+  }
+
+  async function saveCanvasEmail(
+    artifactKey: string,
+    value: { design: unknown; html: string; text?: string; subject?: string; preview?: string },
+  ) {
+    await post(
+      `/api/workflows/runs/${runId}/artifacts/${encodeURIComponent(artifactKey)}/canvas/email`,
+      value as Record<string, unknown>,
+    );
+  }
+
+  async function submitComposerText(text: string) {
+    const value = text.trim();
+    if (!value || busy) return;
+    const normalized = value.toLowerCase();
+    if (pendingInteraction) {
+      if (/^(approve|approved|yes|send|approve and send)$/i.test(value)) {
+        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+          command: "approve",
+          value: { channel: "dashboard", approvalIntent: "approve_and_send", text: value },
+        });
+      } else if (/^(reject|cancel|stop)$/i.test(value)) {
+        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+          command: "reject",
+          value: { channel: "dashboard", reason: "Rejected by operator" },
+        });
+      } else if (gate.operatorView?.actions.some((action) => action.command === "submit_input")) {
+        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+          command: "submit_input",
+          value: { channel: "dashboard", text: value },
+        });
+      } else {
+        await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, {
+          command: "revise",
+          value: { channel: "dashboard", feedback: value },
+        });
+      }
+      await continueRunStream();
+      return;
+    }
+    if (/^(continue|resume|retry|run|rerun)$/i.test(normalized) && !ACTIVE_STATUSES.has(run.status)) {
+      await post(`/api/workflows/runs/${runId}/retry`);
+      await continueRunStream();
+      return;
+    }
+    await sendMessage({ text: value });
+  }
+
+  const gateTitle = gate.operatorView?.workspace.title || "Draft review";
+  const gateSubtitle = gate.interaction?.question?.trim() || gateTitle;
+  const gateHint = gate.operatorView?.blocks.some((block) => block.surface === "review.email" || block.surface === "review.draft")
+    ? "Edit the draft above if needed, then approve, request changes, or reject."
+    : "Choose how to continue this run.";
+  const showGateComposer = gate.show && gate.operatorView && !submittedAnswer;
 
   return (
-    <main
-      className="flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden bg-[#f7f8fb] text-[#121a31]"
-      style={{ fontFamily: "var(--font-fustat)" }}
-    >
-      <div className="mx-auto flex min-h-0 w-full max-w-[1660px] flex-1 flex-col px-7 py-5">
-        <header className="mb-4 shrink-0 flex items-start justify-between gap-4">
-          <div>
-            <nav className="mb-2 flex items-center gap-2 text-[13px] font-medium text-[#9ca3af]">
-              <Link href="/dashboard/loops" className="hover:text-[#111827]">Loops</Link>
-              <ChevronRight className="size-3.5" />
-              <Link href={`/dashboard/loops/${workflowId}`} className="hover:text-[#111827]">{run.workflow_title}</Link>
-              <ChevronRight className="size-3.5" />
-              <span className="text-[#111827]">Run #{run.id.slice(0, 6)}</span>
-            </nav>
-            <div className="flex flex-wrap items-center gap-3">
-              <h1
-                className="text-[25px] font-bold leading-tight tracking-[-0.02em] text-[#111827]"
-                style={{ fontFamily: "var(--font-title)" }}
-              >
-                {run.workflow_title}
-              </h1>
-              <RunStatusPill status={run.status} />
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              title="Refresh"
-              onClick={() => void refreshRun()}
-              disabled={Boolean(busy)}
-              className="grid size-9 place-items-center border border-[#d1d5db] bg-white text-[#6b7280] transition-colors hover:bg-[#fafafa] hover:text-[#111827] disabled:opacity-50"
-            >
-              <RefreshCw className="size-4" />
-            </button>
-            {terminal ? (
-              <button
-                type="button"
-                onClick={() => void post(`/api/workflows/runs/${runId}/retry`)}
-                disabled={Boolean(busy)}
-                className="border border-[#111827] bg-[#111827] px-4 py-2 text-[13px] font-semibold text-white hover:opacity-85 disabled:opacity-50"
-              >
-                Retry
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => void post(`/api/workflows/runs/${runId}/cancel`)}
-                disabled={Boolean(busy)}
-                className="grid size-9 place-items-center border border-[#d1d5db] bg-white text-[#6b7280] transition-colors hover:border-[#d9a3a3] hover:text-[#991b1b] disabled:opacity-50"
-              >
-                <X className="size-4" />
-              </button>
-            )}
-          </div>
-        </header>
+    <main className="relative flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden bg-white text-[#111827]">
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-0 h-[400px] bg-gradient-to-t from-slate-100 to-transparent" />
+      <div className="relative z-10 flex h-full flex-col overflow-hidden">
+        <Conversation>
+          <ConversationContent className={`mx-auto max-w-3xl gap-8 p-4 transition-[padding-bottom] ${showGateComposer ? "pb-[560px]" : "pb-40"}`}>
+            <ScrollOnUpdate />
 
-        {(error || run.error_json?.message) ? (
-          <div className="mb-4 shrink-0 border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            {error ?? run.error_json?.message}
-          </div>
-        ) : null}
+            {(error || run.error_json?.message) ? (
+              <Message from="assistant">
+                <MessageContent>
+                  <p className="text-sm text-[#991b1b]">{error ?? run.error_json?.message}</p>
+                </MessageContent>
+              </Message>
+            ) : null}
 
-        <div className="grid min-h-0 flex-1 items-stretch gap-5 overflow-hidden lg:grid-cols-[minmax(0,1fr)_490px]">
-          <section className="flex min-h-0 flex-col overflow-hidden border border-[#d1d5db] bg-white">
-            <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div className="pointer-events-none absolute inset-x-0 bottom-0 z-0 h-[280px] bg-gradient-to-t from-slate-100/80 to-transparent" />
-              <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden">
-                <Conversation className="min-h-0 flex-1">
-                  <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
-                    <SpecRunChatTranscript
-                      messages={messages}
-                      error={chatError}
-                      addToolApprovalResponse={addToolApprovalResponse}
+            {transcriptMessages.map((message, index) => {
+              if (isTriggerSeedMessage(message, index)) {
+                const summary = parseTriggerSummary(readMessageText(message));
+                if (summary) return <TriggerCard key={message.id} summary={summary} />;
+              }
+              return null;
+            })}
+
+            {stepTranscript.map((block) => (
+              <div key={block.message.id} className="flex w-full flex-col gap-4">
+                <Message from={block.message.role}>
+                  <MessageContent className="w-full">
+                    <TranscriptMessageContent
+                      message={block.message}
+                      renderTool={renderRunTool}
+                      shouldRenderText={shouldRenderAssistantText}
                     />
-                    {(chatStatus === "streaming" || chatStatus === "submitted" || run.status === "running") && (
-                      <div className="flex items-center gap-2 text-sm text-[#6b7280]">
-                        <Loader2 className="size-4 animate-spin" />
-                        Running loop…
-                      </div>
-                    )}
-                  </ConversationContent>
-                  <ConversationScrollButton />
-                </Conversation>
+                  </MessageContent>
+                </Message>
 
-                <div className="shrink-0 px-4 pb-4 pt-2">
-                  <div className="mx-auto max-w-3xl">
-                    <motion.div
-                      className="relative overflow-hidden border border-[#d1d5db] bg-white transition-colors focus-within:border-[#9ca3af]"
-                      layout
-                      transition={{ layout: { duration: 0.32, ease: [0.16, 1, 0.3, 1] } }}
-                    >
-                      <PromptInput
-                        className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0"
-                        onSubmit={({ text }) => {
-                          const value = text.trim();
-                          if (!value || !canSend) return;
-                          void sendMessage({ text: value });
+                {block.step.id === artifactStepAttemptId && displayArtifact ? (
+                  <Message from="assistant" className="max-w-none">
+                    <MessageContent className="w-full max-w-none border-0 bg-transparent p-0 shadow-none">
+                      <ArtifactRenderer
+                        artifact={toArtifactRecord(displayArtifact)}
+                        flushRef={canvasFlushRef}
+                        runId={runId}
+                        saving={busy}
+                        onSave={async (data) => {
+                          await saveCanvasEmail(displayArtifact.artifact_key, data as {
+                            design: unknown;
+                            html: string;
+                            text?: string;
+                            subject?: string;
+                            preview?: string;
+                          });
                         }}
-                      >
-                        <PromptInputTextarea
-                          placeholder={canSend ? "Send a follow-up to the loop runner…" : "Run finished"}
-                          disabled={!canSend}
-                          className="min-h-0 pr-12 pb-2"
-                        />
-                        <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
-                          <PromptInputSubmit onStop={stop} status={chatStatus} className="bg-[#111827] text-white hover:opacity-85" />
-                        </PromptInputFooter>
-                      </PromptInput>
-                    </motion.div>
-                  </div>
-                </div>
+                      />
+                    </MessageContent>
+                  </Message>
+                ) : null}
               </div>
-            </div>
-          </section>
+            ))}
 
-          <aside className="min-h-0 space-y-5 overflow-y-auto">
-            <EditorialSidebarPanel
-              title="Agents"
-              icon={Bot}
-              meta={(
-                <EditorialMetaTag tone={run.status === "succeeded" ? "neutral" : "blue"}>
-                  {doneSteps}/{latestSteps.length} done
-                </EditorialMetaTag>
-              )}
-            >
-              <ParentAgentRow
-                parentName={parentName}
-                roster={roster}
-                statusLine={statusLine}
-                parentRunPhase={parentRunPhase}
-                onHire={() => undefined}
-                onSelect={() => setSelectedStepId(null)}
-                onInfo={() => undefined}
-              />
-              <ChildAgentsShell>
-                <ChildAgentsHeader count={latestSteps.length} />
-                {latestSteps.map((step) => {
-                  const selected = selectedStepId === step.id || (!selectedStepId && currentStep?.id === step.id);
-                  const phase = resolveStepRowPhase(step, currentStep, run.status);
-                  const isCurrent = currentStep?.id === step.id;
-                  return (
-                    <ChildAgentRow
-                      key={step.id}
-                      step={step}
-                      phase={phase}
-                      selected={selected}
-                      isCurrent={isCurrent}
-                      toolRefs={resolveStepToolRefs(step, run.definition)}
-                      onSelect={() => setSelectedStepId(step.id)}
-                      onHire={() => undefined}
-                      onInfo={() => undefined}
-                      onRerun={() => undefined}
+            {showWorking ? (
+              <Message from="assistant">
+                <MessageContent>
+                  <div className="flex items-center gap-2 text-sm text-[#6b7280]">
+                    <Loader2 className="size-4 animate-spin" />
+                    Working…
+                  </div>
+                </MessageContent>
+              </Message>
+            ) : null}
+          </ConversationContent>
+          <ConversationScrollButton />
+        </Conversation>
+
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-3xl px-4 pb-4">
+          <AnimatePresence mode="wait" initial={false}>
+            {showGateComposer ? (
+              <motion.div
+                key={`gate-${gate.interaction?.id}`}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 20 }}
+                initial={{ opacity: 0, y: 20 }}
+                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                className="pointer-events-auto space-y-2 border border-[#d1d5db] bg-white"
+              >
+                <p className="px-4 pt-3 text-[12px] leading-5 text-[#6b7280]">{gateHint}</p>
+                <InteractivePromptMenu
+                  allowMultiple={false}
+                  allowOther
+                  disabled={busy}
+                  onSubmit={(answer) => { void handleGateSubmit(answer); }}
+                  options={buildGatePromptOptions(gate.operatorView!)}
+                  placement="composer"
+                  question={gateSubtitle}
+                  recommendedOptionIds={["approve"]}
+                  submittedAnswer={submittedAnswer ?? undefined}
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="prompt-input"
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 10 }}
+                transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                className="pointer-events-auto relative overflow-hidden border border-[#d1d5db] bg-white transition-colors focus-within:border-[#9ca3af]"
+              >
+                <PromptInput
+                  className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0"
+                  onSubmit={({ text }) => { void submitComposerText(text); }}
+                >
+                  <PromptInputTextarea
+                    className="min-h-0 pr-12 pb-2"
+                    disabled={busy || chatStatus === "streaming" || chatStatus === "submitted"}
+                    placeholder="Message the loop runner..."
+                  />
+                  <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
+                    <PromptInputSubmit
+                      className="bg-[#111827] text-white hover:opacity-85"
+                      onStop={stop}
+                      status={chatStatus}
                     />
-                  );
-                })}
-              </ChildAgentsShell>
-              {latestSteps.length === 0 ? (
-                <p className="px-5 py-6 text-[13px] text-[#9ca3af]">Waiting for agents to start.</p>
-              ) : null}
-            </EditorialSidebarPanel>
-          </aside>
+                  </PromptInputFooter>
+                </PromptInput>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+        <div className="flex items-center justify-center gap-1 pb-4 text-center text-[11px] text-[#999]">
+          <p>Tallei can make mistakes. Check important info.</p>
         </div>
       </div>
     </main>

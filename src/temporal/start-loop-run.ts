@@ -7,13 +7,18 @@ import type { LoopRunWorkflowInput } from "./types.js";
 export async function startLoopRunWorkflow(input: LoopRunWorkflowInput & { runId: string }): Promise<void> {
   if (!isTemporalEnabled()) {
     const { resolveLoopRunAuth } = await import("../services/loop-runtime/resolve-loop-run-auth.js");
-    const { executeSpecRunHeadless } = await import("../services/loop-runtime/spec-runner.js");
+    const { drainLoopRunCommands } = await import("../services/loop-runtime/spec-run-commands.js");
     const auth = await resolveLoopRunAuth({
       tenantId: input.tenantId,
       userId: input.userId,
       workflowId: input.workflowId,
     });
-    void executeSpecRunHeadless(auth, input.workflowId, input.runId).catch((error) => {
+    void drainLoopRunCommands({
+      auth,
+      workflowId: input.workflowId,
+      runId: input.runId,
+      executeFallback: true,
+    }).catch((error) => {
       console.error(`Loop headless run failed for workflow ${input.workflowId}:`, error);
     });
     return;

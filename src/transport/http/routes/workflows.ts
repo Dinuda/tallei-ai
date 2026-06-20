@@ -19,10 +19,13 @@ import {
   getWorkflowTriggerActivity,
   listSpecLoopRuns,
   retrySpecLoopRun,
+  saveCanvasEmailArtifact,
   startSpecManualLoopRun,
   streamSpecRunChat,
 } from "../../../services/loop-runtime/index.js";
-import { validateUIMessages, type UIMessage } from "ai";
+import { handleSpecRunInteractionCommand } from "../../../services/loop-runtime/spec-run-interactions.js";
+import { normalizeRunMessages } from "../../../services/loop-runtime/run-messages.js";
+import { validateUIMessages } from "ai";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
@@ -32,6 +35,24 @@ router.use(workspaceMiddleware);
 
 const workflowIdSchema = z.object({ workflowId: z.string().uuid() });
 const runIdSchema = z.object({ runId: z.string().uuid() });
+const artifactKeySchema = z.object({ artifactKey: z.string().trim().min(1).max(240) });
+const canvasEmailSaveSchema = z.object({
+  design: z.unknown().optional(),
+  html: z.string().min(1).max(5_000_000),
+  text: z.string().max(1_000_000).optional(),
+  subject: z.string().max(500).optional(),
+  preview: z.string().max(1_000).optional(),
+  reactEmailSource: z.string().max(1_000_000).optional(),
+  editorContent: z.string().max(5_000_000).optional(),
+  designId: z.string().max(120).optional(),
+  source: z.string().max(120).optional(),
+  updatedAt: z.string().max(120).optional(),
+  finalUse: z.boolean().optional(),
+});
+const interactionCommandSchema = z.object({
+  command: z.enum(["approve", "reject", "revise", "submit_input"]),
+  value: z.record(z.unknown()).optional(),
+});
 
 const createWorkspaceSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -211,7 +232,7 @@ router.post("/loops/:workflowId/run/chat", requireScopes(["memory:write"]), asyn
   try {
     const { workflowId } = workflowIdSchema.parse(req.params);
     const body = runChatSchema.parse(req.body ?? {});
-    const messages = await validateUIMessages({ messages: body.messages as UIMessage[] });
+    const messages = await validateUIMessages({ messages: normalizeRunMessages(body.messages) });
     await streamSpecRunChat({
       auth: req.authContext!,
       workflowId,
@@ -243,6 +264,45 @@ router.post("/runs/:runId/retry", requireScopes(["memory:write"]), async (req: A
     res.status(202).json({ run: await getSpecRunEditorialProjection(req.authContext!, runId) });
   } catch (error) {
     sendError(res, error, "Failed to retry run");
+  }
+});
+
+router.post("/runs/:runId/artifacts/:artifactKey/canvas/email", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const { artifactKey } = artifactKeySchema.parse(req.params);
+    const body = canvasEmailSaveSchema.parse(req.body ?? {});
+    res.status(201).json({
+      run: await saveCanvasEmailArtifact({
+        auth: req.authContext!,
+        runId,
+        artifactKey,
+        emailTemplate: body,
+      }),
+    });
+  } catch (error) {
+    sendError(res, error, "Failed to save canvas email");
+  }
+});
+
+router.post("/runs/:runId/interactions/:interactionId/commands", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { runId } = runIdSchema.parse(req.params);
+    const interactionId = z.string().uuid().parse(req.params.interactionId);
+    const body = interactionCommandSchema.parse(req.body ?? {});
+    const result = await handleSpecRunInteractionCommand({
+      auth: req.authContext!,
+      runId,
+      interactionId,
+      command: body.command,
+      value: body.value,
+    });
+    res.json({
+      ...result,
+      run: await getSpecRunEditorialProjection(req.authContext!, runId),
+    });
+  } catch (error) {
+    sendError(res, error, "Failed to handle interaction command");
   }
 });
 

@@ -1181,12 +1181,18 @@ export async function initDb() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         trigger_instance_id TEXT NOT NULL REFERENCES workflow_connector_triggers(trigger_instance_id) ON DELETE CASCADE,
         external_event_id TEXT NOT NULL,
+        dedupe_key TEXT,
         run_id UUID,
         received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(trigger_instance_id, external_event_id)
       );
       ALTER TABLE workflow_connector_trigger_events
         ADD COLUMN IF NOT EXISTS payload_json JSONB;
+      ALTER TABLE workflow_connector_trigger_events
+        ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_trigger_events_dedupe
+        ON workflow_connector_trigger_events(trigger_instance_id, dedupe_key)
+        WHERE dedupe_key IS NOT NULL;
     `);
 
     await client.query(`
@@ -1453,6 +1459,27 @@ export async function initDb() {
       ALTER TABLE loop_specs
         ADD COLUMN IF NOT EXISTS intent_context_json JSONB;
 
+      CREATE TABLE IF NOT EXISTS loop_agent_avatars (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        style TEXT NOT NULL DEFAULT 'dylan',
+        seed TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'allocated'
+          CHECK (status IN ('allocated', 'bound')),
+        bound_spec_id UUID REFERENCES loop_specs(id) ON DELETE SET NULL,
+        bound_agent_id TEXT,
+        bound_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (tenant_id, seed)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_agent_avatars_scope_status
+        ON loop_agent_avatars(tenant_id, user_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_loop_agent_avatars_bound_spec
+        ON loop_agent_avatars(bound_spec_id)
+        WHERE bound_spec_id IS NOT NULL;
+
       CREATE TABLE IF NOT EXISTS loop_engine_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1509,7 +1536,7 @@ export async function initDb() {
         run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
         step_attempt_id UUID REFERENCES loop_engine_step_attempts(id) ON DELETE CASCADE,
         command_type TEXT NOT NULL
-          CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_interaction', 'finalize_run', 'retry_step')),
+          CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_interaction', 'execute_write_action', 'finalize_run', 'retry_step')),
         status TEXT NOT NULL DEFAULT 'pending'
           CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled')),
         idempotency_key TEXT NOT NULL UNIQUE,
@@ -1647,7 +1674,7 @@ export async function initDb() {
         WHERE command_type = 'continue_after_gate';
       ALTER TABLE loop_engine_commands
         ADD CONSTRAINT loop_engine_commands_command_type_check
-        CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_interaction', 'finalize_run', 'retry_step'));
+        CHECK (command_type IN ('start_run', 'execute_step', 'continue_after_interaction', 'execute_write_action', 'finalize_run', 'retry_step'));
 
       UPDATE workflows
       SET status = 'archived', updated_at = NOW()

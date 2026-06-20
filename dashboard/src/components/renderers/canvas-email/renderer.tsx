@@ -7,20 +7,23 @@ import {
   inferArtifactDisplayTitle,
 } from "../editorial-artifact-ui";
 import { CanvasEmailEditor } from "../../../../app/dashboard/loops/[workflowId]/runs/[runId]/components/canvas-email-editor";
+import type { CanvasEmailTemplateData } from "@/lib/email-artifacts/from-canvas-artifact";
 
-type EmailTemplate = {
-  design: unknown;
-  html: string;
-  text?: string;
-  subject?: string;
-  preview?: string;
-  updatedAt?: string;
-  source?: string;
-  finalUse?: boolean;
-};
+type EmailTemplate = CanvasEmailTemplateData;
 
-export function CanvasEmailRenderer({ artifact, saving, onSave }: ArtifactRendererProps) {
-  const template = artifact.data_json?.emailTemplate as EmailTemplate | undefined;
+export function CanvasEmailRenderer({ artifact, saving, onSave, flushRef }: ArtifactRendererProps) {
+  const rawTemplate = artifact.data_json?.emailTemplate as EmailTemplate | undefined;
+  const bodyText = artifact.body?.trim() ?? "";
+  const template = rawTemplate ? {
+    ...rawTemplate,
+    html: rawTemplate.html || bodyText,
+    text: rawTemplate.text || (bodyText && !bodyText.startsWith("<") ? bodyText : undefined),
+    subject: rawTemplate.subject || undefined,
+  } : bodyText ? {
+    html: bodyText.startsWith("<") ? bodyText : undefined,
+    text: bodyText.startsWith("<") ? undefined : bodyText,
+    subject: "Email draft",
+  } as EmailTemplate : undefined;
   const canvasState = artifact.data_json?.canvas_state as string | undefined;
   const isPreview = canvasState === "preview";
   const displayTitle = inferArtifactDisplayTitle(artifact, "Email");
@@ -61,11 +64,12 @@ export function CanvasEmailRenderer({ artifact, saving, onSave }: ArtifactRender
       <EditorialArtifactToolbar
         tag="Email"
         title={displayTitle}
-        hint="Edit the email below. Save changes before approving this step."
+        hint="Edit the draft in the React Email editor below. Save changes before approving this step."
       />
       <div className="border border-t-0 border-[#d1d5db] bg-white p-6">
         <CanvasEmailEditor
           artifactKey={artifact.artifact_key}
+          flushRef={flushRef}
           template={template}
           saving={saving}
           onSave={handleSave}

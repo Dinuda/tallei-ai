@@ -20,12 +20,16 @@ import {
 
 import { cn } from "@/lib/utils";
 import { EditorialMetaTag } from "@/components/editorial-run-ui";
+import { AgentPersonaAvatar } from "@/components/agent-persona/agent-persona-avatar";
+import { agentStatusLine } from "@/components/agent-persona/agent-persona";
+import type { AgentPersonaUi } from "@/components/agent-persona/agent-persona";
 
 type AgentSnapshot = {
   id?: string;
   name?: string;
   task?: string;
   tools?: Array<{ ref: string }>;
+  persona?: AgentPersonaUi;
 };
 
 type StepLike = {
@@ -399,9 +403,20 @@ export function ChildAgentRow({
   onRerun: () => void;
 }) {
   const canRetry = canRetryProp ?? (step.status === "failed" || step.status === "cancelled");
-  const displayName = formatWorkerDisplayName(step.agent_snapshot.name ?? step.agent_id);
+  const persona = step.agent_snapshot.persona;
+  const displayName = persona?.displayName ?? formatWorkerDisplayName(step.agent_snapshot.name ?? step.agent_id);
   const icon = resolveChildAgentIcon(step, phase, toolRefs);
   const isRunning = phase === "current_running" || phase === "running";
+  const statusPhase = phase === "done" || step.status === "succeeded"
+    ? "finished"
+    : phase === "failed" || step.status === "failed"
+      ? "failed"
+      : isRunning
+        ? "working"
+        : "queued";
+  const personaStatusLine = persona
+    ? agentStatusLine(persona.displayName, statusPhase, step.agent_snapshot.task)
+    : null;
 
   return (
     <div
@@ -424,7 +439,11 @@ export function ChildAgentRow({
       )}
     >
       <AgentPanelAnimationStyles />
-      <AgentIconBox {...icon} />
+      {persona ? (
+        <AgentPersonaAvatar persona={persona} size="lg" className="size-14" />
+      ) : (
+        <AgentIconBox {...icon} />
+      )}
 
       <div className="min-w-0 flex-1">
         <div className="pr-20">
@@ -438,8 +457,16 @@ export function ChildAgentRow({
             >
               {displayName}
             </p>
+            {persona?.roleLabel ? (
+              <span className="shrink-0 rounded-full border border-[#e4f5c6] bg-[#f8fdf2] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#3d5c18]">
+                {persona.roleLabel}
+              </span>
+            ) : null}
             {isRunning ? <RunningIndicator /> : null}
           </div>
+          {personaStatusLine ? (
+            <p className="mt-1 text-[11px] text-[#7eb71b]">{personaStatusLine}</p>
+          ) : null}
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <AttemptChip attempt={step.attempt} />
             {toolRefs.map((toolRef) => (

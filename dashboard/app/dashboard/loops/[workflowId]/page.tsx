@@ -16,6 +16,9 @@ import {
 import { VisuallyHidden } from "@radix-ui/react-visually-hidden";
 
 import { loopBuilderHref, resolveLoopRunNavigation, triggerSourceLabel } from "@/lib/loop-run-navigation";
+import { AgentPersonaCard } from "@/components/agent-persona/agent-persona-card";
+import type { AgentPersonaUi } from "@/components/agent-persona/agent-persona";
+import { toolRefsToLabels } from "@/components/agent-persona/agent-persona";
 
 type LoopRun = {
   id: string;
@@ -31,6 +34,9 @@ type LoopAgent = {
   name: string;
   task: string;
   tools?: Array<{ ref: string }>;
+  toolRefs?: string[];
+  legacyTools?: Array<{ ref: string }>;
+  persona?: AgentPersonaUi;
 };
 
 type LoopWorkflow = {
@@ -49,7 +55,12 @@ type LoopWorkflow = {
     schedule?: { cron?: string; timezone?: string };
     noSlopSpec?: {
       specJson?: {
-        agents?: Array<{ name: string; goal: string }>;
+        agents?: Array<{
+          name: string;
+          goal: string;
+          tools?: string[];
+          persona?: AgentPersonaUi;
+        }>;
       };
     };
   };
@@ -108,7 +119,15 @@ function loopSchedule(workflow: LoopWorkflow): { cron: string; timezone: string 
 
 function loopAgents(workflow: LoopWorkflow): LoopAgent[] {
   const graphChildren = workflow.definition?.agentGraph?.children;
-  if (graphChildren?.length) return graphChildren;
+  if (graphChildren?.length) {
+    return graphChildren.map((agent, index) => ({
+      id: agent.id ?? `graph-agent-${index}`,
+      name: agent.name,
+      task: agent.task,
+      toolRefs: agent.tools?.map((tool) => tool.ref) ?? [],
+      legacyTools: agent.tools,
+    }));
+  }
 
   const specAgents = workflow.runnableSpec?.noSlopSpec?.specJson?.agents;
   if (!specAgents?.length) return [];
@@ -117,6 +136,8 @@ function loopAgents(workflow: LoopWorkflow): LoopAgent[] {
     id: `spec-agent-${index}`,
     name: agent.name,
     task: agent.goal,
+    toolRefs: agent.tools ?? [],
+    persona: agent.persona,
   }));
 }
 
@@ -128,7 +149,21 @@ function formatDate(value: string | null): string {
 }
 
 function prettyStatus(status: string): string {
+  if (status === "waiting_for_approval" || status === "waiting_for_interaction") return "Needs review";
+  if (status === "succeeded") return "Succeeded";
+  if (status === "failed") return "Failed";
+  if (status === "cancelled") return "Cancelled";
+  if (status === "running" || status === "queued") return "Running";
   return status.replace(/_/g, " ");
+}
+
+function runStatusClass(status: string): string {
+  if (status === "waiting_for_approval" || status === "waiting_for_interaction") {
+    return "bg-[#edf3fb] text-[#1e4070]";
+  }
+  if (status === "succeeded") return "bg-[#edf8f2] text-[#166534]";
+  if (status === "failed" || status === "cancelled") return "bg-[#fdf2f2] text-[#991b1b]";
+  return "bg-slate-100 text-slate-700";
 }
 
 function formatJsonFull(value: unknown): string {
@@ -180,18 +215,7 @@ export default function LoopWorkflowPage() {
     void loadWorkflow();
   }, [loadWorkflow]);
 
-  useEffect(() => {
-    if (!workflow || workflow.status !== "active") return;
-    const interval = window.setInterval(() => {
-      void loadWorkflow();
-    }, 30_000);
-    const onFocus = () => { void loadWorkflow(); };
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [loadWorkflow, workflow]);
+
 
   async function openLatestRun() {
     setBusy("open");
@@ -293,10 +317,10 @@ export default function LoopWorkflowPage() {
             type="button"
             className="h-9 gap-1.5"
             onClick={() => void openLatestRun()}
-            disabled={busy !== null}
+            disabled={busy !== null || (!workflow.latestRun && runs.length === 0)}
           >
             {busy === "open" ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
-            Open loop
+            Open latest run
           </Button>
           <Button
             type="button"
@@ -331,7 +355,7 @@ export default function LoopWorkflowPage() {
             Start manual run
           </Button>
           <p className="w-full text-xs text-[var(--text-muted)]">
-            Opens the run page — where scheduled and triggered executions appear. Use Edit in builder to change the spec.
+            Open latest run only opens an existing execution. Use Start manual run to test the loop yourself.
           </p>
         </div>
       </header>
@@ -356,15 +380,30 @@ export default function LoopWorkflowPage() {
               {agents.length === 0 ? (
                 <p className="text-sm text-[var(--text-2)]">No specialist agents configured.</p>
               ) : agents.map((agent, index) => (
-                <div key={agent.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
-                  <div className="text-sm font-medium text-[var(--text)]">{index + 1}. {agent.name}</div>
-                  <p className="mt-1 text-sm text-[var(--text-2)]">{agent.task}</p>
-                  {agent.tools?.length ? (
-                    <p className="mt-2 text-xs text-[var(--text-muted)]">
-                      Tools: {agent.tools.map((tool) => tool.ref).join(", ")}
-                    </p>
-                  ) : null}
-                </div>
+                agent.persona ? (
+                  <AgentPersonaCard
+                    key={agent.id}
+                    persona={agent.persona}
+                    goal={agent.task}
+                    actions={toolRefsToLabels(agent.toolRefs ?? [])}
+                    index={index}
+                    compact
+                  />
+                ) : (
+                  <div key={agent.id} className="rounded-md border border-[var(--border-light)] bg-[var(--muted)] p-3">
+                    <div className="text-sm font-medium text-[var(--text)]">{index + 1}. {agent.name}</div>
+                    <p className="mt-1 text-sm text-[var(--text-2)]">{agent.task}</p>
+                    {agent.toolRefs?.length ? (
+                      <p className="mt-2 text-xs text-[var(--text-muted)]">
+                        Tools: {agent.toolRefs.join(", ")}
+                      </p>
+                    ) : agent.legacyTools?.length ? (
+                      <p className="mt-2 text-xs text-[var(--text-muted)]">
+                        Tools: {agent.legacyTools.map((tool) => tool.ref).join(", ")}
+                      </p>
+                    ) : null}
+                  </div>
+                )
               ))}
             </div>
           </Card>
@@ -464,17 +503,17 @@ export default function LoopWorkflowPage() {
                   key={run.id}
                   type="button"
                   onClick={() => router.push(`/dashboard/loops/${workflowId}/runs/${run.id}`)}
-                  className="flex w-full items-center justify-between gap-2 rounded-md border border-[var(--border-light)] bg-white px-3 py-2 text-left transition hover:border-[var(--border)] hover:bg-[var(--muted)]"
+                  className="flex w-full items-center justify-between gap-3 rounded-md border border-[var(--border-light)] bg-white px-3 py-2.5 text-left transition hover:border-[var(--border)] hover:bg-[var(--muted)]"
                 >
-                  <div>
-                    <div className="text-sm font-medium text-[var(--text)]">Run {run.id.slice(0, 8)}</div>
-                    <div className="text-xs text-[var(--text-muted)]">{formatDate(run.createdAt)}</div>
-                    <div className="mt-1 text-[10px] font-medium text-[var(--text-2)]">
-                      {triggerSourceLabel(run.triggerSource, run.triggerLabel)}
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-[var(--text)]">Run {run.id.slice(0, 8)}</div>
+                    <div className="mt-0.5 text-xs text-[var(--text-muted)]">{formatDate(run.createdAt)}</div>
+                    <div className="mt-1 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--text-2)]">
+                      Triggered by {triggerSourceLabel(run.triggerSource, run.triggerLabel)}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium capitalize text-slate-700">
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${runStatusClass(run.status)}`}>
                       {prettyStatus(run.status)}
                     </span>
                     <ArrowRight size={14} className="text-[var(--text-muted)]" />

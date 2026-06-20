@@ -29,7 +29,6 @@ import {
 } from "@/components/ui/tooltip";
 import Image from "next/image";
 import { apiFetch } from "@/lib/api-fetch";
-import { resolveLoopRunNavigation } from "@/lib/loop-run-navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 
 /* ------------------------------------------------------------------ */
@@ -727,10 +726,9 @@ export default function LoopsPage() {
     setLoopActionError(null);
     setRunningLoopId(id);
     try {
-      const href = await resolveLoopRunNavigation(id);
-      router.push(href);
+      router.push(`/dashboard/loops/${id}`);
     } catch (activateError) {
-      setLoopActionError(activateError instanceof Error ? activateError.message : "Failed to open loop run");
+      setLoopActionError(activateError instanceof Error ? activateError.message : "Failed to open loop");
     } finally {
       setRunningLoopId(null);
     }

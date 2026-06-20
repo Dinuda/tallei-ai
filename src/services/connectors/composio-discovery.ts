@@ -18,6 +18,10 @@ import {
   getCatalogContracts,
 } from "./composio-catalog.js";
 import { getOrCreateComposioSession } from "./composio-session.js";
+import {
+  partitionSelectedToolkits,
+  platformManagedToolContracts,
+} from "./platform-integrations.js";
 
 export type DiscoveredTool = {
   contract: ToolContract;
@@ -90,21 +94,41 @@ async function connectedActionSlugs(
 
 export async function discoverToolsForLoopBuild(input: DiscoverToolsInput): Promise<DiscoverToolsResult> {
   const limit = Math.max(1, Math.min(input.limit ?? 12, 50));
-  const selectedToolkits = new Set(input.selectedToolkits.map((toolkit) => toolkit.trim().toLowerCase()).filter(Boolean));
-  if (selectedToolkits.size === 0) throw new Error("Select at least one app before discovering tools");
+  const { composioToolkits, platformManagedToolkits } = partitionSelectedToolkits(input.selectedToolkits);
+  if (composioToolkits.length === 0 && platformManagedToolkits.length === 0) {
+    throw new Error("Select at least one app before discovering tools");
+  }
+
+  const platformTools: DiscoveredTool[] = platformManagedToolContracts(platformManagedToolkits).map((contract) => ({
+    contract,
+    connected: true,
+    source: "platform_managed",
+  }));
+
+  if (composioToolkits.length === 0) {
+    const session = input.composioSessionId
+      ? await getOrCreateComposioSession(input.auth, input.composioSessionId)
+      : null;
+    return {
+      sessionId: session?.sessionId ?? input.composioSessionId ?? undefined,
+      tools: platformTools.slice(0, limit),
+    };
+  }
+
+  const composioToolkitSet = new Set(composioToolkits);
   const session = await getOrCreateComposioSession(input.auth, input.composioSessionId);
   const [sessionSearchTools, connectedSlugs] = await Promise.all([
     discoverViaSessionSearch(
       session.client,
-      `${input.prompt}\nUse only these user-selected apps: ${[...selectedToolkits].join(", ")}.`,
+      `${input.prompt}\nUse only these user-selected apps: ${[...composioToolkitSet].join(", ")}.`,
     ),
     connectedActionSlugs(session.client),
   ]);
   const selectedTools = sessionSearchTools.filter((entry) =>
-    selectedToolkits.has(String(entry.contract.constraints.toolkit ?? "").trim().toLowerCase()),
+    composioToolkitSet.has(String(entry.contract.constraints.toolkit ?? "").trim().toLowerCase()),
   );
-  if (selectedTools.length === 0) {
-    throw new Error(`No matching actions were found in the selected apps: ${[...selectedToolkits].join(", ")}`);
+  if (selectedTools.length === 0 && platformTools.length === 0) {
+    throw new Error(`No matching actions were found in the selected apps: ${[...composioToolkitSet, ...platformManagedToolkits].join(", ")}`);
   }
   const merged = selectedTools.map((entry) => {
     const actionSlug = normalizeConnectedToolRef(String(entry.contract.constraints.actionSlug ?? ""));
@@ -121,6 +145,6 @@ export async function discoverToolsForLoopBuild(input: DiscoverToolsInput): Prom
 
   return {
     sessionId: session.sessionId,
-    tools: merged.slice(0, limit),
+    tools: [...platformTools, ...merged].slice(0, limit),
   };
 }

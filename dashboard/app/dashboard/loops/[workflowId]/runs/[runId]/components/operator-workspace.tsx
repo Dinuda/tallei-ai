@@ -186,11 +186,15 @@ function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNo
   if (block.kind === "review_artifact") {
     const output = blockAgentOutput(block, ctx.agentOutput ?? ctx.centerBody);
     const template = ctx.activeCanvasArtifact?.data_json?.emailTemplate;
+    const hasRenderableCanvas = Boolean(
+      ctx.activeCanvasArtifact
+      && (template || ctx.activeCanvasArtifact.body?.trim()),
+    );
     return (
       <DraftReviewWorkspace agentOutput={output}>
-        {ctx.activeCanvasArtifact && template ? (
+        {hasRenderableCanvas ? (
           <ArtifactRenderer
-            artifact={{ ...ctx.activeCanvasArtifact, invalidated_at: ctx.activeCanvasArtifact.invalidated_at ?? null }}
+            artifact={{ ...ctx.activeCanvasArtifact!, invalidated_at: ctx.activeCanvasArtifact!.invalidated_at ?? null }}
             runId={ctx.runId}
             saving={ctx.busy}
             onSave={async (data) => {
@@ -322,13 +326,17 @@ function renderBlock(block: OperatorBlock, ctx: OperatorWorkspaceProps): ReactNo
   if (surface === "review.email" || surface === "review.preview" || surface === "confirm.send") {
     const template = ctx.activeCanvasArtifact?.data_json?.emailTemplate;
     const agentOutput = blockAgentOutput(block, ctx.agentOutput ?? ctx.centerBody);
+    const hasRenderableCanvas = Boolean(
+      ctx.activeCanvasArtifact
+      && (template || ctx.activeCanvasArtifact.body?.trim()),
+    );
     return (
       <DraftReviewWorkspace agentOutput={agentOutput}>
-        {ctx.activeCanvasArtifact && template ? (
+        {hasRenderableCanvas ? (
           <ArtifactRenderer
             artifact={{
-              ...ctx.activeCanvasArtifact,
-              invalidated_at: ctx.activeCanvasArtifact.invalidated_at ?? null,
+              ...ctx.activeCanvasArtifact!,
+              invalidated_at: ctx.activeCanvasArtifact!.invalidated_at ?? null,
             }}
             runId={ctx.runId}
             saving={ctx.busy}

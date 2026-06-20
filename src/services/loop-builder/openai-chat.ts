@@ -21,6 +21,13 @@ function isGpt5Model(model: string): boolean {
   return model.toLowerCase().startsWith("gpt-5");
 }
 
+export function loopBuilderOpenAiTimeoutMs(): number {
+  const raw = process.env.TALLEI_LOOP_BUILDER__OPENAI_TIMEOUT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isFinite(parsed)) return 45_000;
+  return Math.max(5_000, Math.min(180_000, parsed));
+}
+
 export function isLoopBuilderReasoningModel(model: string): boolean {
   const normalized = model.toLowerCase();
   return (
@@ -138,6 +145,29 @@ type LoopBuilderJsonSchemaFormat = {
   schema: Record<string, unknown>;
 };
 
+function createCallSignal(parent: AbortSignal | undefined, timeoutMs: number): {
+  signal: AbortSignal;
+  cleanup: () => void;
+  timedOut: () => boolean;
+} {
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
+  const onParentAbort = () => controller.abort();
+  parent?.addEventListener("abort", onParentAbort, { once: true });
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", onParentAbort);
+    },
+    timedOut: () => didTimeout,
+  };
+}
+
 export async function loopBuilderOpenAiChat(input: {
   messages: OpenAI.Chat.ChatCompletionMessageParam[];
   temperature?: number;
@@ -148,9 +178,11 @@ export async function loopBuilderOpenAiChat(input: {
   responseFormat?: "json_object" | LoopBuilderJsonSchemaFormat;
   reasoningEffort?: LoopBuilderReasoningEffort | null;
   signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<LoopBuilderOpenAiChatResult> {
   const model = loopBuilderOpenAiModel();
   const useCompletionTokensParam = isGpt5Model(model);
+  const timeoutMs = input.timeoutMs ?? loopBuilderOpenAiTimeoutMs();
   const baseMaxCompletionTokens = input.exactMaxTokens
     ? input.maxTokens ?? 4096
     : completionTokenBudget(model, input.maxTokens);
@@ -162,32 +194,43 @@ export async function loopBuilderOpenAiChat(input: {
     reasoningEffort: LoopBuilderReasoningEffort | null;
     maxCompletionTokens: number;
   }): Promise<LoopBuilderOpenAiChatResult> {
-    const response = await openAiClient().chat.completions.create(
-      {
-        model,
-        messages: input.messages,
-        ...openAiTemperatureParam(model, input.temperature),
-        response_format: input.responseFormat === "json_object"
-          ? { type: "json_object" as const }
-          : input.responseFormat && typeof input.responseFormat === "object"
-            ? {
-                type: "json_schema" as const,
-                json_schema: {
-                  name: input.responseFormat.name,
-                  strict: true,
-                  schema: input.responseFormat.schema,
-                },
-              }
-            : undefined,
-        ...(isLoopBuilderReasoningModel(model) && attempt.reasoningEffort
-          ? { reasoning_effort: attempt.reasoningEffort }
-          : {}),
-        ...(useCompletionTokensParam
-          ? { max_completion_tokens: attempt.maxCompletionTokens }
-          : { max_tokens: attempt.maxCompletionTokens }),
-      },
-      input.signal ? { signal: input.signal } : undefined,
-    );
+    const callSignal = createCallSignal(input.signal, timeoutMs);
+    let response: OpenAI.Chat.ChatCompletion;
+    try {
+      response = await openAiClient().chat.completions.create(
+        {
+          model,
+          messages: input.messages,
+          ...openAiTemperatureParam(model, input.temperature),
+          response_format: input.responseFormat === "json_object"
+            ? { type: "json_object" as const }
+            : input.responseFormat && typeof input.responseFormat === "object"
+              ? {
+                  type: "json_schema" as const,
+                  json_schema: {
+                    name: input.responseFormat.name,
+                    strict: true,
+                    schema: input.responseFormat.schema,
+                  },
+                }
+              : undefined,
+          ...(isLoopBuilderReasoningModel(model) && attempt.reasoningEffort
+            ? { reasoning_effort: attempt.reasoningEffort }
+            : {}),
+          ...(useCompletionTokensParam
+            ? { max_completion_tokens: attempt.maxCompletionTokens }
+            : { max_tokens: attempt.maxCompletionTokens }),
+        },
+        { signal: callSignal.signal },
+      );
+    } catch (error) {
+      if (callSignal.timedOut()) {
+        throw new Error(`Loop builder LLM call timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      }
+      throw error;
+    } finally {
+      callSignal.cleanup();
+    }
     const message = response.choices[0]?.message;
     return {
       text: normalizeTextContent(message?.content).trim(),

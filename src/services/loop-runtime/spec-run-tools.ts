@@ -22,7 +22,7 @@ import {
 } from "./spec-run-types.js";
 import type { ToolContract } from "../tool-spec/types.js";
 import type { RunContext } from "./build-run-context.js";
-import { renderArtifactTemplate } from "./render-artifact-template.js";
+import { enrichDraftPayload, type DeferredWriteMeta } from "./spec-run-write-payload.js";
 
 function contractToolkit(contract: ToolContract): string {
   const configured = contract.constraints.toolkit;
@@ -64,38 +64,7 @@ function resolveSearchMemorySources(
   return { sources: filtered, warnings };
 }
 
-function enrichDraftPayload(
-  actionSlug: string,
-  payload: Record<string, unknown>,
-  runContext?: RunContext,
-): Record<string, unknown> {
-  if (!runContext?.ticket) return payload;
-  const slug = actionSlug.toUpperCase();
-  if (!slug.includes("CREATE") || !slug.includes("DRAFT")) return payload;
-
-  const template = runContext.templates[0];
-  const variables = {
-    ticket_subject: runContext.ticket.subject,
-    customer_name: runContext.customer?.name ?? runContext.customer?.email ?? "Customer",
-  };
-  const rendered = template
-    ? renderArtifactTemplate(template, variables)
-    : null;
-
-  const next = { ...payload };
-  if (runContext.customer?.email && !next.recipient_email) {
-    next.recipient_email = runContext.customer.email;
-  }
-  if (runContext.ticket.threadId && !next.thread_id) {
-    next.thread_id = runContext.ticket.threadId;
-  }
-  if (rendered) {
-    if (!next.subject) next.subject = rendered.subject;
-    if (!next.body) next.body = rendered.body;
-    if (!next.is_html) next.is_html = true;
-  }
-  return next;
-}
+export { enrichDraftPayload, type DeferredWriteMeta } from "./spec-run-write-payload.js";
 
 export function buildSpecRunTools(input: {
   auth: AuthContext;
@@ -121,6 +90,7 @@ export function buildSpecRunTools(input: {
   const reviewPolicy = buildContract ? selectedReviewPolicy(buildContract) : "approve_each_action";
 
   const tools: Record<string, Tool> = {};
+  const deferredWrites: Record<string, DeferredWriteMeta> = {};
 
   tools.searchMemory = tool({
       description: "Search Tallei internal memory and workspace memory (includes prior loop run outputs). Use for customer history and FAQs — not for discovering new tickets when trigger payload is provided.",
@@ -236,10 +206,14 @@ export function buildSpecRunTools(input: {
         payload: z.record(z.unknown()),
         rationale: z.string().optional(),
       }),
-      ...(write ? { needsApproval: true } : {}),
       execute: async ({ payload }) => {
+        if (write) {
+          throw new Error(`Action ${actionSlug} requires operator approval before execution.`);
+        }
         const enriched = enrichDraftPayload(actionSlug, payload, input.runContext);
-        const idempotencyKey = `spec-run:${input.runId}:${toolKey}:${Date.now()}`;
+        const idempotencyKey = write
+          ? `spec-run:${input.runId}:${toolKey}`
+          : `spec-run:${input.runId}:${toolKey}:${Date.now()}`;
         const result = await executeApprovedComposioAction({
           auth: input.auth,
           toolkit,
@@ -252,7 +226,15 @@ export function buildSpecRunTools(input: {
         return { ok: true, output: result.output };
       },
     });
+    if (write) {
+      deferredWrites[toolKey] = {
+        toolkit,
+        actionSlug,
+        actionLabel: toolContract.name,
+        isSendAction: isSendAction(actionSlug),
+      };
+    }
   }
 
-  return tools;
+  return { tools, deferredWrites };
 }

@@ -9,6 +9,7 @@ import {
 } from "../loop-executor/verification.js";
 import { discoverToolsForLoopBuild } from "../connectors/composio-discovery.js";
 import { listComposioTriggerTypes } from "../connectors/composio.js";
+import { normalizeDiscoveredToolContracts } from "../connectors/platform-integrations.js";
 import { refreshBuilderConnectorAvailability } from "./connectors.js";
 import {
   loopIntentAnalysisSchema,
@@ -185,6 +186,7 @@ async function ensureDraftedSpec(
     prompt: session.goal,
     intentContext: session.resolvedIntent,
     buildContract: session.buildContract,
+    discoveredToolContracts: session.discoveredToolContracts,
   });
   await updateWorkflowBuilderSession(auth, sessionId, { phase: "spec_drafted", spec, error: null });
   return spec;
@@ -235,13 +237,13 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         limit: 24,
       });
       const discoveredTriggers = await listComposioTriggerTypes(selectedToolkits).catch(() => []);
-      if (discovered.sessionId !== session.composioSessionId) {
+      if (discovered.sessionId != null && discovered.sessionId !== session.composioSessionId) {
         throw new Error("Composio discovery did not reuse the persisted builder session");
       }
-      const contracts = discovered.tools.map((entry) => ({
+      const contracts = normalizeDiscoveredToolContracts(discovered.tools.map((entry) => ({
         ...entry.contract,
         constraints: { ...entry.contract.constraints, connected: entry.connected },
-      }));
+      })));
       const buildContract = deriveLoopBuildContract({
         intentContext: resolvedIntent,
         discoveredToolContracts: contracts,
@@ -390,8 +392,10 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       });
       const workflowId = String((loop as { id?: unknown }).id ?? "");
       await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", workflowId, error: null });
-      await initializeWorkflowVerification(auth, workflowId);
-      const verification = await runWorkflowVerification(auth, workflowId);
+      const verification = await initializeWorkflowVerification(auth, workflowId);
+      void runWorkflowVerification(auth, workflowId).catch((error) => {
+        console.error("[saveLoop] background verification failed:", error instanceof Error ? error.message : String(error));
+      });
       return { loop, verification, workflowId };
     }
     case "runVerification": {

@@ -12,6 +12,7 @@ import {
 } from "ai";
 
 import { getLoopSpec, listLoopSpecs } from "../../../services/loop-builder/specs.js";
+import { allocateAgentAvatars, bindAgentAvatar } from "../../../services/loop-builder/agent-avatars.js";
 import {
   refreshBuilderConnectorAvailability,
   resolveBuilderConnectorRequirement,
@@ -170,9 +171,23 @@ function analyzerTools(
       }),
     }),
     scheduleSetup: tool({
-      description: "Render the first-class schedule chooser for the pending trigger requirement. It only offers schedules supported by the current platform. This is a UI interaction, not a builder command.",
+      description: "Render the first-class schedule chooser for the pending trigger requirement. Provide workflow-aware schedule options (minimum cadence: once per hour). Always include allowOther so the user can describe a different timing. This is a UI interaction, not a builder command.",
       inputSchema: z.object({
         requirementId: z.string().min(1),
+        question: z.string().min(1).default("How often should this loop run?"),
+        subtitle: z.string().optional(),
+        options: z.array(z.object({
+          id: z.string().min(1),
+          label: z.string().min(1),
+          description: z.string().optional(),
+          trigger: z.enum(["schedule", "event"]).default("schedule"),
+          cron: z.string().optional(),
+          timezone: z.string().optional(),
+          toolkit: z.string().optional(),
+          triggerSlug: z.string().optional(),
+        })).min(1).max(8).optional(),
+        recommendedOptionIds: z.array(z.string().min(1)).max(8).default([]),
+        allowOther: z.boolean().default(true),
       }),
     }),
     knowledgeBaseSetup: tool({
@@ -330,8 +345,16 @@ async function buildAnalyzerSystemPrompt(
     "- For a pending grounding requirement, never use interactivePrompt as the primary grounding UI when knowledgeBaseSetup is the correct tool.",
     "- Optional product/user/CRM data: offer only via knowledgeBaseSetup external toolkit checkboxes or interactivePrompt using connectedSearchToolkits from groundingContext. If a toolkit is wanted but not connected, offer connectorSetup or skip — never require pasted URLs or credentials.",
     "- User may choose no grounding via resolveBuildRequirement with { mode: 'none' } when allowNone is true.",
-    "After getAvailableTools, resolve every pending build-contract requirement one at a time. For a pending connector requirement, call connectorSetup and stop; never use interactivePrompt for connector setup and never offer connect later. For a pending trigger_schedule requirement, call scheduleSetup and stop. For a pending grounding requirement, call knowledgeBaseSetup and stop. For a pending artifact_contract requirement, call artifactSetup with draftTemplates entries (acknowledgment, troubleshooting, escalation, resolution) that pre-fill subject/body copy for the minimal support-reply templates and stop; never use interactivePrompt or prose numbered options for artifact setup. For a pending stable_input, review_policy, or other generic build requirement, call requirementSetup and stop — never ask in prose with numbered or bulleted option lists. requirementSetup must offer 2-4 concrete options with short descriptions (e.g. simple rule, paste policy, use Tallei default) and allowOther true so the user can type custom guidance. Never invent event-driven execution unless an exact discovered trigger capability explicitly supports it. Never offer schedules more frequent than hourly.",
-    "After scheduleSetup, knowledgeBaseSetup, artifactSetup, or requirementSetup returns, pass its exact typed value to resolveBuildRequirement. Map requirementSetup answers to the requirement schema: for stable_input use { name, value } where value is the selected option value and/or otherText; for review_policy use { mode } inferred from the answer. Do not reinterpret the selected schedule, knowledge sources, artifact bundle, or operational policy.",
+    "After getAvailableTools, resolve every pending build-contract requirement one at a time. For a pending connector requirement, call connectorSetup and stop; never use interactivePrompt for connector setup and never offer connect later. For a pending trigger_schedule requirement, call scheduleSetup and stop. For a pending grounding requirement, call knowledgeBaseSetup and stop. For a pending artifact_contract requirement, call artifactSetup with draftTemplates entries (acknowledgment, troubleshooting, escalation, resolution) that pre-fill subject/body copy for the minimal support-reply templates and stop; never use interactivePrompt or prose numbered options for artifact setup. For a pending stable_input, review_policy, or other generic build requirement, call requirementSetup and stop — never ask in prose with numbered or bulleted option lists. requirementSetup must offer 2-4 concrete options with short descriptions (e.g. simple rule, paste policy, use Tallei default) and allowOther true so the user can type custom guidance. Never invent event-driven execution unless an exact discovered trigger capability explicitly supports it.",
+    "Schedule playbook for trigger_schedule:",
+    "- Minimum cadence is once per hour. Never offer or resolve schedules more frequent than hourly.",
+    "- Call scheduleSetup with 2-4 workflow-aware options inferred from the resolved intent (e.g. weekly Monday morning for newsletters, daily morning for digests, hourly for monitoring). Mark the best-fit option recommended via recommendedOptionIds.",
+    "- Include discovered event triggers in scheduleSetup only when they exactly match the workflow; prefer the matching event over polling when appropriate.",
+    "- Always set allowOther true so the user can choose Tell Tallei what to do differently for custom timing.",
+    "- Use a concrete question and optional subtitle tied to the workflow (e.g. weekly newsletter timing), not generic hourly/daily-only wording.",
+    "- Never ask schedule timing in prose or numbered lists outside scheduleSetup.",
+    "After scheduleSetup, knowledgeBaseSetup, artifactSetup, or requirementSetup returns, pass its exact typed value to resolveBuildRequirement. Map requirementSetup answers to the requirement schema: for stable_input use { name, value } where value is the selected option value and/or otherText; for review_policy use { mode } inferred from the answer. For scheduleSetup with a selected preset, pass { trigger: 'schedule', cron, timezone } or { trigger: 'event', toolkit, triggerSlug } from the tool output value. If scheduleSetup returns customScheduleText, translate it into a valid schedule at least 1 hour apart, then resolve — never reject reasonable custom timing without offering the nearest valid option.",
+    "Do not reinterpret the selected schedule, knowledge sources, artifact bundle, or operational policy except when converting customScheduleText into cron.",
     "Never show schema validation errors, cron expressions, tool identifiers, or internal validation wording to the user. If a requested capability is unavailable, say that capability is currently limited or unsupported and offer the nearest supported choice through the appropriate UI tool.",
     "Never treat unrelated prose as a valid requirement answer. Never silently assume a connector, trigger, schedule, source, template, stable input, or review policy.",
     "The user may explicitly choose no source or no template only when the requirement allows it; persist that choice through resolveBuildRequirement.",
@@ -711,8 +734,6 @@ router.get("/specs/:specId", requireScopes(["memory:read"]), async (req: AuthReq
   }
 });
 
-export default router;
-
 router.patch("/sessions/:sessionId", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = z.string().uuid().parse(req.params.sessionId);
@@ -735,3 +756,32 @@ router.patch("/sessions/:sessionId", requireScopes(["memory:write"]), async (req
     res.status(error instanceof z.ZodError ? 400 : 500).json({ error: message });
   }
 });
+
+router.post("/agent-avatars/allocate", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = z.object({ count: z.number().int().min(1).max(20).optional() }).parse(req.body ?? {});
+    const avatars = await allocateAgentAvatars(req.authContext!, body.count ?? 1);
+    res.json({ avatars });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to allocate avatars";
+    res.status(error instanceof z.ZodError ? 400 : 500).json({ error: message });
+  }
+});
+
+router.post("/agent-avatars/:avatarId/bind", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const avatarId = z.string().uuid().parse(req.params.avatarId);
+    const body = z.object({
+      specId: z.string().uuid(),
+      agentId: z.string().min(1).trim(),
+    }).parse(req.body ?? {});
+    const avatar = await bindAgentAvatar(req.authContext!, avatarId, body);
+    res.json({ avatar });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to bind avatar";
+    const status = message.includes("not found") ? 404 : message.includes("already bound") ? 409 : error instanceof z.ZodError ? 400 : 500;
+    res.status(status).json({ error: message });
+  }
+});
+
+export default router;

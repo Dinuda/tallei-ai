@@ -1,4 +1,6 @@
-import type { ComponentType } from "react";
+import type { ComponentType, MutableRefObject } from "react";
+
+export type ArtifactFlushRef = MutableRefObject<(() => Promise<void>) | null>;
 
 export type ArtifactRecord = {
   id: string;
@@ -15,6 +17,7 @@ export type ArtifactRendererProps = {
   runId: string;
   saving: boolean;
   onSave?: (data: Record<string, unknown>) => Promise<void>;
+  flushRef?: ArtifactFlushRef;
 };
 
 export type RendererDef = {

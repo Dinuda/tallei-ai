@@ -139,10 +139,14 @@ type RunEvent = {
 
 type Interaction = {
   id: string;
+  step_attempt_id: string;
   interaction_kind: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
   status: string;
   question: string;
   payload_json: { items?: Array<MemoryGateItem | SourceGateItem>; result?: { text?: string } } & Record<string, unknown>;
+  decision_json?: Record<string, unknown>;
+  created_at?: string;
+  completed_at?: string | null;
 };
 
 type SourceGateItem = {
@@ -2569,9 +2573,9 @@ export default function StableLoopRunPage() {
               <ChildAgentsShell>
                 <ChildAgentsHeader count={latestSteps.length} />
                 {latestSteps.map((step) => {
-                  const selected = selectedStepId === step.id || (!selectedStepId && selectedStep?.id === step.id);
+                  const selected = selectedStepId === step.id;
+                  const isCurrent = currentStep?.id === step.id && !selectedStepId;
                   const phase = resolveStepRowPhase(step, currentStep, pendingInteraction);
-                  const isCurrent = currentStep?.id === step.id;
                   return (
                     <ChildAgentRow
                       key={step.id}

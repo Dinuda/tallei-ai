@@ -4,6 +4,7 @@ import test from "node:test";
 import { buildSpecRunTools } from "../../../src/services/loop-runtime/spec-run-tools.js";
 import { buildSpecRunSystemPrompt } from "../../../src/services/loop-runtime/spec-run-prompt.js";
 import { projectRunContext } from "../../../src/services/loop-runtime/build-run-context.js";
+import { gmailTriggerDedupeKey } from "../../../src/services/loop-runtime/trigger-normalizers/gmail.js";
 import type { RunnableSpec } from "../../../src/services/loop-runtime/spec-run-types.js";
 import type { AuthContext } from "../../../src/domain/auth/index.js";
 
@@ -137,7 +138,7 @@ const spec: RunnableSpec = {
     buildContract,
     specJson: {
       purpose: "Support loop",
-      agents: [{ name: "A", goal: "G", guardrails: [], doneWhen: [], failureModes: [] }],
+      agents: [{ name: "A", goal: "G", tools: [], guardrails: [], doneWhen: [], failureModes: [] }],
       guardrails: [],
       successCriteria: [],
       failureModes: [],
@@ -151,7 +152,7 @@ const spec: RunnableSpec = {
 };
 
 test("buildSpecRunTools exposes connector_selection read and write actions", () => {
-  const tools = buildSpecRunTools({
+  const { tools } = buildSpecRunTools({
     auth,
     spec,
     runId: "run-1",
@@ -163,7 +164,7 @@ test("buildSpecRunTools exposes connector_selection read and write actions", () 
 });
 
 test("draft_only review policy hides send actions", () => {
-  const tools = buildSpecRunTools({
+  const { tools } = buildSpecRunTools({
     auth,
     spec,
     runId: "run-1",
@@ -187,7 +188,7 @@ test("event run with payload exposes getTriggerTicket tool", () => {
       externalEventId: "evt-1",
     },
   });
-  const tools = buildSpecRunTools({
+  const { tools } = buildSpecRunTools({
     auth,
     spec,
     runId: "run-1",
@@ -215,4 +216,42 @@ test("buildSpecRunSystemPrompt includes runtime policies for event runs", () => 
   assert.match(prompt, /Runtime policies/);
   assert.match(prompt, /do NOT search memory to discover the ticket/i);
   assert.match(prompt, /Draft-only mode/);
+});
+
+test("gmail trigger dedupe prefers message id", () => {
+  const left = gmailTriggerDedupeKey({
+    id: "msg-123",
+    threadId: "thread-1",
+    from: "Customer <customer@example.com>",
+    subject: "Site down",
+    body: "The site seems down.",
+  });
+  const right = gmailTriggerDedupeKey({
+    message_id: "msg-123",
+    thread_id: "thread-2",
+    from_email: "other@example.com",
+    subject: "Different envelope",
+    body: "Different body",
+  });
+
+  assert.equal(left, "gmail:message:msg-123");
+  assert.equal(right, left);
+});
+
+test("gmail trigger dedupe falls back to stable message fields", () => {
+  const left = gmailTriggerDedupeKey({
+    threadId: "thread-1",
+    from: "Customer <customer@example.com>",
+    subject: "Site down",
+    body: "The site seems down.",
+  });
+  const right = gmailTriggerDedupeKey({
+    thread_id: "thread-1",
+    from_email: "customer@example.com",
+    subject: "SITE DOWN",
+    body: "The site seems down.",
+  });
+
+  assert.ok(left?.startsWith("gmail:fallback:"));
+  assert.equal(right, left);
 });

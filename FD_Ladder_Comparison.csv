@@ -1,0 +1,23 @@
+Option A — Everything in 24-month FDs,,,,,,,,,
+Principal,20000000,,,,,,,,
+Rate,11.25%,,,,,,,,
+Period (months),24,,,,,,,,
+Interest,=B2*B3*(B4/12),,,,,,,,
+Final value,=B2+B5,,,,,,,,
+,,,,,,,,,
+Option B — Ladder (Reinvest at 11%),,,,,,,,,
+Global Reinvest Rate,11.00%,,,,,,,,
+,,,,,,,,,
+FD Name,Principal,Initial Rate,Initial Term (months),Initial Interest,Value after Initial Term,Reinvest Term (months),Reinvest Rate,Reinvest Interest,Final Value
+FD 1–3,10000000,11.25%,24,=B12*C12*(D12/12),=B12+E12,0,=$B$9,=F12*H12*(G12/12),=F12+I12
+FD 4,3000000,10.50%,13,=B13*C13*(D13/12),=B13+E13,11,=$B$9,=F13*H13*(G13/12),=F13+I13
+FD 5,3000000,10.50%,7,=B14*C14*(D14/12),=B14+E14,17,=$B$9,=F14*H14*(G14/12),=F14+I14
+FD 6,2000000,9.50%,6,=B15*C15*(D15/12),=B15+E15,18,=$B$9,=F15*H15*(G15/12),=F15+I15
+FD 7,2000000,8.50%,3,=B16*C16*(D16/12),=B16+E16,21,=$B$9,=F16*H16*(G16/12),=F16+I16
+Total,=SUM(B12:B16),,,=SUM(E12:E16),=SUM(F12:F16),,,=SUM(I12:I16),=SUM(J12:J16)
+,,,,,,,,,
+Comparison,,,,,,,,,
+Strategy,Final Value,Interest Earned,,,,,,,
+All 24-month,=B6,=B5,,,,,,,
+Ladder + reinvest,=J17,=J17-B17,,,,,,,
+Difference,=B21-B22,=C21-C22,,,,,,,

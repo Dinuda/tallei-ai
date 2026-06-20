@@ -1,10 +1,7 @@
 import { randomUUID } from "crypto";
 import {
-  convertToModelMessages,
   createUIMessageStream,
   pipeUIMessageStreamToResponse,
-  stepCountIs,
-  streamText,
   validateUIMessages,
   type UIMessage,
 } from "ai";
@@ -12,18 +9,19 @@ import type { Response } from "express";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { loopBuilderOpenAiModel, loopBuilderStreamProviderOptions } from "../loop-builder/openai-chat.js";
-import { sanitizeLoopBuilderChatMessages } from "../loop-builder/sessions.js";
-import { resolveLoopChatLanguageModel } from "../llm/loop-chat-client.js";
 import { getLoopWorkflow } from "../loop-executor/creator.js";
-import { listLoopRunMessages, normalizeRunMessages, replaceLoopRunMessages } from "./run-messages.js";
-import { buildSpecRunSystemPrompt } from "./spec-run-prompt.js";
+import { listLoopRunMessages, mergeRunChatMessages, normalizeRunMessages, replaceLoopRunMessages } from "./run-messages.js";
 import { loadWorkflowWorkspaceId, withWorkflowWorkspaceAuth } from "./resolve-loop-run-auth.js";
-import { buildSpecRunTools } from "./spec-run-tools.js";
 import { parseRunnableSpec, type RunnableSpec } from "./spec-run-types.js";
 import { startLoopRunWorkflow, cancelLoopRunWorkflow } from "../../temporal/start-loop-run.js";
 import { buildRunSeedMessage, projectRunContext, type RunContext } from "./build-run-context.js";
 import { loadTriggerPayloadForRun } from "./trigger-payload.js";
+import { enqueueLoopRunCommand } from "./spec-run-commands.js";
+import {
+  executeAgenticSpecRun,
+  materializeSpecRunAgentSteps,
+  SpecRunInteractionRequiredError,
+} from "./spec-run-agent-runner.js";
 
 export type SpecRunTriggerSource = "manual" | "schedule" | "event";
 
@@ -117,6 +115,8 @@ export async function createSpecLoopRun(
       now,
     ],
   );
+
+  await materializeSpecRunAgentSteps({ auth, runId, spec });
 
   await pool.query(
     `INSERT INTO loop_engine_events (tenant_id, user_id, run_id, event_type, payload_json)
@@ -226,28 +226,6 @@ async function setRunStatus(runId: string, status: string, extra?: { summary?: s
   );
 }
 
-async function consumeUIMessageStream(stream: ReadableStream<unknown>): Promise<void> {
-  const reader = stream.getReader();
-  try {
-    while (true) {
-      const { done } = await reader.read();
-      if (done) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-type ExecuteSpecRunInput = {
-  auth: AuthContext;
-  workflowId: string;
-  runId: string;
-  messages: UIMessage[];
-  mode: "headless" | "stream";
-  res?: Response;
-  runContext?: RunContext;
-};
-
 async function resolveRunContext(input: {
   auth: AuthContext;
   workflowId: string;
@@ -275,89 +253,6 @@ async function resolveRunContext(input: {
   });
 }
 
-async function executeSpecRun(input: ExecuteSpecRunInput): Promise<void> {
-  const { spec, title } = await loadRunnableSpec(input.auth, input.workflowId);
-  const workspaceId = await loadWorkflowWorkspaceId(input.auth.tenantId, input.auth.userId, input.workflowId);
-  const auth = withWorkflowWorkspaceAuth(input.auth, workspaceId);
-  const runContext = input.runContext ?? await resolveRunContext({
-    auth,
-    workflowId: input.workflowId,
-    runId: input.runId,
-    spec,
-  });
-
-  await pool.query(
-    `UPDATE loop_engine_runs SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW() WHERE id = $1`,
-    [input.runId],
-  );
-
-  const tools = buildSpecRunTools({
-    auth,
-    spec,
-    runId: input.runId,
-    workflowId: input.workflowId,
-    workflowTitle: title,
-    runContext,
-    onFinalize: async (summary) => {
-      await setRunStatus(input.runId, "succeeded", { summary });
-      await pool.query(
-        `INSERT INTO loop_engine_events (tenant_id, user_id, run_id, event_type, payload_json)
-         VALUES ($1, $2, $3, 'run_succeeded', $4::jsonb)`,
-        [input.auth.tenantId, input.auth.userId, input.runId, JSON.stringify({ summary })],
-      );
-    },
-  });
-
-  const system = buildSpecRunSystemPrompt(spec, runContext);
-  const modelId = loopBuilderOpenAiModel();
-  const model = resolveLoopChatLanguageModel(modelId);
-  const apiMessages = sanitizeLoopBuilderChatMessages(input.messages);
-  const result = streamText({
-    model,
-    system,
-    messages: await convertToModelMessages(apiMessages, { tools }),
-    tools,
-    providerOptions: loopBuilderStreamProviderOptions(modelId),
-    stopWhen: stepCountIs(12),
-    onError: ({ error }) => console.error("Spec loop run stream failed:", error),
-  });
-
-  const stream = createUIMessageStream({
-    originalMessages: input.messages,
-    execute: async ({ writer }) => {
-      if (input.mode === "stream") {
-        writer.write({ type: "data-run", data: { runId: input.runId, workflowId: input.workflowId }, transient: true });
-      }
-      writer.merge(result.toUIMessageStream({ originalMessages: input.messages, sendReasoning: true }));
-    },
-    onFinish: async ({ messages: completedMessages }) => {
-      await replaceLoopRunMessages(input.auth, input.runId, completedMessages);
-      const current = await getSpecRunProjection(auth, input.runId);
-      if (current.status !== "succeeded" && current.status !== "failed" && current.status !== "cancelled") {
-        const lastAssistant = [...completedMessages].reverse().find((message) => message.role === "assistant");
-        const text = lastAssistant?.parts
-          .filter((part): part is { type: "text"; text: string } => part.type === "text")
-          .map((part) => part.text)
-          .join("\n")
-          .trim();
-        if (text) {
-          await setRunStatus(input.runId, "succeeded", { summary: text.slice(0, 2000) });
-        }
-      }
-    },
-    onError: (error) => {
-      throw error instanceof Error ? error : new Error(String(error));
-    },
-  });
-
-  if (input.mode === "stream" && input.res) {
-    pipeUIMessageStreamToResponse({ response: input.res, stream });
-    return;
-  }
-
-  await consumeUIMessageStream(stream);
-}
-
 export async function streamSpecRunChat(input: {
   auth: AuthContext;
   workflowId: string;
@@ -365,16 +260,65 @@ export async function streamSpecRunChat(input: {
   messages: UIMessage[];
   res: Response;
 }): Promise<void> {
-  const messages = await validateUIMessages({ messages: normalizeRunMessages(input.messages) });
-  await replaceLoopRunMessages(input.auth, input.runId, messages);
-  await executeSpecRun({
-    auth: input.auth,
+  const { spec, title } = await loadRunnableSpec(input.auth, input.workflowId);
+  const workspaceId = await loadWorkflowWorkspaceId(input.auth.tenantId, input.auth.userId, input.workflowId);
+  const hydratedAuth = withWorkflowWorkspaceAuth(input.auth, workspaceId);
+  const runContext = await resolveRunContext({
+    auth: hydratedAuth,
     workflowId: input.workflowId,
     runId: input.runId,
-    messages,
-    mode: "stream",
-    res: input.res,
+    spec,
   });
+  const normalizedMessages = await validateUIMessages({ messages: normalizeRunMessages(input.messages) });
+  const existingMessages = await listLoopRunMessages(hydratedAuth, input.runId);
+  const triggerSeedMessages: UIMessage[] = [{
+    id: randomUUID(),
+    role: "user",
+    parts: [{ type: "text", text: buildRunSeedMessage(runContext, spec) }],
+  }];
+  const messages: UIMessage[] = normalizedMessages.length > 0
+    ? mergeRunChatMessages(existingMessages, normalizedMessages)
+    : existingMessages.length > 0
+      ? existingMessages
+      : triggerSeedMessages;
+  await replaceLoopRunMessages(hydratedAuth, input.runId, messages);
+
+  const stream = createUIMessageStream({
+    originalMessages: messages,
+    execute: async ({ writer }) => {
+      writer.write({ type: "data-run", data: { runId: input.runId, workflowId: input.workflowId }, transient: true });
+      try {
+        await executeAgenticSpecRun({
+          auth: hydratedAuth,
+          workflowId: input.workflowId,
+          runId: input.runId,
+          spec,
+          workflowTitle: title,
+          runContext,
+          writer,
+        });
+      } catch (error) {
+        if (!(error instanceof SpecRunInteractionRequiredError)) {
+          throw error;
+        }
+      }
+      const projection = await getSpecRunProjection(hydratedAuth, input.runId);
+      writer.write({
+        type: "data-run",
+        data: {
+          runId: input.runId,
+          workflowId: input.workflowId,
+          status: projection.status,
+          summary: projection.summary,
+        },
+        transient: true,
+      });
+    },
+    onFinish: async ({ messages: completedMessages }) => {
+      await replaceLoopRunMessages(hydratedAuth, input.runId, completedMessages);
+    },
+  });
+  pipeUIMessageStreamToResponse({ response: input.res, stream });
 }
 
 export async function executeSpecRunHeadless(
@@ -382,7 +326,7 @@ export async function executeSpecRunHeadless(
   workflowId: string,
   runId: string,
 ): Promise<void> {
-  const { spec } = await loadRunnableSpec(auth, workflowId);
+  const { spec, title } = await loadRunnableSpec(auth, workflowId);
   const workspaceId = await loadWorkflowWorkspaceId(auth.tenantId, auth.userId, workflowId);
   const hydratedAuth = withWorkflowWorkspaceAuth(auth, workspaceId);
   const runContext = await resolveRunContext({
@@ -391,22 +335,30 @@ export async function executeSpecRunHeadless(
     runId,
     spec,
   });
-  const initialMessages: UIMessage[] = [{
+  const existingMessages = await listLoopRunMessages(hydratedAuth, runId);
+  const triggerSeedMessages: UIMessage[] = [{
     id: randomUUID(),
     role: "user",
     parts: [{ type: "text", text: buildRunSeedMessage(runContext, spec) }],
   }];
+  const initialMessages: UIMessage[] = existingMessages.length > 0
+    ? existingMessages
+    : triggerSeedMessages;
+  if (existingMessages.length === 0) {
+    await replaceLoopRunMessages(hydratedAuth, runId, initialMessages);
+  }
 
   try {
-    await executeSpecRun({
+    await executeAgenticSpecRun({
       auth: hydratedAuth,
       workflowId,
       runId,
-      messages: initialMessages,
-      mode: "headless",
+      spec,
+      workflowTitle: title,
       runContext,
     });
   } catch (error) {
+    if (error instanceof SpecRunInteractionRequiredError) return;
     const message = error instanceof Error ? error.message : String(error);
     await setRunStatus(runId, "failed", { error: message });
     throw error;
@@ -428,6 +380,13 @@ export async function getSpecRunMessages(auth: AuthContext, runId: string): Prom
 
 export async function startSpecManualLoopRun(auth: AuthContext, workflowId: string): Promise<SpecRunProjection> {
   const run = await createSpecLoopRun(auth, workflowId, { source: "manual", label: "Manual" });
+  await enqueueLoopRunCommand({
+    auth,
+    runId: run.id,
+    commandType: "start_run",
+    idempotencyKey: `spec-run:${run.id}:start`,
+    payload: { workflowId, trigger: "manual" },
+  });
   await startLoopRunWorkflow({
     tenantId: auth.tenantId,
     userId: auth.userId,
@@ -479,7 +438,19 @@ export async function retrySpecLoopRun(auth: AuthContext, runId: string): Promis
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
     [runId, hydratedAuth.tenantId, hydratedAuth.userId],
   );
+  await materializeSpecRunAgentSteps({
+    auth: hydratedAuth,
+    runId,
+    spec: projection.runnableSpec,
+  });
   await replaceLoopRunMessages(hydratedAuth, runId, []);
+  await enqueueLoopRunCommand({
+    auth: hydratedAuth,
+    runId,
+    commandType: "start_run",
+    idempotencyKey: `spec-run:${runId}:retry:${Date.now()}`,
+    payload: { workflowId: projection.workflowId, retry: true },
+  });
 
   await startLoopRunWorkflow({
     tenantId: hydratedAuth.tenantId,

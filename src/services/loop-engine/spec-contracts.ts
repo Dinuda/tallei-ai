@@ -42,12 +42,35 @@ function normalizeSpecDelivery(value: unknown): unknown {
   };
 }
 
+export const agentPersonaRoleKeySchema = z.enum([
+  "researcher",
+  "analyst",
+  "classifier",
+  "marketer",
+  "writer",
+  "engineer",
+  "reviewer",
+  "publisher",
+  "coordinator",
+  "generalist",
+]);
+
+export const agentPersonaSchema = z.object({
+  displayName: z.string().min(1).trim(),
+  roleKey: agentPersonaRoleKeySchema,
+  roleLabel: z.string().min(1).trim(),
+  avatarId: z.string().uuid(),
+  avatarSeed: z.string().min(1).trim(),
+});
+
 export const noSlopSpecAgentSchema = z.object({
   name: z.string().min(1).trim(),
   goal: z.string().min(1).trim(),
+  tools: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   guardrails: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   doneWhen: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   failureModes: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
+  persona: agentPersonaSchema.optional(),
 });
 
 const connectorActionRiskSchema = z.enum(["read", "write", "send", "destructive"]);
@@ -187,6 +210,8 @@ export const noSlopSpecSnapshotSchema = z.object({
   approvedAt: z.string().min(1),
 });
 
+export type AgentPersonaRoleKey = z.infer<typeof agentPersonaRoleKeySchema>;
+export type AgentPersona = z.infer<typeof agentPersonaSchema>;
 export type NoSlopSpec = z.infer<typeof noSlopSpecSchema>;
 export type NoSlopSpecAgent = z.infer<typeof noSlopSpecAgentSchema>;
 export type NoSlopSpecStatus = z.infer<typeof noSlopSpecStatusSchema>;

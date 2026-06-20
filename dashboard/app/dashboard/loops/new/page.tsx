@@ -34,7 +34,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import { Message, MessageContent } from "@/components/ai-elements/message";
+import { TranscriptMessageContent, CollapsibleTool } from "@/components/ai-elements/transcript-message";
 import {
   InteractivePromptMenu,
   type InteractivePromptAnswer,
@@ -55,14 +56,17 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
-import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
-import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+import { type ToolPart, ToolContent, ToolHeader } from "@/components/ai-elements/tool";
 import { BuilderConnectorChecklist } from "@/components/builder-connector-checklist";
 import { BuilderAppSelector, type AppSelectionOutput } from "@/components/builder-app-selector";
 import { BuilderScheduleSelector, type ScheduleSelectionOutput } from "@/components/builder-schedule-selector";
 import { BuilderKnowledgeBaseSelector, type KnowledgeBaseSelectionOutput } from "@/components/builder-knowledge-base-selector";
 import { BuilderArtifactEditor, type ArtifactSetupOutput, updateArtifactToolOutput } from "@/components/builder-artifact-editor";
 import { BuilderRequirementSelector, type RequirementSetupOutput } from "@/components/builder-requirement-selector";
+import {
+  BuilderAgentSpawnPanel,
+  isSpecDraftSpawnTool,
+} from "@/components/agent-persona/builder-agent-spawn-panel";
 import type { EmailTemplateId, EmailTemplateProps } from "@/lib/email-artifacts/types";
 import { notifyLoopBuilderSessionUpdated } from "@/components/loop-builder-header";
 import { dedupeChatMessagesById } from "@/lib/chat-messages";
@@ -76,6 +80,17 @@ const LoopSuggestionCards = dynamic(
   () => import("@/components/loop-suggestion-cards").then((mod) => mod.LoopSuggestionCards),
   { ssr: false },
 );
+
+function lastSpecDraftSpawnPartIndex(parts: UIMessage["parts"]): number {
+  let lastIndex = -1;
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i];
+    if (!isToolUIPart(part)) continue;
+    const toolName = getToolName(part);
+    if (isSpecDraftSpawnTool(toolName, part)) lastIndex = i;
+  }
+  return lastIndex;
+}
 
 
 export default function NewLoopBuilderPage() {
@@ -348,27 +363,14 @@ export default function NewLoopBuilderPage() {
                   onSelect={submitComposerText}
                 />
               )}
-              {transcriptMessages.map((message) => (
+              {transcriptMessages.map((message) => {
+                const specDraftSpawnPartIndex = lastSpecDraftSpawnPartIndex(message.parts);
+                return (
                 <Message from={message.role} key={message.id}>
                   <MessageContent>
-                    {message.parts.map((part, index) => {
-                      if (part.type === "text") return <MessageResponse key={index}>{part.text}</MessageResponse>;
-                      if (isReasoningUIPart(part)) {
-                        const reasoningText = part.text?.trim() ?? "";
-                        if (!reasoningText && part.state !== "streaming") return null;
-                        return (
-                          <Reasoning
-                            isStreaming={part.state === "streaming"}
-                            defaultOpen={part.state === "streaming"}
-                            key={`reasoning-${index}`}
-                          >
-                            <ReasoningTrigger />
-                            <ReasoningContent>{part.text}</ReasoningContent>
-                          </Reasoning>
-                        );
-                      }
-                      if (isToolUIPart(part)) {
-                        const toolName = getToolName(part);
+                    <TranscriptMessageContent
+                      message={message}
+                      renderTool={(part, toolName, index) => {
                         if (toolName === "appSelection") {
                           if (part.state === "input-streaming" || part.state === "input-available") return null;
                           const input = part.input && typeof part.input === "object" ? part.input as {
@@ -411,13 +413,34 @@ export default function NewLoopBuilderPage() {
                         }
                         if (toolName === "scheduleSetup") {
                           if (part.state === "input-streaming" || part.state === "input-available") return null;
-                          const input = part.input && typeof part.input === "object" ? part.input as { requirementId?: string } : {};
+                          const input = part.input && typeof part.input === "object" ? part.input as {
+                            requirementId?: string;
+                            question?: string;
+                            subtitle?: string;
+                            options?: Array<{
+                              id: string;
+                              label: string;
+                              description?: string;
+                              trigger?: "schedule" | "event";
+                              cron?: string;
+                              timezone?: string;
+                              toolkit?: string;
+                              triggerSlug?: string;
+                            }>;
+                            recommendedOptionIds?: string[];
+                            allowOther?: boolean;
+                          } : {};
                           const output = part.output && typeof part.output === "object" ? part.output as ScheduleSelectionOutput : null;
                           return sessionId && output ? <BuilderScheduleSelector
+                            allowOther={input.allowOther}
                             completedOutput={output}
                             key={index}
+                            options={input.options}
+                            question={input.question}
+                            recommendedOptionIds={input.recommendedOptionIds}
                             requirementId={input.requirementId ?? "trigger_schedule"}
                             sessionId={sessionId}
+                            subtitle={input.subtitle}
                           /> : null;
                         }
                         if (toolName === "knowledgeBaseSetup") {
@@ -491,32 +514,22 @@ export default function NewLoopBuilderPage() {
                         if (toolName === "getAvailableTools" && part.state === "output-available") {
                           return <AvailableTools key={index} part={part} />;
                         }
-                        return (
-                          <CollapsibleTool key={index} part={part}>
-                            {part.type === "dynamic-tool"
-                              ? <ToolHeader type={part.type} state={part.state} toolName={part.toolName} />
-                              : <ToolHeader type={part.type} state={part.state} />}
-                            <ToolContent
-                              className={cn(
-                                "transition-all",
-                                part.state !== "output-available" && [
-                                  "max-h-[360px] overflow-hidden",
-                                  "[mask-image:linear-gradient(to_bottom,black_85%,transparent_100%)]",
-                                  "[-webkit-mask-image:linear-gradient(to_bottom,black_85%,transparent_100%)]",
-                                ],
-                              )}
-                            >
-                              <ToolInput input={part.input} />
-                              <ToolOutput output={part.output} errorText={part.errorText} />
-                            </ToolContent>
-                          </CollapsibleTool>
-                        );
-                      }
-                      return null;
-                    })}
+                        if (toolName === "saveLoop" && !isSpecDraftSpawnTool(toolName, part)) {
+                          return null;
+                        }
+                        if (isSpecDraftSpawnTool(toolName, part) && index === specDraftSpawnPartIndex) {
+                          return <BuilderAgentSpawnPanel key={index} part={part} commands={commands} />;
+                        }
+                        if (isSpecDraftSpawnTool(toolName, part)) {
+                          return null;
+                        }
+                        return undefined;
+                      }}
+                    />
                   </MessageContent>
                 </Message>
-              ))}
+              );
+              })}
               {error && <p className="text-sm text-destructive">{error.message}</p>}
             </ConversationContent>
             <ConversationScrollButton />
@@ -620,13 +633,29 @@ export default function NewLoopBuilderPage() {
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
                   >
                     <BuilderScheduleSelector
+                      allowOther={(activeScheduleSetup.input as { allowOther?: boolean } | undefined)?.allowOther}
                       onComplete={(output) => addToolOutput({
                         tool: "scheduleSetup",
                         toolCallId: activeScheduleSetup.toolCallId,
                         output,
                       })}
+                      options={(activeScheduleSetup.input as {
+                        options?: Array<{
+                          id: string;
+                          label: string;
+                          description?: string;
+                          trigger?: "schedule" | "event";
+                          cron?: string;
+                          timezone?: string;
+                          toolkit?: string;
+                          triggerSlug?: string;
+                        }>;
+                      } | undefined)?.options}
+                      question={String((activeScheduleSetup.input as { question?: string } | undefined)?.question ?? "How often should this loop run?")}
+                      recommendedOptionIds={(activeScheduleSetup.input as { recommendedOptionIds?: string[] } | undefined)?.recommendedOptionIds}
                       requirementId={String((activeScheduleSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "trigger_schedule")}
                       sessionId={sessionId}
+                      subtitle={(activeScheduleSetup.input as { subtitle?: string } | undefined)?.subtitle}
                     />
                   </motion.div>
                 ) : showRequirementSetup ? (
@@ -845,36 +874,36 @@ function InteractivePromptTool({
 function ScrollOnToolComplete({ messages }: { messages: UIMessage[] }) {
   const { scrollToBottom, isAtBottom } = useStickToBottomContext();
   const lastCompletedRef = useRef<string | null>(null);
+  const lastMessageIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    let shouldScroll = false;
+
+    const lastMessage = messages[messages.length - 1];
+    const lastMessageId = lastMessage?.id ?? null;
+    if (lastMessageId && lastMessageId !== lastMessageIdRef.current) {
+      lastMessageIdRef.current = lastMessageId;
+      shouldScroll = true;
+    }
+
     const completedTool = messages
       .flatMap((message) => message.parts)
       .find((part) => isToolUIPart(part) && part.state === "output-available" && "toolCallId" in part && part.toolCallId !== lastCompletedRef.current);
 
     if (completedTool && "toolCallId" in completedTool) {
       lastCompletedRef.current = completedTool.toolCallId;
-      if (isAtBottom) {
-        void scrollToBottom({
-          animation: { damping: 0.8, stiffness: 0.04, mass: 1.5 },
-          preserveScrollPosition: true,
-        });
-      }
+      shouldScroll = true;
+    }
+
+    if (shouldScroll && isAtBottom) {
+      void scrollToBottom({
+        animation: { damping: 0.8, stiffness: 0.04, mass: 1.5 },
+        preserveScrollPosition: true,
+      });
     }
   }, [messages, scrollToBottom, isAtBottom]);
 
   return null;
-}
-
-function CollapsibleTool({ part, children }: { part: ToolPart; children: React.ReactNode }) {
-  const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined);
-  const isCompleted = part.state === "output-available";
-  const open = isCompleted ? (userOpen ?? false) : (userOpen ?? true);
-
-  return (
-    <Tool open={open} onOpenChange={setUserOpen}>
-      {children}
-    </Tool>
-  );
 }
 
 function findActiveInteractivePrompt(messages: UIMessage[]): ToolPart | null {

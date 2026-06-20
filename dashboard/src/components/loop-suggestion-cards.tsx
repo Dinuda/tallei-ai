@@ -20,7 +20,7 @@ const SUGGESTIONS: LoopSuggestion[] = [
   },
   {
     id: "lead-scoring",
-    title: "Lead Scoring Loop",
+  title: "Lead Scoring Loop",
     description: "Score incoming leads and notify the sales team when a hot lead arrives.",
     prompt: "Build a loop that scores incoming leads from form submissions and alerts me when a hot lead is identified.",
     image: "/loops/lead-scoring-funnel.png",
@@ -29,7 +29,7 @@ const SUGGESTIONS: LoopSuggestion[] = [
     id: "support",
     title: "Support Auto-Reply",
     description: "Auto-classify support tickets and draft context-aware replies.",
-    prompt: "Set up a loop that monitors support tickets, classifies them by priority, and drafts personalized replies.",
+    prompt: "Set up a loop that monitors support tickets, classifies them by priority, and drafts personalized replies and sends them to the customer.",
     image: "/loops/support-brain.png",
   },
   {

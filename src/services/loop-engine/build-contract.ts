@@ -2,6 +2,7 @@ import Ajv from "ajv";
 import { z } from "zod";
 
 import { nextCronRunAt, validateFiveFieldCron } from "../loop-executor/cron.js";
+import { isPlatformManagedToolkit } from "../connectors/platform-integrations.js";
 import type { LoopIntentContext } from "./intent-context.js";
 import type { ToolContract } from "../tool-spec/types.js";
 
@@ -137,6 +138,7 @@ export function deriveLoopBuildContract(input: {
   const connectorGroups = new Map<string, ToolContract[]>();
   for (const contract of input.discoveredToolContracts.filter((entry) => entry.provider === "composio")) {
     const toolkit = toolkitFor(contract);
+    if (isPlatformManagedToolkit(toolkit)) continue;
     connectorGroups.set(toolkit, [...(connectorGroups.get(toolkit) ?? []), contract]);
   }
 

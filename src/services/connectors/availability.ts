@@ -7,6 +7,7 @@ import {
   listComposioToolkits,
   reconcileComposioConnectorAccounts,
 } from "./composio.js";
+import { isPlatformManagedToolkit } from "./platform-integrations.js";
 
 export type ConnectorAvailabilityState =
   | "not_connected"
@@ -52,6 +53,12 @@ function toolkitFor(contract: ToolContract): string {
   return match?.[1]?.toLowerCase() ?? contract.name.toLowerCase();
 }
 
+function isComposioConnectorContract(contract: ToolContract): boolean {
+  if (contract.provider !== "composio") return false;
+  const toolkit = toolkitFor(contract);
+  return toolkit.length > 0 && !isPlatformManagedToolkit(toolkit);
+}
+
 function actionSlugCandidates(contract: ToolContract): string[] {
   const candidates = new Set<string>();
   const configured = String(contract.constraints.actionSlug ?? "").trim();
@@ -83,7 +90,7 @@ export async function resolveConnectorAvailability(input: {
   selectedAccountIdsByToolkit?: Record<string, string[]>;
 }): Promise<{ snapshot: ConnectorAvailabilitySnapshot; contracts: ToolContract[] }> {
   if (input.previousComposioSessionId) invalidateComposioSession(input.previousComposioSessionId);
-  const connectorContracts = input.contracts.filter((contract) => contract.provider === "composio");
+  const connectorContracts = input.contracts.filter(isComposioConnectorContract);
   const requestedToolkits = [...new Set(connectorContracts.map(toolkitFor))];
   const [accounts, toolkitMetadata] = await Promise.all([
     reconcileComposioConnectorAccounts({ auth: input.auth, toolkits: requestedToolkits }).catch(() => []),
@@ -151,7 +158,7 @@ export async function resolveConnectorAvailability(input: {
   });
 
   const refreshedContracts = input.contracts.map((contract) => {
-    if (contract.provider !== "composio") return contract;
+    if (!isComposioConnectorContract(contract)) return contract;
     const toolkit = toolkitFor(contract);
     return {
       ...contract,

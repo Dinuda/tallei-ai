@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+
 export type NormalizedGmailTriggerTicket = {
   subject: string;
   body: string;
@@ -83,4 +85,23 @@ export function normalizeGmailTriggerPayload(data: Record<string, unknown>): Nor
     messageId,
     threadId,
   };
+}
+
+function stableHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 24);
+}
+
+export function gmailTriggerDedupeKey(data: Record<string, unknown>): string | null {
+  const normalized = normalizeGmailTriggerPayload(data);
+  if (!normalized) return null;
+  if (normalized.messageId) return `gmail:message:${normalized.messageId}`;
+
+  const fallbackParts = [
+    normalized.threadId,
+    normalized.fromEmail.toLowerCase(),
+    normalized.subject.toLowerCase(),
+    stableHash(normalized.body),
+  ].filter(Boolean);
+  if (fallbackParts.length === 0) return null;
+  return `gmail:fallback:${stableHash(fallbackParts.join("\n"))}`;
 }
