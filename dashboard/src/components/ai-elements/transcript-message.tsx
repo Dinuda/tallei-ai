@@ -7,11 +7,10 @@ import {
   isToolUIPart,
   type UIMessage,
 } from "ai";
-import { BrainIcon } from "lucide-react";
+import { Bot, BrainIcon, CheckCircle2, Circle, PauseCircle, XCircle } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { AgentPersonaAvatar } from "@/components/agent-persona/agent-persona-avatar";
-import { agentStatusLine, roleBadgeClass, type AgentPersonaUi } from "@/components/agent-persona/agent-persona";
+import { type AgentPersonaUi } from "@/components/agent-persona/agent-persona";
 import { builderFallbackNarration, prepareBuilderTranscriptParts } from "@/lib/loop-builder-transcript";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
@@ -42,6 +41,7 @@ export type RenderMessagePartContext = {
   parts: UIMessage["parts"];
   isStreaming?: boolean;
   expandReasoning?: boolean;
+  transcriptVariant?: "builder" | "run";
   renderTool?: (part: ToolPart, toolName: string, index: number) => ReactNode | null | undefined;
   shouldRenderText?: (ctx: ShouldRenderTextContext) => boolean;
   hideFinalizeAgent?: boolean;
@@ -133,38 +133,42 @@ export function AgentTurnHeader({ data }: { data: DataAgentPartData }) {
   const persona = data.persona;
   const displayName = persona?.displayName ?? data.agentName ?? "Agent";
   const phase = data.phase ?? "working";
-  const statusText = agentStatusLine(displayName, phase, data.task);
+  const statusText = phase === "working"
+    ? null
+    : phase === "finished"
+    ? "Done"
+    : phase === "failed"
+      ? "Failed"
+      : phase === "queued"
+        ? "Queued"
+        : null;
+  const StatusIcon = statusText === "Done"
+    ? CheckCircle2
+    : statusText === "Failed"
+        ? XCircle
+        : statusText === "Queued"
+          ? Circle
+          : PauseCircle;
 
   return (
-    <div className="mb-2 flex items-start gap-3 rounded-md border border-[#e4f5c6] bg-[#f8fdf2] px-3 py-2.5">
-      {persona ? (
-        <AgentPersonaAvatar persona={persona} size="md" />
-      ) : (
-        <div className="grid size-10 shrink-0 place-items-center rounded-full border border-[#d1d5db] bg-white text-[11px] font-semibold text-[#374151]">
-          {(displayName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2) || "A").toUpperCase()}
-        </div>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-[#182506]">{displayName}</span>
-          {persona?.roleLabel ? (
-            <span
-              className={cn(
-                "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-                roleBadgeClass(persona.roleKey),
-              )}
-            >
-              {persona.roleLabel}
-            </span>
-          ) : null}
-          {typeof data.stepIndex === "number" && typeof data.totalAgents === "number" ? (
-            <span className="text-[11px] text-[#7a9a4a]">
-              Agent {data.stepIndex + 1} of {data.totalAgents}
-            </span>
-          ) : null}
-        </div>
-        <p className="mt-0.5 text-xs font-medium text-[#7eb71b]">{statusText}</p>
+    <div className="mb-4 flex items-center gap-4 border border-[#e5e7eb] bg-white px-4 py-3.5">
+      <div className="grid size-12 shrink-0 place-items-center border border-[#e5e7eb] bg-[#fafafa] text-[#6b7280]">
+        <Bot className="size-4" strokeWidth={2} />
       </div>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[15px] font-semibold text-[#111827]">{displayName}</p>
+        {typeof data.stepIndex === "number" ? (
+          <p className="mt-0.5 text-[13px] font-medium text-[#6b7280]">
+            Agent {data.stepIndex + 1}
+          </p>
+        ) : null}
+      </div>
+      {statusText ? (
+        <span className="inline-flex shrink-0 items-center gap-2 text-[13px] font-medium text-[#6b7280]">
+          <StatusIcon className="size-4" strokeWidth={2} />
+          {statusText}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -225,7 +229,8 @@ export function renderMessagePart(
 
   if (isReasoningUIPart(part)) {
     const reasoningText = part.text ?? "";
-    const reasoningStreaming = part.state === "streaming";
+    const reasoningStreaming = part.state === "streaming" && Boolean(ctx.isStreaming);
+    if (ctx.transcriptVariant === "run") return null;
     if (!reasoningText.trim() && !reasoningStreaming) return null;
     if (ctx.expandReasoning) {
       return (
@@ -270,6 +275,7 @@ export function TranscriptMessageContent({
   hideFinalizeAgent,
   isStreaming,
   expandReasoning = false,
+  transcriptVariant = "builder",
 }: {
   message: UIMessage;
   renderTool?: RenderMessagePartContext["renderTool"];
@@ -277,18 +283,19 @@ export function TranscriptMessageContent({
   hideFinalizeAgent?: boolean;
   isStreaming?: boolean;
   expandReasoning?: boolean;
+  transcriptVariant?: "builder" | "run";
 }) {
   const parts = useMemo(
-    () => message.role === "assistant"
+    () => message.role === "assistant" && transcriptVariant === "builder"
       ? prepareBuilderTranscriptParts(message.parts)
       : coalesceAdjacentTextParts(message.parts),
-    [message.parts, message.role],
+    [message.parts, message.role, transcriptVariant],
   );
   const fallbackNarration = useMemo(() => (
-    message.role === "assistant"
+    message.role === "assistant" && transcriptVariant === "builder"
       ? builderFallbackNarration(message.parts, { isStreaming })
       : null
-  ), [isStreaming, message.parts, message.role]);
+  ), [isStreaming, message.parts, message.role, transcriptVariant]);
 
   return (
     <>
@@ -298,6 +305,7 @@ export function TranscriptMessageContent({
         parts,
         isStreaming,
         expandReasoning,
+        transcriptVariant,
         renderTool,
         shouldRenderText,
         hideFinalizeAgent,

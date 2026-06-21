@@ -527,6 +527,10 @@ function resolveStepRowPhase(
   pendingInteraction: Interaction | null,
 ): StepRowPhase {
   const isCurrent = currentStep?.id === step.id;
+  const hasPendingForStep = pendingInteraction?.step_attempt_id === step.id;
+  if (hasPendingForStep && step.status !== "failed" && step.status !== "cancelled") {
+    return isCurrent ? "current_gate" : "done";
+  }
   if (isCurrent && pendingInteraction && step.status === "waiting_for_interaction") return "current_gate";
   if (isCurrent && step.status === "running") return "current_running";
   if (step.status === "running") return "running";
@@ -1308,12 +1312,6 @@ function RunStatusBand({
             style={{ fontFamily: "var(--font-fustat)" }}
           >
             <div className="min-w-0 flex-1">
-              <p
-                className="text-[11px] font-semibold tracking-[0.1em] text-[#64748b] uppercase"
-                style={{ fontFamily: "var(--font-title)" }}
-              >
-                Running
-              </p>
               <RunningSlotText stages={runningStages} />
             </div>
           </motion.div>
@@ -1496,7 +1494,7 @@ export default function StableLoopRunPage() {
   }, [load]);
 
   useEffect(() => {
-    if (!run || terminalStatuses.has(run.status)) return;
+    if (!run || terminalStatuses.has(run.status) || isSpecDrivenRun(run)) return;
     const timer = window.setInterval(() => void load(), 3_000);
     return () => window.clearInterval(timer);
   }, [run, load]);

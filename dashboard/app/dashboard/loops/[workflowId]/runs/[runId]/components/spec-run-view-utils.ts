@@ -2,6 +2,8 @@ import type { UIMessage } from "ai";
 
 import type { OperatorView } from "@/lib/operator-view-types";
 
+export { buildGatePromptOptions } from "@/lib/operator-view-types";
+
 export type SpecRunStep = {
   id: string;
   step_index: number;
@@ -230,6 +232,19 @@ export function formatAgentStructuredOutput(output: unknown): string {
   return formatStructuredData(record);
 }
 
+function collapseValidationError(message: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) return "";
+  const matches = trimmed.match(/data must NOT have additional properties/g);
+  if (!matches || matches.length <= 1) return trimmed;
+  const fields = [...trimmed.matchAll(/property '([^']+)'/g)].map((match) => match[1]);
+  const uniqueFields = [...new Set(fields.filter(Boolean))];
+  if (uniqueFields.length > 0) {
+    return `Output has unexpected fields: ${uniqueFields.join(", ")}`;
+  }
+  return "Output has unexpected additional properties.";
+}
+
 export function formatStepOutput(step: SpecRunStep): string {
   const text = step.output_json?.text?.trim();
   if (text) {
@@ -248,7 +263,9 @@ export function formatStepOutput(step: SpecRunStep): string {
     if (formatted) return formatted;
   }
 
-  if (step.error_json?.message?.trim()) return step.error_json.message.trim();
+  if (step.error_json?.message?.trim()) {
+    return collapseValidationError(step.error_json.message);
+  }
   return "";
 }
 
@@ -374,11 +391,50 @@ export function formatInteractionDecision(interaction: SpecRunInteraction): stri
     return text || "Submitted input";
   }
   if (interaction.status === "rejected") {
-    const reason = typeof decision.reason === "string" ? decision.reason.trim() : "";
+    const rawReason = typeof decision.reason === "string" ? decision.reason.trim() : "";
+    const reason = rawReason
+      .replace(/^requested\s+changes:\s*/gi, "")
+      .replace(/^revise(d)?\s*/i, "")
+      .trim();
     if (decision.command === "revise") return reason ? `Requested changes: ${reason}` : "Requested changes";
     return reason ? `Rejected: ${reason}` : "Rejected";
   }
   return null;
+}
+
+/** Synthetic run narration we hide from the transcript — only show real chat/tool output. */
+export function isRunMetaNarration(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  return /configured .*gate will now/.test(normalized)
+    || /delivery specialist will proceed/.test(normalized)
+    || /proceeding to .*specialist/.test(normalized)
+    || /^now proceeding to /.test(normalized)
+    || /^i['’]ll start by /.test(normalized)
+    || /^let me /.test(normalized)
+    || /^good,\s*i have\b/.test(normalized)
+    || /^i also found /.test(normalized)
+    || /^context specialist complete\b/.test(normalized)
+    || /^draft specialist complete\b/.test(normalized)
+    || /^delivery specialist complete\b/.test(normalized)
+    || /\blet me now finalize\b/.test(normalized)
+    || /all (three )?agents have completed/.test(normalized)
+    || /workflow run summary/.test(normalized)
+    || /approval required per .*policy/.test(normalized)
+    || /operator for review before/.test(normalized)
+    || /^i(?:'|’)ll start by /.test(normalized)
+    || /^let me (?:now )?(?:check|fetch|look|search|gather|craft|draft|finalize)\b/.test(normalized)
+    || /^now let me /.test(normalized)
+    || /^good,\s*i have .*now let me /.test(normalized)
+    || /^i see the context from /.test(normalized)
+    || /^based on (?:the |my )?(?:context|evidence|research)/.test(normalized)
+    || /^i(?:'|’)ve (?:gathered|reviewed|analyzed|identified)/.test(normalized)
+    || /^here(?:'|’)s (?:the |my )?(?:context|summary|analysis)/.test(normalized)
+    || /^subject:\s*.+/i.test(text.trim())
+    || /^dear\s+/i.test(normalized)
+    || /^hi\s+[a-z]+,/i.test(normalized)
+    || /^[a-z\s]+specialist complete\./.test(normalized)
+    || /^requested changes:/i.test(text.trim());
 }
 
 export function isRunPausedForGate(runStatus: string): boolean {
@@ -427,6 +483,45 @@ export function resolveDisplayArtifact(input: {
   return artifact;
 }
 
+export function isNoActionRequiredValue(value: unknown): boolean {
+  if (!value) return false;
+  if (typeof value === "string") {
+    const normalized = value.replace(/[_-]+/g, " ").toLowerCase();
+    return /\bno (new )?(support )?tickets? (found|detected)\b/.test(normalized)
+      || /\bno (formal )?support tickets?\b/.test(normalized)
+      || /\bno drafts? (were )?(created|needed|could be created)\b/.test(normalized)
+      || /\bnothing actionable\b/.test(normalized);
+  }
+  if (Array.isArray(value)) return value.some(isNoActionRequiredValue);
+  if (typeof value !== "object") return false;
+
+  const record = value as Record<string, unknown>;
+  const status = typeof record.status === "string" ? record.status.trim().toLowerCase() : "";
+  if (status === "no_action_required" || status === "no_tickets_found" || status === "no_ticket_found") {
+    return true;
+  }
+  for (const key of ["structuredOutput", "data", "summary", "text", "body", "message", "conclusion", "findings"]) {
+    if (isNoActionRequiredValue(record[key])) return true;
+  }
+  return false;
+}
+
+export function isNoActionReview(input: {
+  operatorView: OperatorView | null;
+  pendingInteraction: SpecRunInteraction | null;
+  displayArtifact: SpecRunArtifact | null;
+}): boolean {
+  const surface = input.operatorView?.blocks.find((block) => block.required && !block.satisfied)?.surface
+    ?? input.operatorView?.blocks[0]?.surface
+    ?? (typeof input.pendingInteraction?.payload_json?.surface === "string"
+      ? input.pendingInteraction.payload_json.surface
+      : "");
+  if (surface !== "review.email" && surface !== "review.draft" && surface !== "review.preview") return false;
+  return isNoActionRequiredValue(input.displayArtifact?.data_json)
+    || isNoActionRequiredValue(input.displayArtifact?.body)
+    || isNoActionRequiredValue(input.pendingInteraction?.payload_json);
+}
+
 export function resolveActiveGate(input: {
   runStatus: string;
   steps: SpecRunStep[];
@@ -438,20 +533,23 @@ export function resolveActiveGate(input: {
   interaction: SpecRunInteraction | null;
   operatorView: OperatorView | null;
 } {
-  if (!input.pendingInteraction || !input.operatorView) {
+  if (!input.pendingInteraction) {
     return { show: false, step: null, interaction: null, operatorView: null };
   }
 
   const step = input.steps.find((entry) => entry.id === input.pendingInteraction!.step_attempt_id) ?? null;
-  if (!step) {
-    return { show: false, step: null, interaction: input.pendingInteraction, operatorView: input.operatorView };
-  }
   return {
     show: true,
     step,
     interaction: input.pendingInteraction,
     operatorView: input.operatorView,
   };
+}
+
+export function isGateComposerReady(input: {
+  gate: ReturnType<typeof resolveActiveGate>;
+}): boolean {
+  return Boolean(input.gate.show && input.gate.interaction && input.gate.operatorView);
 }
 
 export function toArtifactRecord(artifact: SpecRunArtifact): {
@@ -474,28 +572,261 @@ export function toArtifactRecord(artifact: SpecRunArtifact): {
   };
 }
 
-export function buildGatePromptOptions(operatorView: OperatorView) {
-  const isDraft = operatorView.blocks.some((block) =>
-    block.surface === "review.email" || block.surface === "review.draft");
-  const options = [
-    {
-      id: "approve",
-      label: isDraft ? "Approve draft" : "Approve",
-      value: "approve",
-      description: isDraft ? "Save edits and continue" : "Continue",
-    },
-    {
-      id: "revise",
-      label: "Request changes",
-      value: "revise",
-      description: "Send back for another pass",
-    },
-    {
-      id: "reject",
-      label: "Reject run",
-      value: "reject",
-      description: "Stop this run",
-    },
-  ];
-  return options;
+export type HandoffFieldRow = {
+  key: string;
+  preview: string;
+  targetPath?: string;
+};
+
+export type PriorOutputGroup = {
+  agentName: string;
+  agentId: string;
+  fields: HandoffFieldRow[];
+};
+
+export type HandoffTargetGroup = {
+  agentName: string;
+  fields: string[];
+};
+
+const INTERNAL_OUTPUT_KEYS = new Set(["ok", "approved", "interactionKind", "value"]);
+
+function previewFieldValue(value: unknown, maxLen = 120): string {
+  if (value == null) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    return trimmed.length > maxLen ? `${trimmed.slice(0, maxLen)}…` : trimmed;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return `[${value.length} item${value.length === 1 ? "" : "s"}]`;
+  if (typeof value === "object") {
+    const formatted = formatAgentStructuredOutput(value);
+    if (formatted) {
+      const singleLine = formatted.replace(/\s+/g, " ").trim();
+      return singleLine.length > maxLen ? `${singleLine.slice(0, maxLen)}…` : singleLine;
+    }
+    try {
+      const raw = JSON.stringify(value);
+      return raw.length > maxLen ? `${raw.slice(0, maxLen)}…` : raw;
+    } catch {
+      return "…";
+    }
+  }
+  return "";
+}
+
+function readStructuredOutputFromStep(step: SpecRunStep): Record<string, unknown> | null {
+  const data = step.output_json?.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+
+  const structured = data.structuredOutput;
+  if (structured && typeof structured === "object" && !Array.isArray(structured)) {
+    return structured as Record<string, unknown>;
+  }
+
+  const nested = data.data;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    return nested as Record<string, unknown>;
+  }
+
+  if (!isInternalPayload(data)) {
+    return data;
+  }
+
+  return null;
+}
+
+function extractTopLevelFields(record: Record<string, unknown>): HandoffFieldRow[] {
+  return Object.entries(record)
+    .filter(([key]) => !INTERNAL_OUTPUT_KEYS.has(key))
+    .map(([key, value]) => ({
+      key,
+      preview: previewFieldValue(value),
+    }))
+    .filter((field) => field.preview);
+}
+
+function readResolvedHandoffBindings(step: SpecRunStep): Array<Record<string, unknown>> {
+  const resolvedHandoff = step.input_json?.resolvedHandoff;
+  if (!resolvedHandoff || typeof resolvedHandoff !== "object" || Array.isArray(resolvedHandoff)) {
+    return [];
+  }
+  const bindings = (resolvedHandoff as Record<string, unknown>).resolvedBindings;
+  return Array.isArray(bindings)
+    ? bindings.filter((entry): entry is Record<string, unknown> =>
+      Boolean(entry && typeof entry === "object" && !Array.isArray(entry)))
+    : [];
+}
+
+function readBindingSourceAgentId(binding: Record<string, unknown>): string {
+  const source = binding.source;
+  if (!source || typeof source !== "object" || Array.isArray(source)) return "";
+  const agentId = (source as Record<string, unknown>).agentId;
+  return typeof agentId === "string" ? agentId : "";
+}
+
+function readBindingSourceKind(binding: Record<string, unknown>): string {
+  const source = binding.source;
+  if (!source || typeof source !== "object" || Array.isArray(source)) return "";
+  const kind = (source as Record<string, unknown>).kind;
+  return typeof kind === "string" ? kind : "";
+}
+
+function readBindingSourcePath(binding: Record<string, unknown>): string {
+  const source = binding.source;
+  if (!source || typeof source !== "object" || Array.isArray(source)) return "";
+  const path = (source as Record<string, unknown>).path;
+  return typeof path === "string" && path.trim() ? path.trim() : "/";
+}
+
+function sourcePathToFieldKey(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === "/") return "output";
+  const segments = trimmed.split("/").filter(Boolean);
+  return segments.at(-1) ?? "output";
+}
+
+function attachTargetPaths(
+  group: PriorOutputGroup,
+  bindings: Array<Record<string, unknown>>,
+): PriorOutputGroup {
+  const bindingByKey = new Map<string, string>();
+  for (const binding of bindings) {
+    if (readBindingSourceKind(binding) !== "agent_output") continue;
+    if (readBindingSourceAgentId(binding) !== group.agentId) continue;
+    const fieldKey = sourcePathToFieldKey(readBindingSourcePath(binding));
+    const targetPath = typeof binding.targetPath === "string" ? binding.targetPath.trim() : "";
+    if (fieldKey && targetPath) bindingByKey.set(fieldKey, targetPath);
+  }
+
+  return {
+    ...group,
+    fields: group.fields.map((field) => ({
+      ...field,
+      targetPath: bindingByKey.get(field.key) ?? field.targetPath,
+    })),
+  };
+}
+
+export function extractPriorOutputGroups(step: SpecRunStep | undefined): PriorOutputGroup[] {
+  if (!step) return [];
+
+  const priorOutputs = step.input_json?.priorOutputs;
+  if (!Array.isArray(priorOutputs) || priorOutputs.length === 0) return [];
+
+  const bindings = readResolvedHandoffBindings(step);
+  const groups = new Map<string, PriorOutputGroup>();
+
+  for (const entry of priorOutputs) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const agentId = typeof record.agentId === "string" ? record.agentId : "";
+    const agentName = typeof record.agentName === "string" && record.agentName.trim()
+      ? record.agentName.trim()
+      : agentId || "Prior agent";
+    const groupKey = agentId || agentName;
+    const output = record.output;
+    const fields = output && typeof output === "object" && !Array.isArray(output)
+      ? extractTopLevelFields(output as Record<string, unknown>)
+      : previewFieldValue(output)
+        ? [{ key: "output", preview: previewFieldValue(output) }]
+        : [];
+
+    if (fields.length === 0) continue;
+
+    const existing = groups.get(groupKey);
+    if (existing) {
+      const mergedKeys = new Set(existing.fields.map((field) => field.key));
+      for (const field of fields) {
+        if (mergedKeys.has(field.key)) continue;
+        existing.fields.push(field);
+        mergedKeys.add(field.key);
+      }
+      continue;
+    }
+
+    groups.set(groupKey, attachTargetPaths({
+      agentName,
+      agentId,
+      fields,
+    }, bindings));
+  }
+
+  return [...groups.values()].map((group) => attachTargetPaths(group, bindings));
+}
+
+export function extractOutputFields(step: SpecRunStep | undefined): HandoffFieldRow[] {
+  if (!step) return [];
+  const structured = readStructuredOutputFromStep(step);
+  if (!structured) return [];
+  return extractTopLevelFields(structured);
+}
+
+function stepMatchesPriorOutputEntry(
+  step: SpecRunStep,
+  entry: Record<string, unknown>,
+): boolean {
+  const agentId = typeof entry.agentId === "string" ? entry.agentId : "";
+  const agentName = typeof entry.agentName === "string" ? entry.agentName : "";
+  const matchesId = Boolean(agentId && agentId === step.agent_id);
+  const matchesName = Boolean(
+    agentName
+    && step.agent_snapshot.name
+    && agentName.toLowerCase() === step.agent_snapshot.name.toLowerCase(),
+  );
+  return matchesId || matchesName;
+}
+
+export function resolveHandoffTargets(step: SpecRunStep | undefined, allSteps: SpecRunStep[]): HandoffTargetGroup[] {
+  if (!step) return [];
+
+  const laterSteps = latestAttemptPerStep(allSteps)
+    .filter((entry) => entry.step_index > step.step_index);
+
+  const targets: HandoffTargetGroup[] = [];
+
+  for (const laterStep of laterSteps) {
+    const priorOutputs = laterStep.input_json?.priorOutputs;
+    if (!Array.isArray(priorOutputs)) continue;
+
+    const matched = priorOutputs.some((entry) =>
+      entry && typeof entry === "object" && !Array.isArray(entry)
+      && stepMatchesPriorOutputEntry(step, entry as Record<string, unknown>));
+    if (!matched) continue;
+
+    const agentName = laterStep.agent_snapshot.name?.trim() || laterStep.agent_id;
+    const bindings = readResolvedHandoffBindings(laterStep);
+    const fields = bindings
+      .filter((binding) =>
+        readBindingSourceKind(binding) === "agent_output"
+        && readBindingSourceAgentId(binding) === step.agent_id)
+      .map((binding) => {
+        const targetPath = typeof binding.targetPath === "string" ? binding.targetPath.trim() : "";
+        if (targetPath) return targetPath;
+        return sourcePathToFieldKey(readBindingSourcePath(binding));
+      })
+      .filter(Boolean);
+
+    if (fields.length === 0) {
+      const matchedEntry = priorOutputs.find((entry) =>
+        entry && typeof entry === "object" && !Array.isArray(entry)
+        && stepMatchesPriorOutputEntry(step, entry as Record<string, unknown>));
+      const output = matchedEntry && typeof matchedEntry === "object" && !Array.isArray(matchedEntry)
+        ? (matchedEntry as Record<string, unknown>).output
+        : null;
+      if (output && typeof output === "object" && !Array.isArray(output)) {
+        fields.push(...Object.keys(output as Record<string, unknown>).filter((key) => !INTERNAL_OUTPUT_KEYS.has(key)));
+      }
+    }
+
+    if (fields.length === 0) continue;
+
+    targets.push({
+      agentName,
+      fields: [...new Set(fields)],
+    });
+  }
+
+  return targets;
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -6,6 +7,8 @@ import {
   mapInteractionKindForUi,
   patchMessagesWithToolResult,
 } from "../../../src/services/loop-runtime/spec-run-interactions.js";
+
+const interactionWriterPath = new URL("../../../src/services/loop-runtime/spec-run-interaction-writer.ts", import.meta.url);
 
 test("mapInteractionKindForUi prefers payload gateType", () => {
   const kind = mapInteractionKindForUi({
@@ -107,6 +110,65 @@ test("buildOperatorViewFromInteraction preserves explicit builder-style interact
   assert.equal(view?.blocks[0]?.surface, "input.text");
   assert.equal(view?.actions[0]?.command, "submit_input");
   assert.equal(view?.meta?.nextAgentName, "Draft Writer");
+});
+
+test("buildOperatorViewFromInteraction exposes non-send connector approvals as confirm_action", () => {
+  const view = buildOperatorViewFromInteraction({
+    id: "ix-action",
+    run_id: "run-1",
+    step_attempt_id: "step-1",
+    interaction_kind: "confirm_action",
+    status: "pending",
+    question: "Approve Gmail draft.",
+    payload_json: {
+      gateType: "action_approval",
+      toolKey: "action_gmail_GMAIL_REPLY_TO_THREAD",
+      workspace: {
+        title: "Action approval",
+        subtitle: "Approve Gmail draft.",
+        stamp: { tag: "Approve", name: "Delivery Specialist" },
+      },
+      blocks: [{
+        kind: "confirm_action",
+        id: "action_gmail_GMAIL_REPLY_TO_THREAD",
+        required: true,
+        satisfied: false,
+        label: "Gmail reply to thread",
+        description: "Approve Gmail draft.",
+        data: { actionRef: "composio.gmail.action.GMAIL_REPLY_TO_THREAD" },
+      }],
+      actions: [{ id: "approve", command: "approve", label: "Approve Gmail reply to thread", enabled: true }],
+      deferred: {
+        actionLabel: "Gmail reply to thread",
+        actionRef: "composio.gmail.action.GMAIL_REPLY_TO_THREAD",
+        payload: { thread_id: "thread-1", body: "Draft" },
+      },
+    },
+    decision_json: {},
+  }, { name: "Delivery Specialist" });
+
+  assert.ok(view);
+  assert.equal(view?.workspace.title, "Action approval");
+  assert.equal(view?.blocks[0]?.kind, "confirm_action");
+  assert.equal(view?.blocks[0]?.surface, undefined);
+  assert.equal(view?.blocks[0]?.props, undefined);
+  assert.equal(view?.actions[0]?.label, "Approve Gmail reply to thread");
+  assert.equal(view?.meta?.renderTarget, undefined);
+  assert.equal(view?.meta?.canvasArtifactKey, undefined);
+});
+
+test("interaction writer separates draft render review from non-send action approval", async () => {
+  const source = await readFile(interactionWriterPath, "utf8");
+
+  assert.match(source, /surface: "confirm\.send"/);
+  assert.match(source, /if \(!input\.deferred\.isSendAction\)/);
+  assert.match(source, /kind: "confirm_action"/);
+  assert.match(source, /'confirm_action', 'pending'/);
+  assert.match(source, /findInteractionIdByKey/);
+  assert.match(source, /ON CONFLICT \(idempotency_key\) DO UPDATE/);
+  assert.match(source, /RETURNING id/);
+  assert.match(source, /renderTargetForSurface\(surface\)/);
+  assert.match(source, /if \(surface === "review\.email"\)/);
 });
 
 test("patchMessagesWithToolResult completes pending tool parts", () => {

@@ -14,7 +14,8 @@ test("transcript message renderer handles text, reasoning, tools, and agent pers
   assert.match(source, /coalesceAdjacentTextParts/);
   assert.match(source, /ExpandedReasoningBlock|expandReasoning/);
   assert.match(source, /AgentTurnHeader/);
-  assert.match(source, /AgentPersonaAvatar/);
+  assert.match(source, /phase === "working"\s*\?\s*null/);
+  assert.doesNotMatch(source, /statusText === "Running"/);
   assert.match(source, /isDataAgentPart/);
   assert.match(source, /CollapsibleTool/);
   assert.match(source, /findActiveToolPart/);
@@ -40,6 +41,7 @@ test("code block highlighter does not set state during render", async () => {
     new URL("../../../dashboard/src/components/ai-elements/code-block.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /asyncTokenState/);
+  assert.match(source, /subscribers/);
+  assert.match(source, /requestHighlightedTokens/);
   assert.doesNotMatch(source, /if\s*\([^)]*asyncKeyRef[\s\S]*?setAsyncTokens/);
 });

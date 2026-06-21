@@ -1,14 +1,15 @@
-import { getToolName, isToolUIPart, type UIMessage } from "ai";
+import { getToolName, isReasoningUIPart, isToolUIPart, type UIMessage } from "ai";
 
-import type { AgentPersonaUi } from "@/components/agent-persona/agent-persona";
+import {
+  isDataAgentPart as isStreamDataAgentPart,
+  mergeToolPartIntoParts,
+} from "@/lib/spec-run-tool-transcript";
+
 import type { DataAgentPartData } from "@/components/ai-elements/transcript-message";
 
 import {
   formatAgentStructuredOutput,
-  formatInteractionDecision,
-  formatStepOutput,
-  latestAttemptPerStep,
-  resolveStepDisplayText,
+  isRunMetaNarration,
   type SpecRunInteraction,
   type SpecRunStep,
 } from "./spec-run-view-utils";
@@ -39,28 +40,10 @@ export function hasSubstantiveAssistantMessages(messages: UIMessage[]): boolean 
   });
 }
 
-function readPersona(snapshot: SpecRunStep["agent_snapshot"]): AgentPersonaUi | undefined {
-  const persona = snapshot.persona;
-  if (!persona?.displayName) return undefined;
-  return persona;
-}
-
-function stepPhase(step: SpecRunStep): DataAgentPartData["phase"] {
-  if (step.status === "succeeded") return "finished";
-  if (step.status === "failed" || step.status === "cancelled") return "failed";
-  if (step.status === "running") return "working";
-  if (step.status === "waiting_for_interaction") return "working";
-  return "queued";
-}
-
 function isDataAgentPart(
   part: UIMessage["parts"][number],
 ): part is { type: "data-agent"; data: DataAgentPartData } {
-  return part.type === "data-agent"
-    && "data" in part
-    && part.data !== null
-    && typeof part.data === "object"
-    && !Array.isArray(part.data);
+  return isStreamDataAgentPart(part);
 }
 
 export function readFinalizeAgentOutput(part: UIMessage["parts"][number]): string {
@@ -72,23 +55,12 @@ export function readFinalizeAgentOutput(part: UIMessage["parts"][number]): strin
   return formatAgentStructuredOutput(input.output);
 }
 
-function effectiveStepPhase(step: SpecRunStep, allSteps: SpecRunStep[]): DataAgentPartData["phase"] {
-  const natural = stepPhase(step);
-  if (natural === "finished" || natural === "failed") return natural;
-  const laterProgress = allSteps.some((entry) =>
-    entry.step_index > step.step_index
-    && (entry.status === "succeeded"
-      || entry.status === "waiting_for_interaction"
-      || entry.status === "running"));
-  if (laterProgress && step.status === "queued") return "finished";
-  return natural;
-}
-
 function isDisplayableAssistantText(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false;
   if (/"emailDrafts"\s*:/.test(trimmed)) return false;
+  if (isRunMetaNarration(trimmed)) return false;
   return true;
 }
 
@@ -158,180 +130,103 @@ export function resolveFinalizeAgentFromMessages(
   return "";
 }
 
-function fallbackStepDisplayText(step: SpecRunStep, allSteps: SpecRunStep[]): string {
-  const effectivelyDone = step.status === "succeeded"
-    || allSteps.some((entry) => entry.step_index > step.step_index
-      && (entry.status === "succeeded" || entry.status === "waiting_for_interaction"));
-  if (!effectivelyDone) return "";
-  if (step.agent_snapshot.persona?.roleKey === "researcher") {
-    return "Completed research and classification for this ticket.";
-  }
-  return "Step completed.";
+/** Merge assistant parts for one step across multiple flushed messages (mirrors server normalize). */
+function normalizeReasoningText(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
 }
 
-function buildStepAssistantMessage(
-  step: SpecRunStep,
-  totalAgents: number,
-  interactions: SpecRunInteraction[],
-  allSteps: SpecRunStep[],
-  messages: UIMessage[],
-): UIMessage | null {
-  const text = resolveStepDisplayText(step, interactions, {
-    steps: allSteps,
-    messages,
-    resolveFinalizeAgent: resolveFinalizeAgentFromMessages,
-  })
-    || resolveStreamTextForStep(step, messages)
-    || fallbackStepDisplayText(step, allSteps);
-  const phase = effectiveStepPhase(step, allSteps);
-  const persona = readPersona(step.agent_snapshot);
-  const hasAgentHeader = Boolean(persona || step.agent_snapshot.name);
-  if (!hasAgentHeader && !text && phase !== "working") return null;
-
-  const parts: UIMessage["parts"] = [];
-  if (hasAgentHeader) {
-    parts.push({
-      type: "data-agent",
-      data: {
-        agentId: step.agent_id,
-        agentName: step.agent_snapshot.name,
-        stepIndex: step.step_index,
-        totalAgents,
-        task: step.agent_snapshot.task,
-        phase,
-        ...(persona ? { persona } : {}),
-      },
-    } as UIMessage["parts"][number]);
-  }
-  if (text) {
-    parts.push({ type: "text", text });
-  }
-  if (parts.length === 0) return null;
-
-  return {
-    id: `agent-turn-${step.id}`,
-    role: "assistant",
-    parts,
-  };
-}
-
-export function buildAgentTurnMessagesFromSteps(
-  steps: SpecRunStep[],
-  interactions: SpecRunInteraction[],
-  messages: UIMessage[],
-): UIMessage[] {
-  return buildSequentialStepTranscript({ steps, messages, interactions })
-    .map((block) => block.message);
-}
-
-/** A single agent step rendered as one chronological block (header + tools + text). */
-export type StepTranscriptBlock = {
-  step: SpecRunStep;
-  message: UIMessage;
-  isLive: boolean;
-  showArtifact: boolean;
-};
-
-function resolveActiveStepIndex(steps: SpecRunStep[]): number | null {
-  const active = steps.find((entry) =>
-    entry.status === "running" || entry.status === "waiting_for_interaction");
-  return active?.step_index ?? null;
-}
-
-function buildHeaderPart(
-  step: SpecRunStep,
-  totalAgents: number,
-  phase: DataAgentPartData["phase"],
+function pickPreferredReasoningPart(
+  left: UIMessage["parts"][number],
+  right: UIMessage["parts"][number],
 ): UIMessage["parts"][number] {
-  const persona = readPersona(step.agent_snapshot);
-  return {
-    type: "data-agent",
-    data: {
-      agentId: step.agent_id,
-      agentName: step.agent_snapshot.name,
-      stepIndex: step.step_index,
-      totalAgents,
-      task: step.agent_snapshot.task,
-      phase,
-      ...(persona ? { persona } : {}),
-    },
-  } as UIMessage["parts"][number];
+  if (!isReasoningUIPart(left) || !isReasoningUIPart(right)) return right;
+  if (left.state === "streaming" && right.state !== "streaming") return left;
+  if (right.state === "streaming" && left.state !== "streaming") return right;
+  return (right.text?.length ?? 0) >= (left.text?.length ?? 0) ? right : left;
 }
 
-/** Parts other than the agent header are the "body" (tools, text, reasoning). */
-function stripHeaderParts(parts: UIMessage["parts"]): UIMessage["parts"] {
-  return parts.filter((part) => !isDataAgentPart(part));
-}
-
-function isFinalizeAgentPart(part: UIMessage["parts"][number]): boolean {
-  return isToolUIPart(part) && getToolName(part) === FINALIZE_TOOL_NAME;
-}
-
-function isControlToolPart(part: UIMessage["parts"][number]): boolean {
-  return isToolUIPart(part)
-    && (getToolName(part) === FINALIZE_TOOL_NAME || GATE_TOOL_NAMES.has(getToolName(part)));
-}
-
-function toolParts(parts: UIMessage["parts"], options: { includeFinalize?: boolean } = {}): UIMessage["parts"] {
-  return parts.filter((part) =>
-    isToolUIPart(part)
-    && (options.includeFinalize || !isFinalizeAgentPart(part)));
-}
-
-function terminalStepStatus(status: string): boolean {
-  return status === "succeeded" || status === "failed" || status === "cancelled";
-}
-
-/** Does the body have anything worth showing (a tool call or non-empty text)? */
-function bodyHasContent(parts: UIMessage["parts"]): boolean {
-  return parts.some((part) => {
-    if (part.type === "text") return part.text.trim().length > 0;
-    return true;
-  });
-}
-
-function bodyHasText(parts: UIMessage["parts"]): boolean {
-  return parts.some((part) => part.type === "text" && part.text.trim().length > 0);
-}
-
-function appendMissingVisibleText(
-  body: UIMessage["parts"],
-  fallbackParts: UIMessage["parts"],
+function mergeReasoningPart(
+  merged: UIMessage["parts"],
+  part: UIMessage["parts"][number],
 ): UIMessage["parts"] {
-  if (bodyHasText(body)) return body;
-  const fallbackText = fallbackParts.filter((part) => part.type === "text" && part.text.trim());
-  return fallbackText.length > 0 ? [...body, ...fallbackText] : body;
+  if (!isReasoningUIPart(part)) return [...merged, part];
+
+  const normalized = normalizeReasoningText(part.text ?? "");
+  if (!normalized) return [...merged, part];
+
+  for (let index = 0; index < merged.length; index += 1) {
+    const existing = merged[index];
+    if (!isReasoningUIPart(existing)) continue;
+    const existingNorm = normalizeReasoningText(existing.text ?? "");
+    if (!existingNorm) continue;
+    if (normalized === existingNorm
+      || normalized.startsWith(existingNorm)
+      || existingNorm.startsWith(normalized)) {
+      const next = [...merged];
+      next[index] = pickPreferredReasoningPart(existing, part);
+      return next;
+    }
+  }
+
+  return [...merged, part];
 }
 
-function hydratedBodyForStep(input: {
-  step: SpecRunStep;
-  totalAgents: number;
-  interactions: SpecRunInteraction[];
-  steps: SpecRunStep[];
-  messages: UIMessage[];
-}): UIMessage["parts"] {
-  const hydrated = buildStepAssistantMessage(
-    input.step,
-    input.totalAgents,
-    input.interactions,
-    input.steps,
-    input.messages,
-  );
-  return hydrated ? stripHeaderParts(hydrated.parts) : [];
-}
-
-function interactionDecisionParts(
-  step: SpecRunStep,
-  interactions: SpecRunInteraction[],
+function mergeTextPart(
+  merged: UIMessage["parts"],
+  part: UIMessage["parts"][number],
 ): UIMessage["parts"] {
-  return interactions
-    .filter((interaction) => interaction.step_attempt_id === step.id)
-    .map(formatInteractionDecision)
-    .filter((text): text is string => Boolean(text))
-    .map((text) => ({ type: "text", text }));
+  if (part.type !== "text") return mergeReasoningPart(merged, part);
+  const text = part.text?.trim() ?? "";
+  if (!text) return merged;
+
+  for (let index = merged.length - 1; index >= 0; index -= 1) {
+    const existing = merged[index];
+    if (existing?.type !== "text") continue;
+    const existingText = existing.text?.trim() ?? "";
+    if (!existingText) continue;
+    if (existingText === text) return merged;
+    if (text.startsWith(existingText)) {
+      const next = [...merged];
+      next[index] = part;
+      return next;
+    }
+    if (existingText.startsWith(text)) return merged;
+    break;
+  }
+
+  return [...merged, part];
 }
 
-/** Group streamed assistant message parts by step index (latest message wins per step). */
+function mergeStreamPartsForStep(existing: UIMessage["parts"], incoming: UIMessage["parts"]): UIMessage["parts"] {
+  let merged = [...existing];
+  if (incoming.some(isDataAgentPart) && merged.some((part) => part.type === "text" || isReasoningUIPart(part))) {
+    merged = merged.filter((part) => isDataAgentPart(part) || isToolUIPart(part));
+  }
+
+  for (const part of incoming) {
+    if (isDataAgentPart(part)) {
+      if (!merged.some(isDataAgentPart)) merged.push(part);
+      continue;
+    }
+    if (isToolUIPart(part)) {
+      merged = mergeToolPartIntoParts(merged, part);
+      continue;
+    }
+    if (isReasoningUIPart(part)) {
+      merged = mergeReasoningPart(merged, part);
+      continue;
+    }
+    if (part.type === "text") {
+      merged = mergeTextPart(merged, part);
+      continue;
+    }
+    merged.push(part);
+  }
+
+  return merged;
+}
+
+/** Group streamed assistant message parts by step index, merging across message flushes. */
 export function extractStreamPartsByStepIndex(messages: UIMessage[]): Map<number, UIMessage["parts"]> {
   const byStep = new Map<number, UIMessage["parts"]>();
 
@@ -342,9 +237,9 @@ export function extractStreamPartsByStepIndex(messages: UIMessage[]): Map<number
     let currentParts: UIMessage["parts"] = [];
 
     const flush = () => {
-      if (currentStepIndex !== null && currentParts.length > 0) {
-        byStep.set(currentStepIndex, currentParts);
-      }
+      if (currentStepIndex === null || currentParts.length === 0) return;
+      const existing = byStep.get(currentStepIndex) ?? [];
+      byStep.set(currentStepIndex, mergeStreamPartsForStep(existing, currentParts));
       currentParts = [];
     };
 
@@ -363,117 +258,97 @@ export function extractStreamPartsByStepIndex(messages: UIMessage[]): Map<number
   return byStep;
 }
 
-/**
- * Build a linear step-by-step transcript: one block per started agent, in step_index
- * order, with streamed tools/text merged inline under each agent header.
- */
-export function buildSequentialStepTranscript(input: {
-  steps: SpecRunStep[];
-  messages: UIMessage[];
-  interactions: SpecRunInteraction[];
-  chatStatus?: string;
-  pendingInteractionStepAttemptId?: string | null;
-}): StepTranscriptBlock[] {
-  const latestSteps = latestAttemptPerStep(input.steps);
-  if (latestSteps.length === 0) return [];
+export function readAgentStepIndex(message: UIMessage): number | null {
+  if (message.role !== "assistant") return null;
+  for (const part of message.parts) {
+    if (isDataAgentPart(part) && typeof part.data.stepIndex === "number") {
+      return part.data.stepIndex;
+    }
+  }
+  return null;
+}
 
-  const visibleMessages = input.messages.filter((message) => !isHiddenControlMessage(message));
-  const streamPartsByStep = extractStreamPartsByStepIndex(visibleMessages);
-  const activeStepIndex = resolveActiveStepIndex(latestSteps);
-  const isStreaming = input.chatStatus === "streaming" || input.chatStatus === "submitted";
-  const totalAgents = latestSteps.length;
-  const blocks: StepTranscriptBlock[] = [];
+export function isAgentTurnMessage(message: UIMessage): boolean {
+  return readAgentStepIndex(message) !== null;
+}
 
-  for (const step of latestSteps) {
-    const streamParts = streamPartsByStep.get(step.step_index);
-    const hasStreamParts = Boolean(streamParts && streamParts.length > 0);
+/** One assistant block per agent step, merged from streamed chat messages only. */
+export function normalizeTranscriptMessages(messages: UIMessage[]): UIMessage[] {
+  const visible = messages.filter((message) => !isHiddenControlMessage(message));
+  const streamByStep = extractStreamPartsByStepIndex(visible);
+  const seenSteps = new Set<number>();
+  const normalized: UIMessage[] = [];
 
-    // Reveal a step if it has started, OR if the live stream is already emitting for it
-    // (run.steps polling is paused during streaming so it can lag behind the stream).
-    if (step.status === "queued" && !hasStreamParts) continue;
-
-    // Phase: persisted status wins, but a step with active stream output is "working".
-    let phase = effectiveStepPhase(step, latestSteps);
-    if (hasStreamParts
-      && step.status !== "succeeded"
-      && step.status !== "failed"
-      && step.status !== "cancelled") {
-      phase = "working";
+  for (const message of visible) {
+    if (message.role !== "assistant") {
+      normalized.push(message);
+      continue;
     }
 
-    // Header is ALWAYS rebuilt from the authoritative step row so the agent card is
-    // stable and never flickers between the stream and the polled-step sources.
-    const header = buildHeaderPart(step, totalAgents, phase);
-
-    // Anchor the artifact to the step the pending interaction belongs to. Use the
-    // interaction (not the polled step status) as the source of truth so the editor
-    // shows in sync with the gate composer even while run.steps lags behind.
-    const showArtifact = Boolean(input.pendingInteractionStepAttemptId)
-      && step.id === input.pendingInteractionStepAttemptId;
-    const isLive = isStreaming
-      && hasStreamParts
-      && !terminalStepStatus(step.status)
-      && (activeStepIndex === null || step.step_index === activeStepIndex);
-
-    const streamBody = hasStreamParts ? stripHeaderParts(streamParts!) : [];
-    const streamedTools = toolParts(streamBody);
-    const hasFinalizeOutput = streamBody.some((part) => Boolean(readFinalizeAgentOutput(part)));
-    const hydratedBody = hydratedBodyForStep({
-      step,
-      totalAgents,
-      interactions: input.interactions,
-      steps: latestSteps,
-      messages: visibleMessages,
-    });
-    const decisionBody = interactionDecisionParts(step, input.interactions);
-
-    let body: UIMessage["parts"] = [];
-    if (showArtifact) {
-      body = [...streamedTools, ...decisionBody];
-    } else if (isLive) {
-      // Once a finalize/gate tool appears, preceding prose is just scratchpad
-      // narration. Keep the run fast and live, but stop showing that prose.
-      body = streamBody.some(isControlToolPart)
-        ? toolParts(streamBody, { includeFinalize: true })
-        : streamBody;
-      if (!bodyHasContent(body) && bodyHasContent(hydratedBody)) body = hydratedBody;
-      body = [...body, ...decisionBody];
-    } else if (hasFinalizeOutput) {
-      body = [
-        ...streamedTools,
-        ...streamBody.filter(isFinalizeAgentPart),
-        ...decisionBody,
-      ];
-    } else {
-      body = [
-        ...streamedTools,
-        ...hydratedBody,
-        ...decisionBody,
-      ];
+    const stepIndex = readAgentStepIndex(message);
+    if (stepIndex === null) {
+      normalized.push(message);
+      continue;
     }
-    body = appendMissingVisibleText(body, [...decisionBody, ...hydratedBody]);
 
-    blocks.push({
-      step,
-      isLive,
-      showArtifact,
-      message: {
-        id: `step-transcript-${step.id}`,
-        role: "assistant",
-        parts: [header, ...body],
-      },
+    if (seenSteps.has(stepIndex)) continue;
+    seenSteps.add(stepIndex);
+
+    const parts = streamByStep.get(stepIndex);
+    if (!parts || parts.length === 0) continue;
+
+    normalized.push({
+      ...message,
+      id: message.id || `agent-turn-${stepIndex}`,
+      role: "assistant",
+      parts,
     });
   }
 
-  return blocks;
+  return normalized;
+}
+
+function resolveAgentPhaseFromStep(step: SpecRunStep | undefined): DataAgentPartData["phase"] {
+  if (!step) return "working";
+  if (step.status === "running") return "working";
+  if (step.status === "failed" || step.status === "cancelled") return "failed";
+  if (step.status === "queued") return "queued";
+  return "finished";
+}
+
+function patchAgentPhaseFromStep(
+  parts: UIMessage["parts"],
+  step: SpecRunStep | undefined,
+): UIMessage["parts"] {
+  const phase = resolveAgentPhaseFromStep(step);
+  return parts.map((part) => {
+    if (!isDataAgentPart(part)) return part;
+    return {
+      ...part,
+      data: {
+        ...part.data,
+        phase,
+      },
+    };
+  });
 }
 
 export function hydrateMessagesFromSteps(
   messages: UIMessage[],
-  steps: SpecRunStep[],
-  interactions: SpecRunInteraction[] = [],
+  steps: SpecRunStep[] = [],
+  _interactions: SpecRunInteraction[] = [],
 ): UIMessage[] {
-  return messages.filter((message) => !isHiddenControlMessage(message));
+  const normalized = normalizeTranscriptMessages(messages);
+  const stepByIndex = new Map(steps.map((step) => [step.step_index, step]));
+  return normalized.map((message) => {
+    const stepIndex = readAgentStepIndex(message);
+    if (stepIndex === null) return message;
+    const step = stepByIndex.get(stepIndex);
+    return {
+      ...message,
+      parts: patchAgentPhaseFromStep(message.parts, step),
+    };
+  });
 }
 
 export function isGateCompletionMessage(message: UIMessage): boolean {

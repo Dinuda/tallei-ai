@@ -71,6 +71,33 @@ export function EditorialOpenEditorButton({
   );
 }
 
+export function EditorialArtifactSaveButton({
+  label = "Save",
+  onClick,
+  disabled,
+  saving,
+}: {
+  label?: string;
+  onClick: () => void;
+  disabled?: boolean;
+  saving?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || saving}
+      className="inline-flex h-8 shrink-0 items-center gap-1.5 border border-[#d1d5db] bg-white px-3 text-[12px] font-medium text-[#4b5563] transition-colors hover:border-[#9ca3af] hover:bg-[#f9fafb] disabled:opacity-50"
+      style={{ fontFamily: "var(--font-fustat)" }}
+    >
+      {saving ? (
+        <span className="size-3 animate-spin rounded-full border-2 border-[#d1d5db] border-t-[#6b7280]" aria-hidden />
+      ) : null}
+      {label}
+    </button>
+  );
+}
+
 export function EditorialArtifactToolbar({
   tag,
   title,

@@ -139,6 +139,36 @@ export function contractVisibility(contract: Pick<DataContract, "visibility"> | 
   return contract?.visibility ?? "internal";
 }
 
+/** Keep only keys declared in a JSON object schema (top-level). */
+export function stripToSchema(schema: Record<string, unknown>, data: unknown): unknown {
+  const normalized = normalizeContractSchema(schema);
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  if (normalized.type !== "object" || !normalized.properties || typeof normalized.properties !== "object") {
+    return data;
+  }
+  const properties = normalized.properties as Record<string, unknown>;
+  const record = data as Record<string, unknown>;
+  const stripped: Record<string, unknown> = {};
+  for (const key of Object.keys(properties)) {
+    if (key in record) stripped[key] = record[key];
+  }
+  return stripped;
+}
+
+/** Collapse repetitive AJV additionalProperties errors into one readable line. */
+export function formatContractValidationReason(reason: string): string {
+  const trimmed = reason.trim();
+  if (!trimmed) return "Structured output failed schema validation.";
+  const additionalPropertyMatches = trimmed.match(/data must NOT have additional properties/g);
+  if (!additionalPropertyMatches || additionalPropertyMatches.length <= 1) return trimmed;
+  const fields = [...trimmed.matchAll(/property '([^']+)'/g)].map((match) => match[1]);
+  const uniqueFields = [...new Set(fields.filter(Boolean))];
+  if (uniqueFields.length > 0) {
+    return `Output has unexpected fields: ${uniqueFields.join(", ")}`;
+  }
+  return "Output has unexpected additional properties.";
+}
+
 export function validateContractData(
   schema: Record<string, unknown>,
   data: unknown,
@@ -151,6 +181,6 @@ export function validateContractData(
   if (validate(data)) return { valid: true };
   return {
     valid: false,
-    reason: ajv.errorsText(validate.errors) || "Structured output failed schema validation.",
+    reason: formatContractValidationReason(ajv.errorsText(validate.errors) || "Structured output failed schema validation."),
   };
 }

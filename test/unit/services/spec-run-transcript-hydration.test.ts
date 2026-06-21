@@ -19,23 +19,31 @@ const projectionPath = new URL(
   import.meta.url,
 );
 
-test("agent turns are built from persisted steps instead of chat-only hydration", async () => {
+test("agent turns are built from streamed chat messages instead of run-step synthesis", async () => {
   const [hydration, specRunPage] = await Promise.all([
     readFile(hydrationPath, "utf8"),
     readFile(specRunPagePath, "utf8"),
   ]);
-  assert.match(hydration, /buildSequentialStepTranscript/);
-  assert.match(hydration, /buildAgentTurnMessagesFromSteps/);
+  assert.match(hydration, /normalizeTranscriptMessages/);
+  assert.doesNotMatch(specRunPage, /isDraftReviewInteraction/);
   assert.match(hydration, /extractStreamPartsByStepIndex/);
-  assert.match(hydration, /buildHeaderPart/);
-  assert.match(hydration, /bodyHasContent/);
-  assert.match(hydration, /toolParts/);
-  assert.match(hydration, /hasFinalizeOutput/);
-  assert.match(hydration, /showArtifact/);
-  assert.match(hydration, /appendMissingVisibleText/);
-  assert.match(hydration, /bodyHasText/);
-  assert.match(specRunPage, /buildSequentialStepTranscript/);
-  assert.match(specRunPage, /stepTranscript\.map/);
+  assert.match(hydration, /readAgentStepIndex/);
+  assert.match(hydration, /isAgentTurnMessage/);
+  assert.match(hydration, /mergeStreamPartsForStep/);
+  assert.match(hydration, /mergeToolPartIntoParts/);
+  assert.match(hydration, /mergeTextPart/);
+  assert.match(hydration, /pickPreferredReasoningPart/);
+  assert.doesNotMatch(hydration, /buildSequentialStepTranscript/);
+  assert.doesNotMatch(hydration, /buildHeaderPart/);
+  assert.doesNotMatch(hydration, /hydratedBodyForStep/);
+  assert.doesNotMatch(hydration, /compactCompletedStreamBody/);
+  assert.match(specRunPage, /isAgentTurnMessage/);
+  assert.match(specRunPage, /readAgentStepIndex/);
+  assert.match(specRunPage, /liveAgentMessageId/);
+  assert.match(specRunPage, /kickRunStream/);
+  assert.match(specRunPage, /spec-run-stream-guard/);
+  assert.doesNotMatch(specRunPage, /buildSequentialStepTranscript/);
+  assert.doesNotMatch(specRunPage, /stepTranscript\.map/);
 });
 
 test("step display resolves handoff and finalize agent outputs", async () => {
@@ -46,11 +54,31 @@ test("step display resolves handoff and finalize agent outputs", async () => {
   assert.match(utils, /resolveFinalizeAgent/);
   assert.match(utils, /formatClassifiedEmails/);
   assert.match(utils, /data\.emails/);
-  assert.match(utils, /if \(!step\)[\s\S]*show: false/);
+  assert.match(utils, /collapseValidationError/);
+  assert.match(utils, /if \(!input\.pendingInteraction\)/);
 });
 
 test("editorial projection parses structured JSON stored in step text", async () => {
   const projection = await readFile(projectionPath, "utf8");
   assert.match(projection, /JSON\.parse\(rawText\)/);
   assert.match(projection, /input_json: asRecord\(row\.input_json\)/);
+});
+
+test("agent turn rendering lets artifacts own draft output", async () => {
+  const specRunPage = await readFile(specRunPagePath, "utf8");
+
+  assert.match(specRunPage, /const persistedStepArtifact = resolveArtifactForStep/);
+  assert.match(specRunPage, /const syntheticStepArtifact = persistedStepArtifact \? null : buildRenderedStepArtifact/);
+  assert.match(specRunPage, /const hideArtifactSummary = showArtifact/);
+  assert.match(specRunPage, /if \(showArtifact\) return false/);
+  assert.match(specRunPage, /\^re:\\s\*\.\+\\n\+hi\\s\+/);
+  assert.match(specRunPage, /best regards,\\s\*the support team/);
+});
+
+test("agent turn rendering surfaces failed step errors", async () => {
+  const specRunPage = await readFile(specRunPagePath, "utf8");
+
+  assert.match(specRunPage, /const stepError = typeof step\?\.error_json\?\.message === "string"/);
+  assert.match(specRunPage, /border-\[#fecaca\] bg-\[#fef2f2\] text-\[#991b1b\]/);
+  assert.match(specRunPage, /void refreshMessages\(true\)/);
 });

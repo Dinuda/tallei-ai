@@ -17,6 +17,7 @@ import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import type { ToolContract } from "../tool-spec/types.js";
 import { slugifyAgentId } from "./agent-personas.js";
 import { availableToolsForSpecDraft, type SpecAvailableTool } from "./spec-available-tools.js";
+import { operatorReviewRequired } from "../loop-runtime/spec-run-gate-policy.js";
 
 export type CompileRunnerSpecInput = {
   prompt: string;
@@ -59,11 +60,39 @@ function evidenceOutputContract(): DataContract {
     schema: {
       type: "object",
       properties: {
+        status: { type: "string", enum: ["ticket_found", "no_tickets_found"] },
         summary: { type: "string" },
+        priority: { type: "string", enum: ["high", "medium", "low"] },
+        ticket: {
+          type: "object",
+          properties: {
+            subject: { type: "string" },
+            body: { type: "string" },
+            threadId: { type: "string" },
+            messageId: { type: "string" },
+          },
+          required: ["subject", "body"],
+          additionalProperties: true,
+        },
+        customer: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            email: { type: "string" },
+          },
+          additionalProperties: true,
+        },
         findings: { type: "array", items: { type: "string" } },
         context: { type: "object", additionalProperties: true },
       },
-      required: ["summary"],
+      required: ["summary", "status"],
+      allOf: [{
+        if: {
+          properties: { status: { const: "ticket_found" } },
+          required: ["status"],
+        },
+        then: { required: ["ticket"] },
+      }],
       additionalProperties: true,
     },
   };
@@ -72,7 +101,7 @@ function evidenceOutputContract(): DataContract {
 function draftOutputContract(renderer: "canvas.email" | "canvas.preview"): DataContract {
   if (renderer === "canvas.email") {
     return {
-      description: "Operator-reviewable email draft matching the approved artifact contract.",
+      description: "Operator-reviewable email draft matching the approved artifact contract, or an explicit no-action status when there is no support ticket to draft for.",
       representation: "json",
       mediaType: "application/json",
       visibility: "operator",
@@ -80,17 +109,19 @@ function draftOutputContract(renderer: "canvas.email" | "canvas.preview"): DataC
       schema: {
         type: "object",
         properties: {
+          status: { type: "string", enum: ["draft_ready", "no_action_required"] },
           subject: { type: "string" },
           body: { type: "string" },
           html: { type: "string" },
+          summary: { type: "string" },
         },
-        required: ["subject", "body"],
+        required: ["status"],
         additionalProperties: false,
       },
     };
   }
   return {
-    description: "Operator-reviewable preview artifact.",
+    description: "Operator-reviewable preview artifact, or an explicit no-action status when there is nothing actionable to preview.",
     representation: "json",
     mediaType: "application/json",
     visibility: "operator",
@@ -98,10 +129,12 @@ function draftOutputContract(renderer: "canvas.email" | "canvas.preview"): DataC
     schema: {
       type: "object",
       properties: {
+        status: { type: "string", enum: ["preview_ready", "no_action_required"] },
         title: { type: "string" },
         body: { type: "string" },
+        summary: { type: "string" },
       },
-      required: ["title", "body"],
+      required: ["status"],
       additionalProperties: true,
     },
   };
@@ -189,7 +222,7 @@ function deriveInputRequirements(input: {
       when: "before_step",
     });
   }
-  if (input.draftRenderer === "canvas.email") {
+  if (input.draftRenderer === "canvas.email" && operatorReviewRequired(input.reviewPolicy)) {
     requirements.push({
       key: "draft_review",
       surface: "review.email",
@@ -197,7 +230,7 @@ function deriveInputRequirements(input: {
       required: true,
       when: "before_send",
     });
-  } else if (input.draftRenderer === "canvas.preview") {
+  } else if (input.draftRenderer === "canvas.preview" && operatorReviewRequired(input.reviewPolicy)) {
     requirements.push({
       key: "draft_review",
       surface: "review.preview",
@@ -251,6 +284,7 @@ export function compileRunnerSpecFromBuildContract(input: CompileRunnerSpecInput
   const availableTools = availableToolsForSpecDraft(buildContract, input.discoveredToolContracts ?? []);
   const contracts = selectedToolContracts(buildContract, input.discoveredToolContracts ?? []);
   const reviewPolicy = selectedReviewPolicy(buildContract);
+  const requiresOperatorReview = operatorReviewRequired(reviewPolicy);
   const artifact = selectedArtifactContract(buildContract);
   const groundingSources = selectedGroundingSources(buildContract);
   const externalSearchToolkits = selectedExternalDataToolkits(buildContract);
@@ -333,19 +367,21 @@ export function compileRunnerSpecFromBuildContract(input: CompileRunnerSpecInput
         ? productionToolRefs
         : ["internal.llm_only"],
       guardrails: ["Use finalizeAgent output that matches the declared output contract.", "Do not send or publish directly unless this agent owns delivery tools."],
-      doneWhen: ["Draft output matches the declared contract."],
-      doneCriteria: ["Output is ready for operator review or downstream delivery."],
+      doneWhen: ["Draft output matches the declared contract, or status is no_action_required when upstream evidence has no actionable item."],
+      doneCriteria: ["Output is ready for operator review or downstream delivery, unless status is no_action_required."],
       failureModes: ["Pause when required upstream evidence is missing."],
       inputContract: defaultInputContract(priorAgentId ? "Evidence from the prior agent." : "Trigger payload and stable configuration."),
       outputContract: draftOutputContract(draftRenderer ?? "canvas.preview"),
       handoffBindings: priorAgentId ? [handoffFromAgent(priorAgentId)] : [],
       ...(draftRenderer ? {
-        gate: {
-          type: draftRenderer === "canvas.email" ? "draft_review" : "preview_review",
-          question: draftRenderer === "canvas.email"
-            ? "Review the email draft before continuing."
-            : "Review the preview before continuing.",
-        },
+        ...(requiresOperatorReview ? {
+          gate: {
+            type: draftRenderer === "canvas.email" ? "draft_review" : "preview_review",
+            question: draftRenderer === "canvas.email"
+              ? "Review the email draft before continuing."
+              : "Review the preview before continuing.",
+          },
+        } : {}),
         artifactRole: "draft_body" as const,
       } : {}),
     });
@@ -358,7 +394,7 @@ export function compileRunnerSpecFromBuildContract(input: CompileRunnerSpecInput
     agentIds.push(agentId);
     agents.push({
       name,
-      goal: "Prepare the approved delivery package and request operator confirmation before external send.",
+      goal: "Deliver the operator-approved draft from upstream. Request confirmation only for external send actions — draft review already happened at the prior agent gate.",
       tools: deliveryToolRefs,
       guardrails: ["Never send without operator confirmation.", "Use requestApproval for mutating external actions."],
       doneWhen: ["Delivery package is ready for operator confirmation."],
@@ -368,10 +404,12 @@ export function compileRunnerSpecFromBuildContract(input: CompileRunnerSpecInput
       outputContract: deliveryOutputContract(),
       handoffBindings: priorAgentId ? [handoffFromAgent(priorAgentId)] : [],
       artifactRole: "delivery",
-      gate: {
-        type: "pre_send",
-        question: "Confirm delivery before sending.",
-      },
+      ...(requiresOperatorReview && reviewPolicy === "approve_each_action" ? {
+        gate: {
+          type: "pre_send",
+          question: "Confirm delivery before sending.",
+        },
+      } : {}),
     });
   }
 

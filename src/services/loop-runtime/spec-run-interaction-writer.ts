@@ -48,6 +48,19 @@ function operatorTitleForSurface(surface: InputSurface): string {
   return "Draft review";
 }
 
+function approvalLabel(actionLabel: string): string {
+  const trimmed = actionLabel.trim();
+  return trimmed ? `Approve ${trimmed}` : "Approve action";
+}
+
+async function findInteractionIdByKey(idempotencyKey: string): Promise<string | null> {
+  const result = await pool.query<{ id: string }>(
+    `SELECT id FROM loop_engine_interactions WHERE idempotency_key = $1 LIMIT 1`,
+    [idempotencyKey],
+  );
+  return result.rows[0]?.id ?? null;
+}
+
 function artifactBodyFromSurface(surface: InputSurface, artifactData: Record<string, unknown>): {
   body: string;
   dataJson: Record<string, unknown>;
@@ -148,10 +161,17 @@ export async function createSpecRunInputInteraction(input: {
     meta: { nextAgentName: input.agentName },
   };
 
-  await pool.query(
+  const idempotencyKey = `spec-run:${input.runId}:${input.stepAttemptId}:input:${input.key}`;
+  const existingId = await findInteractionIdByKey(idempotencyKey);
+  if (existingId) return existingId;
+
+  const result = await pool.query<{ id: string }>(
     `INSERT INTO loop_engine_interactions
        (id, tenant_id, user_id, run_id, step_attempt_id, interaction_kind, status, question, payload_json, decision_json, idempotency_key, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, 'collect_input', 'pending', $6, $7::jsonb, '{}'::jsonb, $8, NOW(), NOW())`,
+     VALUES ($1, $2, $3, $4, $5, 'collect_input', 'pending', $6, $7::jsonb, '{}'::jsonb, $8, NOW(), NOW())
+     ON CONFLICT (idempotency_key) DO UPDATE
+       SET updated_at = loop_engine_interactions.updated_at
+     RETURNING id`,
     [
       interactionId,
       input.auth.tenantId,
@@ -160,10 +180,10 @@ export async function createSpecRunInputInteraction(input: {
       input.stepAttemptId,
       question,
       JSON.stringify(payload),
-      `spec-run:${input.runId}:${input.stepAttemptId}:input:${input.key}`,
+      idempotencyKey,
     ],
   );
-  return interactionId;
+  return result.rows[0]?.id ?? interactionId;
 }
 
 export async function createSpecRunReviewInteraction(input: {
@@ -230,6 +250,7 @@ export async function createSpecRunReviewInteraction(input: {
     ...(input.configuredGate ? { configuredGate: true } : {}),
   };
 
+  const idempotencyKey = `spec-run:${input.runId}:${input.stepAttemptId}:review:${input.artifactKey}`;
   const artifact = artifactBodyFromSurface(surface, input.artifactData);
   await pool.query(
     `INSERT INTO loop_engine_artifacts
@@ -252,10 +273,16 @@ export async function createSpecRunReviewInteraction(input: {
       JSON.stringify(artifact.dataJson),
     ],
   );
-  await pool.query(
+  const existingId = await findInteractionIdByKey(idempotencyKey);
+  if (existingId) return existingId;
+
+  const result = await pool.query<{ id: string }>(
     `INSERT INTO loop_engine_interactions
        (id, tenant_id, user_id, run_id, step_attempt_id, interaction_kind, status, question, payload_json, decision_json, idempotency_key, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8::jsonb, '{}'::jsonb, $9, NOW(), NOW())`,
+     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8::jsonb, '{}'::jsonb, $9, NOW(), NOW())
+     ON CONFLICT (idempotency_key) DO UPDATE
+       SET updated_at = loop_engine_interactions.updated_at
+     RETURNING id`,
     [
       interactionId,
       input.auth.tenantId,
@@ -265,10 +292,10 @@ export async function createSpecRunReviewInteraction(input: {
       interactionKindForSurface(surface),
       question,
       JSON.stringify(payload),
-      `spec-run:${input.runId}:${input.stepAttemptId}:review:${input.artifactKey}`,
+      idempotencyKey,
     ],
   );
-  return interactionId;
+  return result.rows[0]?.id ?? interactionId;
 }
 
 export async function createSpecRunApprovalInteraction(input: {
@@ -282,6 +309,71 @@ export async function createSpecRunApprovalInteraction(input: {
   deferred: DeferredWriteToolCall;
   artifactKey?: string;
 }): Promise<string> {
+  if (!input.deferred.isSendAction) {
+    const interactionId = randomUUID();
+    const actionLabel = input.deferred.actionLabel.trim() || "Connector action";
+    const question = input.deferred.rationale?.trim() || `Approve ${actionLabel}.`;
+    const actionRef = input.deferred.actionRef ?? `${input.deferred.toolkit}.${input.deferred.actionSlug}`;
+    const payload = {
+      gateType: "action_approval",
+      toolKey: input.toolKey,
+      agentId: input.agentId,
+      stepIndex: input.stepIndex,
+      deferred: input.deferred,
+      workspace: {
+        title: "Action approval",
+        subtitle: question,
+        stamp: { tag: "Approve", name: input.agentName },
+      },
+      blocks: [{
+        kind: "confirm_action",
+        id: input.toolKey,
+        required: true,
+        satisfied: false,
+        label: actionLabel,
+        description: question,
+        data: {
+          actionRef,
+          payload: input.deferred.payload,
+          rationale: input.deferred.rationale,
+        },
+      }],
+      actions: [
+        { id: "approve", command: "approve", label: approvalLabel(actionLabel), enabled: true },
+        { id: "revise", command: "revise", label: "Request changes", enabled: true },
+        { id: "reject", command: "reject", label: "Reject", enabled: true },
+      ],
+      meta: {
+        agentOutput: input.deferred.rationale,
+        nextAgentName: input.agentName,
+      },
+    };
+
+    const idempotencyKey = `spec-run:${input.runId}:${input.stepAttemptId}:approval:${input.toolKey}`;
+    const existingId = await findInteractionIdByKey(idempotencyKey);
+    if (existingId) return existingId;
+
+    const result = await pool.query<{ id: string }>(
+      `INSERT INTO loop_engine_interactions
+         (id, tenant_id, user_id, run_id, step_attempt_id, interaction_kind, status, question, payload_json, decision_json, idempotency_key, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'confirm_action', 'pending', $6, $7::jsonb, '{}'::jsonb, $8, NOW(), NOW())
+       ON CONFLICT (idempotency_key) DO UPDATE
+         SET updated_at = loop_engine_interactions.updated_at
+       RETURNING id`,
+      [
+        interactionId,
+        input.auth.tenantId,
+        input.auth.userId,
+        input.runId,
+        input.stepAttemptId,
+        question,
+        JSON.stringify(payload),
+        idempotencyKey,
+      ],
+    );
+    return result.rows[0]?.id ?? interactionId;
+  }
+
   const interactionId = await createSpecRunReviewInteraction({
     auth: input.auth,
     runId: input.runId,
@@ -289,7 +381,7 @@ export async function createSpecRunApprovalInteraction(input: {
     agentId: input.agentId,
     agentName: input.agentName,
     stepIndex: input.stepIndex,
-    surface: input.deferred.isSendAction ? "confirm.send" : "review.preview",
+    surface: "confirm.send",
     artifactKey: input.artifactKey ?? `${input.toolKey}:approval`,
     artifactData: {
       actionRef: input.deferred.actionRef ?? `${input.deferred.toolkit}.${input.deferred.actionSlug}`,

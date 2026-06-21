@@ -5,7 +5,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { executeApprovedComposioAction } from "../connectors/composio.js";
 import { selectedConnectorAccountId, type LoopBuildContract } from "../loop-engine/build-contract.js";
-import { listLoopRunMessages, replaceLoopRunMessages } from "./run-messages.js";
+import { listLoopRunMessages, pruneStepNarrationForStep, replaceLoopRunMessages } from "./run-messages.js";
 import { parseLoopDefinitionSnapshot } from "./spec-run-types.js";
 import { compileSpecRunPlan } from "./spec-run-plan.js";
 import {
@@ -46,9 +46,13 @@ async function finalizeInteractionResume(input: {
   toolKey: string;
   toolOutput: unknown;
   viaStream: boolean;
+  pruneStepIndex?: number;
 }): Promise<void> {
   if (input.viaStream) {
-    const messages = await listLoopRunMessages(input.auth, input.runId);
+    let messages = await listLoopRunMessages(input.auth, input.runId);
+    if (input.pruneStepIndex !== undefined) {
+      messages = pruneStepNarrationForStep(messages, input.pruneStepIndex);
+    }
     const patched = patchMessagesWithToolResult(messages, input.toolKey, input.toolOutput);
     await replaceLoopRunMessages(input.auth, input.runId, patched);
     return;
@@ -132,8 +136,14 @@ function fallbackActionRefs(deferred: DeferredWriteToolCall, toolKey: string): s
 export function mapInteractionKindForUi(row: InteractionRow): string {
   const payload = asRecord(row.payload_json);
   if (typeof payload.gateType === "string") return payload.gateType;
+  const surface = typeof payload.surface === "string" ? payload.surface.trim() : "";
+  if (surface === "confirm.send") return "pre_send";
+  if (surface.startsWith("input.")) return "missing_input";
+  if (surface === "review.sources") return "source_confirmation";
+  if (surface === "review.memories") return "memory_confirmation";
   if (row.interaction_kind === "collect_input") return "missing_input";
   if (row.interaction_kind === "confirm_action") return "pre_send";
+  if (row.interaction_kind === "review_artifact") return "draft_review";
   return "draft_review";
 }
 
@@ -185,12 +195,29 @@ export function buildOperatorViewFromInteraction(
     : explicitCanvasArtifactKey?.includes("canvas.email")
       ? "canvas.email"
       : undefined;
-  const surface = gateType === "pre_send"
-    ? "confirm.send"
-    : renderTarget === "canvas.email"
-      ? "review.email"
-      : "review.preview";
+  const payloadSurface = typeof payload.surface === "string" ? payload.surface.trim() : "";
+  const surface = payloadSurface.startsWith("review.")
+    || payloadSurface === "confirm.send"
+    || payloadSurface.startsWith("input.")
+    ? payloadSurface as OperatorViewPayload["blocks"][number]["surface"]
+    : gateType === "pre_send"
+      ? "confirm.send"
+      : renderTarget === "canvas.email"
+        ? "review.email"
+        : "review.preview";
   const agentName = stepSnapshot?.name ?? (typeof payload.agentId === "string" ? payload.agentId : "Agent");
+  const fallbackWorkspace = asRecord(payload.workspace);
+  const workspaceTitle = typeof fallbackWorkspace.title === "string"
+    ? fallbackWorkspace.title
+    : gateType === "pre_send"
+      ? "Send approval"
+      : renderTarget === "canvas.email"
+        ? "Draft review"
+        : "Review";
+  const workspaceSubtitle = typeof fallbackWorkspace.subtitle === "string"
+    ? fallbackWorkspace.subtitle
+    : interaction.question;
+  const workspaceStamp = asRecord(fallbackWorkspace.stamp);
   const blockProps = explicitCanvasArtifactKey
     ? {
       ...(renderTarget ? { renderTarget } : {}),
@@ -201,15 +228,15 @@ export function buildOperatorViewFromInteraction(
   return {
     interactionId: interaction.id,
     workspace: {
-      title: gateType === "pre_send"
-        ? "Send approval"
-        : renderTarget === "canvas.email"
-          ? "Draft review"
-          : "Review",
-      subtitle: interaction.question,
+      title: workspaceTitle,
+      subtitle: workspaceSubtitle,
       stamp: {
-        tag: gateType === "pre_send" ? "Send" : "Review",
-        name: deferred.actionLabel ?? agentName,
+        tag: typeof workspaceStamp.tag === "string"
+          ? workspaceStamp.tag
+          : gateType === "pre_send"
+            ? "Send"
+            : "Review",
+        name: typeof workspaceStamp.name === "string" ? workspaceStamp.name : deferred.actionLabel ?? agentName,
       },
     },
     blocks: [{
@@ -520,6 +547,10 @@ export async function handleSpecRunInteractionCommand(input: {
        WHERE id = $1`,
       [input.runId],
     );
+    const stepRow = await pool.query<{ step_index: number }>(
+      `SELECT step_index FROM loop_engine_step_attempts WHERE id = $1 LIMIT 1`,
+      [interaction.step_attempt_id],
+    );
     await finalizeInteractionResume({
       auth: input.auth,
       runId: input.runId,
@@ -528,6 +559,7 @@ export async function handleSpecRunInteractionCommand(input: {
       toolKey: typeof payload.toolKey === "string" ? payload.toolKey : "requestReview",
       toolOutput: { ok: true, revised: true, reason },
       viaStream: resumeViaStream,
+      pruneStepIndex: stepRow.rows[0]?.step_index,
     });
     return { ok: true, resumeViaStream: resumeViaStream || undefined };
   }

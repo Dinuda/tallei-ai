@@ -26,6 +26,17 @@ export const dataInputSurfaceSchema = z.enum([
 
 export type DataInputSurface = z.infer<typeof dataInputSurfaceSchema>;
 
+export const reviewSurfaceSchema = z.enum([
+  "review.draft",
+  "review.email",
+  "review.preview",
+  "review.sources",
+  "review.memories",
+  "confirm.send",
+]);
+
+export type ReviewSurface = z.infer<typeof reviewSurfaceSchema>;
+
 type InputValueType = "string" | "number" | "integer" | "boolean" | "object" | "array";
 
 export function inputSurfaceAcceptsValueType(surface: InputSurface, valueType: InputValueType): boolean {

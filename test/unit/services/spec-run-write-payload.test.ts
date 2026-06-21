@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { enrichDraftPayload } from "../../../src/services/loop-runtime/spec-run-write-payload.js";
+import { enrichDraftPayload, prepareConnectorActionPayload } from "../../../src/services/loop-runtime/spec-run-write-payload.js";
 import type { RunContext } from "../../../src/services/loop-runtime/build-run-context.js";
 
 const runContext: RunContext = {
@@ -58,6 +58,48 @@ test("enrichDraftPayload fills Gmail reply recipient and thread from trigger con
   assert.equal(payload.recipient_email, "claude@example.com");
   assert.equal(payload.thread_id, "thread-1");
   assert.equal(payload.message_id, "msg-1");
+});
+
+test("enrichDraftPayload maps Gmail reply message field to body", () => {
+  const payload = enrichDraftPayload("GMAIL_REPLY_TO_THREAD", {
+    threadId: "thread-1",
+    message: "Thanks, we are investigating.",
+  }, runContext);
+
+  assert.equal(payload.recipient_email, "claude@example.com");
+  assert.equal(payload.thread_id, "thread-1");
+  assert.equal(payload.body, "Thanks, we are investigating.");
+  assert.equal("message" in payload, false);
+});
+
+test("prepareConnectorActionPayload enriches read-tool Gmail reply payloads before execution", () => {
+  const inputSchema = {
+    type: "object",
+    properties: {
+      recipient_email: { type: "string" },
+      thread_id: { type: "string" },
+      body: { type: "string" },
+      userId: { type: "string" },
+    },
+    required: ["recipient_email", "thread_id", "body"],
+    additionalProperties: true,
+  };
+
+  const prepared = prepareConnectorActionPayload({
+    actionSlug: "GMAIL_REPLY_TO_THREAD",
+    inputSchema,
+    payload: {
+      userId: "me",
+      threadId: "thread-1",
+      message: "Re: site down - We're on it!",
+    },
+    runContext,
+  });
+
+  assert.equal(prepared.recipient_email, "claude@example.com");
+  assert.equal(prepared.thread_id, "thread-1");
+  assert.equal(prepared.body, "Re: site down - We're on it!");
+  assert.equal(prepared.userId, "me");
 });
 
 test("enrichDraftPayload still applies templates for Gmail draft creation", () => {

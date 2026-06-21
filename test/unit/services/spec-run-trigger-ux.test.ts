@@ -63,8 +63,7 @@ test("spec run page uses builder-style chat transcript with universal renderer",
   assert.match(specRunPage, /TranscriptMessageContent/);
   assert.match(specRunPage, /resolveActiveGate/);
   assert.match(specRunPage, /ArtifactRenderer/);
-  assert.match(specRunPage, /findActiveToolPart/);
-  assert.match(specRunPage, /buildSequentialStepTranscript/);
+  assert.match(specRunPage, /isAgentTurnMessage/);
   assert.match(specRunPage, /hydrateMessagesFromSteps/);
   assert.match(specRunPage, /shouldAutoStartRunStream/);
   assert.match(specRunPage, /SpecRunDetailsDialog/);
@@ -95,11 +94,10 @@ test("spec run gate opens from pending interaction and surfaces produced artifac
     ),
   ]);
   assert.match(utils, /resolveDisplayArtifact/);
-  assert.match(utils, /!input\.pendingInteraction \|\| !input\.operatorView/);
-  assert.match(specRunPage, /resolveActiveGate/);
+  assert.match(specRunPage, /showGateComposer/);
   assert.match(specRunPage, /ArtifactRenderer/);
-  assert.match(specRunPage, /artifactStepAttemptId/);
-  assert.match(specRunPage, /displayArtifact\?\.step_attempt_id/);
+  assert.match(specRunPage, /resolveArtifactForStep/);
+  assert.match(specRunPage, /resolveDisplayArtifact/);
   assert.match(specRunPage, /InboundEmailTriggerCard/);
   assert.match(specRunPage, /gate\.show/);
 });

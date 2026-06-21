@@ -24,6 +24,8 @@ import {
   SpecRunInteractionRequiredError,
 } from "./spec-run-agent-runner.js";
 
+const activeSpecRunChatStreams = new Set<string>();
+
 export type SpecRunTriggerSource = "manual" | "schedule" | "event";
 
 export type SpecRunTrigger = {
@@ -260,6 +262,19 @@ export async function streamSpecRunChat(input: {
   messages: UIMessage[];
   res: Response;
 }): Promise<void> {
+  if (activeSpecRunChatStreams.has(input.runId)) {
+    if (!input.res.headersSent) {
+      input.res.status(409).json({ error: "Run stream already in progress" });
+    }
+    return;
+  }
+  activeSpecRunChatStreams.add(input.runId);
+  const releaseChatLock = () => {
+    activeSpecRunChatStreams.delete(input.runId);
+  };
+  input.res.on("close", releaseChatLock);
+
+  try {
   const projection = await getSpecRunProjection(input.auth, input.runId);
   const spec = projection.loopDefinition;
   const title = projection.workflowTitle;
@@ -317,10 +332,18 @@ export async function streamSpecRunChat(input: {
       });
     },
     onFinish: async ({ messages: completedMessages }) => {
-      await replaceLoopRunMessages(hydratedAuth, input.runId, completedMessages);
+      try {
+        await replaceLoopRunMessages(hydratedAuth, input.runId, completedMessages);
+      } finally {
+        releaseChatLock();
+      }
     },
   });
   pipeUIMessageStreamToResponse({ response: input.res, stream });
+  } catch (error) {
+    releaseChatLock();
+    throw error;
+  }
 }
 
 export async function executeSpecRunHeadless(
@@ -432,6 +455,11 @@ export async function retrySpecLoopRun(auth: AuthContext, runId: string): Promis
   const workspaceId = await loadWorkflowWorkspaceId(auth.tenantId, auth.userId, projection.workflowId);
   const hydratedAuth = withWorkflowWorkspaceAuth(auth, workspaceId);
 
+  await pool.query(
+    `DELETE FROM loop_engine_step_attempts
+     WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3`,
+    [runId, hydratedAuth.tenantId, hydratedAuth.userId],
+  );
   await pool.query(
     `UPDATE loop_engine_runs
      SET status = 'queued',

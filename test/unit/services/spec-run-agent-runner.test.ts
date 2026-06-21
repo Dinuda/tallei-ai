@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { suppressAgentTextChunks } from "../../../src/services/loop-runtime/spec-run-agent-runner.js";
+
 const runnerPath = new URL("../../../src/services/loop-runtime/spec-run-agent-runner.ts", import.meta.url);
 const toolsPath = new URL("../../../src/services/loop-runtime/spec-run-agent-tools.ts", import.meta.url);
 const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
@@ -30,20 +32,40 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(runner, /export async function materializeSpecRunAgentSteps/);
   assert.match(runner, /agent_started/);
   assert.match(runner, /streamText/);
-  assert.match(runner, /writer\.merge\(agentStream\.toUIMessageStream/);
+  assert.match(runner, /hasToolCall/);
+  assert.match(runner, /hasToolCall\("finalizeAgent"\)/);
+  assert.match(runner, /hasToolCall\("finalizeRun"\)/);
+  assert.match(runner, /writer\.merge\(suppressAgentTextChunks\(agentStream\.toUIMessageStream/);
   assert.match(runner, /type: "data-agent"/);
   assert.match(runner, /persona/);
   assert.match(runner, /phase: "working"/);
   assert.match(runner, /availableToolNames: Object\.keys\(tools\)/);
   assert.match(runner, /resolvedHandoff/);
   assert.match(runner, /validateContractData/);
+  assert.match(runner, /reconcileStaleRunningSteps/);
+  assert.match(runner, /reconcilePendingInteractionSteps/);
+  assert.match(runner, /isReasoningStreamChunk/);
   assert.match(runner, /createConfiguredGateIfNeeded/);
+  assert.match(runner, /Spec-defined gates are authoritative/);
+  assert.match(runner, /isNoActionRequiredOutput/);
+  assert.match(runner, /if \(isNoActionRequiredOutput\(input\.structuredOutput\)\) return false/);
+  assert.match(runner, /if \(isNoActionRequiredOutput\(completed\.structuredOutput\)\)/);
+  assert.doesNotMatch(runner, /configuredAgentGateRequired/);
   assert.match(runner, /persistAgentOutputArtifact/);
   assert.match(runner, /structuredOutput/);
   assert.match(runner, /authorization identifiers, not callable tool names/);
-  assert.match(runner, /Never call build-spec refs directly/);
+  assert.match(runner, /This agent has no write actionRefs/);
+  assert.match(runner, /do not create labels, drafts, replies, sends, or any other Gmail mutations/);
+  assert.match(runner, /action_\* tools enforce the declared Composio input schema via Zod/);
   assert.match(runner, /NEVER call requestInput for searchMemory queries/);
   assert.match(runner, /Never write that a review was submitted, approval is pending, or the run is paused/);
+  assert.match(runner, /Stop after finalizeAgent/);
+  assert.match(runner, /MUST include summary and status/);
+  assert.match(runner, /Do not produce draft\/subject\/body\/html\/message\/reply\/emailTemplate fields/);
+  assert.match(runner, /assertSourceEvidenceDoesNotDraft/);
+  assert.match(runner, /Source evidence agents must not produce draft fields/);
+  assert.match(runner, /suppressAgentTextChunks\(agentStream\.toUIMessageStream/);
+  assert.match(runner, /no_tickets_found/);
   assert.match(runner, /assertNoFakeOperatorGate/);
   assert.match(runner, /claimsOperatorGateWithoutInteraction/);
   assert.match(runner, /prose does not create prompt suggestions/);
@@ -51,15 +73,47 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(tools, /tool_spawned/);
   assert.match(tools, /stepAttemptId: input\.stepAttemptId/);
   assert.match(tools, /agentWriteTools/);
-  assert.match(tools, /validateConnectorActionPayload/);
-  assert.match(tools, /normalizeConnectorPayloadForSchema/);
+  assert.match(tools, /agentCanRequestInput/);
+  assert.match(tools, /if \(agentCanRequestInput\(input\.plan, input\.agent\)\)/);
+  assert.match(tools, /if \(writeToolsForAgent\.length > 0 && !input\.agent\.gate\)/);
+  assert.match(tools, /buildConnectorToolInputSchema/);
+  assert.match(tools, /connectorToolDescription/);
+  assert.match(tools, /extractConnectorActionPayload/);
+  assert.match(tools, /prepareConnectorActionPayload/);
+  assert.match(tools, /superRefine/);
   assert.match(tools, /resolvedHandoff/);
   assert.match(tools, /isRedundantTriggerReadTool/);
   assert.match(tools, /const searchCache = new Map<string, unknown>\(\)/);
   assert.match(tools, /cachedSearch\(`memory:\$\{query\.trim\(\)\.toLowerCase\(\)\}`/);
-  assert.match(tools, /if \(agentWriteTools\(input\.plan, input\.agent\)\.length > 0\)/);
+  assert.match(tools, /if \(writeToolsForAgent\.length > 0\)/);
+  assert.doesNotMatch(tools, /tools\.finalizeRun = tool/);
   assert.match(tools, /GMAIL_FETCH_MESSAGE_BY_THREAD_ID/);
   assert.doesNotMatch(runner, /buildTrackedSpecRunTools/);
+});
+
+test("agent UI stream suppresses freeform text chunks", async () => {
+  const source = new ReadableStream({
+    start(controller) {
+      controller.enqueue({ type: "data-agent", data: { stepIndex: 1, agentId: "draft" } });
+      controller.enqueue({ type: "text-start", id: "txt-1" });
+      controller.enqueue({ type: "text-delta", id: "txt-1", delta: "Leaked draft" });
+      controller.enqueue({ type: "text-end", id: "txt-1" });
+      controller.enqueue({
+        type: "tool-input-available",
+        toolCallId: "call-1",
+        toolName: "finalizeAgent",
+        input: { output: { status: "draft_ready" } },
+      });
+      controller.close();
+    },
+  });
+
+  const chunks: Array<{ type: string }> = [];
+  for await (const chunk of suppressAgentTextChunks(source as Parameters<typeof suppressAgentTextChunks>[0])) {
+    chunks.push(chunk);
+  }
+
+  assert.deepEqual(chunks.map((chunk) => chunk.type), ["data-agent", "tool-input-available"]);
 });
 
 test("run creation and retry materialize approved agents before async execution starts", async () => {

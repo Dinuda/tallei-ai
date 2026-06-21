@@ -1,8 +1,11 @@
 "use client";
 
+import { useCallback, useRef } from "react";
+
 import type { ArtifactRendererProps } from "../registry";
 import {
-  EditorialArtifactToolbar,
+  EditorialArtifactSaveButton,
+  EditorialArtifactTag,
   EditorialPreviewFrame,
   inferArtifactDisplayTitle,
 } from "../editorial-artifact-ui";
@@ -12,6 +15,11 @@ import type { CanvasEmailTemplateData } from "@/lib/email-artifacts/from-canvas-
 type EmailTemplate = CanvasEmailTemplateData;
 
 export function CanvasEmailRenderer({ artifact, saving, onSave, flushRef }: ArtifactRendererProps) {
+  const saveRef = useRef<(() => Promise<void>) | null>(null);
+  const registerSave = useCallback((save: () => Promise<void>) => {
+    saveRef.current = save;
+  }, []);
+
   const rawTemplate = artifact.data_json?.emailTemplate as EmailTemplate | undefined;
   const bodyText = artifact.body?.trim() ?? "";
   const template = rawTemplate ? {
@@ -38,17 +46,23 @@ export function CanvasEmailRenderer({ artifact, saving, onSave, flushRef }: Arti
 
   if (isPreview) {
     return (
-      <div className="space-y-0">
-        <EditorialArtifactToolbar
-          tag={template.finalUse ? "Final" : "Ready"}
-          title={displayTitle}
-          hint="Final preview — approved and ready to send."
-        />
-        <EditorialPreviewFrame title="Email preview">
+      <div className="border border-[#d1d5db] bg-white">
+        <div className="flex items-center gap-2.5 border-b border-[#e5e7eb] px-4 py-2.5">
+          <EditorialArtifactTag tone={template.finalUse ? "green" : "blue"}>
+            {template.finalUse ? "Final" : "Ready"}
+          </EditorialArtifactTag>
+          <p
+            className="truncate text-[13px] font-semibold text-[#111827]"
+            style={{ fontFamily: "var(--font-title)" }}
+          >
+            {displayTitle}
+          </p>
+        </div>
+        <EditorialPreviewFrame title="Email preview" className="border-0">
           <iframe
             srcDoc={template.html}
             className="w-full border-0"
-            style={{ minHeight: "620px" }}
+            style={{ minHeight: "420px" }}
             sandbox=""
             title="Email preview"
           />
@@ -60,18 +74,32 @@ export function CanvasEmailRenderer({ artifact, saving, onSave, flushRef }: Arti
   const handleSave = onSave ?? (async () => {});
 
   return (
-    <div className="space-y-0">
-      <EditorialArtifactToolbar
-        tag="Email"
-        title={displayTitle}
-        hint="Edit the draft in the React Email editor below. Save changes before approving this step."
-      />
-      <div className="border border-t-0 border-[#d1d5db] bg-white p-6">
+    <div className="border border-[#d1d5db] bg-white">
+      <div className="flex items-center justify-between gap-3 border-b border-[#e5e7eb] px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <EditorialArtifactTag>Email</EditorialArtifactTag>
+          <p
+            className="truncate text-[13px] font-semibold text-[#111827]"
+            style={{ fontFamily: "var(--font-title)" }}
+          >
+            {displayTitle}
+          </p>
+        </div>
+        <EditorialArtifactSaveButton
+          disabled={saving}
+          label={saving ? "Saving…" : "Save changes"}
+          onClick={() => { void saveRef.current?.(); }}
+          saving={saving}
+        />
+      </div>
+      <div className="px-3 py-2">
         <CanvasEmailEditor
           artifactKey={artifact.artifact_key}
           flushRef={flushRef}
-          template={template}
+          onRegisterSave={registerSave}
           saving={saving}
+          template={template}
+          variant="inline"
           onSave={handleSave}
         />
       </div>

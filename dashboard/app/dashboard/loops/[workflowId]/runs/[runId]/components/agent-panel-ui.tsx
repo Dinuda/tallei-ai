@@ -217,43 +217,16 @@ export function AttemptChip({ attempt }: { attempt: number }) {
 
 function StepPhaseTag({ phase }: { phase: StepRowPhase }) {
   if (phase === "current_gate") return <EditorialMetaTag tone="amber">Paused · Needs approval</EditorialMetaTag>;
-  if (phase === "current_running") return <EditorialMetaTag tone="blue">Current · running</EditorialMetaTag>;
-  if (phase === "running") return <EditorialMetaTag tone="blue">Running</EditorialMetaTag>;
+  if (phase === "current_running" || phase === "running") return null;
   if (phase === "done") return <EditorialMetaTag>Done</EditorialMetaTag>;
   if (phase === "queued") return <EditorialMetaTag>Up next</EditorialMetaTag>;
   if (phase === "failed") return <EditorialMetaTag tone="red">Failed</EditorialMetaTag>;
   return <EditorialMetaTag>Waiting</EditorialMetaTag>;
 }
 
-function RunningIndicator() {
-  return (
-    <span className="inline-flex items-center" aria-label="Running">
-      <span
-        className="agent-running-underscore text-[16px] font-semibold leading-none text-[#8ca0ff]"
-        style={{ fontFamily: "var(--font-title)" }}
-      >
-        _
-      </span>
-    </span>
-  );
-}
-
 function AgentPanelAnimationStyles() {
   return (
     <style jsx global>{`
-      @keyframes agent-running-underscore {
-        0%, 100% {
-          opacity: 0.2;
-          filter: drop-shadow(0 0 0 rgba(140, 160, 255, 0));
-          transform: translateY(0);
-        }
-        50% {
-          opacity: 1;
-          filter: drop-shadow(0 0 6px rgba(140, 160, 255, 0.8));
-          transform: translateY(-1px);
-        }
-      }
-
       @keyframes agent-name-shimmer {
         0% { background-position: 140% 50%; }
         100% { background-position: -40% 50%; }
@@ -266,10 +239,6 @@ function AgentPanelAnimationStyles() {
         -webkit-background-clip: text;
         background-clip: text;
         animation: agent-name-shimmer 2.4s ease-in-out infinite;
-      }
-
-      .agent-running-underscore {
-        animation: agent-running-underscore 1.1s ease-in-out infinite;
       }
     `}</style>
   );
@@ -431,11 +400,11 @@ export function ChildAgentRow({
       }}
       className={cn(
         "relative flex w-full cursor-pointer items-start gap-3 border-b border-[#e5e7eb] px-5 py-3.5 pr-10 text-left transition-colors last:border-b-0",
-        isCurrent && phase === "current_gate" && "bg-[#fffbeb] ring-2 ring-inset ring-[#f9a8d4]",
-        isCurrent && phase === "current_running" && "bg-[#eff6ff] ring-2 ring-inset ring-[#f9a8d4]",
-        isCurrent && phase !== "current_gate" && phase !== "current_running" && "bg-[#f8fbff] ring-2 ring-inset ring-[#f9a8d4]",
+        isCurrent && phase === "current_gate" && "bg-[#fffbeb]",
+        isCurrent && phase === "current_running" && "bg-[#eff6ff]",
+        isCurrent && phase !== "current_gate" && phase !== "current_running" && "bg-[#f8fbff]",
         !isCurrent && "bg-white hover:bg-[#fafafa]",
-        selected && !isCurrent && "ring-2 ring-inset ring-[#f9a8d4]",
+        selected && !isCurrent && "bg-[#f8fbff]",
       )}
     >
       <AgentPanelAnimationStyles />
@@ -449,10 +418,7 @@ export function ChildAgentRow({
         <div className="pr-20">
           <div className="flex min-w-0 items-center gap-2">
             <p
-              className={cn(
-                "truncate text-[14px] font-semibold text-[#111827]",
-                isRunning && "agent-name-shimmer",
-              )}
+              className="truncate text-[14px] font-semibold text-[#111827]"
               style={{ fontFamily: "var(--font-title)" }}
             >
               {displayName}
@@ -462,7 +428,6 @@ export function ChildAgentRow({
                 {persona.roleLabel}
               </span>
             ) : null}
-            {isRunning ? <RunningIndicator /> : null}
           </div>
           {personaStatusLine ? (
             <p className="mt-1 text-[11px] text-[#7eb71b]">{personaStatusLine}</p>

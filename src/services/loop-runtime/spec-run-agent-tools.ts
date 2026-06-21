@@ -6,16 +6,8 @@ import { pool } from "../../infrastructure/db/index.js";
 import { executeApprovedComposioAction, runComposioToolkitPrompt } from "../connectors/composio.js";
 import { runGroundedKnowledgeSearch, type GroundingSource } from "../grounded-knowledge-search.js";
 import { selectedConnectorAccountId } from "../loop-engine/build-contract.js";
-import { inputSurfaceSchema } from "../loop-engine/input-surfaces.js";
+import { dataInputSurfaceSchema, reviewSurfaceSchema } from "../loop-engine/input-surfaces.js";
 import { runExaWebSearch } from "../loop-executor/agent-runner-internals.js";
-import {
-  noteVectorFailure,
-  persistLoopRunWorkspaceMemory,
-} from "../workspace-memory.js";
-import {
-  normalizeConnectorPayloadForSchema,
-  validateConnectorActionPayload,
-} from "./connector-action-payload.js";
 import type { RunContext } from "./build-run-context.js";
 import { SpecRunInteractionRequiredError } from "./spec-run-agent-errors.js";
 import { emitRunEvent } from "./spec-run-agent-events.js";
@@ -31,11 +23,15 @@ import {
 } from "./spec-run-approval-grants.js";
 import type { CompiledSpecRunPlan, RunPlanAgent, RunPlanTool } from "./spec-run-plan.js";
 import type { SpecRunDefinition } from "./spec-run-types.js";
-import { enrichDraftPayload } from "./spec-run-write-payload.js";
+import {
+  buildConnectorToolInputSchema,
+  connectorToolDescription,
+  extractConnectorActionPayload,
+} from "./connector-tool-input-schema.js";
+import { prepareConnectorActionPayload } from "./spec-run-write-payload.js";
 
 type FinalizedAgentToolState = {
   agentOutput?: unknown;
-  runSummary?: string;
 };
 
 export type BuildAgentToolsInput = {
@@ -104,8 +100,10 @@ function agentWriteTools(plan: CompiledSpecRunPlan, agent: RunPlanAgent): RunPla
   return plan.writeTools.filter((toolRef) => agent.toolRefs.includes(toolRef.toolRef));
 }
 
-function validationMessage(errors: ReturnType<typeof validateConnectorActionPayload>["errors"]): string {
-  return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
+function agentCanRequestInput(plan: CompiledSpecRunPlan, agent: RunPlanAgent): boolean {
+  if (agent.gate?.type.trim().toLowerCase() === "missing_input") return true;
+  return plan.inputRequirements.some((requirement) =>
+    requirement.required && requirement.surface.startsWith("input."));
 }
 
 function isRedundantTriggerReadTool(runContext: RunContext, readTool: RunPlanTool): boolean {
@@ -305,24 +303,29 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
     if (!input.agent.toolRefs.includes(readTool.toolRef)) continue;
     if (isRedundantTriggerReadTool(input.runContext, readTool)) continue;
     tools[readTool.toolKey] = tool({
-      description: `${readTool.contract.name}: ${readTool.contract.description}`,
-      inputSchema: z.object({
-        payload: z.record(z.unknown()).default({}),
-        rationale: z.string().optional(),
-      }),
-      execute: async ({ payload }) => withToolEvents({
+      description: connectorToolDescription(readTool.contract),
+      inputSchema: buildConnectorToolInputSchema(readTool.contract.inputSchema),
+      execute: async (toolInput) => withToolEvents({
         auth: input.auth,
         runId: input.runId,
         stepAttemptId: input.stepAttemptId,
         toolKey: readTool.toolKey,
-        input: { payload },
+        input: toolInput,
         execute: async () => {
+          const payload = extractConnectorActionPayload(toolInput as Record<string, unknown>);
+          const prepared = prepareConnectorActionPayload({
+            actionSlug: readTool.actionSlug,
+            inputSchema: readTool.contract.inputSchema,
+            payload,
+            runContext: input.runContext,
+            resolvedHandoff: input.resolvedHandoff,
+          });
           const result = await executeApprovedComposioAction({
             auth: input.auth,
             toolkit: readTool.toolkit,
             actionSlug: readTool.actionSlug,
             connectorAccountId: buildContract ? selectedConnectorAccountId(buildContract, readTool.toolkit) : undefined,
-            payload,
+            payload: prepared,
             idempotencyKey: `spec-run:${input.runId}:${input.stepAttemptId}:${readTool.toolKey}:${Date.now()}`,
           });
           if (!result.ok) throw new Error(result.error ?? `${readTool.contract.name} failed`);
@@ -332,44 +335,47 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
     });
   }
 
-  tools.requestInput = tool({
-    description: "Create a first-class operator input surface. Use instead of asking for missing runtime input in prose.",
-    inputSchema: z.object({
-      surface: inputSurfaceSchema,
-      key: z.string().min(1),
-      label: z.string().optional(),
-      description: z.string().optional(),
-    }),
-    execute: async ({ surface, key, label, description }) => {
-      const interactionId = await createSpecRunInputInteraction({
-        auth: input.auth,
-        runId: input.runId,
-        stepAttemptId: input.stepAttemptId,
-        agentId: input.agent.id,
-        agentName: input.agent.name,
-        stepIndex: input.agent.index,
-        surface,
-        key,
-        label,
-        description,
-      });
-      await markAgentStepWaiting({
-        auth: input.auth,
-        runId: input.runId,
-        stepAttemptId: input.stepAttemptId,
-        interactionId,
-        eventType: "interaction_requested",
-        payload: { toolKey: "requestInput", surface, key },
-      });
-      return pauseForInteraction(input.stepAttemptId, interactionId);
-    },
-  });
-
-  if (agentWriteTools(input.plan, input.agent).length > 0) {
-    tools.requestReview = tool({
-      description: "Create a first-class operator artifact review surface for this writer/action agent. Pass artifactData as a plain JSON object (NOT a stringified JSON string).",
+  if (agentCanRequestInput(input.plan, input.agent)) {
+    tools.requestInput = tool({
+      description: "Create a first-class operator input surface for explicitly declared missing runtime data only. Use only input.* surfaces (e.g. input.text). For draft/artifact review use configured gates or requestReview instead.",
       inputSchema: z.object({
-        surface: inputSurfaceSchema,
+        surface: dataInputSurfaceSchema,
+        key: z.string().min(1),
+        label: z.string().optional(),
+        description: z.string().optional(),
+      }),
+      execute: async ({ surface, key, label, description }) => {
+        const interactionId = await createSpecRunInputInteraction({
+          auth: input.auth,
+          runId: input.runId,
+          stepAttemptId: input.stepAttemptId,
+          agentId: input.agent.id,
+          agentName: input.agent.name,
+          stepIndex: input.agent.index,
+          surface,
+          key,
+          label,
+          description,
+        });
+        await markAgentStepWaiting({
+          auth: input.auth,
+          runId: input.runId,
+          stepAttemptId: input.stepAttemptId,
+          interactionId,
+          eventType: "interaction_requested",
+          payload: { toolKey: "requestInput", surface, key },
+        });
+        return pauseForInteraction(input.stepAttemptId, interactionId);
+      },
+    });
+  }
+
+  const writeToolsForAgent = agentWriteTools(input.plan, input.agent);
+  if (writeToolsForAgent.length > 0 && !input.agent.gate) {
+    tools.requestReview = tool({
+      description: "Create a first-class operator artifact review surface. Use review.* or confirm.send surfaces only — never use requestInput for review surfaces.",
+      inputSchema: z.object({
+        surface: reviewSurfaceSchema,
         artifactKey: z.string().min(1),
         // LLMs occasionally JSON-stringify the object before passing it — accept both.
         artifactData: z.union([
@@ -407,30 +413,57 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
         return pauseForInteraction(input.stepAttemptId, interactionId);
       },
     });
+  }
 
+  if (writeToolsForAgent.length > 0) {
     tools.requestApproval = tool({
-      description: "Create a first-class approval interaction for a mutating connector action. The action is executed server-side only after approval.",
+      description: [
+        "Create a first-class approval interaction for a mutating connector action. The action is executed server-side only after approval.",
+        "The payload must match the selected actionRef connector schema exactly.",
+      ].join(" "),
       inputSchema: z.object({
         actionRef: z.string().min(1),
         payload: z.record(z.unknown()),
         rationale: z.string().optional(),
         artifactKey: z.string().optional(),
+      }).superRefine((value, ctx) => {
+        const writeTool = selectedWriteTool(input.plan, value.actionRef, input.agent);
+        if (!writeTool) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["actionRef"],
+            message: `Action is not allowed for agent ${input.agent.name}: ${value.actionRef}`,
+          });
+          return;
+        }
+        try {
+          prepareConnectorActionPayload({
+            actionSlug: writeTool.actionSlug,
+            inputSchema: writeTool.contract.inputSchema,
+            payload: value.payload as Record<string, unknown>,
+            runContext: input.runContext,
+            resolvedHandoff: input.resolvedHandoff,
+          });
+        } catch (error) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["payload"],
+            message: error instanceof Error ? error.message : "Connector payload failed schema validation",
+          });
+        }
       }),
       execute: async ({ actionRef, payload, rationale, artifactKey }) => {
         const writeTool = selectedWriteTool(input.plan, actionRef, input.agent);
         if (!writeTool) {
           throw new Error(`Action is not allowed for agent ${input.agent.name}: ${actionRef}`);
         }
-        const boundPayload = {
-          ...payload,
-          ...(input.resolvedHandoff ?? {}),
-        };
-        const normalizedPayload = normalizeConnectorPayloadForSchema(boundPayload, writeTool.contract.inputSchema);
-        const validation = validateConnectorActionPayload({ inputSchema: writeTool.contract.inputSchema }, normalizedPayload);
-        if (!validation.valid) {
-          throw new Error(`Connector payload failed declared handoff/input schema validation: ${validationMessage(validation.errors)}`);
-        }
-        const enriched = enrichDraftPayload(writeTool.actionSlug, normalizedPayload, input.runContext);
+        const enriched = prepareConnectorActionPayload({
+          actionSlug: writeTool.actionSlug,
+          inputSchema: writeTool.contract.inputSchema,
+          payload: payload as Record<string, unknown>,
+          runContext: input.runContext,
+          resolvedHandoff: input.resolvedHandoff,
+        });
         const deferred: DeferredWriteToolCall = {
           toolkit: writeTool.toolkit,
           actionSlug: writeTool.actionSlug,
@@ -509,33 +542,6 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
       return { ok: true };
     },
   });
-
-  if (input.agent.index === input.plan.agents.length - 1) {
-    tools.finalizeRun = tool({
-      description: "Complete the whole run after all required agents and interactions are done.",
-      inputSchema: z.object({
-        summary: z.string().min(1),
-        deliverable: z.string().optional(),
-      }),
-      execute: async ({ summary, deliverable }) => {
-        input.finalized.runSummary = summary;
-        if (input.auth.workspaceId) {
-          try {
-            await persistLoopRunWorkspaceMemory(input.auth, {
-              workflowId: input.workflowId,
-              runId: input.runId,
-              workflowTitle: input.workflowTitle,
-              approvedMemories: [],
-              artifactTexts: deliverable ? [deliverable] : [summary],
-            });
-          } catch (error) {
-            noteVectorFailure(error, "loop_run_finalize");
-          }
-        }
-        return { ok: true, summary };
-      },
-    });
-  }
 
   return tools;
 }

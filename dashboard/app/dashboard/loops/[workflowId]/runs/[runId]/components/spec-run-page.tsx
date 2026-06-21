@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
+  getToolName,
+  isToolUIPart,
   type UIMessage,
 } from "ai";
 import { AnimatePresence, motion } from "motion/react";
@@ -27,11 +29,16 @@ import {
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
 import {
-  findActiveToolPart,
   TranscriptMessageContent,
 } from "@/components/ai-elements/transcript-message";
 import { type ToolPart } from "@/components/ai-elements/tool";
-import { dedupeChatMessagesById } from "@/lib/chat-messages";
+import { dedupeChatMessagesById, mergeChatMessagesById } from "@/lib/chat-messages";
+import { mergeSpecRunProjection } from "@/lib/spec-run-run-merge";
+import {
+  canKickSpecRunStream,
+  hasSpecRunAutoStartAttempted,
+  markSpecRunAutoStartAttempted,
+} from "@/lib/spec-run-stream-guard";
 import type { OperatorView } from "@/lib/operator-view-types";
 import { ArtifactRenderer } from "@/components/renderers";
 import {
@@ -43,19 +50,33 @@ import {
 } from "@/components/ui/dialog";
 
 import { InboundEmailTriggerCard } from "./inbound-email-trigger-card";
+import { isCompactRunTool, RunToolRow } from "./run-tool-row";
 import {
-  buildSequentialStepTranscript,
   hydrateMessagesFromSteps,
+  isAgentTurnMessage,
+  readAgentStepIndex,
   readMessageText,
   shouldAutoStartRunStream,
 } from "./spec-run-transcript-hydration";
+import { buildGatePromptOptions } from "@/lib/operator-view-types";
 import {
-  buildGatePromptOptions,
+  isArtifactSummaryNarration,
+  resolveArtifactForStep,
+  shouldShowStepOutputArtifact,
+} from "@/lib/spec-run-step-artifacts";
+import {
   formatAgentStructuredOutput,
+  extractOutputFields,
+  extractPriorOutputGroups,
+  isNoActionReview,
+  isRunMetaNarration,
   latestAttemptPerStep,
   resolveActiveGate,
   resolveDisplayArtifact,
+  resolveHandoffTargets,
   toArtifactRecord,
+  type HandoffFieldRow,
+  type PriorOutputGroup,
   type SpecRunArtifact,
   type SpecRunInteraction,
   type SpecRunStep,
@@ -134,11 +155,146 @@ function parseJsonRecord(text: string): Record<string, unknown> | null {
   }
 }
 
-function shouldRenderAssistantText(text: string): boolean {
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function readStepStructuredOutput(step: SpecRunStep | undefined, message: UIMessage): unknown {
+  const stepData = step?.output_json?.data;
+  if (stepData && "structuredOutput" in stepData) return stepData.structuredOutput;
+  if (stepData && "data" in stepData) return stepData.data;
+
+  for (const part of message.parts) {
+    if (!isToolUIPart(part) || getToolName(part) !== "finalizeAgent") continue;
+    if (part.state !== "input-available" && part.state !== "output-available") continue;
+    const input = asRecord(part.input);
+    if ("output" in input) return input.output;
+  }
+
+  return null;
+}
+
+function textFromOutput(output: unknown): string {
+  if (typeof output === "string") return output.trim();
+  const record = asRecord(output);
+  for (const key of ["body", "text", "content", "message", "summary", "html"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return Object.keys(record).length > 0 ? JSON.stringify(record, null, 2) : "";
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function plainTextEmailHtml(text: string): string {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const body = paragraphs.length > 0
+    ? paragraphs.map((part) => `<p>${escapeHtml(part).replace(/\n/g, "<br/>")}</p>`).join("")
+    : "<p></p>";
+  return `<html><body>${body}</body></html>`;
+}
+
+function buildRenderedStepArtifact(step: SpecRunStep | undefined, message: UIMessage): SpecRunArtifact | null {
+  if (!step) return null;
+  const outputContract = asRecord(step.agent_snapshot.outputContract);
+  const renderer = typeof step.agent_snapshot.renderer === "string" && step.agent_snapshot.renderer.trim()
+    ? step.agent_snapshot.renderer.trim()
+    : typeof outputContract.renderer === "string" && outputContract.renderer.trim()
+      ? outputContract.renderer.trim()
+      : "";
+  const visibility = typeof outputContract.visibility === "string" ? outputContract.visibility : "";
+  if (!renderer && visibility !== "operator") return null;
+
+  const structuredOutput = readStepStructuredOutput(step, message);
+  if (!structuredOutput) return null;
+  const record = asRecord(structuredOutput);
+  const artifactKey = step.agent_snapshot.outputArtifactId ?? `${step.agent_id}_output`;
+  const bodyText = textFromOutput(structuredOutput);
+  const isEmailRenderer = renderer === "canvas.email" || renderer === "react.email" || renderer === "react-email";
+  const isPreviewRenderer = renderer === "canvas.preview";
+
+  if (isEmailRenderer || isPreviewRenderer) {
+    const emailTemplate = asRecord(record.emailTemplate);
+    const subject = typeof record.subject === "string" && record.subject.trim()
+      ? record.subject.trim()
+      : typeof emailTemplate.subject === "string" && emailTemplate.subject.trim()
+        ? emailTemplate.subject.trim()
+        : "Email draft";
+    const html = typeof record.html === "string" && record.html.trim()
+      ? record.html
+      : typeof emailTemplate.html === "string" && emailTemplate.html.trim()
+        ? emailTemplate.html
+        : plainTextEmailHtml(bodyText);
+    const text = typeof record.body === "string" && record.body.trim()
+      ? record.body
+      : typeof record.text === "string" && record.text.trim()
+        ? record.text
+        : typeof emailTemplate.text === "string" && emailTemplate.text.trim()
+          ? emailTemplate.text
+          : bodyText;
+    return {
+      id: `synthetic:${step.id}:${renderer}`,
+      step_attempt_id: step.id,
+      artifact_key: artifactKey,
+      kind: isEmailRenderer ? "canvas_email" : "canvas_preview",
+      body: html,
+      data_json: {
+        renderer,
+        renderTarget: renderer,
+        outputContract,
+        structuredOutput,
+        data: structuredOutput,
+        ...(renderer === "canvas.preview" ? { canvas_state: "preview" } : {}),
+        emailTemplate: {
+          ...emailTemplate,
+          html,
+          text,
+          subject,
+          preview: typeof record.preview === "string" ? record.preview : subject,
+          source: "spec-run",
+        },
+      },
+      invalidated_at: null,
+    };
+  }
+
+  return {
+    id: `synthetic:${step.id}:${renderer || "operator"}`,
+    step_attempt_id: step.id,
+    artifact_key: artifactKey,
+    kind: renderer || step.agent_snapshot.outputArtifactKind || "markdown",
+    body: bodyText,
+    data_json: {
+      ...(renderer ? { renderer, renderTarget: renderer } : {}),
+      outputContract,
+      structuredOutput,
+      data: structuredOutput,
+    },
+    invalidated_at: null,
+  };
+}
+
+function shouldRenderAssistantText(text: string, options?: { hideArtifactSummary?: boolean }): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (parseJsonRecord(trimmed)) return false;
   if (/"emailDrafts"\s*:/.test(trimmed)) return false;
+  if (/^re:\s*.+\n+hi\s+/i.test(trimmed)) return false;
+  if (/best regards,\s*the support team/i.test(trimmed)) return false;
+  if (/^priority classification:/i.test(trimmed)) return false;
+  if (isRunMetaNarration(trimmed)) return false;
+  if (options?.hideArtifactSummary && isArtifactSummaryNarration(trimmed)) return false;
   return true;
 }
 
@@ -163,12 +319,57 @@ function isLooseTranscriptMessage(message: UIMessage, index: number): boolean {
   return hasVisibleText(message);
 }
 
-function ScrollOnUpdate() {
+function shouldRenderLiveStepText(ctx: {
+  text: string;
+  partIndex: number;
+  parts: UIMessage["parts"];
+  isLive: boolean;
+}): boolean {
+  if (!shouldRenderAssistantText(ctx.text)) return false;
+  if (!ctx.isLive) return true;
+  const trimmed = ctx.text.trim();
+  if (trimmed.length >= 24) return true;
+  const lastTextIdx = [...ctx.parts]
+    .map((part, index) => (part.type === "text" && part.text.trim() ? index : -1))
+    .filter((index) => index >= 0)
+    .at(-1) ?? -1;
+  return ctx.partIndex === lastTextIdx;
+}
+
+function ScrollOnStepComplete({ messages }: {
+  messages: UIMessage[];
+}) {
   const { scrollToBottom, isAtBottom } = useStickToBottomContext();
+  const completedToolIdsRef = useRef<Set<string>>(new Set());
+  const lastAgentTurnCountRef = useRef(0);
+
   useEffect(() => {
-    if (!isAtBottom) return;
-    void scrollToBottom({ animation: { damping: 0.85, stiffness: 0.05, mass: 1.2 } });
-  }, [isAtBottom, scrollToBottom]);
+    let shouldScroll = false;
+
+    const agentTurnCount = messages.filter(isAgentTurnMessage).length;
+    if (agentTurnCount !== lastAgentTurnCountRef.current) {
+      lastAgentTurnCountRef.current = agentTurnCount;
+      shouldScroll = true;
+    }
+
+    for (const message of messages) {
+      for (const part of message.parts) {
+        if (!isToolUIPart(part) || part.state !== "output-available") continue;
+        if (!("toolCallId" in part) || typeof part.toolCallId !== "string") continue;
+        if (completedToolIdsRef.current.has(part.toolCallId)) continue;
+        completedToolIdsRef.current.add(part.toolCallId);
+        shouldScroll = true;
+      }
+    }
+
+    if (shouldScroll && isAtBottom) {
+      void scrollToBottom({
+        animation: { damping: 0.8, stiffness: 0.04, mass: 1.5 },
+        preserveScrollPosition: true,
+      });
+    }
+  }, [messages, scrollToBottom, isAtBottom]);
+
   return null;
 }
 
@@ -179,6 +380,178 @@ function TriggerCard({ summary }: { summary: TriggerSummary }) {
         <InboundEmailTriggerCard summary={summary} />
       </MessageContent>
     </Message>
+  );
+}
+
+function stepStatusLabel(status: string | undefined): string {
+  if (!status) return "queued";
+  return status.replace(/_/g, " ");
+}
+
+function StepStatusBadge({ status }: { status: string | undefined }) {
+  const normalized = status ?? "queued";
+  if (normalized === "running") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.04em] text-[#2563eb]">
+        <Loader2 className="size-3 animate-spin" />
+        running
+      </span>
+    );
+  }
+  if (normalized === "succeeded") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.04em] text-[#16a34a]">
+        <span className="size-2 rounded-full bg-[#16a34a]" aria-hidden />
+        succeeded
+      </span>
+    );
+  }
+  if (normalized === "failed") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.04em] text-[#dc2626]">
+        <span className="size-2 rounded-full bg-[#dc2626]" aria-hidden />
+        failed
+      </span>
+    );
+  }
+  if (normalized === "waiting_for_interaction" || normalized === "waiting_for_approval") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.04em] text-[#d97706]">
+        <span className="size-2 rounded-full bg-[#d97706]" aria-hidden />
+        {stepStatusLabel(normalized)}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.04em] text-[#6b7280]">
+      <span className="size-2 rounded-full bg-[#d1d5db]" aria-hidden />
+      {stepStatusLabel(normalized)}
+    </span>
+  );
+}
+
+function StepHeader({
+  step,
+  stepIndex,
+  totalSteps,
+  showDivider,
+}: {
+  step: SpecRunStep | undefined;
+  stepIndex: number | null;
+  totalSteps: number;
+  showDivider: boolean;
+}) {
+  const displayIndex = stepIndex !== null ? stepIndex + 1 : null;
+  const agentName = step?.agent_snapshot.name?.trim() || step?.agent_id || "Agent";
+
+  return (
+    <div className={`flex w-full flex-col gap-2 ${showDivider ? "mt-6 border-t border-[#e5e7eb] pt-4" : ""}`}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {displayIndex !== null ? (
+            <span className="shrink-0 rounded-full border border-[#d1d5db] bg-[#f9fafb] px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[#4b5563]">
+              Step {displayIndex}{totalSteps > 0 ? ` / ${totalSteps}` : ""}
+            </span>
+          ) : null}
+          <span className="truncate text-[14px] font-semibold text-[#111827]">{agentName}</span>
+        </div>
+        <StepStatusBadge status={step?.status} />
+      </div>
+    </div>
+  );
+}
+
+function HandoffFieldList({ fields }: { fields: HandoffFieldRow[] }) {
+  return (
+    <div className="space-y-1.5">
+      {fields.map((field) => (
+        <div key={`${field.key}:${field.targetPath ?? ""}`} className="grid gap-1 sm:grid-cols-[120px_1fr] sm:items-start">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-mono text-[11px] text-[#374151]">{field.key}</span>
+            {field.targetPath ? (
+              <>
+                <span className="text-[#9ca3af]">→</span>
+                <span className="font-mono text-[11px] text-[#6b7280]">{field.targetPath}</span>
+              </>
+            ) : null}
+          </div>
+          <p className="text-[12px] leading-5 text-[#6b7280]">{field.preview}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function HandoffInputGroup({ group }: { group: PriorOutputGroup }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[#6b7280]">
+        Received from {group.agentName}
+      </p>
+      <HandoffFieldList fields={group.fields} />
+    </div>
+  );
+}
+
+function HandoffInputPanel({ step }: { step: SpecRunStep | undefined }) {
+  const groups = useMemo(() => extractPriorOutputGroups(step), [step]);
+  const fieldCount = groups.reduce((total, group) => total + group.fields.length, 0);
+  if (groups.length === 0) return null;
+
+  const content = (
+    <div className="space-y-4">
+      {groups.map((group) => (
+        <HandoffInputGroup key={`${group.agentId}:${group.agentName}`} group={group} />
+      ))}
+    </div>
+  );
+
+  if (fieldCount <= 4) {
+    return (
+      <div className="mt-3 rounded-md border border-[#e5e7eb] bg-[#f9fafb] px-4 py-3 text-[12px]">
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <details className="group mt-3 rounded-md border border-[#e5e7eb] bg-[#f9fafb] px-4 py-3 text-[12px]">
+      <summary className="cursor-pointer list-none text-[11px] font-semibold uppercase tracking-[0.06em] text-[#6b7280] marker:content-none [&::-webkit-details-marker]:hidden">
+        Received handoff ({fieldCount} fields)
+      </summary>
+      <div className="mt-3">{content}</div>
+    </details>
+  );
+}
+
+function HandoffOutputPanel({
+  step,
+  allSteps,
+}: {
+  step: SpecRunStep | undefined;
+  allSteps: SpecRunStep[];
+}) {
+  const fields = useMemo(() => extractOutputFields(step), [step]);
+  const targets = useMemo(() => resolveHandoffTargets(step, allSteps), [allSteps, step]);
+  if (fields.length === 0) return null;
+
+  return (
+    <div className="mt-3 rounded-md border border-[#e5e7eb] bg-[#f9fafb] px-4 py-3 text-[12px]">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[#6b7280]">Produced</p>
+      <div className="mt-2">
+        <HandoffFieldList fields={fields} />
+      </div>
+      {targets.length > 0 ? (
+        <div className="mt-3 space-y-1 border-t border-[#e5e7eb] pt-3">
+          {targets.map((target) => (
+            <p key={target.agentName} className="text-[11px] text-[#9ca3af]">
+              → feeds into {target.agentName}
+              {target.fields.length > 0 ? ` (${target.fields.join(", ")})` : ""}
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -233,31 +606,6 @@ function CompletedGateSummary({ toolName, part }: { toolName: string; part: Tool
   );
 }
 
-function SearchToolSummary({ part, toolName }: { part: ToolPart; toolName: string }) {
-  const input = part.input && typeof part.input === "object" && !Array.isArray(part.input)
-    ? part.input as Record<string, unknown>
-    : {};
-  const output = part.output && typeof part.output === "object" && !Array.isArray(part.output)
-    ? part.output as Record<string, unknown>
-    : {};
-  const query = typeof input.query === "string" ? input.query.trim() : "";
-  const sources = Array.isArray(output.sources) ? output.sources : [];
-  const reused = output.reused === true;
-  const label = toolName === "searchWeb" ? "Web search" : "Memory search";
-  const sourceLabel = sources.length === 1 ? "1 source" : `${sources.length} sources`;
-
-  return (
-    <div className="rounded-md border border-[#e5e7eb] bg-[#fafafa] px-4 py-3 text-[13px] text-[#374151]">
-      <div className="flex flex-wrap items-center gap-2 font-medium text-[#111827]">
-        <CheckCircle2 className="size-4 text-[#16a34a]" />
-        <span>{label} completed</span>
-        <span className="text-[#6b7280]">· {reused ? "reused" : sourceLabel}</span>
-      </div>
-      {query ? <p className="mt-1.5 leading-5 text-[#6b7280]">{query}</p> : null}
-    </div>
-  );
-}
-
 function mapGateAnswer(answer: InteractivePromptAnswer) {
   const optionId = answer.selectedOptionIds[0];
   if (optionId === "approve") {
@@ -285,9 +633,10 @@ function optimisticInteractionStatus(command: GateCommand["command"]): SpecRunIn
 function optimisticDecision(mapped: GateCommand): Record<string, unknown> {
   if (mapped.command === "submit_input") return { input: mapped.value, channel: mapped.value.channel };
   if (mapped.command === "revise") {
+    const raw = typeof mapped.value.feedback === "string" ? mapped.value.feedback : "Operator requested changes.";
     return {
       command: "revise",
-      reason: typeof mapped.value.feedback === "string" ? mapped.value.feedback : "Operator requested changes.",
+      reason: raw.replace(/^requested\s+changes:\s*/i, "").replace(/^revise(d)?\s*/i, "").trim() || raw,
       channel: mapped.value.channel,
     };
   }
@@ -370,9 +719,11 @@ function SpecRunDetailsDialog({
                         </p>
                         <p className="text-[12px] text-[#6b7280]">Agent {step.step_index + 1} · attempt {step.attempt}</p>
                       </div>
-                      <span className="shrink-0 border border-[#d1d5db] bg-white px-2 py-1 text-[11px] font-medium uppercase text-[#4b5563]">
-                        {step.status}
-                      </span>
+                      {step.status === "running" ? null : (
+                        <span className="shrink-0 border border-[#d1d5db] bg-white px-2 py-1 text-[11px] font-medium uppercase text-[#4b5563]">
+                          {step.status}
+                        </span>
+                      )}
                     </div>
                     {step.agent_snapshot.task ? (
                       <p className="mt-2 text-[13px] leading-5 text-[#374151]">{step.agent_snapshot.task}</p>
@@ -425,7 +776,7 @@ export function SpecRunPage({
   workflowId,
   runId,
   run: initialRun,
-  onRefresh,
+  onRefresh: _onRefresh,
 }: {
   workflowId: string;
   runId: string;
@@ -438,18 +789,20 @@ export function SpecRunPage({
   const [submittedAnswer, setSubmittedAnswer] = useState<InteractivePromptAnswer | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const canvasFlushRef = useRef<(() => Promise<void>) | null>(null);
-  const autoStartAttemptedRef = useRef(false);
+  const continueInFlightRef = useRef(false);
+  const chatStatusRef = useRef("ready");
 
   useEffect(() => {
-    setRun(initialRun);
+    setRun((prev) => mergeSpecRunProjection(prev, initialRun));
   }, [initialRun]);
 
   const refreshRun = useCallback(async () => {
     const response = await fetch(`/api/workflows/runs/${runId}`, { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
-    if (response.ok && payload.run) setRun(payload.run as SpecRunProjection);
-    await onRefresh();
-  }, [onRefresh, runId]);
+    if (response.ok && payload.run) {
+      setRun((prev) => mergeSpecRunProjection(prev, payload.run as SpecRunProjection));
+    }
+  }, [runId]);
 
   const { messages, sendMessage, setMessages, status: chatStatus, stop } = useChat({
     id: runId,
@@ -472,19 +825,63 @@ export function SpecRunPage({
       },
     }),
     onFinish: () => {
-      // Refresh run state + reload messages from server (server dedupes by step index on save).
       void refreshRun();
-      void refreshMessages();
+      window.setTimeout(() => {
+        void refreshMessages(true);
+      }, 400);
+    },
+    onError: (chatError) => {
+      continueInFlightRef.current = false;
+      setError(chatError.message || "Run stream failed");
+      window.setTimeout(() => {
+        void refreshRun();
+        void refreshMessages(true);
+      }, 400);
     },
   });
 
-  const refreshMessages = useCallback(async () => {
+  useEffect(() => {
+    chatStatusRef.current = chatStatus;
+    if (chatStatus === "ready") {
+      continueInFlightRef.current = false;
+    }
+  }, [chatStatus]);
+
+  const refreshMessages = useCallback(async (force = false) => {
+    if (!force && !canKickSpecRunStream(chatStatus)) return;
     const response = await fetch(`/api/workflows/runs/${runId}/messages`, { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
     if (response.ok && Array.isArray(payload.messages)) {
-      setMessages(dedupeChatMessagesById(payload.messages as UIMessage[]));
+      setMessages((prev) => mergeChatMessagesById(
+        dedupeChatMessagesById(payload.messages as UIMessage[]),
+        prev,
+      ));
     }
-  }, [runId, setMessages]);
+  }, [chatStatus, runId, setMessages]);
+
+  const isChatActive = chatStatus === "streaming" || chatStatus === "submitted";
+
+  const kickRunStream = useCallback(async () => {
+    if (!canKickSpecRunStream(chatStatusRef.current) || continueInFlightRef.current) return false;
+    continueInFlightRef.current = true;
+    try {
+      await sendMessage({ text: "Continue" });
+      return true;
+    } catch {
+      continueInFlightRef.current = false;
+      return false;
+    }
+  }, [sendMessage]);
+
+  const resumeRunStreamWithRetry = useCallback(async () => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (canKickSpecRunStream(chatStatusRef.current)) {
+        return kickRunStream();
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    return false;
+  }, [kickRunStream]);
 
   useEffect(() => {
     let cancelled = false;
@@ -498,21 +895,6 @@ export function SpecRunPage({
     return () => { cancelled = true; };
   }, [runId, setMessages]);
 
-  useEffect(() => {
-    // Only poll while the run is live or a stream is in flight.
-    if (!ACTIVE_STATUSES.has(run.status) && chatStatus !== "streaming" && chatStatus !== "submitted") return;
-    // Don't poll during streaming — refreshMessages during streaming can overwrite in-flight
-    // messages and cause visual flicker.  onFinish does the authoritative reload.
-    if (chatStatus === "streaming" || chatStatus === "submitted") return;
-    const timer = window.setInterval(() => {
-      void (async () => {
-        await refreshRun();
-        await refreshMessages();
-      })();
-    }, 2_500);
-    return () => window.clearInterval(timer);
-  }, [run.status, chatStatus, refreshMessages, refreshRun]);
-
   const post = useCallback(async (path: string, body?: Record<string, unknown>) => {
     setBusy(true);
     setError(null);
@@ -524,7 +906,9 @@ export function SpecRunPage({
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "Request failed");
-      if (payload.run) setRun(payload.run as SpecRunProjection);
+      if (payload.run) {
+        setRun((prev) => mergeSpecRunProjection(prev, payload.run as SpecRunProjection));
+      }
       await refreshRun();
       await refreshMessages();
       return payload;
@@ -537,8 +921,11 @@ export function SpecRunPage({
   }, [refreshMessages, refreshRun]);
 
   const continueRunStream = useCallback(async () => {
-    await sendMessage({ text: "Continue" });
-  }, [sendMessage]);
+    const resumed = await resumeRunStreamWithRetry();
+    if (!resumed) {
+      setError("Could not resume the run. Send Continue to try again.");
+    }
+  }, [resumeRunStreamWithRetry]);
 
   const pendingInteraction = useMemo(
     () => run.interactions?.find((interaction) => interaction.status === "pending") ?? null,
@@ -555,11 +942,6 @@ export function SpecRunPage({
     [pendingInteraction, run.operatorView, run.status, run.steps],
   );
 
-  const activeGateTool = useMemo(
-    () => findActiveToolPart(messages, GATE_TOOL_NAMES),
-    [messages],
-  );
-
   const transcriptMessages = useMemo(
     () => hydrateMessagesFromSteps(
       dedupeChatMessagesById(messages),
@@ -568,17 +950,20 @@ export function SpecRunPage({
     ),
     [messages, run.interactions, run.steps],
   );
-  const looseTranscriptMessages = useMemo(
-    () => transcriptMessages.filter(isLooseTranscriptMessage),
-    [transcriptMessages],
+
+  const liveAgentMessageId = useMemo(() => {
+    if (!isChatActive) return null;
+    const turns = transcriptMessages.filter(isAgentTurnMessage);
+    return turns.at(-1)?.id ?? null;
+  }, [isChatActive, transcriptMessages]);
+
+  const stepByIndex = useMemo(
+    () => new Map(latestAttemptPerStep(run.steps).map((step) => [step.step_index, step])),
+    [run.steps],
   );
 
   useEffect(() => {
-    autoStartAttemptedRef.current = false;
-  }, [runId]);
-
-  useEffect(() => {
-    if (autoStartAttemptedRef.current) return;
+    if (hasSpecRunAutoStartAttempted(runId)) return;
     if (!shouldAutoStartRunStream({
       runStatus: run.status,
       messages,
@@ -587,9 +972,9 @@ export function SpecRunPage({
     })) {
       return;
     }
-    autoStartAttemptedRef.current = true;
-    void sendMessage({ text: "Continue" });
-  }, [chatStatus, messages, pendingInteraction, run.status, sendMessage]);
+    markSpecRunAutoStartAttempted(runId);
+    void kickRunStream();
+  }, [chatStatus, kickRunStream, messages, pendingInteraction, run.status, runId]);
 
   const displayArtifact = useMemo(
     () => resolveDisplayArtifact({
@@ -601,34 +986,95 @@ export function SpecRunPage({
   );
 
   const canvasArtifact = displayArtifact;
-  const artifactStepAttemptId = displayArtifact?.step_attempt_id ?? pendingInteraction?.step_attempt_id ?? null;
+  const gateArtifactForStep = displayArtifact;
+  const noActionReview = isNoActionReview({
+    operatorView: gate.operatorView,
+    pendingInteraction,
+    displayArtifact,
+  });
 
-  const stepTranscript = useMemo(
-    () => buildSequentialStepTranscript({
-      steps: run.steps,
-      messages,
-      interactions: run.interactions ?? [],
-      chatStatus,
-      pendingInteractionStepAttemptId: artifactStepAttemptId,
-    }),
-    [artifactStepAttemptId, chatStatus, messages, run.interactions, run.steps],
-  );
+  const submitInteractionCommand = useCallback(async (
+    interactionId: string,
+    mapped: GateCommand,
+    options?: { submittedAnswer?: InteractivePromptAnswer | null; flushCanvas?: boolean },
+  ) => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (options?.flushCanvas && mapped.command === "approve" && canvasArtifact && canvasFlushRef.current) {
+        try {
+          await canvasFlushRef.current();
+        } catch {
+          // Proceed even if draft save fails.
+        }
+      }
+      const response = await fetch(
+        `/api/workflows/runs/${runId}/interactions/${interactionId}/commands`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(mapped),
+        },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "Failed to submit review decision");
+
+      setRun((prev) => {
+        const optimistic: SpecRunProjection = {
+          ...prev,
+          status: "running",
+          interactions: (prev.interactions ?? []).map((entry) =>
+            entry.id === interactionId
+              ? {
+                ...entry,
+                status: optimisticInteractionStatus(mapped.command),
+                decision_json: optimisticDecision(mapped),
+              }
+              : entry
+          ),
+        };
+        return payload.run
+          ? mergeSpecRunProjection(optimistic, payload.run as SpecRunProjection)
+          : optimistic;
+      });
+      if (options?.submittedAnswer !== undefined) {
+        setSubmittedAnswer(options.submittedAnswer);
+      }
+
+      if (payload.resumeViaStream !== false) {
+        const resumed = await resumeRunStreamWithRetry();
+        if (!resumed) {
+          setError("Your decision was saved, but the run did not resume. Send Continue to retry.");
+        }
+      } else {
+        await refreshRun();
+      }
+      if (payload.resumeViaStream !== false) {
+        void refreshMessages(true);
+      }
+    } catch (requestError) {
+      if (options?.submittedAnswer !== undefined) {
+        setSubmittedAnswer(null);
+      }
+      setError(requestError instanceof Error ? requestError.message : "Failed to submit review decision");
+      throw requestError;
+    } finally {
+      setBusy(false);
+    }
+  }, [canvasArtifact, refreshMessages, refreshRun, resumeRunStreamWithRetry, runId]);
 
   useEffect(() => {
     if (!gate.show) setSubmittedAnswer(null);
   }, [gate.show, gate.interaction?.id]);
 
-  // Show the working indicator only in the pre-stream gap (run is active but no tokens yet).
-  // Don't show it while streaming — real content is already visible then.
-  const showWorking = !gate.show
-    && !activeGateTool
-    && chatStatus !== "streaming"
-    && (run.status === "running" || chatStatus === "submitted");
-
   const renderRunTool = useCallback((part: ToolPart, toolName: string, index: number): ReactNode | null | undefined => {
-    if (toolName === "searchMemory" || toolName === "searchWeb") {
-      if (part.state === "input-streaming" || part.state === "input-available") return null;
-      if (part.state === "output-available") return <SearchToolSummary key={index} part={part} toolName={toolName} />;
+    if (isCompactRunTool(toolName)) {
+      if (
+        part.state === "output-available"
+        || part.state === "output-error"
+      ) {
+        return <RunToolRow key={index} part={part} toolName={toolName} />;
+      }
       return null;
     }
     if (toolName === "finalizeAgent") {
@@ -661,58 +1107,11 @@ export function SpecRunPage({
 
   async function handleGateSubmit(answer: InteractivePromptAnswer) {
     if (!gate.interaction) return;
-    const mapped = mapGateAnswer(answer);
-    const interactionId = gate.interaction.id;
-    setBusy(true);
-    setError(null);
-    try {
-      if (mapped.command === "approve" && canvasArtifact && canvasFlushRef.current) {
-        try {
-          await canvasFlushRef.current();
-        } catch {
-          // Proceed even if draft save fails.
-        }
-      }
-      const response = await fetch(
-        `/api/workflows/runs/${runId}/interactions/${interactionId}/commands`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(mapped),
-        },
-      );
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error ?? "Failed to submit review decision");
-
-      // Optimistically resolve the gate — don't wait for refreshRun to dismiss it.
-      setRun((prev) => ({
-        ...prev,
-        status: "running",
-        interactions: (prev.interactions ?? []).map((entry) =>
-          entry.id === interactionId
-            ? {
-              ...entry,
-              status: optimisticInteractionStatus(mapped.command),
-              decision_json: optimisticDecision(mapped),
-            }
-            : entry
-        ),
-      }));
-      setSubmittedAnswer(answer);
-      setBusy(false);
-
-      // Kick off the stream immediately. onFinish will refresh run/messages.
-      if (payload.resumeViaStream !== false) {
-        void sendMessage({ text: "Continue" });
-      } else {
-        // Headless path — refresh to pick up completed state.
-        void refreshRun();
-      }
-    } catch (requestError) {
-      setSubmittedAnswer(null);
-      setError(requestError instanceof Error ? requestError.message : "Failed to submit review decision");
-      setBusy(false);
-    }
+    await submitInteractionCommand(
+      gate.interaction.id,
+      mapGateAnswer(answer),
+      { submittedAnswer: answer, flushCanvas: true },
+    );
   }
 
   async function saveCanvasEmail(
@@ -734,13 +1133,10 @@ export function SpecRunPage({
       if (/^(approve|approved|yes|send|approve and send)$/i.test(value)) {
         mapped = {
           command: "approve",
-          value: { channel: "dashboard", approvalIntent: "approve_and_send", text: value },
+          value: { channel: "dashboard", approvalIntent: "approve_and_send" },
         };
       } else if (/^(reject|cancel|stop)$/i.test(value)) {
-        mapped = {
-          command: "reject",
-          value: { channel: "dashboard", reason: "Rejected by operator" },
-        };
+        mapped = { command: "reject", value: { reason: "Rejected by operator" } };
       } else if (gate.operatorView?.actions.some((action) => action.command === "submit_input")) {
         mapped = {
           command: "submit_input",
@@ -752,37 +1148,34 @@ export function SpecRunPage({
           value: { channel: "dashboard", feedback: value },
         };
       }
-      await post(`/api/workflows/runs/${runId}/interactions/${pendingInteraction.id}/commands`, mapped);
-      setRun((prev) => ({
-        ...prev,
-        status: "running",
-        interactions: (prev.interactions ?? []).map((entry) =>
-          entry.id === pendingInteraction.id
-            ? {
-              ...entry,
-              status: optimisticInteractionStatus(mapped.command),
-              decision_json: optimisticDecision(mapped),
-            }
-            : entry
-        ),
-      }));
+      await submitInteractionCommand(pendingInteraction.id, mapped);
+      return;
+    }
+    if (chatStatus === "streaming" || chatStatus === "submitted") {
+      setError("Wait for the current step to finish.");
+      return;
+    }
+    if (ACTIVE_STATUSES.has(run.status)) {
+      if (/^(retry|rerun)$/i.test(normalized) && (run.status === "failed" || run.status === "cancelled")) {
+        await post(`/api/workflows/runs/${runId}/retry`);
+      }
       await continueRunStream();
       return;
     }
-    if (/^(continue|resume|retry|run|rerun)$/i.test(normalized) && !ACTIVE_STATUSES.has(run.status)) {
-      await post(`/api/workflows/runs/${runId}/retry`);
+    if (/^(continue|resume)$/i.test(normalized)) {
       await continueRunStream();
       return;
     }
     await sendMessage({ text: value });
   }
 
-  const gateTitle = gate.operatorView?.workspace.title || "Draft review";
-  const gateSubtitle = gate.interaction?.question?.trim() || gateTitle;
-  const gateHint = gate.operatorView?.blocks.some((block) => block.surface === "review.email" || block.surface === "review.draft")
-    ? "Edit the draft above if needed, then approve, request changes, or reject."
-    : "Choose how to continue this run.";
-  const showGateComposer = gate.show && gate.operatorView && !submittedAnswer;
+  const gateTitle = gate.operatorView?.workspace.title ?? pendingInteraction?.question ?? "Review required";
+  const gateSubtitle = gate.operatorView?.workspace.subtitle ?? pendingInteraction?.question ?? gateTitle;
+  const showGateComposer = Boolean(gate.show && gate.operatorView && !submittedAnswer && !noActionReview);
+  const showGateLoading = gate.show && !submittedAnswer && !gate.operatorView && !noActionReview;
+  const composerPlaceholder = pendingInteraction
+    ? "Respond to the pending review…"
+    : "Message the loop runner…";
 
   return (
     <main className="relative flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden bg-white text-[#111827]">
@@ -799,9 +1192,9 @@ export function SpecRunPage({
           </button>
         </div>
         <SpecRunDetailsDialog open={detailsOpen} onOpenChange={setDetailsOpen} run={run} />
-        <Conversation>
-          <ConversationContent className={`mx-auto max-w-3xl gap-8 px-4 pb-40 pt-16 transition-[padding-bottom] ${showGateComposer ? "pb-[560px]" : "pb-40"}`}>
-            <ScrollOnUpdate />
+        <Conversation resize={isChatActive ? "instant" : "smooth"}>
+          <ConversationContent className={`mx-auto max-w-3xl gap-8 px-4 pb-40 pt-16 ${showGateComposer ? "pb-[560px]" : "pb-40"}`}>
+            <ScrollOnStepComplete messages={transcriptMessages} />
 
             {(error || run.error_json?.message) ? (
               <Message from="assistant">
@@ -816,67 +1209,139 @@ export function SpecRunPage({
                 const summary = parseTriggerSummary(readMessageText(message));
                 if (summary) return <TriggerCard key={message.id} summary={summary} />;
               }
-              return null;
-            })}
 
-            {stepTranscript.map((block) => (
-              <div key={block.message.id} className="flex w-full flex-col gap-4">
-                <Message from={block.message.role}>
-                  <MessageContent className="w-full">
-                    <TranscriptMessageContent
-                      message={block.message}
-                      renderTool={renderRunTool}
-                      shouldRenderText={({ text }) => shouldRenderAssistantText(text)}
+              if (isAgentTurnMessage(message)) {
+                const stepIndex = readAgentStepIndex(message);
+                const step = stepIndex !== null ? stepByIndex.get(stepIndex) : undefined;
+                const isLive = message.id === liveAgentMessageId;
+                const persistedStepArtifact = resolveArtifactForStep({
+                  artifacts: run.artifacts,
+                  stepAttemptId: step?.id,
+                  gateArtifact: gateArtifactForStep,
+                });
+                const syntheticStepArtifact = persistedStepArtifact ? null : buildRenderedStepArtifact(step, message);
+                const stepArtifact = persistedStepArtifact ?? syntheticStepArtifact;
+                const pendingForStep = run.interactions?.find((interaction) =>
+                  interaction.step_attempt_id === step?.id
+                  && interaction.status === "pending"
+                ) ?? null;
+                const showArtifact = Boolean(
+                  stepArtifact
+                  && (shouldShowStepOutputArtifact(step) || pendingForStep)
+                  && !noActionReview
+                );
+                const hideArtifactSummary = showArtifact;
+                const stepError = typeof step?.error_json?.message === "string"
+                  ? step.error_json.message.trim()
+                  : "";
+                const priorAgentTurns = transcriptMessages
+                  .slice(0, index)
+                  .filter(isAgentTurnMessage).length;
+
+                return (
+                  <div key={message.id} className="flex w-full flex-col gap-3">
+                    <StepHeader
+                      step={step}
+                      stepIndex={stepIndex}
+                      totalSteps={stepByIndex.size}
+                      showDivider={priorAgentTurns > 0}
                     />
-                  </MessageContent>
-                </Message>
+                    <HandoffInputPanel step={step} />
+                    <div className="relative ml-3 border-l-2 border-[#e5e7eb] pl-6">
+                      <Message from="assistant">
+                        <MessageContent className="w-full">
+                          <TranscriptMessageContent
+                            message={message}
+                            renderTool={renderRunTool}
+                            isStreaming={isLive}
+                            transcriptVariant="run"
+                            shouldRenderText={({ text, partIndex, parts }) => {
+                              if (showArtifact) return false;
+                              if (!shouldRenderAssistantText(text, { hideArtifactSummary })) return false;
+                              return shouldRenderLiveStepText({
+                                text,
+                                partIndex,
+                                parts,
+                                isLive,
+                              });
+                            }}
+                          />
+                        </MessageContent>
+                      </Message>
 
-                {block.step.id === artifactStepAttemptId && displayArtifact ? (
-                  <Message from="assistant" className="max-w-none">
-                    <MessageContent className="w-full max-w-none border-0 bg-transparent p-0 shadow-none">
-                      <ArtifactRenderer
-                        artifact={toArtifactRecord(displayArtifact)}
-                        flushRef={canvasFlushRef}
-                        runId={runId}
-                        saving={busy}
-                        onSave={async (data) => {
-                          await saveCanvasEmail(displayArtifact.artifact_key, data as {
-                            design: unknown;
-                            html: string;
-                            text?: string;
-                            subject?: string;
-                            preview?: string;
-                          });
-                        }}
+                      {stepError ? (
+                        <Message from="assistant" className="mt-3">
+                          <MessageContent className="w-full border-[#fecaca] bg-[#fef2f2] text-[#991b1b]">
+                            {stepError}
+                          </MessageContent>
+                        </Message>
+                      ) : null}
+
+                      {showArtifact && stepArtifact ? (
+                        <Message from="assistant" className="mt-3 max-w-none">
+                          <MessageContent className="w-full max-w-none border-0 bg-transparent p-0 shadow-none">
+                            <ArtifactRenderer
+                              artifact={toArtifactRecord(stepArtifact)}
+                              flushRef={
+                                gateArtifactForStep?.id === stepArtifact.id
+                                  ? canvasFlushRef
+                                  : undefined
+                              }
+                              runId={runId}
+                              saving={busy}
+                              onSave={async (data) => {
+                                if (stepArtifact.id.startsWith("synthetic:")) return;
+                                await saveCanvasEmail(stepArtifact.artifact_key, data as {
+                                  design: unknown;
+                                  html: string;
+                                  text?: string;
+                                  subject?: string;
+                                  preview?: string;
+                                });
+                              }}
+                            />
+                          </MessageContent>
+                        </Message>
+                      ) : null}
+                    </div>
+
+                    {!showArtifact && step?.status === "succeeded" ? (
+                      <HandoffOutputPanel step={step} allSteps={run.steps} />
+                    ) : null}
+                  </div>
+                );
+              }
+
+              if (isLooseTranscriptMessage(message, index)) {
+                return (
+                  <Message key={message.id} from={message.role === "user" ? "user" : "assistant"}>
+                    <MessageContent className="w-full">
+                      <TranscriptMessageContent
+                        message={message}
+                        renderTool={renderRunTool}
+                        shouldRenderText={message.role === "assistant"
+                          ? ({ text }) => shouldRenderAssistantText(text)
+                          : undefined}
                       />
                     </MessageContent>
                   </Message>
-                ) : null}
-              </div>
-            ))}
+                );
+              }
 
-            {looseTranscriptMessages.map((message) => (
-              <Message key={message.id} from={message.role === "user" ? "user" : "assistant"}>
-                <MessageContent className="w-full">
-                  <TranscriptMessageContent
-                    message={message}
-                    renderTool={renderRunTool}
-                    shouldRenderText={message.role === "assistant" ? ({ text }) => shouldRenderAssistantText(text) : undefined}
-                  />
-                </MessageContent>
-              </Message>
-            ))}
+              return null;
+            })}
 
-            {showWorking ? (
+            {isChatActive && !liveAgentMessageId ? (
               <Message from="assistant">
-                <MessageContent>
+                <MessageContent className="w-full">
                   <div className="flex items-center gap-2 text-sm text-[#6b7280]">
                     <Loader2 className="size-4 animate-spin" />
-                    Working…
+                    <span>Working on the next step…</span>
                   </div>
                 </MessageContent>
               </Message>
             ) : null}
+
           </ConversationContent>
           <ConversationScrollButton />
         </Conversation>
@@ -892,18 +1357,27 @@ export function SpecRunPage({
                 transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
                 className="pointer-events-auto space-y-2 border border-[#d1d5db] bg-white"
               >
-                <p className="px-4 pt-3 text-[12px] leading-5 text-[#6b7280]">{gateHint}</p>
-                <InteractivePromptMenu
-                  allowMultiple={false}
-                  allowOther
-                  disabled={busy}
-                  onSubmit={(answer) => { void handleGateSubmit(answer); }}
-                  options={buildGatePromptOptions(gate.operatorView!)}
-                  placement="composer"
-                  question={gateSubtitle}
-                  recommendedOptionIds={["approve"]}
-                  submittedAnswer={submittedAnswer ?? undefined}
-                />
+                {showGateLoading ? (
+                  <div className="flex items-center gap-2 px-4 py-6 text-[13px] text-[#6b7280]">
+                    <Loader2 className="size-4 animate-spin" />
+                    {gateTitle}
+                  </div>
+                ) : (
+                  <>
+                    <p className="px-4 pt-3 text-[12px] leading-5 text-[#6b7280]">{gateSubtitle}</p>
+                    <InteractivePromptMenu
+                      allowMultiple={false}
+                      allowOther
+                      disabled={busy}
+                      onSubmit={(answer) => { void handleGateSubmit(answer); }}
+                      options={buildGatePromptOptions(gate.operatorView!)}
+                      placement="composer"
+                      question={gateSubtitle}
+                      recommendedOptionIds={["approve"]}
+                      submittedAnswer={submittedAnswer ?? undefined}
+                    />
+                  </>
+                )}
               </motion.div>
             ) : (
               <motion.div
@@ -921,7 +1395,7 @@ export function SpecRunPage({
                   <PromptInputTextarea
                     className="min-h-0 pr-12 pb-2"
                     disabled={busy || chatStatus === "streaming" || chatStatus === "submitted"}
-                    placeholder="Message the loop runner..."
+                    placeholder={composerPlaceholder}
                   />
                   <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
                     <PromptInputSubmit

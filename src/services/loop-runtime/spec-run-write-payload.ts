@@ -1,4 +1,9 @@
 import type { RunContext } from "./build-run-context.js";
+import { stripToSchema } from "../loop-engine/data-contract.js";
+import {
+  normalizeConnectorPayloadForSchema,
+  validateConnectorActionPayload,
+} from "./connector-action-payload.js";
 import { renderArtifactTemplate } from "./render-artifact-template.js";
 
 function readString(value: unknown): string {
@@ -13,13 +18,11 @@ function firstString(...values: unknown[]): string {
   return "";
 }
 
-function looksLikeGmailEmailAction(actionSlug: string): boolean {
-  const slug = actionSlug.toUpperCase();
-  return slug.includes("GMAIL")
-    && (slug.includes("DRAFT") || slug.includes("REPLY") || slug.includes("SEND") || slug.includes("EMAIL"));
+function looksLikeGmailAction(actionSlug: string): boolean {
+  return actionSlug.toUpperCase().includes("GMAIL");
 }
 
-function normalizeGmailEmailPayload(
+function normalizeGmailPayload(
   payload: Record<string, unknown>,
   runContext?: RunContext,
 ): Record<string, unknown> {
@@ -41,6 +44,9 @@ function normalizeGmailEmailPayload(
   );
   if (threadId) next.thread_id = threadId;
 
+  const body = firstString(next.body, next.message, next.text);
+  if (body) next.body = body;
+
   const messageId = firstString(
     next.message_id,
     next.messageId,
@@ -51,6 +57,8 @@ function normalizeGmailEmailPayload(
   delete next.to;
   delete next.recipient;
   delete next.email;
+  delete next.message;
+  delete next.text;
   delete next.threadId;
   delete next.messageId;
 
@@ -63,8 +71,8 @@ export function enrichDraftPayload(
   runContext?: RunContext,
 ): Record<string, unknown> {
   const slug = actionSlug.toUpperCase();
-  const normalized = looksLikeGmailEmailAction(slug)
-    ? normalizeGmailEmailPayload(payload, runContext)
+  const normalized = looksLikeGmailAction(slug)
+    ? normalizeGmailPayload(payload, runContext)
     : payload;
 
   if (!runContext?.ticket) return normalized;
@@ -92,6 +100,60 @@ export function enrichDraftPayload(
     if (!next.is_html) next.is_html = true;
   }
   return next;
+}
+
+function formatValidationErrors(
+  errors: ReturnType<typeof validateConnectorActionPayload>["errors"],
+): string {
+  return errors
+    .map((error) => `${error.path}: ${error.message}`)
+    .join("; ");
+}
+
+/** Strip, normalize, enrich from run context, and validate before Composio execution. */
+export function prepareConnectorActionPayload(input: {
+  actionSlug: string;
+  inputSchema: Record<string, unknown>;
+  payload: Record<string, unknown>;
+  runContext?: RunContext;
+  resolvedHandoff?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const boundPayload = {
+    ...input.payload,
+    ...(input.resolvedHandoff ?? {}),
+  };
+  const aliasedPayload = enrichDraftPayload(
+    input.actionSlug,
+    boundPayload,
+    input.runContext,
+  );
+  const strippedPayload = stripToSchema(
+    input.inputSchema,
+    aliasedPayload,
+  ) as Record<string, unknown>;
+  const normalizedPayload = normalizeConnectorPayloadForSchema(
+    strippedPayload,
+    input.inputSchema,
+  );
+  const enriched = enrichDraftPayload(
+    input.actionSlug,
+    normalizedPayload,
+    input.runContext,
+  );
+  const finalPayload = stripToSchema(
+    input.inputSchema,
+    enriched,
+  ) as Record<string, unknown>;
+  const validation = validateConnectorActionPayload(
+    { inputSchema: input.inputSchema },
+    finalPayload,
+  );
+  if (!validation.valid) {
+    throw new Error(
+      `Connector payload failed schema validation: ${formatValidationErrors(validation.errors)}`,
+    );
+  }
+  return finalPayload;
 }
 
 export type DeferredWriteMeta = {

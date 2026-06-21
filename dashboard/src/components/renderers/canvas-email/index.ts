@@ -28,3 +28,17 @@ registerRenderer({
   displayMode: "inline",
   component: CanvasEmailRenderer,
 });
+
+registerRenderer({
+  kind: "react.email",
+  label: "Email",
+  displayMode: "inline",
+  component: CanvasEmailRenderer,
+});
+
+registerRenderer({
+  kind: "react-email",
+  label: "Email",
+  displayMode: "inline",
+  component: CanvasEmailRenderer,
+});

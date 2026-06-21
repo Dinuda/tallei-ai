@@ -140,6 +140,7 @@ const tokensCache = new Map<string, TokenizedCode>();
 
 // Subscribers for async token updates
 const subscribers = new Map<string, Set<(result: TokenizedCode) => void>>();
+const pendingHighlights = new Set<string>();
 
 const getTokensCacheKey = (code: string, language: BundledLanguage) => {
   const start = code.slice(0, 100);
@@ -180,30 +181,38 @@ const createRawTokens = (code: string): TokenizedCode => ({
   ),
 });
 
-// Synchronous highlight with callback for async results
-export const highlightCode = (
+export const peekHighlightedTokens = (
+  code: string,
+  language: BundledLanguage
+): TokenizedCode | null =>
+  tokensCache.get(getTokensCacheKey(code, language)) ?? null;
+
+const notifyHighlightSubscribers = (
+  tokensCacheKey: string,
+  tokenized: TokenizedCode
+) => {
+  const subs = subscribers.get(tokensCacheKey);
+  if (!subs) {
+    return;
+  }
+
+  subscribers.delete(tokensCacheKey);
+  for (const sub of [...subs]) {
+    sub(tokenized);
+  }
+};
+
+const startHighlightJob = (
   code: string,
   language: BundledLanguage,
-  // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-callbacks)
-  callback?: (result: TokenizedCode) => void
-): TokenizedCode | null => {
-  const tokensCacheKey = getTokensCacheKey(code, language);
-
-  // Return cached result if available
-  const cached = tokensCache.get(tokensCacheKey);
-  if (cached) {
-    return cached;
+  tokensCacheKey: string
+) => {
+  if (pendingHighlights.has(tokensCacheKey)) {
+    return;
   }
 
-  // Subscribe callback if provided
-  if (callback) {
-    if (!subscribers.has(tokensCacheKey)) {
-      subscribers.set(tokensCacheKey, new Set());
-    }
-    subscribers.get(tokensCacheKey)?.add(callback);
-  }
+  pendingHighlights.add(tokensCacheKey);
 
-  // Start highlighting in background - fire-and-forget async pattern
   getHighlighter(language)
     // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-then)
     .then((highlighter) => {
@@ -224,25 +233,47 @@ export const highlightCode = (
         tokens: result.tokens,
       };
 
-      // Cache the result
       tokensCache.set(tokensCacheKey, tokenized);
-
-      // Notify all subscribers
-      const subs = subscribers.get(tokensCacheKey);
-      if (subs) {
-        for (const sub of subs) {
-          sub(tokenized);
-        }
-        subscribers.delete(tokensCacheKey);
-      }
+      notifyHighlightSubscribers(tokensCacheKey, tokenized);
     })
     // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-then), eslint-plugin-promise(prefer-await-to-callbacks)
     .catch((error) => {
       console.error("Failed to highlight code:", error);
       subscribers.delete(tokensCacheKey);
+    })
+  // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-then)
+    .finally(() => {
+      pendingHighlights.delete(tokensCacheKey);
     });
+};
 
-  return null;
+export const requestHighlightedTokens = (
+  code: string,
+  language: BundledLanguage,
+  // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-callbacks)
+  callback: (result: TokenizedCode) => void
+): (() => void) => {
+  const tokensCacheKey = getTokensCacheKey(code, language);
+  const cached = tokensCache.get(tokensCacheKey);
+  if (cached) {
+    callback(cached);
+    return () => {};
+  }
+
+  if (!subscribers.has(tokensCacheKey)) {
+    subscribers.set(tokensCacheKey, new Set());
+  }
+  const subs = subscribers.get(tokensCacheKey)!;
+  subs.add(callback);
+
+  startHighlightJob(code, language, tokensCacheKey);
+
+  return () => {
+    subs.delete(callback);
+    if (subs.size === 0) {
+      subscribers.delete(tokensCacheKey);
+    }
+  };
 };
 
 const CodeBlockBody = memo(
@@ -381,55 +412,36 @@ export const CodeBlockContent = ({
   showLineNumbers?: boolean;
 }) => {
   const normalizedCode = typeof code === "string" ? code : "";
-  const tokenKey = useMemo(
-    () => getTokensCacheKey(normalizedCode, language),
-    [normalizedCode, language]
-  );
-  // Memoized raw tokens for immediate display
-  const rawTokens = useMemo(() => createRawTokens(normalizedCode), [normalizedCode]);
-
-  // Synchronous cache lookup — avoids setState in effect for cached results
-  const syncTokens = useMemo(
-    () => highlightCode(normalizedCode, language) ?? rawTokens,
-    [normalizedCode, language, rawTokens]
-  );
-
-  // Async highlighting result (populated after shiki loads)
-  const [asyncTokenState, setAsyncTokenState] = useState<{
-    key: string;
-    tokens: TokenizedCode;
-  } | null>(null);
+  const [tokenized, setTokenized] = useState<TokenizedCode>(() => (
+    peekHighlightedTokens(normalizedCode, language) ?? createRawTokens(normalizedCode)
+  ));
 
   useEffect(() => {
     let cancelled = false;
 
-    const cached = highlightCode(normalizedCode, language, (result) => {
-      if (!cancelled) {
-        setAsyncTokenState({ key: tokenKey, tokens: result });
-      }
-    });
-
+    const cached = peekHighlightedTokens(normalizedCode, language);
     if (cached) {
-      setAsyncTokenState((current) => (
-        current?.key === tokenKey && current.tokens === cached
-          ? current
-          : { key: tokenKey, tokens: cached }
-      ));
-    } else {
-      setAsyncTokenState((current) => (
-        current?.key === tokenKey ? current : null
-      ));
+      setTokenized((current) => (current === cached ? current : cached));
+      return;
     }
+
+    setTokenized(createRawTokens(normalizedCode));
+
+    const unsubscribe = requestHighlightedTokens(
+      normalizedCode,
+      language,
+      (result) => {
+        if (!cancelled) {
+          setTokenized((current) => (current === result ? current : result));
+        }
+      }
+    );
 
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [normalizedCode, language, tokenKey]);
-
-  const asyncTokens = asyncTokenState?.key === tokenKey
-    ? asyncTokenState.tokens
-    : null;
-  const tokenized = asyncTokens ?? syncTokens;
+  }, [normalizedCode, language]);
 
   return (
     <div className="relative overflow-auto">

@@ -1,5 +1,6 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
+import { compileSpecRunPlan } from "./spec-run-plan.js";
 import { getSpecRunProjection } from "./spec-runner.js";
 import {
   buildOperatorViewFromInteraction,
@@ -85,8 +86,11 @@ function toolDisplayName(toolKey: string): string {
   return titleCase(toolKey);
 }
 
-function mapStepStatus(status: string): string {
+function mapStepStatus(status: string, stepAttemptId: string, pendingInteraction: { step_attempt_id: string } | null): string {
   if (status === "waiting_for_interaction") return "waiting_for_interaction";
+  if (pendingInteraction?.step_attempt_id === stepAttemptId && status !== "failed" && status !== "cancelled") {
+    return "waiting_for_interaction";
+  }
   return status;
 }
 
@@ -170,7 +174,13 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
     loadPendingInteractionForRun(auth, runId),
   ]);
 
-  const steps = stepsResult.rows.map((row) => {
+  const planAgentIds = new Set(
+    compileSpecRunPlan(specRun.loopDefinition).agents.map((agent) => agent.id),
+  );
+
+  const steps = stepsResult.rows
+    .filter((row) => planAgentIds.has(row.agent_id))
+    .map((row) => {
     const snapshot = asRecord(row.agent_snapshot);
     const personaRaw = asRecord(snapshot.persona);
     return {
@@ -202,7 +212,7 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
         } : {}),
       },
       attempt: row.attempt,
-      status: mapStepStatus(row.status),
+      status: mapStepStatus(row.status, row.id, pendingInteraction),
       created_at: iso(row.created_at) ?? specRun.createdAt,
       started_at: iso(row.started_at),
       finished_at: iso(row.finished_at),
