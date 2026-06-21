@@ -14,7 +14,6 @@ import {
 } from "../../../services/loop-executor/index.js";
 import {
   cancelSpecLoopRun,
-  getSpecRunMessages,
   getSpecRunEditorialProjection,
   getWorkflowTriggerActivity,
   listSpecLoopRuns,
@@ -22,11 +21,7 @@ import {
   saveSpecRunAsLoop,
   saveCanvasEmailArtifact,
   startSpecManualLoopRun,
-  streamSpecRunChat,
 } from "../../../services/loop-runtime/index.js";
-import { handleSpecRunInteractionCommand } from "../../../services/loop-runtime/spec-run-interactions.js";
-import { normalizeRunMessages } from "../../../services/loop-runtime/run-messages.js";
-import { validateUIMessages } from "ai";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
@@ -49,10 +44,6 @@ const canvasEmailSaveSchema = z.object({
   source: z.string().max(120).optional(),
   updatedAt: z.string().max(120).optional(),
   finalUse: z.boolean().optional(),
-});
-const interactionCommandSchema = z.object({
-  command: z.enum(["approve", "reject", "revise", "submit_input"]),
-  value: z.record(z.unknown()).optional(),
 });
 const saveRunAsLoopSchema = z.object({
   title: z.string().trim().min(1).max(160).optional(),
@@ -218,39 +209,12 @@ router.get("/runs/:runId", requireScopes(["memory:read"]), async (req: AuthReque
   }
 });
 
-router.get("/runs/:runId/messages", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse(req.params);
-    const messages = await getSpecRunMessages(req.authContext!, runId);
-    res.json({ messages });
-  } catch (error) {
-    sendError(res, error, "Failed to read run messages");
-  }
+router.get("/runs/:runId/messages", requireScopes(["memory:read"]), async (_req: AuthRequest, res: Response) => {
+  res.status(410).json({ error: "Run chat has been removed and is being rebuilt." });
 });
 
-const runChatSchema = z.object({
-  runId: z.string().uuid(),
-  messages: z.array(z.unknown()),
-});
-
-router.post("/loops/:workflowId/run/chat", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { workflowId } = workflowIdSchema.parse(req.params);
-    const body = runChatSchema.parse(req.body ?? {});
-    const messages = await validateUIMessages({ messages: normalizeRunMessages(body.messages) });
-    await streamSpecRunChat({
-      auth: req.authContext!,
-      workflowId,
-      runId: body.runId,
-      messages,
-      res,
-    });
-  } catch (error) {
-    if (!res.headersSent) {
-      const status = error instanceof z.ZodError ? 400 : /not found/i.test(error instanceof Error ? error.message : "") ? 404 : 500;
-      res.status(status).json({ error: error instanceof Error ? error.message : "Failed to stream run chat" });
-    }
-  }
+router.post("/loops/:workflowId/run/chat", requireScopes(["memory:write"]), async (_req: AuthRequest, res: Response) => {
+  res.status(410).json({ error: "Run chat has been removed and is being rebuilt." });
 });
 
 router.post("/runs/:runId/cancel", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
@@ -305,25 +269,8 @@ router.post("/runs/:runId/artifacts/:artifactKey/canvas/email", requireScopes(["
   }
 });
 
-router.post("/runs/:runId/interactions/:interactionId/commands", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const { runId } = runIdSchema.parse(req.params);
-    const interactionId = z.string().uuid().parse(req.params.interactionId);
-    const body = interactionCommandSchema.parse(req.body ?? {});
-    const result = await handleSpecRunInteractionCommand({
-      auth: req.authContext!,
-      runId,
-      interactionId,
-      command: body.command,
-      value: body.value,
-    });
-    res.json({
-      ...result,
-      run: await getSpecRunEditorialProjection(req.authContext!, runId),
-    });
-  } catch (error) {
-    sendError(res, error, "Failed to handle interaction command");
-  }
+router.post("/runs/:runId/interactions/:interactionId/commands", requireScopes(["memory:write"]), async (_req: AuthRequest, res: Response) => {
+  res.status(410).json({ error: "Run interactions have been removed and are being rebuilt." });
 });
 
 export default router;

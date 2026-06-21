@@ -95,7 +95,7 @@ import {
   selectPreferredArtifact,
 } from "@/lib/loop-artifact-selection";
 import type { CanvasEmailTemplate } from "./components/canvas-email-editor";
-import { SpecRunPage } from "./components/spec-run-page";
+import { RunPlaceholder } from "./components/run-placeholder";
 
 type UsageSummary = {
   calls: number;
@@ -2105,11 +2105,10 @@ export default function StableLoopRunPage() {
 
   if (isSpecDrivenRun(run)) {
     return (
-      <SpecRunPage
+      <RunPlaceholder
         workflowId={workflowId}
         runId={runId}
-        run={run}
-        onRefresh={load}
+        workflowTitle={run.workflow_title}
       />
     );
   }

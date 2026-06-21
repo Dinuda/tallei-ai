@@ -11,10 +11,3 @@ export function dedupeChatMessagesById(messages: UIMessage[]): UIMessage[] {
   }
   return deduped;
 }
-
-/** Prefer server messages for shared ids; keep client-only trailing messages. */
-export function mergeChatMessagesById(server: UIMessage[], client: UIMessage[]): UIMessage[] {
-  const serverIds = new Set(server.map((message) => message.id));
-  const trailingClient = client.filter((message) => !serverIds.has(message.id));
-  return dedupeChatMessagesById([...server, ...trailingClient]);
-}
