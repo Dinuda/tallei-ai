@@ -1,5 +1,7 @@
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 
+import { maskBuilderIssueText } from "./builder-issue-text";
+
 export type BuilderCommandSnapshot = {
   id?: string;
   toolName?: string;
@@ -63,13 +65,14 @@ export function builderCommandFailureMessage(input: {
     return "Saving your loop timed out due to a temporary backend issue on our side. Your builder session is still saved — try again in a few minutes or refresh the page.";
   }
 
-  return rawError;
+  return maskBuilderIssueText(rawError, "recovery-message");
 }
 
 const BACKEND_COMMAND_TOOLS = new Set([
   "getAvailableTools",
   "resolveBuildRequirement",
   "saveLoop",
+  "runBuilderTest",
   "runVerification",
   "confirmActivation",
 ]);
@@ -82,6 +85,7 @@ const INPUT_GATE_TOOLS = new Set([
   "knowledgeBaseSetup",
   "requirementSetup",
   "scheduleSetup",
+  "outputReviewGatesSetup",
 ]);
 
 function latestCommandForTool(
@@ -127,7 +131,10 @@ export function hydrateBuilderMessagesFromCommands(
         return {
           ...part,
           state: "output-error",
-          errorText: command.error ?? "This step did not finish.",
+          errorText: maskBuilderIssueText(
+            command.error ?? "This step did not finish.",
+            `command:${toolName}`,
+          ),
         } as unknown as typeof part;
       }
       return part;
@@ -238,7 +245,9 @@ export function findRunningBuilderCommand(
 export function builderRunningCommandLabel(command: BuilderCommandSnapshot | null): string {
   switch (command?.toolName) {
     case "saveLoop":
-      return "Saving and testing your loop…";
+      return "Saving your loop...";
+    case "runBuilderTest":
+      return "Running builder test...";
     case "getAvailableTools":
       return "Discovering available tools…";
     case "resolveBuildRequirement":

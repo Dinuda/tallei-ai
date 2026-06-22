@@ -110,19 +110,17 @@ test("free text resolves a dismissed interactive prompt before continuing", asyn
 });
 
 test("runtime save compiles runner contract from persisted build contract without LLM", async () => {
-  const [specs, dispatcher, compiler] = await Promise.all([
+  const [specs, dispatcher] = await Promise.all([
     readFile(specsPath, "utf8"),
     readFile(dispatcherPath, "utf8"),
-    readFile(new URL("../../../src/services/loop-builder/runner-spec-compiler.ts", import.meta.url), "utf8"),
   ]);
 
   assert.doesNotMatch(specs, /discoverToolsForLoopBuild/);
   assert.doesNotMatch(specs, /generateSpecJson/);
   assert.doesNotMatch(specs, /loopBuilderOpenAiChat/);
   assert.doesNotMatch(specs, /spec_generation/);
-  assert.match(specs, /compileRunnerSpecFromBuildContract/);
+  assert.match(specs, /buildRunnerSpecFromBuildContract/);
   assert.match(specs, /compileRuntimeSpecSnapshot/);
-  assert.match(compiler, /outputContract/);
   assert.match(dispatcher, /compileRuntimeSpecSnapshot/);
   assert.match(dispatcher, /compileEnrichedRuntimeSpecSnapshot/);
   assert.doesNotMatch(dispatcher, /ensureDraftedSpec/);
@@ -224,7 +222,7 @@ test("event choices come from discovered connector triggers and scheduled fallba
   assert.ok(connectorRoute.indexOf('router.post("/composio/webhook"') < connectorRoute.indexOf("router.use(authMiddleware)"));
 });
 
-test("runtime save persists workflow and starts a safe builder test run", async () => {
+test("runtime save persists workflow and exposes a separate safe builder test run", async () => {
   const [route, dispatcher] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
@@ -237,11 +235,14 @@ test("runtime save persists workflow and starts a safe builder test run", async 
   assert.doesNotMatch(route, /saveLoop with preview true/);
   assert.match(route, /Save and test loop/);
   assert.match(route, /Activate.*I'll do more changes/);
+  assert.match(route, /runBuilderTest:\s*tool\(/);
+  assert.match(route, /After saveLoop completes, call runBuilderTest as a separate step/);
   assert.match(dispatcher, /compileRuntimeSnapshotForSession/);
   assert.match(dispatcher, /runSavedWorkflowTestRun/);
   assert.match(dispatcher, /createSpecLoopRun/);
   assert.match(dispatcher, /runSpecLoopHeadless/);
   assert.match(dispatcher, /runWorkflowVerification/);
+  assert.match(dispatcher, /\|\s*"runBuilderTest"/);
   assert.doesNotMatch(dispatcher, /spec\.status !== "approved"/);
   assert.doesNotMatch(dispatcher, /approveLoopSpec\(/);
   assert.match(dispatcher, /\["intent_resolved", "saved", "failed"\]/);
@@ -249,9 +250,17 @@ test("runtime save persists workflow and starts a safe builder test run", async 
   assert.match(dispatcher, /isRecoverableBuilderError/);
 });
 
+test("loop builder stream sets max output tokens for analyzer turns", async () => {
+  const route = await readFile(routePath, "utf8");
+  assert.match(route, /maxOutputTokens:\s*loopBuilderStreamMaxOutputTokens/);
+  assert.match(route, /experimental_repairToolCall:\s*createLoopBuilderToolCallRepair/);
+  assert.match(route, /getAvailableToolsInputSchema/);
+  assert.doesNotMatch(route, /normalizedIntent:\s*normalizedIntentSchema/);
+});
+
 test("legacy persisted specs still preserve the resolved build contract", async () => {
   const specs = await readFile(specsPath, "utf8");
 
-  assert.match(specs, /compileRunnerSpecFromBuildContract\(\{[\s\S]*buildContract: current\.specJson\.buildContract/);
+  assert.match(specs, /buildRunnerSpecFromBuildContract\(\{[\s\S]*buildContract: current\.specJson\.buildContract/);
   assert.match(specs, /spec\.specJson\.buildContract \? \{ buildContract: spec\.specJson\.buildContract \}/);
 });

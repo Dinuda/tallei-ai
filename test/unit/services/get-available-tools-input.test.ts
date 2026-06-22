@@ -1,0 +1,93 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  extractAppSelectionSlugsFromUnknown,
+  normalizeGetAvailableToolsInput,
+  tryParseJsonWithClosingBraces,
+} from "../../../src/services/loop-builder/get-available-tools-input.js";
+import { createLoopBuilderToolCallRepair } from "../../../src/services/loop-builder/tool-call-repair.js";
+import { InvalidToolInputError, type ModelMessage } from "ai";
+
+test("normalizeGetAvailableToolsInput accepts flat analyzer payloads", () => {
+  const normalized = normalizeGetAvailableToolsInput({
+    outcome: "Monitor Gmail support tickets",
+    cadence: "hourly",
+    approvalModel: "agent_autonomous",
+    selectedToolkits: ["gmail"],
+    capabilityQueries: ["fetch unread support emails"],
+  }, "fallback goal");
+
+  assert.equal(normalized.outcome, "Monitor Gmail support tickets");
+  assert.equal(normalized.resolvedIntent, "Monitor Gmail support tickets");
+  assert.deepEqual(normalized.selectedToolkits, ["gmail"]);
+  assert.deepEqual(normalized.capabilityQueries, ["fetch unread support emails"]);
+});
+
+test("normalizeGetAvailableToolsInput accepts legacy nested payloads", () => {
+  const normalized = normalizeGetAvailableToolsInput({
+    normalizedIntent: {
+      outcome: "Monitor Gmail support tickets",
+      cadence: "hourly",
+      approvalModel: "agent_autonomous",
+    },
+    resolvedIntent: "Monitor Gmail support tickets hourly",
+    selectedToolkits: ["Gmail"],
+  }, "fallback goal");
+
+  assert.equal(normalized.outcome, "Monitor Gmail support tickets");
+  assert.equal(normalized.resolvedIntent, "Monitor Gmail support tickets hourly");
+  assert.deepEqual(normalized.selectedToolkits, ["gmail"]);
+});
+
+test("tryParseJsonWithClosingBraces repairs truncated getAvailableTools JSON", () => {
+  const truncated = "{\"normalizedIntent\": {\"outcome\":\"Monitor Gmail support tickets\",\"cadence\":\"hourly\",\"approvalModel\":\"agent_autonomous\"}";
+  const parsed = tryParseJsonWithClosingBraces(truncated);
+  assert.deepEqual(parsed, {
+    normalizedIntent: {
+      outcome: "Monitor Gmail support tickets",
+      cadence: "hourly",
+      approvalModel: "agent_autonomous",
+    },
+  });
+});
+
+test("createLoopBuilderToolCallRepair fills missing toolkits from appSelection output", async () => {
+  const repair = createLoopBuilderToolCallRepair("Monitor Gmail support");
+  const truncated = "{\"normalizedIntent\": {\"outcome\":\"Monitor Gmail support tickets\",\"cadence\":\"hourly\",\"approvalModel\":\"agent_autonomous\"}";
+  const error = new InvalidToolInputError({
+    toolName: "getAvailableTools",
+    toolInput: truncated,
+    cause: new Error("JSON parsing failed"),
+  });
+
+  const repaired = await repair({
+    toolCall: {
+      type: "tool-call",
+      toolCallId: "call_1",
+      toolName: "getAvailableTools",
+      input: truncated,
+    },
+    tools: {},
+    inputSchema: async () => ({}),
+    system: undefined,
+    messages: [{
+      role: "assistant",
+      content: [{
+        type: "tool-result",
+        toolCallId: "app_1",
+        toolName: "appSelection",
+        output: {
+          selectedToolkits: [{ slug: "gmail", name: "Gmail" }],
+          answerText: "Use Gmail",
+        },
+      }],
+    } satisfies ModelMessage],
+    error,
+  });
+
+  assert.ok(repaired);
+  const input = JSON.parse(repaired!.input);
+  assert.equal(input.outcome, "Monitor Gmail support tickets");
+  assert.deepEqual(input.selectedToolkits, ["gmail"]);
+});

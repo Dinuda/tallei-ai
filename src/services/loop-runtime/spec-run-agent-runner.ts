@@ -18,8 +18,17 @@ import { SpecRunInteractionRequiredError } from "./spec-run-agent-errors.js";
 import { emitRunEvent } from "./spec-run-agent-events.js";
 import { buildAgentTools } from "./spec-run-agent-tools.js";
 import { compileSpecRunPlan, type CompiledSpecRunPlan, type RunPlanAgent } from "./spec-run-plan.js";
+import { hydrateDefinitionForExecution } from "./definition-hydration.js";
 import { dicebearDylanUrl } from "../loop-builder/agent-personas.js";
 import { buildSpecRunSystemPrompt } from "./spec-run-prompt.js";
+import { configuredAgentGateRequired } from "./spec-run-gate-policy.js";
+import { evaluateAgentHandoff } from "./spec-run-handoff-eval.js";
+import {
+  buildBoundaryEnvelope,
+  normalizedHandoffFromStepOutput,
+  readBoundaryEnvelope,
+  type AgentBoundaryEnvelope,
+} from "./runner-boundary.js";
 import {
   createSpecRunInputInteraction,
   createSpecRunReviewInteraction,
@@ -48,7 +57,7 @@ type PriorAgentOutput = {
   output: unknown;
 };
 
-type ResolvedHandoff = {
+export type ResolvedHandoff = {
   value: Record<string, unknown>;
   resolvedBindings: Array<{
     targetPath: string;
@@ -80,7 +89,7 @@ function isTextStreamChunk(chunk: AgentStreamChunk): boolean {
 }
 
 function isReasoningStreamChunk(chunk: AgentStreamChunk): boolean {
-  return chunk.type === "reasoning" || chunk.type.startsWith("reasoning-");
+  return chunk.type.startsWith("reasoning-");
 }
 
 function isSuppressedAgentStreamChunk(chunk: AgentStreamChunk): boolean {
@@ -171,6 +180,8 @@ function stableConfigForRun(input: {
 }
 
 function structuredOutputFromStep(step: AgentStepRow): unknown {
+  const envelope = readBoundaryEnvelope(step.output_json);
+  if (envelope) return envelope.normalizedHandoff;
   const output = asRecord(step.output_json);
   const data = asRecord(output.data);
   if ("structuredOutput" in data) return data.structuredOutput;
@@ -279,8 +290,20 @@ export async function materializeSpecRunAgentSteps(input: {
   auth: AuthContext;
   runId: string;
   spec: SpecRunDefinition;
+  workflowId?: string;
 }): Promise<AgentStepRow[]> {
-  const plan = compileSpecRunPlan(input.spec);
+  let workflowId = input.workflowId;
+  if (!workflowId) {
+    const row = await pool.query<{ workflow_id: string }>(
+      `SELECT workflow_id FROM loop_engine_runs WHERE id = $1 LIMIT 1`,
+      [input.runId],
+    );
+    workflowId = row.rows[0]?.workflow_id;
+  }
+  const spec = workflowId
+    ? await hydrateDefinitionForExecution(input.auth, workflowId, input.spec)
+    : input.spec;
+  const plan = compileSpecRunPlan(spec);
   if (plan.agents.length === 0) {
     throw new Error("Runnable spec has no approved agents to execute.");
   }
@@ -364,7 +387,7 @@ async function resolveHandoffForAgent(input: {
   const operatorInputs: Record<string, unknown> = {};
   for (const planAgent of input.plan.agents) {
     const step = latestStepForIndex(input.steps, planAgent.index);
-    if (step?.status === "succeeded") outputsByAgent.set(planAgent.id, structuredOutputFromStep(step));
+    if (step?.status === "succeeded") outputsByAgent.set(planAgent.id, normalizedHandoffFromStepOutput(step.output_json));
     Object.assign(operatorInputs, asRecord(asRecord(step?.input_json).operatorInputs));
   }
   const artifacts = await loadLatestArtifacts(input);
@@ -420,7 +443,7 @@ function priorOutputsForAgent(plan: CompiledSpecRunPlan, steps: AgentStepRow[], 
       return [{
         agentId: agent.id,
         agentName: agent.name,
-        output: asRecord(step.output_json),
+        output: normalizedHandoffFromStepOutput(step.output_json),
       }];
     });
 }
@@ -442,6 +465,15 @@ function outputText(output: unknown): string {
   return "";
 }
 
+function normalizedRecordForOutput(output: unknown, text?: string): Record<string, unknown> {
+  const record = asRecord(output);
+  if (Object.keys(record).length > 0) return record;
+  const fallbackText = typeof output === "string" && output.trim()
+    ? output.trim()
+    : text?.trim();
+  return fallbackText ? { text: fallbackText } : {};
+}
+
 function collectStrings(value: unknown, depth = 0): string[] {
   if (depth > 6) return [];
   if (typeof value === "string") return [value];
@@ -451,51 +483,6 @@ function collectStrings(value: unknown, depth = 0): string[] {
     key,
     ...collectStrings(entry, depth + 1),
   ]);
-}
-
-function agentHasWriteActions(plan: CompiledSpecRunPlan, agent: RunPlanAgent): boolean {
-  return plan.writeTools.some((toolRef) => agent.toolRefs.includes(toolRef.toolRef));
-}
-
-function claimsOperatorGateWithoutInteraction(output: unknown): boolean {
-  const text = collectStrings(output)
-    .join("\n")
-    .replace(/[_-]+/g, " ")
-    .toLowerCase();
-  if (!text.trim()) return false;
-  return /draft review submitted/.test(text)
-    || /submitted.{0,40}(operator )?(review|approval)/.test(text)
-    || /(awaiting|pending|requires|needs).{0,50}(operator )?(review|approval)/.test(text)
-    || /run is paused.{0,80}(approval|review)/.test(text)
-    || /once approved/.test(text);
-}
-
-function assertNoFakeOperatorGate(input: {
-  plan: CompiledSpecRunPlan;
-  agent: RunPlanAgent;
-  output: unknown;
-}): void {
-  if (!claimsOperatorGateWithoutInteraction(input.output)) return;
-  const gateCapable = agentHasWriteActions(input.plan, input.agent) || input.plan.reviewSurfaces.length > 0;
-  if (!gateCapable) return;
-  throw new Error(
-    "Agent claimed an operator review/approval in normal output instead of creating a runtime interaction. Use requestReview or requestApproval; prose does not create prompt suggestions.",
-  );
-}
-
-const SOURCE_EVIDENCE_DRAFT_FIELDS = ["draft", "subject", "body", "html", "text", "message", "reply", "emailTemplate"];
-
-function assertSourceEvidenceDoesNotDraft(input: {
-  agent: RunPlanAgent;
-  output: unknown;
-}): void {
-  if (input.agent.artifactRole !== "source_evidence") return;
-  const record = asRecord(input.output);
-  const fields = SOURCE_EVIDENCE_DRAFT_FIELDS.filter((field) => field in record);
-  if (fields.length === 0) return;
-  throw new Error(
-    `Source evidence agents must not produce draft fields (${fields.join(", ")}). Return ticket/customer evidence only; the Draft Specialist owns draft content.`,
-  );
 }
 
 function isNoActionRequiredOutput(output: unknown): boolean {
@@ -514,6 +501,13 @@ function isNoActionRequiredOutput(output: unknown): boolean {
     || /\bno (formal )?support tickets?\b/.test(text)
     || /\bno drafts? (were )?(created|needed|could be created)\b/.test(text)
     || /\bnothing actionable\b/.test(text);
+}
+
+/** Only terminal no-op from draft/delivery ends the run; context evidence still hands off downstream. */
+function shouldTerminateRunAfterAgent(output: unknown): boolean {
+  const record = asRecord(output);
+  const status = typeof record.status === "string" ? record.status.trim().toLowerCase() : "";
+  return status === "no_action_required";
 }
 
 function tryParseJsonObject(value: string): Record<string, unknown> | null {
@@ -588,27 +582,35 @@ function coerceOutputToContract(input: {
   contract: DataContract;
   output: unknown;
   artifactRole?: string;
-}): { structuredOutput: unknown; text: string } {
+}): { structuredOutput: unknown; normalizedOutput: Record<string, unknown>; text: string; contractIssues: string[] } {
+  const contractIssues: string[] = [];
   if (contractUsesJson(input.contract)) {
     let structuredOutput = normalizeAgentStepOutput(input.output, { artifactRole: input.artifactRole });
     if (typeof structuredOutput === "string") {
       try {
         structuredOutput = JSON.parse(structuredOutput) as unknown;
       } catch {
-        throw new Error("Agent output contract requires JSON, but finalizeAgent output was not valid JSON.");
+        contractIssues.push("Agent output contract requires JSON, but finalizeAgent output was not valid JSON.");
       }
     }
     const stripped = stripToSchema(input.contract.schema, structuredOutput);
     const validation = validateContractData(input.contract.schema, stripped);
-    if (!validation.valid) throw new Error(validation.reason);
+    if (!validation.valid) contractIssues.push(validation.reason);
+    const text = outputText(stripped);
     return {
       structuredOutput: stripped,
-      text: outputText(stripped),
+      normalizedOutput: normalizedRecordForOutput(stripped, text),
+      text,
+      contractIssues,
     };
   }
+  const structuredOutput = input.output;
+  const text = outputText(structuredOutput);
   return {
-    structuredOutput: input.output,
-    text: outputText(input.output),
+    structuredOutput,
+    normalizedOutput: normalizedRecordForOutput(structuredOutput, text),
+    text,
+    contractIssues,
   };
 }
 
@@ -713,27 +715,14 @@ async function completeAgentStep(input: {
   runId: string;
   stepAttemptId: string;
   agent: RunPlanAgent;
-  output: unknown;
-  runContext?: RunContext;
+  boundaryEnvelope: AgentBoundaryEnvelope;
+  text: string;
   stepInput?: Record<string, unknown>;
 }): Promise<{ structuredOutput: unknown; text: string }> {
-  let agentOutput = input.output;
-  if (input.agent.artifactRole === "source_evidence" && input.runContext) {
-    agentOutput = enrichEvidenceStructuredOutput(input.runContext, agentOutput);
-  }
-  assertSourceEvidenceDoesNotDraft({
-    agent: input.agent,
-    output: agentOutput,
-  });
-  const normalized = coerceOutputToContract({
-    contract: input.agent.outputContract,
-    output: agentOutput,
-    artifactRole: input.agent.artifactRole,
-  });
   const deferSuccess = agentNeedsConfiguredGate({
     agent: input.agent,
     stepInput: input.stepInput ?? {},
-    structuredOutput: normalized.structuredOutput,
+    structuredOutput: input.boundaryEnvelope.structuredOutput,
   });
   await pool.query(
     `UPDATE loop_engine_step_attempts
@@ -746,11 +735,22 @@ async function completeAgentStep(input: {
     [
       input.stepAttemptId,
       JSON.stringify({
+        protocolVersion: input.boundaryEnvelope.protocolVersion,
+        rawOutput: input.boundaryEnvelope.rawOutput,
+        structuredOutput: input.boundaryEnvelope.structuredOutput,
+        normalizedOutput: input.boundaryEnvelope.normalizedOutput,
+        normalizedHandoff: input.boundaryEnvelope.normalizedHandoff,
+        goalEval: input.boundaryEnvelope.goalEval,
+        boundaryEnvelope: input.boundaryEnvelope,
         data: {
-          structuredOutput: normalized.structuredOutput,
-          data: normalized.structuredOutput,
+          structuredOutput: input.boundaryEnvelope.structuredOutput,
+          data: input.boundaryEnvelope.structuredOutput,
+          normalizedOutput: input.boundaryEnvelope.normalizedOutput,
+          normalizedHandoff: input.boundaryEnvelope.normalizedHandoff,
+          goalEval: input.boundaryEnvelope.goalEval,
+          boundaryEnvelope: input.boundaryEnvelope,
         },
-        text: normalized.text,
+        text: input.text,
       }),
       input.auth.tenantId,
       input.auth.userId,
@@ -762,10 +762,10 @@ async function completeAgentStep(input: {
     runId: input.runId,
     stepAttemptId: input.stepAttemptId,
     agent: input.agent,
-    structuredOutput: normalized.structuredOutput,
-    text: normalized.text,
+    structuredOutput: input.boundaryEnvelope.structuredOutput,
+    text: input.text,
   });
-  return normalized;
+  return { structuredOutput: input.boundaryEnvelope.structuredOutput, text: input.text };
 }
 
 async function failAgentStep(input: {
@@ -782,6 +782,96 @@ async function failAgentStep(input: {
      WHERE id = $1 AND tenant_id = $3 AND user_id = $4`,
     [input.stepAttemptId, JSON.stringify({ message: input.message }), input.auth.tenantId, input.auth.userId],
   );
+}
+
+async function requeueAgentStepRetry(input: {
+  auth: AuthContext;
+  runId: string;
+  step: AgentStepRow;
+  agent: RunPlanAgent;
+  message: string;
+}): Promise<AgentStepRow | null> {
+  if (input.step.attempt >= 3) return null;
+  await failAgentStep({
+    auth: input.auth,
+    stepAttemptId: input.step.id,
+    message: input.message,
+  });
+  const nextId = randomUUID();
+  await pool.query(
+    `INSERT INTO loop_engine_step_attempts
+       (id, tenant_id, user_id, run_id, step_index, agent_id, agent_snapshot, attempt, status, input_json, output_json, error_json, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', $9::jsonb, '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+     ON CONFLICT (run_id, step_index, attempt) DO NOTHING`,
+    [
+      nextId,
+      input.auth.tenantId,
+      input.auth.userId,
+      input.runId,
+      input.step.step_index,
+      input.step.agent_id,
+      JSON.stringify(input.step.agent_snapshot),
+      input.step.attempt + 1,
+      JSON.stringify({
+        ...asRecord(input.step.input_json),
+        retry: {
+          reason: input.message,
+          previousStepAttemptId: input.step.id,
+        },
+      }),
+    ],
+  );
+  return {
+    ...input.step,
+    id: nextId,
+    attempt: input.step.attempt + 1,
+    status: "queued",
+    input_json: {
+      ...asRecord(input.step.input_json),
+      retry: { reason: input.message, previousStepAttemptId: input.step.id },
+    },
+    output_json: {},
+    error_json: {},
+  };
+}
+
+async function createMissingHandoffInputIfPossible(input: {
+  auth: AuthContext;
+  runId: string;
+  stepAttemptId: string;
+  agent: RunPlanAgent;
+  missingRequired: string[];
+  reason: string;
+}): Promise<boolean> {
+  const gateType = input.agent.gate?.type.trim().toLowerCase();
+  if (gateType !== "missing_input") return false;
+  const key = `${input.agent.id}_missing_handoff`;
+  const interactionId = await createSpecRunInputInteraction({
+    auth: input.auth,
+    runId: input.runId,
+    stepAttemptId: input.stepAttemptId,
+    agentId: input.agent.id,
+    agentName: input.agent.name,
+    stepIndex: input.agent.index,
+    surface: "input.text",
+    key,
+    label: "Missing handoff input",
+    description: `${input.reason}\n\nMissing: ${input.missingRequired.join(", ")}`,
+  });
+  await markStepWaitingForInteraction({
+    auth: input.auth,
+    runId: input.runId,
+    stepAttemptId: input.stepAttemptId,
+    interactionId,
+    eventType: "interaction_requested",
+    payload: {
+      toolKey: "handoffPreflight",
+      surface: "input.text",
+      key,
+      missingRequired: input.missingRequired,
+    },
+  });
+  return true;
 }
 
 function reviewSurfaceForAgent(agent: RunPlanAgent): InputSurface {
@@ -861,9 +951,12 @@ async function createConfiguredGateIfNeeded(input: {
   stepInput: Record<string, unknown>;
   structuredOutput: unknown;
   text: string;
+  plan?: CompiledSpecRunPlan;
 }): Promise<boolean> {
-  // Spec-defined gates are authoritative — if agent.gate exists, pause after finalizeAgent.
   if (!input.agent.gate) return false;
+  const gateType = input.agent.gate.type.trim().toLowerCase();
+  // Spec-defined gates are authoritative: builder/compiler decides whether a gate exists.
+  if (!configuredAgentGateRequired(gateType)) return false;
   if (asRecord(input.stepInput.reviewApproval).approved === true) return false;
   if (isNoActionRequiredOutput(input.structuredOutput)) return false;
 
@@ -912,6 +1005,7 @@ async function createConfiguredGateIfNeeded(input: {
     artifactData,
     rationale: input.agent.gate.question,
     configuredGate: true,
+    nextAgentName: input.plan?.agents[input.agent.index + 1]?.name,
   });
   await markStepWaitingForInteraction({
     auth: input.auth,
@@ -1093,7 +1187,7 @@ async function runAgent(input: {
       system,
       prompt,
       tools,
-      providerOptions: loopBuilderStreamProviderOptions(modelId),
+      providerOptions: loopBuilderStreamProviderOptions(modelId) as never,
       stopWhen: [hasToolCall("finalizeAgent"), hasToolCall("finalizeRun"), stepCountIs(10)],
       onError: ({ error }) => {
         if (!(error instanceof SpecRunInteractionRequiredError)) {
@@ -1113,7 +1207,7 @@ async function runAgent(input: {
     system,
     prompt,
     tools,
-    providerOptions: loopBuilderStreamProviderOptions(modelId),
+    providerOptions: loopBuilderStreamProviderOptions(modelId) as never,
     stopWhen: [hasToolCall("finalizeAgent"), hasToolCall("finalizeRun"), stepCountIs(10)],
   });
   return {
@@ -1173,7 +1267,8 @@ async function reconcilePendingInteractionSteps(input: {
 }
 
 export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): Promise<void> {
-  const plan = compileSpecRunPlan(input.spec);
+  const spec = await hydrateDefinitionForExecution(input.auth, input.workflowId, input.spec);
+  const plan = compileSpecRunPlan(spec);
   if (plan.agents.length === 0) {
     throw new Error("Runnable spec has no approved agents to execute.");
   }
@@ -1207,7 +1302,7 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
     const resolvedHandoff = await resolveHandoffForAgent({
       auth: input.auth,
       runId: input.runId,
-      spec: input.spec,
+      spec,
       workflowTitle: input.workflowTitle,
       runContext: input.runContext,
       plan,
@@ -1215,7 +1310,32 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
       steps,
     });
     if (resolvedHandoff.missingRequired.length > 0) {
-      throw new Error(`Missing required handoff bindings for ${agent.name}: ${resolvedHandoff.missingRequired.join(", ")}`);
+      const reason = `Missing required handoff bindings for ${agent.name}: ${resolvedHandoff.missingRequired.join(", ")}`;
+      const waiting = await createMissingHandoffInputIfPossible({
+        auth: input.auth,
+        runId: input.runId,
+        stepAttemptId: step.id,
+        agent,
+        missingRequired: resolvedHandoff.missingRequired,
+        reason,
+      });
+      if (waiting) return;
+      await failAgentStep({ auth: input.auth, stepAttemptId: step.id, message: reason });
+      await markRunStatus({ runId: input.runId, status: "failed", error: reason });
+      await emitRunEvent({
+        auth: input.auth,
+        runId: input.runId,
+        stepAttemptId: step.id,
+        eventType: "handoff_evaluated",
+        payload: {
+          agentId: agent.id,
+          agentName: agent.name,
+          status: "needs_input",
+          reason,
+          missingRequired: resolvedHandoff.missingRequired,
+        },
+      });
+      throw new Error(reason);
     }
     await pool.query(
       `UPDATE loop_engine_step_attempts
@@ -1250,7 +1370,7 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         auth: input.auth,
         workflowId: input.workflowId,
         runId: input.runId,
-        spec: input.spec,
+        spec,
         workflowTitle: input.workflowTitle,
         runContext: input.runContext,
         plan,
@@ -1260,19 +1380,96 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         resolvedHandoff,
         writer: input.writer,
       });
-      assertNoFakeOperatorGate({
+      const stepInput = asRecord(step.input_json);
+      let agentOutput = result.output;
+      if (agent.artifactRole === "source_evidence") {
+        agentOutput = enrichEvidenceStructuredOutput(input.runContext, agentOutput);
+      }
+      const coerced = coerceOutputToContract({
+        contract: agent.outputContract,
+        output: agentOutput,
+        artifactRole: agent.artifactRole,
+      });
+      const nextAgent = plan.agents.find((candidate) => candidate.index === agent.index + 1);
+      const goalEval = await evaluateAgentHandoff({
         plan,
         agent,
-        output: result.output,
+        nextAgent,
+        rawOutput: result.output,
+        structuredOutput: coerced.structuredOutput,
+        normalizedOutput: coerced.normalizedOutput,
+        priorOutputs,
+        resolvedHandoff,
+        contractIssues: coerced.contractIssues,
       });
-      const stepInput = asRecord(step.input_json);
+      await emitRunEvent({
+        auth: input.auth,
+        runId: input.runId,
+        stepAttemptId: step.id,
+        eventType: "handoff_evaluated",
+        payload: {
+          agentId: agent.id,
+          agentName: agent.name,
+          status: goalEval.status,
+          reason: goalEval.reason,
+          blockers: goalEval.blockers,
+          missingRequired: goalEval.missingRequired,
+        },
+      });
+      if (goalEval.status === "needs_input") {
+        const missingRequired = goalEval.missingRequired ?? resolvedHandoff.missingRequired;
+        const waiting = await createMissingHandoffInputIfPossible({
+          auth: input.auth,
+          runId: input.runId,
+          stepAttemptId: step.id,
+          agent,
+          missingRequired,
+          reason: goalEval.reason,
+        });
+        if (waiting) return;
+        await failAgentStep({ auth: input.auth, stepAttemptId: step.id, message: goalEval.reason });
+        await markRunStatus({ runId: input.runId, status: "failed", error: goalEval.reason });
+        return;
+      }
+      if (goalEval.status === "retry") {
+        const retryStep = await requeueAgentStepRetry({
+          auth: input.auth,
+          runId: input.runId,
+          step,
+          agent,
+          message: goalEval.reason,
+        });
+        if (!retryStep) {
+          await failAgentStep({ auth: input.auth, stepAttemptId: step.id, message: goalEval.reason });
+          await markRunStatus({ runId: input.runId, status: "failed", error: goalEval.reason });
+          return;
+        }
+        await markRunStatus({ runId: input.runId, status: "running", currentStepIndex: agent.index });
+        return executeAgenticSpecRun(input);
+      }
+      if (goalEval.status === "fail") {
+        await failAgentStep({ auth: input.auth, stepAttemptId: step.id, message: goalEval.reason });
+        await markRunStatus({ runId: input.runId, status: "failed", error: goalEval.reason });
+        return;
+      }
+      const normalizedOutput = asRecord(goalEval.normalizedOutput);
+      const normalizedHandoff = asRecord(goalEval.normalizedHandoff);
+      const boundaryEnvelope = buildBoundaryEnvelope({
+        rawOutput: result.output,
+        structuredOutput: coerced.structuredOutput,
+        normalizedOutput: Object.keys(normalizedOutput).length > 0 ? normalizedOutput : coerced.normalizedOutput,
+        normalizedHandoff: Object.keys(normalizedHandoff).length > 0
+          ? normalizedHandoff
+          : (Object.keys(normalizedOutput).length > 0 ? normalizedOutput : coerced.normalizedOutput),
+        goalEval,
+      });
       const completed = await completeAgentStep({
         auth: input.auth,
         runId: input.runId,
         stepAttemptId: step.id,
         agent,
-        output: result.output,
-        runContext: input.runContext,
+        boundaryEnvelope,
+        text: coerced.text,
         stepInput,
       });
       finalSummary = completed.text;
@@ -1283,7 +1480,7 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         eventType: "agent_completed",
         payload: { agentId: agent.id, agentName: agent.name },
       });
-      if (isNoActionRequiredOutput(completed.structuredOutput)) {
+      if (shouldTerminateRunAfterAgent(completed.structuredOutput)) {
         finalSummary = completed.text || finalSummary;
         break;
       }
@@ -1295,6 +1492,7 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         stepInput,
         structuredOutput: completed.structuredOutput,
         text: completed.text,
+        plan,
       });
       if (gated) return;
       if (agent.gate) {

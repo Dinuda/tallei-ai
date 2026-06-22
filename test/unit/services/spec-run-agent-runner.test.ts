@@ -42,6 +42,12 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(runner, /availableToolNames: Object\.keys\(tools\)/);
   assert.match(runner, /resolvedHandoff/);
   assert.match(runner, /validateContractData/);
+  assert.match(runner, /evaluateAgentHandoff/);
+  assert.match(runner, /buildBoundaryEnvelope/);
+  assert.match(runner, /normalizedHandoffFromStepOutput/);
+  assert.match(runner, /handoff_evaluated/);
+  assert.match(runner, /requeueAgentStepRetry/);
+  assert.match(runner, /createMissingHandoffInputIfPossible/);
   assert.match(runner, /reconcileStaleRunningSteps/);
   assert.match(runner, /reconcilePendingInteractionSteps/);
   assert.match(runner, /isReasoningStreamChunk/);
@@ -49,8 +55,9 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(runner, /Spec-defined gates are authoritative/);
   assert.match(runner, /isNoActionRequiredOutput/);
   assert.match(runner, /if \(isNoActionRequiredOutput\(input\.structuredOutput\)\) return false/);
-  assert.match(runner, /if \(isNoActionRequiredOutput\(completed\.structuredOutput\)\)/);
-  assert.doesNotMatch(runner, /configuredAgentGateRequired/);
+  assert.match(runner, /shouldTerminateRunAfterAgent/);
+  assert.match(runner, /configuredAgentGateRequired/);
+  assert.doesNotMatch(runner, /outputReviewGatesMode/);
   assert.match(runner, /persistAgentOutputArtifact/);
   assert.match(runner, /structuredOutput/);
   assert.match(runner, /authorization identifiers, not callable tool names/);
@@ -62,13 +69,11 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(runner, /Stop after finalizeAgent/);
   assert.match(runner, /MUST include summary and status/);
   assert.match(runner, /Do not produce draft\/subject\/body\/html\/message\/reply\/emailTemplate fields/);
-  assert.match(runner, /assertSourceEvidenceDoesNotDraft/);
-  assert.match(runner, /Source evidence agents must not produce draft fields/);
   assert.match(runner, /suppressAgentTextChunks\(agentStream\.toUIMessageStream/);
   assert.match(runner, /no_tickets_found/);
-  assert.match(runner, /assertNoFakeOperatorGate/);
-  assert.match(runner, /claimsOperatorGateWithoutInteraction/);
-  assert.match(runner, /prose does not create prompt suggestions/);
+  assert.doesNotMatch(runner, /assertSourceEvidenceDoesNotDraft/);
+  assert.doesNotMatch(runner, /assertNoFakeOperatorGate/);
+  assert.doesNotMatch(runner, /claimsOperatorGateWithoutInteraction/);
   assert.doesNotMatch(runner, /Allowed direct tools \(call without any gate\): searchMemory, searchWeb/);
   assert.match(tools, /tool_spawned/);
   assert.match(tools, /stepAttemptId: input\.stepAttemptId/);
@@ -120,7 +125,7 @@ test("run creation and retry materialize approved agents before async execution 
   const source = await readFile(specRunnerPath, "utf8");
 
   assert.match(source, /materializeSpecRunAgentSteps/);
-  assert.match(source, /createSpecLoopRun[\s\S]*await materializeSpecRunAgentSteps\(\{ auth, runId, spec \}\)/);
+  assert.match(source, /createSpecLoopRun[\s\S]*await materializeSpecRunAgentSteps\(\{ auth, runId, spec, workflowId \}\)/);
   assert.match(source, /retrySpecLoopRun[\s\S]*await materializeSpecRunAgentSteps\(\{\s*auth: hydratedAuth,\s*runId,\s*spec: projection\.loopDefinition,/);
   assert.match(source, /await materializeSpecRunAgentSteps[\s\S]*await startLoopRunWorkflow/);
 });

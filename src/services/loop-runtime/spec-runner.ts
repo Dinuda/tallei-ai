@@ -119,7 +119,7 @@ export async function createSpecLoopRun(
     ],
   );
 
-  await materializeSpecRunAgentSteps({ auth, runId, spec });
+  await materializeSpecRunAgentSteps({ auth, runId, spec, workflowId });
 
   await pool.query(
     `INSERT INTO loop_engine_events (tenant_id, user_id, run_id, event_type, payload_json)
@@ -474,6 +474,7 @@ export async function retrySpecLoopRun(auth: AuthContext, runId: string): Promis
     auth: hydratedAuth,
     runId,
     spec: projection.loopDefinition,
+    workflowId: projection.workflowId,
   });
   await replaceLoopRunMessages(hydratedAuth, runId, []);
   await enqueueLoopRunCommand({

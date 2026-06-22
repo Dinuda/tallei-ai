@@ -6,12 +6,12 @@
  */
 
 import { z } from "zod";
-import { agentPersonaSchema, connectorPolicySchema, noSlopSpecSnapshotSchema } from "../loop-engine/spec-contracts.js";
+import { agentPersonaSchema, connectorPolicySchema } from "../loop-engine/spec-contracts.js";
 import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
 import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
 import { dataContractSchema, normalizeContractSchema } from "../loop-engine/data-contract.js";
 import { operatorInteractionPlanSchema } from "../loop-engine/operator-interactions.js";
-import { loopBuildContractSchema } from "../loop-engine/build-contract.js";
+import { loopBuildContractSchema, persistedLoopBuildContractSchema } from "../loop-engine/build-contract.js";
 
 /** Normalize null/blank optional strings to omitted so LLM/client payloads validate. */
 function normalizeOptionalString(value: unknown): unknown {
@@ -235,8 +235,8 @@ export const loopAgentGraphChildSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
-  task: z.string().min(1),
-  goal: z.string().min(1).optional(),
+  task: z.string().min(1).optional(),
+  goal: z.string().min(1),
   tools: z.array(loopToolAssignmentSchema).default([]),
   guardrails: z.array(z.string().min(1)).default([]).optional(),
   failureModes: z.array(z.string().min(1)).default([]).optional(),
@@ -293,28 +293,27 @@ export const loopDefinitionSchema = z.object({
     name: z.string().default("CEO"),
     task: z.string().min(1),
     policy: z.string().min(1),
-  }),
+  }).optional(),
   draftPolicy: z.object({
     requireDraftBeforeExternalAction: z.boolean().default(true),
     approvalRequiredFor: z.array(z.string()).default(["publish", "send", "external_action"]),
-  }),
+  }).optional(),
   deliveryType: optionalNonEmptyStringSchema,
   /** LLM-chosen delivery routing for the agentic engine (replaces regex classification). */
   delivery: loopDeliveryRoutingSchema.optional(),
   connectorPolicy: connectorPolicySchema.optional(),
   inputRequirements: z.array(inputRequirementSchema).default([]).optional(),
   operatorInteractionPlan: operatorInteractionPlanSchema.optional(),
-  buildContract: loopBuildContractSchema.optional(),
+  buildContract: z.union([loopBuildContractSchema, persistedLoopBuildContractSchema]).optional(),
   engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
   agentGraph: loopAgentGraphSchema,
   plan: loopPlanSchema.optional(),
   builderMeta: z.object({
-    designedBy: z.enum(["ceo_llm", "loop_architect"]).default("ceo_llm"),
+    designedBy: z.literal("loop_architect").default("loop_architect"),
     engineVersion: z.literal(LOOP_ENGINE_VERSION).optional(),
     preApproved: z.boolean().default(true),
     sourceTemplateIds: z.array(z.string()).optional(),
     model: z.string().optional(),
-    noSlopSpec: noSlopSpecSnapshotSchema.optional(),
     agentSpecGeneration: z.object({
       mode: z.literal("hybrid"),
       model: z.string().optional(),
@@ -322,10 +321,12 @@ export const loopDefinitionSchema = z.object({
     }).optional(),
     designDiagnostics: z.record(z.unknown()).optional(),
     discoveredToolContracts: z.array(z.record(z.unknown())).optional(),
+    runnerProtocolVersion: z.string().min(1).optional(),
     planningIRVersion: z.string().optional(),
     planningIR: z.record(z.unknown()).optional(),
     workflowUserProfile: workflowUserProfileSchema.optional(),
     workflowBuilderSessionId: z.string().uuid().optional(),
+    specId: z.string().uuid().optional(),
   }).optional(),
 });
 

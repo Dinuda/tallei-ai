@@ -9,6 +9,7 @@ import { selectedConnectorAccountId } from "../loop-engine/build-contract.js";
 import { dataInputSurfaceSchema, reviewSurfaceSchema } from "../loop-engine/input-surfaces.js";
 import { runExaWebSearch } from "../loop-executor/agent-runner-internals.js";
 import type { RunContext } from "./build-run-context.js";
+import { resolveBuildContract } from "./definition-hydration.js";
 import { SpecRunInteractionRequiredError } from "./spec-run-agent-errors.js";
 import { emitRunEvent } from "./spec-run-agent-events.js";
 import {
@@ -192,9 +193,7 @@ async function withToolEvents<T>(input: {
 }
 
 export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Tool> {
-  const buildContract = input.spec.buildContract
-    ?? input.spec.builderMeta?.noSlopSpec?.buildContract
-    ?? input.spec.builderMeta?.noSlopSpec?.specJson.buildContract;
+  const buildContract = resolveBuildContract(input.spec);
   const tools: Record<string, Tool> = {};
   const groundingSources = groundingSourcesForPlan(input.plan);
   const searchCache = new Map<string, unknown>();

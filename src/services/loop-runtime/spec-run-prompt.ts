@@ -5,10 +5,10 @@ import {
   selectedExternalDataToolkits,
   selectedGroundingSources,
 } from "../loop-engine/build-contract.js";
+import { resolveBuildContract } from "./definition-hydration.js";
 
 export function buildSpecRunSystemPrompt(definition: SpecRunDefinition, runContext?: RunContext): string {
-  const noSlop = definition.builderMeta?.noSlopSpec?.specJson;
-  const contract = definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? noSlop?.buildContract;
+  const contract = resolveBuildContract(definition);
   const grounding = contract ? selectedGroundingSources(contract) : [];
   const externalToolkits = contract ? selectedExternalDataToolkits(contract) : [];
   const artifacts = contract ? selectedArtifactContract(contract) : null;
@@ -70,15 +70,17 @@ export function buildSpecRunSystemPrompt(definition: SpecRunDefinition, runConte
     definition.goal,
     "",
     "## Success criteria",
-    ...(noSlop?.successCriteria ?? (definition.agentGraph?.children ?? []).flatMap((agent) => agent.doneCriteria ?? [])).map((c) => `- ${c}`),
+    ...(definition.agentGraph?.children ?? []).flatMap((agent) => agent.doneCriteria ?? []).map((c) => `- ${c}`),
     "",
     "## Agents (execute in order)",
     agentLines,
     "",
     "## Delivery",
-    noSlop?.delivery
-      ? `${noSlop.delivery.provider}: ${noSlop.delivery.description}`
-      : definition.delivery?.provider ?? definition.deliveryType ?? "Dashboard only",
+    definition.delivery?.provider
+      ? `${definition.delivery.provider}`
+      : definition.deliveryType && definition.deliveryType !== "none"
+        ? definition.deliveryType
+        : "Dashboard only",
     "",
     ...runtimePolicyLines,
     ...reviewLines,

@@ -83,6 +83,20 @@ test("loopBuilderOpenAiReasoningEffort defaults to minimal and can be disabled",
   }
 });
 
+test("loopBuilderStreamMaxOutputTokens uses reasoning-model completion budget", async () => {
+  const previous = process.env.TALLEI_LOOP_BUILDER__GPT5_MIN_COMPLETION_TOKENS;
+  process.env.TALLEI_LOOP_BUILDER__GPT5_MIN_COMPLETION_TOKENS = "16384";
+  const mod = await import("../../../src/services/loop-builder/openai-chat.js?t=stream-budget");
+
+  try {
+    assert.equal(mod.loopBuilderStreamMaxOutputTokens("gpt-5.1"), 16_384);
+    assert.equal(mod.loopBuilderStreamMaxOutputTokens("gpt-4o"), 10_000);
+  } finally {
+    if (previous === undefined) delete process.env.TALLEI_LOOP_BUILDER__GPT5_MIN_COMPLETION_TOKENS;
+    else process.env.TALLEI_LOOP_BUILDER__GPT5_MIN_COMPLETION_TOKENS = previous;
+  }
+});
+
 test("loopBuilderOpenAiTimeoutMs defaults and clamps env overrides", async () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__OPENAI_TIMEOUT_MS;
   const { loopBuilderOpenAiTimeoutMs } = await import("../../../src/services/loop-builder/openai-chat.js?t=timeout");

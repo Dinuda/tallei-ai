@@ -1,6 +1,6 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { connectedAppToolkits, listComposioToolkitTools, listConnectorAccounts, searchComposioTools } from "../connectors/composio.js";
-import { buildComposioActionContract, connectorActionToolRef, hasExactComposioActionSchemas } from "./tool-contracts.js";
+import { buildComposioActionContract, connectorActionToolRef, hasExactComposioActionSchemas, normalizeToolRef } from "./tool-contracts.js";
 import { searchLearnedToolSpecs } from "./learned-catalog.js";
 import type { ToolContract } from "./types.js";
 
@@ -64,10 +64,11 @@ export async function mergeRequiredToolContracts(
   discovered: DiscoveredToolContract[],
   requiredActions: Array<{ toolkit: string; actionSlug: string; risk: string; description?: string }>,
 ): Promise<DiscoveredToolContract[]> {
-  const merged = new Map(discovered.map((entry) => [entry.contract.toolRef.toLowerCase(), entry]));
+  const merged = new Map(discovered.map((entry) => [normalizeToolRef(entry.contract.toolRef), entry]));
   for (const action of requiredActions) {
-    const toolRef = connectorActionToolRef(action).toLowerCase();
-    if (merged.has(toolRef)) continue;
+    const toolRef = connectorActionToolRef(action);
+    const normalizedRef = normalizeToolRef(toolRef);
+    if (merged.has(normalizedRef)) continue;
     const [sdkResults, learnedResults, toolkitTools] = await Promise.all([
       searchComposioTools(`${action.toolkit} ${action.actionSlug}`, 50),
       searchLearnedToolSpecs(`${action.toolkit} ${action.actionSlug}`, 50),
@@ -79,7 +80,7 @@ export async function mergeRequiredToolContracts(
       ?? toolkitTools.find((candidate) =>
         candidate.toolkit.toLowerCase() === action.toolkit.toLowerCase()
         && candidate.actionSlug.toLowerCase() === action.actionSlug.toLowerCase());
-    const exactLearned = learnedResults.find((candidate) => candidate.toolRef.toLowerCase() === toolRef);
+    const exactLearned = learnedResults.find((candidate) => normalizeToolRef(candidate.toolRef) === normalizedRef);
     const sdkContract = exactSdk && hasExactComposioActionSchemas(exactSdk)
       ? buildComposioActionContract(exactSdk)
       : null;
@@ -89,7 +90,7 @@ export async function mergeRequiredToolContracts(
       && exactLearned.contract.readiness.sourceHash === sdkContract.readiness.sourceHash,
     );
     const contract = learnedMatchesSdk ? exactLearned!.contract : sdkContract ?? exactLearned?.contract ?? null;
-    if (contract) merged.set(toolRef, { contract, connected: false, source: "required_spec" });
+    if (contract) merged.set(normalizedRef, { contract, connected: false, source: "required_spec" });
   }
   return [...merged.values()];
 }

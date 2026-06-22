@@ -54,6 +54,8 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
   duration?: number;
   /** When true, collapse automatically after streaming ends. Enabled by default. */
   autoClose?: boolean;
+  /** When true, never auto-expand while streaming (builder transcript). */
+  preferCollapsed?: boolean;
 };
 
 const AUTO_CLOSE_DELAY = 700;
@@ -69,6 +71,7 @@ export const Reasoning = memo(
     onOpenChange,
     duration: durationProp,
     autoClose = true,
+    preferCollapsed = false,
     children,
     ...props
   }: ReasoningProps) => {
@@ -110,9 +113,9 @@ export const Reasoning = memo(
     }, [isStreaming, setDuration]);
 
     useEffect(() => {
-      if (!isStreaming || isExplicitlyClosed || isOpenRef.current) return;
+      if (preferCollapsed || !isStreaming || isExplicitlyClosed || isOpenRef.current) return;
       setIsOpen(true);
-    }, [isExplicitlyClosed, isStreaming, setIsOpen]);
+    }, [isExplicitlyClosed, isStreaming, preferCollapsed, setIsOpen]);
 
     useEffect(() => {
       if (

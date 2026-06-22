@@ -70,6 +70,11 @@ function completionTokenBudget(model: string, requested?: number): number {
     : fallback;
 }
 
+/** Completion budget for streamed analyzer turns (tool calls + visible text). */
+export function loopBuilderStreamMaxOutputTokens(model = loopBuilderOpenAiModel()): number {
+  return completionTokenBudget(model);
+}
+
 function normalizeTextContent(value: unknown): string {
   if (typeof value === "string") return value;
   if (!Array.isArray(value)) return "";

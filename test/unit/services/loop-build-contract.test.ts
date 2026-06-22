@@ -280,6 +280,7 @@ test("approved behavioral specs preserve the resolved build contract", () => {
     ["stable_input:0", { name: "Customer segment", value: "Enterprise" }],
     ["grounding", { mode: "none" }],
     ["artifact_contract", { mode: "none" }],
+    ["output_review_gates", { mode: "review_drafts" }],
   ] as const) {
     contract = resolveBuildRequirement({ contract, requirementId, value, discoveredToolContracts: [] });
   }

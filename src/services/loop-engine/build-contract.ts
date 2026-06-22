@@ -6,16 +6,17 @@ import { isPlatformManagedToolkit } from "../connectors/platform-integrations.js
 import type { LoopIntentContext } from "./intent-context.js";
 import type { ToolContract } from "../tool-spec/types.js";
 
-const buildRequirementKindSchema = z.enum([
+export const buildRequirementKindSchema = z.enum([
   "connector",
   "trigger_schedule",
   "stable_input",
   "grounding",
   "artifact_contract",
   "review_policy",
+  "output_review_gates",
 ]);
 
-const buildRequirementStatusSchema = z.enum(["unresolved", "resolved", "invalid"]);
+export const buildRequirementStatusSchema = z.enum(["unresolved", "resolved", "invalid"]);
 
 const buildRequirementSchema = z.object({
   id: z.string().min(1),
@@ -53,13 +54,36 @@ export const loopBuildContractSchema = z.object({
   updatedAt: z.string().min(1),
 });
 
+/** Resolved build-contract snapshot persisted on workflows (no build-time metadata). */
+export const persistedBuildRequirementSchema = z.object({
+  id: z.string().min(1),
+  kind: buildRequirementKindSchema,
+  status: buildRequirementStatusSchema,
+  value: z.unknown().optional(),
+  provenance: z.object({
+    source: z.enum(["user", "explicit_none", "legacy"]),
+    resolvedAt: z.string().min(1),
+  }).optional(),
+});
+
+export const persistedLoopBuildContractSchema = z.object({
+  version: z.literal("v1"),
+  requirements: z.array(persistedBuildRequirementSchema),
+  issues: z.array(z.string()).default([]),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+});
+
+export type PersistedLoopBuildContract = z.infer<typeof persistedLoopBuildContractSchema>;
+export type AnyLoopBuildContract = LoopBuildContract | PersistedLoopBuildContract;
+
 type BuildRequirement = z.infer<typeof buildRequirementSchema>;
 export type LoopBuildContract = z.infer<typeof loopBuildContractSchema>;
 type SelectedLoopTrigger =
   | { mode: "schedule"; cron: string; timezone: string }
   | { mode: "event"; toolkit: string; triggerSlug: string };
 
-export function selectedLoopTrigger(contract: LoopBuildContract): SelectedLoopTrigger | null {
+export function selectedLoopTrigger(contract: AnyLoopBuildContract): SelectedLoopTrigger | null {
   const requirement = contract.requirements.find((entry) => entry.kind === "trigger_schedule");
   if (!requirement?.value || typeof requirement.value !== "object" || Array.isArray(requirement.value)) return null;
   const value = requirement.value as Record<string, unknown>;
@@ -105,6 +129,20 @@ function reviewPolicyRequirement(): BuildRequirement {
     allowNone: false,
     valueSchema: objectSchema({
       mode: { type: "string", enum: ["draft_only", "approve_each_action", "approve_batch"] },
+    }, ["mode"]),
+  });
+}
+
+function outputReviewGatesRequirement(): BuildRequirement {
+  return requirement({
+    id: "output_review_gates",
+    kind: "output_review_gates",
+    question: "Should the loop pause for operator review between agents?",
+    reason: "Output review gates pause the run for draft or send confirmation.",
+    required: true,
+    allowNone: false,
+    valueSchema: objectSchema({
+      mode: { type: "string", enum: ["review_drafts", "review_drafts_and_send"] },
     }, ["mode"]),
   });
 }
@@ -273,6 +311,8 @@ export function deriveLoopBuildContract(input: {
         structure: { type: "string", minLength: 1 },
       }, ["mode"]),
     }));
+
+    requirements.push(outputReviewGatesRequirement());
   }
 
   return loopBuildContractSchema.parse({ version: "v1", requirements, issues: [], createdAt: now, updatedAt: now });
@@ -443,8 +483,12 @@ export function resolveBuildRequirement(input: {
       selected.has(String(contract.constraints.actionSlug ?? contract.name))
       && (contract.effect === "write_external" || contract.effect === "irreversible_external"));
     const existingReview = requirements.find((entry) => entry.kind === "review_policy");
-    requirements = requirements.filter((entry) => entry.kind !== "review_policy");
-    if (needsReview) requirements.push(existingReview ?? reviewPolicyRequirement());
+    const existingOutputGates = requirements.find((entry) => entry.kind === "output_review_gates");
+    requirements = requirements.filter((entry) => entry.kind !== "review_policy" && entry.kind !== "output_review_gates");
+    if (needsReview) {
+      requirements.push(existingReview ?? reviewPolicyRequirement());
+      requirements.push(existingOutputGates ?? outputReviewGatesRequirement());
+    }
     const selectedContracts = input.discoveredToolContracts.filter((contract) =>
       selected.has(String(contract.constraints.actionSlug ?? contract.name)));
     const existingRequirementIds = new Set(requirements.map((entry) => entry.id));
@@ -454,12 +498,23 @@ export function resolveBuildRequirement(input: {
   return loopBuildContractSchema.parse({ ...parsed, requirements, updatedAt: now });
 }
 
+export function isPersistedBuildContract(contract: AnyLoopBuildContract): contract is PersistedLoopBuildContract {
+  return contract.requirements.some((requirement) => !("question" in requirement));
+}
+
 export function unresolvedBuildRequirements(contract: LoopBuildContract): BuildRequirement[] {
   return loopBuildContractSchema.parse(contract).requirements.filter((entry) => entry.required && entry.status !== "resolved");
 }
 
-export function assertBuildContractReady(contract: LoopBuildContract | null | undefined): asserts contract is LoopBuildContract {
+export function assertBuildContractReady(contract: AnyLoopBuildContract | null | undefined): asserts contract is AnyLoopBuildContract {
   if (!contract) throw new Error("A build contract is required before drafting the spec.");
+  if (isPersistedBuildContract(contract)) {
+    const unresolved = contract.requirements.filter((entry) => entry.status !== "resolved");
+    if (unresolved.length > 0) {
+      throw new Error(`Build contract is not ready. Resolve: ${unresolved.map((entry) => entry.id).join(", ")}`);
+    }
+    return;
+  }
   const unresolved = unresolvedBuildRequirements(contract);
   if (unresolved.length > 0) {
     throw new Error(`Build contract is not ready. Resolve: ${unresolved.map((entry) => entry.id).join(", ")}`);
@@ -467,7 +522,7 @@ export function assertBuildContractReady(contract: LoopBuildContract | null | un
 }
 
 export function selectedConnectorAccountIds(
-  contract: LoopBuildContract | null | undefined,
+  contract: AnyLoopBuildContract | null | undefined,
   toolkit: string,
 ): string[] {
   if (!contract) return [];
@@ -495,7 +550,7 @@ export function selectedConnectorAccountIds(
 }
 
 export function selectedConnectorAccountId(
-  contract: LoopBuildContract | null | undefined,
+  contract: AnyLoopBuildContract | null | undefined,
   toolkit: string,
 ): string | undefined {
   const ids = selectedConnectorAccountIds(contract, toolkit);
@@ -506,8 +561,9 @@ export function selectedConnectorAccountId(
 }
 
 export type ReviewPolicyMode = "draft_only" | "approve_each_action" | "approve_batch";
+export type OutputReviewGatesMode = "none" | "review_drafts" | "review_drafts_and_send";
 
-export function selectedReviewPolicy(contract: LoopBuildContract | null | undefined): ReviewPolicyMode | null {
+export function selectedReviewPolicy(contract: AnyLoopBuildContract | null | undefined): ReviewPolicyMode | null {
   if (!contract) return null;
   const requirement = contract.requirements.find((entry) => entry.kind === "review_policy" && entry.status === "resolved");
   const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
@@ -520,7 +576,20 @@ export function selectedReviewPolicy(contract: LoopBuildContract | null | undefi
   return null;
 }
 
-export function selectedStableInputs(contract: LoopBuildContract | null | undefined): Record<string, string> {
+export function selectedOutputReviewGatesMode(
+  contract: AnyLoopBuildContract | null | undefined,
+): OutputReviewGatesMode {
+  if (!contract) return "none";
+  const requirement = contract.requirements.find((entry) => entry.kind === "output_review_gates" && entry.status === "resolved");
+  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+    ? requirement.value as Record<string, unknown>
+    : {};
+  const mode = value.mode;
+  if (mode === "review_drafts" || mode === "review_drafts_and_send") return mode;
+  return "none";
+}
+
+export function selectedStableInputs(contract: AnyLoopBuildContract | null | undefined): Record<string, string> {
   if (!contract) return {};
   const inputs: Record<string, string> = {};
   for (const requirement of contract.requirements) {
@@ -535,7 +604,7 @@ export function selectedStableInputs(contract: LoopBuildContract | null | undefi
   return inputs;
 }
 
-export function selectedConnectorActionSlugs(contract: LoopBuildContract | null | undefined): string[] {
+export function selectedConnectorActionSlugs(contract: AnyLoopBuildContract | null | undefined): string[] {
   if (!contract) return [];
   const requirement = contract.requirements.find((entry) => entry.kind === "connector" && entry.status === "resolved");
   const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
@@ -561,7 +630,7 @@ export type GroundingSourceRef =
   | { type: "knowledge_base"; id: string }
   | { type: "google_doc"; id: string };
 
-export function selectedGroundingSources(contract: LoopBuildContract | null | undefined): GroundingSourceRef[] {
+export function selectedGroundingSources(contract: AnyLoopBuildContract | null | undefined): GroundingSourceRef[] {
   if (!contract) return [];
   const requirement = contract.requirements.find((entry) => entry.id === "grounding" && entry.status === "resolved");
   const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
@@ -582,7 +651,7 @@ export function selectedGroundingSources(contract: LoopBuildContract | null | un
   return parsed;
 }
 
-export function selectedExternalDataToolkits(contract: LoopBuildContract | null | undefined): string[] {
+export function selectedExternalDataToolkits(contract: AnyLoopBuildContract | null | undefined): string[] {
   if (!contract) return [];
   const requirement = contract.requirements.find((entry) => entry.id === "grounding" && entry.status === "resolved");
   const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
@@ -613,7 +682,7 @@ type SelectedArtifactContract = {
 };
 
 export function selectedArtifactContract(
-  contract: LoopBuildContract | null | undefined,
+  contract: AnyLoopBuildContract | null | undefined,
 ): SelectedArtifactContract | null {
   if (!contract) return null;
   const requirement = contract.requirements.find((entry) => entry.id === "artifact_contract" && entry.status === "resolved");
@@ -629,7 +698,13 @@ export function selectedArtifactContract(
       ...(typeof value.structure === "string" ? { structure: value.structure } : {}),
     };
   }
-  if (mode !== "supplied_template" || typeof value.template !== "string") return null;
+  if (mode !== "supplied_template") return null;
+  if (typeof value.template !== "string") {
+    if (typeof value.designId === "string" && value.designId.trim()) {
+      return { mode, designId: value.designId.trim(), templates: [] };
+    }
+    return null;
+  }
   try {
     const bundle = JSON.parse(value.template) as {
       designId?: string;
@@ -650,4 +725,23 @@ export function selectedArtifactContract(
   } catch {
     return null;
   }
+}
+
+export function slimBuildContractForPersistence(contract: LoopBuildContract): PersistedLoopBuildContract {
+  const parsed = loopBuildContractSchema.parse(contract);
+  return persistedLoopBuildContractSchema.parse({
+    version: parsed.version,
+    createdAt: parsed.createdAt,
+    updatedAt: parsed.updatedAt,
+    issues: parsed.issues.length > 0 ? parsed.issues : [],
+    requirements: parsed.requirements.map((requirement) => ({
+      id: requirement.id,
+      kind: requirement.kind,
+      status: requirement.status,
+      ...(requirement.value !== undefined
+        ? { value: requirement.value }
+        : {}),
+      ...(requirement.provenance ? { provenance: requirement.provenance } : {}),
+    })),
+  });
 }

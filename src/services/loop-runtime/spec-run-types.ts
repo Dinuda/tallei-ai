@@ -9,6 +9,9 @@ import {
   type LoopDefinition,
 } from "../loop-executor/types.js";
 import type { ToolContract } from "../tool-spec/types.js";
+import { canonicalToolRef } from "../tool-spec/tool-contracts.js";
+import { slimLoopDefinitionForPersistence } from "./definition-slim.js";
+import { RUNNER_BOUNDARY_PROTOCOL_VERSION } from "./runner-boundary.js";
 export type SpecRunDefinition = LoopDefinition;
 
 function outputArtifactKind(renderer: unknown): string | undefined {
@@ -53,7 +56,7 @@ export function definitionFromApprovedSpec(input: {
 }): LoopDefinition {
   const buildContract = input.buildContract ?? input.snapshot.buildContract ?? input.snapshot.specJson.buildContract;
   const noSlop = input.snapshot.specJson;
-  return loopDefinitionSchema.parse({
+  const parsed = loopDefinitionSchema.parse({
     definitionVersion: LOOP_DEFINITION_VERSION,
     goal: input.snapshot.specJson.purpose,
     schedule: { cron: input.cron, timezone: input.timezone },
@@ -94,9 +97,8 @@ export function definitionFromApprovedSpec(input: {
           id,
           name: agent.name,
           nodeKind: agent.nodeKind,
-          task: agent.goal,
           goal: agent.goal,
-          tools: (agent.tools ?? []).map((ref) => ({ ref })),
+          tools: (agent.tools ?? []).map((ref) => ({ ref: canonicalToolRef(ref) })),
           guardrails: agent.guardrails ?? [],
           failureModes: agent.failureModes ?? [],
           doneCriteria: agent.doneCriteria ?? agent.doneWhen ?? [],
@@ -115,11 +117,15 @@ export function definitionFromApprovedSpec(input: {
       designedBy: "loop_architect",
       engineVersion: LOOP_ENGINE_VERSION,
       preApproved: true,
-      noSlopSpec: input.snapshot,
-      discoveredToolContracts: input.discoveredToolContracts,
+      specId: input.snapshot.id,
       ...(input.builderSessionId ? { workflowBuilderSessionId: input.builderSessionId } : {}),
+      ...(input.discoveredToolContracts && input.discoveredToolContracts.length > 0
+        ? { discoveredToolContracts: input.discoveredToolContracts as unknown as Record<string, unknown>[] }
+        : {}),
+      runnerProtocolVersion: RUNNER_BOUNDARY_PROTOCOL_VERSION,
     },
   });
+  return loopDefinitionSchema.parse(slimLoopDefinitionForPersistence(parsed));
 }
 
 export function parseLoopDefinition(metadata: unknown): LoopDefinition | null {

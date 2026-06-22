@@ -23,8 +23,28 @@ export function normalizeToolRef(ref: string): string {
   return ref.trim().toLowerCase();
 }
 
+export function normalizeConnectorActionSlug(slug: string): string {
+  return slug.trim().replace(/[^a-zA-Z0-9_]/g, "_").replace(/_+/g, "_").toUpperCase();
+}
+
 export function connectorActionToolRef(action: { toolkit: string; actionSlug: string }): string {
-  return `composio.${action.toolkit.trim().toLowerCase()}.action.${action.actionSlug.trim().toLowerCase()}`;
+  return `composio.${action.toolkit.trim().toLowerCase()}.action.${normalizeConnectorActionSlug(action.actionSlug)}`;
+}
+
+/** Canonical persisted tool ref (uppercase Composio action slugs). */
+export function canonicalToolRef(ref: string): string {
+  const trimmed = ref.trim();
+  const parsed = parseConnectorActionToolRef(trimmed);
+  if (parsed) {
+    return connectorActionToolRef({
+      toolkit: parsed.toolkit,
+      actionSlug: normalizeConnectorActionSlug(parsed.actionSlug),
+    });
+  }
+  const searchMatch = parseConnectedSearchToolRef(trimmed);
+  if (searchMatch) return `composio.${searchMatch.toolkit}.search`;
+  if (trimmed.toLowerCase() === "internal.llm_only") return "internal.llm_only";
+  return trimmed;
 }
 
 export function hasExactComposioActionSchemas(action: Pick<ActionLike, "inputSchema" | "outputSchema">): boolean {

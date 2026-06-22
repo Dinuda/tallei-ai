@@ -198,6 +198,7 @@ export async function createSpecRunReviewInteraction(input: {
   artifactData: Record<string, unknown>;
   rationale?: string;
   configuredGate?: boolean;
+  nextAgentName?: string;
 }): Promise<string> {
   const surface = inputSurfaceSchema.parse(input.surface);
   if (!surface.startsWith("review.") && surface !== "confirm.send") {
@@ -244,7 +245,7 @@ export async function createSpecRunReviewInteraction(input: {
       canvasArtifactKey: input.artifactKey,
       renderTarget,
       agentOutput: input.rationale,
-      nextAgentName: input.agentName,
+      ...(input.nextAgentName ? { nextAgentName: input.nextAgentName } : {}),
       ...(input.configuredGate ? { configuredGate: true } : {}),
     },
     ...(input.configuredGate ? { configuredGate: true } : {}),

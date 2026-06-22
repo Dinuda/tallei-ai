@@ -58,9 +58,9 @@ test("discovery interleaves query results before applying the global cap", () =>
     [entry("gmail", "GMAIL_SEND_EMAIL")],
   ], 3);
   assert.deepEqual(merged.map((item) => item.contract.toolRef), [
-    "composio.search.action.one",
-    "composio.gmail.action.gmail_send_email",
-    "composio.search.action.two",
+    "composio.search.action.ONE",
+    "composio.gmail.action.GMAIL_SEND_EMAIL",
+    "composio.search.action.TWO",
   ]);
 });
 

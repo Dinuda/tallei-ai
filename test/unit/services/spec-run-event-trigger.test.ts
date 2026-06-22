@@ -204,27 +204,6 @@ const spec = {
       },
     ],
   },
-  noSlopSpec: {
-    id: "spec-id",
-    slug: "support",
-    title: "Support",
-    version: 1,
-    bodyMarkdown: "",
-    approvedAt: "2026-06-17T16:40:46.916Z",
-    buildContract,
-    specJson: {
-      purpose: "Support loop",
-      agents: [{ name: "A", goal: "G", tools: [], guardrails: [], doneWhen: [], failureModes: [] }],
-      guardrails: [],
-      successCriteria: [],
-      failureModes: [],
-      delivery: { provider: "none", description: "none" },
-      schedule: { description: "daily" },
-      connectorPolicy: { allowedReadActions: [], allowedWriteActions: [] },
-      inputRequirements: [],
-      buildContract,
-    },
-  },
 } as any;
 
 test("compileSpecRunPlan exposes only build-contract selected connector actions", () => {
@@ -234,11 +213,12 @@ test("compileSpecRunPlan exposes only build-contract selected connector actions"
   assert.ok(plan.readTools.some((tool) => tool.actionSlug === "GMAIL_LIST_THREADS"));
 });
 
-test("draft_only review policy hides send actions", () => {
+test("draft_only review policy remaps delivery slugs to draft write tools", () => {
   const plan = compileSpecRunPlan(spec);
 
   assert.ok(plan.writeTools.some((tool) => tool.actionSlug === "GMAIL_CREATE_EMAIL_DRAFT"));
-  assert.equal(plan.writeTools.some((tool) => tool.actionSlug === "GMAIL_SEND_DRAFT"), false);
+  assert.ok(plan.writeTools.some((tool) => tool.actionSlug === "GMAIL_SEND_DRAFT"));
+  assert.equal(plan.reviewPolicy, "draft_only");
 });
 
 test("buildSpecRunSystemPrompt includes runtime policies for event runs", () => {

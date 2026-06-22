@@ -3,9 +3,18 @@ import test from "node:test";
 
 import {
   buildComposioActionContract,
+  canonicalToolRef,
   getStaticToolContract,
   isRenderTargetCompatible,
 } from "../../../src/services/tool-spec/tool-contracts.js";
+
+test("canonicalToolRef uppercases Composio action slugs", () => {
+  assert.equal(
+    canonicalToolRef("composio.gmail.action.gmail_fetch_emails"),
+    "composio.gmail.action.GMAIL_FETCH_EMAILS",
+  );
+  assert.equal(canonicalToolRef("internal.llm_only"), "internal.llm_only");
+});
 
 test("internal tools expose stable contracts and render recommendations", () => {
   const contract = getStaticToolContract("internal.llm_only");
@@ -34,7 +43,7 @@ test("Composio action contracts preserve SDK schemas and declared risk without u
     inputSchema: { type: "object" },
     outputSchema: { type: "object", properties: { id: { type: "string" } } },
   });
-  assert.equal(contract.toolRef, "composio.resend.action.resend_send_email");
+  assert.equal(contract.toolRef, "composio.resend.action.RESEND_SEND_EMAIL");
   assert.equal(contract.effect, "write_external");
   assert.equal(contract.approval.required, true);
   assert.equal(contract.source, "composio_sdk");

@@ -289,7 +289,7 @@ const workflowCriticResultSchema = z.object({
 
 export type WorkflowCriticResult = z.infer<typeof workflowCriticResultSchema>;
 
-const goalEvalStatusSchema = z.enum(["pass", "fail", "needs_input"]);
+const goalEvalStatusSchema = z.enum(["pass", "fail", "needs_input", "retry"]);
 type GoalEvalStatus = z.infer<typeof goalEvalStatusSchema>;
 
 export const goalEvalResultSchema = z.object({
@@ -297,6 +297,9 @@ export const goalEvalResultSchema = z.object({
   reason: z.string().min(1),
   blockers: z.array(z.string()).default([]),
   gateType: loopGateTypeSchema.optional(),
+  missingRequired: z.array(z.string()).optional(),
+  normalizedOutput: z.record(z.unknown()).optional(),
+  normalizedHandoff: z.record(z.unknown()).optional(),
 });
 
 export type GoalEvalResult = z.infer<typeof goalEvalResultSchema>;

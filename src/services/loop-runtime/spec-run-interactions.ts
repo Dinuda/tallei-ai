@@ -4,10 +4,11 @@ import type { UIMessage } from "ai";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { executeApprovedComposioAction } from "../connectors/composio.js";
-import { selectedConnectorAccountId, type LoopBuildContract } from "../loop-engine/build-contract.js";
+import { selectedConnectorAccountId, type AnyLoopBuildContract } from "../loop-engine/build-contract.js";
 import { listLoopRunMessages, pruneStepNarrationForStep, replaceLoopRunMessages } from "./run-messages.js";
 import { parseLoopDefinitionSnapshot } from "./spec-run-types.js";
 import { compileSpecRunPlan } from "./spec-run-plan.js";
+import { resolveBuildContract } from "./definition-hydration.js";
 import {
   actionRefsForTool,
   storeSpecRunApprovalGrant,
@@ -343,7 +344,7 @@ async function executeDeferredWriteTool(input: {
   stepAttemptId?: string;
   toolKey?: string;
   deferred: DeferredWriteToolCall;
-  buildContract?: LoopBuildContract | null;
+  buildContract?: AnyLoopBuildContract | null;
 }): Promise<unknown> {
   const idempotencyKey = `spec-run:${input.runId}:${input.stepAttemptId ?? "run"}:${input.toolKey ?? input.deferred.actionSlug}`;
   const result = await executeApprovedComposioAction({
@@ -397,9 +398,7 @@ export async function handleSpecRunInteractionCommand(input: {
     )).rows[0]?.definition_snapshot,
   );
   const plan = definition ? compileSpecRunPlan(definition) : null;
-  const buildContract = definition?.buildContract
-    ?? definition?.builderMeta?.noSlopSpec?.buildContract
-    ?? definition?.builderMeta?.noSlopSpec?.specJson.buildContract;
+  const buildContract = definition ? resolveBuildContract(definition) : null;
 
   const storeApprovalGrant = async (authorizedActionRefs: string[]) => {
     if (!plan) return;

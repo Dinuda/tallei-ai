@@ -26,10 +26,11 @@ test("spec-run editorial projection preserves persona on agent snapshots", async
   assert.match(source, /avatarSeed/);
 });
 
-test("spec-run editorial projection exposes referenced run definition snapshot", async () => {
+test("spec-run editorial projection exposes slim spec roster and build contract", async () => {
   const source = await readFile(projectionPath, "utf8");
   assert.match(source, /spec: \{/);
-  assert.match(source, /noSlopSpec: noSlop \?\? null/);
+  assert.match(source, /specId/);
+  assert.match(source, /agents,/);
   assert.match(source, /buildContract/);
   assert.match(source, /definition: \{/);
   assert.match(source, /specRun\.loopDefinition/);

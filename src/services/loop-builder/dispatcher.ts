@@ -4,6 +4,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import {
   confirmWorkflowVerification,
+  getWorkflowVerification,
   initializeWorkflowVerification,
   runWorkflowVerification,
 } from "../loop-executor/verification.js";
@@ -12,12 +13,14 @@ import { discoverToolsForLoopBuild } from "../connectors/composio-discovery.js";
 import { listComposioTriggerTypes } from "../connectors/composio.js";
 import { normalizeDiscoveredToolContracts } from "../connectors/platform-integrations.js";
 import { refreshBuilderConnectorAvailability } from "./connectors.js";
+import { normalizeGetAvailableToolsInput } from "./get-available-tools-input.js";
 import {
   loopIntentAnalysisSchema,
   loopIntentContextSchema,
 } from "../loop-engine/intent-context.js";
 import {
   emptyLoopBuilderUsage,
+  reportLoopBuilderProgress,
   runWithLoopBuilderProgress,
   sanitizeLoopBuilderProgressDetails,
   type LoopBuilderProgressEvent,
@@ -44,6 +47,7 @@ export type BuilderToolName =
   | "resolveBuildRequirement"
   | "refreshConnectorAvailability"
   | "saveLoop"
+  | "runBuilderTest"
   | "runVerification"
   | "confirmActivation";
 
@@ -90,6 +94,7 @@ function legacyKind(toolName: BuilderToolName): string {
     resolveBuildRequirement: "resolve-build-requirement",
     refreshConnectorAvailability: "refresh-connector-availability",
     saveLoop: "save",
+    runBuilderTest: "run-builder-test",
     runVerification: "run-verification",
     confirmActivation: "confirm-activation",
   } satisfies Record<BuilderToolName, string>)[toolName];
@@ -189,12 +194,30 @@ type BuilderTestRunResult = {
 };
 
 async function runSavedWorkflowTestRun(auth: AuthContext, workflowId: string): Promise<BuilderTestRunResult> {
+  reportLoopBuilderProgress({
+    stage: "builder_test",
+    message: "Starting builder test run...",
+    status: "running",
+  });
   const queued = await createSpecLoopRun(auth, workflowId, {
     source: "manual",
     label: "Builder verification test",
   });
   try {
     const completed = await runSpecLoopHeadless(auth, workflowId, queued.id);
+    reportLoopBuilderProgress({
+      stage: "builder_test",
+      message: completed.status === "succeeded"
+        ? "Builder test run completed."
+        : `Builder test run finished with status: ${completed.status}.`,
+      status: completed.status === "failed" ? "failed" : "completed",
+      details: {
+        runId: completed.id,
+        workflowId: completed.workflowId,
+        status: completed.status,
+        error: completed.error,
+      },
+    });
     return {
       id: completed.id,
       workflowId: completed.workflowId,
@@ -203,12 +226,24 @@ async function runSavedWorkflowTestRun(auth: AuthContext, workflowId: string): P
       error: completed.error,
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    reportLoopBuilderProgress({
+      stage: "builder_test",
+      message: "Builder test run failed.",
+      status: "failed",
+      details: {
+        runId: queued.id,
+        workflowId,
+        status: "failed",
+        error: message,
+      },
+    });
     return {
       id: queued.id,
       workflowId,
       status: "failed",
       triggerLabel: queued.triggerLabel,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     };
   }
 }
@@ -219,25 +254,29 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
     case "getAvailableTools": {
       requirePhase(session.phase, ["new", "analyzing", "needs_clarification", "failed"], toolName);
       await updateWorkflowBuilderSession(auth, sessionId, { phase: "analyzing", error: null });
-      const normalizedIntent = input.normalizedIntent && typeof input.normalizedIntent === "object"
-        ? input.normalizedIntent as Record<string, unknown>
-        : {};
-      const resolvedIntentText = String(input.resolvedIntent ?? normalizedIntent.outcome ?? session.goal).trim();
+      const {
+        outcome,
+        cadence,
+        approvalModel,
+        toolCategories,
+        runtimeInputs,
+        resolvedIntent: resolvedIntentText,
+        selectedToolkits,
+        capabilityQueries,
+        assumptions,
+      } = normalizeGetAvailableToolsInput(input, session.goal);
       if (!resolvedIntentText) throw new Error("getAvailableTools requires a normalized resolved intent");
-      const selectedToolkits = Array.isArray(input.selectedToolkits)
-        ? [...new Set(input.selectedToolkits.map(String).map((value) => value.trim().toLowerCase()).filter(Boolean))]
-        : [];
       if (selectedToolkits.length === 0) throw new Error("Select at least one app before discovering tools");
       const analysis = loopIntentAnalysisSchema.parse({
         normalizedIntent: {
-          outcome: String(normalizedIntent.outcome ?? resolvedIntentText),
-          toolCategories: Array.isArray(normalizedIntent.toolCategories) ? normalizedIntent.toolCategories : [],
-          cadence: String(normalizedIntent.cadence ?? "As needed"),
-          approvalModel: String(normalizedIntent.approvalModel ?? "Operator approval before external mutations"),
-          runtimeInputs: Array.isArray(normalizedIntent.runtimeInputs) ? normalizedIntent.runtimeInputs : [],
+          outcome,
+          toolCategories,
+          cadence,
+          approvalModel,
+          runtimeInputs,
         },
         questions: [],
-        assumptions: Array.isArray(input.assumptions) ? input.assumptions : [],
+        assumptions,
         connectorFeasibility: [],
         interactivePrompts: [],
         events: [],
@@ -254,12 +293,8 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         auth,
         prompt: resolvedIntentText,
         selectedToolkits,
-        capabilityQueries: Array.isArray(input.capabilityQueries)
-          ? input.capabilityQueries.map(String).filter(Boolean)
-          : [],
-        toolCategories: Array.isArray(normalizedIntent.toolCategories)
-          ? normalizedIntent.toolCategories.map(String).filter(Boolean)
-          : [],
+        capabilityQueries,
+        toolCategories,
         composioSessionId: session.composioSessionId,
         limit: 24,
       });
@@ -341,8 +376,8 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       }
 
       if (session.phase === "saved" && session.workflowId) {
-        const testRun = await runSavedWorkflowTestRun(auth, session.workflowId);
         const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
+        if (!buildContract) throw new Error("Builder session is missing a build contract.");
         const spec = await compileEnrichedRuntimeSpecSnapshot({
           auth,
           prompt: session.goal,
@@ -350,11 +385,11 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
           buildContract,
           discoveredToolContracts: session.discoveredToolContracts,
         });
+        const verification = await getWorkflowVerification(auth, session.workflowId);
         return {
           workflowId: session.workflowId,
           loop: { id: session.workflowId },
-          verification: await runWorkflowVerification(auth, session.workflowId),
-          testRun,
+          verification,
           spec,
         };
       }
@@ -395,8 +430,13 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       void runWorkflowVerification(auth, workflowId).catch((error) => {
         console.error("[saveLoop] background verification failed:", error instanceof Error ? error.message : String(error));
       });
-      const testRun = await runSavedWorkflowTestRun(auth, workflowId);
-      return { loop, verification, workflowId, spec: snapshot, testRun };
+      return { loop, verification, workflowId, spec: snapshot };
+    }
+    case "runBuilderTest": {
+      requirePhase(session.phase, ["saved", "failed"], toolName);
+      if (!session.workflowId) throw new Error("Session has no saved workflow.");
+      const testRun = await runSavedWorkflowTestRun(auth, session.workflowId);
+      return { workflowId: session.workflowId, testRun };
     }
     case "runVerification": {
       if (!session.workflowId) {

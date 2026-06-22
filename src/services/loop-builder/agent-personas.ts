@@ -77,6 +77,22 @@ export function displayNameFromSeed(seed: string): string {
   return AGENT_DISPLAY_NAME_POOL[index] ?? "Alex";
 }
 
+export function pickUniqueDisplayName(seed: string, index: number, used: Set<string>): string {
+  const primary = displayNameFromSeed(seed);
+  let start = AGENT_DISPLAY_NAME_POOL.indexOf(primary);
+  if (start < 0) start = 0;
+  for (let offset = 0; offset < AGENT_DISPLAY_NAME_POOL.length; offset += 1) {
+    const candidate = AGENT_DISPLAY_NAME_POOL[(start + offset + index) % AGENT_DISPLAY_NAME_POOL.length]!;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+  const fallback = `Agent ${used.size + 1}`;
+  used.add(fallback);
+  return fallback;
+}
+
 export function slugifyAgentId(name: string, index: number): string {
   const slug = name
     .toLowerCase()

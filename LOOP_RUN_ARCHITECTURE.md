@@ -1,5 +1,39 @@
 # Loop Run Architecture Review
 
+## Builder → Runner Seam (loop_spec_v1)
+
+Spec-driven loops use a strict three-layer boundary. Do not add LLM structure decisions at the runner or duplicate tool-role logic outside the shared classifier.
+
+| Layer | Owner | Source of truth |
+|-------|--------|-----------------|
+| **Design** | Loop builder (`LoopBuildContract`) | User-approved requirements: connectors, schedule, review policy, artifacts |
+| **Compile** | `runner-spec-compiler.ts` via `buildRunnerSpecFromBuildContract` | Deterministic agent graph, gates, tool assignments — no LLM |
+| **Execute** | `spec-run-agent-runner.ts` | Reads persisted `LoopDefinition` only; LLM operates inside compiled agents |
+
+### Rules
+
+1. **`LoopBuildContract` is the only user-authored truth.** Never edit agent structure independently in the runner.
+2. **`compileRunnerSpecFromBuildContract` is the only structure compiler.** `specs.ts` delegates to it; do not reimplement compile logic elsewhere.
+3. **`tool-roles.ts` is the only tool-role classifier.** Both the compiler and `compileSpecRunPlan` import it — do not re-derive send/write/draft/delivery heuristics.
+4. **Persisted definitions must be self-sufficient.** `definitionFromApprovedSpec` embeds `discoveredToolContracts` and inline artifact templates at save time. `hydrateDefinitionForExecution` only expands slim agent-graph defaults — it does not load builder sessions, loop_specs, or Composio catalogs.
+5. **Slim/hydrate is transport, not semantics.** `definition-slim.ts` / `definition-hydration.ts` expand persisted shape; they must not re-decide agent tools or gates.
+
+### Boundary band-aids (classified)
+
+| File | Verdict | Role |
+|------|---------|------|
+| `src/services/loop-engine/tool-roles.ts` | **Keep** | Single classifier for compiler + run plan |
+| `src/services/loop-builder/runner-spec-compiler.ts` | **Keep** | Deterministic compile API |
+| `src/services/loop-builder/tool-call-repair.ts` | **Keep** | Model tool-call entropy at runtime |
+| `src/services/loop-builder/tool-input-json-repair.ts` | **Keep** | Model JSON entropy at runtime |
+| `src/services/loop-runtime/definition-hydration.ts` | **Keep** | Slim-definition expansion only |
+| `src/services/loop-runtime/definition-slim.ts` | **Keep** | Lossless persistence transport |
+| `dashboard/.../spec-run-transcript-hydration.ts` | **Keep (UI)** | Run transcript reconstruction — out of compile seam |
+| `dashboard/src/lib/spec-run-stream-guard.ts` | **Keep (UI)** | Stream dedup — out of compile seam |
+| `dashboard/src/lib/spec-run-run-merge.ts` | **Keep (UI)** | Run projection merge — out of compile seam |
+
+---
+
 ## 1. Overall Architecture
 
 ### 1.1 Core Concepts

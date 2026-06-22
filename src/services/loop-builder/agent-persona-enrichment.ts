@@ -1,10 +1,10 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { AgentPersona, NoSlopSpec, NoSlopSpecAgent } from "../loop-engine/spec-contracts.js";
 import { agentPersonaSchema } from "../loop-engine/spec-contracts.js";
-import { allocateAgentAvatars, bindAgentAvatar } from "./agent-avatars.js";
+import { allocateAgentAvatars, bindAgentAvatar, loopSpecExists } from "./agent-avatars.js";
 import {
-  displayNameFromSeed,
   inferActionLabelsFromToolRefs,
+  pickUniqueDisplayName,
   resolveAgentRole,
   slugifyAgentId,
 } from "./agent-personas.js";
@@ -25,6 +25,7 @@ export async function enrichSpecAgentsWithPersonas(input: {
   specId: string;
   specJson: NoSlopSpec;
   previousAgents?: NoSlopSpecAgent[];
+  bindAvatars?: boolean;
 }): Promise<NoSlopSpec> {
   const previousById = new Map<string, AgentPersona>();
   for (const [index, agent] of (input.previousAgents ?? []).entries()) {
@@ -34,12 +35,16 @@ export async function enrichSpecAgentsWithPersonas(input: {
 
   const enrichedAgents: NoSlopSpecAgent[] = [];
   const pendingNew: Array<{ index: number; agent: NoSlopSpecAgent; agentId: string }> = [];
+  const usedDisplayNames = new Set<string>(
+    [...previousById.values()].map((persona) => persona.displayName),
+  );
 
   for (const [index, agent] of input.specJson.agents.entries()) {
     const agentId = slugifyAgentId(agent.name, index);
     const existingPersona = previousById.get(agentId);
 
     if (existingPersona) {
+      usedDisplayNames.add(existingPersona.displayName);
       enrichedAgents[index] = { ...agent, persona: existingPersona };
       reportLoopBuilderProgress({
         stage: "agent_spawn",
@@ -59,12 +64,13 @@ export async function enrichSpecAgentsWithPersonas(input: {
   }
 
   if (pendingNew.length > 0) {
+    const canBindAvatars = input.bindAvatars ?? await loopSpecExists(input.auth, input.specId);
     const avatars = await allocateAgentAvatars(input.auth, pendingNew.length);
     await Promise.all(pendingNew.map(async ({ index, agent, agentId }, avatarIndex) => {
       const avatar = avatars[avatarIndex];
       if (!avatar) return;
       const role = resolveAgentRole(agent.name, agent.goal);
-      const displayName = displayNameFromSeed(avatar.seed);
+      const displayName = pickUniqueDisplayName(avatar.seed, avatarIndex, usedDisplayNames);
       const persona: AgentPersona = {
         displayName,
         roleKey: role.roleKey,
@@ -73,7 +79,9 @@ export async function enrichSpecAgentsWithPersonas(input: {
         avatarSeed: avatar.seed,
       };
 
-      await bindAgentAvatar(input.auth, avatar.id, { specId: input.specId, agentId });
+      if (canBindAvatars) {
+        await bindAgentAvatar(input.auth, avatar.id, { specId: input.specId, agentId });
+      }
       enrichedAgents[index] = { ...agent, persona };
 
       reportLoopBuilderProgress({
@@ -94,4 +102,18 @@ export async function enrichSpecAgentsWithPersonas(input: {
     ...input.specJson,
     agents: input.specJson.agents.map((agent, index) => enrichedAgents[index] ?? agent),
   };
+}
+
+export async function bindLoopSpecAgentAvatars(
+  auth: AuthContext,
+  snapshot: { id: string; specJson: NoSlopSpec },
+): Promise<void> {
+  await Promise.all(snapshot.specJson.agents.map(async (agent, index) => {
+    const avatarId = agent.persona?.avatarId;
+    if (!avatarId) return;
+    await bindAgentAvatar(auth, avatarId, {
+      specId: snapshot.id,
+      agentId: slugifyAgentId(agent.name, index),
+    });
+  }));
 }

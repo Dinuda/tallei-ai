@@ -11,6 +11,7 @@ import {
 } from "../loop-engine/build-contract.js";
 import type { SpecRunTrigger } from "./spec-runner.js";
 import type { SpecRunDefinition } from "./spec-run-types.js";
+import { resolveBuildContract } from "./definition-hydration.js";
 import type { StoredTriggerPayload } from "./trigger-payload.js";
 import { normalizeGmailTriggerPayload } from "./trigger-normalizers/gmail.js";
 
@@ -56,10 +57,6 @@ export type RunContext = {
   connectorAccountIds: Record<string, string>;
   hasTriggerPayload: boolean;
 };
-
-function resolveBuildContract(definition: SpecRunDefinition) {
-  return definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract ?? null;
-}
 
 function applyTicketContentMode(ticket: RunContextTicket, mode: string): RunContextTicket {
   if (mode === "subject_and_body" || mode === "subject + body") {
@@ -212,7 +209,6 @@ export function buildRunSeedMessage(runContext: RunContext, spec: SpecRunDefinit
 
   const failureModes = definition.agentGraph?.children?.flatMap((agent) => agent.failureModes ?? []) ?? [];
   const noTicketHint = failureModes.find((mode) => /no new ticket/i.test(mode))
-    ?? definition.builderMeta?.noSlopSpec?.specJson.failureModes.find((mode) => /no new ticket/i.test(mode))
     ?? "No new tickets found.";
   return [
     `Execute the loop: ${definition.goal}`,

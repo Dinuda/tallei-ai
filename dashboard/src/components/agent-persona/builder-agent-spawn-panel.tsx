@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
-import { CalendarClock, Loader2, Send, Users, XCircle } from "lucide-react";
+import { CalendarClock, Loader2, Send, Users } from "lucide-react";
 
 import type { ToolPart } from "@/components/ai-elements/tool";
+import { IssueNotice } from "@/components/ai-elements/tool";
+import { maskBuilderIssueText } from "@/lib/builder-issue-text";
 import { cn } from "@/lib/utils";
 import { AgentPersonaCard } from "./agent-persona-card";
 import type { AgentPersonaUi } from "./agent-persona";
@@ -152,7 +154,10 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
   const isFailed = !isComplete && (
     part.state === "output-error" || latestCommand?.status === "failed" || latestCommand?.status === "rejected"
   );
-  const errorText = part.errorText ?? latestCommand?.error ?? "The runtime agent contract did not complete. Please try again.";
+  const issueSummary = maskBuilderIssueText(
+    part.errorText ?? latestCommand?.error,
+    "save-loop",
+  );
   const latestProgressMessage = latestCommand?.events?.at(-1)?.message;
   const [revealedCount, setRevealedCount] = useState(0);
 
@@ -182,19 +187,23 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
     ? agentsToShow
     : agentsToShow.slice(0, Math.min(revealedCount, agentsToShow.length));
 
+  if (isFailed) {
+    return <IssueNotice summary={issueSummary} />;
+  }
+
   return (
     <div className="my-2 overflow-hidden rounded-lg border border-[#cce89e] bg-[#f8fdf2] shadow-sm">
       <div className="flex items-center gap-2 border-b border-[#e4f5c6] bg-white px-4 py-3">
-        {isFailed ? <XCircle size={16} className="text-[#dc2626]" /> : <Users size={16} className="text-[#7eb71b]" />}
+        <Users size={16} className="text-[#7eb71b]" />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-[#182506]" style={{ fontFamily: "var(--font-title)" }}>
-            {isFailed ? "Specialist agents did not finish" : isComplete ? "Specialist agents ready" : "Finalizing specialist agents"}
+            {isComplete ? "Specialist agents ready" : "Finalizing specialist agents"}
           </div>
           {isComplete && outputData?.title ? (
             <div className="truncate text-xs text-[#7a9a4a]">{outputData.title}</div>
           ) : null}
         </div>
-        {!isComplete && !isFailed ? <Loader2 size={16} className="animate-spin text-[#7a9a4a]" /> : null}
+        {!isComplete ? <Loader2 size={16} className="animate-spin text-[#7a9a4a]" /> : null}
       </div>
 
       <div className="space-y-3 p-4">
@@ -219,13 +228,7 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
           <p className="text-sm leading-relaxed text-[#3d5c18]">{outputData.purpose}</p>
         ) : null}
 
-        {isFailed ? (
-          <div className="rounded-md border border-[#fecaca] bg-[#fef2f2] p-3 text-sm text-[#991b1b]">
-            {errorText}
-          </div>
-        ) : null}
-
-        {visibleAgents.length === 0 && !isComplete && !isFailed ? (
+        {visibleAgents.length === 0 && !isComplete ? (
           <p className="text-sm text-[#7a9a4a]">{latestProgressMessage ?? "Assigning agent personas…"}</p>
         ) : null}
 

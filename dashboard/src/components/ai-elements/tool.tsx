@@ -9,6 +9,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import {
+  AlertCircleIcon,
   CheckCircleIcon,
   ChevronDownIcon,
   CircleIcon,
@@ -19,6 +20,7 @@ import {
 import type { ComponentProps, ReactNode } from "react";
 import { isValidElement } from "react";
 
+import { BUILDER_ISSUE_SUMMARY, maskBuilderIssueText } from "@/lib/builder-issue-text";
 import { CodeBlock } from "./code-block";
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
@@ -52,7 +54,7 @@ const statusLabels: Record<ToolPart["state"], string> = {
   "input-streaming": "Pending",
   "output-available": "Completed",
   "output-denied": "Denied",
-  "output-error": "Error",
+  "output-error": "Issue",
 };
 
 const statusIcons: Record<ToolPart["state"], ReactNode> = {
@@ -62,8 +64,33 @@ const statusIcons: Record<ToolPart["state"], ReactNode> = {
   "input-streaming": <CircleIcon className="size-4" />,
   "output-available": <CheckCircleIcon className="size-4 text-green-600" />,
   "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
-  "output-error": <XCircleIcon className="size-4 text-red-600" />,
+  "output-error": <AlertCircleIcon className="size-4 text-amber-700" />,
 };
+
+export function IssueNotice({
+  className,
+  summary,
+}: {
+  className?: string;
+  summary?: string;
+}) {
+  const message = summary ?? BUILDER_ISSUE_SUMMARY;
+
+  return (
+    <Collapsible className={cn("not-prose mb-4 w-full border border-[#e5e7eb] bg-[#fafafa]", className)} defaultOpen={false}>
+      <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left">
+        <div className="flex items-center gap-2 text-sm text-[#6b7280]">
+          <AlertCircleIcon className="size-4 shrink-0 text-amber-700" />
+          <span>{message}</span>
+        </div>
+        <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="border-t border-[#e5e7eb] px-3 py-2.5 text-sm text-[#6b7280]">
+        Something did not finish as expected. You can retry or adjust your choices and continue.
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
 
 export const getStatusBadge = (status: ToolPart["state"]) => (
   <Badge className="gap-1.5 text-xs border" variant="secondary">
@@ -142,7 +169,15 @@ export const ToolOutput = ({
   errorText,
   ...props
 }: ToolOutputProps) => {
-  if (output === undefined && !errorText) {
+  if (errorText) {
+    return (
+      <div className={className} {...props}>
+        <IssueNotice summary={maskBuilderIssueText(errorText, "tool-output")} />
+      </div>
+    );
+  }
+
+  if (output === undefined) {
     return null;
   }
 
@@ -159,17 +194,9 @@ export const ToolOutput = ({
   return (
     <div className={cn("space-y-2", className)} {...props}>
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-        {errorText ? "Error" : "Result"}
+        Result
       </h4>
-      <div
-        className={cn(
-          "overflow-x-auto text-xs [&_table]:w-full border border-[#e5e7eb]",
-          errorText
-            ? "bg-destructive/10 text-destructive"
-            : "bg-muted/50 text-foreground"
-        )}
-      >
-        {errorText && <div>{errorText}</div>}
+      <div className="overflow-x-auto border border-[#e5e7eb] bg-muted/50 text-xs text-foreground [&_table]:w-full">
         {Output}
       </div>
     </div>

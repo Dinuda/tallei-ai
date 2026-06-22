@@ -306,6 +306,43 @@ test("shouldShowBuilderThinking is false when composer gate is active", async ()
   );
 });
 
+test("prepareBuilderTranscriptParts strips raw technical error text", async () => {
+  const { prepareBuilderTranscriptParts } = await import(
+    "../../../dashboard/src/lib/loop-builder-transcript.ts"
+  );
+
+  const parts = prepareBuilderTranscriptParts([
+    { type: "text", text: 'insert or update on table "loop_agent_avatars" violates foreign key constraint "loop_agent_avatars_bound_spec_id_fkey"' },
+    { type: "text", text: "Let me retry that save step." },
+  ] as never[]);
+
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0]?.type, "text");
+  assert.match((parts[0] as { text?: string }).text ?? "", /retry/i);
+});
+
+test("prepareBuilderTranscriptParts masks tool error text", async () => {
+  const { prepareBuilderTranscriptParts } = await import(
+    "../../../dashboard/src/lib/loop-builder-transcript.ts"
+  );
+  const { BUILDER_ISSUE_SUMMARY } = await import(
+    "../../../dashboard/src/lib/builder-issue-text.ts"
+  );
+
+  const parts = prepareBuilderTranscriptParts([
+    {
+      type: "tool-saveLoop",
+      toolCallId: "1",
+      state: "output-error",
+      input: {},
+      errorText: 'insert or update on table "loop_agent_avatars" violates foreign key constraint',
+    },
+  ] as never[]);
+
+  assert.equal(parts.length, 1);
+  assert.equal((parts[0] as { errorText?: string }).errorText, BUILDER_ISSUE_SUMMARY);
+});
+
 test("shouldShowBuilderThinking is false when assistant already has visible tool output", async () => {
   const { shouldShowBuilderThinking } = await import(
     "../../../dashboard/src/lib/loop-builder-transcript.ts"

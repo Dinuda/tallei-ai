@@ -1,4 +1,4 @@
-import type { LoopBuildContract, GroundingSourceRef } from "../loop-engine/build-contract.js";
+import type { AnyLoopBuildContract, GroundingSourceRef } from "../loop-engine/build-contract.js";
 import { selectedGroundingSources, selectedLoopTrigger } from "../loop-engine/build-contract.js";
 import { deriveRequiredConnectorActionsFromSpec } from "../loop-engine/spec-required-connectors.js";
 import type { NoSlopSpec } from "../loop-engine/spec-contracts.js";
@@ -21,7 +21,7 @@ function normalizeActionSlug(slug: string): string {
   return slug.replace(/-/g, "_").toUpperCase();
 }
 
-function selectedConnectorSlugs(contract: LoopBuildContract): VerificationTarget[] {
+function selectedConnectorSlugs(contract: AnyLoopBuildContract): VerificationTarget[] {
   const requirement = contract.requirements.find((entry) => entry.kind === "connector" && entry.status === "resolved");
   const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
     ? requirement.value as Record<string, unknown>
@@ -120,35 +120,39 @@ function classifyTarget(
 }
 
 function definitionSpecBody(definition: LoopDefinition): Pick<NoSlopSpec, "purpose" | "delivery" | "agents"> {
-  const noSlop = definition.builderMeta?.noSlopSpec?.specJson;
-  if (noSlop) {
+  const children = definition.agentGraph?.children ?? [];
+  if (children.length > 0) {
     return {
-      purpose: noSlop.purpose,
-      delivery: noSlop.delivery,
-      agents: noSlop.agents,
+      purpose: definition.goal,
+      delivery: {
+        provider: definition.delivery?.provider ?? definition.deliveryType ?? "none",
+        description: definition.delivery?.provider ?? "Dashboard only",
+      },
+      agents: children.map((agent) => ({
+        name: agent.name,
+        goal: agent.goal ?? agent.task,
+        tools: (agent.tools ?? []).map((tool) => (typeof tool === "string" ? tool : tool.ref)),
+        guardrails: agent.guardrails ?? [],
+        doneWhen: agent.doneCriteria ?? [],
+        failureModes: agent.failureModes ?? [],
+        handoffBindings: agent.handoffBindings ?? [],
+      })),
     };
   }
+
   return {
     purpose: definition.goal,
     delivery: {
       provider: definition.delivery?.provider ?? definition.deliveryType ?? "none",
       description: definition.delivery?.provider ?? "Dashboard only",
     },
-    agents: (definition.agentGraph?.children ?? []).map((agent) => ({
-      name: agent.name,
-      goal: agent.goal ?? agent.task,
-      tools: [],
-      guardrails: agent.guardrails ?? [],
-      doneWhen: agent.doneCriteria ?? [],
-      failureModes: agent.failureModes ?? [],
-      handoffBindings: [],
-    })),
+    agents: [],
   };
 }
 
 export function deriveVerificationScope(input: {
   definition: LoopDefinition;
-  buildContract: LoopBuildContract;
+  buildContract: AnyLoopBuildContract;
 }): VerificationTarget[] {
   const specBody = definitionSpecBody(input.definition);
 
@@ -212,7 +216,7 @@ function isWorkspaceScopedGroundingSource(source: GroundingSourceRef): boolean {
   return source.type === "workspace_memory" || source.type === "knowledge_base" || source.type === "google_doc";
 }
 
-export function deriveGroundingVerificationTargets(buildContract: LoopBuildContract): VerificationTarget[] {
+export function deriveGroundingVerificationTargets(buildContract: AnyLoopBuildContract): VerificationTarget[] {
   const sources = selectedGroundingSources(buildContract);
   if (sources.length === 0) return [];
   return sources.map((source) => ({
@@ -231,6 +235,6 @@ export const VERIFICATION_RUNTIME_TRANSPARENCY_NOTES = [
   "Connector dry-runs validate selected Composio actions and event triggers only.",
 ] as const;
 
-export function selectedConnectorSlugsFromContract(contract: LoopBuildContract): string[] {
+export function selectedConnectorSlugsFromContract(contract: AnyLoopBuildContract): string[] {
   return selectedConnectorSlugs(contract).map((target) => target.actionSlug);
 }

@@ -5,6 +5,13 @@ import {
   type UIMessage,
 } from "ai";
 
+import {
+  isBuilderUserFacingIssueText,
+  looksLikeTechnicalIssueText,
+  maskBuilderIssueText,
+  stripTechnicalLinesFromText,
+} from "./builder-issue-text";
+
 export type BuilderTranscriptTextContext = {
   text: string;
   partIndex: number;
@@ -21,7 +28,9 @@ export const BUILDER_TRANSCRIPT_TOOLS = new Set([
   "getAvailableTools",
   "interactivePrompt",
   "knowledgeBaseSetup",
+  "outputReviewGatesSetup",
   "requirementSetup",
+  "runBuilderTest",
   "saveLoop",
   "scheduleSetup",
 ]);
@@ -58,9 +67,29 @@ function readMessageText(message: UIMessage): string {
     .trim();
 }
 
+function sanitizeBuilderToolPart(part: UIMessage["parts"][number]): UIMessage["parts"][number] {
+  if (!isToolUIPart(part) || part.state !== "output-error") return part;
+  if (!("errorText" in part) || typeof part.errorText !== "string" || !part.errorText.trim()) {
+    return part;
+  }
+  return {
+    ...part,
+    errorText: maskBuilderIssueText(part.errorText, "tool-part"),
+  } as typeof part;
+}
+
 /** Keep narration in step order: reasoning → text → tool → text → tool. */
 export function prepareBuilderTranscriptParts(parts: UIMessage["parts"]): UIMessage["parts"] {
-  return coalesceAdjacentTextParts(parts);
+  const filtered = parts.flatMap((part) => {
+    if (part.type === "text") {
+      const sanitized = stripTechnicalLinesFromText(part.text ?? "", "transcript-part");
+      if (!sanitized) return [];
+      if (sanitized === part.text) return [part];
+      return [{ ...part, text: sanitized }];
+    }
+    return [sanitizeBuilderToolPart(part)];
+  });
+  return coalesceAdjacentTextParts(filtered);
 }
 
 function lastNonEmptyTextPartIndex(parts: UIMessage["parts"]): number {
@@ -107,6 +136,10 @@ export function shouldRenderBuilderTranscriptText(ctx: BuilderTranscriptTextCont
   const trimmed = ctx.text.trim();
   if (!trimmed) return false;
 
+  if (looksLikeTechnicalIssueText(trimmed) && !isBuilderUserFacingIssueText(trimmed)) {
+    return false;
+  }
+
   if (!messageHasBuilderTools(ctx.parts)) return true;
 
   const lastTextIndex = lastNonEmptyTextPartIndex(ctx.parts);
@@ -146,6 +179,7 @@ const PENDING_TOOL_NARRATION: Record<string, string> = {
   artifactSetup: "Review and confirm the reply templates for this loop.",
   connectorSetup: "Connect the apps this loop needs to work.",
   knowledgeBaseSetup: "Choose which knowledge sources this loop should use.",
+  outputReviewGatesSetup: "Choose when this loop should pause for your review.",
   scheduleSetup: "Choose when this loop should run.",
 };
 

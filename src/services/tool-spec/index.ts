@@ -1,6 +1,5 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { connectedAppToolkits, listConnectorAccounts } from "../connectors/composio.js";
-import type { NoSlopSpecSnapshot } from "../loop-engine/spec-contracts.js";
 import { INTERNAL_TOOL_SPECS } from "./internal-tools.js";
 import { generateComposioToolkitSpecs } from "./composio-tools.js";
 import { TOOL_USE_CASES } from "./use-cases.js";
@@ -127,51 +126,6 @@ export function addDiscoveredContractsToRegistry(
       ...registry.toolContracts.filter((contract) => !refs.has(contract.toolRef.toLowerCase())),
       ...contracts,
     ],
-  };
-}
-
-function approvedToolRefsForSpec(noSlopSpec: NoSlopSpecSnapshot): Set<string> {
-  const policy = noSlopSpec.specJson.connectorPolicy;
-  return new Set([
-    ...policy.allowedReadActions.map((action) => connectorActionToolRef(action)),
-    ...policy.allowedWriteActions.map((action) => connectorActionToolRef(action)),
-  ].map((ref) => ref.toLowerCase()));
-}
-
-/** Limit architect tool reference to spec-approved refs so the LLM cannot pick discovery noise. */
-export function filterToolSpecRegistryForSpec(
-  registry: ToolSpecRegistry,
-  noSlopSpec?: NoSlopSpecSnapshot,
-): ToolSpecRegistry {
-  if (!noSlopSpec) return registry;
-
-  const allowedRefs = approvedToolRefsForSpec(noSlopSpec);
-  const internalTools = registry.internalTools.filter((tool) => allowedRefs.has(tool.ref.toLowerCase()));
-  const composioToolkits = registry.composioToolkits
-    .map((toolkit) => {
-      const searchRef = `composio.${(toolkit.toolkit ?? toolkit.ref.replace(/^composio\./, "")).toLowerCase()}.search`;
-      const approvedActions = (toolkit.actions ?? []).filter((action) =>
-        action.contract ? allowedRefs.has(action.contract.toolRef.toLowerCase()) : false,
-      );
-      const includeSearch = allowedRefs.has(searchRef);
-      if (!includeSearch && approvedActions.length === 0) return null;
-      return {
-        ...toolkit,
-        actions: approvedActions,
-        contract: includeSearch ? toolkit.contract : undefined,
-      };
-    })
-    .filter((toolkit): toolkit is NonNullable<typeof toolkit> => Boolean(toolkit));
-
-  const toolContracts = registry.toolContracts.filter((contract) =>
-    allowedRefs.has(contract.toolRef.toLowerCase()),
-  );
-
-  return {
-    ...registry,
-    internalTools,
-    composioToolkits,
-    toolContracts,
   };
 }
 

@@ -2,18 +2,32 @@ import {
   selectedConnectorActionSlugs,
   selectedExternalDataToolkits,
   selectedGroundingSources,
+  selectedOutputReviewGatesMode,
   selectedReviewPolicy,
   type GroundingSourceRef,
+  type OutputReviewGatesMode,
   type ReviewPolicyMode,
 } from "../loop-engine/build-contract.js";
-import type { DataContract } from "../loop-engine/data-contract.js";
 import type { InputRequirement, InputSurface } from "../loop-engine/input-surfaces.js";
 import type { AgentPersona, NoSlopSpecAgent } from "../loop-engine/spec-contracts.js";
 import type { ToolContract, ToolRenderTarget } from "../tool-spec/types.js";
 import {
+  resolveAgentInputContract,
+  resolveAgentOutputContract,
+} from "./agent-contract-catalog.js";
+import {
   discoveredContractsFromDefinition,
   type SpecRunDefinition,
 } from "./spec-run-types.js";
+import { resolveBuildContract } from "./definition-hydration.js";
+import type { DataContract } from "../loop-engine/data-contract.js";
+import {
+  contractActionSlug,
+  isPlanReadTool,
+  isPlanWriteTool,
+  isSendLikeContract,
+  isWriteContract,
+} from "../loop-engine/tool-roles.js";
 
 export type RunPlanAgent = {
   id: string;
@@ -75,6 +89,7 @@ export type CompiledSpecRunPlan = {
   grounding: GroundingSourceRef[];
   externalDataToolkits: string[];
   reviewPolicy: ReviewPolicyMode | null;
+  outputReviewGatesMode: OutputReviewGatesMode;
   readTools: RunPlanTool[];
   writeTools: RunPlanTool[];
   reviewSurfaces: InputSurface[];
@@ -85,22 +100,6 @@ function contractToolkit(contract: ToolContract): string {
   if (typeof configured === "string" && configured.trim()) return configured.trim().toLowerCase();
   const match = contract.toolRef.match(/^composio\.([^.]+)\./i);
   return match?.[1]?.toLowerCase() ?? "";
-}
-
-function contractActionSlug(contract: ToolContract): string {
-  const configured = contract.constraints.actionSlug;
-  if (typeof configured === "string" && configured.trim()) return configured.trim();
-  return contract.toolRef.split(".").pop() ?? contract.name;
-}
-
-function isWriteContract(contract: ToolContract): boolean {
-  return contract.effect === "write_external" || contract.effect === "irreversible_external";
-}
-
-function isSendLikeContract(contract: ToolContract): boolean {
-  if (contract.skillTags.includes("send")) return true;
-  const text = `${contract.toolRef} ${contract.name} ${contract.description}`.toLowerCase();
-  return /\bsend|sent|publish|post\b/.test(text);
 }
 
 export function runPlanToolKey(contract: ToolContract): string {
@@ -127,7 +126,7 @@ function compileTool(contract: ToolContract): RunPlanTool {
 type PlanAgentSource = SpecRunDefinition["agentGraph"]["children"][number];
 
 function selectedContracts(definition: SpecRunDefinition): ToolContract[] {
-  const contract = definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract;
+  const contract = resolveBuildContract(definition);
   const discovered = discoveredContractsFromDefinition(definition);
   if (!contract) return [];
   const selectedSlugs = new Set(
@@ -214,25 +213,22 @@ function defaultOutputContract(agent: NoSlopSpecAgent | PlanAgentSource): DataCo
 }
 
 export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecRunPlan {
-  const buildContract = definition.buildContract ?? definition.builderMeta?.noSlopSpec?.buildContract ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract;
+  const buildContract = resolveBuildContract(definition);
   const reviewPolicy = buildContract ? selectedReviewPolicy(buildContract) : null;
+  const outputReviewGatesMode = buildContract ? selectedOutputReviewGatesMode(buildContract) : "none";
   const contracts = selectedContracts(definition);
   const readTools = contracts
-    .filter((contract) => contract.effect === "read_external")
+    .filter((contract) => isPlanReadTool(contract, reviewPolicy))
     .map(compileTool);
   const writeTools = contracts
-    .filter((contract) => {
-      if (!isWriteContract(contract)) return false;
-      if (reviewPolicy === "draft_only" && isSendLikeContract(contract)) return false;
-      return true;
-    })
+    .filter((contract) => isPlanWriteTool(contract, reviewPolicy))
     .map(compileTool);
   const allTools = [...readTools, ...writeTools];
   const externalDataToolkits = buildContract ? selectedExternalDataToolkits(buildContract) : [];
   const agents = (definition.agentGraph?.children ?? []).map((agent, index): RunPlanAgent => ({
     ...(() => {
       const id = agent.id;
-      const outputContract = agent.outputContract ?? defaultOutputContract(agent);
+      const outputContract = resolveAgentOutputContract(agent) ?? defaultOutputContract(agent);
       return {
         id,
         index,
@@ -244,7 +240,7 @@ export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecR
         doneCriteria: agent.doneCriteria ?? [],
         failureModes: agent.failureModes ?? [],
         toolRefs: declaredAgentToolRefs(agent, allTools),
-        inputContract: agent.inputContract ?? defaultInputContract(agent),
+        inputContract: agent.inputContract ?? resolveAgentInputContract(agent),
         outputContract,
         handoffBindings: agent.handoffBindings,
         gate: agent.gate,
@@ -262,6 +258,7 @@ export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecR
     grounding: buildContract ? selectedGroundingSources(buildContract) : [],
     externalDataToolkits,
     reviewPolicy,
+    outputReviewGatesMode,
     readTools,
     writeTools,
     reviewSurfaces: declaredReviewSurfaces(definition),

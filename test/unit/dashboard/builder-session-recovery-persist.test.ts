@@ -9,7 +9,11 @@ test("builderRunningCommandLabel describes saveLoop work", async () => {
   );
   assert.equal(
     builderRunningCommandLabel({ toolName: "saveLoop", status: "running" }),
-    "Saving and testing your loop…",
+    "Saving your loop...",
+  );
+  assert.equal(
+    builderRunningCommandLabel({ toolName: "runBuilderTest", status: "running" }),
+    "Running builder test...",
   );
 });
 

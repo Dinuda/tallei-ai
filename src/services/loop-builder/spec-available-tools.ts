@@ -5,6 +5,7 @@ import {
 } from "../loop-engine/build-contract.js";
 import type { NoSlopSpec } from "../loop-engine/spec-contracts.js";
 import type { ToolContract } from "../tool-spec/types.js";
+import { canonicalToolRef, connectorActionToolRef, normalizeToolRef } from "../tool-spec/tool-contracts.js";
 
 export type SpecAvailableTool = {
   toolRef: string;
@@ -87,8 +88,8 @@ export function availableToolsForSpecDraft(
   if (discoveredToolContracts.length === 0) {
     for (const selection of connectorSelections(buildContract)) {
       for (const actionSlug of selection.actionSlugs) {
-        const toolRef = `composio.${selection.toolkit}.action.${actionSlug}`;
-        if (tools.some((entry) => entry.toolRef === toolRef)) continue;
+        const toolRef = connectorActionToolRef({ toolkit: selection.toolkit, actionSlug });
+        if (tools.some((entry) => normalizeToolRef(entry.toolRef) === normalizeToolRef(toolRef))) continue;
         const isRead = /read|search|list|get|fetch|retrieve/i.test(actionSlug);
         tools.push({
           toolRef,
@@ -116,26 +117,66 @@ export function agentToolAssignmentIssues(
   availableTools: SpecAvailableTool[],
 ): string[] {
   const issues: string[] = [];
-  const availableRefs = new Set(availableTools.map((tool) => tool.toolRef));
+  const availableRefs = new Set(availableTools.map((tool) => normalizeToolRef(tool.toolRef)));
   const writeOwners = new Map<string, string>();
 
   for (const agent of spec.agents) {
     for (const rawRef of agent.tools ?? []) {
-      const ref = rawRef.trim();
+      const ref = canonicalToolRef(rawRef.trim());
       if (!ref) continue;
-      if (!availableRefs.has(ref)) {
+      if (!availableRefs.has(normalizeToolRef(ref))) {
         issues.push(`Agent "${agent.name}" declares unknown tool ref "${ref}". Use only refs from the available tools list.`);
       }
       if (isMutatingToolRef(ref, availableTools)) {
-        const owner = writeOwners.get(ref);
+        const ownerKey = normalizeToolRef(ref);
+        const owner = writeOwners.get(ownerKey);
         if (owner && owner !== agent.name) {
           issues.push(`Write tool "${ref}" is assigned to both "${owner}" and "${agent.name}". Each write tool must belong to exactly one agent.`);
         } else {
-          writeOwners.set(ref, agent.name);
+          writeOwners.set(ownerKey, agent.name);
         }
       }
     }
   }
 
   return issues;
+}
+
+const DELIVERY_ACTION_SLUGS = new Set([
+  "GMAIL_REPLY_TO_THREAD",
+  "GMAIL_SEND_EMAIL",
+  "GMAIL_SEND_DRAFT",
+]);
+
+function isDeliveryToolRef(ref: string): boolean {
+  const slug = ref.split(".").pop()?.replace(/-/g, "_").toUpperCase() ?? "";
+  if (DELIVERY_ACTION_SLUGS.has(slug)) return true;
+  return /\b(send|reply_to_thread)\b/i.test(ref);
+}
+
+export function agentGuardrailToolConflicts(spec: NoSlopSpec): string[] {
+  const issues: string[] = [];
+  for (const agent of spec.agents) {
+    const guardrails = (agent.guardrails ?? []).join(" ").toLowerCase();
+    const blocksOutbound = /do not draft or send|do not send outbound|never send/.test(guardrails);
+    if (!blocksOutbound) continue;
+    for (const ref of agent.tools ?? []) {
+      if (isDeliveryToolRef(ref.trim())) {
+        issues.push(`Agent "${agent.name}" guardrails forbid outbound actions but includes "${ref}".`);
+      }
+    }
+  }
+  return issues;
+}
+
+export function validateAgentToolAssignments(
+  spec: NoSlopSpec,
+  buildContract: LoopBuildContract,
+  discoveredToolContracts: ToolContract[] = [],
+): string[] {
+  const available = availableToolsForSpecDraft(buildContract, discoveredToolContracts);
+  return [
+    ...agentToolAssignmentIssues(spec, available),
+    ...agentGuardrailToolConflicts(spec),
+  ];
 }

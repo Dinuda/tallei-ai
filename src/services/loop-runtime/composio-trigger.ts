@@ -2,6 +2,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { selectedLoopTrigger } from "../loop-engine/build-contract.js";
 import { getLoopWorkflow } from "../loop-executor/creator.js";
+import { resolveBuildContract } from "./definition-hydration.js";
 import { enqueueLoopRunCommand } from "./spec-run-commands.js";
 import { resolveLoopRunAuth } from "./resolve-loop-run-auth.js";
 import { createSpecLoopRun } from "./spec-runner.js";
@@ -39,10 +40,7 @@ export async function getWorkflowTriggerActivity(
   const workflow = await getLoopWorkflow(auth, workflowId);
   if (!workflow) throw new Error("Loop workflow not found");
 
-  const buildContract = workflow.definition?.buildContract
-    ?? workflow.definition?.builderMeta?.noSlopSpec?.buildContract
-    ?? workflow.definition?.builderMeta?.noSlopSpec?.specJson?.buildContract
-    ?? null;
+  const buildContract = workflow.definition ? resolveBuildContract(workflow.definition) : null;
   const selected = buildContract ? selectedLoopTrigger(buildContract) : null;
   const mode = selected?.mode === "event" ? "event" : selected?.mode === "schedule" ? "schedule" : "none";
 

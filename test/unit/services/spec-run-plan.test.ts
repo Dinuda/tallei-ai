@@ -121,48 +121,6 @@ function buildSpec(reviewMode: "draft_only" | "approve_each_action" = "approve_e
       templates: [],
       structure: "Priority and draft reply",
     },
-    noSlopSpec: {
-      id: "spec-1",
-      slug: "support-monitor",
-      title: "Support monitor",
-      version: 1,
-      bodyMarkdown: "",
-      approvedAt: "2026-06-18T00:00:00.000Z",
-      buildContract,
-      specJson: {
-        purpose: "Monitor support and draft replies",
-        agents: [
-          {
-            name: "Context Reader",
-            goal: "Read context, search history, and collect source facts.",
-            tools: ["internal.memory_search", "composio.crm.search", "composio.mail.action.READ_TICKETS"],
-            guardrails: [],
-            doneWhen: ["Ticket context is ready."],
-            failureModes: [],
-          },
-          {
-            name: "Draft Writer",
-            goal: "Draft reply, create the draft artifact, and request approval for writes.",
-            tools: ["composio.mail.action.CREATE_DRAFT", "composio.mail.action.SEND_MESSAGE"],
-            guardrails: ["Do not send directly."],
-            doneWhen: ["Draft is ready for review."],
-            failureModes: [],
-          },
-        ],
-        guardrails: [],
-        successCriteria: [],
-        failureModes: [],
-        delivery: { provider: "mail", description: "Create reviewed replies." },
-        schedule: { description: "Hourly" },
-        connectorPolicy: { allowedReadActions: [], allowedWriteActions: [] },
-        inputRequirements: [
-          { key: "team_tone", surface: "input.text", label: "Tone", required: true, when: "run_start" },
-          { key: "draft_review", surface: "review.email", required: true, when: "before_send" },
-          { key: "source_review", surface: "review.sources", required: true, when: "before_step" },
-        ],
-        buildContract,
-      },
-    },
     agentGraph: {
       parent: {
         id: "orchestrator",
@@ -224,15 +182,13 @@ test("compileSpecRunPlan keeps mutating tools approval-only and honors draft-onl
   const plan = compileSpecRunPlan(buildSpec("draft_only"));
 
   assert.ok(plan.writeTools.some((entry) => entry.actionSlug === "CREATE_DRAFT"));
-  assert.ok(!plan.writeTools.some((entry) => entry.actionSlug === "SEND_MESSAGE"));
+  assert.ok(plan.writeTools.some((entry) => entry.actionSlug === "SEND_MESSAGE"));
   assert.ok(plan.writeTools.every((entry) => entry.requiresApproval));
 });
 
 test("compileSpecRunPlan does not expose connector tools without build-contract selections", () => {
   const spec = buildSpec();
   spec.buildContract = undefined;
-  spec.noSlopSpec.buildContract = undefined;
-  spec.noSlopSpec.specJson.buildContract = undefined;
 
   const plan = compileSpecRunPlan(spec);
 
@@ -333,7 +289,7 @@ test("compileSpecRunPlan uses declared agent tools when present", () => {
 test("declaredAgentToolRefs uses only spec-declared tools when tools array is empty", () => {
   const spec = buildSpec();
   const plan = compileSpecRunPlan(spec);
-  const agent = { ...spec.noSlopSpec.specJson.agents[0]!, tools: [] };
+  const agent = { ...spec.agentGraph.children[0]!, tools: [] };
   const refs = declaredAgentToolRefs(agent, plan.readTools.concat(plan.writeTools));
   assert.deepEqual(refs, ["internal.llm_only"]);
 });

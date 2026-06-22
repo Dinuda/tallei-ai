@@ -1,6 +1,7 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { compileSpecRunPlan } from "./spec-run-plan.js";
+import { resolveBuildContract } from "./definition-hydration.js";
 import { getSpecRunProjection } from "./spec-runner.js";
 import {
   buildOperatorViewFromInteraction,
@@ -267,11 +268,21 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
   const currentStepIndex = steps.findIndex((step) =>
     step.status === "running" || step.status === "waiting_for_interaction");
 
-  const noSlop = specRun.loopDefinition.builderMeta?.noSlopSpec?.specJson;
-  const buildContract = specRun.loopDefinition.buildContract
-    ?? specRun.loopDefinition.builderMeta?.noSlopSpec?.buildContract
-    ?? noSlop?.buildContract
-    ?? null;
+  const buildContract = resolveBuildContract(specRun.loopDefinition);
+  const specId = specRun.loopDefinition.builderMeta?.specId ?? null;
+  const agents = (specRun.loopDefinition.agentGraph?.children ?? []).map((agent) => ({
+    id: agent.id,
+    name: agent.name,
+    goal: agent.goal ?? agent.task,
+    tools: agent.tools ?? [],
+    persona: agent.persona,
+    gate: agent.gate,
+    outputContract: agent.outputContract,
+    artifactRole: agent.artifactRole,
+    guardrails: agent.guardrails ?? [],
+    doneCriteria: agent.doneCriteria ?? [],
+    failureModes: agent.failureModes ?? [],
+  }));
 
   return {
     id: specRun.id,
@@ -293,7 +304,8 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
       triggerLabel: specRun.triggerLabel,
       builderSessionId: specRun.builderSessionId,
       buildContract,
-      noSlopSpec: noSlop ?? null,
+      specId,
+      agents,
       artifacts: [],
     },
     definition: {

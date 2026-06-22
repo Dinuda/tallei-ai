@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compileRunnerSpecFromBuildContract } from "../../../src/services/loop-builder/runner-spec-compiler.js";
+import { buildRunnerSpecFromBuildContract, specAtomicityIssues } from "../../../src/services/loop-builder/specs.js";
 import { validateContractData } from "../../../src/services/loop-engine/data-contract.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
 
@@ -103,12 +103,39 @@ function buildContract(reviewMode: "draft_only" | "approve_each_action" | "appro
         validationErrors: [],
         warnings: [],
       },
+      {
+        id: "output_review_gates",
+        kind: "output_review_gates" as const,
+        question: "Output review gates",
+        reason: "Opt-in pauses",
+        required: true,
+        allowNone: false,
+        valueSchema: {},
+        status: "resolved" as const,
+        value: { mode: "review_drafts" as const },
+        validationErrors: [],
+        warnings: [],
+      },
     ],
   };
 }
 
-test("compileRunnerSpecFromBuildContract builds finalizeAgent-ready agents without LLM", () => {
-  const spec = compileRunnerSpecFromBuildContract({
+function buildContractWithOutputGates(
+  gatesMode: "automatic" | "review_drafts" | "review_drafts_and_send",
+  reviewMode: "draft_only" | "approve_each_action" | "approve_batch" = "approve_each_action",
+) {
+  return {
+    ...buildContract(reviewMode),
+    requirements: buildContract(reviewMode).requirements.map((req) =>
+      req.kind === "output_review_gates"
+        ? { ...req, value: { mode: gatesMode } }
+        : req,
+    ),
+  };
+}
+
+test("buildRunnerSpecFromBuildContract builds finalizeAgent-ready agents without LLM", () => {
+  const spec = buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract(),
     discoveredToolContracts: [
@@ -140,6 +167,10 @@ test("compileRunnerSpecFromBuildContract builds finalizeAgent-ready agents witho
   });
 
   assert.equal(spec.agents.length, 3);
+  assert.equal(spec.agents[1]?.gate?.type, "draft_review");
+  assert.equal(spec.agents[2]?.gate, undefined);
+  assert.equal(spec.inputRequirements.some((req) => req.key === "draft_review"), false);
+  assert.equal(spec.inputRequirements.some((req) => req.key === "source_review"), false);
   assert.ok(spec.agents.every((agent) => agent.outputContract));
   assert.equal(spec.agents[0]?.artifactRole, "source_evidence");
   assert.equal(spec.agents[0]?.outputContract?.visibility, "internal");
@@ -147,15 +178,15 @@ test("compileRunnerSpecFromBuildContract builds finalizeAgent-ready agents witho
   assert.match(spec.agents[0]?.guardrails.join("\n") ?? "", /Do not draft or send outbound messages/);
   assert.equal(spec.agents[1]?.artifactRole, "draft_body");
   assert.equal(spec.agents[1]?.outputContract?.renderer, "canvas.email");
-  assert.ok(spec.agents[1]?.gate);
+  assert.equal(spec.agents[1]?.gate?.type, "draft_review");
   assert.equal(spec.delivery.provider, "gmail");
   assert.doesNotMatch(spec.delivery.provider, /GMAIL_CREATE_EMAIL_DRAFT|gmail_create_email_draft/i);
   assert.match(spec.purpose, /Monitor Gmail/);
-  assert.equal(spec.buildContract?.requirements.length, 4);
+  assert.equal(spec.buildContract, undefined);
 });
 
-test("compiled Context Specialist contract supports ticket and no-ticket outcomes", () => {
-  const spec = compileRunnerSpecFromBuildContract({
+test("built Context Specialist contract supports ticket and no-ticket outcomes", () => {
+  const spec = buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract(),
     discoveredToolContracts: [
@@ -198,8 +229,8 @@ test("compiled Context Specialist contract supports ticket and no-ticket outcome
   if (!missingTicket.valid) assert.match(missingTicket.reason, /ticket/);
 });
 
-test("compileRunnerSpecFromBuildContract keeps delivery provider behavioral", () => {
-  const spec = compileRunnerSpecFromBuildContract({
+test("buildRunnerSpecFromBuildContract keeps delivery provider behavioral", () => {
+  const spec = buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract(),
     discoveredToolContracts: [
@@ -212,8 +243,8 @@ test("compileRunnerSpecFromBuildContract keeps delivery provider behavioral", ()
   assert.equal(spec.agents.at(-1)?.tools[0], "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT");
 });
 
-test("compileRunnerSpecFromBuildContract omits agent gates for draft_only review policy", () => {
-  const spec = compileRunnerSpecFromBuildContract({
+test("buildRunnerSpecFromBuildContract keeps builder-time gates for draft_only review policy", () => {
+  const spec = buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract("draft_only"),
     discoveredToolContracts: [
@@ -224,14 +255,81 @@ test("compileRunnerSpecFromBuildContract omits agent gates for draft_only review
   });
 
   assert.equal(spec.agents.length, 2);
-  assert.equal(spec.agents[1]?.gate, undefined);
+  assert.equal(spec.agents[1]?.gate?.type, "draft_review");
   assert.equal(spec.inputRequirements.some((req) => req.key === "draft_review"), false);
   assert.equal(spec.inputRequirements.some((req) => req.key === "confirm_send"), false);
 });
 
-test("compileRunnerSpecFromBuildContract completes quickly for preview path", () => {
+test("buildRunnerSpecFromBuildContract routes mutating tools to delivery agent", () => {
+  const spec = buildRunnerSpecFromBuildContract({
+    prompt: "Reply to Gmail support tickets",
+    buildContract: {
+      ...buildContract(),
+      requirements: buildContract().requirements.map((req) =>
+        req.kind === "connector"
+          ? {
+              ...req,
+              value: {
+                selections: [{
+                  toolkit: "gmail",
+                  accounts: [{ id: accountId }],
+          actionSlugs: ["GMAIL_FETCH_EMAILS", "GMAIL_CREATE_EMAIL_DRAFT", "GMAIL_SEND_EMAIL"],
+                }],
+              },
+            }
+          : req,
+      ),
+    },
+    discoveredToolContracts: [
+      contract("GMAIL_FETCH_EMAILS", "read_external", ["retrieve"]),
+      contract("GMAIL_CREATE_EMAIL_DRAFT", "write_external", ["draft", "create"]),
+      contract("GMAIL_SEND_EMAIL", "irreversible_external", ["send"]),
+    ],
+  });
+
+  const contextAgent = spec.agents.find((agent) => agent.artifactRole === "source_evidence");
+  const deliveryAgent = spec.agents.find((agent) => agent.artifactRole === "delivery");
+  assert.ok(contextAgent);
+  assert.ok(deliveryAgent);
+  assert.ok(contextAgent.tools.some((ref) => ref.includes("GMAIL_FETCH_EMAILS")));
+  assert.ok(!contextAgent.tools.some((ref) => ref.includes("GMAIL_CREATE_EMAIL_DRAFT")));
+  assert.ok(deliveryAgent.tools.some((ref) => ref.includes("GMAIL_CREATE_EMAIL_DRAFT")));
+  assert.ok(deliveryAgent.tools.some((ref) => ref.includes("GMAIL_SEND_EMAIL")));
+});
+
+test("buildRunnerSpecFromBuildContract adds gates from explicit output review modes only", () => {
+  const contracts = [
+    contract("GMAIL_FETCH_EMAILS", "read_external", ["retrieve"]),
+    contract("GMAIL_CREATE_EMAIL_DRAFT", "write_external", ["draft", "create"]),
+    contract("GMAIL_SEND_EMAIL", "irreversible_external", ["send"]),
+  ];
+  const legacyAutomatic = buildRunnerSpecFromBuildContract({
+    prompt: "Handle Gmail support tickets",
+    buildContract: buildContractWithOutputGates("automatic"),
+    discoveredToolContracts: contracts,
+  });
+  assert.ok(legacyAutomatic.agents.every((agent) => !agent.gate));
+
+  const draftReview = buildRunnerSpecFromBuildContract({
+    prompt: "Handle Gmail support tickets",
+    buildContract: buildContractWithOutputGates("review_drafts"),
+    discoveredToolContracts: contracts,
+  });
+  assert.equal(draftReview.agents[1]?.gate?.type, "draft_review");
+  assert.equal(draftReview.agents[2]?.gate, undefined);
+
+  const withGates = buildRunnerSpecFromBuildContract({
+    prompt: "Handle Gmail support tickets",
+    buildContract: buildContractWithOutputGates("review_drafts_and_send"),
+    discoveredToolContracts: contracts,
+  });
+  assert.equal(withGates.agents[1]?.gate?.type, "draft_review");
+  assert.equal(withGates.agents[2]?.gate?.type, "pre_send");
+});
+
+test("buildRunnerSpecFromBuildContract completes quickly for preview path", () => {
   const started = performance.now();
-  compileRunnerSpecFromBuildContract({
+  buildRunnerSpecFromBuildContract({
     prompt: "Quick compile",
     buildContract: buildContract(),
     discoveredToolContracts: [
@@ -240,4 +338,38 @@ test("compileRunnerSpecFromBuildContract completes quickly for preview path", ()
     ],
   });
   assert.ok(performance.now() - started < 50);
+});
+
+test("specAtomicityIssues flags agents that mix connector tools with llm synthesis", () => {
+  const issues = specAtomicityIssues({
+    agents: [
+      {
+        name: "Mixed Agent",
+        goal: "Read Gmail and synthesize a reply.",
+        tools: ["composio.gmail.action.GMAIL_FETCH_EMAILS", "internal.llm_only"],
+        guardrails: [],
+        doneWhen: ["Done"],
+        doneCriteria: ["Done"],
+        failureModes: [],
+        inputContract: { description: "Input", schema: {} },
+        outputContract: { description: "Output", schema: {}, representation: "text" },
+        handoffBindings: [],
+      },
+      {
+        name: "Synthesis Agent",
+        goal: "Synthesize.",
+        tools: ["internal.llm_only"],
+        guardrails: [],
+        doneWhen: ["Done"],
+        doneCriteria: ["Done"],
+        failureModes: [],
+        inputContract: { description: "Input", schema: {} },
+        outputContract: { description: "Output", schema: {}, representation: "text" },
+        handoffBindings: [],
+      },
+    ],
+  });
+
+  assert.equal(issues.length, 1);
+  assert.match(issues[0] ?? "", /Mixed Agent/);
 });

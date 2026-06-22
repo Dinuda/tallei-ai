@@ -7,15 +7,21 @@ import {
   isToolUIPart,
   type UIMessage,
 } from "ai";
-import { Bot, BrainIcon, CheckCircle2, Circle, PauseCircle, XCircle } from "lucide-react";
+import { Bot, BrainIcon, CheckCircle2, ChevronDownIcon, Circle, PauseCircle, XCircle } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { AgentPersonaAvatar } from "@/components/agent-persona/agent-persona-avatar";
+import { roleBadgeClass } from "@/components/agent-persona/agent-persona";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { type AgentPersonaUi } from "@/components/agent-persona/agent-persona";
 import { builderFallbackNarration, prepareBuilderTranscriptParts } from "@/lib/loop-builder-transcript";
 import { MessageResponse } from "@/components/ai-elements/message";
-import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Shimmer } from "@/components/ai-elements/shimmer";
-import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
+import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, IssueNotice, type ToolPart } from "@/components/ai-elements/tool";
 
 export type DataAgentPartData = {
   agentId?: string;
@@ -82,8 +88,8 @@ export function isDataAgentPart(
 
 export function CollapsibleTool({ part, children }: { part: ToolPart; children: ReactNode }) {
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined);
-  const isCompleted = part.state === "output-available";
-  const open = isCompleted ? (userOpen ?? false) : (userOpen ?? true);
+  const isSettled = part.state === "output-available" || part.state === "output-error";
+  const open = isSettled ? (userOpen ?? false) : (userOpen ?? true);
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen === open) return;
@@ -97,35 +103,33 @@ export function CollapsibleTool({ part, children }: { part: ToolPart; children: 
   );
 }
 
-/** Stateless reasoning row for builder transcript — avoids Radix Collapsible update loops. */
-function ExpandedReasoningBlock({
+/** Builder reasoning stays collapsed unless the user expands it. */
+function BuilderReasoningNotice({
   text,
   isStreaming,
 }: {
   text: string;
   isStreaming: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   const trimmed = text.trim();
   if (!trimmed && !isStreaming) return null;
 
   return (
-    <div className="not-prose mb-4">
-      <div className="flex w-full items-center gap-2 text-sm text-muted-foreground">
+    <Collapsible className="not-prose mb-4" onOpenChange={setOpen} open={open}>
+      <CollapsibleTrigger className="flex w-full items-center gap-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground">
         <BrainIcon className="size-4 shrink-0" />
-        <span className="min-w-0 flex-1 text-left">
-          {isStreaming ? (
-            <Shimmer duration={1}>Thinking...</Shimmer>
-          ) : (
-            "Thought for a few seconds"
-          )}
+        <span className="min-w-0 flex-1">
+          {isStreaming ? <Shimmer duration={1}>Thinking...</Shimmer> : "Thought for a few seconds"}
         </span>
-      </div>
+        <ChevronDownIcon className={cn("size-4 shrink-0 transition-transform", open && "rotate-180")} />
+      </CollapsibleTrigger>
       {trimmed ? (
-        <div className="mt-4 text-sm text-muted-foreground">
+        <CollapsibleContent className="mt-3 text-sm text-muted-foreground">
           <MessageResponse isAnimating={isStreaming}>{text}</MessageResponse>
-        </div>
+        </CollapsibleContent>
       ) : null}
-    </div>
+    </Collapsible>
   );
 }
 
@@ -151,24 +155,40 @@ export function AgentTurnHeader({ data }: { data: DataAgentPartData }) {
           : PauseCircle;
 
   return (
-    <div className="mb-4 flex items-center gap-4 border border-[#e5e7eb] bg-white px-4 py-3.5">
-      <div className="grid size-12 shrink-0 place-items-center border border-[#e5e7eb] bg-[#fafafa] text-[#6b7280]">
-        <Bot className="size-4" strokeWidth={2} />
-      </div>
+    <div className="mb-3 flex items-start gap-3">
+      {persona ? (
+        <AgentPersonaAvatar persona={persona} size="sm" />
+      ) : (
+        <div className="grid size-9 shrink-0 place-items-center rounded-full border border-[#e4f5c6] bg-[#f8fdf2] text-[#6b7280]">
+          <Bot className="size-4" strokeWidth={2} />
+        </div>
+      )}
       <div className="min-w-0 flex-1">
-        <p className="truncate text-[15px] font-semibold text-[#111827]">{displayName}</p>
-        {typeof data.stepIndex === "number" ? (
-          <p className="mt-0.5 text-[13px] font-medium text-[#6b7280]">
-            Agent {data.stepIndex + 1}
-          </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {typeof data.stepIndex === "number" ? (
+            <span className="text-[11px] font-semibold text-[#7a9a4a]">{data.stepIndex + 1}.</span>
+          ) : null}
+          <p className="truncate text-[14px] font-semibold text-[#182506]">{displayName}</p>
+          {persona?.roleLabel ? (
+            <span className={cn(
+              "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+              roleBadgeClass(persona.roleKey),
+            )}
+            >
+              {persona.roleLabel}
+            </span>
+          ) : null}
+          {statusText ? (
+            <span className="inline-flex shrink-0 items-center gap-1.5 text-[12px] font-medium text-[#6b7280]">
+              <StatusIcon className="size-3.5" strokeWidth={2} />
+              {statusText}
+            </span>
+          ) : null}
+        </div>
+        {data.task ? (
+          <p className="mt-1 text-[13px] leading-5 text-[#6b7280]">{data.task}</p>
         ) : null}
       </div>
-      {statusText ? (
-        <span className="inline-flex shrink-0 items-center gap-2 text-[13px] font-medium text-[#6b7280]">
-          <StatusIcon className="size-4" strokeWidth={2} />
-          {statusText}
-        </span>
-      ) : null}
     </div>
   );
 }
@@ -178,6 +198,10 @@ function defaultShouldRenderText(ctx: ShouldRenderTextContext): boolean {
 }
 
 export function renderGenericToolPart(part: ToolPart, index: number): ReactNode {
+  if (part.state === "output-error") {
+    return <IssueNotice key={index} />;
+  }
+
   return (
     <CollapsibleTool key={index} part={part}>
       {part.type === "dynamic-tool"
@@ -232,26 +256,12 @@ export function renderMessagePart(
     const reasoningStreaming = part.state === "streaming" && Boolean(ctx.isStreaming);
     if (ctx.transcriptVariant === "run") return null;
     if (!reasoningText.trim() && !reasoningStreaming) return null;
-    if (ctx.expandReasoning) {
-      return (
-        <ExpandedReasoningBlock
-          isStreaming={reasoningStreaming}
-          key={key}
-          text={reasoningText}
-        />
-      );
-    }
     return (
-      <Reasoning
-        autoClose
+      <BuilderReasoningNotice
         isStreaming={reasoningStreaming}
         key={key}
-      >
-        <ReasoningTrigger />
-        <ReasoningContent isAnimating={reasoningStreaming}>
-          {reasoningText}
-        </ReasoningContent>
-      </Reasoning>
+        text={reasoningText}
+      />
     );
   }
 

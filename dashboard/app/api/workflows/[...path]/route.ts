@@ -104,12 +104,23 @@ async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT" | "PATCH" 
   if (workspaceId) headers["X-Workspace-Id"] = workspaceId;
 
   try {
-    const body = method === "GET" ? undefined : JSON.stringify(await req.json().catch(() => ({})));
-    const res = await fetchWithTimeout(target.toString(), {
-      method,
-      headers,
-      body,
-    });
+    const isStreamingChat = method === "POST" && path.endsWith("/run/chat");
+    const body = method === "GET" ? undefined : isStreamingChat
+      ? await req.text()
+      : JSON.stringify(await req.json().catch(() => ({})));
+
+    const res = isStreamingChat
+      ? await fetch(target.toString(), { method, headers, body })
+      : await fetchWithTimeout(target.toString(), { method, headers, body });
+
+    if (isStreamingChat) {
+      return new Response(res.body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      });
+    }
+
     const data = await safeJson(res);
     return Response.json(data, { status: res.status });
   } catch (error) {

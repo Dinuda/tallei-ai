@@ -4,7 +4,6 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { reportLoopBuilderProgress } from "./progress.js";
 import { enrichSpecAgentsWithPersonas } from "./agent-persona-enrichment.js";
-import { compileRunnerSpecFromBuildContract } from "./runner-spec-compiler.js";
 import {
   noSlopSpecDraftSchema,
   noSlopSpecSchema,
@@ -15,10 +14,30 @@ import {
   type NoSlopSpecStatus,
 } from "../loop-engine/spec-contracts.js";
 import { loopIntentContextSchema, type LoopIntentContext } from "../loop-engine/intent-context.js";
-import { loopBuildContractSchema, selectedExternalDataToolkits, selectedGroundingSources, type LoopBuildContract } from "../loop-engine/build-contract.js";
+import {
+  loopBuildContractSchema,
+  selectedArtifactContract,
+  selectedExternalDataToolkits,
+  selectedGroundingSources,
+  selectedLoopTrigger,
+  selectedOutputReviewGatesMode,
+  selectedReviewPolicy,
+  selectedStableInputs,
+  type LoopBuildContract,
+} from "../loop-engine/build-contract.js";
 import { normalizeProviderIdentity } from "../loop-engine/spec-required-connectors.js";
 import { listComposioToolkits } from "../connectors/composio.js";
+import { validateAgentToolAssignments } from "./spec-available-tools.js";
 import type { ToolContract } from "../tool-spec/types.js";
+import { availableToolsForSpecDraft, type SpecAvailableTool } from "./spec-available-tools.js";
+import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
+import {
+  catalogInputContract,
+  defaultHandoffBinding,
+  deliveryOutputContract,
+  draftOutputContract,
+  evidenceOutputContract,
+} from "../loop-runtime/agent-contract-catalog.js";
 
 export type LoopSpecView = {
   id: string;
@@ -166,6 +185,48 @@ export async function compileEnrichedRuntimeSpecSnapshot(input: {
   });
 }
 
+/** Persist an approved runtime snapshot so avatar rows can reference loop_specs(id). */
+export async function persistApprovedLoopSpecSnapshot(
+  auth: AuthContext,
+  snapshot: NoSlopSpecSnapshot,
+): Promise<void> {
+  const parsed = noSlopSpecSnapshotSchema.parse(snapshot);
+  const sourcePrompt = parsed.intentContext?.resolvedIntent?.trim()
+    || parsed.specJson.purpose.trim()
+    || parsed.title;
+  await pool.query(
+    `INSERT INTO loop_specs
+       (id, tenant_id, user_id, slug, title, status, version, source_prompt, body_markdown, spec_json, intent_context_json, approved_at, approved_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, 'approved', $6, $7, $8, $9::jsonb, $10::jsonb, $11::timestamptz, $12)
+     ON CONFLICT (id) DO UPDATE
+       SET slug = EXCLUDED.slug,
+           title = EXCLUDED.title,
+           status = 'approved',
+           version = EXCLUDED.version,
+           source_prompt = EXCLUDED.source_prompt,
+           body_markdown = EXCLUDED.body_markdown,
+           spec_json = EXCLUDED.spec_json,
+           intent_context_json = EXCLUDED.intent_context_json,
+           approved_at = EXCLUDED.approved_at,
+           approved_by_user_id = EXCLUDED.approved_by_user_id,
+           updated_at = NOW()`,
+    [
+      parsed.id,
+      auth.tenantId,
+      auth.userId,
+      parsed.slug,
+      parsed.title,
+      parsed.version,
+      sourcePrompt,
+      parsed.bodyMarkdown,
+      JSON.stringify(parsed.specJson),
+      parsed.intentContext ? JSON.stringify(parsed.intentContext) : null,
+      parsed.approvedAt,
+      auth.userId,
+    ],
+  );
+}
+
 export function compileRuntimeSpecSnapshot(input: {
   prompt: string;
   intentContext?: LoopIntentContext;
@@ -181,7 +242,7 @@ export function compileRuntimeSpecSnapshot(input: {
     message: "Building runtime agent contract from approved configuration…",
     status: "running",
   });
-  const specJson = normalizeGeneratedSpec(compileRunnerSpecFromBuildContract({
+  const specJson = normalizeGeneratedSpec(buildRunnerSpecFromBuildContract({
     prompt,
     intentContext,
     buildContract,
@@ -234,6 +295,213 @@ async function explicitAvailableProvider(intent: string): Promise<string> {
 
 export function normalizeBehavioralSpec(spec: NoSlopSpec): NoSlopSpec {
   return spec;
+}
+
+function deriveInputRequirements(buildContract: LoopBuildContract): NoSlopSpec["inputRequirements"] {
+  const requirements: NoSlopSpec["inputRequirements"] = [];
+  for (const [name, value] of Object.entries(selectedStableInputs(buildContract))) {
+    requirements.push({
+      key: name,
+      surface: "input.text",
+      label: name.replace(/_/g, " "),
+      required: true,
+      when: "run_start",
+      description: value,
+    });
+  }
+  return requirements;
+}
+
+function scheduleDescription(buildContract: LoopBuildContract): { description: string; cron?: string; timezone?: string } {
+  const trigger = selectedLoopTrigger(buildContract);
+  if (trigger?.mode === "schedule") {
+    return {
+      description: `Approved schedule: ${trigger.cron} (${trigger.timezone})`,
+      cron: trigger.cron,
+      timezone: trigger.timezone,
+    };
+  }
+  if (trigger?.mode === "event") {
+    return { description: `Event-triggered via ${trigger.toolkit}:${trigger.triggerSlug}` };
+  }
+  return { description: "Runs on the approved trigger." };
+}
+
+function deliveryFromTools(sendTools: SpecAvailableTool[]): NoSlopSpec["delivery"] {
+  const sendTool = sendTools[0];
+  if (!sendTool) {
+    return { provider: "none", description: "Dashboard only; no outbound delivery." };
+  }
+  const parsed = parseConnectorActionToolRef(sendTool.toolRef);
+  const provider = parsed?.toolkit ?? sendTool.toolRef.replace(/^composio\.([^.]+)\.action\..+$/i, "$1");
+  return {
+    provider,
+    description: `Deliver through ${sendTool.name}.`,
+  };
+}
+
+export function buildRunnerSpecFromBuildContract(input: {
+  prompt: string;
+  intentContext?: LoopIntentContext;
+  buildContract: LoopBuildContract;
+  discoveredToolContracts?: ToolContract[];
+  feedback?: string;
+}): NoSlopSpec {
+  const buildContract = input.buildContract;
+  const availableTools = availableToolsForSpecDraft(buildContract, input.discoveredToolContracts ?? []);
+  const reviewPolicy = selectedReviewPolicy(buildContract) ?? "approve_each_action";
+  const outputReviewGates = selectedOutputReviewGatesMode(buildContract);
+  const wantsDraftReview = outputReviewGates === "review_drafts" || outputReviewGates === "review_drafts_and_send";
+  const wantsPreSend = outputReviewGates === "review_drafts_and_send";
+  const artifact = selectedArtifactContract(buildContract);
+  const groundingSources = selectedGroundingSources(buildContract);
+  const externalSearchToolkits = selectedExternalDataToolkits(buildContract);
+
+  const connectorTools = availableTools.filter((tool) => !tool.toolRef.startsWith("internal."));
+  const intakeTools = connectorTools.filter((tool) => tool.effect === "read_external");
+  const mutatingTools = connectorTools.filter((tool) => tool.effect === "write_external" || tool.effect === "irreversible_external");
+
+  const searchTools: string[] = [];
+  if (groundingSources.some((source) => source.type === "tallei_memory" || source.type === "workspace_memory")) {
+    searchTools.push("internal.memory_search");
+  }
+  for (const toolkit of externalSearchToolkits) {
+    const ref = `composio.${toolkit}.search`;
+    if (!searchTools.includes(ref)) searchTools.push(ref);
+  }
+
+  const intakeToolRefs = [...new Set([
+    ...intakeTools.map((tool) => tool.toolRef),
+    ...searchTools,
+  ])];
+  const draftRenderer = artifact?.mode === "supplied_template" ? "canvas.email" : "canvas.preview";
+  const draftToolRefs = reviewPolicy === "draft_only" && mutatingTools.length > 0
+    ? mutatingTools.map((tool) => tool.toolRef)
+    : ["internal.llm_only"];
+  const deliveryToolRefs = reviewPolicy === "draft_only"
+    ? []
+    : mutatingTools.map((tool) => tool.toolRef);
+
+  const purposeBase = input.intentContext?.resolvedIntent?.trim() || input.prompt.trim();
+  const purpose = input.feedback?.trim()
+    ? `${purposeBase}\n\nRefinement: ${input.feedback.trim()}`
+    : purposeBase;
+
+  const agents: NoSlopSpec["agents"] = [];
+  const agentIds: string[] = [];
+
+  if (intakeToolRefs.length > 0) {
+    const name = "Context Specialist";
+    const agentId = "context_specialist";
+    agentIds.push(agentId);
+    agents.push({
+      name,
+      goal: "Gather trigger context, search connected sources, and produce structured evidence for downstream agents.",
+      tools: intakeToolRefs,
+      guardrails: ["Use only approved read and search tools.", "Do not draft or send outbound messages."],
+      doneWhen: ["Structured evidence is ready for the next agent."],
+      doneCriteria: ["Evidence matches the intake output contract."],
+      failureModes: ["Pause for operator input when required context is missing."],
+      inputContract: catalogInputContract("Trigger payload and stable configuration."),
+      outputContract: evidenceOutputContract(),
+      handoffBindings: [],
+      artifactRole: "source_evidence",
+    });
+  }
+
+  const draftAgentId = "draft_specialist";
+  const priorAgentId = agentIds.at(-1);
+  agentIds.push(draftAgentId);
+  agents.push({
+    name: "Draft Specialist",
+    goal: artifact?.structure?.trim()
+      ? `Produce the approved artifact: ${artifact.structure.trim()}`
+      : "Produce the operator-reviewable draft defined by the output contract.",
+    tools: draftToolRefs,
+    guardrails: ["Use finalizeAgent output that matches the declared output contract.", "Do not send or publish directly unless this agent owns delivery tools."],
+    doneWhen: ["Draft output matches the declared contract, or status is no_action_required when upstream evidence has no actionable item."],
+    doneCriteria: ["Output is ready for operator review or downstream delivery, unless status is no_action_required."],
+    failureModes: ["Pause when required upstream evidence is missing."],
+    inputContract: catalogInputContract(priorAgentId ? "Evidence from the prior agent." : "Trigger payload and stable configuration."),
+    outputContract: draftOutputContract(draftRenderer),
+    handoffBindings: priorAgentId ? [defaultHandoffBinding(priorAgentId)] : [],
+    artifactRole: draftRenderer === "canvas.email" ? "draft_body" : "final_preview",
+    ...(wantsDraftReview ? {
+      gate: {
+        type: draftRenderer === "canvas.email" ? "draft_review" as const : "preview_review" as const,
+        question: draftRenderer === "canvas.email"
+          ? "Review the email draft before continuing."
+          : "Review the draft before continuing.",
+      },
+    } : {}),
+  });
+
+  if (deliveryToolRefs.length > 0) {
+    const name = "Delivery Specialist";
+    const agentId = "delivery_specialist";
+    const priorDeliveryAgentId = agentIds.at(-1);
+    agentIds.push(agentId);
+    agents.push({
+      name,
+      goal: "Deliver the approved output from upstream. Use requestApproval before any mutating connector action.",
+      tools: deliveryToolRefs,
+      guardrails: ["Use requestApproval before any mutating external action.", "Do not execute mutating connector actions without operator approval."],
+      doneWhen: ["Delivery package is ready for operator confirmation."],
+      doneCriteria: ["Delivery output matches the declared contract."],
+      failureModes: ["Pause when upstream draft or approval is missing."],
+      inputContract: catalogInputContract(priorDeliveryAgentId ? "Approved draft from the prior agent." : "Trigger payload and stable configuration."),
+      outputContract: deliveryOutputContract(),
+      handoffBindings: priorDeliveryAgentId ? [defaultHandoffBinding(priorDeliveryAgentId)] : [],
+      artifactRole: "delivery",
+      ...(wantsPreSend ? {
+        gate: {
+          type: "pre_send" as const,
+          question: "Confirm delivery before sending.",
+        },
+      } : {}),
+    });
+  }
+
+  const schedule = scheduleDescription(buildContract);
+  const outcome = input.intentContext?.analysis.normalizedIntent.outcome ?? purpose;
+
+  return noSlopSpecDraftSchema.parse({
+    purpose,
+    agents,
+    guardrails: [
+      "Use finalizeAgent for structured step output; do not narrate tool calls in prose.",
+      "Mutating external actions require operator approval gates.",
+    ],
+    successCriteria: [outcome],
+    failureModes: [
+      "Pause for operator input when required context is missing.",
+      "Do not proceed after a failed connector probe or missing approval.",
+    ],
+    schedule,
+    delivery: deliveryFromTools(reviewPolicy === "draft_only" ? [] : availableTools.filter((tool) =>
+      tool.effect === "write_external" || tool.effect === "irreversible_external",
+    )),
+    connectorPolicy: {
+      allowedReadActions: [],
+      allowedWriteActions: [],
+    },
+    inputRequirements: deriveInputRequirements(buildContract),
+  });
+}
+
+export function specAtomicityIssues(spec: Pick<NoSlopSpec, "agents">): string[] {
+  const issues: string[] = [];
+  for (const agent of spec.agents) {
+    const tools = agent.tools ?? [];
+    const hasLlmOnly = tools.includes("internal.llm_only");
+    const hasConnectorTool = tools.some((tool) => tool.startsWith("composio."));
+    if (hasLlmOnly && hasConnectorTool) {
+      issues.push(
+        `${agent.name} mixes connector tools with internal.llm_only; split read/action work from synthesis before runtime execution.`,
+      );
+    }
+  }
+  return issues;
 }
 
 function normalizeGeneratedSpec(input: NoSlopSpec): NoSlopSpec {
@@ -373,13 +641,13 @@ export async function draftLoopSpec(input: {
     message: "Building runner contract from approved configuration…",
     status: "running",
   });
-  const specJson = compileRunnerSpecFromBuildContract({
+  const specJson = buildRunnerSpecFromBuildContract({
     prompt,
     intentContext,
     buildContract,
     discoveredToolContracts: input.discoveredToolContracts ?? [],
   });
-  return persistGeneratedLoopSpec({ auth: input.auth, prompt, intentContext, specJson });
+  return persistGeneratedLoopSpec({ auth: input.auth, prompt, intentContext, specJson, buildContract });
 }
 
 async function persistGeneratedLoopSpec(input: {
@@ -387,11 +655,15 @@ async function persistGeneratedLoopSpec(input: {
   prompt: string;
   intentContext?: LoopIntentContext;
   specJson: NoSlopSpec;
+  buildContract?: LoopBuildContract;
 }): Promise<LoopSpecView> {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error("Prompt is required");
   const intentContext = input.intentContext ? loopIntentContextSchema.parse(input.intentContext) : undefined;
-  const specJson = normalizeGeneratedSpec(noSlopSpecDraftSchema.parse(input.specJson));
+  const specJson = normalizeGeneratedSpec(noSlopSpecDraftSchema.parse({
+    ...input.specJson,
+    ...(input.buildContract ? { buildContract: input.buildContract } : {}),
+  }));
   const title = titleFromPurpose(specJson.purpose);
   const slug = slugify(title);
   const bodyMarkdown = renderSpecMarkdown(specJson);
@@ -475,7 +747,7 @@ export async function refineLoopSpec(input: {
     message: "Rebuilding runner contract from approved configuration…",
     status: "running",
   });
-  const specJson = compileRunnerSpecFromBuildContract({
+  const specJson = buildRunnerSpecFromBuildContract({
     prompt: current.sourcePrompt,
     intentContext: current.intentContext,
     buildContract: current.specJson.buildContract,
@@ -511,6 +783,7 @@ export async function approveLoopSpec(input: {
   specId: string;
   bodyMarkdown?: string;
   specJson?: unknown;
+  discoveredToolContracts?: ToolContract[];
 }): Promise<LoopSpecView> {
   const current = await getLoopSpec(input.auth, input.specId);
   if (!current || current.status === "archived") throw new Error("Loop spec not found");
@@ -527,6 +800,18 @@ export async function approveLoopSpec(input: {
     intent: current.intentContext?.resolvedIntent ?? current.sourcePrompt,
     validateSemantics: true,
   });
+  const buildContract = parsedSpec.buildContract;
+  if (!buildContract) {
+    throw new Error("Spec is missing build contract metadata required for approval.");
+  }
+  const toolIssues = validateAgentToolAssignments(
+    parsedSpec,
+    buildContract,
+    input.discoveredToolContracts ?? [],
+  );
+  if (toolIssues.length > 0) {
+    throw new Error(`Spec has invalid agent tool assignments: ${toolIssues.join("; ")}`);
+  }
   const bodyMarkdown = renderSpecMarkdown(parsedSpec);
 
   const result = await pool.query<LoopSpecRow>(

@@ -4,6 +4,14 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { dicebearDylanUrl } from "./agent-personas.js";
 
+export async function loopSpecExists(auth: AuthContext, specId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM loop_specs WHERE id = $1 AND tenant_id = $2 AND user_id = $3 LIMIT 1`,
+    [specId, auth.tenantId, auth.userId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export type AgentAvatarView = {
   id: string;
   seed: string;

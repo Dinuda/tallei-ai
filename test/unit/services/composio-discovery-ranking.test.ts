@@ -51,7 +51,7 @@ test("interleaveDiscoveredTools round-robins per-action result sets", () => {
   ], 2);
 
   assert.deepEqual(merged.map((tool) => tool.contract.toolRef), [
-    "composio.gmail.action.gmail_list_messages",
-    "composio.gmail.action.gmail_send_email",
+    "composio.gmail.action.GMAIL_LIST_MESSAGES",
+    "composio.gmail.action.GMAIL_SEND_EMAIL",
   ]);
 });

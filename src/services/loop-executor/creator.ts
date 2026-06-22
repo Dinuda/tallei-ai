@@ -63,6 +63,33 @@ type LatestRunRow = {
   updated_at: string;
 };
 
+export function buildLoopDefinition(input: unknown): LoopDefinition {
+  const row = input && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const schedule = row.schedule && typeof row.schedule === "object" && !Array.isArray(row.schedule)
+    ? row.schedule as Record<string, unknown>
+    : {
+      cron: row.cron,
+      timezone: row.timezone,
+    };
+  return loopDefinitionSchema.parse({
+    definitionVersion: LOOP_DEFINITION_VERSION,
+    ...row,
+    goal: row.goal ?? row.task,
+    schedule,
+    operatorInteractionPlan: row.operatorInteractionPlan && typeof row.operatorInteractionPlan === "object" && !Array.isArray(row.operatorInteractionPlan)
+      ? {
+        items: Array.isArray((row.operatorInteractionPlan as Record<string, unknown>).items)
+          ? (row.operatorInteractionPlan as Record<string, unknown>).items
+          : Array.isArray((row.operatorInteractionPlan as Record<string, unknown>).interactions)
+            ? (row.operatorInteractionPlan as Record<string, unknown>).interactions
+            : [],
+      }
+      : row.operatorInteractionPlan,
+  });
+}
+
 function parseLatestRunFromRow(row: LatestRunRow | undefined): LoopWorkflowView["latestRun"] {
   if (!row) return null;
   const context = row.context_json && typeof row.context_json === "object" && !Array.isArray(row.context_json)
@@ -113,7 +140,7 @@ export async function createLoopFromDefinition(input: {
   await requireLoopAdmin(input.auth);
   const parsed = loopDefinitionSchema.parse(input.definition);
   const workflowId = randomUUID();
-  const title = input.title?.trim() || parsed.builderMeta?.noSlopSpec?.title || "Untitled loop";
+  const title = input.title?.trim() || parsed.goal?.trim() || "Untitled loop";
   const cron = normalizeDesignCron(parsed.schedule.cron, parsed.goal);
   const fingerprint = createHash("sha256")
     .update(`${LOOP_DEFINITION_VERSION}:${parsed.goal}:${cron}:${title}`)

@@ -8,6 +8,7 @@ import {
   selectedConnectorAccountId,
   selectedConnectorAccountIds,
   selectedLoopTrigger,
+  type AnyLoopBuildContract,
   type LoopBuildContract,
 } from "../loop-engine/build-contract.js";
 import {
@@ -15,6 +16,7 @@ import {
   validateConnectorActionOutput,
 } from "../loop-runtime/connector-action-payload.js";
 import { nextCronRunAt } from "./cron.js";
+import { hydrateDefinitionForExecution, resolveBuildContract, resolveDiscoveredToolContracts } from "../loop-runtime/definition-hydration.js";
 import { parseLoopDefinition } from "../loop-runtime/spec-run-types.js";
 import type { LoopDefinition } from "./types.js";
 import { scheduleTriggerLabel } from "../loop-runtime/spec-runner.js";
@@ -135,7 +137,7 @@ async function runDryRunProbe(input: {
   verificationId: string;
   target: VerificationTarget;
   contract: ToolContract;
-  buildContract: LoopBuildContract;
+  buildContract: AnyLoopBuildContract;
   definition: LoopDefinition;
   chainState: Record<string, unknown>;
 }): Promise<{ ok: boolean; detail: string; payloadSummary: string; chainPatch: Record<string, unknown> }> {
@@ -195,7 +197,7 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
   }
 
   let definitionFailure: string | null = null;
-  let workflowBuildContract: LoopBuildContract | null = null;
+  let workflowBuildContract: import("../loop-engine/build-contract.js").AnyLoopBuildContract | null = null;
   let definition: LoopDefinition | null = null;
   let builderSessionId: string | null = null;
   let definitionDiscoveredToolContracts: ToolContract[] = [];
@@ -205,12 +207,10 @@ export async function runWorkflowVerification(auth: AuthContext, workflowId: str
       : {};
     definition = parseLoopDefinition(metadata);
     if (!definition) throw new Error("Workflow is missing a loop definition. Re-save from the loop builder.");
-    workflowBuildContract = definition.buildContract
-      ?? definition.builderMeta?.noSlopSpec?.buildContract
-      ?? definition.builderMeta?.noSlopSpec?.specJson.buildContract
-      ?? null;
+    definition = await hydrateDefinitionForExecution(auth, workflowId, definition);
+    workflowBuildContract = resolveBuildContract(definition);
     builderSessionId = definition.builderMeta?.workflowBuilderSessionId ?? null;
-    definitionDiscoveredToolContracts = (definition.builderMeta?.discoveredToolContracts ?? []) as unknown as ToolContract[];
+    definitionDiscoveredToolContracts = resolveDiscoveredToolContracts(definition);
     if (!workflowBuildContract) throw new Error("Loop definition is missing build contract metadata.");
     assertBuildContractReady(workflowBuildContract);
   } catch (error) {
@@ -597,9 +597,7 @@ export async function confirmWorkflowVerification(auth: AuthContext, workflowId:
     ? snapshot.metadata_json as Record<string, unknown>
     : {};
   const definition = parseLoopDefinition(metadata);
-  const buildContract = definition?.buildContract
-    ?? definition?.builderMeta?.noSlopSpec?.buildContract
-    ?? definition?.builderMeta?.noSlopSpec?.specJson.buildContract;
+  const buildContract = definition ? resolveBuildContract(definition) : null;
   if (!buildContract) throw new Error("Workflow is missing a loop build contract. Re-save from the loop builder.");
   const selectedTrigger = buildContract ? selectedLoopTrigger(buildContract) : null;
   const registeredTrigger = selectedTrigger?.mode === "event"
