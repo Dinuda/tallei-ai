@@ -443,9 +443,9 @@ export function buildRunnerSpecFromBuildContract(input: {
     agentIds.push(agentId);
     agents.push({
       name,
-      goal: "Deliver the approved output from upstream. Use requestApproval before any mutating connector action.",
+      goal: "Deliver the approved output from upstream. Use requestGate type=action before any mutating connector action.",
       tools: deliveryToolRefs,
-      guardrails: ["Use requestApproval before any mutating external action.", "Do not execute mutating connector actions without operator approval."],
+      guardrails: ["Use requestGate type=action before any mutating external action.", "Do not execute mutating connector actions without operator approval."],
       doneWhen: ["Delivery package is ready for operator confirmation."],
       doneCriteria: ["Delivery output matches the declared contract."],
       failureModes: ["Pause when upstream draft or approval is missing."],

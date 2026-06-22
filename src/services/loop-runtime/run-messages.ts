@@ -13,7 +13,7 @@ function isReasoningLikePart(part: UIMessage["parts"][number]): boolean {
   return part.type === "reasoning" || part.type.startsWith("reasoning-");
 }
 
-const GATE_TOOL_NAMES = new Set(["requestReview", "requestApproval", "requestInput"]);
+const GATE_TOOL_NAMES = new Set(["requestGate", "requestReview", "requestApproval", "requestInput"]);
 
 function stepHasRenderableOutput(parts: UIMessage["parts"]): boolean {
   return parts.some((part) => {

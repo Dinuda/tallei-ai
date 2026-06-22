@@ -60,7 +60,7 @@ export function shouldContinueRunStream(input: {
   if (latest.length === 0) return false;
 
   if (latest.some((step) => step.status === "waiting_for_interaction")) return false;
-  if (latest.some((step) => step.status === "running")) return true;
+  if (latest.some((step) => step.status === "queued")) return true;
 
   const succeeded = latest.filter((step) => step.status === "succeeded").length;
   return succeeded > 0 && succeeded < input.totalAgents;

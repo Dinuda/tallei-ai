@@ -5,8 +5,19 @@ import { decryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.
 
 const RESEND_URL = "https://api.resend.com/emails";
 const REQUEST_TIMEOUT_MS = 8_000;
+const VERIFICATION_SINK_SUFFIXES = [".local", ".invalid"];
+const VERIFICATION_SINK_ADDRESSES = new Set(["verifier@test.local"]);
 function dryRunId(prefix) {
     return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+function isVerificationSinkAddress(address) {
+    const normalized = address.trim().toLowerCase();
+    if (!normalized) return false;
+    if (VERIFICATION_SINK_ADDRESSES.has(normalized)) return true;
+    const atIndex = normalized.lastIndexOf("@");
+    if (atIndex < 0) return false;
+    const domain = normalized.slice(atIndex + 1);
+    return VERIFICATION_SINK_SUFFIXES.some((suffix) => domain.endsWith(suffix));
 }
 async function resolveConnectorResendCredentials(auth) {
     const result = await pool.query(`SELECT metadata_json
@@ -119,6 +130,10 @@ export async function sendResendEmail(input) {
     if (!config.notificationsOutboundEmailEnabled) {
         console.info(`[notifications] outbound email dry-run: ${input.subject} -> ${input.to}`);
         return { ok: true, status: 202, id: dryRunId("dry_email") };
+    }
+    if (isVerificationSinkAddress(input.to)) {
+        console.info(`[notifications] verification sink email skipped: ${input.subject} -> ${input.to}`);
+        return { ok: true, status: 202, id: dryRunId("skipped_email") };
     }
     const creds = await resolveResendCredentials(input.auth);
     if (!creds) {

@@ -13,9 +13,7 @@ import { resolveBuildContract } from "./definition-hydration.js";
 import { SpecRunInteractionRequiredError } from "./spec-run-agent-errors.js";
 import { emitRunEvent } from "./spec-run-agent-events.js";
 import {
-  createSpecRunApprovalInteraction,
-  createSpecRunInputInteraction,
-  createSpecRunReviewInteraction,
+  createSpecRunGateInteraction,
   type DeferredWriteToolCall,
 } from "./spec-run-interaction-writer.js";
 import {
@@ -334,124 +332,160 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
     });
   }
 
-  if (agentCanRequestInput(input.plan, input.agent)) {
-    tools.requestInput = tool({
-      description: "Create a first-class operator input surface for explicitly declared missing runtime data only. Use only input.* surfaces (e.g. input.text). For draft/artifact review use configured gates or requestReview instead.",
-      inputSchema: z.object({
-        surface: dataInputSurfaceSchema,
-        key: z.string().min(1),
-        label: z.string().optional(),
-        description: z.string().optional(),
-      }),
-      execute: async ({ surface, key, label, description }) => {
-        const interactionId = await createSpecRunInputInteraction({
-          auth: input.auth,
-          runId: input.runId,
-          stepAttemptId: input.stepAttemptId,
-          agentId: input.agent.id,
-          agentName: input.agent.name,
-          stepIndex: input.agent.index,
-          surface,
-          key,
-          label,
-          description,
-        });
-        await markAgentStepWaiting({
-          auth: input.auth,
-          runId: input.runId,
-          stepAttemptId: input.stepAttemptId,
-          interactionId,
-          eventType: "interaction_requested",
-          payload: { toolKey: "requestInput", surface, key },
-        });
-        return pauseForInteraction(input.stepAttemptId, interactionId);
-      },
-    });
-  }
-
   const writeToolsForAgent = agentWriteTools(input.plan, input.agent);
-  if (writeToolsForAgent.length > 0 && !input.agent.gate) {
-    tools.requestReview = tool({
-      description: "Create a first-class operator artifact review surface. Use review.* or confirm.send surfaces only — never use requestInput for review surfaces.",
-      inputSchema: z.object({
-        surface: reviewSurfaceSchema,
-        artifactKey: z.string().min(1),
-        // LLMs occasionally JSON-stringify the object before passing it — accept both.
-        artifactData: z.union([
-          z.record(z.unknown()),
-          z.string().transform((raw, ctx) => {
-            try { return JSON.parse(raw) as Record<string, unknown>; } catch {
-              ctx.addIssue({ code: z.ZodIssueCode.custom, message: "artifactData string is not valid JSON" });
-              return z.NEVER;
-            }
-          }),
-        ]),
-        rationale: z.string().optional(),
-      }),
-      execute: async ({ surface, artifactKey, artifactData, rationale }) => {
-        const interactionId = await createSpecRunReviewInteraction({
-          auth: input.auth,
-          runId: input.runId,
-          stepAttemptId: input.stepAttemptId,
-          agentId: input.agent.id,
-          agentName: input.agent.name,
-          stepIndex: input.agent.index,
-          surface,
-          artifactKey,
-          artifactData,
-          rationale,
+  const canRequestGate = agentCanRequestInput(input.plan, input.agent) || writeToolsForAgent.length > 0;
+  if (canRequestGate) {
+    const requestGateSchema = z.object({
+      type: z.enum(["input", "review", "action"]),
+      surface: z.string().optional(),
+      key: z.string().optional(),
+      label: z.string().optional(),
+      description: z.string().optional(),
+      artifactKey: z.string().optional(),
+      artifactData: z.union([
+        z.record(z.unknown()),
+        z.string().transform((raw, ctx) => {
+          try { return JSON.parse(raw) as Record<string, unknown>; } catch {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, message: "artifactData string is not valid JSON" });
+            return z.NEVER;
+          }
+        }),
+      ]).optional(),
+      rationale: z.string().optional(),
+      actionRef: z.string().optional(),
+      payload: z.record(z.unknown()).optional(),
+    }).superRefine((value, ctx) => {
+      if (value.type === "input") {
+        const surface = dataInputSurfaceSchema.safeParse(value.surface);
+        if (!surface.success) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["surface"],
+            message: "Input gate requires an input.* surface.",
+          });
+        }
+        if (!value.key) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["key"], message: "Input gate requires key." });
+        }
+        return;
+      }
+      if (value.type === "review") {
+        const surface = reviewSurfaceSchema.safeParse(value.surface);
+        if (!surface.success) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["surface"],
+            message: "Review gate requires a review.* or confirm.send surface.",
+          });
+        }
+        if (!value.artifactKey) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["artifactKey"], message: "Review gate requires artifactKey." });
+        }
+        if (!value.artifactData) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["artifactData"], message: "Review gate requires artifactData." });
+        }
+        return;
+      }
+      if (!value.actionRef) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["actionRef"], message: "Action gate requires actionRef." });
+        return;
+      }
+      if (!value.payload) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["payload"], message: "Action gate requires payload." });
+        return;
+      }
+      const writeTool = selectedWriteTool(input.plan, value.actionRef, input.agent);
+      if (!writeTool) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["actionRef"],
+          message: `Action is not allowed for agent ${input.agent.name}: ${value.actionRef}`,
         });
-        await markAgentStepWaiting({
-          auth: input.auth,
-          runId: input.runId,
-          stepAttemptId: input.stepAttemptId,
-          interactionId,
-          eventType: "interaction_requested",
-          payload: { toolKey: "requestReview", surface, artifactKey },
+        return;
+      }
+      try {
+        prepareConnectorActionPayload({
+          actionSlug: writeTool.actionSlug,
+          inputSchema: writeTool.contract.inputSchema,
+          payload: value.payload,
+          runContext: input.runContext,
+          resolvedHandoff: input.resolvedHandoff,
         });
-        return pauseForInteraction(input.stepAttemptId, interactionId);
-      },
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["payload"],
+          message: error instanceof Error ? error.message : "Connector payload failed schema validation",
+        });
+      }
     });
-  }
 
-  if (writeToolsForAgent.length > 0) {
-    tools.requestApproval = tool({
+    tools.requestGate = tool({
       description: [
-        "Create a first-class approval interaction for a mutating connector action. The action is executed server-side only after approval.",
-        "The payload must match the selected actionRef connector schema exactly.",
+        "Create one first-class operator gate for missing input, artifact review, or approval of a mutating connector action.",
+        "Use type=input only for declared input.* surfaces.",
+        "Use type=review for review.* or confirm.send artifact review surfaces.",
+        "Use type=action for mutating connector actions; the action executes server-side only after approval.",
       ].join(" "),
-      inputSchema: z.object({
-        actionRef: z.string().min(1),
-        payload: z.record(z.unknown()),
-        rationale: z.string().optional(),
-        artifactKey: z.string().optional(),
-      }).superRefine((value, ctx) => {
-        const writeTool = selectedWriteTool(input.plan, value.actionRef, input.agent);
-        if (!writeTool) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["actionRef"],
-            message: `Action is not allowed for agent ${input.agent.name}: ${value.actionRef}`,
+      inputSchema: requestGateSchema,
+      execute: async (gateInput) => {
+        if (gateInput.type === "input") {
+          const surface = dataInputSurfaceSchema.parse(gateInput.surface);
+          const key = z.string().min(1).parse(gateInput.key);
+          const interactionId = await createSpecRunGateInteraction({
+            gateType: "input",
+            auth: input.auth,
+            runId: input.runId,
+            stepAttemptId: input.stepAttemptId,
+            agentId: input.agent.id,
+            agentName: input.agent.name,
+            stepIndex: input.agent.index,
+            surface,
+            key,
+            label: gateInput.label,
+            description: gateInput.description,
           });
-          return;
+          await markAgentStepWaiting({
+            auth: input.auth,
+            runId: input.runId,
+            stepAttemptId: input.stepAttemptId,
+            interactionId,
+            eventType: "interaction_requested",
+            payload: { toolKey: "requestGate", gateType: "input", surface, key },
+          });
+          return pauseForInteraction(input.stepAttemptId, interactionId);
         }
-        try {
-          prepareConnectorActionPayload({
-            actionSlug: writeTool.actionSlug,
-            inputSchema: writeTool.contract.inputSchema,
-            payload: value.payload as Record<string, unknown>,
-            runContext: input.runContext,
-            resolvedHandoff: input.resolvedHandoff,
+
+        if (gateInput.type === "review") {
+          const surface = reviewSurfaceSchema.parse(gateInput.surface);
+          const artifactKey = z.string().min(1).parse(gateInput.artifactKey);
+          const artifactData = z.record(z.unknown()).parse(gateInput.artifactData);
+          const interactionId = await createSpecRunGateInteraction({
+            gateType: "review",
+            auth: input.auth,
+            runId: input.runId,
+            stepAttemptId: input.stepAttemptId,
+            agentId: input.agent.id,
+            agentName: input.agent.name,
+            stepIndex: input.agent.index,
+            surface,
+            artifactKey,
+            artifactData,
+            rationale: gateInput.rationale,
           });
-        } catch (error) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["payload"],
-            message: error instanceof Error ? error.message : "Connector payload failed schema validation",
+          await markAgentStepWaiting({
+            auth: input.auth,
+            runId: input.runId,
+            stepAttemptId: input.stepAttemptId,
+            interactionId,
+            eventType: "interaction_requested",
+            payload: { toolKey: "requestGate", gateType: "review", surface, artifactKey },
           });
+          return pauseForInteraction(input.stepAttemptId, interactionId);
         }
-      }),
-      execute: async ({ actionRef, payload, rationale, artifactKey }) => {
+
+        const actionRef = z.string().min(1).parse(gateInput.actionRef);
+        const payload = z.record(z.unknown()).parse(gateInput.payload);
         const writeTool = selectedWriteTool(input.plan, actionRef, input.agent);
         if (!writeTool) {
           throw new Error(`Action is not allowed for agent ${input.agent.name}: ${actionRef}`);
@@ -459,7 +493,7 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
         const enriched = prepareConnectorActionPayload({
           actionSlug: writeTool.actionSlug,
           inputSchema: writeTool.contract.inputSchema,
-          payload: payload as Record<string, unknown>,
+          payload,
           runContext: input.runContext,
           resolvedHandoff: input.resolvedHandoff,
         });
@@ -470,7 +504,7 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
           isSendAction: writeTool.isSendLike || writeTool.effect === "irreversible_external",
           actionRef: writeTool.toolRef,
           payload: enriched,
-          rationale,
+          rationale: gateInput.rationale,
         };
         const approvalGrant = await approvalGrantCoversAction({
           auth: input.auth,
@@ -507,7 +541,8 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
             },
           });
         }
-        const interactionId = await createSpecRunApprovalInteraction({
+        const interactionId = await createSpecRunGateInteraction({
+          gateType: "action",
           auth: input.auth,
           runId: input.runId,
           stepAttemptId: input.stepAttemptId,
@@ -516,15 +551,15 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
           stepIndex: input.agent.index,
           toolKey: writeTool.toolKey,
           deferred,
-          artifactKey,
+          artifactKey: gateInput.artifactKey,
         });
         await markAgentStepWaiting({
           auth: input.auth,
           runId: input.runId,
           stepAttemptId: input.stepAttemptId,
           interactionId,
-          eventType: "approval_requested",
-          payload: { toolKey: "requestApproval", actionRef: writeTool.toolRef, artifactKey },
+          eventType: "gate_requested",
+          payload: { toolKey: "requestGate", gateType: "action", actionRef: writeTool.toolRef, artifactKey: gateInput.artifactKey },
         });
         return pauseForInteraction(input.stepAttemptId, interactionId);
       },

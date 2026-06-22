@@ -143,3 +143,110 @@ test("gmail drafts-only scope marks create/get draft critical and contacts optio
     ["GMAIL_CREATE_EMAIL_DRAFT", "GMAIL_GET_CONTACTS", "GMAIL_GET_DRAFT", "GMAIL_LIST_DRAFTS"].sort(),
   );
 });
+
+test("gmail send actions are visibility-only during verification", () => {
+  const localContracts: ToolContract[] = [
+    {
+      toolRef: "composio.gmail.action.GMAIL_SEND_EMAIL",
+      provider: "composio",
+      name: "GMAIL_SEND_EMAIL",
+      description: "GMAIL_SEND_EMAIL",
+      skillTags: [],
+      effect: "write_external",
+      resources: ["gmail"],
+      inputSchema: { type: "object", properties: {} },
+      outputSchema: { type: "object" },
+      executionMode: "short_circuit",
+      approval: { required: false },
+      renderRecommendations: [],
+      constraints: { toolkit: "gmail", actionSlug: "GMAIL_SEND_EMAIL", connected: true },
+      source: "composio_sdk",
+    },
+  ];
+
+  let buildContract = deriveLoopBuildContract({
+    intentContext: intent,
+    discoveredToolContracts: localContracts,
+    now: "2026-06-15T00:00:00.000Z",
+  });
+  buildContract = resolveBuildRequirement({
+    contract: buildContract,
+    requirementId: "trigger_schedule",
+    value: { trigger: "schedule", cron: "0 9 * * *", timezone: "UTC" },
+    discoveredToolContracts: localContracts,
+  });
+  buildContract = resolveBuildRequirement({
+    contract: buildContract,
+    requirementId: "grounding",
+    value: { mode: "none" },
+    discoveredToolContracts: localContracts,
+  });
+  buildContract = resolveBuildRequirement({
+    contract: buildContract,
+    requirementId: "artifact_contract",
+    value: {
+      mode: "supplied_template",
+      template: JSON.stringify({
+        templates: [{
+          id: "t1",
+          name: "Acknowledgment",
+          templateId: "acknowledgment",
+          subject: "We received your request",
+          html: "<p>Thanks</p>",
+        }],
+      }),
+    },
+    discoveredToolContracts: localContracts,
+  });
+  buildContract = resolveBuildRequirement({
+    contract: buildContract,
+    requirementId: "connector_selection",
+    value: {
+      selections: [{
+        toolkit: "gmail",
+        actionSlugs: ["GMAIL_SEND_EMAIL"],
+        accounts: [{ id: "11111111-1111-4111-8111-111111111111" }],
+      }],
+    },
+    discoveredToolContracts: localContracts,
+  });
+
+  const scope = deriveVerificationScope({
+    buildContract,
+    definition: {
+      definitionVersion: "loop_executor_v2",
+      goal: "Send Gmail replies for support tickets",
+      schedule: { cron: "0 9 * * *", timezone: "UTC" },
+      schedulerTarget: "internal",
+      allowedIntegrations: ["internal"],
+      ceo: { name: "CEO", task: "Send Gmail replies for support tickets", policy: "Send Gmail replies for support tickets" },
+      draftPolicy: { requireDraftBeforeExternalAction: true, approvalRequiredFor: ["publish", "send", "external_action"] },
+      deliveryType: "composio.gmail.action.GMAIL_SEND_EMAIL",
+      agentGraph: {
+        parent: { id: "root", name: "CEO", task: "Send Gmail replies for support tickets", policy: "Send Gmail replies for support tickets" },
+        children: [{
+          id: "sender",
+          name: "Sender",
+          task: "Send approved Gmail replies",
+          goal: "Send approved Gmail replies",
+          tools: [],
+          doneCriteria: ["Reply sent"],
+        }],
+      },
+      builderMeta: {
+        designedBy: "loop_architect",
+        preApproved: true,
+        discoveredToolContracts: [],
+      },
+    } as any,
+  });
+
+  assert.deepEqual(scope, [
+    {
+      toolkit: "gmail",
+      actionSlug: "GMAIL_SEND_EMAIL",
+      role: "critical",
+      probeKind: "visibility_only",
+    },
+  ]);
+});

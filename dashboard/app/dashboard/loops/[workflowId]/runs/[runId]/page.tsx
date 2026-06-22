@@ -223,6 +223,13 @@ function isSpecDrivenRun(run: RunProjection | null | undefined): boolean {
 function isSpecRunnerStep(step: StepAttempt): boolean {
   return step.agent_id === "spec_runner" || step.id.endsWith(":spec-runner");
 }
+
+function resolveVisibleInteraction(interactions: Interaction[] | undefined): Interaction | null {
+  const items = interactions ?? [];
+  return items.find((gate) => gate.status === "pending")
+    ?? [...items].reverse().find((gate) => gate.status === "submitted")
+    ?? null;
+}
 const currencyFormatter = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const numberFormatter = new Intl.NumberFormat("en-US");
 const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
@@ -1532,7 +1539,7 @@ export default function StableLoopRunPage() {
       || (artifact.kind !== "structured_output" && !artifact.data_json?.artifactEnvelope)),
     [latestArtifacts],
   );
-  const pendingInteraction = useMemo(() => (run?.interactions ?? []).find((gate) => gate.status === "pending") ?? null, [run?.interactions]);
+  const pendingInteraction = useMemo(() => resolveVisibleInteraction(run?.interactions), [run?.interactions]);
   const operatorView = run?.operatorView ?? null;
   const contactsUploadGate = useMemo(
     () => resolveContactsUploadGate(run?.interactions, pendingInteraction),

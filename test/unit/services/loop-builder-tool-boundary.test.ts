@@ -17,6 +17,7 @@ const artifactStudioPath = new URL("../../../dashboard/src/components/email-arti
 const builderArtifactEditorPath = new URL("../../../dashboard/src/components/builder-artifact-editor.tsx", import.meta.url);
 const triggerWebhookPath = new URL("../../../src/services/loop-runtime/composio-trigger.ts", import.meta.url);
 const connectorRoutePath = new URL("../../../src/transport/http/routes/connectors.ts", import.meta.url);
+const dbPath = new URL("../../../src/infrastructure/db/index.ts", import.meta.url);
 
 test("chat exposes real builder tools without synthetic intent tools", async () => {
   const [route, dispatcher] = await Promise.all([
@@ -192,13 +193,14 @@ test("operational build requirements use structured requirementSetup choices", a
 });
 
 test("event choices come from discovered connector triggers and scheduled fallback is hourly or daily", async () => {
-  const [route, dispatcher, scheduleSelector, verification, triggerWebhook, connectorRoute] = await Promise.all([
+  const [route, dispatcher, scheduleSelector, verification, triggerWebhook, connectorRoute, db] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
     readFile(scheduleSelectorPath, "utf8"),
     readFile(verificationPath, "utf8"),
     readFile(triggerWebhookPath, "utf8"),
     readFile(connectorRoutePath, "utf8"),
+    readFile(dbPath, "utf8"),
   ]);
 
   assert.match(dispatcher, /listComposioTriggerTypes/);
@@ -218,6 +220,7 @@ test("event choices come from discovered connector triggers and scheduled fallba
   assert.match(triggerWebhook, /createSpecLoopRun/);
   assert.match(triggerWebhook, /startLoopRunWorkflow/);
   assert.match(triggerWebhook, /workflow_connector_trigger_events/);
+  assert.match(db, /workflow_connector_trigger_events_run_id_fkey[\s\S]*REFERENCES loop_engine_runs\(id\)/);
   assert.match(connectorRoute, /handleComposioTriggerWebhook/);
   assert.ok(connectorRoute.indexOf('router.post("/composio/webhook"') < connectorRoute.indexOf("router.use(authMiddleware)"));
 });

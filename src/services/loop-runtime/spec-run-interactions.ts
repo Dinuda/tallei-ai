@@ -387,7 +387,12 @@ export async function handleSpecRunInteractionCommand(input: {
     rationale: typeof deferredRaw.rationale === "string" ? deferredRaw.rationale : undefined,
   };
   const hasDeferredAction = Boolean(deferred.toolkit && deferred.actionSlug);
-  const toolKey = typeof payload.toolKey === "string" ? payload.toolKey : "action";
+  const toolKey = typeof payload.deferredToolKey === "string"
+    ? payload.deferredToolKey
+    : typeof payload.toolKey === "string"
+      ? payload.toolKey
+      : "action";
+  const gateToolKey = typeof payload.toolKey === "string" ? payload.toolKey : "requestGate";
   const workflowId = await loadRunWorkflowId(input.auth, input.runId);
   const definition = parseLoopDefinitionSnapshot(
     (await pool.query<{ definition_snapshot: unknown }>(
@@ -503,7 +508,7 @@ export async function handleSpecRunInteractionCommand(input: {
       runId: input.runId,
       workflowId,
       interactionId: interaction.id,
-      toolKey: typeof payload.toolKey === "string" ? payload.toolKey : "requestInput",
+      toolKey: gateToolKey,
       toolOutput: { ok: true, submitted: submitted },
       viaStream: resumeViaStream,
     });
@@ -555,7 +560,7 @@ export async function handleSpecRunInteractionCommand(input: {
       runId: input.runId,
       workflowId,
       interactionId: interaction.id,
-      toolKey: typeof payload.toolKey === "string" ? payload.toolKey : "requestReview",
+      toolKey: gateToolKey,
       toolOutput: { ok: true, revised: true, reason },
       viaStream: resumeViaStream,
       pruneStepIndex: stepRow.rows[0]?.step_index,
@@ -665,7 +670,7 @@ export async function handleSpecRunInteractionCommand(input: {
       ],
     );
     const messages = await listLoopRunMessages(input.auth, input.runId);
-    const patchedApproval = patchMessagesWithToolResult(messages, "requestApproval", output);
+    const patchedApproval = patchMessagesWithToolResult(messages, gateToolKey, output);
     const patched = patchMessagesWithToolResult(patchedApproval, toolKey, output);
     await replaceLoopRunMessages(input.auth, input.runId, patched);
   } else if (hasDeferredAction && resumeViaStream) {

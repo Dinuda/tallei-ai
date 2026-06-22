@@ -15,8 +15,15 @@ import {
 } from "./spec-run-view-utils";
 
 const HIDDEN_CONTROL_TEXTS = new Set(["continue", "resume", "run", "rerun"]);
-const GATE_TOOL_NAMES = new Set(["requestReview", "requestApproval", "requestInput"]);
+const GATE_TOOL_NAMES = new Set(["requestGate", "requestReview", "requestApproval", "requestInput"]);
 const FINALIZE_TOOL_NAME = "finalizeAgent";
+
+export type PlannedSpecAgent = {
+  id?: string;
+  name?: string;
+  task?: string;
+  persona?: DataAgentPartData["persona"];
+};
 
 export function readMessageText(message: UIMessage): string {
   const part = message.parts.find((entry) => entry.type === "text");
@@ -355,14 +362,35 @@ function syntheticAgentMessageForStep(step: SpecRunStep, totalAgents: number): U
   };
 }
 
+function syntheticAgentMessageForPlan(agent: PlannedSpecAgent, stepIndex: number, totalAgents: number): UIMessage {
+  return {
+    id: `synthetic-planned-agent-turn:${agent.id ?? stepIndex}`,
+    role: "assistant",
+    parts: [{
+      type: "data-agent",
+      data: {
+        agentId: agent.id ?? `agent-${stepIndex}`,
+        agentName: agent.name ?? agent.id ?? `Agent ${stepIndex + 1}`,
+        stepIndex,
+        totalAgents,
+        task: agent.task,
+        persona: agent.persona,
+        phase: "queued",
+      },
+    } as UIMessage["parts"][number]],
+  };
+}
+
 export function hydrateMessagesFromSteps(
   messages: UIMessage[],
   steps: SpecRunStep[] = [],
   _interactions: SpecRunInteraction[] = [],
+  plannedAgents: PlannedSpecAgent[] = [],
 ): UIMessage[] {
   const normalized = normalizeTranscriptMessages(messages);
   const stepByIndex = new Map(steps.map((step) => [step.step_index, step]));
-  const totalAgents = steps.length > 0 ? Math.max(...steps.map((step) => step.step_index)) + 1 : 0;
+  const maxStepIndex = steps.length > 0 ? Math.max(...steps.map((step) => step.step_index)) : -1;
+  const totalAgents = Math.max(plannedAgents.length, maxStepIndex + 1);
   const patched = normalized.map((message) => {
     const stepIndex = readAgentStepIndex(message);
     if (stepIndex === null) return message;
@@ -373,9 +401,13 @@ export function hydrateMessagesFromSteps(
     };
   });
 
-  if (steps.length === 0) return patched;
+  if (totalAgents === 0) return patched;
 
-  const latestSteps = [...stepByIndex.values()].sort((left, right) => left.step_index - right.step_index);
+  const timeline = Array.from({ length: totalAgents }, (_, stepIndex) => ({
+    stepIndex,
+    step: stepByIndex.get(stepIndex),
+    agent: plannedAgents[stepIndex],
+  }));
   const existingSteps = new Set(
     patched
       .map(readAgentStepIndex)
@@ -385,12 +417,16 @@ export function hydrateMessagesFromSteps(
   const hydrated: UIMessage[] = [];
 
   const appendMissingBefore = (stepIndex: number) => {
-    while (nextStepOffset < latestSteps.length) {
-      const step = latestSteps[nextStepOffset]!;
-      if (step.step_index >= stepIndex) return;
-      if (!existingSteps.has(step.step_index)) {
-        hydrated.push(syntheticAgentMessageForStep(step, totalAgents));
-        existingSteps.add(step.step_index);
+    while (nextStepOffset < timeline.length) {
+      const entry = timeline[nextStepOffset]!;
+      if (entry.stepIndex >= stepIndex) return;
+      if (!existingSteps.has(entry.stepIndex)) {
+        hydrated.push(
+          entry.step
+            ? syntheticAgentMessageForStep(entry.step, totalAgents)
+            : syntheticAgentMessageForPlan(entry.agent ?? {}, entry.stepIndex, totalAgents),
+        );
+        existingSteps.add(entry.stepIndex);
       }
       nextStepOffset += 1;
     }
@@ -400,7 +436,7 @@ export function hydrateMessagesFromSteps(
     const stepIndex = readAgentStepIndex(message);
     if (stepIndex !== null) {
       appendMissingBefore(stepIndex);
-      while (nextStepOffset < latestSteps.length && latestSteps[nextStepOffset]!.step_index <= stepIndex) {
+      while (nextStepOffset < timeline.length && timeline[nextStepOffset]!.stepIndex <= stepIndex) {
         nextStepOffset += 1;
       }
     }

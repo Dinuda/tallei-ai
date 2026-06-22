@@ -64,7 +64,7 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(runner, /This agent has no write actionRefs/);
   assert.match(runner, /do not create labels, drafts, replies, sends, or any other Gmail mutations/);
   assert.match(runner, /action_\* tools enforce the declared Composio input schema via Zod/);
-  assert.match(runner, /NEVER call requestInput for searchMemory queries/);
+  assert.match(runner, /NEVER call requestGate type=input for searchMemory queries/);
   assert.match(runner, /Never write that a review was submitted, approval is pending, or the run is paused/);
   assert.match(runner, /Stop after finalizeAgent/);
   assert.match(runner, /MUST include summary and status/);
@@ -79,8 +79,8 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(tools, /stepAttemptId: input\.stepAttemptId/);
   assert.match(tools, /agentWriteTools/);
   assert.match(tools, /agentCanRequestInput/);
-  assert.match(tools, /if \(agentCanRequestInput\(input\.plan, input\.agent\)\)/);
-  assert.match(tools, /if \(writeToolsForAgent\.length > 0 && !input\.agent\.gate\)/);
+  assert.match(tools, /const canRequestGate = agentCanRequestInput\(input\.plan, input\.agent\) \|\| writeToolsForAgent\.length > 0/);
+  assert.match(tools, /tools\.requestGate = tool/);
   assert.match(tools, /buildConnectorToolInputSchema/);
   assert.match(tools, /connectorToolDescription/);
   assert.match(tools, /extractConnectorActionPayload/);
@@ -90,7 +90,7 @@ test("agent runner materializes spec agents before execution and records tool ev
   assert.match(tools, /isRedundantTriggerReadTool/);
   assert.match(tools, /const searchCache = new Map<string, unknown>\(\)/);
   assert.match(tools, /cachedSearch\(`memory:\$\{query\.trim\(\)\.toLowerCase\(\)\}`/);
-  assert.match(tools, /if \(writeToolsForAgent\.length > 0\)/);
+  assert.match(tools, /writeToolsForAgent\.length > 0/);
   assert.doesNotMatch(tools, /tools\.finalizeRun = tool/);
   assert.match(tools, /GMAIL_FETCH_MESSAGE_BY_THREAD_ID/);
   assert.doesNotMatch(runner, /buildTrackedSpecRunTools/);
@@ -130,13 +130,15 @@ test("run creation and retry materialize approved agents before async execution 
   assert.match(source, /await materializeSpecRunAgentSteps[\s\S]*await startLoopRunWorkflow/);
 });
 
-test("mutating connector actions are gated through requestApproval interactions", async () => {
+test("mutating connector actions are gated through requestGate action interactions", async () => {
   const source = await readFile(toolsPath, "utf8");
 
-  assert.match(source, /tools\.requestApproval = tool/);
-  assert.match(source, /selectedWriteTool\(input\.plan, actionRef, input\.agent\)/);
+  assert.match(source, /tools\.requestGate = tool/);
+  assert.match(source, /type: z\.enum\(\["input", "review", "action"\]\)/);
+  assert.match(source, /selectedWriteTool\(input\.plan, value\.actionRef, input\.agent\)/);
   assert.match(source, /approvalGrantCoversAction/);
-  assert.match(source, /createSpecRunApprovalInteraction/);
+  assert.match(source, /createSpecRunGateInteraction/);
+  assert.match(source, /gateType: "action"/);
   assert.match(source, /idempotencyKey: `spec-run:\$\{input\.runId\}:\$\{input\.stepAttemptId\}:\$\{writeTool\.toolKey\}`/);
   assert.doesNotMatch(source, /for \(const writeTool of input\.plan\.writeTools\)[\s\S]*tools\[writeTool\.toolKey\]/);
 });
@@ -158,6 +160,6 @@ test("operator decisions resume, revise, or reject through engine state", async 
   assert.match(source, /resumeRunAfterApproval/);
   assert.match(source, /finalizeInteractionResume/);
   assert.match(source, /shouldResumeViaStream/);
-  assert.match(source, /patchMessagesWithToolResult\(messages, "requestApproval", output\)/);
+  assert.match(source, /patchMessagesWithToolResult\(messages, gateToolKey, output\)/);
   assert.match(source, /patchMessagesWithToolResult\(patchedApproval, toolKey, output\)/);
 });

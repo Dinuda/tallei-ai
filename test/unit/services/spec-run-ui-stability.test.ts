@@ -92,14 +92,14 @@ test("pruneStepNarrationForStep removes stale draft text before a step retry", (
       parts: [
         { type: "data-agent", data: { stepIndex: 1, agentId: "draft", agentName: "Draft", phase: "working" } },
         { type: "text", text: "Old draft body" },
-        { type: "tool-requestReview", toolCallId: "call-1", state: "output-available", input: {}, output: {} },
+        { type: "tool-requestGate", toolCallId: "call-1", state: "output-available", input: { type: "review" }, output: {} },
       ],
     },
   ] satisfies UIMessage[];
 
   const pruned = pruneStepNarrationForStep(messages, 1);
   assert.equal(pruned[0]?.parts.some((part) => part.type === "text"), false);
-  assert.equal(pruned[0]?.parts.some((part) => part.type === "tool-requestReview"), true);
+  assert.equal(pruned[0]?.parts.some((part) => part.type === "tool-requestGate"), true);
 });
 
 test("normalizeRunMessages keeps the latest draft text when a step restarts", () => {
@@ -128,7 +128,7 @@ test("normalizeRunMessages keeps the latest draft text when a step restarts", ()
   assert.equal(text, "New draft body");
 });
 
-test("requestInput and requestReview surface schemas are split", () => {
+test("requestGate keeps input and review surface schemas split by gate type", () => {
   assert.equal(dataInputSurfaceSchema.safeParse("input.text").success, true);
   assert.equal(dataInputSurfaceSchema.safeParse("review.draft").success, false);
   assert.equal(reviewSurfaceSchema.safeParse("review.draft").success, true);

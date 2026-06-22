@@ -25,13 +25,16 @@ import { configuredAgentGateRequired } from "./spec-run-gate-policy.js";
 import { evaluateAgentHandoff } from "./spec-run-handoff-eval.js";
 import {
   buildBoundaryEnvelope,
+  legacyStepOutputFromBoundary,
   normalizedHandoffFromStepOutput,
   readBoundaryEnvelope,
+  routeBoundary,
   type AgentBoundaryEnvelope,
+  type BoundaryRouterDecision,
 } from "./runner-boundary.js";
+import { persistStepBoundary, projectOutputWithBoundary } from "./boundary-store.js";
 import {
-  createSpecRunInputInteraction,
-  createSpecRunReviewInteraction,
+  createSpecRunGateInteraction,
 } from "./spec-run-interaction-writer.js";
 import type { SpecRunDefinition } from "./spec-run-types.js";
 
@@ -49,6 +52,17 @@ type AgentStepRow = {
   input_json: unknown;
   output_json: unknown;
   error_json: unknown;
+};
+
+type AgentStepQueryRow = AgentStepRow & {
+  boundary_protocol_version?: string | null;
+  boundary_raw_output_json?: unknown;
+  boundary_structured_output_json?: unknown;
+  boundary_normalized_output_json?: unknown;
+  boundary_normalized_handoff_json?: unknown;
+  boundary_goal_eval_json?: unknown;
+  boundary_router_decision?: string | null;
+  boundary_legacy_output_json?: unknown;
 };
 
 type PriorAgentOutput = {
@@ -179,6 +193,32 @@ function stableConfigForRun(input: {
   };
 }
 
+function mapAgentStepRow(row: AgentStepQueryRow): AgentStepRow {
+  return {
+    id: row.id,
+    step_index: row.step_index,
+    attempt: row.attempt,
+    agent_id: row.agent_id,
+    agent_snapshot: row.agent_snapshot,
+    status: row.status,
+    input_json: row.input_json,
+    output_json: projectOutputWithBoundary({
+      outputJson: row.output_json,
+      boundary: {
+        protocol_version: row.boundary_protocol_version,
+        raw_output_json: row.boundary_raw_output_json,
+        structured_output_json: row.boundary_structured_output_json,
+        normalized_output_json: row.boundary_normalized_output_json,
+        normalized_handoff_json: row.boundary_normalized_handoff_json,
+        goal_eval_json: row.boundary_goal_eval_json,
+        router_decision: row.boundary_router_decision,
+        legacy_output_json: row.boundary_legacy_output_json,
+      },
+    }),
+    error_json: row.error_json,
+  };
+}
+
 function structuredOutputFromStep(step: AgentStepRow): unknown {
   const envelope = readBoundaryEnvelope(step.output_json);
   if (envelope) return envelope.normalizedHandoff;
@@ -275,15 +315,24 @@ async function ensureAgentSteps(input: {
     );
   }
 
-  const result = await pool.query<AgentStepRow>(
-    `SELECT id, step_index, attempt, agent_id, agent_snapshot, status, input_json, output_json, error_json
-     FROM loop_engine_step_attempts
-     WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
-     ORDER BY step_index ASC, attempt ASC`,
+  const result = await pool.query<AgentStepQueryRow>(
+    `SELECT sa.id, sa.step_index, sa.attempt, sa.agent_id, sa.agent_snapshot, sa.status, sa.input_json, sa.output_json, sa.error_json,
+            b.protocol_version AS boundary_protocol_version,
+            b.raw_output_json AS boundary_raw_output_json,
+            b.structured_output_json AS boundary_structured_output_json,
+            b.normalized_output_json AS boundary_normalized_output_json,
+            b.normalized_handoff_json AS boundary_normalized_handoff_json,
+            b.goal_eval_json AS boundary_goal_eval_json,
+            b.router_decision AS boundary_router_decision,
+            b.legacy_output_json AS boundary_legacy_output_json
+     FROM loop_engine_step_attempts sa
+     LEFT JOIN loop_engine_boundaries b ON b.step_attempt_id = sa.id
+     WHERE sa.run_id = $1 AND sa.tenant_id = $2 AND sa.user_id = $3
+     ORDER BY sa.step_index ASC, sa.attempt ASC`,
     [input.runId, input.auth.tenantId, input.auth.userId],
   );
   const agentIds = new Set(input.plan.agents.map((agent) => agent.id));
-  return result.rows.filter((row) => agentIds.has(row.agent_id));
+  return result.rows.map(mapAgentStepRow).filter((row) => agentIds.has(row.agent_id));
 }
 
 export async function materializeSpecRunAgentSteps(input: {
@@ -331,15 +380,24 @@ async function loadAgentSteps(input: {
   runId: string;
   plan: CompiledSpecRunPlan;
 }): Promise<AgentStepRow[]> {
-  const result = await pool.query<AgentStepRow>(
-    `SELECT id, step_index, attempt, agent_id, agent_snapshot, status, input_json, output_json, error_json
-     FROM loop_engine_step_attempts
-     WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
-     ORDER BY step_index ASC, attempt ASC`,
+  const result = await pool.query<AgentStepQueryRow>(
+    `SELECT sa.id, sa.step_index, sa.attempt, sa.agent_id, sa.agent_snapshot, sa.status, sa.input_json, sa.output_json, sa.error_json,
+            b.protocol_version AS boundary_protocol_version,
+            b.raw_output_json AS boundary_raw_output_json,
+            b.structured_output_json AS boundary_structured_output_json,
+            b.normalized_output_json AS boundary_normalized_output_json,
+            b.normalized_handoff_json AS boundary_normalized_handoff_json,
+            b.goal_eval_json AS boundary_goal_eval_json,
+            b.router_decision AS boundary_router_decision,
+            b.legacy_output_json AS boundary_legacy_output_json
+     FROM loop_engine_step_attempts sa
+     LEFT JOIN loop_engine_boundaries b ON b.step_attempt_id = sa.id
+     WHERE sa.run_id = $1 AND sa.tenant_id = $2 AND sa.user_id = $3
+     ORDER BY sa.step_index ASC, sa.attempt ASC`,
     [input.runId, input.auth.tenantId, input.auth.userId],
   );
   const agentIds = new Set(input.plan.agents.map((agent) => agent.id));
-  return result.rows.filter((row) => agentIds.has(row.agent_id));
+  return result.rows.map(mapAgentStepRow).filter((row) => agentIds.has(row.agent_id));
 }
 
 async function loadLatestArtifacts(input: {
@@ -578,6 +636,69 @@ export function normalizeAgentStepOutput(
   return candidate;
 }
 
+function inferPriorityFromTicket(ticket: RunContext["ticket"]): "high" | "medium" | "low" {
+  const text = `${ticket?.subject ?? ""}\n${ticket?.body ?? ""}`.toLowerCase();
+  if (/\b(site|system|service|app|production|prod)\b.*\b(down|outage|unavailable|offline|broken)\b/.test(text)) {
+    return "high";
+  }
+  if (/\b(urgent|critical|asap|blocked|cannot access|can't access)\b/.test(text)) return "high";
+  if (/\b(error|failed|failure|bug|issue|problem)\b/.test(text)) return "medium";
+  return "low";
+}
+
+export function fallbackSourceEvidenceOutput(runContext: RunContext): Record<string, unknown> {
+  if (!runContext.ticket) {
+    return {
+      status: "no_tickets_found",
+      summary: "No actionable support ticket was available in the trigger context.",
+      findings: ["No trigger ticket was available for downstream drafting."],
+      context: {
+        trigger: runContext.trigger,
+        hasTriggerPayload: runContext.hasTriggerPayload,
+      },
+    };
+  }
+
+  const priority = inferPriorityFromTicket(runContext.ticket);
+  const customerLabel = runContext.customer?.email
+    ? ` from ${runContext.customer.email}`
+    : runContext.customer?.name
+      ? ` from ${runContext.customer.name}`
+      : "";
+  return {
+    status: "ticket_found",
+    summary: `Found support ticket '${runContext.ticket.subject}'${customerLabel}.`,
+    priority,
+    ticket: runContext.ticket,
+    ...(runContext.customer ? { customer: runContext.customer } : {}),
+    findings: [
+      `Trigger context provided ticket subject: ${runContext.ticket.subject}`,
+      ...(runContext.ticket.threadId ? [`Thread ID: ${runContext.ticket.threadId}`] : []),
+      ...(runContext.ticket.messageId ? [`Message ID: ${runContext.ticket.messageId}`] : []),
+    ],
+    context: {
+      trigger: runContext.trigger,
+      hasTriggerPayload: runContext.hasTriggerPayload,
+    },
+  };
+}
+
+function missingAgentOutputError(input: {
+  agent: RunPlanAgent;
+  finishReason?: string;
+  toolCalls?: string[];
+  streamError?: unknown;
+}): Error {
+  if (input.streamError instanceof Error) return input.streamError;
+  const toolCalls = input.toolCalls && input.toolCalls.length > 0
+    ? input.toolCalls.join(", ")
+    : "none";
+  const finishReason = input.finishReason ?? "unknown";
+  return new Error(
+    `${input.agent.name} did not call finalizeAgent and produced no text output. finishReason=${finishReason}; lastStepToolCalls=${toolCalls}`,
+  );
+}
+
 function coerceOutputToContract(input: {
   contract: DataContract;
   output: unknown;
@@ -716,6 +837,8 @@ async function completeAgentStep(input: {
   stepAttemptId: string;
   agent: RunPlanAgent;
   boundaryEnvelope: AgentBoundaryEnvelope;
+  routerDecision: BoundaryRouterDecision;
+  boundaryIssues?: string[];
   text: string;
   stepInput?: Record<string, unknown>;
 }): Promise<{ structuredOutput: unknown; text: string }> {
@@ -724,39 +847,20 @@ async function completeAgentStep(input: {
     stepInput: input.stepInput ?? {},
     structuredOutput: input.boundaryEnvelope.structuredOutput,
   });
-  await pool.query(
-    `UPDATE loop_engine_step_attempts
-     SET status = $5,
-         output_json = $2::jsonb,
-         error_json = '{}'::jsonb,
-         finished_at = CASE WHEN $5 = 'succeeded' THEN NOW() ELSE finished_at END,
-         updated_at = NOW()
-     WHERE id = $1 AND tenant_id = $3 AND user_id = $4`,
-    [
-      input.stepAttemptId,
-      JSON.stringify({
-        protocolVersion: input.boundaryEnvelope.protocolVersion,
-        rawOutput: input.boundaryEnvelope.rawOutput,
-        structuredOutput: input.boundaryEnvelope.structuredOutput,
-        normalizedOutput: input.boundaryEnvelope.normalizedOutput,
-        normalizedHandoff: input.boundaryEnvelope.normalizedHandoff,
-        goalEval: input.boundaryEnvelope.goalEval,
-        boundaryEnvelope: input.boundaryEnvelope,
-        data: {
-          structuredOutput: input.boundaryEnvelope.structuredOutput,
-          data: input.boundaryEnvelope.structuredOutput,
-          normalizedOutput: input.boundaryEnvelope.normalizedOutput,
-          normalizedHandoff: input.boundaryEnvelope.normalizedHandoff,
-          goalEval: input.boundaryEnvelope.goalEval,
-          boundaryEnvelope: input.boundaryEnvelope,
-        },
-        text: input.text,
-      }),
-      input.auth.tenantId,
-      input.auth.userId,
-      deferSuccess ? "waiting_for_interaction" : "succeeded",
-    ],
-  );
+  const legacyOutputJson = legacyStepOutputFromBoundary({
+    envelope: input.boundaryEnvelope,
+    text: input.text,
+  });
+  await persistStepBoundary({
+    auth: input.auth,
+    runId: input.runId,
+    stepAttemptId: input.stepAttemptId,
+    status: deferSuccess ? "waiting_for_interaction" : "succeeded",
+    envelope: input.boundaryEnvelope,
+    routerDecision: input.routerDecision,
+    boundaryIssues: input.boundaryIssues,
+    legacyOutputJson,
+  });
   await persistAgentOutputArtifact({
     auth: input.auth,
     runId: input.runId,
@@ -846,7 +950,8 @@ async function createMissingHandoffInputIfPossible(input: {
   const gateType = input.agent.gate?.type.trim().toLowerCase();
   if (gateType !== "missing_input") return false;
   const key = `${input.agent.id}_missing_handoff`;
-  const interactionId = await createSpecRunInputInteraction({
+  const interactionId = await createSpecRunGateInteraction({
+    gateType: "input",
     auth: input.auth,
     runId: input.runId,
     stepAttemptId: input.stepAttemptId,
@@ -962,7 +1067,8 @@ async function createConfiguredGateIfNeeded(input: {
 
   if (input.agent.gate.type.trim().toLowerCase() === "missing_input") {
     const key = `${input.agent.id}_input`;
-    const interactionId = await createSpecRunInputInteraction({
+    const interactionId = await createSpecRunGateInteraction({
+      gateType: "input",
       auth: input.auth,
       runId: input.runId,
       stepAttemptId: input.stepAttemptId,
@@ -993,7 +1099,8 @@ async function createConfiguredGateIfNeeded(input: {
     outputContract: input.agent.outputContract,
     artifactRole: input.agent.artifactRole,
   };
-  const interactionId = await createSpecRunReviewInteraction({
+  const interactionId = await createSpecRunGateInteraction({
+    gateType: "review",
     auth: input.auth,
     runId: input.runId,
     stepAttemptId: input.stepAttemptId,
@@ -1036,7 +1143,7 @@ function buildAgentPrompt(input: {
   const pendingRevision = asRecord(input.stepInput.revision);
   const reviewApproval = asRecord(input.stepInput.reviewApproval);
   const reviewWasApproved = Object.keys(reviewApproval).length > 0;
-  const gateToolNameSet = new Set<string>(["requestInput", "requestReview", "requestApproval"]);
+  const gateToolNameSet = new Set<string>(["requestGate"]);
   const gateToolNames = input.availableToolNames.filter((name) => gateToolNameSet.has(name));
   const directToolNames = input.availableToolNames.filter((name) => !gateToolNameSet.has(name));
   const writeActionRefs = input.plan.writeTools
@@ -1057,7 +1164,7 @@ function buildAgentPrompt(input: {
       ? `Declared handoff bindings:\n${JSON.stringify(input.agent.handoffBindings, null, 2)}`
       : "",
     input.agent.gate
-      ? `Configured gate (runner creates this after finalizeAgent; do not call requestReview for it):\n${JSON.stringify(input.agent.gate, null, 2)}`
+      ? `Configured gate (runner creates this after finalizeAgent; do not call requestGate for it):\n${JSON.stringify(input.agent.gate, null, 2)}`
       : "",
     input.agent.artifactRole ? `Artifact role: ${input.agent.artifactRole}` : "",
     input.agent.artifactRole === "source_evidence"
@@ -1065,7 +1172,7 @@ function buildAgentPrompt(input: {
       : "",
     `Build-spec tool refs assigned to this agent (authorization identifiers, not callable tool names):\n${input.agent.toolRefs.map((entry) => `- ${entry}`).join("\n")}`,
     `Callable tools available in this invocation:\n${input.availableToolNames.map((entry) => `- ${entry}`).join("\n")}`,
-    "Never call build-spec refs directly. Do not call internal.* or composio.* names as tools. For connector reads, use the action_* callable tool listed above. For connector writes/sends, call requestApproval with the exact write actionRef.",
+    "Never call build-spec refs directly. Do not call internal.* or composio.* names as tools. For connector reads, use the action_* callable tool listed above. For connector writes/sends, call requestGate with type=action and the exact write actionRef.",
     readOnlyAgent
       ? "This agent has no write actionRefs. It is read-only: do not create labels, drafts, replies, sends, or any other Gmail mutations. If the needed mutation tool is not listed, finalize with the evidence/status instead of inventing a tool name."
       : "",
@@ -1073,7 +1180,7 @@ function buildAgentPrompt(input: {
       ? "Connector action_* tools enforce the declared Composio input schema via Zod. Pass fields at the top level using exact property names (for example thread_id, not threadId). Do not nest fields under payload."
       : "",
     writeActionRefs.length > 0
-      ? `Write actionRefs allowed through requestApproval:\n${writeActionRefs.map((entry) => `- ${entry}`).join("\n")}`
+      ? `Write actionRefs allowed through requestGate type=action:\n${writeActionRefs.map((entry) => `- ${entry}`).join("\n")}`
       : "",
     input.plan.inputRequirements.length > 0
       ? `Declared operator surfaces:\n${JSON.stringify(input.plan.inputRequirements, null, 2)}`
@@ -1091,7 +1198,7 @@ function buildAgentPrompt(input: {
       ? `Operator revision feedback for this retry:\n${JSON.stringify(pendingRevision, null, 2)}`
       : "",
     reviewWasApproved
-      ? `The operator approved this run's draft review. Do not call requestReview again for the same artifact. Continue the agent. Before any connector write/send, call requestApproval with the exact write actionRef; the runner will create the required approval gate or execute only if that exact action was already approved. The approved draft content is already saved as an artifact.\nApproval context: ${JSON.stringify(reviewApproval, null, 2)}`
+      ? `The operator approved this run's draft review. Do not call requestGate again for the same artifact. Continue the agent. Before any connector write/send, call requestGate with type=action and the exact write actionRef; the runner will create the required approval gate or execute only if that exact action was already approved. The approved draft content is already saved as an artifact.\nApproval context: ${JSON.stringify(reviewApproval, null, 2)}`
       : "",
     "",
     "Run only this agent.",
@@ -1101,14 +1208,14 @@ function buildAgentPrompt(input: {
     gateToolNames.length > 0
       ? `Operator gate callable tools in this invocation:\n${gateToolNames.map((entry) => `- ${entry}`).join("\n")}`
       : "",
-    "NEVER call requestInput for searchMemory queries, IDs you could look up, or any data accessible via a direct tool.",
+    "NEVER call requestGate type=input for searchMemory queries, IDs you could look up, or any data accessible via a direct tool.",
     input.runContext.ticket && input.agent.handoffBindings.length > 0
-      ? "The run seed and resolved handoff already include ticket/customer context when present. Do not call requestInput for subject, body, sender name, sender email, or thread/message IDs — use the handoff and run seed directly."
+      ? "The run seed and resolved handoff already include ticket/customer context when present. Do not call requestGate type=input for subject, body, sender name, sender email, or thread/message IDs — use the handoff and run seed directly."
       : "",
-    "requestInput is ONLY for input.* surfaces (input.text, input.markdown, etc.). requestReview is for review.* and confirm.send surfaces. Configured gates are created automatically after finalizeAgent — do not call requestReview for them.",
+    "requestGate type=input is ONLY for input.* surfaces (input.text, input.markdown, etc.). requestGate type=review is for review.* and confirm.send surfaces. Configured gates are created automatically after finalizeAgent — do not call requestGate for them.",
     "Do not narrate tool choices, print JSON, or draft operator-facing content in normal prose before the relevant tool call. Use finalizeAgent for the declared output contract; the runner will create configured artifacts/reviews from outputContract.renderer and gate.",
     gateToolNames.length > 0
-      ? "If operator choices are needed, you MUST create them with requestInput/requestReview/requestApproval. Never write that a review was submitted, approval is pending, or the run is paused unless the matching gate tool has been called."
+      ? "If operator choices are needed, you MUST create them with requestGate. Never write that a review was submitted, approval is pending, or the run is paused unless requestGate has been called."
       : "",
     "When your agent step is complete, call finalizeAgent with structured output. Stop after finalizeAgent; the runtime advances gates, later agents, and final run status.",
   ].filter(Boolean).join("\n");
@@ -1147,7 +1254,7 @@ async function runAgent(input: {
   const system = [
     buildSpecRunSystemPrompt(input.spec, input.runContext),
     "",
-    "Execution architecture: one model invocation controls exactly one approved spec agent. Mutating external actions are never direct tools; create requestApproval interactions instead. Operator input and review must be represented with runtime tools, not prose.",
+    "Execution architecture: one model invocation controls exactly one approved spec agent. Mutating external actions are never direct tools; create requestGate type=action interactions instead. Operator input and review must be represented with requestGate, not prose.",
   ].join("\n");
   const prompt = buildAgentPrompt({
     spec: input.spec,
@@ -1182,6 +1289,7 @@ async function runAgent(input: {
         ...(persona ? { persona } : {}),
       },
     });
+    let streamError: unknown;
     const agentStream = streamText({
       model,
       system,
@@ -1191,15 +1299,29 @@ async function runAgent(input: {
       stopWhen: [hasToolCall("finalizeAgent"), hasToolCall("finalizeRun"), stepCountIs(10)],
       onError: ({ error }) => {
         if (!(error instanceof SpecRunInteractionRequiredError)) {
+          streamError = error;
           console.error("Agent stream error:", error);
         }
       },
     });
     input.writer.merge(suppressAgentTextChunks(agentStream.toUIMessageStream({ sendReasoning: true })));
-    const text = await agentStream.text;
-    return {
-      output: finalized.agentOutput ?? { text: text.trim() },
-    };
+    const [text, finishReason, toolCalls] = await Promise.all([
+      agentStream.text,
+      Promise.resolve(agentStream.finishReason).catch(() => undefined),
+      Promise.resolve(agentStream.toolCalls).catch(() => []),
+    ]);
+    if (finalized.agentOutput !== undefined) return { output: finalized.agentOutput };
+    const trimmed = text.trim();
+    if (trimmed) return { output: { text: trimmed } };
+    if (input.agent.artifactRole === "source_evidence") {
+      return { output: fallbackSourceEvidenceOutput(input.runContext) };
+    }
+    throw missingAgentOutputError({
+      agent: input.agent,
+      finishReason,
+      toolCalls: toolCalls.map((call: { toolName: string }) => String(call.toolName)),
+      streamError,
+    });
   }
 
   const result = await generateText({
@@ -1210,9 +1332,21 @@ async function runAgent(input: {
     providerOptions: loopBuilderStreamProviderOptions(modelId) as never,
     stopWhen: [hasToolCall("finalizeAgent"), hasToolCall("finalizeRun"), stepCountIs(10)],
   });
-  return {
-    output: finalized.agentOutput ?? { text: result.text.trim() },
-  };
+  if (finalized.agentOutput !== undefined) return { output: finalized.agentOutput };
+  const trimmed = result.text.trim();
+  if (trimmed) {
+    return {
+      output: { text: trimmed },
+    };
+  }
+  if (input.agent.artifactRole === "source_evidence") {
+    return { output: fallbackSourceEvidenceOutput(input.runContext) };
+  }
+  throw missingAgentOutputError({
+    agent: input.agent,
+    finishReason: result.finishReason,
+    toolCalls: result.toolCalls.map((call) => String(call.toolName)),
+  });
 }
 
 async function reconcileStaleRunningSteps(input: {
@@ -1416,7 +1550,28 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
           missingRequired: goalEval.missingRequired,
         },
       });
-      if (goalEval.status === "needs_input") {
+      const normalizedOutput = asRecord(goalEval.normalizedOutput);
+      const normalizedHandoff = asRecord(goalEval.normalizedHandoff);
+      const boundaryStructuredOutput = coerced.structuredOutput;
+      const boundaryNormalizedOutput = Object.keys(normalizedOutput).length > 0 ? normalizedOutput : coerced.normalizedOutput;
+      const routerDecision = routeBoundary({
+        goalEval,
+        normalizedOutput: boundaryNormalizedOutput,
+        structuredOutput: boundaryStructuredOutput,
+      });
+      await emitRunEvent({
+        auth: input.auth,
+        runId: input.runId,
+        stepAttemptId: step.id,
+        eventType: "boundary_routed",
+        payload: {
+          agentId: agent.id,
+          agentName: agent.name,
+          routerDecision,
+          goalEvalStatus: goalEval.status,
+        },
+      });
+      if (routerDecision === "pause_for_input") {
         const missingRequired = goalEval.missingRequired ?? resolvedHandoff.missingRequired;
         const waiting = await createMissingHandoffInputIfPossible({
           auth: input.auth,
@@ -1431,7 +1586,7 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         await markRunStatus({ runId: input.runId, status: "failed", error: goalEval.reason });
         return;
       }
-      if (goalEval.status === "retry") {
+      if (routerDecision === "retry_step") {
         const retryStep = await requeueAgentStepRetry({
           auth: input.auth,
           runId: input.runId,
@@ -1447,20 +1602,18 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         await markRunStatus({ runId: input.runId, status: "running", currentStepIndex: agent.index });
         return executeAgenticSpecRun(input);
       }
-      if (goalEval.status === "fail") {
+      if (routerDecision === "fail_run") {
         await failAgentStep({ auth: input.auth, stepAttemptId: step.id, message: goalEval.reason });
         await markRunStatus({ runId: input.runId, status: "failed", error: goalEval.reason });
         return;
       }
-      const normalizedOutput = asRecord(goalEval.normalizedOutput);
-      const normalizedHandoff = asRecord(goalEval.normalizedHandoff);
       const boundaryEnvelope = buildBoundaryEnvelope({
         rawOutput: result.output,
-        structuredOutput: coerced.structuredOutput,
-        normalizedOutput: Object.keys(normalizedOutput).length > 0 ? normalizedOutput : coerced.normalizedOutput,
+        structuredOutput: boundaryStructuredOutput,
+        normalizedOutput: boundaryNormalizedOutput,
         normalizedHandoff: Object.keys(normalizedHandoff).length > 0
           ? normalizedHandoff
-          : (Object.keys(normalizedOutput).length > 0 ? normalizedOutput : coerced.normalizedOutput),
+          : boundaryNormalizedOutput,
         goalEval,
       });
       const completed = await completeAgentStep({
@@ -1469,6 +1622,8 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         stepAttemptId: step.id,
         agent,
         boundaryEnvelope,
+        routerDecision,
+        boundaryIssues: coerced.contractIssues,
         text: coerced.text,
         stepInput,
       });
@@ -1477,10 +1632,17 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         auth: input.auth,
         runId: input.runId,
         stepAttemptId: step.id,
+        eventType: "boundary_persisted",
+        payload: { agentId: agent.id, agentName: agent.name, routerDecision },
+      });
+      await emitRunEvent({
+        auth: input.auth,
+        runId: input.runId,
+        stepAttemptId: step.id,
         eventType: "agent_completed",
         payload: { agentId: agent.id, agentName: agent.name },
       });
-      if (shouldTerminateRunAfterAgent(completed.structuredOutput)) {
+      if (routerDecision === "finish_no_action" || shouldTerminateRunAfterAgent(completed.structuredOutput)) {
         finalSummary = completed.text || finalSummary;
         break;
       }

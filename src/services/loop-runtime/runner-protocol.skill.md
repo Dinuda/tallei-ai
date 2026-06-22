@@ -1,14 +1,14 @@
-# Runner Boundary Protocol v1
+# Runner Boundary Protocol v2
 
-Version: `runner-boundary-v1`
+Version: `runner-boundary-v2`
 
 ## Worker Agent Rules
 - Run exactly one approved spec agent.
 - Use only callable tools supplied by the runner.
 - Never call build-spec refs such as `internal.*` or `composio.*` directly.
 - Complete the step with `finalizeAgent`.
-- Mutating external actions require `requestApproval`.
-- Human input/review must be created through runtime interaction tools, not prose.
+- Mutating external actions require `requestGate` with `type=action`.
+- Human input/review must be created through `requestGate`, not prose.
 
 ## Handoff Evaluator Rules
 - Evaluate only the boundary between the completed agent and the next step.
@@ -22,7 +22,8 @@ Version: `runner-boundary-v1`
 - `retry`: requeue the same step within retry budget.
 - `needs_input`: create or preserve a first-class interaction and pause.
 - `fail`: fail the current step and run with the evaluator reason.
-- `no_action_required` in normalized output may terminate downstream delivery/review.
+- `no_action_required` in normalized output is handled by deterministic routing, not evaluator authority.
+- Router decisions are `continue`, `pause_for_input`, `retry_step`, `fail_run`, and `finish_no_action`.
 
 ## Gate Rules
 - Configured gates are created by the runner after a passing boundary.

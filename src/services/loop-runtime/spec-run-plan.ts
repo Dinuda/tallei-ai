@@ -21,13 +21,7 @@ import {
 } from "./spec-run-types.js";
 import { resolveBuildContract } from "./definition-hydration.js";
 import type { DataContract } from "../loop-engine/data-contract.js";
-import {
-  contractActionSlug,
-  isPlanReadTool,
-  isPlanWriteTool,
-  isSendLikeContract,
-  isWriteContract,
-} from "../loop-engine/tool-roles.js";
+import { actionSlugFromToolRef, contractActionSlug } from "../loop-engine/tool-roles.js";
 
 export type RunPlanAgent = {
   id: string;
@@ -108,7 +102,11 @@ export function runPlanToolKey(contract: ToolContract): string {
   return `action_${toolkit}_${actionSlug}`.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 64);
 }
 
-function compileTool(contract: ToolContract): RunPlanTool {
+function isWriteEffect(effect: ToolContract["effect"]): boolean {
+  return effect === "write_external" || effect === "irreversible_external";
+}
+
+function compileTool(contract: ToolContract, options: { forceAction?: boolean; isDelivery?: boolean } = {}): RunPlanTool {
   return {
     toolKey: runPlanToolKey(contract),
     toolRef: contract.toolRef,
@@ -117,8 +115,8 @@ function compileTool(contract: ToolContract): RunPlanTool {
     actionSlug: contractActionSlug(contract),
     effect: contract.effect,
     executionMode: contract.executionMode,
-    requiresApproval: contract.approval.required || isWriteContract(contract),
-    isSendLike: isSendLikeContract(contract),
+    requiresApproval: contract.approval.required || options.forceAction === true || isWriteEffect(contract.effect),
+    isSendLike: options.isDelivery === true,
     renderTargets: contract.renderRecommendations.map((entry) => entry.target),
   };
 }
@@ -137,6 +135,70 @@ function selectedContracts(definition: SpecRunDefinition): ToolContract[] {
     if (toolContract.provider !== "composio") return false;
     return selectedSlugs.has(contractActionSlug(toolContract).toUpperCase());
   });
+}
+
+function normalizeToolRef(value: string): string {
+  return value.trim().replace(/-/g, "_").toLowerCase();
+}
+
+function contractMatchesRef(contract: ToolContract, ref: string): boolean {
+  const normalizedRef = normalizeToolRef(ref);
+  if (!normalizedRef) return false;
+  return normalizeToolRef(contract.toolRef) === normalizedRef
+    || normalizeToolRef(contractActionSlug(contract)) === normalizedRef
+    || normalizeToolRef(contract.toolRef).endsWith(`.${normalizedRef}`)
+    || normalizeToolRef(actionSlugFromToolRef(contract.toolRef)) === normalizedRef;
+}
+
+function isActionAgent(agent: PlanAgentSource): boolean {
+  if (agent.nodeKind === "action") return true;
+  if (agent.artifactRole === "delivery") return true;
+  const gateType = agent.gate?.type?.toLowerCase() ?? "";
+  return gateType === "action" || gateType === "pre_send";
+}
+
+function architectToolPlan(definition: SpecRunDefinition, contracts: ToolContract[]): {
+  readContracts: ToolContract[];
+  writeContracts: ToolContract[];
+  deliveryRefs: Set<string>;
+  actionRefs: Set<string>;
+} {
+  const deliveryProvider = definition.delivery?.provider ?? definition.deliveryType ?? "";
+  const deliveryRefs = new Set<string>();
+  if (deliveryProvider && deliveryProvider.toLowerCase() !== "none") {
+    deliveryRefs.add(normalizeToolRef(deliveryProvider));
+  }
+
+  const declaredRefs = new Set<string>();
+  const actionRefs = new Set<string>();
+  for (const agent of definition.agentGraph?.children ?? []) {
+    const refs = (agent.tools ?? [])
+      .map((tool) => typeof tool === "string" ? tool : tool.ref)
+      .map((ref) => ref.trim())
+      .filter((ref) => ref && !ref.startsWith("internal."));
+    for (const ref of refs) {
+      declaredRefs.add(normalizeToolRef(ref));
+      if (isActionAgent(agent)) actionRefs.add(normalizeToolRef(ref));
+    }
+  }
+
+  const readContracts: ToolContract[] = [];
+  const writeContracts: ToolContract[] = [];
+  for (const contract of contracts) {
+    const isDeclared = declaredRefs.size === 0
+      || [...declaredRefs].some((ref) => contractMatchesRef(contract, ref));
+    if (!isDeclared) continue;
+
+    const isDelivery = [...deliveryRefs].some((ref) => contractMatchesRef(contract, ref));
+    const isArchitectAction = [...actionRefs].some((ref) => contractMatchesRef(contract, ref));
+    if (isDelivery || isArchitectAction || isWriteEffect(contract.effect)) {
+      writeContracts.push(contract);
+    } else if (contract.effect === "read_external") {
+      readContracts.push(contract);
+    }
+  }
+
+  return { readContracts, writeContracts, deliveryRefs, actionRefs };
 }
 
 // TODO: move this to a config file
@@ -217,12 +279,12 @@ export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecR
   const reviewPolicy = buildContract ? selectedReviewPolicy(buildContract) : null;
   const outputReviewGatesMode = buildContract ? selectedOutputReviewGatesMode(buildContract) : "none";
   const contracts = selectedContracts(definition);
-  const readTools = contracts
-    .filter((contract) => isPlanReadTool(contract, reviewPolicy))
-    .map(compileTool);
-  const writeTools = contracts
-    .filter((contract) => isPlanWriteTool(contract, reviewPolicy))
-    .map(compileTool);
+  const toolPlan = architectToolPlan(definition, contracts);
+  const readTools = toolPlan.readContracts.map((contract) => compileTool(contract));
+  const writeTools = toolPlan.writeContracts.map((contract) => compileTool(contract, {
+    forceAction: [...toolPlan.actionRefs].some((ref) => contractMatchesRef(contract, ref)),
+    isDelivery: [...toolPlan.deliveryRefs].some((ref) => contractMatchesRef(contract, ref)),
+  }));
   const allTools = [...readTools, ...writeTools];
   const externalDataToolkits = buildContract ? selectedExternalDataToolkits(buildContract) : [];
   const agents = (definition.agentGraph?.children ?? []).map((agent, index): RunPlanAgent => ({

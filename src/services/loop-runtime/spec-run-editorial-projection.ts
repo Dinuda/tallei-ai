@@ -8,6 +8,7 @@ import {
   loadPendingInteractionForRun,
   mapInteractionKindForUi,
 } from "./spec-run-interactions.js";
+import { projectOutputWithBoundary } from "./boundary-store.js";
 
 type StepRow = {
   id: string;
@@ -22,6 +23,14 @@ type StepRow = {
   created_at: string | Date;
   started_at: string | Date | null;
   finished_at: string | Date | null;
+  boundary_protocol_version?: string | null;
+  boundary_raw_output_json?: unknown;
+  boundary_structured_output_json?: unknown;
+  boundary_normalized_output_json?: unknown;
+  boundary_normalized_handoff_json?: unknown;
+  boundary_goal_eval_json?: unknown;
+  boundary_router_decision?: string | null;
+  boundary_legacy_output_json?: unknown;
 };
 
 type InteractionRow = {
@@ -137,11 +146,20 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
 
   const [stepsResult, interactionsResult, artifactsResult, eventsResult, pendingInteraction] = await Promise.all([
     pool.query<StepRow>(
-      `SELECT id, step_index, agent_id, agent_snapshot, attempt, status, input_json, output_json, error_json,
-              created_at, started_at, finished_at
-       FROM loop_engine_step_attempts
-       WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
-       ORDER BY step_index ASC, attempt ASC`,
+      `SELECT sa.id, sa.step_index, sa.agent_id, sa.agent_snapshot, sa.attempt, sa.status, sa.input_json, sa.output_json, sa.error_json,
+              sa.created_at, sa.started_at, sa.finished_at,
+              b.protocol_version AS boundary_protocol_version,
+              b.raw_output_json AS boundary_raw_output_json,
+              b.structured_output_json AS boundary_structured_output_json,
+              b.normalized_output_json AS boundary_normalized_output_json,
+              b.normalized_handoff_json AS boundary_normalized_handoff_json,
+              b.goal_eval_json AS boundary_goal_eval_json,
+              b.router_decision AS boundary_router_decision,
+              b.legacy_output_json AS boundary_legacy_output_json
+       FROM loop_engine_step_attempts sa
+       LEFT JOIN loop_engine_boundaries b ON b.step_attempt_id = sa.id
+       WHERE sa.run_id = $1 AND sa.tenant_id = $2 AND sa.user_id = $3
+       ORDER BY sa.step_index ASC, sa.attempt ASC`,
       [runId, auth.tenantId, auth.userId],
     ),
     pool.query<InteractionRow>(
@@ -182,6 +200,19 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
   const steps = stepsResult.rows
     .filter((row) => planAgentIds.has(row.agent_id))
     .map((row) => {
+    const projectedOutput = projectOutputWithBoundary({
+      outputJson: row.output_json,
+      boundary: {
+        protocol_version: row.boundary_protocol_version,
+        raw_output_json: row.boundary_raw_output_json,
+        structured_output_json: row.boundary_structured_output_json,
+        normalized_output_json: row.boundary_normalized_output_json,
+        normalized_handoff_json: row.boundary_normalized_handoff_json,
+        goal_eval_json: row.boundary_goal_eval_json,
+        router_decision: row.boundary_router_decision,
+        legacy_output_json: row.boundary_legacy_output_json,
+      },
+    });
     const snapshot = asRecord(row.agent_snapshot);
     const personaRaw = asRecord(snapshot.persona);
     return {
@@ -219,8 +250,8 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
       finished_at: iso(row.finished_at),
       input_json: asRecord(row.input_json),
       output_json: {
-        text: stepOutputText(row.output_json),
-        data: asRecord(asRecord(row.output_json).data),
+        text: stepOutputText(projectedOutput),
+        data: asRecord(asRecord(projectedOutput).data),
       },
       error_json: asRecord(row.error_json),
     };

@@ -142,16 +142,10 @@ export function agentToolAssignmentIssues(
   return issues;
 }
 
-const DELIVERY_ACTION_SLUGS = new Set([
-  "GMAIL_REPLY_TO_THREAD",
-  "GMAIL_SEND_EMAIL",
-  "GMAIL_SEND_DRAFT",
-]);
-
-function isDeliveryToolRef(ref: string): boolean {
-  const slug = ref.split(".").pop()?.replace(/-/g, "_").toUpperCase() ?? "";
-  if (DELIVERY_ACTION_SLUGS.has(slug)) return true;
-  return /\b(send|reply_to_thread)\b/i.test(ref);
+function isDeclaredDeliveryToolRef(ref: string, spec: NoSlopSpec): boolean {
+  const provider = spec.delivery.provider?.trim();
+  if (!provider || provider.toLowerCase() === "none") return false;
+  return normalizeToolRef(ref) === normalizeToolRef(provider);
 }
 
 export function agentGuardrailToolConflicts(spec: NoSlopSpec): string[] {
@@ -161,7 +155,7 @@ export function agentGuardrailToolConflicts(spec: NoSlopSpec): string[] {
     const blocksOutbound = /do not draft or send|do not send outbound|never send/.test(guardrails);
     if (!blocksOutbound) continue;
     for (const ref of agent.tools ?? []) {
-      if (isDeliveryToolRef(ref.trim())) {
+      if (isDeclaredDeliveryToolRef(ref.trim(), spec)) {
         issues.push(`Agent "${agent.name}" guardrails forbid outbound actions but includes "${ref}".`);
       }
     }

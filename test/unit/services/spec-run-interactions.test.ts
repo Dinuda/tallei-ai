@@ -157,18 +157,22 @@ test("buildOperatorViewFromInteraction exposes non-send connector approvals as c
   assert.equal(view?.meta?.canvasArtifactKey, undefined);
 });
 
-test("interaction writer separates draft render review from non-send action approval", async () => {
+test("interaction writer uses one gate primitive for review, input, and action approvals", async () => {
   const source = await readFile(interactionWriterPath, "utf8");
 
+  assert.match(source, /export async function createSpecRunGateInteraction/);
+  assert.match(source, /gateType: "action"/);
+  assert.match(source, /deferredToolKey/);
   assert.match(source, /surface: "confirm\.send"/);
-  assert.match(source, /if \(!input\.deferred\.isSendAction\)/);
+  assert.match(source, /if \(input\.deferred\.isSendAction\)/);
   assert.match(source, /kind: "confirm_action"/);
-  assert.match(source, /'confirm_action', 'pending'/);
+  assert.match(source, /interactionKind: "collect_input" \| "review_artifact" \| "confirm_action"/);
   assert.match(source, /findInteractionIdByKey/);
   assert.match(source, /ON CONFLICT \(idempotency_key\) DO UPDATE/);
   assert.match(source, /RETURNING id/);
   assert.match(source, /renderTargetForSurface\(surface\)/);
   assert.match(source, /if \(surface === "review\.email"\)/);
+  assert.match(source, /return createSpecRunGateInteraction\(\{/);
 });
 
 test("patchMessagesWithToolResult completes pending tool parts", () => {

@@ -37,10 +37,10 @@ test("mergeRunChatMessages keeps server tool patches and appends new client turn
       id: "assistant-1",
       role: "assistant",
       parts: [{
-        type: "tool-requestReview",
+        type: "tool-requestGate",
         toolCallId: "call-1",
         state: "output-available",
-        input: {},
+        input: { type: "review" },
         output: { ok: true, approved: true },
       }],
     },
@@ -53,6 +53,6 @@ test("mergeRunChatMessages keeps server tool patches and appends new client turn
   const merged = mergeRunChatMessages(server, client);
 
   assert.equal(merged.length, 3);
-  assert.equal(merged[1]?.parts[0]?.type, "tool-requestReview");
+  assert.equal(merged[1]?.parts[0]?.type, "tool-requestGate");
   assert.equal(merged[2]?.id, "continue-1");
 });

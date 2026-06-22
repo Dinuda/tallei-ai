@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildBoundaryEnvelope,
   normalizedHandoffFromStepOutput,
+  routeBoundary,
   RUNNER_BOUNDARY_PROTOCOL_VERSION,
 } from "../../../src/services/loop-runtime/runner-boundary.js";
 
@@ -30,4 +31,27 @@ test("normalizedHandoffFromStepOutput keeps legacy structured output compatibili
   };
 
   assert.deepEqual(normalizedHandoffFromStepOutput(legacy), { subject: "Launch", body: "Shipped." });
+});
+
+test("routeBoundary maps evaluator status and no-action output deterministically", () => {
+  assert.equal(routeBoundary({
+    goalEval: { status: "pass", reason: "ok", blockers: [] },
+    normalizedOutput: { status: "ready" },
+  }), "continue");
+  assert.equal(routeBoundary({
+    goalEval: { status: "pass", reason: "ok", blockers: [] },
+    normalizedOutput: { status: "no_action_required" },
+  }), "finish_no_action");
+  assert.equal(routeBoundary({
+    goalEval: { status: "needs_input", reason: "missing", blockers: [] },
+    normalizedOutput: {},
+  }), "pause_for_input");
+  assert.equal(routeBoundary({
+    goalEval: { status: "retry", reason: "malformed", blockers: [] },
+    normalizedOutput: {},
+  }), "retry_step");
+  assert.equal(routeBoundary({
+    goalEval: { status: "fail", reason: "wrong output", blockers: [] },
+    normalizedOutput: {},
+  }), "fail_run");
 });

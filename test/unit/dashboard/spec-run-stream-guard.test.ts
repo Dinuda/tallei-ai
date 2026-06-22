@@ -25,3 +25,10 @@ test("spec run stream guard blocks duplicate auto-start and active chat kicks", 
   assert.match(guard, /shouldContinueRunStream/);
   assert.match(specRunPage, /shouldContinueRunStream/);
 });
+
+test("spec run stream guard resumes queued work after refresh", async () => {
+  const guard = await readFile(guardPath, "utf8");
+  assert.match(guard, /step\.status === "queued"/);
+  assert.match(guard, /step\.status === "waiting_for_interaction"/);
+  assert.doesNotMatch(guard, /step\.status === "running"\)\) return true/);
+});

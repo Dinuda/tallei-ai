@@ -96,6 +96,8 @@ function buildSpec(reviewMode: "draft_only" | "approve_each_action" = "approve_e
     allowedIntegrations: ["internal"],
     ceo: { name: "CEO", task: "Monitor support and draft replies", policy: "Monitor support and draft replies" },
     draftPolicy: { requireDraftBeforeExternalAction: true, approvalRequiredFor: ["publish", "send", "external_action"] },
+    deliveryType: "composio.mail.action.SEND_MESSAGE",
+    delivery: { provider: "composio.mail.action.SEND_MESSAGE" },
     buildContract,
     inputRequirements: [
       { key: "team_tone", surface: "input.text", label: "Tone", required: true, when: "run_start" },
@@ -284,6 +286,30 @@ test("compileSpecRunPlan uses declared agent tools when present", () => {
   assert.ok(!plan.agents[0]?.toolRefs.includes("composio.mail.action.CREATE_DRAFT"));
   assert.ok(plan.agents[1]?.toolRefs.includes("composio.mail.action.CREATE_DRAFT"));
   assert.ok(!plan.agents[1]?.toolRefs.includes("internal.memory_search"));
+});
+
+test("compileSpecRunPlan trusts architect delivery routing over catalog effect labels", () => {
+  const spec = buildSpec();
+  spec.buildContract.requirements[0]!.value.selections[0]!.actionSlugs.push("REPLY_TO_THREAD");
+  spec.builderMeta.discoveredToolContracts.push(contract("REPLY_TO_THREAD", "read_external", ["reply"]));
+  spec.deliveryType = "composio.mail.action.REPLY_TO_THREAD";
+  spec.delivery = { provider: "composio.mail.action.REPLY_TO_THREAD" };
+  spec.agentGraph.children[1] = {
+    ...spec.agentGraph.children[1]!,
+    nodeKind: "action",
+    artifactRole: "delivery",
+    tools: ["composio.mail.action.REPLY_TO_THREAD"],
+    gate: { type: "pre_send", question: "Confirm reply." },
+  };
+
+  const plan = compileSpecRunPlan(spec);
+  const deliveryTool = plan.writeTools.find((entry) => entry.actionSlug === "REPLY_TO_THREAD");
+
+  assert.ok(deliveryTool);
+  assert.equal(deliveryTool.effect, "read_external");
+  assert.equal(deliveryTool.requiresApproval, true);
+  assert.equal(deliveryTool.isSendLike, true);
+  assert.equal(plan.readTools.some((entry) => entry.actionSlug === "REPLY_TO_THREAD"), false);
 });
 
 test("declaredAgentToolRefs uses only spec-declared tools when tools array is empty", () => {

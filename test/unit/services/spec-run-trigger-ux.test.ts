@@ -95,6 +95,9 @@ test("spec run gate opens from pending interaction and surfaces produced artifac
   ]);
   assert.match(utils, /resolveDisplayArtifact/);
   assert.match(specRunPage, /showGateComposer/);
+  assert.match(specRunPage, /ApprovalGatePanel/);
+  assert.match(specRunPage, /inlineGateStepId/);
+  assert.match(specRunPage, /selectedValue === "approve"/);
   assert.match(specRunPage, /ArtifactRenderer/);
   assert.match(specRunPage, /resolveArtifactForStep/);
   assert.match(specRunPage, /resolveDisplayArtifact/);

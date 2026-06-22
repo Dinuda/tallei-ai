@@ -186,7 +186,7 @@ export const ROLE_AGENT_DEFAULTS: Record<AgentContractRole, {
     failureModes: ["Pause when required upstream evidence is missing."],
   },
   delivery: {
-    guardrails: ["Use requestApproval before any mutating external action.", "Do not execute mutating connector actions without operator approval."],
+    guardrails: ["Use requestGate type=action before any mutating external action.", "Do not execute mutating connector actions without operator approval."],
     doneCriteria: ["Delivery output matches the declared contract."],
     failureModes: ["Pause when upstream draft or approval is missing."],
   },

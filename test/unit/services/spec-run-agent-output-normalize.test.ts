@@ -5,7 +5,10 @@ import {
   stripToSchema,
   validateContractData,
 } from "../../../src/services/loop-engine/data-contract.js";
-import { normalizeAgentStepOutput } from "../../../src/services/loop-runtime/spec-run-agent-runner.js";
+import {
+  fallbackSourceEvidenceOutput,
+  normalizeAgentStepOutput,
+} from "../../../src/services/loop-runtime/spec-run-agent-runner.js";
 
 const evidenceSchema = {
   type: "object",
@@ -75,4 +78,32 @@ test("normalizeAgentStepOutput promotes ticket evidence from context", () => {
     },
   });
   assert.deepEqual(result, { valid: true });
+});
+
+test("fallbackSourceEvidenceOutput builds valid evidence from trigger context", () => {
+  const output = fallbackSourceEvidenceOutput({
+    workflowId: "workflow-1",
+    trigger: { source: "connector", slug: "GMAIL_NEW_GMAIL_MESSAGE", toolkit: "gmail" },
+    ticket: {
+      subject: "site down",
+      body: "Production site is unavailable.",
+      threadId: "thread-1",
+      messageId: "message-1",
+    },
+    customer: { email: "customer@example.com" },
+    policies: {
+      ticketContentMode: "email_body",
+      customerDetailsMode: "sender_name_email",
+      reviewMode: "review_drafts",
+    },
+    grounding: [],
+    templates: [],
+    connectorActionSlugs: [],
+    connectorAccountIds: {},
+    hasTriggerPayload: true,
+  });
+
+  assert.equal(output.status, "ticket_found");
+  assert.equal(output.priority, "high");
+  assert.deepEqual(validateEvidence(output), { valid: true });
 });

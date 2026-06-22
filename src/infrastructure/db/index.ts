@@ -1,6 +1,5 @@
 import pg from "pg";
 import { config } from "../../config/index.js";
-import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 
 const { Pool } = pg;
 
@@ -56,285 +55,7 @@ export let pool = createPool(config.databaseUrl);
 
 type DbClient = pg.PoolClient;
 
-type MemoryType = "preference" | "fact" | "event" | "decision" | "note" | "checkpoint";
-
 const MEMORY_TYPE_CHECK = "'preference', 'fact', 'event', 'decision', 'note', 'checkpoint'";
-
-function classifyLegacyMemoryText(content: string): { memoryType: MemoryType; category: string | null; isPinned: boolean } {
-  const text = content.trim();
-  const isPreference =
-    /\b(i\s+prefer|i\s+like|i\s+love|i\s+hate|my\s+favou?rite|preferred)\b/i.test(text) ||
-    /\b(my\s+name\s+is|my\s+email\s+is|my\s+phone|my\s+pronouns|i\s+live\s+in|i\s+am\s+from)\b/i.test(text);
-  if (isPreference) {
-    if (/\b(my\s+name\s+is|my\s+email\s+is|my\s+phone|my\s+pronouns)\b/i.test(text)) {
-      return { memoryType: "preference", category: "identity", isPinned: true };
-    }
-    if (/\b(ui|ux|design|theme|color|style)\b/i.test(text)) {
-      return { memoryType: "preference", category: "ui", isPinned: true };
-    }
-    if (/\b(next\.js|typescript|react|node|postgres|qdrant|stack)\b/i.test(text)) {
-      return { memoryType: "preference", category: "stack", isPinned: true };
-    }
-    return { memoryType: "preference", category: null, isPinned: true };
-  }
-  if (/\b(decide|decided|decision|agreed|chose|chosen)\b/i.test(text)) {
-    return { memoryType: "decision", category: null, isPinned: false };
-  }
-  if (/\b(yesterday|today|tomorrow|last\s+week|last\s+month|meeting|event|happened)\b/i.test(text)) {
-    return { memoryType: "event", category: null, isPinned: false };
-  }
-  if (/\b(note|reminder|todo|to\s*do)\b/i.test(text)) {
-    return { memoryType: "note", category: null, isPinned: false };
-  }
-  return { memoryType: "fact", category: null, isPinned: false };
-}
-
-async function hasColumn(client: DbClient, table: string, column: string): Promise<boolean> {
-  const result = await client.query<{ exists: boolean }>(
-    `SELECT EXISTS (
-      SELECT 1
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = $1
-        AND column_name = $2
-    ) AS exists`,
-    [table, column]
-  );
-  return Boolean(result.rows[0]?.exists);
-}
-
-async function backfillMemoryTypes(client: DbClient): Promise<void> {
-  const rows = await client.query<{
-    id: string;
-    content_ciphertext: string;
-    memory_type: string;
-    category: string | null;
-    is_pinned: boolean | null;
-  }>(
-    `SELECT id, content_ciphertext, memory_type, category, is_pinned
-     FROM memory_records
-     WHERE deleted_at IS NULL
-       AND superseded_by IS NULL`
-  );
-
-  for (const row of rows.rows) {
-    if (
-      row.memory_type !== "fact" ||
-      row.category !== null ||
-      row.is_pinned === true
-    ) {
-      continue;
-    }
-
-    let plaintext = "";
-    try {
-      plaintext = decryptMemoryContent(row.content_ciphertext);
-    } catch {
-      continue;
-    }
-
-    const classified = classifyLegacyMemoryText(plaintext);
-    if (
-      classified.memoryType === "fact" &&
-      classified.category === null &&
-      classified.isPinned === false
-    ) {
-      continue;
-    }
-
-    await client.query(
-      `UPDATE memory_records
-       SET memory_type = $1,
-           category = COALESCE($2, category),
-           is_pinned = CASE WHEN $3 THEN TRUE ELSE is_pinned END
-       WHERE id = $4`,
-      [classified.memoryType, classified.category, classified.isPinned, row.id]
-    );
-  }
-}
-
-async function ensurePrimaryTenantMembership(client: DbClient, userId: string, email: string | null): Promise<void> {
-  const existing = await client.query<{ tenant_id: string }>(
-    "SELECT tenant_id FROM tenant_memberships WHERE user_id = $1 LIMIT 1",
-    [userId]
-  );
-  if (existing.rows[0]?.tenant_id) return;
-
-  const tenantName = email && email.includes("@")
-    ? `tenant-${email.split("@")[0].replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 36)}`
-    : `tenant-${userId.slice(0, 8)}`;
-
-  const tenant = await client.query<{ id: string }>(
-    "INSERT INTO tenants (name) VALUES ($1) RETURNING id",
-    [tenantName]
-  );
-
-  await client.query(
-    `INSERT INTO tenant_memberships (tenant_id, user_id, role, is_primary)
-     VALUES ($1, $2, 'owner', true)
-     ON CONFLICT (user_id) DO NOTHING`,
-    [tenant.rows[0].id, userId]
-  );
-}
-
-async function backfillWorkspaces(client: DbClient): Promise<void> {
-  const memberships = await client.query<{ tenant_id: string; user_id: string }>(
-    `SELECT tenant_id, user_id FROM tenant_memberships`
-  );
-
-  for (const membership of memberships.rows) {
-    const { tenant_id: tenantId, user_id: userId } = membership;
-
-    let personal = await client.query<{ id: string }>(
-      `SELECT id
-       FROM loop_workspaces
-       WHERE tenant_id = $1
-         AND user_id = $2
-         AND is_default = TRUE
-       LIMIT 1`,
-      [tenantId, userId]
-    );
-
-    if (!personal.rows[0]) {
-      const existing = await client.query<{ id: string }>(
-        `SELECT id
-         FROM loop_workspaces
-         WHERE tenant_id = $1
-           AND user_id = $2
-         ORDER BY created_at ASC
-         LIMIT 1`,
-        [tenantId, userId]
-      );
-      if (existing.rows[0]) {
-        await client.query(
-          `UPDATE loop_workspaces
-           SET kind = 'personal',
-               is_default = TRUE,
-               slug = 'personal',
-               updated_at = NOW()
-           WHERE id = $1`,
-          [existing.rows[0].id]
-        );
-        personal = existing;
-      } else {
-        personal = await client.query<{ id: string }>(
-          `INSERT INTO loop_workspaces
-             (tenant_id, user_id, name, description, slug, kind, is_default, icon, color, settings_json)
-           VALUES ($1, $2, 'Personal', NULL, 'personal', 'personal', TRUE, NULL, '#6366f1', '{}'::jsonb)
-           RETURNING id`,
-          [tenantId, userId]
-        );
-      }
-    }
-
-    const personalId = personal.rows[0]!.id;
-
-    await client.query(
-      `INSERT INTO workspace_memberships (workspace_id, tenant_id, user_id, role)
-       VALUES ($1, $2, $3, 'owner')
-       ON CONFLICT (user_id, workspace_id) DO NOTHING`,
-      [personalId, tenantId, userId]
-    );
-
-    await client.query(
-      `INSERT INTO user_workspace_preferences (user_id, tenant_id, last_active_workspace_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (user_id) DO UPDATE
-         SET last_active_workspace_id = COALESCE(user_workspace_preferences.last_active_workspace_id, EXCLUDED.last_active_workspace_id),
-             updated_at = NOW()`,
-      [userId, tenantId, personalId]
-    );
-
-    const backfillTables = [
-      "workflows",
-      "notification_channels",
-      "connector_accounts",
-      "documents",
-      "document_lots",
-      "workflow_builder_sessions",
-      "collab_tasks",
-    ] as const;
-
-    for (const table of backfillTables) {
-      if (await hasColumn(client, table, "workspace_id")) {
-        await client.query(
-          `UPDATE ${table}
-           SET workspace_id = $1
-           WHERE tenant_id = $2
-             AND user_id = $3
-             AND workspace_id IS NULL`,
-          [personalId, tenantId, userId]
-        );
-      }
-    }
-  }
-}
-
-async function backfillTenants(client: DbClient): Promise<void> {
-  const users = await client.query<{ id: string; email: string | null }>(
-    "SELECT id, email FROM users"
-  );
-
-  for (const user of users.rows) {
-    await ensurePrimaryTenantMembership(client, user.id, user.email);
-  }
-
-  await client.query(`
-    UPDATE api_keys ak
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE ak.user_id = tm.user_id
-      AND ak.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE oauth_authorization_codes oac
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE oac.user_id = tm.user_id
-      AND oac.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE oauth_tokens ot
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE ot.user_id = tm.user_id
-      AND ot.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE oauth_device_codes odc
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE odc.user_id = tm.user_id
-      AND odc.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE mcp_call_events mce
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE mce.user_id = tm.user_id
-      AND mce.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE claude_onboarding_sessions cos
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE cos.user_id = tm.user_id
-      AND cos.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE claude_onboarding_events coe
-    SET tenant_id = cos.tenant_id
-    FROM claude_onboarding_sessions cos
-    WHERE coe.session_id = cos.id
-      AND coe.tenant_id IS NULL
-  `);
-}
 
 async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
   if (!config.enableSupabaseRlsPolicies) return;
@@ -451,7 +172,7 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
 }
 
 async function configureMigrationSession(client: DbClient): Promise<void> {
-  // Boot-time DDL (CREATE INDEX, ALTER TABLE, backfills) can exceed the pool's
+  // Boot-time DDL can exceed the pool's
   // 5s statement timeout on non-trivial databases.
   await client.query("SET statement_timeout = 0");
   await client.query("SET idle_in_transaction_session_timeout = 0");
@@ -535,8 +256,7 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user_id
         ON tenant_memberships(user_id);
-      CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_id
-        ON tenant_memberships(tenant_id);
+      DROP INDEX IF EXISTS idx_tenant_memberships_tenant_id;
     `);
 
     await client.query(`
@@ -555,8 +275,8 @@ export async function initDb() {
       
       CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
       CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON api_keys(tenant_id);
-      CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
       CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(user_id, revoked_at) WHERE revoked_at IS NULL;
+      DROP INDEX IF EXISTS idx_api_keys_hash;
     `);
 
     await client.query(`
@@ -684,19 +404,6 @@ export async function initDb() {
         ON documents(tenant_id, user_id, conversation_id, created_at DESC)
         WHERE deleted_at IS NULL AND conversation_id IS NOT NULL;
     `);
-
-    const hadMemoryTypeColumn = await hasColumn(client, "memory_records", "memory_type");
-    const hadCategoryColumn = await hasColumn(client, "memory_records", "category");
-    const hadPinnedColumn = await hasColumn(client, "memory_records", "is_pinned");
-    const hadReferenceCountColumn = await hasColumn(client, "memory_records", "reference_count");
-    const hadTierColumn = await hasColumn(client, "memory_records", "tier");
-    const hadSegmentColumn = await hasColumn(client, "memory_records", "segment");
-    const hadImportanceColumn = await hasColumn(client, "memory_records", "importance");
-    const hadDecayRateColumn = await hasColumn(client, "memory_records", "decay_rate");
-    const hadAccessCountColumn = await hasColumn(client, "memory_records", "access_count");
-    const hadLifecycleColumn = await hasColumn(client, "memory_records", "lifecycle");
-    const hadLastReferencedAtColumn = await hasColumn(client, "memory_records", "last_referenced_at");
-    const hadSupersededByColumn = await hasColumn(client, "memory_records", "superseded_by");
 
     await client.query(`
       ALTER TABLE memory_records
@@ -833,23 +540,6 @@ export async function initDb() {
         ON memory_records(tenant_id, user_id, content_hash)
         WHERE deleted_at IS NULL AND superseded_by IS NULL;
     `);
-
-    if (
-      !hadMemoryTypeColumn ||
-      !hadCategoryColumn ||
-      !hadPinnedColumn ||
-      !hadReferenceCountColumn ||
-      !hadTierColumn ||
-      !hadSegmentColumn ||
-      !hadImportanceColumn ||
-      !hadDecayRateColumn ||
-      !hadAccessCountColumn ||
-      !hadLifecycleColumn ||
-      !hadLastReferencedAtColumn ||
-      !hadSupersededByColumn
-    ) {
-      await backfillMemoryTypes(client);
-    }
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS memory_events (
@@ -1090,6 +780,8 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_scope_updated
         ON workflow_builder_sessions(tenant_id, user_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_spec
+        ON workflow_builder_sessions(tenant_id, user_id, spec_id, updated_at DESC);
 
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'new';
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS composio_session_id TEXT;
@@ -1106,6 +798,11 @@ export async function initDb() {
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS transcript_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS draft_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS debate_json;
+      ALTER TABLE workflow_builder_sessions
+        DROP CONSTRAINT IF EXISTS workflow_builder_sessions_spec_id_fkey;
+      ALTER TABLE workflow_builder_sessions
+        ADD CONSTRAINT workflow_builder_sessions_spec_id_fkey
+        FOREIGN KEY (spec_id) REFERENCES loop_specs(id) ON DELETE SET NULL;
       ALTER TABLE workflow_builder_sessions DROP CONSTRAINT IF EXISTS workflow_builder_sessions_phase_check;
       ALTER TABLE workflow_builder_sessions
         ADD CONSTRAINT workflow_builder_sessions_phase_check
@@ -1190,6 +887,22 @@ export async function initDb() {
         ADD COLUMN IF NOT EXISTS payload_json JSONB;
       ALTER TABLE workflow_connector_trigger_events
         ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+      UPDATE workflow_connector_trigger_events e
+        SET run_id = NULL
+        WHERE run_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM loop_engine_runs r
+            WHERE r.id = e.run_id
+          );
+      ALTER TABLE workflow_connector_trigger_events
+        DROP CONSTRAINT IF EXISTS workflow_connector_trigger_events_run_id_fkey;
+      ALTER TABLE workflow_connector_trigger_events
+        ADD CONSTRAINT workflow_connector_trigger_events_run_id_fkey
+        FOREIGN KEY (run_id) REFERENCES loop_engine_runs(id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS idx_workflow_connector_trigger_events_run_id
+        ON workflow_connector_trigger_events(run_id)
+        WHERE run_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_trigger_events_dedupe
         ON workflow_connector_trigger_events(trigger_instance_id, dedupe_key)
         WHERE dedupe_key IS NOT NULL;
@@ -1248,9 +961,6 @@ export async function initDb() {
           CHECK (status IN ('scheduled', 'running', 'waiting_for_strategy_approval', 'strategy_approved', 'waiting_for_email_approval', 'waiting_for_contact_list', 'waiting_for_input', 'waiting_for_approval', 'waiting_for_interaction', 'executing_action', 'distributing', 'paused_for_approval', 'completed', 'failed', 'blocked', 'skipped', 'cancelled')),
         scheduled_for TIMESTAMPTZ,
         strategy_output TEXT,
-        waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE,
-        draft_output TEXT,
-        connector_action_status TEXT,
         metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1258,13 +968,12 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_scope_status
         ON workflow_runs(tenant_id, user_id, status, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow
-        ON workflow_runs(workflow_id, created_at DESC);
+      DROP INDEX IF EXISTS idx_workflow_runs_workflow;
 
       ALTER TABLE workflow_runs
-        ADD COLUMN IF NOT EXISTS strategy_output TEXT;
-      ALTER TABLE workflow_runs
-        ADD COLUMN IF NOT EXISTS waiting_for_strategy_approval BOOLEAN NOT NULL DEFAULT FALSE;
+        DROP COLUMN IF EXISTS waiting_for_strategy_approval,
+        DROP COLUMN IF EXISTS draft_output,
+        DROP COLUMN IF EXISTS connector_action_status;
       ALTER TABLE workflow_runs
         DROP CONSTRAINT IF EXISTS workflow_runs_status_check;
       UPDATE workflow_runs
@@ -1528,6 +1237,61 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_loop_engine_attempts_run_step
         ON loop_engine_step_attempts(run_id, step_index, attempt DESC);
+
+      CREATE TABLE IF NOT EXISTS loop_engine_boundaries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        run_id UUID NOT NULL REFERENCES loop_engine_runs(id) ON DELETE CASCADE,
+        step_attempt_id UUID NOT NULL REFERENCES loop_engine_step_attempts(id) ON DELETE CASCADE,
+        protocol_version TEXT NOT NULL,
+        raw_output_json JSONB NOT NULL DEFAULT 'null'::jsonb,
+        structured_output_json JSONB NOT NULL DEFAULT 'null'::jsonb,
+        normalized_output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        normalized_handoff_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        goal_eval_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        router_decision TEXT NOT NULL DEFAULT 'continue'
+          CHECK (router_decision IN ('continue', 'pause_for_input', 'retry_step', 'fail_run', 'finish_no_action')),
+        boundary_issues_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        evaluator_metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        legacy_output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (step_attempt_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_loop_engine_boundaries_run_step
+        ON loop_engine_boundaries(run_id, step_attempt_id);
+
+      INSERT INTO loop_engine_boundaries
+        (tenant_id, user_id, run_id, step_attempt_id, protocol_version,
+         raw_output_json, structured_output_json, normalized_output_json, normalized_handoff_json,
+         goal_eval_json, router_decision, boundary_issues_json, evaluator_metadata_json, legacy_output_json,
+         created_at, updated_at)
+      SELECT
+        sa.tenant_id,
+        sa.user_id,
+        sa.run_id,
+        sa.id,
+        COALESCE(sa.output_json->>'protocolVersion', sa.output_json->'data'->'boundaryEnvelope'->>'protocolVersion'),
+        COALESCE(sa.output_json->'rawOutput', sa.output_json->'data'->'boundaryEnvelope'->'rawOutput', 'null'::jsonb),
+        COALESCE(sa.output_json->'structuredOutput', sa.output_json->'data'->'boundaryEnvelope'->'structuredOutput', 'null'::jsonb),
+        COALESCE(sa.output_json->'normalizedOutput', sa.output_json->'data'->'boundaryEnvelope'->'normalizedOutput', '{}'::jsonb),
+        COALESCE(sa.output_json->'normalizedHandoff', sa.output_json->'data'->'boundaryEnvelope'->'normalizedHandoff', '{}'::jsonb),
+        COALESCE(sa.output_json->'goalEval', sa.output_json->'data'->'boundaryEnvelope'->'goalEval', '{}'::jsonb),
+        CASE
+          WHEN COALESCE(sa.output_json->'normalizedOutput'->>'status', sa.output_json->'structuredOutput'->>'status') IN ('no_action_required', 'no_tickets_found', 'no_ticket_found')
+            THEN 'finish_no_action'
+          ELSE 'continue'
+        END,
+        '[]'::jsonb,
+        '{}'::jsonb,
+        sa.output_json,
+        sa.created_at,
+        NOW()
+      FROM loop_engine_step_attempts sa
+      WHERE COALESCE(sa.output_json->>'protocolVersion', sa.output_json->'data'->'boundaryEnvelope'->>'protocolVersion') = 'runner-boundary-v2'
+      ON CONFLICT (step_attempt_id) DO NOTHING;
 
       CREATE TABLE IF NOT EXISTS loop_engine_commands (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1965,48 +1729,8 @@ export async function initDb() {
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS workflow_approval_tokens (
-        token TEXT PRIMARY KEY,
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        target_type TEXT NOT NULL
-          CHECK (target_type IN ('workflow_suggestion', 'workflow_run', 'workflow_gate')),
-        target_id UUID NOT NULL,
-        channel TEXT NOT NULL
-          CHECK (channel IN ('email', 'gmail', 'whatsapp', 'telegram')),
-        expires_at TIMESTAMPTZ NOT NULL,
-        consumed_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      ALTER TABLE workflow_approval_tokens
-        DROP CONSTRAINT IF EXISTS workflow_approval_tokens_target_type_check;
-      ALTER TABLE workflow_approval_tokens
-        ADD CONSTRAINT workflow_approval_tokens_target_type_check
-        CHECK (target_type IN ('workflow_suggestion', 'workflow_run', 'workflow_gate'));
-
-      ALTER TABLE workflow_approval_tokens
-        DROP CONSTRAINT IF EXISTS workflow_approval_tokens_channel_check;
-      ALTER TABLE workflow_approval_tokens
-        ADD CONSTRAINT workflow_approval_tokens_channel_check
-        CHECK (channel IN ('email', 'gmail', 'whatsapp', 'telegram'));
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS daily_intelligence_runs (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        status TEXT NOT NULL
-          CHECK (status IN ('running', 'completed', 'failed')),
-        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        completed_at TIMESTAMPTZ
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_daily_intelligence_runs_scope_created
-        ON daily_intelligence_runs(tenant_id, user_id, created_at DESC);
+      DROP TABLE IF EXISTS workflow_approval_tokens;
+      DROP TABLE IF EXISTS daily_intelligence_runs;
     `);
 
     await client.query(`
@@ -2164,6 +1888,7 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access_expiry ON oauth_tokens(access_expires_at);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh_expiry ON oauth_tokens(refresh_expires_at);
+      DROP INDEX IF EXISTS idx_oauth_tokens_refresh;
     `);
 
     await client.query(`
@@ -2480,8 +2205,7 @@ export async function initDb() {
         created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
-      CREATE INDEX IF NOT EXISTS idx_browser_flow_templates_learned
-        ON browser_flow_templates(state, is_learned) WHERE is_learned = TRUE;
+      DROP INDEX IF EXISTS idx_browser_flow_templates_learned;
     `);
 
     await client.query(`
@@ -2818,7 +2542,7 @@ export async function initDb() {
     // Intentionally preserve existing api_keys.
     await client.query(`
       ALTER TABLE api_keys
-        ADD COLUMN IF NOT EXISTS pepper_version TEXT NOT NULL DEFAULT 'v1';
+        DROP COLUMN IF EXISTS pepper_version;
     `);
 
     await client.query(`
@@ -2948,14 +2672,6 @@ export async function initDb() {
         ON collab_tasks(tenant_id, user_id, workspace_id);
     `);
 
-    await backfillTenants(client);
-    await backfillWorkspaces(client);
-    await client.query(`
-      UPDATE api_keys
-      SET revoked_at = NOW()
-      WHERE revoked_at IS NULL
-        AND connector_type IS NULL
-    `);
     await applySupabaseRlsPolicies(client);
 
     console.log("Database schema initialized successfully.");

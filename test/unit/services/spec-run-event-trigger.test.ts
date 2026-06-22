@@ -187,7 +187,7 @@ const spec = {
         name: "Context Reader",
         goal: "Read context, search history, and collect source facts.",
         task: "Read context, search history, and collect source facts.",
-        tools: ["internal.memory_search", "composio.crm.search", "composio.mail.action.GMAIL_FETCH_MESSAGE_BY_THREAD_ID"],
+        tools: ["internal.memory_search", "composio.crm.search", "composio.gmail.action.GMAIL_LIST_THREADS"],
         guardrails: [],
         doneCriteria: ["Ticket context is ready."],
         failureModes: [],
@@ -197,7 +197,7 @@ const spec = {
         name: "Draft Writer",
         goal: "Draft reply, create the draft artifact, and request approval for writes.",
         task: "Draft reply, create the draft artifact, and request approval for writes.",
-        tools: ["composio.mail.action.GMAIL_CREATE_EMAIL_DRAFT", "composio.mail.action.GMAIL_SEND_DRAFT"],
+        tools: ["composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT", "composio.gmail.action.GMAIL_SEND_DRAFT"],
         guardrails: ["Do not send directly."],
         doneCriteria: ["Draft is ready for review."],
         failureModes: [],
@@ -213,7 +213,7 @@ test("compileSpecRunPlan exposes only build-contract selected connector actions"
   assert.ok(plan.readTools.some((tool) => tool.actionSlug === "GMAIL_LIST_THREADS"));
 });
 
-test("draft_only review policy remaps delivery slugs to draft write tools", () => {
+test("draft_only review policy keeps architect-declared draft write tools", () => {
   const plan = compileSpecRunPlan(spec);
 
   assert.ok(plan.writeTools.some((tool) => tool.actionSlug === "GMAIL_CREATE_EMAIL_DRAFT"));

@@ -103,7 +103,9 @@ function classifyTarget(
   }
   if (isSendAction(slug)) {
     const role = specRequiresSend(spec) || required ? "critical" : "optional";
-    return { ...target, actionSlug: slug, role, probeKind: "dry_run" };
+    // Send actions are irreversible, so verification only checks that the connector
+    // is available; it must not invoke the live send endpoint.
+    return { ...target, actionSlug: slug, role, probeKind: "visibility_only" };
   }
   if (required) {
     return {

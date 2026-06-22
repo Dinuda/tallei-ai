@@ -26,6 +26,9 @@ test("agent turns merge streamed chat messages with persisted step synthesis", a
   ]);
   assert.match(hydration, /normalizeTranscriptMessages/);
   assert.match(hydration, /syntheticAgentMessageForStep/);
+  assert.match(hydration, /syntheticAgentMessageForPlan/);
+  assert.match(hydration, /plannedAgents: PlannedSpecAgent\[\]/);
+  assert.match(hydration, /totalAgents = Math\.max\(plannedAgents\.length/);
   assert.doesNotMatch(specRunPage, /isDraftReviewInteraction/);
   assert.match(hydration, /extractStreamPartsByStepIndex/);
   assert.match(hydration, /readAgentStepIndex/);
@@ -42,6 +45,7 @@ test("agent turns merge streamed chat messages with persisted step synthesis", a
   assert.match(specRunPage, /isAgentTurnMessage/);
   assert.match(specRunPage, /readAgentStepIndex/);
   assert.match(specRunPage, /liveAgentMessageId/);
+  assert.match(specRunPage, /run\.definition\?\.agentGraph\?\.children \?\? \[\]/);
   assert.match(specRunPage, /kickRunStream/);
   assert.match(specRunPage, /spec-run-stream-guard/);
   assert.doesNotMatch(specRunPage, /buildSequentialStepTranscript/);
@@ -83,4 +87,7 @@ test("agent turn rendering surfaces failed step errors", async () => {
   assert.match(specRunPage, /const failureMessage = resolveStepFailureMessage/);
   assert.match(specRunPage, /<span className="font-medium text-\[#374151\]">Error: <\/span>/);
   assert.match(specRunPage, /void refreshMessages\(true\)/);
+  assert.match(specRunPage, /Loading approval controls/);
+  assert.match(specRunPage, /const inlineGateStepId = gate\.show && !submittedAnswer && !noActionReview/);
+  assert.match(specRunPage, /operatorView: OperatorView \| null/);
 });

@@ -28,7 +28,7 @@ const SUGGESTIONS: LoopSuggestion[] = [
   {
     id: "support",
     title: "Support Auto-Reply",
-    description: "Auto-classify support tickets and draft context-aware replies.",
+    description: "Auto-classify support tickets and send context-aware replies.",
     prompt: "Set up a loop that monitors support tickets, classifies them by priority, and drafts personalized replies and sends them to the customer.",
     image: "/loops/support-brain.png",
   },

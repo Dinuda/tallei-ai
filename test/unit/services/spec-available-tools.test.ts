@@ -47,7 +47,7 @@ function supportSpec(): NoSlopSpec {
     guardrails: [],
     successCriteria: [],
     failureModes: [],
-    delivery: { provider: "gmail", description: "Gmail" },
+    delivery: { provider: "composio.gmail.action.GMAIL_REPLY_TO_THREAD", description: "Gmail reply action" },
     schedule: { description: "Hourly" },
     connectorPolicy: { allowedReadActions: [], allowedWriteActions: [] },
     inputRequirements: [],

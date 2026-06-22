@@ -24,6 +24,11 @@ import {
   retryFailedBuilderCommand,
   type BuilderToolName,
 } from "../../../services/loop-builder/dispatcher.js";
+import {
+  normalizeSaveLoopInput,
+  saveLoopInputSchema,
+  saveLoopRequestSchema,
+} from "../../../services/loop-builder/save-loop-input.js";
 import { loopBuilderOpenAiModel, loopBuilderStreamMaxOutputTokens, loopBuilderStreamProviderOptions } from "../../../services/loop-builder/openai-chat.js";
 import { createLoopBuilderToolCallRepair } from "../../../services/loop-builder/tool-call-repair.js";
 import { resolveLoopChatLanguageModel } from "../../../services/llm/loop-chat-client.js";
@@ -257,14 +262,8 @@ function analyzerTools(
     }),
     saveLoop: tool({
       description: "Compile the config-driven runtime agent contract, save the loop, and initialize verification. Call only after requirements are ready and the user confirms they want to save.",
-      inputSchema: z.object({
-        cron: z.string().optional(),
-        timezone: z.string().optional(),
-        workspaceId: z.string().uuid().nullable().optional(),
-      }),
-      execute: (input) => {
-        return run("saveLoop", { ...input, approved: true });
-      },
+      inputSchema: saveLoopInputSchema,
+      execute: (input) => run("saveLoop", { ...normalizeSaveLoopInput(input), approved: true }),
     }),
     runBuilderTest: tool({
       description: "Start the safe builder test run for the saved workflow. Call after saveLoop completes, not before.",
@@ -679,15 +678,10 @@ router.get("/jobs/:jobId", requireScopes(["memory:read"]), async (req: AuthReque
 
 router.post("/save", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
-    const body = z.object({
-      sessionId: z.string().uuid(),
-      cron: z.string().optional(),
-      timezone: z.string().optional(),
-      workspaceId: z.string().uuid().nullable().optional(),
-    }).parse(req.body ?? {});
+    const body = saveLoopRequestSchema.parse(req.body ?? {});
     const command = await dispatchWorkflowBuilderCommand({
       auth: req.authContext!, sessionId: body.sessionId, toolName: "saveLoop",
-      input: { cron: body.cron, timezone: body.timezone, workspaceId: body.workspaceId, approved: true },
+      input: { ...normalizeSaveLoopInput(body), approved: true },
     });
     res.status(202).json(command);
   } catch (error) {

@@ -10,7 +10,7 @@ import {
 } from "ai";
 import { AnimatePresence, motion } from "motion/react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
-import { CheckCircle2, FileText, Loader2, Workflow } from "lucide-react";
+import { CheckCircle2, FileText, Loader2, ShieldCheck, Workflow, XCircle } from "lucide-react";
 
 import {
   InteractivePromptMenu,
@@ -124,7 +124,7 @@ type SpecRunProjection = {
 
 const ACTIVE_STATUSES = new Set(["running", "queued", "waiting_for_interaction", "waiting_for_approval"]);
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
-const GATE_TOOL_NAMES = ["requestReview", "requestApproval", "requestInput"];
+const GATE_TOOL_NAMES = ["requestGate", "requestReview", "requestApproval", "requestInput"];
 
 type TriggerSummary = {
   event: string;
@@ -171,6 +171,13 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function resolveVisibleInteraction(interactions: SpecRunInteraction[] | undefined): SpecRunInteraction | null {
+  const items = interactions ?? [];
+  return items.find((interaction) => interaction.status === "pending")
+    ?? [...items].reverse().find((interaction) => interaction.status === "submitted")
+    ?? null;
 }
 
 function readStepStructuredOutput(step: SpecRunStep | undefined, message: UIMessage): unknown {
@@ -567,8 +574,19 @@ function CompletedGateSummary({ toolName, part }: { toolName: string; part: Tool
         ? `Connector action completed. ID: ${connectorOutput.id}`
         : "Connector action completed successfully."
     : "";
-  const label = toolName === "requestApproval" && output.ok === true && connectorOutput
+  const gateType = typeof input.type === "string"
+    ? input.type
+    : typeof input.gateType === "string"
+      ? input.gateType
+      : "";
+  const label = (toolName === "requestGate" || toolName === "requestApproval") && output.ok === true && connectorOutput
     ? "Connector action completed"
+    : toolName === "requestGate" && gateType === "review"
+      ? "Draft review completed"
+    : toolName === "requestGate" && gateType === "action"
+      ? "Approval completed"
+    : toolName === "requestGate" && gateType === "input"
+      ? "Input received"
     : toolName === "requestReview"
     ? "Draft review completed"
     : toolName === "requestApproval"
@@ -589,14 +607,17 @@ function CompletedGateSummary({ toolName, part }: { toolName: string; part: Tool
 
 function mapGateAnswer(answer: InteractivePromptAnswer) {
   const optionId = answer.selectedOptionIds[0];
-  if (optionId === "approve") {
+  const selectedValue = answer.selectedValues[0] ?? optionId;
+  if (optionId === "approve" || selectedValue === "approve") {
     return {
       command: "approve" as const,
       value: { channel: "dashboard", approvalIntent: "approve_and_send" },
     };
   }
-  if (optionId === "reject") return { command: "reject" as const, value: { reason: "Rejected by operator" } };
-  if (optionId === "revise") {
+  if (optionId === "reject" || selectedValue === "reject") {
+    return { command: "reject" as const, value: { reason: "Rejected by operator" } };
+  }
+  if (optionId === "revise" || selectedValue === "revise") {
     const feedback = answer.otherText?.trim() || answer.answerText || "Operator requested changes.";
     return { command: "revise" as const, value: { feedback, channel: "dashboard" } };
   }
@@ -630,6 +651,159 @@ function optimisticDecision(mapped: GateCommand): Record<string, unknown> {
   return { output: { ok: true, approved: true, value: mapped.value }, channel: mapped.value.channel };
 }
 
+function ApprovalGatePanel({
+  title,
+  subtitle,
+  operatorView,
+  busy,
+  submittedAnswer,
+  onSubmit,
+}: {
+  title: string;
+  subtitle: string;
+  operatorView: OperatorView | null;
+  busy: boolean;
+  submittedAnswer: InteractivePromptAnswer | null;
+  onSubmit: (answer: InteractivePromptAnswer) => void;
+}) {
+  const [revisionOpen, setRevisionOpen] = useState(false);
+  const [revisionText, setRevisionText] = useState("");
+  const options = useMemo(() => operatorView ? buildGatePromptOptions(operatorView) : [], [operatorView]);
+  const optionByValue = useMemo(() => {
+    const map = new Map<string, (typeof options)[number]>();
+    for (const option of options) map.set(option.value, option);
+    return map;
+  }, [options]);
+  const approveOption = optionByValue.get("approve");
+  const reviseOption = optionByValue.get("revise");
+  const rejectOption = optionByValue.get("reject");
+  const disabled = busy || Boolean(submittedAnswer);
+
+  const submitOption = useCallback((option: (typeof options)[number], text?: string) => {
+    const extra = text?.trim();
+    onSubmit({
+      selectedOptionIds: [option.id],
+      selectedValues: [option.value],
+      ...(extra ? { otherText: extra } : {}),
+      answerText: extra ? `${option.value}; ${extra}` : option.value,
+    });
+  }, [onSubmit]);
+
+  return (
+    <section className="mt-3 border border-[#d1d5db] bg-white shadow-sm">
+      <div className="flex flex-col gap-3 border-b border-[#e5e7eb] bg-[#fbfcfd] px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 border border-[#bbf7d0] bg-[#f0fdf4] px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[#15803d]">
+              <ShieldCheck className="size-3.5" />
+              Approval gate
+            </span>
+            <span className="text-[12px] font-medium text-[#6b7280]">
+              {operatorView?.workspace.stamp.name ?? "Preparing"}
+            </span>
+          </div>
+          <h3 className="text-[15px] font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+            {title}
+          </h3>
+          {subtitle ? <p className="mt-1 text-[13px] leading-5 text-[#6b7280]">{subtitle}</p> : null}
+        </div>
+        {operatorView?.meta?.nextAgentName ? (
+          <p className="shrink-0 text-[12px] font-medium text-[#7eb71b]">
+            Then → {operatorView.meta.nextAgentName}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="space-y-3 px-4 py-4">
+        {submittedAnswer ? (
+          <div className="flex items-center gap-2 text-[13px] font-medium text-[#15803d]">
+            <CheckCircle2 className="size-4" />
+            Decision submitted: {submittedAnswer.answerText}
+          </div>
+        ) : null}
+
+        {operatorView ? (
+          <div className="flex flex-wrap items-center gap-2">
+          {approveOption ? (
+            <button
+              className="inline-flex h-9 items-center gap-2 bg-[#111827] px-3 text-[13px] font-semibold text-white transition-colors hover:bg-[#374151] disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={disabled}
+              onClick={() => submitOption(approveOption)}
+              type="button"
+            >
+              <CheckCircle2 className="size-4" />
+              {approveOption.label}
+            </button>
+          ) : null}
+          {reviseOption ? (
+            <button
+              className="inline-flex h-9 items-center gap-2 border border-[#d1d5db] bg-white px-3 text-[13px] font-semibold text-[#374151] transition-colors hover:bg-[#f9fafb] disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={disabled}
+              onClick={() => {
+                const feedback = revisionText.trim();
+                if (feedback) submitOption(reviseOption, feedback);
+                else setRevisionOpen(true);
+              }}
+              type="button"
+            >
+              {reviseOption.label}
+            </button>
+          ) : null}
+          {rejectOption ? (
+            <button
+              className="inline-flex h-9 items-center gap-2 border border-[#fecaca] bg-[#fef2f2] px-3 text-[13px] font-semibold text-[#b91c1c] transition-colors hover:bg-[#fee2e2] disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={disabled}
+              onClick={() => submitOption(rejectOption)}
+              type="button"
+            >
+              <XCircle className="size-4" />
+              {rejectOption.label}
+            </button>
+          ) : null}
+          {busy ? (
+            <span className="inline-flex items-center gap-2 text-[12px] text-[#6b7280]">
+              <Loader2 className="size-3.5 animate-spin" />
+              Saving decision
+            </span>
+          ) : null}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-[13px] text-[#6b7280]">
+            <Loader2 className="size-4 animate-spin" />
+            Loading approval controls…
+          </div>
+        )}
+
+        {reviseOption && revisionOpen ? (
+          <div className="flex flex-col gap-2 border-t border-[#e5e7eb] pt-3">
+            <label className="text-[12px] font-medium text-[#374151]" htmlFor="approval-revision-feedback">
+              Revision notes
+            </label>
+            <textarea
+              className="min-h-[76px] w-full resize-y border border-[#d1d5db] bg-white px-3 py-2 text-[13px] leading-5 text-[#111827] outline-none transition-colors placeholder:text-[#9ca3af] focus:border-[#9ca3af]"
+              disabled={disabled}
+              id="approval-revision-feedback"
+              onChange={(event) => setRevisionText(event.target.value)}
+              placeholder="Tell the agent what to change before approval"
+              value={revisionText}
+            />
+            <div className="flex justify-end">
+              <button
+                className="inline-flex h-8 items-center bg-[#111827] px-3 text-[12px] font-semibold text-white transition-colors hover:bg-[#374151] disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={disabled || !revisionText.trim()}
+                onClick={() => submitOption(reviseOption, revisionText)}
+                type="button"
+              >
+                Send revision
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function toolRefLabel(tool: unknown): string {
   if (typeof tool === "string") return tool;
   if (tool && typeof tool === "object" && !Array.isArray(tool)) {
@@ -638,6 +812,251 @@ function toolRefLabel(tool: unknown): string {
     if (typeof record.name === "string") return record.name;
   }
   return "";
+}
+
+function titleCase(value: string): string {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatDateTime(value: string | undefined | null): string {
+  if (!value) return "unknown";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
+}
+
+function preview(value: string, maxChars = 260): string {
+  const text = value.trim().replace(/\s+/g, " ");
+  if (!text) return "";
+  return text.length > maxChars ? `${text.slice(0, Math.max(0, maxChars - 3))}...` : text;
+}
+
+function interactionKindLabel(kind: SpecRunInteraction["interaction_kind"]): string {
+  switch (kind) {
+    case "draft_review":
+      return "Draft review";
+    case "pre_send":
+      return "Send approval";
+    case "memory_confirmation":
+      return "Memory confirmation";
+    case "source_confirmation":
+      return "Source confirmation";
+    case "missing_input":
+      return "Input needed";
+    default:
+      return titleCase(kind);
+  }
+}
+
+function interactionStampTag(kind: SpecRunInteraction["interaction_kind"]): string {
+  switch (kind) {
+    case "pre_send":
+      return "Approve";
+    case "draft_review":
+      return "Review";
+    case "memory_confirmation":
+    case "source_confirmation":
+      return "Confirm";
+    case "missing_input":
+      return "Input";
+    default:
+      return "Gate";
+  }
+}
+
+function interactionWorkspaceTitle(interaction: SpecRunInteraction): string {
+  const payload = asRecord(interaction.payload_json);
+  const workspace = asRecord(payload.workspace);
+  const title = typeof workspace.title === "string" ? workspace.title.trim() : "";
+  return title || interactionKindLabel(interaction.interaction_kind);
+}
+
+function interactionWorkspaceSubtitle(interaction: SpecRunInteraction): string {
+  const payload = asRecord(interaction.payload_json);
+  const workspace = asRecord(payload.workspace);
+  const subtitle = typeof workspace.subtitle === "string" ? workspace.subtitle.trim() : "";
+  return subtitle || interaction.question;
+}
+
+function interactionStampName(interaction: SpecRunInteraction, step?: SpecRunStep | null): string {
+  const payload = asRecord(interaction.payload_json);
+  const workspace = asRecord(payload.workspace);
+  const stamp = asRecord(workspace.stamp);
+  const stampName = typeof stamp.name === "string" ? stamp.name.trim() : "";
+  return stampName || step?.agent_snapshot.name || step?.agent_id || "Agent";
+}
+
+function interactionActions(interaction: SpecRunInteraction): Array<{
+  id: string;
+  label: string;
+  command: "approve" | "revise" | "reject" | "submit_input";
+  variant: "primary" | "secondary" | "danger";
+}> {
+  const payload = asRecord(interaction.payload_json);
+  const explicit = Array.isArray(payload.actions)
+    ? payload.actions.filter((action): action is Record<string, unknown> => Boolean(action) && typeof action === "object" && !Array.isArray(action)).map((action, index) => {
+      const command = typeof action.command === "string" ? action.command : "approve";
+      const resolvedCommand = command === "approve" || command === "revise" || command === "reject" || command === "submit_input"
+        ? command
+        : "approve";
+      return {
+        id: typeof action.id === "string" && action.id.trim() ? action.id : `${interaction.id}:action:${index}`,
+        label: typeof action.label === "string" && action.label.trim() ? action.label : titleCase(resolvedCommand),
+        command: resolvedCommand,
+        variant: resolvedCommand === "approve"
+          ? "primary"
+          : resolvedCommand === "reject"
+            ? "danger"
+            : "secondary",
+      };
+    })
+    : [];
+  if (explicit.length > 0) return explicit;
+
+  if (interaction.interaction_kind === "missing_input") {
+    return [{
+      id: `${interaction.id}:submit`,
+      label: "Submit input",
+      command: "submit_input",
+      variant: "secondary",
+    }];
+  }
+
+  return [
+    { id: `${interaction.id}:approve`, label: "Approve", command: "approve", variant: "primary" },
+    { id: `${interaction.id}:revise`, label: "Request changes", command: "revise", variant: "secondary" },
+    { id: `${interaction.id}:reject`, label: "Reject", command: "reject", variant: "danger" },
+  ];
+}
+
+function interactionPreview(interaction: SpecRunInteraction): string {
+  const payload = asRecord(interaction.payload_json);
+  const deferred = asRecord(payload.deferred);
+  const blocks = Array.isArray(payload.blocks)
+    ? payload.blocks.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry))
+    : [];
+  const firstBlock = blocks[0] ?? null;
+  const blockData = firstBlock ? asRecord(firstBlock.data) : {};
+  const pieces = [
+    typeof deferred.rationale === "string" ? deferred.rationale.trim() : "",
+    typeof deferred.actionRef === "string" ? `Action: ${deferred.actionRef.trim()}` : "",
+    typeof deferred.actionLabel === "string" ? `Label: ${deferred.actionLabel.trim()}` : "",
+    typeof blockData.subject === "string" ? `Subject: ${blockData.subject.trim()}` : "",
+    typeof blockData.body === "string" ? `Body: ${preview(blockData.body)}` : "",
+    typeof blockData.text === "string" ? `Text: ${preview(blockData.text)}` : "",
+  ].filter(Boolean);
+
+  if (pieces.length === 0) {
+    pieces.push(interaction.question);
+  }
+
+  return pieces.join("\n\n");
+}
+
+function StepGateHistory({
+  step,
+  interactions,
+  activeInteractionId,
+}: {
+  step: SpecRunStep;
+  interactions: SpecRunInteraction[] | undefined;
+  activeInteractionId?: string | null;
+}) {
+  const history = useMemo(
+    () => [...(interactions ?? [])]
+      .filter((interaction) => interaction.step_attempt_id === step.id && interaction.id !== activeInteractionId)
+      .sort((left, right) => {
+        const leftTime = left.completed_at ?? left.created_at ?? "";
+        const rightTime = right.completed_at ?? right.created_at ?? "";
+        return leftTime.localeCompare(rightTime) || left.id.localeCompare(right.id);
+      }),
+    [activeInteractionId, interactions, step.id],
+  );
+
+  if (history.length === 0) return null;
+
+  return (
+    <section className="mt-3 border border-[#e5e7eb] bg-[#fbfcfd] px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b7280]">
+          <ShieldCheck className="size-3.5" />
+          Gate history
+        </div>
+        <span className="text-[11px] font-medium uppercase tracking-[0.04em] text-[#9ca3af]">
+          {step.agent_snapshot.name ?? step.agent_id} · Step {step.step_index + 1}
+        </span>
+      </div>
+      <div className="mt-3 space-y-3">
+        {history.map((interaction) => {
+          const title = interactionWorkspaceTitle(interaction);
+          const subtitle = interactionWorkspaceSubtitle(interaction);
+          const stampName = interactionStampName(interaction, step);
+          const actions = interactionActions(interaction);
+          const detail = interactionPreview(interaction);
+          const createdAt = formatDateTime(interaction.completed_at ?? interaction.created_at);
+
+          return (
+            <article key={interaction.id} className="border border-[#e5e7eb] bg-white p-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 border border-[#bbf7d0] bg-[#f0fdf4] px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[#15803d]">
+                      <ShieldCheck className="size-3.5" />
+                      Approval gate
+                    </span>
+                    <span className="border border-[#e5e7eb] bg-[#fafafa] px-2 py-1 text-[11px] font-medium uppercase tracking-[0.04em] text-[#6b7280]">
+                      {titleCase(interaction.status)}
+                    </span>
+                  </div>
+                  <p className="text-[10px] font-semibold tracking-[0.12em] text-[#9ca3af] uppercase">
+                    {interactionKindLabel(interaction.interaction_kind)} · {createdAt}
+                  </p>
+                  <h3 className="mt-1 text-[15px] font-bold tracking-[-0.02em] text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+                    {title}
+                  </h3>
+                  <p className="mt-1 text-[13px] leading-6 text-[#6b7280]">{subtitle}</p>
+                  <p className="mt-3 text-[12px] font-medium text-[#4b5563]">
+                    <span className="mr-2 inline-flex items-center border border-[#d1d5db] bg-[#fafafa] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#6b7280]">
+                      {interactionStampTag(interaction.interaction_kind)}
+                    </span>
+                    {`Step ${step.step_index + 1} · ${stampName}`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-3 border border-[#e5e7eb] bg-[#fafafa] px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b7280]">Gate UI</p>
+                <p className="mt-2 whitespace-pre-wrap text-[13px] leading-6 text-[#374151]">{detail || interaction.question}</p>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {actions.map((action) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    disabled
+                    className={
+                      action.variant === "primary"
+                        ? "inline-flex h-8 items-center gap-2 border border-[#111827] bg-[#111827] px-3 text-[12px] font-semibold text-white opacity-70"
+                        : action.variant === "danger"
+                          ? "inline-flex h-8 items-center gap-2 border border-[#fecaca] bg-[#fef2f2] px-3 text-[12px] font-semibold text-[#b91c1c] opacity-70"
+                          : "inline-flex h-8 items-center gap-2 border border-[#d1d5db] bg-white px-3 text-[12px] font-semibold text-[#374151] opacity-70"
+                    }
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 function SpecRunDetailsDialog({
@@ -772,16 +1191,31 @@ export function SpecRunPage({
   const canvasFlushRef = useRef<(() => Promise<void>) | null>(null);
   const continueInFlightRef = useRef(false);
   const chatStatusRef = useRef("ready");
+  const refreshRunInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshMessagesInFlightRef = useRef<Promise<void> | null>(null);
+  const streamRetryAfterRef = useRef(0);
 
   useEffect(() => {
     setRun((prev) => mergeSpecRunProjection(prev, initialRun));
   }, [initialRun]);
 
   const refreshRun = useCallback(async () => {
-    const response = await fetch(`/api/workflows/runs/${runId}`, { cache: "no-store" });
-    const payload = await response.json().catch(() => ({}));
-    if (response.ok && payload.run) {
-      setRun((prev) => mergeSpecRunProjection(prev, payload.run as SpecRunProjection));
+    if (refreshRunInFlightRef.current) {
+      await refreshRunInFlightRef.current;
+      return;
+    }
+    const refresh = (async () => {
+      const response = await fetch(`/api/workflows/runs/${runId}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok && payload.run) {
+        setRun((prev) => mergeSpecRunProjection(prev, payload.run as SpecRunProjection));
+      }
+    })();
+    refreshRunInFlightRef.current = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (refreshRunInFlightRef.current === refresh) refreshRunInFlightRef.current = null;
     }
   }, [runId]);
 
@@ -813,7 +1247,12 @@ export function SpecRunPage({
     },
     onError: (chatError) => {
       continueInFlightRef.current = false;
-      setError(chatError.message || "Run stream failed");
+      const message = chatError.message || "Run stream failed";
+      if (/409|already in progress/i.test(message)) {
+        streamRetryAfterRef.current = Date.now() + 4_000;
+      } else {
+        setError(message);
+      }
       window.setTimeout(() => {
         void refreshRun();
         void refreshMessages(true);
@@ -830,13 +1269,25 @@ export function SpecRunPage({
 
   const refreshMessages = useCallback(async (force = false) => {
     if (!force && !canKickSpecRunStream(chatStatus)) return;
-    const response = await fetch(`/api/workflows/runs/${runId}/messages`, { cache: "no-store" });
-    const payload = await response.json().catch(() => ({}));
-    if (response.ok && Array.isArray(payload.messages)) {
-      setMessages((prev) => mergeChatMessagesById(
-        dedupeChatMessagesById(payload.messages as UIMessage[]),
-        prev,
-      ));
+    if (refreshMessagesInFlightRef.current) {
+      await refreshMessagesInFlightRef.current;
+      return;
+    }
+    const refresh = (async () => {
+      const response = await fetch(`/api/workflows/runs/${runId}/messages`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok && Array.isArray(payload.messages)) {
+        setMessages((prev) => mergeChatMessagesById(
+          dedupeChatMessagesById(payload.messages as UIMessage[]),
+          prev,
+        ));
+      }
+    })();
+    refreshMessagesInFlightRef.current = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (refreshMessagesInFlightRef.current === refresh) refreshMessagesInFlightRef.current = null;
     }
   }, [chatStatus, runId, setMessages]);
 
@@ -844,6 +1295,7 @@ export function SpecRunPage({
 
   const kickRunStream = useCallback(async () => {
     if (!canKickSpecRunStream(chatStatusRef.current) || continueInFlightRef.current) return false;
+    if (Date.now() < streamRetryAfterRef.current) return false;
     continueInFlightRef.current = true;
     try {
       await sendMessage({ text: "Continue" });
@@ -865,16 +1317,8 @@ export function SpecRunPage({
   }, [kickRunStream]);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const response = await fetch(`/api/workflows/runs/${runId}/messages`, { cache: "no-store" });
-      const payload = await response.json().catch(() => ({}));
-      if (!cancelled && response.ok && Array.isArray(payload.messages)) {
-        setMessages(dedupeChatMessagesById(payload.messages as UIMessage[]));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [runId, setMessages]);
+    void refreshMessages(true);
+  }, [refreshMessages]);
 
   const post = useCallback(async (path: string, body?: Record<string, unknown>) => {
     setBusy(true);
@@ -909,7 +1353,7 @@ export function SpecRunPage({
   }, [resumeRunStreamWithRetry]);
 
   const pendingInteraction = useMemo(
-    () => run.interactions?.find((interaction) => interaction.status === "pending") ?? null,
+    () => resolveVisibleInteraction(run.interactions),
     [run.interactions],
   );
 
@@ -928,8 +1372,9 @@ export function SpecRunPage({
       dedupeChatMessagesById(messages),
       run.steps,
       run.interactions ?? [],
+      run.definition?.agentGraph?.children ?? [],
     ),
-    [messages, run.interactions, run.steps],
+    [messages, run.definition?.agentGraph?.children, run.interactions, run.steps],
   );
 
   const liveAgentMessageId = useMemo(() => {
@@ -942,6 +1387,16 @@ export function SpecRunPage({
     () => new Map(latestAttemptPerStep(run.steps).map((step) => [step.step_index, step])),
     [run.steps],
   );
+  const transcriptStepIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const message of transcriptMessages) {
+      if (!isAgentTurnMessage(message)) continue;
+      const stepIndex = readAgentStepIndex(message);
+      const step = stepIndex !== null ? stepByIndex.get(stepIndex) : undefined;
+      if (step?.id) ids.add(step.id);
+    }
+    return ids;
+  }, [stepByIndex, transcriptMessages]);
 
   const totalAgents = run.definition?.agentGraph?.children?.length ?? 0;
 
@@ -973,12 +1428,14 @@ export function SpecRunPage({
   }, [chatStatus, kickRunStream, pendingInteraction, run.status, run.steps, totalAgents]);
 
   useEffect(() => {
-    if (TERMINAL_STATUSES.has(run.status) || isChatActive) return;
+    if ((TERMINAL_STATUSES.has(run.status) && !pendingInteraction) || isChatActive) return;
+    const delay = ACTIVE_STATUSES.has(run.status) || pendingInteraction ? 1_250 : 3_000;
     const interval = window.setInterval(() => {
       void refreshRun();
-    }, 3000);
+      void refreshMessages(true);
+    }, delay);
     return () => window.clearInterval(interval);
-  }, [isChatActive, refreshRun, run.status]);
+  }, [isChatActive, pendingInteraction, refreshMessages, refreshRun, run.status]);
 
   const displayArtifact = useMemo(
     () => resolveDisplayArtifact({
@@ -1167,7 +1624,17 @@ export function SpecRunPage({
 
   const gateTitle = gate.operatorView?.workspace.title ?? pendingInteraction?.question ?? "Review required";
   const gateSubtitle = gate.operatorView?.workspace.subtitle ?? pendingInteraction?.question ?? gateTitle;
-  const showGateComposer = Boolean(gate.show && gate.operatorView && !submittedAnswer && !noActionReview);
+  const inlineGateStepId = gate.show && !submittedAnswer && !noActionReview
+    ? gate.interaction?.step_attempt_id ?? pendingInteraction?.step_attempt_id ?? null
+    : null;
+  const hasInlineGateTarget = Boolean(inlineGateStepId && transcriptStepIds.has(inlineGateStepId));
+  const showGateComposer = Boolean(
+    gate.show
+    && gate.operatorView
+    && !submittedAnswer
+    && !noActionReview
+    && !hasInlineGateTarget
+  );
   const showGateLoading = gate.show && !submittedAnswer && !gate.operatorView && !noActionReview;
   const composerPlaceholder = pendingInteraction
     ? "Respond to the pending review…"
@@ -1217,6 +1684,12 @@ export function SpecRunPage({
                   stepArtifact
                   && (shouldShowStepOutputArtifact(step) || pendingForStep)
                   && !noActionReview
+                );
+                const showInlineGate = Boolean(
+                  gate.show
+                  && gate.interaction
+                  && !noActionReview
+                  && inlineGateStepId === step?.id
                 );
                 const hideArtifactSummary = showArtifact;
                 const nextAgentName = stepIndex !== null
@@ -1284,10 +1757,29 @@ export function SpecRunPage({
                       </Message>
                     ) : null}
 
+                    {showInlineGate ? (
+                      <ApprovalGatePanel
+                        busy={busy}
+                        onSubmit={(answer) => { void handleGateSubmit(answer); }}
+                        operatorView={gate.operatorView}
+                        submittedAnswer={submittedAnswer}
+                        subtitle={gateSubtitle}
+                        title={gateTitle}
+                      />
+                    ) : null}
+
                     {step?.status === "succeeded" && nextAgentName ? (
                       <p className="text-[12px] font-medium text-[#7eb71b]">
                         Then → {nextAgentName}
                       </p>
+                    ) : null}
+
+                    {step ? (
+                      <StepGateHistory
+                        activeInteractionId={pendingForStep?.id ?? null}
+                        interactions={run.interactions}
+                        step={step}
+                      />
                     ) : null}
                   </div>
                 );
