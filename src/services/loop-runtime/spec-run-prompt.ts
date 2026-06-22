@@ -28,7 +28,7 @@ export function buildSpecRunSystemPrompt(definition: SpecRunDefinition, runConte
       "## Runtime policies",
       `- Ticket content mode: ${runContext.policies.ticketContentMode}`,
       `- Customer details mode: ${runContext.policies.customerDetailsMode}`,
-      `- Review policy: ${runContext.policies.reviewMode ?? "approve_each_action"}`,
+      "- Mutating connector actions require a canonical approval gate before execution.",
     );
     if (runContext.trigger.source === "event" && runContext.hasTriggerPayload) {
       runtimePolicyLines.push(
@@ -41,23 +41,12 @@ export function buildSpecRunSystemPrompt(definition: SpecRunDefinition, runConte
     runtimePolicyLines.push("");
   }
 
-  const reviewLines = runContext?.policies.reviewMode === "draft_only"
-    ? [
-      "## Approval policy",
-      "Draft-only mode: create email drafts but do not send. Do not call send actions.",
-      "",
-    ]
-    : runContext?.policies.reviewMode === "approve_batch"
-      ? [
-        "## Approval policy",
-        "Batch approval: prepare all drafts before requesting send approval.",
-        "",
-      ]
-      : [
-        "## Approval policy",
-        "Approve each external write individually before execution.",
-        "",
-      ];
+  const reviewLines = [
+    "## Gate policy",
+    "Use top-level `input` gates for missing operator data and top-level `approval` gates for artifact review or connector-action approval.",
+    "Every mutating external write must be approved before execution.",
+    "",
+  ];
 
   return [
     "You are Tallei's loop runner. Execute the approved behavioral spec for this workflow run.",

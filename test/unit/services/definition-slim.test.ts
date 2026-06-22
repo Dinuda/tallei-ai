@@ -11,6 +11,8 @@ import {
 } from "../../../src/services/loop-runtime/definition-slim.js";
 import { resolveAgentOutputContract } from "../../../src/services/loop-runtime/agent-contract-catalog.js";
 import type { LoopDefinition } from "../../../src/services/loop-executor/types.js";
+import type { ToolContract } from "../../../src/services/tool-spec/types.js";
+import { isSlimPersistedToolContract } from "../../../src/services/tool-spec/tool-contracts.js";
 
 function fullBuildContract() {
   return {
@@ -106,4 +108,42 @@ test("expandSlimLoopDefinition restores runtime contracts and ceo defaults", () 
   assert.ok(expanded.agentGraph.children[0]?.guardrails?.length);
   const hydratedContract = expanded.buildContract?.requirements[0]?.value as Record<string, unknown>;
   assert.equal(typeof hydratedContract.template, "string");
+});
+
+function embeddedToolContract(): ToolContract {
+  return {
+    toolRef: "composio.gmail.action.GMAIL_FETCH_EMAILS",
+    provider: "composio",
+    name: "Fetch emails",
+    description: "Fetch Gmail messages",
+    skillTags: ["retrieve"],
+    effect: "read_external",
+    resources: ["gmail"],
+    inputSchema: { type: "object", properties: { query: { type: "string" } } },
+    outputSchema: { type: "object", properties: { messages: { type: "array" } } },
+    executionMode: "short_circuit",
+    approval: { required: false },
+    renderRecommendations: [],
+    constraints: { toolkit: "gmail", actionSlug: "GMAIL_FETCH_EMAILS", connected: true },
+    source: "composio_sdk",
+  };
+}
+
+test("slimLoopDefinitionForPersistence slims builderMeta discoveredToolContracts", () => {
+  const slim = slimLoopDefinitionForPersistence({
+    ...fullDefinition(),
+    builderMeta: {
+      designedBy: "loop_architect",
+      preApproved: true,
+      discoveredToolContracts: [embeddedToolContract() as unknown as Record<string, unknown>],
+    },
+  });
+  const persisted = slim.builderMeta?.discoveredToolContracts?.[0];
+  assert.ok(persisted);
+  assert.ok(isSlimPersistedToolContract(persisted));
+  assert.equal(persisted.toolRef, embeddedToolContract().toolRef);
+  assert.equal(JSON.stringify(slim).length < JSON.stringify({
+    ...fullDefinition(),
+    builderMeta: { discoveredToolContracts: [embeddedToolContract()] },
+  }).length, true);
 });

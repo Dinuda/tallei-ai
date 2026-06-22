@@ -183,6 +183,172 @@ async function restorePoolSessionTimeouts(client: DbClient): Promise<void> {
   await client.query(`SET idle_in_transaction_session_timeout = ${POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
 }
 
+const LEGACY_LOOP_JSON_PATTERN = /artifactRole|review_policy|output_review_gates|missing_input|draft_review|preview_review|pre_send|source_confirmation|memory_confirmation/;
+
+function asJsonRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function migrateLegacyGate(value: unknown): unknown {
+  const gate = asJsonRecord(value);
+  if (!gate) return value;
+  const type = typeof gate.type === "string" ? gate.type.trim().toLowerCase() : "";
+  if (type === "input" || type === "approval") return gate;
+  if (type === "missing_input") {
+    return {
+      ...gate,
+      type: "input",
+      input: {
+        surface: typeof gate.surface === "string" ? gate.surface : "input.text",
+        key: typeof gate.key === "string" ? gate.key : "operator_input",
+      },
+    };
+  }
+  const surface = type === "pre_send"
+    ? "confirm.send"
+    : type === "source_confirmation"
+      ? "review.sources"
+      : type === "memory_confirmation"
+        ? "review.memories"
+        : type === "preview_review"
+          ? "review.preview"
+          : "review.draft";
+  return {
+    ...gate,
+    type: "approval",
+    approval: {
+      surface,
+      ...(typeof gate.artifactKey === "string" ? { artifactKey: gate.artifactKey } : {}),
+      ...(typeof gate.actionRef === "string" ? { actionRef: gate.actionRef } : {}),
+      ...(asJsonRecord(gate.payload) ? { payload: gate.payload } : {}),
+    },
+  };
+}
+
+function migrateLegacyBuildContract(value: unknown): unknown {
+  const contract = asJsonRecord(value);
+  if (!contract || !Array.isArray(contract.requirements)) return value;
+  return {
+    ...contract,
+    requirements: contract.requirements.filter((entry) => {
+      const requirement = asJsonRecord(entry);
+      const kind = typeof requirement?.kind === "string" ? requirement.kind : "";
+      return kind !== "review_policy" && kind !== "output_review_gates";
+    }),
+  };
+}
+
+function migrateLegacyAgent(value: unknown): unknown {
+  const agent = asJsonRecord(value);
+  if (!agent) return value;
+  const next: Record<string, unknown> = { ...agent };
+  const role = typeof next.artifactRole === "string" ? next.artifactRole : "";
+  delete next.artifactRole;
+  if (next.gate) next.gate = migrateLegacyGate(next.gate);
+  const outputContract = asJsonRecord(next.outputContract);
+  if (outputContract) {
+    const contract = { ...outputContract };
+    if (!contract.renderer && role === "draft_body") contract.renderer = "canvas.email";
+    if (!contract.renderer && role === "final_preview") contract.renderer = "canvas.preview";
+    next.outputContract = contract;
+    if (!next.outputArtifactKind) {
+      if (contract.renderer === "canvas.email") next.outputArtifactKind = "canvas_email";
+      else if (contract.renderer === "canvas.preview") next.outputArtifactKind = "canvas_preview";
+    }
+  } else if (!next.outputArtifactKind) {
+    if (role === "draft_body") next.outputArtifactKind = "canvas_email";
+    if (role === "final_preview") next.outputArtifactKind = "canvas_preview";
+    if (role === "delivery") next.outputArtifactKind = "structured_output";
+  }
+  return next;
+}
+
+function migrateLegacyLoopJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(migrateLegacyLoopJson);
+  const record = asJsonRecord(value);
+  if (!record) return value;
+  let next: Record<string, unknown> = { ...record };
+  if (Array.isArray(next.requirements) && next.version === "v1") {
+    next = migrateLegacyBuildContract(next) as Record<string, unknown>;
+  }
+  if (Array.isArray(next.agents)) {
+    next.agents = next.agents.map((agent) => migrateLegacyLoopJson(migrateLegacyAgent(agent)));
+  }
+  const agentGraph = asJsonRecord(next.agentGraph);
+  if (agentGraph && Array.isArray(agentGraph.children)) {
+    next.agentGraph = {
+      ...agentGraph,
+      children: agentGraph.children.map((agent) => migrateLegacyLoopJson(migrateLegacyAgent(agent))),
+    };
+  }
+  if (next.buildContract) next.buildContract = migrateLegacyBuildContract(next.buildContract);
+  if (next.build_contract_json) next.build_contract_json = migrateLegacyBuildContract(next.build_contract_json);
+  if (next.specJson) next.specJson = migrateLegacyLoopJson(next.specJson);
+  if (next.loopDefinition) next.loopDefinition = migrateLegacyLoopJson(next.loopDefinition);
+  return next;
+}
+
+async function updateJsonColumnRows(input: {
+  client: DbClient;
+  table: string;
+  idColumn: string;
+  columns: string[];
+}): Promise<void> {
+  const { client, table, idColumn, columns } = input;
+  const selectColumns = [idColumn, ...columns].map((column) => `"${column}"`).join(", ");
+  const result = await client.query<Record<string, unknown>>(`SELECT ${selectColumns} FROM ${table}`);
+  for (const row of result.rows) {
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    for (const column of columns) {
+      const current = row[column];
+      if (current == null) continue;
+      const text = JSON.stringify(current);
+      if (!LEGACY_LOOP_JSON_PATTERN.test(text)) continue;
+      const migrated = migrateLegacyLoopJson(current);
+      const migratedText = JSON.stringify(migrated);
+      if (migratedText === text) continue;
+      values.push(migratedText);
+      updates.push(`"${column}" = $${values.length}::jsonb`);
+    }
+    if (updates.length === 0) continue;
+    values.push(row[idColumn]);
+    await client.query(
+      `UPDATE ${table} SET ${updates.join(", ")}, updated_at = NOW() WHERE "${idColumn}" = $${values.length}`,
+      values,
+    );
+  }
+}
+
+async function migrateLegacyLoopBuilderGatesAndArtifacts(client: DbClient): Promise<void> {
+  await updateJsonColumnRows({
+    client,
+    table: "loop_specs",
+    idColumn: "id",
+    columns: ["spec_json"],
+  });
+  await updateJsonColumnRows({
+    client,
+    table: "workflow_builder_sessions",
+    idColumn: "id",
+    columns: ["build_contract_json", "current_proposal_json"],
+  });
+  await updateJsonColumnRows({
+    client,
+    table: "workflows",
+    idColumn: "id",
+    columns: ["metadata_json"],
+  });
+  await updateJsonColumnRows({
+    client,
+    table: "loop_engine_runs",
+    idColumn: "id",
+    columns: ["definition_snapshot"],
+  });
+}
+
 export async function initDb() {
   const client = await pool.connect();
   let migrationSessionConfigured = false;
@@ -1254,7 +1420,6 @@ export async function initDb() {
           CHECK (router_decision IN ('continue', 'pause_for_input', 'retry_step', 'fail_run', 'finish_no_action')),
         boundary_issues_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         evaluator_metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        legacy_output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (step_attempt_id)
@@ -1263,10 +1428,13 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_loop_engine_boundaries_run_step
         ON loop_engine_boundaries(run_id, step_attempt_id);
 
+      ALTER TABLE loop_engine_boundaries
+        DROP COLUMN IF EXISTS legacy_output_json;
+
       INSERT INTO loop_engine_boundaries
         (tenant_id, user_id, run_id, step_attempt_id, protocol_version,
          raw_output_json, structured_output_json, normalized_output_json, normalized_handoff_json,
-         goal_eval_json, router_decision, boundary_issues_json, evaluator_metadata_json, legacy_output_json,
+         goal_eval_json, router_decision, boundary_issues_json, evaluator_metadata_json,
          created_at, updated_at)
       SELECT
         sa.tenant_id,
@@ -1286,7 +1454,6 @@ export async function initDb() {
         END,
         '[]'::jsonb,
         '{}'::jsonb,
-        sa.output_json,
         sa.created_at,
         NOW()
       FROM loop_engine_step_attempts sa
@@ -1455,6 +1622,8 @@ export async function initDb() {
           SELECT id FROM workflows WHERE definition_version <> 'loop_executor_v2'
         );
     `);
+
+    await migrateLegacyLoopBuilderGatesAndArtifacts(client);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS approvals (

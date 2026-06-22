@@ -101,7 +101,7 @@ export function routeBoundary(input: {
   return "continue";
 }
 
-export function legacyStepOutputFromBoundary(input: {
+export function projectStepOutputFromBoundary(input: {
   envelope: AgentBoundaryEnvelope;
   text?: string;
 }): Record<string, unknown> {

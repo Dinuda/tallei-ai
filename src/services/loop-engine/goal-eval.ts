@@ -19,14 +19,22 @@ function sourceCount(result: AgentGoalEvalInput["result"]): number {
   return Array.isArray(result.data?.sources) ? result.data.sources.length : 0;
 }
 
+function gateApprovalSurface(agent: LoopRunAgent): string | undefined {
+  const gate = agent.gate;
+  if (!gate || gate.type !== "approval") return undefined;
+  const approval = gate.approval;
+  if (!approval || typeof approval !== "object" || Array.isArray(approval)) return undefined;
+  return typeof approval.surface === "string" ? approval.surface : undefined;
+}
+
 export async function evaluateAgentGoal(input: AgentGoalEvalInput): Promise<AgentGoalEvalResult> {
   const count = sourceCount(input.result);
   const firstToolRef = input.agent.tools[0]?.ref;
 
-  if (input.agent.gate?.type === "memory_confirmation" && count > 0) {
+  if (gateApprovalSurface(input.agent) === "review.memories" && count > 0) {
     return {
       status: "needs_input",
-      gateType: "memory_confirmation",
+      gateType: "approval",
       reason: `${count} validated memories require operator confirmation.`,
     };
   }

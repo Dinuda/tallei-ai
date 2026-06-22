@@ -12,8 +12,6 @@ export const buildRequirementKindSchema = z.enum([
   "stable_input",
   "grounding",
   "artifact_contract",
-  "review_policy",
-  "output_review_gates",
 ]);
 
 export const buildRequirementStatusSchema = z.enum(["unresolved", "resolved", "invalid"]);
@@ -46,13 +44,29 @@ const buildRequirementSchema = z.object({
   }).optional(),
 });
 
-export const loopBuildContractSchema = z.object({
+const DEPRECATED_REQUIREMENT_KINDS = new Set(["review_policy", "output_review_gates"]);
+
+function stripDeprecatedBuildContractRequirements(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const contract = value as Record<string, unknown>;
+  if (!Array.isArray(contract.requirements)) return value;
+  return {
+    ...contract,
+    requirements: contract.requirements.filter((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
+      const kind = (entry as Record<string, unknown>).kind;
+      return typeof kind !== "string" || !DEPRECATED_REQUIREMENT_KINDS.has(kind);
+    }),
+  };
+}
+
+export const loopBuildContractSchema = z.preprocess(stripDeprecatedBuildContractRequirements, z.object({
   version: z.literal("v1"),
   requirements: z.array(buildRequirementSchema),
   issues: z.array(z.string()).default([]),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
-});
+}));
 
 /** Resolved build-contract snapshot persisted on workflows (no build-time metadata). */
 export const persistedBuildRequirementSchema = z.object({
@@ -66,13 +80,13 @@ export const persistedBuildRequirementSchema = z.object({
   }).optional(),
 });
 
-export const persistedLoopBuildContractSchema = z.object({
+export const persistedLoopBuildContractSchema = z.preprocess(stripDeprecatedBuildContractRequirements, z.object({
   version: z.literal("v1"),
   requirements: z.array(persistedBuildRequirementSchema),
   issues: z.array(z.string()).default([]),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
-});
+}));
 
 export type PersistedLoopBuildContract = z.infer<typeof persistedLoopBuildContractSchema>;
 export type AnyLoopBuildContract = LoopBuildContract | PersistedLoopBuildContract;
@@ -116,34 +130,6 @@ function requirement(input: Omit<BuildRequirement, "status" | "validationErrors"
     status: "unresolved",
     validationErrors: [],
     warnings: [],
-  });
-}
-
-function reviewPolicyRequirement(): BuildRequirement {
-  return requirement({
-    id: "review_policy",
-    kind: "review_policy",
-    question: "How should external actions be reviewed?",
-    reason: "External writes require an explicit build-time review policy in addition to per-run approval gates.",
-    required: true,
-    allowNone: false,
-    valueSchema: objectSchema({
-      mode: { type: "string", enum: ["draft_only", "approve_each_action", "approve_batch"] },
-    }, ["mode"]),
-  });
-}
-
-function outputReviewGatesRequirement(): BuildRequirement {
-  return requirement({
-    id: "output_review_gates",
-    kind: "output_review_gates",
-    question: "Should the loop pause for operator review between agents?",
-    reason: "Output review gates pause the run for draft or send confirmation.",
-    required: true,
-    allowNone: false,
-    valueSchema: objectSchema({
-      mode: { type: "string", enum: ["review_drafts", "review_drafts_and_send"] },
-    }, ["mode"]),
   });
 }
 
@@ -312,7 +298,6 @@ export function deriveLoopBuildContract(input: {
       }, ["mode"]),
     }));
 
-    requirements.push(outputReviewGatesRequirement());
   }
 
   return loopBuildContractSchema.parse({ version: "v1", requirements, issues: [], createdAt: now, updatedAt: now });
@@ -479,16 +464,7 @@ export function resolveBuildRequirement(input: {
         : {};
       return Array.isArray(selectedRecord.actionSlugs) ? selectedRecord.actionSlugs.map(String) : [];
     }) : []);
-    const needsReview = input.discoveredToolContracts.some((contract) =>
-      selected.has(String(contract.constraints.actionSlug ?? contract.name))
-      && (contract.effect === "write_external" || contract.effect === "irreversible_external"));
-    const existingReview = requirements.find((entry) => entry.kind === "review_policy");
-    const existingOutputGates = requirements.find((entry) => entry.kind === "output_review_gates");
-    requirements = requirements.filter((entry) => entry.kind !== "review_policy" && entry.kind !== "output_review_gates");
-    if (needsReview) {
-      requirements.push(existingReview ?? reviewPolicyRequirement());
-      requirements.push(existingOutputGates ?? outputReviewGatesRequirement());
-    }
+    requirements = requirements.filter((entry) => !DEPRECATED_REQUIREMENT_KINDS.has(entry.kind));
     const selectedContracts = input.discoveredToolContracts.filter((contract) =>
       selected.has(String(contract.constraints.actionSlug ?? contract.name)));
     const existingRequirementIds = new Set(requirements.map((entry) => entry.id));
@@ -558,35 +534,6 @@ export function selectedConnectorAccountId(
     throw new Error(`Connector action for ${toolkit} requires an explicit account-scoped route because multiple accounts are selected.`);
   }
   return ids[0];
-}
-
-export type ReviewPolicyMode = "draft_only" | "approve_each_action" | "approve_batch";
-export type OutputReviewGatesMode = "none" | "review_drafts" | "review_drafts_and_send";
-
-export function selectedReviewPolicy(contract: AnyLoopBuildContract | null | undefined): ReviewPolicyMode | null {
-  if (!contract) return null;
-  const requirement = contract.requirements.find((entry) => entry.kind === "review_policy" && entry.status === "resolved");
-  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
-    ? requirement.value as Record<string, unknown>
-    : {};
-  const mode = value.mode;
-  if (mode === "draft_only" || mode === "approve_each_action" || mode === "approve_batch") {
-    return mode;
-  }
-  return null;
-}
-
-export function selectedOutputReviewGatesMode(
-  contract: AnyLoopBuildContract | null | undefined,
-): OutputReviewGatesMode {
-  if (!contract) return "none";
-  const requirement = contract.requirements.find((entry) => entry.kind === "output_review_gates" && entry.status === "resolved");
-  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
-    ? requirement.value as Record<string, unknown>
-    : {};
-  const mode = value.mode;
-  if (mode === "review_drafts" || mode === "review_drafts_and_send") return mode;
-  return "none";
 }
 
 export function selectedStableInputs(contract: AnyLoopBuildContract | null | undefined): Record<string, string> {

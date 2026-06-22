@@ -30,7 +30,6 @@ type StepRow = {
   boundary_normalized_handoff_json?: unknown;
   boundary_goal_eval_json?: unknown;
   boundary_router_decision?: string | null;
-  boundary_legacy_output_json?: unknown;
 };
 
 type InteractionRow = {
@@ -154,8 +153,7 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
               b.normalized_output_json AS boundary_normalized_output_json,
               b.normalized_handoff_json AS boundary_normalized_handoff_json,
               b.goal_eval_json AS boundary_goal_eval_json,
-              b.router_decision AS boundary_router_decision,
-              b.legacy_output_json AS boundary_legacy_output_json
+              b.router_decision AS boundary_router_decision
        FROM loop_engine_step_attempts sa
        LEFT JOIN loop_engine_boundaries b ON b.step_attempt_id = sa.id
        WHERE sa.run_id = $1 AND sa.tenant_id = $2 AND sa.user_id = $3
@@ -210,7 +208,6 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
         normalized_handoff_json: row.boundary_normalized_handoff_json,
         goal_eval_json: row.boundary_goal_eval_json,
         router_decision: row.boundary_router_decision,
-        legacy_output_json: row.boundary_legacy_output_json,
       },
     });
     const snapshot = asRecord(row.agent_snapshot);
@@ -309,7 +306,6 @@ export async function getSpecRunEditorialProjection(auth: AuthContext, runId: st
     persona: agent.persona,
     gate: agent.gate,
     outputContract: agent.outputContract,
-    artifactRole: agent.artifactRole,
     guardrails: agent.guardrails ?? [],
     doneCriteria: agent.doneCriteria ?? [],
     failureModes: agent.failureModes ?? [],

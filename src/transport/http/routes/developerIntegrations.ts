@@ -47,11 +47,8 @@ router.get("/integrations", requireScopes(["memory:read"]), async (req: AuthRequ
         ],
         approvalFlows: {
           gateTypes: [
-            { type: "memory_confirmation", description: "Operator selects which memories to include in the next step." },
-            { type: "source_confirmation", description: "Operator selects web search sources and can add custom URLs/titles/snippets." },
-            { type: "missing_input", description: "Operator must paste text content (e.g. sprint notes, product briefs)." },
-            { type: "draft_review", description: "Operator reviews the draft in canvas; can approve as-is or edit to improve." },
-            { type: "pre_send", description: "Operator confirms an external side-effect before it executes." },
+            { type: "input", description: "Operator provides required data through nested input.surface metadata." },
+            { type: "approval", description: "Operator approves canvas review or connector action through nested approval metadata." },
           ],
           approvalModes: [
             { mode: "before", description: "Approval is required before the action executes." },

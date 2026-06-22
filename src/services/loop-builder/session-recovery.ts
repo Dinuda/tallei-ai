@@ -82,7 +82,6 @@ const INPUT_GATE_TOOLS = new Set([
   "knowledgeBaseSetup",
   "requirementSetup",
   "scheduleSetup",
-  "outputReviewGatesSetup",
 ]);
 
 function latestCommandForTool(

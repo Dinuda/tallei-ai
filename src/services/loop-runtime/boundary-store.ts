@@ -3,7 +3,7 @@ import { pool } from "../../infrastructure/db/index.js";
 import {
   agentBoundaryEnvelopeSchema,
   boundaryRouterDecisionSchema,
-  legacyStepOutputFromBoundary,
+  projectStepOutputFromBoundary,
   type AgentBoundaryEnvelope,
   type BoundaryRouterDecision,
 } from "./runner-boundary.js";
@@ -16,7 +16,6 @@ type BoundaryRecordLike = {
   normalized_handoff_json?: unknown;
   goal_eval_json?: unknown;
   router_decision?: string | null;
-  legacy_output_json?: unknown;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -48,9 +47,9 @@ export function projectOutputWithBoundary(input: {
 }): unknown {
   const envelope = boundaryEnvelopeFromRecord(input.boundary);
   if (!envelope) return input.outputJson;
-  const legacy = asRecord(input.boundary.legacy_output_json);
-  const text = typeof legacy.text === "string" ? legacy.text : undefined;
-  return legacyStepOutputFromBoundary({ envelope, text });
+  const output = asRecord(input.outputJson);
+  const text = typeof output.text === "string" ? output.text : undefined;
+  return projectStepOutputFromBoundary({ envelope, text });
 }
 
 export async function persistStepBoundary(input: {
@@ -62,7 +61,7 @@ export async function persistStepBoundary(input: {
   routerDecision: BoundaryRouterDecision;
   boundaryIssues?: string[];
   evaluatorMetadata?: Record<string, unknown>;
-  legacyOutputJson: Record<string, unknown>;
+  projectedOutputJson: Record<string, unknown>;
 }): Promise<void> {
   boundaryRouterDecisionSchema.parse(input.routerDecision);
   const client = await pool.connect();
@@ -72,11 +71,11 @@ export async function persistStepBoundary(input: {
       `INSERT INTO loop_engine_boundaries
          (tenant_id, user_id, run_id, step_attempt_id, protocol_version,
           raw_output_json, structured_output_json, normalized_output_json, normalized_handoff_json,
-          goal_eval_json, router_decision, boundary_issues_json, evaluator_metadata_json, legacy_output_json,
+          goal_eval_json, router_decision, boundary_issues_json, evaluator_metadata_json,
           created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5,
                $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb,
-               $10::jsonb, $11, $12::jsonb, $13::jsonb, $14::jsonb,
+               $10::jsonb, $11, $12::jsonb, $13::jsonb,
                NOW(), NOW())
        ON CONFLICT (step_attempt_id) DO UPDATE
        SET protocol_version = EXCLUDED.protocol_version,
@@ -88,7 +87,6 @@ export async function persistStepBoundary(input: {
            router_decision = EXCLUDED.router_decision,
            boundary_issues_json = EXCLUDED.boundary_issues_json,
            evaluator_metadata_json = EXCLUDED.evaluator_metadata_json,
-           legacy_output_json = EXCLUDED.legacy_output_json,
            updated_at = NOW()`,
       [
         input.auth.tenantId,
@@ -104,7 +102,6 @@ export async function persistStepBoundary(input: {
         input.routerDecision,
         jsonParam(input.boundaryIssues ?? []),
         jsonParam(input.evaluatorMetadata ?? {}),
-        jsonParam(input.legacyOutputJson),
       ],
     );
     await client.query(
@@ -117,7 +114,7 @@ export async function persistStepBoundary(input: {
        WHERE id = $1 AND tenant_id = $3 AND user_id = $4`,
       [
         input.stepAttemptId,
-        jsonParam(input.legacyOutputJson),
+        jsonParam(input.projectedOutputJson),
         input.auth.tenantId,
         input.auth.userId,
         input.status,

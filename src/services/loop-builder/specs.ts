@@ -20,8 +20,6 @@ import {
   selectedExternalDataToolkits,
   selectedGroundingSources,
   selectedLoopTrigger,
-  selectedOutputReviewGatesMode,
-  selectedReviewPolicy,
   selectedStableInputs,
   type LoopBuildContract,
 } from "../loop-engine/build-contract.js";
@@ -33,10 +31,7 @@ import { availableToolsForSpecDraft, type SpecAvailableTool } from "./spec-avail
 import { parseConnectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import {
   catalogInputContract,
-  defaultHandoffBinding,
-  deliveryOutputContract,
   draftOutputContract,
-  evidenceOutputContract,
 } from "../loop-runtime/agent-contract-catalog.js";
 
 export type LoopSpecView = {
@@ -349,10 +344,6 @@ export function buildRunnerSpecFromBuildContract(input: {
 }): NoSlopSpec {
   const buildContract = input.buildContract;
   const availableTools = availableToolsForSpecDraft(buildContract, input.discoveredToolContracts ?? []);
-  const reviewPolicy = selectedReviewPolicy(buildContract) ?? "approve_each_action";
-  const outputReviewGates = selectedOutputReviewGatesMode(buildContract);
-  const wantsDraftReview = outputReviewGates === "review_drafts" || outputReviewGates === "review_drafts_and_send";
-  const wantsPreSend = outputReviewGates === "review_drafts_and_send";
   const artifact = selectedArtifactContract(buildContract);
   const groundingSources = selectedGroundingSources(buildContract);
   const externalSearchToolkits = selectedExternalDataToolkits(buildContract);
@@ -374,93 +365,54 @@ export function buildRunnerSpecFromBuildContract(input: {
     ...intakeTools.map((tool) => tool.toolRef),
     ...searchTools,
   ])];
-  const draftRenderer = artifact?.mode === "supplied_template" ? "canvas.email" : "canvas.preview";
-  const draftToolRefs = reviewPolicy === "draft_only" && mutatingTools.length > 0
-    ? mutatingTools.map((tool) => tool.toolRef)
-    : ["internal.llm_only"];
-  const deliveryToolRefs = reviewPolicy === "draft_only"
-    ? []
-    : mutatingTools.map((tool) => tool.toolRef);
+  const renderer = artifact?.mode === "supplied_template" ? "canvas.email" : "canvas.preview";
+  const toolRefs = [...new Set([
+    ...intakeToolRefs,
+    ...mutatingTools.map((tool) => tool.toolRef),
+    "internal.llm_only",
+  ])];
 
   const purposeBase = input.intentContext?.resolvedIntent?.trim() || input.prompt.trim();
   const purpose = input.feedback?.trim()
     ? `${purposeBase}\n\nRefinement: ${input.feedback.trim()}`
     : purposeBase;
 
-  const agents: NoSlopSpec["agents"] = [];
-  const agentIds: string[] = [];
-
-  if (intakeToolRefs.length > 0) {
-    const name = "Context Specialist";
-    const agentId = "context_specialist";
-    agentIds.push(agentId);
-    agents.push({
-      name,
-      goal: "Gather trigger context, search connected sources, and produce structured evidence for downstream agents.",
-      tools: intakeToolRefs,
-      guardrails: ["Use only approved read and search tools.", "Do not draft or send outbound messages."],
-      doneWhen: ["Structured evidence is ready for the next agent."],
-      doneCriteria: ["Evidence matches the intake output contract."],
-      failureModes: ["Pause for operator input when required context is missing."],
-      inputContract: catalogInputContract("Trigger payload and stable configuration."),
-      outputContract: evidenceOutputContract(),
-      handoffBindings: [],
-      artifactRole: "source_evidence",
-    });
-  }
-
-  const draftAgentId = "draft_specialist";
-  const priorAgentId = agentIds.at(-1);
-  agentIds.push(draftAgentId);
-  agents.push({
-    name: "Draft Specialist",
-    goal: artifact?.structure?.trim()
-      ? `Produce the approved artifact: ${artifact.structure.trim()}`
-      : "Produce the operator-reviewable draft defined by the output contract.",
-    tools: draftToolRefs,
-    guardrails: ["Use finalizeAgent output that matches the declared output contract.", "Do not send or publish directly unless this agent owns delivery tools."],
-    doneWhen: ["Draft output matches the declared contract, or status is no_action_required when upstream evidence has no actionable item."],
-    doneCriteria: ["Output is ready for operator review or downstream delivery, unless status is no_action_required."],
-    failureModes: ["Pause when required upstream evidence is missing."],
-    inputContract: catalogInputContract(priorAgentId ? "Evidence from the prior agent." : "Trigger payload and stable configuration."),
-    outputContract: draftOutputContract(draftRenderer),
-    handoffBindings: priorAgentId ? [defaultHandoffBinding(priorAgentId)] : [],
-    artifactRole: draftRenderer === "canvas.email" ? "draft_body" : "final_preview",
-    ...(wantsDraftReview ? {
-      gate: {
-        type: draftRenderer === "canvas.email" ? "draft_review" as const : "preview_review" as const,
-        question: draftRenderer === "canvas.email"
-          ? "Review the email draft before continuing."
-          : "Review the draft before continuing.",
-      },
-    } : {}),
-  });
-
-  if (deliveryToolRefs.length > 0) {
-    const name = "Delivery Specialist";
-    const agentId = "delivery_specialist";
-    const priorDeliveryAgentId = agentIds.at(-1);
-    agentIds.push(agentId);
-    agents.push({
-      name,
-      goal: "Deliver the approved output from upstream. Use requestGate type=action before any mutating connector action.",
-      tools: deliveryToolRefs,
-      guardrails: ["Use requestGate type=action before any mutating external action.", "Do not execute mutating connector actions without operator approval."],
-      doneWhen: ["Delivery package is ready for operator confirmation."],
-      doneCriteria: ["Delivery output matches the declared contract."],
-      failureModes: ["Pause when upstream draft or approval is missing."],
-      inputContract: catalogInputContract(priorDeliveryAgentId ? "Approved draft from the prior agent." : "Trigger payload and stable configuration."),
-      outputContract: deliveryOutputContract(),
-      handoffBindings: priorDeliveryAgentId ? [defaultHandoffBinding(priorDeliveryAgentId)] : [],
-      artifactRole: "delivery",
-      ...(wantsPreSend ? {
-        gate: {
-          type: "pre_send" as const,
-          question: "Confirm delivery before sending.",
+  const outputContract = artifact
+    ? draftOutputContract(renderer)
+    : {
+        description: "Structured workflow result.",
+        representation: "json" as const,
+        mediaType: "application/json" as const,
+        visibility: "operator" as const,
+        schema: {
+          type: "object",
+          properties: {
+            status: { type: "string" },
+            summary: { type: "string" },
+          },
+          required: ["summary"],
+          additionalProperties: true,
         },
-      } : {}),
-    });
-  }
+      };
+
+  const agents: NoSlopSpec["agents"] = [{
+    name: "Workflow Agent",
+    goal: artifact?.structure?.trim()
+      ? `Complete the loop and produce the approved artifact: ${artifact.structure.trim()}`
+      : "Complete the loop using the approved tools and output contract.",
+    tools: toolRefs,
+    guardrails: [
+      "Use finalizeAgent output that matches the declared output contract.",
+      "For required operator input, call requestGate with type=input and nested input surface metadata.",
+      "For any mutating connector action, call requestGate with type=approval and nested action metadata before execution.",
+    ],
+    doneWhen: ["The loop outcome is complete, or status explains why no action was required."],
+    doneCriteria: ["Output matches the declared contract."],
+    failureModes: ["Pause for operator input when required runtime data is missing."],
+    inputContract: catalogInputContract("Trigger payload, stable configuration, and any connector reads."),
+    outputContract,
+    handoffBindings: [],
+  }];
 
   const schedule = scheduleDescription(buildContract);
   const outcome = input.intentContext?.analysis.normalizedIntent.outcome ?? purpose;
@@ -478,7 +430,7 @@ export function buildRunnerSpecFromBuildContract(input: {
       "Do not proceed after a failed connector probe or missing approval.",
     ],
     schedule,
-    delivery: deliveryFromTools(reviewPolicy === "draft_only" ? [] : availableTools.filter((tool) =>
+    delivery: deliveryFromTools(availableTools.filter((tool) =>
       tool.effect === "write_external" || tool.effect === "irreversible_external",
     )),
     connectorPolicy: {

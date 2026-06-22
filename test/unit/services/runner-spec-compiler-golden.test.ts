@@ -130,7 +130,7 @@ function summarizeAgents(spec: NoSlopSpec) {
     name: agent.name,
     tools: agent.tools,
     gate: agent.gate ?? null,
-    artifactRole: agent.artifactRole ?? null,
+    renderer: agent.outputContract.renderer ?? null,
   }));
 }
 
@@ -149,64 +149,51 @@ test("golden: approve_each_action with review_drafts produces stable agent graph
 
   assert.deepEqual(summarizeAgents(spec), [
     {
-      name: "Context Specialist",
-      tools: ["composio.gmail.action.GMAIL_FETCH_EMAILS"],
-      gate: null,
-      artifactRole: "source_evidence",
-    },
-    {
-      name: "Draft Specialist",
-      tools: ["internal.llm_only"],
-      gate: { type: "draft_review", question: "Review the email draft before continuing." },
-      artifactRole: "draft_body",
-    },
-    {
-      name: "Delivery Specialist",
+      name: "Workflow Agent",
       tools: [
+        "composio.gmail.action.GMAIL_FETCH_EMAILS",
         "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
         "composio.gmail.action.GMAIL_SEND_EMAIL",
+        "internal.llm_only",
       ],
       gate: null,
-      artifactRole: "delivery",
+      renderer: "canvas.email",
     },
   ]);
 });
 
-test("golden: draft_only collapses to context + draft agents", () => {
+test("golden: draft_only still uses architect-owned fallback agent", () => {
   const spec = buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract("draft_only"),
     discoveredToolContracts: gmailContracts,
   });
 
-  assert.equal(spec.agents.length, 2);
+  assert.equal(spec.agents.length, 1);
   assert.deepEqual(summarizeAgents(spec), [
     {
-      name: "Context Specialist",
-      tools: ["composio.gmail.action.GMAIL_FETCH_EMAILS"],
-      gate: null,
-      artifactRole: "source_evidence",
-    },
-    {
-      name: "Draft Specialist",
+      name: "Workflow Agent",
       tools: [
+        "composio.gmail.action.GMAIL_FETCH_EMAILS",
         "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
         "composio.gmail.action.GMAIL_SEND_EMAIL",
+        "internal.llm_only",
       ],
-      gate: { type: "draft_review", question: "Review the email draft before continuing." },
-      artifactRole: "draft_body",
+      gate: null,
+      renderer: "canvas.email",
     },
   ]);
 });
 
-test("golden: review_drafts_and_send adds pre_send gate on delivery agent", () => {
+test("golden: review_drafts_and_send does not add compiler-owned gates", () => {
   const spec = buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract("approve_each_action", "review_drafts_and_send"),
     discoveredToolContracts: gmailContracts,
   });
 
-  assert.equal(spec.agents[2]?.gate?.type, "pre_send");
+  assert.equal(spec.agents.length, 1);
+  assert.equal(spec.agents[0]?.gate, undefined);
 });
 
 test("golden: automatic output gates produces no agent gates", () => {
@@ -256,29 +243,16 @@ test("compiler to plan parity preserves tool role decisions", () => {
       name: agent.name,
       toolRefs: agent.toolRefs.filter((ref) => ref.startsWith("composio.")),
       gate: agent.gate ?? null,
-      artifactRole: agent.artifactRole ?? null,
     })),
     [
       {
-        name: "Context Specialist",
-        toolRefs: ["composio.gmail.action.GMAIL_FETCH_EMAILS"],
-        gate: null,
-        artifactRole: "source_evidence",
-      },
-      {
-        name: "Draft Specialist",
-        toolRefs: [],
-        gate: { type: "draft_review", question: "Review the email draft before continuing." },
-        artifactRole: "draft_body",
-      },
-      {
-        name: "Delivery Specialist",
+        name: "Workflow Agent",
         toolRefs: [
+          "composio.gmail.action.GMAIL_FETCH_EMAILS",
           "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
           "composio.gmail.action.GMAIL_SEND_EMAIL",
         ],
         gate: null,
-        artifactRole: "delivery",
       },
     ],
   );

@@ -14,6 +14,7 @@ import { LOOP_DEFINITION_VERSION } from "../loop-executor/types.js";
 import { listLoopRunMessages, mergeRunChatMessages, normalizeRunMessages, replaceLoopRunMessages } from "./run-messages.js";
 import { loadWorkflowWorkspaceId, withWorkflowWorkspaceAuth } from "./resolve-loop-run-auth.js";
 import { parseLoopDefinitionSnapshot, type SpecRunDefinition } from "./spec-run-types.js";
+import { slimLoopDefinitionForPersistence } from "./definition-slim.js";
 import { startLoopRunWorkflow, cancelLoopRunWorkflow } from "../../temporal/start-loop-run.js";
 import { buildRunSeedMessage, projectRunContext, type RunContext } from "./build-run-context.js";
 import { loadTriggerPayloadForRun } from "./trigger-payload.js";
@@ -96,6 +97,7 @@ export async function createSpecLoopRun(
   trigger?: SpecRunTrigger,
 ): Promise<SpecRunProjection> {
   const { spec, title } = await loadLoopDefinition(auth, workflowId);
+  const slimSpec = slimLoopDefinitionForPersistence(spec);
   const runId = randomUUID();
   const now = new Date().toISOString();
   const resolvedTrigger: SpecRunTrigger = trigger ?? { source: "manual", label: "Manual" };
@@ -113,13 +115,13 @@ export async function createSpecLoopRun(
       auth.tenantId,
       auth.userId,
       workflowId,
-      JSON.stringify(spec),
+      JSON.stringify(slimSpec),
       JSON.stringify(contextJson),
       now,
     ],
   );
 
-  await materializeSpecRunAgentSteps({ auth, runId, spec, workflowId });
+  await materializeSpecRunAgentSteps({ auth, runId, spec: slimSpec, workflowId });
 
   await pool.query(
     `INSERT INTO loop_engine_events (tenant_id, user_id, run_id, event_type, payload_json)
@@ -513,7 +515,7 @@ export async function saveSpecRunAsLoop(input: {
   const workspaceId = await loadWorkflowWorkspaceId(input.auth.tenantId, input.auth.userId, projection.workflowId);
   const loop = await createLoopFromDefinition({
     auth: input.auth,
-    definition,
+    definition: slimLoopDefinitionForPersistence(definition),
     title: input.title ?? `${projection.workflowTitle} copy`,
     workspaceId,
     initialStatus: "verifying",

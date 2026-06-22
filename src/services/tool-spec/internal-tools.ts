@@ -16,7 +16,7 @@ export const INTERNAL_TOOL_SPECS: ToolSpec[] = [
       },
       required: ["text"]
     },
-    handoffFormat: "Output text is passed as `handoff.<agent_id>.text` to downstream agents. For email/newsletter agents, choose artifactRole, renderTarget, and gate explicitly based on whether the workflow needs structured output, visual editing, operator review, or no human gate. The email body itself must be final-use copy only: no draft commentary, send-plan text, placeholder guidance, or signature scaffolding.",
+    handoffFormat: "Output text is passed as `handoff.<agent_id>.text` to downstream agents. For email/newsletter agents, choose outputContract.renderer, renderTarget, and canonical gate metadata explicitly based on whether the workflow needs structured output, visual editing, operator approval, or no human gate. The email body itself must be final-use copy only: no draft commentary, send-plan text, placeholder guidance, or signature scaffolding.",
     useCases: [
       "Draft an email from research findings",
       "Summarize multiple agent outputs into a cohesive report",

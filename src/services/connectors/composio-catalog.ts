@@ -143,7 +143,12 @@ export function convertCatalogToolToContract(tool: ComposioCatalogTool): ToolCon
     executionMode,
     approval: {
       required: effect !== "read_external",
-      ...(effect !== "read_external" ? { suggestedGate: "pre_send", reason: "External side-effect requires operator approval." } : {}),
+      ...(effect !== "read_external"
+        ? {
+          suggestedGate: { type: "approval" as const, approval: { surface: "confirm.send" } },
+          reason: "External side-effect requires operator approval.",
+        }
+        : {}),
     },
     renderRecommendations: [],
     constraints: {

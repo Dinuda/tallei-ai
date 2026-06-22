@@ -377,7 +377,9 @@ export function resolveStepDisplayText(
 
 export function formatInteractionDecision(interaction: SpecRunInteraction): string | null {
   if (interaction.status === "pending") return null;
-  const gateType = typeof interaction.payload_json?.gateType === "string"
+  const gateType = typeof interaction.payload_json?.legacyGateType === "string"
+    ? interaction.payload_json.legacyGateType
+    : typeof interaction.payload_json?.gateType === "string"
     ? interaction.payload_json.gateType
     : interaction.interaction_kind;
   const decision = interaction.decision_json ?? {};

@@ -3,22 +3,16 @@ import test from "node:test";
 
 import {
   configuredAgentGateRequired,
-  operatorReviewRequired,
 } from "../../../src/services/loop-runtime/spec-run-gate-policy.js";
 
-test("operatorReviewRequired is false for draft_only and null", () => {
-  assert.equal(operatorReviewRequired(null), false);
-  assert.equal(operatorReviewRequired("draft_only"), false);
-  assert.equal(operatorReviewRequired("approve_each_action"), true);
-  assert.equal(operatorReviewRequired("approve_batch"), true);
-});
-
-test("configuredAgentGateRequired honors spec-defined gates", () => {
-  assert.equal(configuredAgentGateRequired("draft_review"), true);
-  assert.equal(configuredAgentGateRequired("preview_review"), true);
-  assert.equal(configuredAgentGateRequired("pre_send"), true);
-  assert.equal(configuredAgentGateRequired("source_confirmation"), true);
-  assert.equal(configuredAgentGateRequired("memory_confirmation"), true);
-  assert.equal(configuredAgentGateRequired("missing_input"), true);
+test("configuredAgentGateRequired only honors canonical active gate types", () => {
+  assert.equal(configuredAgentGateRequired("input"), true);
+  assert.equal(configuredAgentGateRequired("approval"), true);
+  assert.equal(configuredAgentGateRequired("draft_review"), false);
+  assert.equal(configuredAgentGateRequired("preview_review"), false);
+  assert.equal(configuredAgentGateRequired("pre_send"), false);
+  assert.equal(configuredAgentGateRequired("source_confirmation"), false);
+  assert.equal(configuredAgentGateRequired("memory_confirmation"), false);
+  assert.equal(configuredAgentGateRequired("missing_input"), false);
   assert.equal(configuredAgentGateRequired("none"), false);
 });

@@ -161,6 +161,8 @@ test("interaction writer uses one gate primitive for review, input, and action a
   const source = await readFile(interactionWriterPath, "utf8");
 
   assert.match(source, /export async function createSpecRunGateInteraction/);
+  assert.doesNotMatch(source, /legacyGateType/);
+  assert.doesNotMatch(source, /gateTypeForSurface/);
   assert.match(source, /gateType: "action"/);
   assert.match(source, /deferredToolKey/);
   assert.match(source, /surface: "confirm\.send"/);

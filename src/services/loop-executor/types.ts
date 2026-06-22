@@ -6,7 +6,7 @@
  */
 
 import { z } from "zod";
-import { agentPersonaSchema, connectorPolicySchema } from "../loop-engine/spec-contracts.js";
+import { agentPersonaSchema, connectorPolicySchema, noSlopSpecAgentGateSchema } from "../loop-engine/spec-contracts.js";
 import { inputRequirementSchema } from "../loop-engine/input-surfaces.js";
 import { workflowUserProfileSchema } from "../loop-engine/workflow-user-profile.js";
 import { dataContractSchema, normalizeContractSchema } from "../loop-engine/data-contract.js";
@@ -31,9 +31,9 @@ export const LOOP_DEFINITION_VERSION = "loop_executor_v2";
 /** Agentic loop engine generation — preset-free design + gated controller runs. */
 export const LOOP_ENGINE_VERSION = "loop_engine_v3";
 
-export const loopGateTypeSchema = z.string();
-export type LoopGateType = string;
-const loopAgentGateSchema = z.object({ type: loopGateTypeSchema, question: z.string().min(1) });
+export const loopGateTypeSchema = z.enum(["input", "approval"]);
+export type LoopGateType = z.infer<typeof loopGateTypeSchema>;
+const loopAgentGateSchema = noSlopSpecAgentGateSchema;
 
 const loopAgentContractSchema = z.preprocess((val) => {
   if (val && typeof val === "object" && !Array.isArray(val)) {
@@ -245,12 +245,6 @@ export const loopAgentGraphChildSchema = z.object({
   outputContract: loopAgentContractSchema.optional(),
   handoffBindings: z.array(agentHandoffBindingSchema).default([]),
   gate: loopAgentGateSchema.optional(),
-  artifactRole: z.enum([
-    "source_evidence",
-    "draft_body",
-    "final_preview",
-    "delivery",
-  ]).optional(),
   outputArtifactId: z.string().min(1).optional(),
   outputArtifactKind: z.string().min(1).optional(),
   persona: agentPersonaSchema.optional(),

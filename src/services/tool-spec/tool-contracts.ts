@@ -102,7 +102,10 @@ export function buildComposioActionContract(action: ActionLike): ToolContract {
     approval: {
       required: effect === "write_external" || effect === "irreversible_external",
       ...(effect === "write_external" || effect === "irreversible_external"
-        ? { suggestedGate: "pre_send" as const, reason: "External side-effect requires operator approval." }
+        ? {
+          suggestedGate: { type: "approval" as const, approval: { surface: "confirm.send" } },
+          reason: "External side-effect requires operator approval.",
+        }
         : {}),
     },
     renderRecommendations: [],
@@ -169,7 +172,7 @@ export function getStaticToolContract(ref: string): ToolContract | null {
       inputSchema: { type: "object" },
       outputSchema: { type: "object" },
       executionMode: "short_circuit",
-      approval: { required: false, suggestedGate: "missing_input" },
+      approval: { required: false, suggestedGate: { type: "input", input: { surface: "input.text", key: "operator_input" } } },
       renderRecommendations: [],
       constraints: { operatorInput: true },
       source: "static",
@@ -208,7 +211,11 @@ export function getStaticToolContract(ref: string): ToolContract | null {
       inputSchema: { type: "object", properties: {}, required: [] },
       outputSchema: { type: "object", properties: { text: { type: "string" }, memories: { type: "array" } }, required: ["text"] },
       executionMode: "short_circuit",
-      approval: { required: false, suggestedGate: "memory_confirmation", reason: "Operator may curate returned memories when the workflow needs review." },
+      approval: {
+        required: false,
+        suggestedGate: { type: "approval", approval: { surface: "review.memories" } },
+        reason: "Operator may curate returned memories when the workflow needs review.",
+      },
       renderRecommendations: [],
       constraints: {},
       source: "static",
@@ -226,7 +233,11 @@ export function getStaticToolContract(ref: string): ToolContract | null {
       inputSchema: { type: "object", properties: {}, required: [] },
       outputSchema: { type: "object", properties: { text: { type: "string" }, sources: { type: "array" } }, required: ["text"] },
       executionMode: "short_circuit",
-      approval: { required: false, suggestedGate: "source_confirmation", reason: "Operator may curate sources when the workflow needs review." },
+      approval: {
+        required: false,
+        suggestedGate: { type: "approval", approval: { surface: "review.sources" } },
+        reason: "Operator may curate sources when the workflow needs review.",
+      },
       renderRecommendations: [],
       constraints: {},
       source: "static",
@@ -264,4 +275,82 @@ export function isRenderTargetCompatible(contract: ToolContract, target: ToolRen
 
 export function contractSupportsExternalWrite(contract: ToolContract): boolean {
   return contract.effect === "write_external" || contract.effect === "irreversible_external";
+}
+
+/** Slim persisted shape: routing metadata without schemas or build-time enrichment. */
+export type PersistedToolContractRef = Pick<
+  ToolContract,
+  "toolRef" | "provider" | "effect" | "skillTags" | "approval" | "executionMode" | "source"
+> & {
+  constraints: {
+    actionSlug?: string;
+    toolkit?: string;
+    toolkitVersion?: string;
+    risk?: string;
+    connected?: boolean;
+    virtualSearchTool?: boolean;
+  };
+};
+
+export function shouldPersistFullToolContract(contract: ToolContract): boolean {
+  if (contract.provider !== "composio") return true;
+  if (contract.source === "reviewed_override" || contract.source === "llm_contract") return true;
+  if (parseConnectedSearchToolRef(contract.toolRef)) return true;
+  return false;
+}
+
+export function isSlimPersistedToolContract(value: Record<string, unknown>): boolean {
+  if (typeof value.toolRef !== "string" || !value.toolRef.trim()) return false;
+  const inputSchema = value.inputSchema;
+  if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) return true;
+  return Object.keys(inputSchema).length === 0;
+}
+
+export function slimToolContractForPersistence(contract: ToolContract): Record<string, unknown> {
+  if (shouldPersistFullToolContract(contract)) {
+    return contract as unknown as Record<string, unknown>;
+  }
+
+  const constraints: PersistedToolContractRef["constraints"] = {};
+  if (typeof contract.constraints.actionSlug === "string") constraints.actionSlug = contract.constraints.actionSlug;
+  if (typeof contract.constraints.toolkit === "string") constraints.toolkit = contract.constraints.toolkit;
+  if (typeof contract.constraints.toolkitVersion === "string") constraints.toolkitVersion = contract.constraints.toolkitVersion;
+  if (typeof contract.constraints.risk === "string") constraints.risk = contract.constraints.risk;
+  if (contract.constraints.connected !== undefined) constraints.connected = Boolean(contract.constraints.connected);
+  if (contract.constraints.virtualSearchTool !== undefined) {
+    constraints.virtualSearchTool = Boolean(contract.constraints.virtualSearchTool);
+  }
+
+  return {
+    toolRef: contract.toolRef,
+    provider: contract.provider,
+    effect: contract.effect,
+    skillTags: contract.skillTags,
+    approval: contract.approval,
+    executionMode: contract.executionMode,
+    source: contract.source,
+    constraints,
+  };
+}
+
+export function slimDiscoveredToolContracts(contracts: ToolContract[]): Record<string, unknown>[] {
+  return contracts.map((contract) => slimToolContractForPersistence(contract));
+}
+
+export function mergePersistedToolContractOverrides(
+  catalog: ToolContract,
+  persisted: Record<string, unknown>,
+): ToolContract {
+  const overrides = persisted as Partial<PersistedToolContractRef>;
+  return {
+    ...catalog,
+    effect: overrides.effect ?? catalog.effect,
+    skillTags: overrides.skillTags?.length ? overrides.skillTags : catalog.skillTags,
+    approval: overrides.approval ?? catalog.approval,
+    executionMode: overrides.executionMode ?? catalog.executionMode,
+    constraints: {
+      ...catalog.constraints,
+      ...(overrides.constraints ?? {}),
+    },
+  };
 }

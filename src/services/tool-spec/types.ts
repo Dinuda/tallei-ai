@@ -18,6 +18,9 @@ export type ToolEffect = "none" | "read_external" | "write_external" | "irrevers
 export type ToolExecutionMode = "short_circuit" | "llm_assisted" | "approval_executed";
 export type ToolContractSource = "static" | "composio_sdk" | "llm_contract" | "reviewed_override";
 export type ToolRenderTarget = "canvas.email" | "canvas.preview";
+export type ToolSuggestedGate =
+  | { type: "input"; input: { surface: string; key?: string } }
+  | { type: "approval"; approval: { surface?: string; actionRef?: string } };
 
 export interface ToolRenderRecommendation {
   target: ToolRenderTarget;
@@ -38,7 +41,7 @@ export interface ToolContract {
   executionMode: ToolExecutionMode;
   approval: {
     required: boolean;
-    suggestedGate?: "memory_confirmation" | "source_confirmation" | "missing_input" | "draft_review" | "pre_send";
+    suggestedGate?: ToolSuggestedGate;
     reason?: string;
   };
   renderRecommendations: ToolRenderRecommendation[];

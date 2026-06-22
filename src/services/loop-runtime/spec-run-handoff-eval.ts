@@ -62,7 +62,6 @@ export function buildHandoffEvalPrompt(input: EvaluateAgentHandoffInput): string
       goal: input.agent.goal,
       guardrails: input.agent.guardrails,
       doneCriteria: input.agent.doneCriteria,
-      artifactRole: input.agent.artifactRole,
       outputContract: input.agent.outputContract,
     }, null, 2),
     "",

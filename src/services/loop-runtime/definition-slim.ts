@@ -5,12 +5,11 @@ import {
   type LoopBuildContract,
 } from "../loop-engine/build-contract.js";
 import type { LoopDefinition } from "../loop-executor/types.js";
+import { slimDiscoveredToolContracts } from "../tool-spec/tool-contracts.js";
+import type { ToolContract } from "../tool-spec/types.js";
 import {
   defaultHandoffBinding,
   expandAgentGraphChild,
-  resolveAgentOutputContract,
-  ROLE_AGENT_DEFAULTS,
-  type AgentContractRole,
 } from "./agent-contract-catalog.js";
 
 const DEFAULT_DRAFT_POLICY = {
@@ -53,32 +52,9 @@ function slimHandoffBinding(
   };
 }
 
-function isGenericInputContract(
-  contract: LoopDefinition["agentGraph"]["children"][number]["inputContract"],
-): boolean {
-  if (!contract) return true;
-  const schema = contract.schema;
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
-  const properties = (schema as Record<string, unknown>).properties;
-  return (schema as Record<string, unknown>).type === "object"
-    && (!properties || (typeof properties === "object" && Object.keys(properties).length === 0));
-}
-
-function shouldOmitCatalogContracts(
-  agent: LoopDefinition["agentGraph"]["children"][number],
-): boolean {
-  if (!agent.artifactRole) return false;
-  const resolvedOutput = resolveAgentOutputContract(agent);
-  const outputMatches = !agent.outputContract
-    || (resolvedOutput && JSON.stringify(agent.outputContract) === JSON.stringify(resolvedOutput));
-  const inputMatches = isGenericInputContract(agent.inputContract);
-  return Boolean(outputMatches && inputMatches);
-}
-
 function slimAgentChild(
   agent: LoopDefinition["agentGraph"]["children"][number],
 ): LoopDefinition["agentGraph"]["children"][number] {
-  const roleDefaults = agent.artifactRole ? ROLE_AGENT_DEFAULTS[agent.artifactRole as AgentContractRole] : null;
   const slim: LoopDefinition["agentGraph"]["children"][number] = {
     id: agent.id,
     name: agent.name,
@@ -90,31 +66,22 @@ function slimAgentChild(
   if (agent.nodeKind) slim.nodeKind = agent.nodeKind;
   if (agent.persona) slim.persona = agent.persona;
   if (agent.gate) slim.gate = agent.gate;
-  if (agent.artifactRole) slim.artifactRole = agent.artifactRole;
   if (agent.outputArtifactKind) slim.outputArtifactKind = agent.outputArtifactKind;
 
-  if (roleDefaults && !arraysEqual(agent.guardrails, roleDefaults.guardrails)) {
-    slim.guardrails = agent.guardrails ?? [];
-  } else if (!roleDefaults && (agent.guardrails?.length ?? 0) > 0) {
+  if ((agent.guardrails?.length ?? 0) > 0) {
     slim.guardrails = agent.guardrails;
   }
 
-  if (roleDefaults && !arraysEqual(agent.doneCriteria, roleDefaults.doneCriteria)) {
-    slim.doneCriteria = agent.doneCriteria ?? [];
-  } else if (!roleDefaults && (agent.doneCriteria?.length ?? 0) > 0) {
+  if ((agent.doneCriteria?.length ?? 0) > 0) {
     slim.doneCriteria = agent.doneCriteria;
   }
 
-  if (roleDefaults && !arraysEqual(agent.failureModes, roleDefaults.failureModes)) {
-    slim.failureModes = agent.failureModes ?? [];
-  } else if (!roleDefaults && (agent.failureModes?.length ?? 0) > 0) {
+  if ((agent.failureModes?.length ?? 0) > 0) {
     slim.failureModes = agent.failureModes;
   }
 
-  if (!shouldOmitCatalogContracts(agent)) {
-    if (agent.inputContract) slim.inputContract = agent.inputContract;
-    if (agent.outputContract) slim.outputContract = agent.outputContract;
-  }
+  if (agent.inputContract) slim.inputContract = agent.inputContract;
+  if (agent.outputContract) slim.outputContract = agent.outputContract;
 
   if ((agent.handoffBindings ?? []).length === 0) {
     slim.handoffBindings = [];
@@ -142,7 +109,14 @@ export function slimLoopDefinitionForPersistence(definition: LoopDefinition): Lo
     slim.inputRequirements = definition.inputRequirements;
   }
   if (definition.engineVersion) slim.engineVersion = definition.engineVersion;
-  if (definition.builderMeta) slim.builderMeta = definition.builderMeta;
+  if (definition.builderMeta) {
+    slim.builderMeta = { ...definition.builderMeta };
+    if (definition.builderMeta.discoveredToolContracts?.length) {
+      slim.builderMeta.discoveredToolContracts = slimDiscoveredToolContracts(
+        definition.builderMeta.discoveredToolContracts as unknown as ToolContract[],
+      );
+    }
+  }
 
   if (definition.buildContract) {
     slim.buildContract = slimBuildContractForPersistence(definition.buildContract as LoopBuildContract);
@@ -198,8 +172,7 @@ export function isSlimBuildContract(contract: AnyLoopBuildContract | null | unde
 export function isSlimLoopDefinition(definition: LoopDefinition): boolean {
   if (!definition.ceo) return true;
   if (isSlimBuildContract(definition.buildContract ?? null)) return true;
-  return definition.agentGraph.children.some((agent) =>
-    Boolean(agent.artifactRole && !agent.outputContract));
+  return false;
 }
 
 export function expandSlimLoopDefinition(definition: LoopDefinition): LoopDefinition {

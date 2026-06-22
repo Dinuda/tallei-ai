@@ -136,7 +136,10 @@ function fallbackActionRefs(deferred: DeferredWriteToolCall, toolKey: string): s
 
 export function mapInteractionKindForUi(row: InteractionRow): string {
   const payload = asRecord(row.payload_json);
-  if (typeof payload.gateType === "string") return payload.gateType;
+  if (typeof payload.legacyGateType === "string") return payload.legacyGateType;
+  if (typeof payload.gateType === "string" && payload.gateType !== "input" && payload.gateType !== "approval") {
+    return payload.gateType;
+  }
   const surface = typeof payload.surface === "string" ? payload.surface.trim() : "";
   if (surface === "confirm.send") return "pre_send";
   if (surface.startsWith("input.")) return "missing_input";

@@ -101,7 +101,7 @@ function buildSpec(reviewMode: "draft_only" | "approve_each_action" = "approve_e
     buildContract,
     inputRequirements: [
       { key: "team_tone", surface: "input.text", label: "Tone", required: true, when: "run_start" },
-      { key: "draft_review", surface: "review.email", required: true, when: "before_send" },
+      { key: "draft_approval", surface: "review.email", required: true, when: "before_send" },
       { key: "source_review", surface: "review.sources", required: true, when: "before_step" },
     ],
     discoveredToolContracts: [
@@ -255,8 +255,7 @@ test("compileSpecRunPlan carries architect-style contracts, handoffs, gates, and
       provenance: "agent_output",
       transformation: "direct",
     }],
-    gate: { type: "draft_review", question: "Review draft." },
-    artifactRole: "draft_body",
+    gate: { type: "approval", question: "Review draft.", approval: { surface: "review.email" } },
   };
 
   const plan = compileSpecRunPlan(spec);
@@ -264,8 +263,8 @@ test("compileSpecRunPlan carries architect-style contracts, handoffs, gates, and
   assert.deepEqual(writer.doneCriteria, ["Return a structured draft."]);
   assert.equal(writer.outputContract.renderer, "canvas.email");
   assert.equal(writer.outputArtifactKind, "canvas_email");
-  assert.equal(writer.gate?.type, "draft_review");
-  assert.equal(writer.artifactRole, "draft_body");
+  assert.equal(writer.gate?.type, "approval");
+  assert.equal(writer.gate?.approval.surface, "review.email");
   assert.equal(writer.handoffBindings[0]?.targetPath, "/ticket");
 });
 
@@ -297,9 +296,8 @@ test("compileSpecRunPlan trusts architect delivery routing over catalog effect l
   spec.agentGraph.children[1] = {
     ...spec.agentGraph.children[1]!,
     nodeKind: "action",
-    artifactRole: "delivery",
     tools: ["composio.mail.action.REPLY_TO_THREAD"],
-    gate: { type: "pre_send", question: "Confirm reply." },
+    gate: { type: "approval", question: "Confirm reply.", approval: { surface: "confirm.send" } },
   };
 
   const plan = compileSpecRunPlan(spec);

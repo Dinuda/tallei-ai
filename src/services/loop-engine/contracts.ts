@@ -75,15 +75,6 @@ const loopArchitectAgentSchema = z.object({
   ]).optional(),
 });
 
-function coerceArchitectInputKey(value: unknown): string | null {
-  if (typeof value === "string" && value.trim()) return value.trim();
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    const row = value as Record<string, unknown>;
-    if (typeof row.key === "string" && row.key.trim()) return row.key.trim();
-  }
-  return null;
-}
-
 function parseArchitectJsonField(value: unknown, fallback: Record<string, unknown> = {}): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;

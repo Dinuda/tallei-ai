@@ -40,7 +40,7 @@ test("memory search returns verified tool output without LLM synthesis", async (
         task: "Search memories for this week's product updates.",
         goal: "Return relevant memories with ids and excerpts.",
         tools: [{ ref: "internal.memory_search" }],
-        gate: { type: "memory_confirmation", question: "Use these memories?" },
+        gate: { type: "approval", question: "Use these memories?", approval: { surface: "review.memories" } },
       },
       assignedTools: [{ ref: "internal.memory_search" }],
       draftPolicy: "approval_required",
@@ -70,7 +70,7 @@ test("memory search sources trigger confirmation gate", async () => {
       task: "Search memories for this week's product updates.",
       goal: "Return relevant memories with ids and excerpts.",
       tools: [{ ref: "internal.memory_search" }],
-      gate: { type: "memory_confirmation", question: "Use these memories?" },
+      gate: { type: "approval", question: "Use these memories?", approval: { surface: "review.memories" } },
     },
     result: {
       text: "Memory search results:\n- [memory-1] Shipped persistent storage endpoints.",
@@ -84,7 +84,7 @@ test("memory search sources trigger confirmation gate", async () => {
   });
 
   assert.equal(result.status, "needs_input");
-  assert.equal(result.gateType, "memory_confirmation");
+  assert.equal(result.gateType, "approval");
 });
 
 test("web search returns sources at top level for goal eval and handoff", async () => {
@@ -163,7 +163,7 @@ test("validated-empty memory search does not trigger confirmation gate", async (
       task: "Search memories for this week's product updates.",
       goal: "Return relevant memories with ids and excerpts.",
       tools: [{ ref: "internal.memory_search" }],
-      gate: { type: "memory_confirmation", question: "Use these memories?" },
+      gate: { type: "approval", question: "Use these memories?", approval: { surface: "review.memories" } },
     },
     result: {
       text: "No validated memories found for this run intent.",

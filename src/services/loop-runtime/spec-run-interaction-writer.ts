@@ -74,14 +74,6 @@ function interactionKindForSurface(surface: InputSurface): "collect_input" | "re
   return "review_artifact";
 }
 
-function gateTypeForSurface(surface: InputSurface): string {
-  if (surface.startsWith("input.")) return "missing_input";
-  if (surface === "confirm.send") return "pre_send";
-  if (surface === "review.sources") return "source_confirmation";
-  if (surface === "review.memories") return "memory_confirmation";
-  return "draft_review";
-}
-
 function operatorTitleForSurface(surface: InputSurface): string {
   if (surface.startsWith("input.")) return "Input required";
   if (surface === "confirm.send") return "Approval required";
@@ -201,12 +193,13 @@ export async function createSpecRunGateInteraction(input: SpecRunGateInput): Pro
     if (!surface.startsWith("input.")) throw new Error(`Input gate requires input.* surface, got ${surface}`);
     const question = input.description ?? input.label ?? "Provide the required input.";
     const payload = {
-      gateType: "missing_input",
+      gateType: "input",
       toolKey: "requestGate",
       agentId: input.agentId,
       stepIndex: input.stepIndex,
       key: input.key,
       surface,
+      input: { surface, key: input.key, label: input.label, description: input.description },
       workspace: {
         title: operatorTitleForSurface(surface),
         subtitle: question,
@@ -246,13 +239,17 @@ export async function createSpecRunGateInteraction(input: SpecRunGateInput): Pro
     const question = input.rationale?.trim() || "Review the agent output, then approve or request changes.";
     const renderTarget = renderTargetForSurface(surface);
     const payload = {
-      gateType: gateTypeForSurface(surface),
+      gateType: "approval",
       toolKey: "requestGate",
       agentId: input.agentId,
       stepIndex: input.stepIndex,
       surface,
       artifactKey: input.artifactKey,
       canvasArtifactKey: input.artifactKey,
+      approval: {
+        surface,
+        artifactKey: input.artifactKey,
+      },
       workspace: {
         title: operatorTitleForSurface(surface),
         subtitle: question,
@@ -362,12 +359,17 @@ export async function createSpecRunGateInteraction(input: SpecRunGateInput): Pro
   const question = input.deferred.rationale?.trim() || `Approve ${actionLabel}.`;
   const actionRef = input.deferred.actionRef ?? `${input.deferred.toolkit}.${input.deferred.actionSlug}`;
   const payload = {
-    gateType: "action_approval",
+    gateType: "approval",
     toolKey: "requestGate",
     deferredToolKey: input.toolKey,
     agentId: input.agentId,
     stepIndex: input.stepIndex,
     deferred: input.deferred,
+    approval: {
+      actionRef,
+      payload: input.deferred.payload,
+      rationale: input.deferred.rationale,
+    },
     workspace: {
       title: "Action approval",
       subtitle: question,

@@ -13,7 +13,6 @@ const JSON_REPAIR_TOOLS = new Set([
   "interactivePrompt",
   "scheduleSetup",
   "connectorSetup",
-  "outputReviewGatesSetup",
   "knowledgeBaseSetup",
   "appSelection",
 ]);

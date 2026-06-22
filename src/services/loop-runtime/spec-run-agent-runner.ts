@@ -13,7 +13,7 @@ import type { InputSurface } from "../loop-engine/input-surfaces.js";
 import { loopBuilderOpenAiModel, loopBuilderStreamProviderOptions } from "../loop-builder/openai-chat.js";
 import { resolveLoopChatLanguageModel } from "../llm/loop-chat-client.js";
 import { buildRunSeedMessage, type RunContext } from "./build-run-context.js";
-import { enrichEvidenceStructuredOutput, enrichResolvedHandoffValue } from "./spec-run-handoff-enrichment.js";
+import { enrichResolvedHandoffValue } from "./spec-run-handoff-enrichment.js";
 import { SpecRunInteractionRequiredError } from "./spec-run-agent-errors.js";
 import { emitRunEvent } from "./spec-run-agent-events.js";
 import { buildAgentTools } from "./spec-run-agent-tools.js";
@@ -25,8 +25,8 @@ import { configuredAgentGateRequired } from "./spec-run-gate-policy.js";
 import { evaluateAgentHandoff } from "./spec-run-handoff-eval.js";
 import {
   buildBoundaryEnvelope,
-  legacyStepOutputFromBoundary,
   normalizedHandoffFromStepOutput,
+  projectStepOutputFromBoundary,
   readBoundaryEnvelope,
   routeBoundary,
   type AgentBoundaryEnvelope,
@@ -62,7 +62,6 @@ type AgentStepQueryRow = AgentStepRow & {
   boundary_normalized_handoff_json?: unknown;
   boundary_goal_eval_json?: unknown;
   boundary_router_decision?: string | null;
-  boundary_legacy_output_json?: unknown;
 };
 
 type PriorAgentOutput = {
@@ -212,7 +211,6 @@ function mapAgentStepRow(row: AgentStepQueryRow): AgentStepRow {
         normalized_handoff_json: row.boundary_normalized_handoff_json,
         goal_eval_json: row.boundary_goal_eval_json,
         router_decision: row.boundary_router_decision,
-        legacy_output_json: row.boundary_legacy_output_json,
       },
     }),
     error_json: row.error_json,
@@ -297,7 +295,6 @@ async function ensureAgentSteps(input: {
           handoffBindings: agent.handoffBindings,
           doneCriteria: agent.doneCriteria,
           gate: agent.gate,
-          artifactRole: agent.artifactRole,
           renderer: agent.outputContract.renderer,
           outputArtifactId: agent.outputArtifactId,
           outputArtifactKind: agent.outputArtifactKind,
@@ -323,8 +320,7 @@ async function ensureAgentSteps(input: {
             b.normalized_output_json AS boundary_normalized_output_json,
             b.normalized_handoff_json AS boundary_normalized_handoff_json,
             b.goal_eval_json AS boundary_goal_eval_json,
-            b.router_decision AS boundary_router_decision,
-            b.legacy_output_json AS boundary_legacy_output_json
+            b.router_decision AS boundary_router_decision
      FROM loop_engine_step_attempts sa
      LEFT JOIN loop_engine_boundaries b ON b.step_attempt_id = sa.id
      WHERE sa.run_id = $1 AND sa.tenant_id = $2 AND sa.user_id = $3
@@ -388,8 +384,7 @@ async function loadAgentSteps(input: {
             b.normalized_output_json AS boundary_normalized_output_json,
             b.normalized_handoff_json AS boundary_normalized_handoff_json,
             b.goal_eval_json AS boundary_goal_eval_json,
-            b.router_decision AS boundary_router_decision,
-            b.legacy_output_json AS boundary_legacy_output_json
+            b.router_decision AS boundary_router_decision
      FROM loop_engine_step_attempts sa
      LEFT JOIN loop_engine_boundaries b ON b.step_attempt_id = sa.id
      WHERE sa.run_id = $1 AND sa.tenant_id = $2 AND sa.user_id = $3
@@ -584,7 +579,6 @@ function tryParseJsonObject(value: string): Record<string, unknown> | null {
 /** Unwrap common finalizeAgent mistakes before output-contract validation. */
 export function normalizeAgentStepOutput(
   output: unknown,
-  options?: { artifactRole?: string },
 ): unknown {
   let candidate = output;
 
@@ -613,74 +607,7 @@ export function normalizeAgentStepOutput(
     }
   }
 
-  if (
-    options?.artifactRole === "source_evidence"
-    && candidate
-    && typeof candidate === "object"
-    && !Array.isArray(candidate)
-  ) {
-    const evidence = { ...(candidate as Record<string, unknown>) };
-    const context = asRecord(evidence.context);
-    if (!isPresent(evidence.ticket) && isPresent(context.ticket)) {
-      evidence.ticket = context.ticket;
-    }
-    if (!isPresent(evidence.customer) && isPresent(context.customer)) {
-      evidence.customer = context.customer;
-    }
-    if (!isPresent(evidence.priority) && typeof context.priority === "string") {
-      evidence.priority = context.priority;
-    }
-    candidate = evidence;
-  }
-
   return candidate;
-}
-
-function inferPriorityFromTicket(ticket: RunContext["ticket"]): "high" | "medium" | "low" {
-  const text = `${ticket?.subject ?? ""}\n${ticket?.body ?? ""}`.toLowerCase();
-  if (/\b(site|system|service|app|production|prod)\b.*\b(down|outage|unavailable|offline|broken)\b/.test(text)) {
-    return "high";
-  }
-  if (/\b(urgent|critical|asap|blocked|cannot access|can't access)\b/.test(text)) return "high";
-  if (/\b(error|failed|failure|bug|issue|problem)\b/.test(text)) return "medium";
-  return "low";
-}
-
-export function fallbackSourceEvidenceOutput(runContext: RunContext): Record<string, unknown> {
-  if (!runContext.ticket) {
-    return {
-      status: "no_tickets_found",
-      summary: "No actionable support ticket was available in the trigger context.",
-      findings: ["No trigger ticket was available for downstream drafting."],
-      context: {
-        trigger: runContext.trigger,
-        hasTriggerPayload: runContext.hasTriggerPayload,
-      },
-    };
-  }
-
-  const priority = inferPriorityFromTicket(runContext.ticket);
-  const customerLabel = runContext.customer?.email
-    ? ` from ${runContext.customer.email}`
-    : runContext.customer?.name
-      ? ` from ${runContext.customer.name}`
-      : "";
-  return {
-    status: "ticket_found",
-    summary: `Found support ticket '${runContext.ticket.subject}'${customerLabel}.`,
-    priority,
-    ticket: runContext.ticket,
-    ...(runContext.customer ? { customer: runContext.customer } : {}),
-    findings: [
-      `Trigger context provided ticket subject: ${runContext.ticket.subject}`,
-      ...(runContext.ticket.threadId ? [`Thread ID: ${runContext.ticket.threadId}`] : []),
-      ...(runContext.ticket.messageId ? [`Message ID: ${runContext.ticket.messageId}`] : []),
-    ],
-    context: {
-      trigger: runContext.trigger,
-      hasTriggerPayload: runContext.hasTriggerPayload,
-    },
-  };
 }
 
 function missingAgentOutputError(input: {
@@ -702,11 +629,10 @@ function missingAgentOutputError(input: {
 function coerceOutputToContract(input: {
   contract: DataContract;
   output: unknown;
-  artifactRole?: string;
 }): { structuredOutput: unknown; normalizedOutput: Record<string, unknown>; text: string; contractIssues: string[] } {
   const contractIssues: string[] = [];
   if (contractUsesJson(input.contract)) {
-    let structuredOutput = normalizeAgentStepOutput(input.output, { artifactRole: input.artifactRole });
+    let structuredOutput = normalizeAgentStepOutput(input.output);
     if (typeof structuredOutput === "string") {
       try {
         structuredOutput = JSON.parse(structuredOutput) as unknown;
@@ -766,7 +692,6 @@ function artifactPayloadForOutput(input: {
       dataJson: {
         renderer,
         renderTarget: renderer,
-        artifactRole: input.agent.artifactRole,
         outputContract: input.agent.outputContract,
         structuredOutput: input.structuredOutput,
         emailTemplate: {
@@ -786,7 +711,6 @@ function artifactPayloadForOutput(input: {
     body: input.text || textFromStructuredOutput(input.structuredOutput),
     dataJson: {
       ...(renderer ? { renderer, renderTarget: renderer } : {}),
-      artifactRole: input.agent.artifactRole,
       outputContract: input.agent.outputContract,
       structuredOutput: input.structuredOutput,
       data: input.structuredOutput,
@@ -847,7 +771,7 @@ async function completeAgentStep(input: {
     stepInput: input.stepInput ?? {},
     structuredOutput: input.boundaryEnvelope.structuredOutput,
   });
-  const legacyOutputJson = legacyStepOutputFromBoundary({
+  const projectedOutputJson = projectStepOutputFromBoundary({
     envelope: input.boundaryEnvelope,
     text: input.text,
   });
@@ -859,7 +783,7 @@ async function completeAgentStep(input: {
     envelope: input.boundaryEnvelope,
     routerDecision: input.routerDecision,
     boundaryIssues: input.boundaryIssues,
-    legacyOutputJson,
+    projectedOutputJson,
   });
   await persistAgentOutputArtifact({
     auth: input.auth,
@@ -947,9 +871,10 @@ async function createMissingHandoffInputIfPossible(input: {
   missingRequired: string[];
   reason: string;
 }): Promise<boolean> {
-  const gateType = input.agent.gate?.type.trim().toLowerCase();
-  if (gateType !== "missing_input") return false;
-  const key = `${input.agent.id}_missing_handoff`;
+  const gate = input.agent.gate;
+  if (gate?.type !== "input") return false;
+  const key = gate.input?.key ?? `${input.agent.id}_missing_handoff`;
+  const surface = gate.input?.surface ?? "input.text";
   const interactionId = await createSpecRunGateInteraction({
     gateType: "input",
     auth: input.auth,
@@ -958,10 +883,10 @@ async function createMissingHandoffInputIfPossible(input: {
     agentId: input.agent.id,
     agentName: input.agent.name,
     stepIndex: input.agent.index,
-    surface: "input.text",
+    surface,
     key,
-    label: "Missing handoff input",
-    description: `${input.reason}\n\nMissing: ${input.missingRequired.join(", ")}`,
+    label: gate.input?.label ?? "Missing handoff input",
+    description: gate.input?.description ?? `${input.reason}\n\nMissing: ${input.missingRequired.join(", ")}`,
   });
   await markStepWaitingForInteraction({
     auth: input.auth,
@@ -971,7 +896,7 @@ async function createMissingHandoffInputIfPossible(input: {
     eventType: "interaction_requested",
     payload: {
       toolKey: "handoffPreflight",
-      surface: "input.text",
+      surface,
       key,
       missingRequired: input.missingRequired,
     },
@@ -980,14 +905,11 @@ async function createMissingHandoffInputIfPossible(input: {
 }
 
 function reviewSurfaceForAgent(agent: RunPlanAgent): InputSurface {
-  const gateType = agent.gate?.type.trim().toLowerCase();
-  if (gateType === "pre_send") return "confirm.send";
-  if (gateType === "source_confirmation") return "review.sources";
-  if (gateType === "memory_confirmation") return "review.memories";
+  if (agent.gate?.type === "approval" && agent.gate.approval.surface) {
+    return agent.gate.approval.surface;
+  }
   if (agent.outputContract.renderer === "canvas.email") return "review.email";
   if (agent.outputContract.renderer === "canvas.preview") return "review.preview";
-  if (gateType === "draft_review") return "review.draft";
-  if (gateType === "preview_review") return "review.preview";
   return "review.preview";
 }
 
@@ -1065,8 +987,9 @@ async function createConfiguredGateIfNeeded(input: {
   if (asRecord(input.stepInput.reviewApproval).approved === true) return false;
   if (isNoActionRequiredOutput(input.structuredOutput)) return false;
 
-  if (input.agent.gate.type.trim().toLowerCase() === "missing_input") {
-    const key = `${input.agent.id}_input`;
+  if (input.agent.gate.type === "input") {
+    const key = input.agent.gate.input?.key ?? `${input.agent.id}_input`;
+    const surface = input.agent.gate.input?.surface ?? "input.text";
     const interactionId = await createSpecRunGateInteraction({
       gateType: "input",
       auth: input.auth,
@@ -1075,10 +998,10 @@ async function createConfiguredGateIfNeeded(input: {
       agentId: input.agent.id,
       agentName: input.agent.name,
       stepIndex: input.agent.index,
-      surface: "input.text",
+      surface,
       key,
-      label: input.agent.gate.question,
-      description: input.agent.gate.question,
+      label: input.agent.gate.input?.label ?? input.agent.gate.question,
+      description: input.agent.gate.input?.description ?? input.agent.gate.question,
     });
     await markStepWaitingForInteraction({
       auth: input.auth,
@@ -1086,18 +1009,18 @@ async function createConfiguredGateIfNeeded(input: {
       stepAttemptId: input.stepAttemptId,
       interactionId,
       eventType: "interaction_requested",
-      payload: { toolKey: "configuredGate", surface: "input.text", key },
+      payload: { toolKey: "configuredGate", surface, key, gateType: "input" },
     });
     return true;
   }
 
   const surface = reviewSurfaceForAgent(input.agent);
+  const artifactKey = input.agent.gate.approval.artifactKey ?? input.agent.outputArtifactId;
   const artifactData = {
     ...asRecord(input.structuredOutput),
     structuredOutput: input.structuredOutput,
     text: input.text,
     outputContract: input.agent.outputContract,
-    artifactRole: input.agent.artifactRole,
   };
   const interactionId = await createSpecRunGateInteraction({
     gateType: "review",
@@ -1108,7 +1031,7 @@ async function createConfiguredGateIfNeeded(input: {
     agentName: input.agent.name,
     stepIndex: input.agent.index,
     surface,
-    artifactKey: input.agent.outputArtifactId,
+    artifactKey,
     artifactData,
     rationale: input.agent.gate.question,
     configuredGate: true,
@@ -1123,8 +1046,8 @@ async function createConfiguredGateIfNeeded(input: {
     payload: {
       toolKey: "configuredGate",
       surface,
-      artifactKey: input.agent.outputArtifactId,
-      gateType: input.agent.gate.type,
+      artifactKey,
+      gateType: "approval",
     },
   });
   return true;
@@ -1166,13 +1089,9 @@ function buildAgentPrompt(input: {
     input.agent.gate
       ? `Configured gate (runner creates this after finalizeAgent; do not call requestGate for it):\n${JSON.stringify(input.agent.gate, null, 2)}`
       : "",
-    input.agent.artifactRole ? `Artifact role: ${input.agent.artifactRole}` : "",
-    input.agent.artifactRole === "source_evidence"
-      ? "For source evidence output, finalizeAgent output MUST include summary and status. Use status \"ticket_found\" with ticket details when a support ticket exists; use status \"no_tickets_found\" with no ticket object when nothing actionable exists. Do not produce draft/subject/body/html/message/reply/emailTemplate fields. Do not produce subject/body/html/message/reply/emailTemplate draft fields; the next Draft Specialist owns all outbound draft content."
-      : "",
     `Build-spec tool refs assigned to this agent (authorization identifiers, not callable tool names):\n${input.agent.toolRefs.map((entry) => `- ${entry}`).join("\n")}`,
     `Callable tools available in this invocation:\n${input.availableToolNames.map((entry) => `- ${entry}`).join("\n")}`,
-    "Never call build-spec refs directly. Do not call internal.* or composio.* names as tools. For connector reads, use the action_* callable tool listed above. For connector writes/sends, call requestGate with type=action and the exact write actionRef.",
+    "Never call build-spec refs directly. Do not call internal.* or composio.* names as tools. For connector reads, use the action_* callable tool listed above. For connector writes/sends, call requestGate with type=approval and approval.actionRef/payload.",
     readOnlyAgent
       ? "This agent has no write actionRefs. It is read-only: do not create labels, drafts, replies, sends, or any other Gmail mutations. If the needed mutation tool is not listed, finalize with the evidence/status instead of inventing a tool name."
       : "",
@@ -1180,7 +1099,7 @@ function buildAgentPrompt(input: {
       ? "Connector action_* tools enforce the declared Composio input schema via Zod. Pass fields at the top level using exact property names (for example thread_id, not threadId). Do not nest fields under payload."
       : "",
     writeActionRefs.length > 0
-      ? `Write actionRefs allowed through requestGate type=action:\n${writeActionRefs.map((entry) => `- ${entry}`).join("\n")}`
+      ? `Write actionRefs allowed through requestGate type=approval:\n${writeActionRefs.map((entry) => `- ${entry}`).join("\n")}`
       : "",
     input.plan.inputRequirements.length > 0
       ? `Declared operator surfaces:\n${JSON.stringify(input.plan.inputRequirements, null, 2)}`
@@ -1198,7 +1117,7 @@ function buildAgentPrompt(input: {
       ? `Operator revision feedback for this retry:\n${JSON.stringify(pendingRevision, null, 2)}`
       : "",
     reviewWasApproved
-      ? `The operator approved this run's draft review. Do not call requestGate again for the same artifact. Continue the agent. Before any connector write/send, call requestGate with type=action and the exact write actionRef; the runner will create the required approval gate or execute only if that exact action was already approved. The approved draft content is already saved as an artifact.\nApproval context: ${JSON.stringify(reviewApproval, null, 2)}`
+      ? `The operator approved this run's gate. Do not call requestGate again for the same artifact/action. Continue the agent. Before any connector write/send, call requestGate with type=approval and the exact approval.actionRef; the runner will create the required approval gate or execute only if that exact action was already approved. Approval context: ${JSON.stringify(reviewApproval, null, 2)}`
       : "",
     "",
     "Run only this agent.",
@@ -1212,7 +1131,7 @@ function buildAgentPrompt(input: {
     input.runContext.ticket && input.agent.handoffBindings.length > 0
       ? "The run seed and resolved handoff already include ticket/customer context when present. Do not call requestGate type=input for subject, body, sender name, sender email, or thread/message IDs — use the handoff and run seed directly."
       : "",
-    "requestGate type=input is ONLY for input.* surfaces (input.text, input.markdown, etc.). requestGate type=review is for review.* and confirm.send surfaces. Configured gates are created automatically after finalizeAgent — do not call requestGate for them.",
+    "requestGate type=input is ONLY for input.* surfaces (input.text, input.markdown, input.file, etc.). requestGate type=approval is for review.* / confirm.send surfaces or connector action approval. Configured gates are created automatically after finalizeAgent — do not call requestGate for them.",
     "Do not narrate tool choices, print JSON, or draft operator-facing content in normal prose before the relevant tool call. Use finalizeAgent for the declared output contract; the runner will create configured artifacts/reviews from outputContract.renderer and gate.",
     gateToolNames.length > 0
       ? "If operator choices are needed, you MUST create them with requestGate. Never write that a review was submitted, approval is pending, or the run is paused unless requestGate has been called."
@@ -1254,7 +1173,7 @@ async function runAgent(input: {
   const system = [
     buildSpecRunSystemPrompt(input.spec, input.runContext),
     "",
-    "Execution architecture: one model invocation controls exactly one approved spec agent. Mutating external actions are never direct tools; create requestGate type=action interactions instead. Operator input and review must be represented with requestGate, not prose.",
+    "Execution architecture: one model invocation controls exactly one approved spec agent. Mutating external actions are never direct tools; create requestGate type=approval interactions instead. Operator input and approval must be represented with requestGate, not prose.",
   ].join("\n");
   const prompt = buildAgentPrompt({
     spec: input.spec,
@@ -1313,9 +1232,6 @@ async function runAgent(input: {
     if (finalized.agentOutput !== undefined) return { output: finalized.agentOutput };
     const trimmed = text.trim();
     if (trimmed) return { output: { text: trimmed } };
-    if (input.agent.artifactRole === "source_evidence") {
-      return { output: fallbackSourceEvidenceOutput(input.runContext) };
-    }
     throw missingAgentOutputError({
       agent: input.agent,
       finishReason,
@@ -1338,9 +1254,6 @@ async function runAgent(input: {
     return {
       output: { text: trimmed },
     };
-  }
-  if (input.agent.artifactRole === "source_evidence") {
-    return { output: fallbackSourceEvidenceOutput(input.runContext) };
   }
   throw missingAgentOutputError({
     agent: input.agent,
@@ -1515,14 +1428,10 @@ export async function executeAgenticSpecRun(input: ExecuteAgenticSpecRunInput): 
         writer: input.writer,
       });
       const stepInput = asRecord(step.input_json);
-      let agentOutput = result.output;
-      if (agent.artifactRole === "source_evidence") {
-        agentOutput = enrichEvidenceStructuredOutput(input.runContext, agentOutput);
-      }
+      const agentOutput = result.output;
       const coerced = coerceOutputToContract({
         contract: agent.outputContract,
         output: agentOutput,
-        artifactRole: agent.artifactRole,
       });
       const nextAgent = plan.agents.find((candidate) => candidate.index === agent.index + 1);
       const goalEval = await evaluateAgentHandoff({

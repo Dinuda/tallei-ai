@@ -1,7 +1,12 @@
 import { z } from "zod";
 
 import { dataContractSchema, normalizeContractSchema } from "./data-contract.js";
-import { inputRequirementSchema, normalizeSpecInputRequirements } from "./input-surfaces.js";
+import {
+  dataInputSurfaceSchema,
+  inputRequirementSchema,
+  normalizeSpecInputRequirements,
+  reviewSurfaceSchema,
+} from "./input-surfaces.js";
 import { loopIntentContextSchema } from "./intent-context.js";
 import { loopBuildContractSchema } from "./build-contract.js";
 
@@ -108,12 +113,94 @@ const noSlopSpecAgentHandoffBindingSchema = z.object({
   transformation: z.enum(["direct", "merge", "transform"]).default("direct").optional(),
 });
 
-const noSlopSpecAgentGateSchema = z.object({
-  type: z.string().min(1),
+function normalizeLegacyGate(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const gate = { ...(value as Record<string, unknown>) };
+  const type = typeof gate.type === "string" ? gate.type.trim().toLowerCase() : "";
+  if (type === "input" || type === "approval") return gate;
+  if (type === "missing_input") {
+    return {
+      ...gate,
+      type: "input",
+      input: {
+        surface: typeof gate.surface === "string" ? gate.surface : "input.text",
+        key: typeof gate.key === "string" ? gate.key : "operator_input",
+      },
+    };
+  }
+  const surface = type === "pre_send"
+    ? "confirm.send"
+    : type === "source_confirmation"
+      ? "review.sources"
+      : type === "memory_confirmation"
+        ? "review.memories"
+        : type === "preview_review"
+          ? "review.preview"
+          : "review.draft";
+  return {
+    ...gate,
+    type: "approval",
+    approval: {
+      surface,
+      ...(typeof gate.artifactKey === "string" ? { artifactKey: gate.artifactKey } : {}),
+      ...(typeof gate.actionRef === "string" ? { actionRef: gate.actionRef } : {}),
+      ...(gate.payload && typeof gate.payload === "object" && !Array.isArray(gate.payload) ? { payload: gate.payload } : {}),
+    },
+  };
+}
+
+export const canonicalInputGateSchema = z.object({
+  type: z.literal("input"),
   question: z.string().min(1),
+  input: z.object({
+    surface: dataInputSurfaceSchema.default("input.text"),
+    key: z.string().min(1).default("operator_input"),
+    label: z.string().min(1).optional(),
+    description: z.string().min(1).optional(),
+  }).default({
+    surface: "input.text",
+    key: "operator_input",
+  }),
 });
 
-export const noSlopSpecAgentSchema = z.object({
+export const canonicalApprovalGateSchema = z.object({
+  type: z.literal("approval"),
+  question: z.string().min(1),
+  approval: z.object({
+    surface: reviewSurfaceSchema.optional(),
+    artifactKey: z.string().min(1).optional(),
+    actionRef: z.string().min(1).optional(),
+    label: z.string().min(1).optional(),
+    payload: z.record(z.unknown()).optional(),
+  }).default({}),
+});
+
+export const noSlopSpecAgentGateSchema = z.preprocess(
+  normalizeLegacyGate,
+  z.discriminatedUnion("type", [
+    canonicalInputGateSchema,
+    canonicalApprovalGateSchema,
+  ]),
+);
+
+function normalizeLegacyArtifactRole(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const agent = { ...(value as Record<string, unknown>) };
+  const role = typeof agent.artifactRole === "string" ? agent.artifactRole : "";
+  delete agent.artifactRole;
+  if (!agent.outputContract || typeof agent.outputContract !== "object" || Array.isArray(agent.outputContract)) {
+    return agent;
+  }
+  const outputContract = { ...(agent.outputContract as Record<string, unknown>) };
+  if (!outputContract.renderer) {
+    if (role === "draft_body") outputContract.renderer = "canvas.email";
+    if (role === "final_preview") outputContract.renderer = "canvas.preview";
+  }
+  agent.outputContract = outputContract;
+  return agent;
+}
+
+export const noSlopSpecAgentSchema = z.preprocess(normalizeLegacyArtifactRole, z.object({
   nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
   name: z.string().min(1).trim(),
   goal: z.string().min(1).trim(),
@@ -126,14 +213,8 @@ export const noSlopSpecAgentSchema = z.object({
   outputContract: z.preprocess(normalizeAgentContract, dataContractSchema).optional(),
   handoffBindings: z.array(noSlopSpecAgentHandoffBindingSchema).default([]),
   gate: noSlopSpecAgentGateSchema.optional(),
-  artifactRole: z.enum([
-    "source_evidence",
-    "draft_body",
-    "final_preview",
-    "delivery",
-  ]).optional(),
   persona: agentPersonaSchema.optional(),
-});
+}));
 
 const connectorActionRiskSchema = z.enum(["read", "write", "send", "destructive"]);
 

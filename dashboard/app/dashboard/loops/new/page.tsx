@@ -66,10 +66,6 @@ import { IssueNotice, type ToolPart, ToolContent, ToolHeader } from "@/component
 import { BuilderConnectorChecklist } from "@/components/builder-connector-checklist";
 import { BuilderAppSelector, type AppSelectionOutput } from "@/components/builder-app-selector";
 import { BuilderScheduleSelector, type ScheduleSelectionOutput } from "@/components/builder-schedule-selector";
-import {
-  BuilderOutputReviewGatesSelector,
-  type OutputReviewGatesSelectionOutput,
-} from "@/components/builder-output-review-gates-selector";
 import { BuilderKnowledgeBaseSelector, type KnowledgeBaseSelectionOutput } from "@/components/builder-knowledge-base-selector";
 import { BuilderArtifactEditor, type ArtifactSetupOutput, updateArtifactToolOutput } from "@/components/builder-artifact-editor";
 import { BuilderRequirementSelector, type RequirementSetupOutput } from "@/components/builder-requirement-selector";
@@ -452,7 +448,6 @@ export default function NewLoopBuilderPage() {
   const activeAppSelection = findActiveAppSelection(messages);
   const activeConnectorSetup = findActiveConnectorSetup(messages);
   const activeScheduleSetup = findActiveScheduleSetup(messages);
-  const activeOutputReviewGatesSetup = findActiveOutputReviewGatesSetup(messages);
   const activeKnowledgeBaseSetup = findActiveKnowledgeBaseSetup(messages);
   const activeArtifactSetup = findActiveArtifactSetup(messages);
   const activeRequirementSetup = findActiveRequirementSetup(messages);
@@ -510,7 +505,6 @@ export default function NewLoopBuilderPage() {
     || activeKnowledgeBaseSetup
     || activeArtifactSetup
     || (activeScheduleSetup && sessionId)
-    || activeOutputReviewGatesSetup
     || showRequirementSetup
     || showInteractivePrompt,
   );
@@ -708,26 +702,6 @@ export default function NewLoopBuilderPage() {
                             recommendedOptionIds={input.recommendedOptionIds}
                             requirementId={input.requirementId ?? "trigger_schedule"}
                             sessionId={sessionId}
-                            subtitle={input.subtitle}
-                          /> : null;
-                        }
-                        if (toolName === "outputReviewGatesSetup") {
-                          if (part.state === "input-streaming" || part.state === "input-available") return null;
-                          const input = part.input && typeof part.input === "object" ? part.input as {
-                            requirementId?: string;
-                            question?: string;
-                            subtitle?: string;
-                            recommendedOptionIds?: string[];
-                            allowOther?: boolean;
-                          } : {};
-                          const output = part.output && typeof part.output === "object" ? part.output as OutputReviewGatesSelectionOutput : null;
-                          return output ? <BuilderOutputReviewGatesSelector
-                            allowOther={input.allowOther}
-                            completedOutput={output}
-                            key={index}
-                            question={input.question}
-                            recommendedOptionIds={input.recommendedOptionIds}
-                            requirementId={input.requirementId ?? "output_review_gates"}
                             subtitle={input.subtitle}
                           /> : null;
                         }
@@ -965,27 +939,6 @@ export default function NewLoopBuilderPage() {
                       requirementId={String((activeScheduleSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "trigger_schedule")}
                       sessionId={sessionId}
                       subtitle={(activeScheduleSetup.input as { subtitle?: string } | undefined)?.subtitle}
-                    />
-                  </motion.div>
-                ) : composerInteractiveReady && activeOutputReviewGatesSetup ? (
-                  <motion.div
-                    key="output-review-gates-setup"
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 20 }}
-                    initial={{ opacity: 0, y: 20 }}
-                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-                  >
-                    <BuilderOutputReviewGatesSelector
-                      allowOther={(activeOutputReviewGatesSetup.input as { allowOther?: boolean } | undefined)?.allowOther}
-                      onComplete={(output) => addToolOutput({
-                        tool: "outputReviewGatesSetup",
-                        toolCallId: activeOutputReviewGatesSetup.toolCallId,
-                        output,
-                      })}
-                      question={String((activeOutputReviewGatesSetup.input as { question?: string } | undefined)?.question ?? "Should this loop pause for operator review between agents?")}
-                      recommendedOptionIds={(activeOutputReviewGatesSetup.input as { recommendedOptionIds?: string[] } | undefined)?.recommendedOptionIds}
-                      requirementId={String((activeOutputReviewGatesSetup.input as { requirementId?: string } | undefined)?.requirementId ?? "output_review_gates")}
-                      subtitle={(activeOutputReviewGatesSetup.input as { subtitle?: string } | undefined)?.subtitle}
                     />
                   </motion.div>
                 ) : composerInteractiveReady && showRequirementSetup ? (
@@ -1326,19 +1279,6 @@ function findActiveScheduleSetup(messages: UIMessage[]): ToolPart | null {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex];
       if (part && isToolUIPart(part) && getToolName(part) === "scheduleSetup"
-        && isBuilderToolInputReady(part)) return part;
-    }
-  }
-  return null;
-}
-
-function findActiveOutputReviewGatesSetup(messages: UIMessage[]): ToolPart | null {
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = messages[messageIndex];
-    if (!message || message.role !== "assistant") continue;
-    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
-      const part = message.parts[partIndex];
-      if (part && isToolUIPart(part) && getToolName(part) === "outputReviewGatesSetup"
         && isBuilderToolInputReady(part)) return part;
     }
   }

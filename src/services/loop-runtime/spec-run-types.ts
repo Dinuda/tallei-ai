@@ -12,6 +12,7 @@ import type { ToolContract } from "../tool-spec/types.js";
 import { canonicalToolRef } from "../tool-spec/tool-contracts.js";
 import { slimLoopDefinitionForPersistence } from "./definition-slim.js";
 import { RUNNER_BOUNDARY_PROTOCOL_VERSION } from "./runner-boundary.js";
+
 export type SpecRunDefinition = LoopDefinition;
 
 function outputArtifactKind(renderer: unknown): string | undefined {
@@ -106,7 +107,6 @@ export function definitionFromApprovedSpec(input: {
           outputContract: agent.outputContract,
           handoffBindings: agent.handoffBindings,
           gate: agent.gate,
-          artifactRole: agent.artifactRole,
           outputArtifactId: `${id}_output`,
           ...(outputArtifactKindValue ? { outputArtifactKind: outputArtifactKindValue } : {}),
           persona: agent.persona,

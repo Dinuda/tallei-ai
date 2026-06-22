@@ -15,7 +15,7 @@ Spec-driven loops use a strict three-layer boundary. Do not add LLM structure de
 1. **`LoopBuildContract` is the only user-authored truth.** Never edit agent structure independently in the runner.
 2. **`compileRunnerSpecFromBuildContract` is the only structure compiler.** `specs.ts` delegates to it; do not reimplement compile logic elsewhere.
 3. **`tool-roles.ts` is the only tool-role classifier.** Both the compiler and `compileSpecRunPlan` import it — do not re-derive send/write/draft/delivery heuristics.
-4. **Persisted definitions must be self-sufficient.** `definitionFromApprovedSpec` embeds `discoveredToolContracts` and inline artifact templates at save time. `hydrateDefinitionForExecution` only expands slim agent-graph defaults — it does not load builder sessions, loop_specs, or Composio catalogs.
+4. **Persisted definitions embed slim tool contract refs** (toolRef + routing metadata) and inline artifact templates at save time. `hydrateDefinitionForExecution` expands slim agent-graph defaults **and** rehydrates Composio schemas from the local `composio-catalog`. Builder sessions remain the source of full discovery data during build only.
 5. **Slim/hydrate is transport, not semantics.** `definition-slim.ts` / `definition-hydration.ts` expand persisted shape; they must not re-decide agent tools or gates.
 
 ### Boundary band-aids (classified)

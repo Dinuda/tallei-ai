@@ -4,10 +4,8 @@ import {
   selectedConnectorActionSlugs,
   selectedGroundingSources,
   selectedLoopTrigger,
-  selectedReviewPolicy,
   selectedStableInputs,
   type GroundingSourceRef,
-  type ReviewPolicyMode,
 } from "../loop-engine/build-contract.js";
 import type { SpecRunTrigger } from "./spec-runner.js";
 import type { SpecRunDefinition } from "./spec-run-types.js";
@@ -49,7 +47,6 @@ export type RunContext = {
   policies: {
     ticketContentMode: string;
     customerDetailsMode: string;
-    reviewMode: ReviewPolicyMode | null;
   };
   grounding: GroundingSourceRef[];
   templates: RunnableArtifactTemplate[];
@@ -172,7 +169,6 @@ export function projectRunContext(input: {
     policies: {
       ticketContentMode: stableInputs.ticket_content ?? "email_body",
       customerDetailsMode: stableInputs.customer_details ?? "sender_name_email",
-      reviewMode: contract ? selectedReviewPolicy(contract) : null,
     },
     grounding: contract ? selectedGroundingSources(contract) : [],
     templates: artifacts?.templates ?? [],

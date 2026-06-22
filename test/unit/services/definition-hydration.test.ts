@@ -3,10 +3,14 @@ import test from "node:test";
 
 import {
   hydrateDefinitionForExecution,
+  hydrateDiscoveredToolContracts,
   resolveBuildContract,
   resolveDiscoveredToolContracts,
 } from "../../../src/services/loop-runtime/definition-hydration.js";
+import { slimLoopDefinitionForPersistence } from "../../../src/services/loop-runtime/definition-slim.js";
+import { compileSpecRunPlan } from "../../../src/services/loop-runtime/spec-run-plan.js";
 import { definitionFromApprovedSpec } from "../../../src/services/loop-runtime/spec-run-types.js";
+import { isSlimPersistedToolContract } from "../../../src/services/tool-spec/tool-contracts.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
 import type { LoopDefinition } from "../../../src/services/loop-executor/types.js";
 
@@ -157,6 +161,7 @@ test("definitionFromApprovedSpec embeds discovered tool contracts in builderMeta
   assert.equal(definition.builderMeta?.workflowBuilderSessionId, "00000000-0000-4000-8000-000000000088");
   assert.equal(definition.builderMeta?.discoveredToolContracts?.length, 1);
   assert.equal(definition.builderMeta?.discoveredToolContracts?.[0]?.toolRef, embeddedContract().toolRef);
+  assert.ok(isSlimPersistedToolContract(definition.builderMeta?.discoveredToolContracts?.[0] ?? {}));
   assert.equal(definition.ceo, undefined);
   assert.equal(definition.draftPolicy, undefined);
 });
@@ -190,4 +195,49 @@ test("hydrateDefinitionForExecution is a no-op for fully expanded definitions", 
   );
 
   assert.strictEqual(hydrated, definition);
+});
+
+test("hydrateDiscoveredToolContracts rehydrates slim composio refs from local catalog", async () => {
+  const slimDefinition = slimLoopDefinitionForPersistence(definitionWithBuildContract());
+  const hydrated = await hydrateDiscoveredToolContracts(slimDefinition);
+  const contracts = resolveDiscoveredToolContracts(hydrated);
+  assert.equal(contracts.length, 1);
+  assert.ok(Object.keys(contracts[0]?.inputSchema ?? {}).length > 0);
+  assert.ok(Object.keys(contracts[0]?.outputSchema ?? {}).length > 0);
+  assert.equal(contracts[0]?.toolRef, embeddedContract().toolRef);
+});
+
+test("compileSpecRunPlan works after hydrating slim discovered tool contracts", async () => {
+  const slimDefinition = slimLoopDefinitionForPersistence({
+    ...definitionWithBuildContract(),
+    buildContract: {
+      version: "v1",
+      createdAt: "2026-06-20T00:00:00.000Z",
+      updatedAt: "2026-06-20T00:00:00.000Z",
+      issues: [],
+      requirements: [{
+        id: "connector_selection",
+        kind: "connector",
+        question: "Tools",
+        reason: "Runtime",
+        required: true,
+        allowNone: false,
+        valueSchema: {},
+        status: "resolved",
+        value: {
+          selections: [{
+            toolkit: "gmail",
+            accounts: [{ id: accountId }],
+            actionSlugs: ["GMAIL_FETCH_EMAILS"],
+          }],
+        },
+        validationErrors: [],
+        warnings: [],
+      }],
+    },
+  });
+  const hydrated = await hydrateDiscoveredToolContracts(slimDefinition);
+  const plan = compileSpecRunPlan(hydrated);
+  assert.equal(plan.readTools.length, 1);
+  assert.equal(plan.readTools[0]?.actionSlug, "GMAIL_FETCH_EMAILS");
 });

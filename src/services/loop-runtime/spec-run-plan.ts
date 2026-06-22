@@ -2,11 +2,7 @@ import {
   selectedConnectorActionSlugs,
   selectedExternalDataToolkits,
   selectedGroundingSources,
-  selectedOutputReviewGatesMode,
-  selectedReviewPolicy,
   type GroundingSourceRef,
-  type OutputReviewGatesMode,
-  type ReviewPolicyMode,
 } from "../loop-engine/build-contract.js";
 import type { InputRequirement, InputSurface } from "../loop-engine/input-surfaces.js";
 import type { AgentPersona, NoSlopSpecAgent } from "../loop-engine/spec-contracts.js";
@@ -40,11 +36,7 @@ export type RunPlanAgent = {
   };
   outputContract: DataContract;
   handoffBindings: AgentHandoffBinding[];
-  gate?: {
-    type: string;
-    question: string;
-  };
-  artifactRole?: "source_evidence" | "draft_body" | "final_preview" | "delivery";
+  gate?: NoSlopSpecAgent["gate"];
   outputArtifactId: string;
   outputArtifactKind: string;
   persona?: AgentPersona;
@@ -82,8 +74,6 @@ export type CompiledSpecRunPlan = {
   inputRequirements: InputRequirement[];
   grounding: GroundingSourceRef[];
   externalDataToolkits: string[];
-  reviewPolicy: ReviewPolicyMode | null;
-  outputReviewGatesMode: OutputReviewGatesMode;
   readTools: RunPlanTool[];
   writeTools: RunPlanTool[];
   reviewSurfaces: InputSurface[];
@@ -152,9 +142,9 @@ function contractMatchesRef(contract: ToolContract, ref: string): boolean {
 
 function isActionAgent(agent: PlanAgentSource): boolean {
   if (agent.nodeKind === "action") return true;
-  if (agent.artifactRole === "delivery") return true;
-  const gateType = agent.gate?.type?.toLowerCase() ?? "";
-  return gateType === "action" || gateType === "pre_send";
+  const gate = agent.gate;
+  if (gate?.type !== "approval") return false;
+  return Boolean(gate.approval?.actionRef);
 }
 
 function architectToolPlan(definition: SpecRunDefinition, contracts: ToolContract[]): {
@@ -276,8 +266,6 @@ function defaultOutputContract(agent: NoSlopSpecAgent | PlanAgentSource): DataCo
 
 export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecRunPlan {
   const buildContract = resolveBuildContract(definition);
-  const reviewPolicy = buildContract ? selectedReviewPolicy(buildContract) : null;
-  const outputReviewGatesMode = buildContract ? selectedOutputReviewGatesMode(buildContract) : "none";
   const contracts = selectedContracts(definition);
   const toolPlan = architectToolPlan(definition, contracts);
   const readTools = toolPlan.readContracts.map((contract) => compileTool(contract));
@@ -306,7 +294,6 @@ export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecR
         outputContract,
         handoffBindings: agent.handoffBindings,
         gate: agent.gate,
-        artifactRole: agent.artifactRole,
         outputArtifactId: agent.outputArtifactId ?? slugArtifactId(id),
         outputArtifactKind: agent.outputArtifactKind ?? outputArtifactKind(outputContract),
         persona: agent.persona,
@@ -319,8 +306,6 @@ export function compileSpecRunPlan(definition: SpecRunDefinition): CompiledSpecR
     inputRequirements: definition.inputRequirements ?? [],
     grounding: buildContract ? selectedGroundingSources(buildContract) : [],
     externalDataToolkits,
-    reviewPolicy,
-    outputReviewGatesMode,
     readTools,
     writeTools,
     reviewSurfaces: declaredReviewSurfaces(definition),

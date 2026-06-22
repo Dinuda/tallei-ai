@@ -426,8 +426,9 @@ export function BuilderConnectorChecklist({
         </div>
       )}
       {busyToolkit === "confirm" && (
-        <div className="mt-4 flex items-center justify-end gap-2 text-xs text-indigo-900/70">
-          <LoaderCircle className="size-4 animate-spin" /> Continuing...
+        <div className="flex items-center gap-2 border-t border-indigo-100 bg-indigo-50/60 px-4 py-2.5 text-xs font-medium text-indigo-600">
+          <LoaderCircle className="size-3.5 animate-spin" />
+          <span>Finalizing connection...</span>
         </div>
       )}
     </div>

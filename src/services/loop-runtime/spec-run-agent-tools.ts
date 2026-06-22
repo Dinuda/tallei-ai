@@ -100,7 +100,8 @@ function agentWriteTools(plan: CompiledSpecRunPlan, agent: RunPlanAgent): RunPla
 }
 
 function agentCanRequestInput(plan: CompiledSpecRunPlan, agent: RunPlanAgent): boolean {
-  if (agent.gate?.type.trim().toLowerCase() === "missing_input") return true;
+  const gateType = agent.gate?.type.trim().toLowerCase();
+  if (gateType === "input") return true;
   return plan.inputRequirements.some((requirement) =>
     requirement.required && requirement.surface.startsWith("input."));
 }
@@ -335,71 +336,137 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
   const writeToolsForAgent = agentWriteTools(input.plan, input.agent);
   const canRequestGate = agentCanRequestInput(input.plan, input.agent) || writeToolsForAgent.length > 0;
   if (canRequestGate) {
-    const requestGateSchema = z.object({
-      type: z.enum(["input", "review", "action"]),
+    const artifactDataSchema = z.union([
+      z.record(z.unknown()),
+      z.string().transform((raw, ctx) => {
+        try { return JSON.parse(raw) as Record<string, unknown>; } catch {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "artifactData string is not valid JSON" });
+          return z.NEVER;
+        }
+      }),
+    ]);
+    const requestGateSchema = z.preprocess((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+      const gate = { ...(raw as Record<string, unknown>) };
+      const type = typeof gate.type === "string" ? gate.type.trim().toLowerCase() : gate.type;
+      if (type === "review") {
+        return {
+          ...gate,
+          type: "approval",
+          approval: {
+            surface: gate.surface,
+            artifactKey: gate.artifactKey,
+            artifactData: gate.artifactData,
+            rationale: gate.rationale,
+          },
+        };
+      }
+      if (type === "action") {
+        return {
+          ...gate,
+          type: "approval",
+          approval: {
+            surface: gate.surface,
+            artifactKey: gate.artifactKey,
+            actionRef: gate.actionRef,
+            payload: gate.payload,
+            rationale: gate.rationale,
+          },
+        };
+      }
+      if (type === "input" && !gate.input) {
+        return {
+          ...gate,
+          input: {
+            surface: gate.surface,
+            key: gate.key,
+            label: gate.label,
+            description: gate.description,
+          },
+        };
+      }
+      if (type === "approval" && !gate.approval) {
+        return {
+          ...gate,
+          approval: {
+            surface: gate.surface,
+            artifactKey: gate.artifactKey,
+            artifactData: gate.artifactData,
+            actionRef: gate.actionRef,
+            payload: gate.payload,
+            rationale: gate.rationale,
+          },
+        };
+      }
+      return gate;
+    }, z.object({
+      type: z.enum(["input", "approval"]),
       surface: z.string().optional(),
       key: z.string().optional(),
       label: z.string().optional(),
       description: z.string().optional(),
       artifactKey: z.string().optional(),
-      artifactData: z.union([
-        z.record(z.unknown()),
-        z.string().transform((raw, ctx) => {
-          try { return JSON.parse(raw) as Record<string, unknown>; } catch {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, message: "artifactData string is not valid JSON" });
-            return z.NEVER;
-          }
-        }),
-      ]).optional(),
+      artifactData: artifactDataSchema.optional(),
       rationale: z.string().optional(),
       actionRef: z.string().optional(),
       payload: z.record(z.unknown()).optional(),
+      input: z.object({
+        surface: z.string().optional(),
+        key: z.string().optional(),
+        label: z.string().optional(),
+        description: z.string().optional(),
+      }).optional(),
+      approval: z.object({
+        surface: z.string().optional(),
+        artifactKey: z.string().optional(),
+        artifactData: artifactDataSchema.optional(),
+        rationale: z.string().optional(),
+        actionRef: z.string().optional(),
+        payload: z.record(z.unknown()).optional(),
+      }).optional(),
     }).superRefine((value, ctx) => {
       if (value.type === "input") {
-        const surface = dataInputSurfaceSchema.safeParse(value.surface);
+        const surface = dataInputSurfaceSchema.safeParse(value.input?.surface);
         if (!surface.success) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            path: ["surface"],
+            path: ["input", "surface"],
             message: "Input gate requires an input.* surface.",
           });
         }
-        if (!value.key) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["key"], message: "Input gate requires key." });
+        if (!value.input?.key) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["input", "key"], message: "Input gate requires key." });
         }
         return;
       }
-      if (value.type === "review") {
-        const surface = reviewSurfaceSchema.safeParse(value.surface);
+      const approval = value.approval ?? {};
+      if (!approval.actionRef) {
+        const surface = reviewSurfaceSchema.safeParse(approval.surface);
         if (!surface.success) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            path: ["surface"],
-            message: "Review gate requires a review.* or confirm.send surface.",
+            path: ["approval", "surface"],
+            message: "Approval review gate requires a review.* or confirm.send surface.",
           });
         }
-        if (!value.artifactKey) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["artifactKey"], message: "Review gate requires artifactKey." });
+        if (!approval.artifactKey) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["approval", "artifactKey"], message: "Approval review gate requires artifactKey." });
         }
-        if (!value.artifactData) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["artifactData"], message: "Review gate requires artifactData." });
+        if (!approval.artifactData) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["approval", "artifactData"], message: "Approval review gate requires artifactData." });
         }
         return;
       }
-      if (!value.actionRef) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["actionRef"], message: "Action gate requires actionRef." });
+      if (!approval.payload) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["approval", "payload"], message: "Approval action gate requires payload." });
         return;
       }
-      if (!value.payload) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["payload"], message: "Action gate requires payload." });
-        return;
-      }
-      const writeTool = selectedWriteTool(input.plan, value.actionRef, input.agent);
+      const writeTool = selectedWriteTool(input.plan, approval.actionRef, input.agent);
       if (!writeTool) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ["actionRef"],
-          message: `Action is not allowed for agent ${input.agent.name}: ${value.actionRef}`,
+          path: ["approval", "actionRef"],
+          message: `Action is not allowed for agent ${input.agent.name}: ${approval.actionRef}`,
         });
         return;
       }
@@ -407,31 +474,31 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
         prepareConnectorActionPayload({
           actionSlug: writeTool.actionSlug,
           inputSchema: writeTool.contract.inputSchema,
-          payload: value.payload,
+          payload: approval.payload,
           runContext: input.runContext,
           resolvedHandoff: input.resolvedHandoff,
         });
       } catch (error) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ["payload"],
+          path: ["approval", "payload"],
           message: error instanceof Error ? error.message : "Connector payload failed schema validation",
         });
       }
-    });
+    }));
 
     tools.requestGate = tool({
       description: [
-        "Create one first-class operator gate for missing input, artifact review, or approval of a mutating connector action.",
-        "Use type=input only for declared input.* surfaces.",
-        "Use type=review for review.* or confirm.send artifact review surfaces.",
-        "Use type=action for mutating connector actions; the action executes server-side only after approval.",
+        "Create one first-class operator gate using the canonical top-level model.",
+        "Use type=input with input.surface/key for declared input.* surfaces.",
+        "Use type=approval with approval.surface/artifactKey/artifactData for canvas or confirmation review.",
+        "Use type=approval with approval.actionRef/payload for mutating connector actions; the action executes server-side only after approval.",
       ].join(" "),
       inputSchema: requestGateSchema,
       execute: async (gateInput) => {
         if (gateInput.type === "input") {
-          const surface = dataInputSurfaceSchema.parse(gateInput.surface);
-          const key = z.string().min(1).parse(gateInput.key);
+          const surface = dataInputSurfaceSchema.parse(gateInput.input?.surface);
+          const key = z.string().min(1).parse(gateInput.input?.key);
           const interactionId = await createSpecRunGateInteraction({
             gateType: "input",
             auth: input.auth,
@@ -442,8 +509,8 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
             stepIndex: input.agent.index,
             surface,
             key,
-            label: gateInput.label,
-            description: gateInput.description,
+            label: gateInput.input?.label,
+            description: gateInput.input?.description,
           });
           await markAgentStepWaiting({
             auth: input.auth,
@@ -456,10 +523,11 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
           return pauseForInteraction(input.stepAttemptId, interactionId);
         }
 
-        if (gateInput.type === "review") {
-          const surface = reviewSurfaceSchema.parse(gateInput.surface);
-          const artifactKey = z.string().min(1).parse(gateInput.artifactKey);
-          const artifactData = z.record(z.unknown()).parse(gateInput.artifactData);
+        const approval = gateInput.approval ?? {};
+        if (!approval.actionRef) {
+          const surface = reviewSurfaceSchema.parse(approval.surface);
+          const artifactKey = z.string().min(1).parse(approval.artifactKey);
+          const artifactData = z.record(z.unknown()).parse(approval.artifactData);
           const interactionId = await createSpecRunGateInteraction({
             gateType: "review",
             auth: input.auth,
@@ -471,7 +539,7 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
             surface,
             artifactKey,
             artifactData,
-            rationale: gateInput.rationale,
+            rationale: approval.rationale,
           });
           await markAgentStepWaiting({
             auth: input.auth,
@@ -484,8 +552,8 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
           return pauseForInteraction(input.stepAttemptId, interactionId);
         }
 
-        const actionRef = z.string().min(1).parse(gateInput.actionRef);
-        const payload = z.record(z.unknown()).parse(gateInput.payload);
+        const actionRef = z.string().min(1).parse(approval.actionRef);
+        const payload = z.record(z.unknown()).parse(approval.payload);
         const writeTool = selectedWriteTool(input.plan, actionRef, input.agent);
         if (!writeTool) {
           throw new Error(`Action is not allowed for agent ${input.agent.name}: ${actionRef}`);
@@ -504,7 +572,7 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
           isSendAction: writeTool.isSendLike || writeTool.effect === "irreversible_external",
           actionRef: writeTool.toolRef,
           payload: enriched,
-          rationale: gateInput.rationale,
+          rationale: approval.rationale,
         };
         const approvalGrant = await approvalGrantCoversAction({
           auth: input.auth,
@@ -551,7 +619,7 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
           stepIndex: input.agent.index,
           toolKey: writeTool.toolKey,
           deferred,
-          artifactKey: gateInput.artifactKey,
+          artifactKey: approval.artifactKey,
         });
         await markAgentStepWaiting({
           auth: input.auth,
@@ -559,7 +627,7 @@ export function buildAgentTools(input: BuildAgentToolsInput): Record<string, Too
           stepAttemptId: input.stepAttemptId,
           interactionId,
           eventType: "gate_requested",
-          payload: { toolKey: "requestGate", gateType: "action", actionRef: writeTool.toolRef, artifactKey: gateInput.artifactKey },
+          payload: { toolKey: "requestGate", gateType: "approval", actionRef: writeTool.toolRef, artifactKey: approval.artifactKey },
         });
         return pauseForInteraction(input.stepAttemptId, interactionId);
       },

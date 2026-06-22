@@ -2,8 +2,6 @@ import type { DataContract } from "../loop-engine/data-contract.js";
 import type { NoSlopSpecAgent } from "../loop-engine/spec-contracts.js";
 import type { LoopDefinition } from "../loop-executor/types.js";
 
-export type AgentContractRole = "source_evidence" | "draft_body" | "final_preview" | "delivery";
-
 export function evidenceOutputContract(): DataContract {
   return {
     description: "Structured evidence and context for downstream agents.",
@@ -129,7 +127,6 @@ type AgentContractSource = {
   name: string;
   goal?: string;
   task?: string;
-  artifactRole?: AgentContractRole;
   inputContract?: NoSlopSpecAgent["inputContract"];
   outputContract?: DataContract;
   outputArtifactKind?: string;
@@ -141,11 +138,7 @@ export function resolveAgentOutputContract(agent: AgentContractSource): DataCont
   if (agent.outputContract) return agent.outputContract;
 
   const renderer = draftRendererFromArtifactKind(agent.outputArtifactKind);
-  if (agent.artifactRole === "source_evidence") return evidenceOutputContract();
-  if (agent.artifactRole === "draft_body" || agent.artifactRole === "final_preview") {
-    return draftOutputContract(renderer ?? "canvas.preview");
-  }
-  if (agent.artifactRole === "delivery") return deliveryOutputContract();
+  if (renderer) return draftOutputContract(renderer);
   return undefined;
 }
 
@@ -165,37 +158,9 @@ export function defaultHandoffBinding(agentId: string, targetPath = "/") {
   };
 }
 
-export const ROLE_AGENT_DEFAULTS: Record<AgentContractRole, {
-  guardrails: string[];
-  doneCriteria: string[];
-  failureModes: string[];
-}> = {
-  source_evidence: {
-    guardrails: ["Use only approved read and search tools.", "Do not draft or send outbound messages."],
-    doneCriteria: ["Evidence matches the intake output contract."],
-    failureModes: ["Pause for operator input when required context is missing."],
-  },
-  draft_body: {
-    guardrails: ["Use finalizeAgent output that matches the declared output contract.", "Do not send or publish directly unless this agent owns delivery tools."],
-    doneCriteria: ["Output is ready for operator review or downstream delivery, unless status is no_action_required."],
-    failureModes: ["Pause when required upstream evidence is missing."],
-  },
-  final_preview: {
-    guardrails: ["Use finalizeAgent output that matches the declared output contract.", "Do not send or publish directly unless this agent owns delivery tools."],
-    doneCriteria: ["Output is ready for operator review or downstream delivery, unless status is no_action_required."],
-    failureModes: ["Pause when required upstream evidence is missing."],
-  },
-  delivery: {
-    guardrails: ["Use requestGate type=action before any mutating external action.", "Do not execute mutating connector actions without operator approval."],
-    doneCriteria: ["Delivery output matches the declared contract."],
-    failureModes: ["Pause when upstream draft or approval is missing."],
-  },
-};
-
 export function expandAgentGraphChild(
   agent: LoopDefinition["agentGraph"]["children"][number],
 ): LoopDefinition["agentGraph"]["children"][number] {
-  const roleDefaults = agent.artifactRole ? ROLE_AGENT_DEFAULTS[agent.artifactRole] : null;
   const outputContract = resolveAgentOutputContract(agent);
   const inputContract = agent.inputContract ?? (outputContract ? catalogInputContract(`Runtime input for ${agent.name}.`) : undefined);
   const handoffBindings = (agent.handoffBindings ?? []).map((binding) => ({
@@ -214,9 +179,9 @@ export function expandAgentGraphChild(
 
   return {
     ...agent,
-    guardrails: agent.guardrails ?? roleDefaults?.guardrails ?? [],
-    doneCriteria: agent.doneCriteria ?? roleDefaults?.doneCriteria ?? [],
-    failureModes: agent.failureModes ?? roleDefaults?.failureModes ?? [],
+    guardrails: agent.guardrails ?? [],
+    doneCriteria: agent.doneCriteria ?? [],
+    failureModes: agent.failureModes ?? [],
     ...(inputContract ? { inputContract } : {}),
     ...(outputContract ? { outputContract } : {}),
     handoffBindings,

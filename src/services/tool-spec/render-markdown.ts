@@ -81,6 +81,9 @@ function renderOutcomesPhase(registry: ToolSpecRegistry): string {
 }
 
 function renderContract(lines: string[], contract: ToolContract): void {
+  const suggestedGate = contract.approval.suggestedGate
+    ? ` (${JSON.stringify(contract.approval.suggestedGate)})`
+    : "";
   lines.push(`### \`${contract.toolRef}\` — ${contract.name}`);
   lines.push(contract.description);
   lines.push("");
@@ -88,7 +91,7 @@ function renderContract(lines: string[], contract: ToolContract): void {
   lines.push(`**Resources:** ${contract.resources.join(", ") || "none"}`);
   lines.push(`**Effect:** ${contract.effect}`);
   lines.push(`**Execution:** ${contract.executionMode}`);
-  lines.push(`**Approval:** ${contract.approval.required ? `Required${contract.approval.suggestedGate ? ` (${contract.approval.suggestedGate})` : ""}` : "Not required"}`);
+  lines.push(`**Approval:** ${contract.approval.required ? `Required${suggestedGate}` : "Not required"}`);
   if (contract.renderRecommendations.length > 0) {
     lines.push(`**Render recommendations:** ${contract.renderRecommendations.map((rec) => `${rec.target} (${rec.strength})`).join(", ")}`);
   } else {
@@ -175,10 +178,10 @@ function renderToolsPhase(registry: ToolSpecRegistry): string {
   lines.push("- `canvas.email` — editable email workspace.");
   lines.push("- `canvas.preview` — read-only rendered email preview.");
   lines.push("");
-  lines.push("**Approval types for canvas agents:**");
-  lines.push("- `draft_review` — operator reviews the draft in canvas; can approve or edit to improve");
-  lines.push("- `pre_send` — operator confirms the final version before an external write effect");
-  lines.push("- `missing_input` — operator pastes required text content (NOT for subscriber lists or delivery config)");
+  lines.push("**Canonical gates:**");
+  lines.push("- `input` — request operator data using nested `input.surface`, such as `input.text`, `input.file`, or `input.contacts_csv`.");
+  lines.push("- `approval` — request operator approval using nested `approval.surface` for canvas/action review, such as `review.email`, `review.preview`, or `confirm.send`.");
+  lines.push("- Connector action approvals use `approval.actionRef` plus payload metadata for the exact mutating action.");
   lines.push("");
 
   lines.push("## Tool Assignment Rules");
