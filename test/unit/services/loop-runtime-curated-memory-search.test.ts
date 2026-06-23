@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { AuthContext } from "../../../src/domain/auth/index.js";
 import type { MemoryRecordRow } from "../../../src/infrastructure/repositories/memory.repository.js";
-import { runCuratedMemorySearch } from "../../../src/services/loop-runtime/curated-memory-search.js";
+import { runCuratedMemorySearch } from "../../../src/services/conductor/runtime/curated-memory-search.js";
 
 const auth: AuthContext = {
   tenantId: "11111111-1111-4111-8111-111111111111",

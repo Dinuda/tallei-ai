@@ -15,7 +15,7 @@ const specRunPagePath = new URL(
   import.meta.url,
 );
 const projectionPath = new URL(
-  "../../../src/services/loop-runtime/spec-run-editorial-projection.ts",
+  "../../../src/services/conductor/runtime/spec-run-editorial-projection.ts",
   import.meta.url,
 );
 

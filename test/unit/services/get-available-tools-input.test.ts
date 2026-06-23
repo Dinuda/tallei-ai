@@ -5,8 +5,8 @@ import {
   extractAppSelectionSlugsFromUnknown,
   normalizeGetAvailableToolsInput,
   tryParseJsonWithClosingBraces,
-} from "../../../src/services/loop-builder/get-available-tools-input.js";
-import { createLoopBuilderToolCallRepair } from "../../../src/services/loop-builder/tool-call-repair.js";
+} from "../../../src/services/conductor/inputs/get-available-tools-input.js";
+import { createLoopBuilderToolCallRepair } from "../../../src/services/conductor/repair/tool-call-repair.js";
 import { InvalidToolInputError, type ModelMessage } from "ai";
 
 test("normalizeGetAvailableToolsInput accepts flat analyzer payloads", () => {

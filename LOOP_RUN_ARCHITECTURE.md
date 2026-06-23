@@ -7,13 +7,13 @@ Spec-driven loops use a strict three-layer boundary. Do not add LLM structure de
 | Layer | Owner | Source of truth |
 |-------|--------|-----------------|
 | **Design** | Loop builder (`LoopBuildContract`) | User-approved requirements: connectors, schedule, review policy, artifacts |
-| **Compile** | `runner-spec-compiler.ts` via `buildRunnerSpecFromBuildContract` | Deterministic agent graph, gates, tool assignments — no LLM |
-| **Execute** | `spec-run-agent-runner.ts` | Reads persisted `LoopDefinition` only; LLM operates inside compiled agents |
+| **Compile** | [`conductor/services/compile.service.ts`](src/services/conductor/services/compile.service.ts) via `buildRunnerSpecFromBuildContract` | Conductor-only compile |
+| **Execute** | [`conductor/runtime/spec-runner.ts`](src/services/conductor/runtime/spec-runner.ts) | Reads persisted `LoopDefinition`; runs agents |
 
 ### Rules
 
 1. **`LoopBuildContract` is the only user-authored truth.** Never edit agent structure independently in the runner.
-2. **`compileRunnerSpecFromBuildContract` is the only structure compiler.** `specs.ts` delegates to it; do not reimplement compile logic elsewhere.
+2. **`buildRunnerSpecFromBuildContract` in `compile.service.ts` is the only structure compiler.** `specs.ts` re-exports it; do not reimplement compile logic elsewhere.
 3. **`tool-roles.ts` is the only tool-role classifier.** Both the compiler and `compileSpecRunPlan` import it — do not re-derive send/write/draft/delivery heuristics.
 4. **Persisted definitions embed slim tool contract refs** (toolRef + routing metadata) and inline artifact templates at save time. `hydrateDefinitionForExecution` expands slim agent-graph defaults **and** rehydrates Composio schemas from the local `composio-catalog`. Builder sessions remain the source of full discovery data during build only.
 5. **Slim/hydrate is transport, not semantics.** `definition-slim.ts` / `definition-hydration.ts` expand persisted shape; they must not re-decide agent tools or gates.
@@ -22,10 +22,14 @@ Spec-driven loops use a strict three-layer boundary. Do not add LLM structure de
 
 | File | Verdict | Role |
 |------|---------|------|
-| `src/services/loop-engine/tool-roles.ts` | **Keep** | Single classifier for compiler + run plan |
-| `src/services/loop-builder/runner-spec-compiler.ts` | **Keep** | Deterministic compile API |
-| `src/services/loop-builder/tool-call-repair.ts` | **Keep** | Model tool-call entropy at runtime |
-| `src/services/loop-builder/tool-input-json-repair.ts` | **Keep** | Model JSON entropy at runtime |
+| `src/services/conductor/domain/tool-roles.ts` | **Keep** | Single classifier for compiler + run plan |
+| `src/services/conductor/services/compile.service.ts` | **Keep** | Deterministic compile + conductor wiring |
+| `src/services/conductor/services/conductor.service.ts` | **Keep** | Multi-agent decomposition (LLM + deterministic fallback) |
+| `src/services/conductor/data/*` | **Keep** | SQL repositories only |
+| `src/services/conductor/commands/dispatcher.ts` | **Keep** | Thin command router |
+| `src/services/conductor/repair/tool-call-repair.ts` | **Keep** | Model tool-call entropy at runtime |
+| `src/services/conductor/repair/tool-input-json-repair.ts` | **Keep** | Model JSON entropy at runtime |
+| `src/services/conductor/contracts/*` | **Keep** | Shared spec schemas |
 | `src/services/loop-runtime/definition-hydration.ts` | **Keep** | Slim-definition expansion only |
 | `src/services/loop-runtime/definition-slim.ts` | **Keep** | Lossless persistence transport |
 | `dashboard/.../spec-run-transcript-hydration.ts` | **Keep (UI)** | Run transcript reconstruction — out of compile seam |

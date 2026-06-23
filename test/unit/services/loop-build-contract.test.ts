@@ -12,10 +12,10 @@ import {
   selectedGroundingSources,
   selectedLoopTrigger,
   unresolvedBuildRequirements,
-} from "../../../src/services/loop-engine/build-contract.js";
-import { loopIntentContextSchema } from "../../../src/services/loop-engine/intent-context.js";
+} from "../../../src/services/conductor/domain/build-contract.js";
+import { loopIntentContextSchema } from "../../../src/services/conductor/contracts/intent-context.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
-import { noSlopSpecSchema } from "../../../src/services/loop-engine/spec-contracts.js";
+import { noSlopSpecSchema } from "../../../src/services/conductor/contracts/spec-contracts.js";
 
 const intent = loopIntentContextSchema.parse({
   analysis: {

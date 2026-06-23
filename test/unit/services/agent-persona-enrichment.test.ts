@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { pickUniqueDisplayName } from "../../../src/services/loop-builder/agent-personas.js";
+import { pickUniqueDisplayName } from "../../../src/services/conductor/services/personas/agent-personas.js";
 
 test("pickUniqueDisplayName avoids duplicate display names in one roster", () => {
   const used = new Set<string>();

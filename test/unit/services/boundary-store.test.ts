@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { projectOutputWithBoundary } from "../../../src/services/loop-runtime/boundary-store.js";
+import { projectOutputWithBoundary } from "../../../src/services/conductor/runtime/boundary-store.js";
 import {
   projectStepOutputFromBoundary,
   RUNNER_BOUNDARY_PROTOCOL_VERSION,
   type AgentBoundaryEnvelope,
-} from "../../../src/services/loop-runtime/runner-boundary.js";
+} from "../../../src/services/conductor/runtime/runner-boundary.js";
 
 const dbIndexPath = new URL("../../../src/infrastructure/db/index.ts", import.meta.url);
 

@@ -271,7 +271,7 @@ export function LoopBuilderHeader() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const loadSession = useCallback(async (id: string) => {
-    const response = await fetch(`/api/loop-builder/sessions/${id}`, { cache: "no-store" });
+    const response = await fetch(`/api/conductor/sessions/${id}`, { cache: "no-store" });
     if (!response.ok) throw new Error("Failed to load session");
     const data = await response.json();
     const nextSession = data?.session ?? null;
@@ -341,7 +341,7 @@ export function LoopBuilderHeader() {
     setTitle(trimmed);
     setIsEditing(false);
     try {
-      const res = await fetch(`/api/loop-builder/sessions/${sessionId}`, {
+      const res = await fetch(`/api/conductor/sessions/${sessionId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: trimmed }),

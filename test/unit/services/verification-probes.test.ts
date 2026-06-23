@@ -5,7 +5,7 @@ import {
   buildProbePayload,
   extractProbeChainState,
   summarizeProbePayload,
-} from "../../../src/services/loop-executor/verification-probes.js";
+} from "../../../src/services/conductor/services/verification-probes.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
 
 const createDraftContract: ToolContract = {

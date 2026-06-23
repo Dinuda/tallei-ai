@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { contactsToCsv, parseContactListCsv, parseContactListText } from "../../../src/services/loop-executor/csv-parser.js";
+import { contactsToCsv, parseContactListCsv, parseContactListText } from "../../../src/services/conductor/workflow/csv-parser.js";
 
 test("parseContactListCsv parses headered csv", () => {
   const contacts = parseContactListCsv("email,name\nalice@example.com,Alice\nbob@example.com,Bob");

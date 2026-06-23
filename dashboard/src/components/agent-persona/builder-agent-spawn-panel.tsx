@@ -14,8 +14,12 @@ import { personaFromSpecAgent, toolRefsToLabels } from "./agent-persona";
 
 type SpawnAgentDetails = {
   agentIndex?: number;
+  agentId?: string;
+  agentName?: string;
+  goal?: string;
   persona?: AgentPersonaUi;
   inferredActions?: string[];
+  status?: string;
 };
 
 type BuilderCommand = {
@@ -67,11 +71,20 @@ function readSpawnEvents(commands: BuilderCommand[]): SpawnAgentDetails[] {
 
   const byIndex = new Map<number, SpawnAgentDetails>();
   for (const event of command.events) {
-    if (event.stage !== "agent_spawn" || event.status !== "completed") continue;
-    const index = event.details?.agentIndex;
-    if (typeof index !== "number" || !event.details?.persona) continue;
-    byIndex.set(index, event.details);
+    if (event.stage !== "agent_spawn") continue;
+    const details = event.details;
+    const index = details?.agentIndex;
+    if (typeof index !== "number") continue;
+
+    const existing = byIndex.get(index);
+    if (existing?.status === "completed" && event.status !== "completed") continue;
+
+    byIndex.set(index, {
+      ...details,
+      status: event.status ?? details?.status,
+    });
   }
+
   return [...byIndex.entries()]
     .sort(([a], [b]) => a - b)
     .map(([, details]) => details);
@@ -161,16 +174,23 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
   const latestProgressMessage = latestCommand?.events?.at(-1)?.message;
   const [revealedCount, setRevealedCount] = useState(0);
 
-  const agentsToShow = isComplete
-    ? outputData?.agents ?? []
-    : liveSpawnEvents
-      .filter((event) => event.persona)
-      .map((event, index) => ({
-        goal: "",
-        persona: event.persona!,
-        actions: event.inferredActions ?? [],
-        index,
+  const agentsToShow = useMemo(() => {
+    if (isComplete) {
+      return (outputData?.agents ?? []).map((agent) => ({
+        ...agent,
+        phase: "queued" as const,
       }));
+    }
+    return liveSpawnEvents.map((event, index) => ({
+      goal: event.goal?.trim() ?? "",
+      persona: event.persona ?? personaFromSpecAgent(
+        { name: event.agentName, goal: event.goal },
+        event.agentIndex ?? index,
+      ),
+      actions: event.inferredActions ?? [],
+      phase: event.status === "completed" ? "queued" as const : "working" as const,
+    }));
+  }, [isComplete, liveSpawnEvents, outputData?.agents]);
 
   useEffect(() => {
     if (isComplete || agentsToShow.length === 0) return;
@@ -197,7 +217,7 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
         <Users size={16} className="text-[#7eb71b]" />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-[#182506]" style={{ fontFamily: "var(--font-title)" }}>
-            {isComplete ? "Specialist agents ready" : "Finalizing specialist agents"}
+            {isComplete ? "Specialist agents ready" : "Designing specialist agents"}
           </div>
           {isComplete && outputData?.title ? (
             <div className="truncate text-xs text-[#7a9a4a]">{outputData.title}</div>
@@ -229,11 +249,14 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
         ) : null}
 
         {visibleAgents.length === 0 && !isComplete ? (
-          <p className="text-sm text-[#7a9a4a]">{latestProgressMessage ?? "Assigning agent personas…"}</p>
+          <p className="text-sm text-[#7a9a4a]">{latestProgressMessage ?? "Running the conductor to split read and write work…"}</p>
         ) : null}
 
         {visibleAgents.length > 0 ? (
-          <div className={cn("grid gap-3", visibleAgents.length > 1 && "sm:grid-cols-1")}>
+          <div className={cn(
+            "grid gap-3",
+            visibleAgents.length > 1 && "md:grid-cols-2",
+          )}>
             {visibleAgents.map((agent, index) => (
               <motion.div
                 key={`${agent.persona.avatarSeed}-${index}`}
@@ -246,7 +269,7 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
                   goal={agent.goal || undefined}
                   actions={agent.actions}
                   index={index}
-                  phase={isComplete ? "queued" : "working"}
+                  phase={agent.phase}
                 />
               </motion.div>
             ))}

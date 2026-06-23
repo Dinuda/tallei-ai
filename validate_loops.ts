@@ -1,5 +1,5 @@
 import { pool } from "./src/infrastructure/db/index.js";
-import { loopDefinitionSchema } from "./src/services/loop-executor/types.js";
+import { loopDefinitionSchema } from "./src/services/conductor/workflow/types.js";
 
 async function main() {
   const result = await pool.query("SELECT id, title, metadata_json->>'loopDefinition' as def FROM workflows WHERE status = 'active';");

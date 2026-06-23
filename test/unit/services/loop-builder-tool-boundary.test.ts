@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const routePath = new URL("../../../src/transport/http/routes/loopBuilder.ts", import.meta.url);
-const dispatcherPath = new URL("../../../src/services/loop-builder/dispatcher.ts", import.meta.url);
+const routePath = new URL("../../../src/transport/http/routes/conductor.ts", import.meta.url);
+const dispatcherPath = new URL("../../../src/services/conductor/commands/dispatcher.ts", import.meta.url);
 const builderPagePath = new URL("../../../dashboard/app/dashboard/loops/new/page.tsx", import.meta.url);
-const creatorPath = new URL("../../../src/services/loop-executor/creator.ts", import.meta.url);
-const verificationPath = new URL("../../../src/services/loop-executor/verification.ts", import.meta.url);
-const specsPath = new URL("../../../src/services/loop-builder/specs.ts", import.meta.url);
+const creatorPath = new URL("../../../src/services/conductor/services/loop-workflow.service.ts", import.meta.url);
+const verificationPath = new URL("../../../src/services/conductor/services/verification.service.ts", import.meta.url);
+const specsPath = new URL("../../../src/services/conductor/services/spec.service.ts", import.meta.url);
+const compileServicePath = new URL("../../../src/services/conductor/services/compile.service.ts", import.meta.url);
+const builderTypesPath = new URL("../../../src/services/conductor/contracts/builder-types.ts", import.meta.url);
 const connectorAvailabilityPath = new URL("../../../src/services/connectors/availability.ts", import.meta.url);
 const connectorServicePath = new URL("../../../src/services/connectors/composio.ts", import.meta.url);
 const connectorChecklistPath = new URL("../../../dashboard/src/components/builder-connector-checklist.tsx", import.meta.url);
@@ -15,29 +17,31 @@ const appSelectorPath = new URL("../../../dashboard/src/components/builder-app-s
 const scheduleSelectorPath = new URL("../../../dashboard/src/components/builder-schedule-selector.tsx", import.meta.url);
 const artifactStudioPath = new URL("../../../dashboard/src/components/email-artifact-studio.tsx", import.meta.url);
 const builderArtifactEditorPath = new URL("../../../dashboard/src/components/builder-artifact-editor.tsx", import.meta.url);
-const triggerWebhookPath = new URL("../../../src/services/loop-runtime/composio-trigger.ts", import.meta.url);
+const triggerWebhookPath = new URL("../../../src/services/conductor/runtime/composio-trigger.ts", import.meta.url);
 const connectorRoutePath = new URL("../../../src/transport/http/routes/connectors.ts", import.meta.url);
 const dbPath = new URL("../../../src/infrastructure/db/index.ts", import.meta.url);
 
 test("chat exposes real builder tools without synthetic intent tools", async () => {
-  const [route, dispatcher] = await Promise.all([
+  const [route, dispatcher, builderTypes] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
+    readFile(builderTypesPath, "utf8"),
   ]);
 
   assert.doesNotMatch(route, /nextChatCommand/);
   assert.doesNotMatch(dispatcher, /\|\s*"analyzeIntent"/);
   assert.doesNotMatch(dispatcher, /\|\s*"resolveClarifications"/);
-  assert.match(dispatcher, /\|\s*"getAvailableTools"/);
+  assert.match(builderTypes, /"getAvailableTools"/);
   assert.match(dispatcher, /\|\s*"resolveBuildRequirement"/);
   assert.match(route, /resolveBuildRequirement:\s*tool\(/);
   assert.match(route, /approved:\s*true/);
 });
 
 test("option-based clarification uses the UI-only interactive prompt capability", async () => {
-  const [route, dispatcher] = await Promise.all([
+  const [route, dispatcher, builderTypes] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
+    readFile(builderTypesPath, "utf8"),
   ]);
 
   assert.match(route, /interactivePrompt:\s*tool\(/);
@@ -111,34 +115,36 @@ test("free text resolves a dismissed interactive prompt before continuing", asyn
 });
 
 test("runtime save compiles runner contract from persisted build contract without LLM", async () => {
-  const [specs, dispatcher] = await Promise.all([
+  const [specs, compileService, dispatcher] = await Promise.all([
     readFile(specsPath, "utf8"),
+    readFile(compileServicePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
   ]);
 
   assert.doesNotMatch(specs, /discoverToolsForLoopBuild/);
-  assert.doesNotMatch(specs, /generateSpecJson/);
-  assert.doesNotMatch(specs, /loopBuilderOpenAiChat/);
-  assert.doesNotMatch(specs, /spec_generation/);
+  assert.doesNotMatch(compileService, /generateSpecJson/);
+  assert.doesNotMatch(compileService, /loopBuilderOpenAiChat/);
+  assert.doesNotMatch(compileService, /spec_generation/);
+  assert.match(compileService, /buildRunnerSpecFromBuildContract/);
   assert.match(specs, /buildRunnerSpecFromBuildContract/);
-  assert.match(specs, /compileRuntimeSpecSnapshot/);
-  assert.match(dispatcher, /compileRuntimeSpecSnapshot/);
+  assert.match(specs, /compileRuntimeSpecSnapshotAsync/);
   assert.match(dispatcher, /compileEnrichedRuntimeSpecSnapshot/);
   assert.doesNotMatch(dispatcher, /ensureDraftedSpec/);
   assert.doesNotMatch(dispatcher, /draftLoopSpec\(/);
 });
 
 test("builder-created workflows remain unscheduled until verification is confirmed", async () => {
-  const [route, dispatcher, creator, verification] = await Promise.all([
+  const [route, dispatcher, creator, verification, builderTypes] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
     readFile(creatorPath, "utf8"),
     readFile(verificationPath, "utf8"),
+    readFile(builderTypesPath, "utf8"),
   ]);
 
   assert.match(dispatcher, /initialStatus:\s*"verifying"/);
-  assert.match(dispatcher, /\|\s*"runVerification"/);
-  assert.match(dispatcher, /\|\s*"confirmActivation"/);
+  assert.match(builderTypes, /"runVerification"/);
+  assert.match(builderTypes, /"confirmActivation"/);
   assert.match(route, /runVerification:\s*tool\(/);
   assert.match(route, /confirmActivation:\s*tool\(/);
   assert.match(creator, /initialStatus === "active" \? nextCronRunAt/);
@@ -226,9 +232,10 @@ test("event choices come from discovered connector triggers and scheduled fallba
 });
 
 test("runtime save persists workflow and exposes a separate safe builder test run", async () => {
-  const [route, dispatcher] = await Promise.all([
+  const [route, dispatcher, builderTypes] = await Promise.all([
     readFile(routePath, "utf8"),
     readFile(dispatcherPath, "utf8"),
+    readFile(builderTypesPath, "utf8"),
   ]);
 
   assert.doesNotMatch(route, /approveSpec:\s*tool\(/);
@@ -245,7 +252,7 @@ test("runtime save persists workflow and exposes a separate safe builder test ru
   assert.match(dispatcher, /createSpecLoopRun/);
   assert.match(dispatcher, /runSpecLoopHeadless/);
   assert.match(dispatcher, /runWorkflowVerification/);
-  assert.match(dispatcher, /\|\s*"runBuilderTest"/);
+  assert.match(dispatcher, /case "runBuilderTest"/);
   assert.doesNotMatch(dispatcher, /spec\.status !== "approved"/);
   assert.doesNotMatch(dispatcher, /approveLoopSpec\(/);
   assert.match(dispatcher, /\["intent_resolved", "saved", "failed"\]/);
@@ -261,9 +268,12 @@ test("loop builder stream sets max output tokens for analyzer turns", async () =
   assert.doesNotMatch(route, /normalizedIntent:\s*normalizedIntentSchema/);
 });
 
-test("legacy persisted specs still preserve the resolved build contract", async () => {
-  const specs = await readFile(specsPath, "utf8");
+test("runtime spec snapshot preserves the resolved build contract", async () => {
+  const [specs, compileService] = await Promise.all([
+    readFile(specsPath, "utf8"),
+    readFile(compileServicePath, "utf8"),
+  ]);
 
-  assert.match(specs, /buildRunnerSpecFromBuildContract\(\{[\s\S]*buildContract: current\.specJson\.buildContract/);
+  assert.match(compileService, /buildRunnerSpecFromBuildContract\(\{/);
   assert.match(specs, /spec\.specJson\.buildContract \? \{ buildContract: spec\.specJson\.buildContract \}/);
 });

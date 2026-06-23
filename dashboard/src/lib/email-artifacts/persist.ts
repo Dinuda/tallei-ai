@@ -23,7 +23,7 @@ export async function persistArtifactBundle(
   output: ArtifactSetupOutput,
   messages?: unknown[],
 ): Promise<void> {
-  const response = await fetch(`/api/loop-builder/sessions/${sessionId}/artifacts/save`, {
+  const response = await fetch(`/api/conductor/sessions/${sessionId}/artifacts/save`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

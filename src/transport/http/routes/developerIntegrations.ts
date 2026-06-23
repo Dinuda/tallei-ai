@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { authMiddleware, requireScopes, type AuthRequest } from "../middleware/auth.middleware.js";
 import { buildToolSpecRegistry, listLearnedToolSpecs, listLearnedUseCases } from "../../../services/tool-spec/index.js";
-import { listAvailableLoopToolsForAuth } from "../../../services/loop-executor/tool-catalog.js";
+import { listAvailableLoopToolsForAuth } from "../../../services/conductor/index.js";
 
 const router = Router();
 router.use(authMiddleware);

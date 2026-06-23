@@ -5,7 +5,7 @@ import { pool } from "../../../src/infrastructure/db/index.js";
 import {
   allocateAgentAvatars,
   bindAgentAvatar,
-} from "../../../src/services/loop-builder/agent-avatars.js";
+} from "../../../src/services/conductor/services/avatar.service.js";
 
 const auth = {
   tenantId: "00000000-0000-4000-8000-000000000010",

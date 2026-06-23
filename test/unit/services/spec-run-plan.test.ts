@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compileSpecRunPlan, declaredAgentToolRefs } from "../../../src/services/loop-runtime/spec-run-plan.js";
+import { compileSpecRunPlan, declaredAgentToolRefs } from "../../../src/services/conductor/runtime/spec-run-plan.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
 
 const accountId = "00000000-0000-4000-8000-000000000001";

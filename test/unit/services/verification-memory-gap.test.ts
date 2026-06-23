@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const resolveAuthPath = new URL("../../../src/services/loop-runtime/resolve-loop-run-auth.ts", import.meta.url);
-const verificationScopePath = new URL("../../../src/services/loop-executor/verification-scope.ts", import.meta.url);
-const verificationPath = new URL("../../../src/services/loop-executor/verification.ts", import.meta.url);
-const composioTriggerPath = new URL("../../../src/services/loop-runtime/composio-trigger.ts", import.meta.url);
-const specSchedulerPath = new URL("../../../src/services/loop-runtime/spec-scheduler.ts", import.meta.url);
-const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
+const resolveAuthPath = new URL("../../../src/services/conductor/runtime/resolve-loop-run-auth.ts", import.meta.url);
+const verificationScopePath = new URL("../../../src/services/conductor/services/verification-scope.ts", import.meta.url);
+const verificationPath = new URL("../../../src/services/conductor/services/verification.service.ts", import.meta.url);
+const composioTriggerPath = new URL("../../../src/services/conductor/runtime/composio-trigger.ts", import.meta.url);
+const specSchedulerPath = new URL("../../../src/services/conductor/runtime/spec-scheduler.ts", import.meta.url);
+const specRunnerPath = new URL("../../../src/services/conductor/runtime/spec-runner.ts", import.meta.url);
 
 test("resolveLoopRunAuth loads workflow workspace into auth", async () => {
   const source = await readFile(resolveAuthPath, "utf8");
@@ -46,7 +46,7 @@ test("verification adds grounding probes and runtime transparency notes", async 
 test("spec run retry endpoint and run page retry controls", async () => {
   const [workflows, specRunner, runPage] = await Promise.all([
     readFile(new URL("../../../src/transport/http/routes/workflows.ts", import.meta.url), "utf8"),
-    readFile(new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../../src/services/conductor/runtime/spec-runner.ts", import.meta.url), "utf8"),
     readFile(new URL("../../../dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/page.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(specRunner, /export async function retrySpecLoopRun/);

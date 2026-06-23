@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { RunContext } from "../../../src/services/loop-runtime/build-run-context.js";
+import type { RunContext } from "../../../src/services/conductor/runtime/build-run-context.js";
 import {
   enrichEvidenceStructuredOutput,
   enrichResolvedHandoffValue,
-} from "../../../src/services/loop-runtime/spec-run-handoff-enrichment.js";
+} from "../../../src/services/conductor/runtime/spec-run-handoff-enrichment.js";
 
 const runContext: RunContext = {
   workflowId: "workflow-1",

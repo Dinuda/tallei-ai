@@ -42,7 +42,7 @@ export async function renderEmailArtifactTemplate(template: {
 
   const promise = (async () => {
     const props = JSON.parse(template.reactEmailSource) as EmailTemplateProps;
-    const response = await fetch("/api/loop-builder/render-email-artifact", {
+    const response = await fetch("/api/conductor/render-email-artifact", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

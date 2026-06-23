@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compileSpecRunPlan } from "../../../src/services/loop-runtime/spec-run-plan.js";
-import { buildSpecRunSystemPrompt } from "../../../src/services/loop-runtime/spec-run-prompt.js";
-import { projectRunContext } from "../../../src/services/loop-runtime/build-run-context.js";
-import { gmailTriggerDedupeKey } from "../../../src/services/loop-runtime/trigger-normalizers/gmail.js";
+import { compileSpecRunPlan } from "../../../src/services/conductor/runtime/spec-run-plan.js";
+import { buildSpecRunSystemPrompt } from "../../../src/services/conductor/runtime/spec-run-prompt.js";
+import { projectRunContext } from "../../../src/services/conductor/runtime/build-run-context.js";
+import { gmailTriggerDedupeKey } from "../../../src/services/conductor/runtime/trigger-normalizers/gmail.js";
 
 const buildContract = {
   version: "v1" as const,

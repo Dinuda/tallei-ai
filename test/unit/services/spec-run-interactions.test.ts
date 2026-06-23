@@ -6,9 +6,9 @@ import {
   buildOperatorViewFromInteraction,
   mapInteractionKindForUi,
   patchMessagesWithToolResult,
-} from "../../../src/services/loop-runtime/spec-run-interactions.js";
+} from "../../../src/services/conductor/runtime/spec-run-interactions.js";
 
-const interactionWriterPath = new URL("../../../src/services/loop-runtime/spec-run-interaction-writer.ts", import.meta.url);
+const interactionWriterPath = new URL("../../../src/services/conductor/runtime/spec-run-interaction-writer.ts", import.meta.url);
 
 test("mapInteractionKindForUi prefers payload gateType", () => {
   const kind = mapInteractionKindForUi({

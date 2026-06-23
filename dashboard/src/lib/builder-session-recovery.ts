@@ -8,6 +8,12 @@ export type BuilderCommandSnapshot = {
   status?: string;
   error?: string;
   result?: Record<string, unknown>;
+  events?: Array<{
+    stage?: string;
+    message?: string;
+    status?: string;
+    details?: Record<string, unknown>;
+  }>;
 };
 
 export type BuilderRecoveryState =
@@ -243,9 +249,12 @@ export function findRunningBuilderCommand(
 }
 
 export function builderRunningCommandLabel(command: BuilderCommandSnapshot | null): string {
+  const latestEventMessage = command?.events?.at(-1)?.message?.trim();
+  if (latestEventMessage) return latestEventMessage;
+
   switch (command?.toolName) {
     case "saveLoop":
-      return "Saving your loop...";
+      return "Designing specialist agents for your loop…";
     case "runBuilderTest":
       return "Running builder test...";
     case "getAvailableTools":
@@ -319,7 +328,7 @@ export async function persistBuilderMessages(
   }
 
   try {
-    const response = await fetch(`/api/loop-builder/sessions/${sessionId}/messages`, {
+    const response = await fetch(`/api/conductor/sessions/${sessionId}/messages`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body,
@@ -336,7 +345,7 @@ export async function persistBuilderMessages(
 }
 
 export async function retryBuilderCommand(sessionId: string, commandId?: string): Promise<{ jobId: string }> {
-  const response = await fetch(`/api/loop-builder/sessions/${sessionId}/retry-command`, {
+  const response = await fetch(`/api/conductor/sessions/${sessionId}/retry-command`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(commandId ? { commandId } : {}),

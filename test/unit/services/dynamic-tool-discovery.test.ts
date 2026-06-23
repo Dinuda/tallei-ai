@@ -8,8 +8,8 @@ import {
 } from "../../../src/services/tool-spec/discovery.js";
 import { normalizeComposioToolSearchResponse } from "../../../src/services/connectors/composio.js";
 import { buildComposioActionContract } from "../../../src/services/tool-spec/tool-contracts.js";
-import { buildLoopDefinition } from "../../../src/services/loop-executor/creator.js";
-import { getEffectiveLoopConstraints, validateAgentRoster } from "../../../src/services/loop-executor/tool-catalog.js";
+import { buildLoopDefinition } from "../../../src/services/conductor/services/loop-workflow.service.js";
+import { getEffectiveLoopConstraints, validateAgentRoster } from "../../../src/services/conductor/services/tool-catalog.service.js";
 
 test("Composio search normalization accepts SDK list response envelopes", () => {
   const tool = { slug: "GMAIL_SEND_EMAIL", toolkit: { slug: "gmail" } };

@@ -6,9 +6,9 @@ import {
   formatContractValidationReason,
   stripToSchema,
   validateContractData,
-} from "../../../src/services/loop-engine/data-contract.js";
-import { normalizeRunMessages, pruneStepNarrationForStep, sanitizeSpecRunMessages } from "../../../src/services/loop-runtime/run-messages.js";
-import { dataInputSurfaceSchema, reviewSurfaceSchema } from "../../../src/services/loop-engine/input-surfaces.js";
+} from "../../../src/services/conductor/contracts/data-contract.js";
+import { normalizeRunMessages, pruneStepNarrationForStep, sanitizeSpecRunMessages } from "../../../src/services/conductor/runtime/run-messages.js";
+import { dataInputSurfaceSchema, reviewSurfaceSchema } from "../../../src/services/conductor/contracts/input-surfaces.js";
 
 test("stripToSchema keeps only declared contract properties", () => {
   const schema = {

@@ -6,7 +6,7 @@ import {
   prioritizeDiscoveredConnectors,
   specSemanticPipeline,
   supplementDiscoveryQueriesFromSpec,
-} from "../../../src/services/loop-engine/spec-required-connectors.js";
+} from "../../../src/services/conductor/domain/spec-required-connectors.js";
 import {
   buildComposioActionContract,
 } from "../../../src/services/tool-spec/tool-contracts.js";

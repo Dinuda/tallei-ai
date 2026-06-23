@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { UIMessage } from "ai";
 
-import { normalizeWorkflowBuilderMessages, sanitizeLoopBuilderChatMessages } from "../../../src/services/loop-builder/sessions.js";
+import { normalizeWorkflowBuilderMessages, sanitizeLoopBuilderChatMessages } from "../../../src/services/conductor/services/session.service.js";
 
 test("workflow builder messages discard empty interrupted-stream artifacts", () => {
   const messages = [

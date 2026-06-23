@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildRunnerSpecFromBuildContract } from "../../../src/services/loop-builder/specs.js";
-import { compileSpecRunPlan } from "../../../src/services/loop-runtime/spec-run-plan.js";
-import { definitionFromApprovedSpec } from "../../../src/services/loop-runtime/spec-run-types.js";
-import type { NoSlopSpec } from "../../../src/services/loop-engine/spec-contracts.js";
+import { buildRunnerSpecFromBuildContract } from "../../../src/services/conductor/services/spec.service.js";
+import { compileSpecRunPlan } from "../../../src/services/conductor/runtime/spec-run-plan.js";
+import { definitionFromApprovedSpec } from "../../../src/services/conductor/runtime/spec-run-types.js";
+import type { NoSlopSpec } from "../../../src/services/conductor/contracts/spec-contracts.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
 
 const accountId = "00000000-0000-4000-8000-000000000001";
@@ -140,64 +140,58 @@ const gmailContracts = [
   contract("GMAIL_SEND_EMAIL", "irreversible_external", ["send"]),
 ];
 
-test("golden: approve_each_action with review_drafts produces stable agent graph", () => {
-  const spec = buildRunnerSpecFromBuildContract({
+const conductorGolden = [
+  {
+    name: "Context Reader",
+    tools: ["composio.gmail.action.GMAIL_FETCH_EMAILS"],
+    gate: null,
+    renderer: null,
+  },
+  {
+    name: "Draft Writer",
+    tools: [
+      "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
+      "composio.gmail.action.GMAIL_SEND_EMAIL",
+    ],
+    gate: null,
+    renderer: "canvas.email",
+  },
+];
+
+test("golden: async approve_each_action with review_drafts produces stable conductor agent graph", async () => {
+  const spec = await buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract(),
     discoveredToolContracts: gmailContracts,
   });
 
-  assert.deepEqual(summarizeAgents(spec), [
-    {
-      name: "Workflow Agent",
-      tools: [
-        "composio.gmail.action.GMAIL_FETCH_EMAILS",
-        "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
-        "composio.gmail.action.GMAIL_SEND_EMAIL",
-        "internal.llm_only",
-      ],
-      gate: null,
-      renderer: "canvas.email",
-    },
-  ]);
+  assert.deepEqual(summarizeAgents(spec), conductorGolden);
 });
 
-test("golden: draft_only still uses architect-owned fallback agent", () => {
-  const spec = buildRunnerSpecFromBuildContract({
+test("golden: async draft_only still uses conductor split agents", async () => {
+  const spec = await buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract("draft_only"),
     discoveredToolContracts: gmailContracts,
   });
 
-  assert.equal(spec.agents.length, 1);
-  assert.deepEqual(summarizeAgents(spec), [
-    {
-      name: "Workflow Agent",
-      tools: [
-        "composio.gmail.action.GMAIL_FETCH_EMAILS",
-        "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
-        "composio.gmail.action.GMAIL_SEND_EMAIL",
-        "internal.llm_only",
-      ],
-      gate: null,
-      renderer: "canvas.email",
-    },
-  ]);
+  assert.equal(spec.agents.length, 2);
+  assert.deepEqual(summarizeAgents(spec), conductorGolden);
 });
 
-test("golden: review_drafts_and_send does not add compiler-owned gates", () => {
-  const spec = buildRunnerSpecFromBuildContract({
+test("golden: async review_drafts_and_send does not add compiler-owned gates", async () => {
+  const spec = await buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract("approve_each_action", "review_drafts_and_send"),
     discoveredToolContracts: gmailContracts,
   });
 
-  assert.equal(spec.agents.length, 1);
-  assert.equal(spec.agents[0]?.gate, undefined);
+  assert.equal(spec.agents.length, 2);
+  assert.ok(spec.agents.every((agent) => agent.gate === undefined));
 });
 
-test("golden: automatic output gates produces no agent gates", () => {
-  const spec = buildRunnerSpecFromBuildContract({
+test("golden: async automatic output gates produces no agent gates", async () => {
+  const spec = await buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: buildContract("approve_each_action", "automatic"),
     discoveredToolContracts: gmailContracts,
@@ -206,10 +200,10 @@ test("golden: automatic output gates produces no agent gates", () => {
   assert.ok(spec.agents.every((agent) => !agent.gate));
 });
 
-test("compiler to plan parity preserves tool role decisions", () => {
+test("compiler to plan async parity preserves tool role decisions", async () => {
   const build = buildContract();
   const discovered = gmailContracts;
-  const spec = buildRunnerSpecFromBuildContract({
+  const spec = await buildRunnerSpecFromBuildContract({
     prompt: "Handle Gmail support tickets",
     buildContract: build,
     discoveredToolContracts: discovered,
@@ -246,9 +240,13 @@ test("compiler to plan parity preserves tool role decisions", () => {
     })),
     [
       {
-        name: "Workflow Agent",
+        name: "Context Reader",
+        toolRefs: ["composio.gmail.action.GMAIL_FETCH_EMAILS"],
+        gate: null,
+      },
+      {
+        name: "Draft Writer",
         toolRefs: [
-          "composio.gmail.action.GMAIL_FETCH_EMAILS",
           "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
           "composio.gmail.action.GMAIL_SEND_EMAIL",
         ],

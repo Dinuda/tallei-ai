@@ -185,6 +185,106 @@
     "source": "src/routes/chatgpt.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/conductor/agent-avatars/:avatarId/bind",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/agent-avatars/allocate",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/chat",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/intent/analyze",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/conductor/jobs/:jobId",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/save",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/conductor/sessions/:sessionId",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/conductor/sessions/:sessionId",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/sessions/:sessionId/artifacts/save",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/sessions/:sessionId/connectors/refresh",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/sessions/:sessionId/connectors/resolve",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/conductor/sessions/:sessionId/messages",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/sessions/:sessionId/retry-command",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/conductor/sessions/:sessionId/schedule-options",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/conductor/specs",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/conductor/specs/:specId",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/specs/:specId/approve",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/specs/:specId/archive",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/specs/:specId/refine",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/conductor/specs/draft",
+    "source": "src/routes/conductor.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/connectors",
     "source": "src/routes/connectors.ts"
@@ -248,6 +348,36 @@
     "method": "GET",
     "path": "/api/developer/integrations",
     "source": "src/routes/developerIntegrations.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/developer/temporal/schedules",
+    "source": "src/routes/developerTemporal.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/developer/temporal/schedules/:scheduleId/pause",
+    "source": "src/routes/developerTemporal.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/developer/temporal/schedules/:scheduleId/unpause",
+    "source": "src/routes/developerTemporal.ts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/developer/temporal/workflows/:temporalWorkflowId/cancel",
+    "source": "src/routes/developerTemporal.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/developer/temporal/workflows/history",
+    "source": "src/routes/developerTemporal.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/developer/temporal/workflows/running",
+    "source": "src/routes/developerTemporal.ts"
   },
   {
     "method": "GET",
@@ -358,81 +488,6 @@
     "method": "GET",
     "path": "/api/knowledge-bases/search",
     "source": "src/routes/knowledge-bases.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/chat",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/intent/analyze",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/loop-builder/jobs/:jobId",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/save",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/loop-builder/sessions/:sessionId",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/sessions/:sessionId/connectors/refresh",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/sessions/:sessionId/connectors/resolve",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/sessions/:sessionId/artifacts/save",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/loop-builder/sessions/:sessionId/schedule-options",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/loop-builder/specs",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/loop-builder/specs/:specId",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/specs/:specId/approve",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/specs/:specId/archive",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/specs/:specId/refine",
-    "source": "src/routes/loopBuilder.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/loop-builder/specs/draft",
-    "source": "src/routes/loopBuilder.ts"
   },
   {
     "method": "POST",
@@ -635,11 +690,6 @@
     "source": "src/routes/workflows.ts"
   },
   {
-    "method": "POST",
-    "path": "/api/workflows/internal/loops",
-    "source": "src/routes/workflows.ts"
-  },
-  {
     "method": "DELETE",
     "path": "/api/workflows/internal/loops/:workflowId",
     "source": "src/routes/workflows.ts"
@@ -661,11 +711,11 @@
   },
   {
     "method": "GET",
-    "path": "/api/workflows/loops",
+    "path": "/api/workflows/internal/loops/:workflowId/triggers",
     "source": "src/routes/workflows.ts"
   },
   {
-    "method": "POST",
+    "method": "GET",
     "path": "/api/workflows/loops",
     "source": "src/routes/workflows.ts"
   },
@@ -726,11 +776,6 @@
   },
   {
     "method": "POST",
-    "path": "/api/workflows/runs/:runId/retry",
-    "source": "src/routes/workflows.ts"
-  },
-  {
-    "method": "POST",
     "path": "/api/workflows/runs/:runId/interactions/:interactionId/commands",
     "source": "src/routes/workflows.ts"
   },
@@ -741,12 +786,12 @@
   },
   {
     "method": "POST",
-    "path": "/api/workflows/runs/:runId/steps/:stepId/output",
+    "path": "/api/workflows/runs/:runId/retry",
     "source": "src/routes/workflows.ts"
   },
   {
     "method": "POST",
-    "path": "/api/workflows/runs/:runId/steps/:stepId/retry",
+    "path": "/api/workflows/runs/:runId/save-as-loop",
     "source": "src/routes/workflows.ts"
   },
   {

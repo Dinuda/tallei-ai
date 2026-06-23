@@ -8,7 +8,7 @@ import { config } from "../../config/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import { decryptMemoryContent, encryptMemoryContent } from "../../infrastructure/crypto/memory-crypto.js";
 import { pool } from "../../infrastructure/db/index.js";
-import type { ConnectorActionRisk } from "../loop-engine/spec-contracts.js";
+import type { ConnectorActionRisk } from "../conductor/contracts/spec-contracts.js";
 import { isPlatformManagedToolkit } from "./platform-integrations.js";
 
 export type ConnectorSetupState =

@@ -5,12 +5,12 @@ import {
   selectedReviewPolicy,
   selectedStableInputs,
   selectedConnectorActionSlugs,
-} from "../../../src/services/loop-engine/build-contract.js";
+} from "../../../src/services/conductor/domain/build-contract.js";
 import {
   buildRunSeedMessage,
   projectRunContext,
-} from "../../../src/services/loop-runtime/build-run-context.js";
-import { normalizeGmailTriggerPayload } from "../../../src/services/loop-runtime/trigger-normalizers/gmail.js";
+} from "../../../src/services/conductor/runtime/build-run-context.js";
+import { normalizeGmailTriggerPayload } from "../../../src/services/conductor/runtime/trigger-normalizers/gmail.js";
 
 const buildContract = {
   version: "v1" as const,

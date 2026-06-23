@@ -92,7 +92,7 @@ export function BuilderConnectorChecklist({
   const resolvingRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    const response = await fetch(`/api/loop-builder/sessions/${sessionId}/connectors/refresh`, { method: "POST" });
+    const response = await fetch(`/api/conductor/sessions/${sessionId}/connectors/refresh`, { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error ?? "Failed to refresh connector availability");
     setChecklist(payload.checklist as Checklist);

@@ -72,11 +72,11 @@ const nextConfig: NextConfig = {
         {
           // Keep NextAuth's own /api/auth/* handlers in Next.js.
           // Keep local dashboard API handlers in Next.js (e.g. /api/documents, /api/collab, /api/tasks,
-          // /api/workflows, /api/loop-builder, /api/connectors, /api/channels, /api/billing, /api/memories,
+          // /api/workflows, /api/conductor, /api/connectors, /api/channels, /api/billing, /api/memories,
           // /api/keys, /api/mcp-events).
           // Proxy all other API routes to the backend.
           source:
-            "/api/:path((?!(?:collab|tasks|developer|documents|integrations|integration-updates|orchestrate|workflows|loop-builder|connectors|channels|billing|memories|keys|mcp-events|workspaces|workspace-memory|knowledge-bases|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
+            "/api/:path((?!(?:collab|tasks|developer|documents|integrations|integration-updates|orchestrate|workflows|conductor|connectors|channels|billing|memories|keys|mcp-events|workspaces|workspace-memory|knowledge-bases|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
           destination: `${BACKEND}/api/:path`,
         },
         {

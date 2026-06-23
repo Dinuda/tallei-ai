@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveConnectorOutputForValidation, sanitizeComposioProviderOutput, validateConnectorActionOutput } from "../../../src/services/loop-runtime/connector-action-payload.js";
+import { resolveConnectorOutputForValidation, sanitizeComposioProviderOutput, validateConnectorActionOutput } from "../../../src/services/conductor/runtime/connector-action-payload.js";
 import { buildComposioActionContract } from "../../../src/services/tool-spec/tool-contracts.js";
 
 const gmailSendOutputSchema = {

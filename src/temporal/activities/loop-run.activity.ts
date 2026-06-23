@@ -1,10 +1,10 @@
 import { Context } from "@temporalio/activity";
 
-import { resolveLoopRunAuth } from "../../services/loop-runtime/resolve-loop-run-auth.js";
+import { resolveLoopRunAuth } from "../../services/conductor/runtime/resolve-loop-run-auth.js";
 import {
   createSpecLoopRun,
-} from "../../services/loop-runtime/spec-runner.js";
-import { drainLoopRunCommands } from "../../services/loop-runtime/spec-run-commands.js";
+} from "../../services/conductor/runtime/spec-runner.js";
+import { drainLoopRunCommands } from "../../services/conductor/runtime/spec-run-commands.js";
 import type { LoopRunWorkflowInput } from "../types.js";
 
 export async function ensureLoopRun(input: LoopRunWorkflowInput): Promise<string> {

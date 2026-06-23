@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const projectionPath = new URL("../../../src/services/loop-runtime/spec-run-editorial-projection.ts", import.meta.url);
+const projectionPath = new URL("../../../src/services/conductor/runtime/spec-run-editorial-projection.ts", import.meta.url);
 
 test("spec-run editorial projection loads persisted step attempts", async () => {
   const source = await readFile(projectionPath, "utf8");

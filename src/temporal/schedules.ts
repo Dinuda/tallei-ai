@@ -1,7 +1,7 @@
 import { config } from "../config/index.js";
 import { getTemporalClient, isTemporalEnabled } from "./client.js";
 import { loopScheduleId } from "./ids.js";
-import type { SpecRunTrigger } from "../services/loop-runtime/spec-runner.js";
+import type { SpecRunTrigger } from "../services/conductor/runtime/spec-runner.js";
 
 function normalizeCronExpression(cron: string): string {
   return cron.replace(/^CRON:/i, "").trim();

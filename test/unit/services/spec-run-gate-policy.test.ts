@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   configuredAgentGateRequired,
-} from "../../../src/services/loop-runtime/spec-run-gate-policy.js";
+} from "../../../src/services/conductor/runtime/spec-run-gate-policy.js";
 
 test("configuredAgentGateRequired only honors canonical active gate types", () => {
   assert.equal(configuredAgentGateRequired("input"), true);

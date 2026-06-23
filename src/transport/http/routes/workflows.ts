@@ -4,29 +4,27 @@ import { z } from "zod";
 
 import {
   assignLoopToWorkspace,
+  cancelSpecLoopRun,
+  confirmWorkflowVerification,
   createWorkspace,
   deleteLoopWorkflow,
   getLoopWorkflow,
-  getWorkflowVerification,
-  listLoopWorkflows,
-  listWorkspaces,
-  runWorkflowVerification,
-  confirmWorkflowVerification,
-} from "../../../services/loop-executor/index.js";
-import {
-  cancelSpecLoopRun,
   getSpecRunEditorialProjection,
   getSpecRunMessages,
   getWorkflowTriggerActivity,
+  getWorkflowVerification,
+  handleSpecRunInteractionCommand,
+  listLoopWorkflows,
   listSpecLoopRuns,
+  listWorkspaces,
+  normalizeRunMessages,
   retrySpecLoopRun,
-  saveSpecRunAsLoop,
+  runWorkflowVerification,
   saveCanvasEmailArtifact,
+  saveSpecRunAsLoop,
   startSpecManualLoopRun,
   streamSpecRunChat,
-} from "../../../services/loop-runtime/index.js";
-import { handleSpecRunInteractionCommand } from "../../../services/loop-runtime/spec-run-interactions.js";
-import { normalizeRunMessages } from "../../../services/loop-runtime/run-messages.js";
+} from "../../../services/conductor/index.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 

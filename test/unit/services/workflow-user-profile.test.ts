@@ -6,7 +6,7 @@ import {
   isWorkflowUserProfileMemory,
   sanitizeWorkflowUserProfile,
   workflowUserProfileSchema,
-} from "../../../src/services/loop-engine/workflow-user-profile.js";
+} from "../../../src/services/conductor/domain/workflow-user-profile.js";
 
 test("formatWorkflowUserProfile renders durable profile memories for prompts", () => {
   const profile = workflowUserProfileSchema.parse({

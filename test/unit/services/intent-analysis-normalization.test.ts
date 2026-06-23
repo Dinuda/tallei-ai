@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loopIntentAnalysisSchema } from "../../../src/services/loop-engine/intent-context.js";
+import { loopIntentAnalysisSchema } from "../../../src/services/conductor/contracts/intent-context.js";
 
 test("intent analysis schema accepts normalized intent defaults", () => {
   const analysis = loopIntentAnalysisSchema.parse({

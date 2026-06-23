@@ -141,7 +141,7 @@ export function BuilderScheduleSelector({
   useEffect(() => {
     if (completedOutput) return;
     let cancelled = false;
-    void fetch(`/api/loop-builder/sessions/${sessionId}/schedule-options`, { cache: "no-store" })
+    void fetch(`/api/conductor/sessions/${sessionId}/schedule-options`, { cache: "no-store" })
       .then(async (response) => {
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error ?? "Could not load schedule options");

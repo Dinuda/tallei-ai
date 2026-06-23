@@ -508,6 +508,6 @@ Keep old Postgres snapshot and last Cloud Run dashboard revision for **30 days**
 
 - Current Cloud Run guide: [`cloudrun/README.md`](./cloudrun/README.md)
 - DNS reference: [`cloudrun/dns.md`](./cloudrun/dns.md)
-- Loop + Temporal architecture: [`../loop-flow.md`](../loop-flow.md)
+- Loop architecture: [`../LOOP_RUN_ARCHITECTURE.md`](../../LOOP_RUN_ARCHITECTURE.md)
 - Config conventions: [`../adr/005-config-schema-zod.md`](../adr/005-config-schema-zod.md)
 - Temporal worker deploy script: [`../../deploy/cloudrun/deploy-temporal-worker.sh`](../../deploy/cloudrun/deploy-temporal-worker.sh)

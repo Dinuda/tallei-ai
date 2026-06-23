@@ -55,6 +55,49 @@ export let pool = createPool(config.databaseUrl);
 
 type DbClient = pg.PoolClient;
 
+function isAuthFailure(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  const message = error instanceof Error ? error.message : "";
+  const cause = error instanceof Error ? error.cause : undefined;
+  const causeMessage = cause instanceof Error ? cause.message : "";
+
+  return code === "28P01"
+    || /password authentication failed|invalid password/i.test(message)
+    || /password authentication failed|invalid password/i.test(causeMessage);
+}
+
+function shouldAttemptDatabaseFallback(error: unknown): boolean {
+  if (!config.databaseUrlFallback) return false;
+  if (config.databaseUrlFallback === config.databaseUrl) return false;
+  return isAuthFailure(error);
+}
+
+async function connectDbClient(): Promise<DbClient> {
+  try {
+    return await pool.connect();
+  } catch (error) {
+    if (!shouldAttemptDatabaseFallback(error)) throw error;
+
+    const primaryPool = pool;
+    const fallbackPool = createPool(config.databaseUrlFallback);
+    pool = fallbackPool;
+
+    try {
+      const client = await fallbackPool.connect();
+      await primaryPool.end().catch((endError: unknown) => {
+        const message = endError instanceof Error ? endError.message : String(endError);
+        console.warn(`[db] failed to close primary pool after fallback swap: ${message}`);
+      });
+      console.warn("[db] primary database auth failed; switched to fallback connection URL");
+      return client;
+    } catch (fallbackError) {
+      pool = primaryPool;
+      await fallbackPool.end().catch(() => undefined);
+      throw fallbackError;
+    }
+  }
+}
+
 const MEMORY_TYPE_CHECK = "'preference', 'fact', 'event', 'decision', 'note', 'checkpoint'";
 
 async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
@@ -350,7 +393,7 @@ async function migrateLegacyLoopBuilderGatesAndArtifacts(client: DbClient): Prom
 }
 
 export async function initDb() {
-  const client = await pool.connect();
+  const client = await connectDbClient();
   let migrationSessionConfigured = false;
   try {
     if (!config.dbAutoMigrateOnBoot) {
@@ -946,9 +989,6 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_scope_updated
         ON workflow_builder_sessions(tenant_id, user_id, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_spec
-        ON workflow_builder_sessions(tenant_id, user_id, spec_id, updated_at DESC);
-
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'new';
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS composio_session_id TEXT;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS workflow_run_id TEXT;
@@ -966,13 +1006,13 @@ export async function initDb() {
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS debate_json;
       ALTER TABLE workflow_builder_sessions
         DROP CONSTRAINT IF EXISTS workflow_builder_sessions_spec_id_fkey;
-      ALTER TABLE workflow_builder_sessions
-        ADD CONSTRAINT workflow_builder_sessions_spec_id_fkey
-        FOREIGN KEY (spec_id) REFERENCES loop_specs(id) ON DELETE SET NULL;
       ALTER TABLE workflow_builder_sessions DROP CONSTRAINT IF EXISTS workflow_builder_sessions_phase_check;
       ALTER TABLE workflow_builder_sessions
         ADD CONSTRAINT workflow_builder_sessions_phase_check
         CHECK (phase IN ('new', 'analyzing', 'needs_clarification', 'resolving_requirements', 'intent_resolved', 'spec_drafted', 'spec_approved', 'graph_generated', 'saved', 'archived', 'failed'));
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_spec
+        ON workflow_builder_sessions(tenant_id, user_id, spec_id, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS workflow_builder_messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1053,22 +1093,6 @@ export async function initDb() {
         ADD COLUMN IF NOT EXISTS payload_json JSONB;
       ALTER TABLE workflow_connector_trigger_events
         ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
-      UPDATE workflow_connector_trigger_events e
-        SET run_id = NULL
-        WHERE run_id IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM loop_engine_runs r
-            WHERE r.id = e.run_id
-          );
-      ALTER TABLE workflow_connector_trigger_events
-        DROP CONSTRAINT IF EXISTS workflow_connector_trigger_events_run_id_fkey;
-      ALTER TABLE workflow_connector_trigger_events
-        ADD CONSTRAINT workflow_connector_trigger_events_run_id_fkey
-        FOREIGN KEY (run_id) REFERENCES loop_engine_runs(id) ON DELETE SET NULL;
-      CREATE INDEX IF NOT EXISTS idx_workflow_connector_trigger_events_run_id
-        ON workflow_connector_trigger_events(run_id)
-        WHERE run_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_trigger_events_dedupe
         ON workflow_connector_trigger_events(trigger_instance_id, dedupe_key)
         WHERE dedupe_key IS NOT NULL;
@@ -1355,6 +1379,10 @@ export async function initDb() {
         ON loop_agent_avatars(bound_spec_id)
         WHERE bound_spec_id IS NOT NULL;
 
+      ALTER TABLE workflow_builder_sessions
+        ADD CONSTRAINT workflow_builder_sessions_spec_id_fkey
+        FOREIGN KEY (spec_id) REFERENCES loop_specs(id) ON DELETE SET NULL;
+
       CREATE TABLE IF NOT EXISTS loop_engine_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1376,6 +1404,23 @@ export async function initDb() {
         ON loop_engine_runs(tenant_id, user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_loop_engine_runs_workflow_created
         ON loop_engine_runs(workflow_id, created_at DESC);
+
+      UPDATE workflow_connector_trigger_events e
+        SET run_id = NULL
+        WHERE run_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM loop_engine_runs r
+            WHERE r.id = e.run_id
+          );
+      ALTER TABLE workflow_connector_trigger_events
+        DROP CONSTRAINT IF EXISTS workflow_connector_trigger_events_run_id_fkey;
+      ALTER TABLE workflow_connector_trigger_events
+        ADD CONSTRAINT workflow_connector_trigger_events_run_id_fkey
+        FOREIGN KEY (run_id) REFERENCES loop_engine_runs(id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS idx_workflow_connector_trigger_events_run_id
+        ON workflow_connector_trigger_events(run_id)
+        WHERE run_id IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS loop_engine_step_attempts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

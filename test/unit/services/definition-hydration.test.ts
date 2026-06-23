@@ -6,13 +6,13 @@ import {
   hydrateDiscoveredToolContracts,
   resolveBuildContract,
   resolveDiscoveredToolContracts,
-} from "../../../src/services/loop-runtime/definition-hydration.js";
-import { slimLoopDefinitionForPersistence } from "../../../src/services/loop-runtime/definition-slim.js";
-import { compileSpecRunPlan } from "../../../src/services/loop-runtime/spec-run-plan.js";
-import { definitionFromApprovedSpec } from "../../../src/services/loop-runtime/spec-run-types.js";
+} from "../../../src/services/conductor/runtime/definition-hydration.js";
+import { slimLoopDefinitionForPersistence } from "../../../src/services/conductor/runtime/definition-slim.js";
+import { compileSpecRunPlan } from "../../../src/services/conductor/runtime/spec-run-plan.js";
+import { definitionFromApprovedSpec } from "../../../src/services/conductor/runtime/spec-run-types.js";
 import { isSlimPersistedToolContract } from "../../../src/services/tool-spec/tool-contracts.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
-import type { LoopDefinition } from "../../../src/services/loop-executor/types.js";
+import type { LoopDefinition } from "../../../src/services/conductor/workflow/types.js";
 
 const accountId = "00000000-0000-4000-8000-000000000001";
 

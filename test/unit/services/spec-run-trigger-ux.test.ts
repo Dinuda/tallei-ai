@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
-const creatorPath = new URL("../../../src/services/loop-executor/creator.ts", import.meta.url);
+const specRunnerPath = new URL("../../../src/services/conductor/runtime/spec-runner.ts", import.meta.url);
+const creatorPath = new URL("../../../src/services/conductor/services/loop-workflow.service.ts", import.meta.url);
 const runPagePath = new URL("../../../dashboard/app/dashboard/loops/[workflowId]/runs/[runId]/page.tsx", import.meta.url);
 const builderHeaderPath = new URL("../../../dashboard/src/components/loop-builder-header.tsx", import.meta.url);
 const developerPagePath = new URL("../../../dashboard/app/dashboard/loops/developer/page.tsx", import.meta.url);
 const workflowPagePath = new URL("../../../dashboard/app/dashboard/loops/[workflowId]/page.tsx", import.meta.url);
-const loopBuilderRoutePath = new URL("../../../src/transport/http/routes/loopBuilder.ts", import.meta.url);
+const loopBuilderRoutePath = new URL("../../../src/transport/http/routes/conductor.ts", import.meta.url);
 
 test("spec runs persist trigger provenance in context and projection", async () => {
   const specRunner = await readFile(specRunnerPath, "utf8");
@@ -33,7 +33,7 @@ test("workflow list attaches latestRun metadata", async () => {
 
 test("spec run editorial projection exposes steps and artifacts for the run page", async () => {
   const projection = await readFile(
-    new URL("../../../src/services/loop-runtime/spec-run-editorial-projection.ts", import.meta.url),
+    new URL("../../../src/services/conductor/runtime/spec-run-editorial-projection.ts", import.meta.url),
     "utf8",
   );
   const workflows = await readFile(

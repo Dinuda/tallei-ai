@@ -4,8 +4,8 @@ import test from "node:test";
 import {
   agentGuardrailToolConflicts,
   validateAgentToolAssignments,
-} from "../../../src/services/loop-builder/spec-available-tools.js";
-import type { NoSlopSpec } from "../../../src/services/loop-engine/spec-contracts.js";
+} from "../../../src/services/conductor/services/discovery.service.js";
+import type { NoSlopSpec } from "../../../src/services/conductor/contracts/spec-contracts.js";
 
 const buildContract = {
   version: "v1" as const,

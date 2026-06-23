@@ -3,14 +3,14 @@ import test from "node:test";
 
 import {
   slimBuildContractForPersistence,
-} from "../../../src/services/loop-engine/build-contract.js";
+} from "../../../src/services/conductor/domain/build-contract.js";
 import {
   expandSlimLoopDefinition,
   isSlimLoopDefinition,
   slimLoopDefinitionForPersistence,
-} from "../../../src/services/loop-runtime/definition-slim.js";
-import { resolveAgentOutputContract } from "../../../src/services/loop-runtime/agent-contract-catalog.js";
-import type { LoopDefinition } from "../../../src/services/loop-executor/types.js";
+} from "../../../src/services/conductor/runtime/definition-slim.js";
+import { resolveAgentOutputContract } from "../../../src/services/conductor/runtime/agent-contract-catalog.js";
+import type { LoopDefinition } from "../../../src/services/conductor/workflow/types.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
 import { isSlimPersistedToolContract } from "../../../src/services/tool-spec/tool-contracts.js";
 

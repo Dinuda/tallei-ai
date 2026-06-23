@@ -128,11 +128,3 @@ export function addDiscoveredContractsToRegistry(
     ],
   };
 }
-
-export function renderOutcomesForArchitect(registry: ToolSpecRegistry): string {
-  return renderToolSpecMarkdown(registry, "outcomes");
-}
-
-export function renderToolsForArchitect(registry: ToolSpecRegistry): string {
-  return renderToolSpecMarkdown(registry, "tools");
-}

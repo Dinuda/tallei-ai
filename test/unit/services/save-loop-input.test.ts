@@ -6,7 +6,7 @@ test("saveLoop input accepts null placeholders and normalizes them away", async 
     normalizeSaveLoopInput,
     saveLoopInputSchema,
     saveLoopRequestSchema,
-  } = await import("../../../src/services/loop-builder/save-loop-input.ts?t=nullable");
+  } = await import("../../../src/services/conductor/inputs/save-loop-input.ts?t=nullable");
 
   const parsedInput = saveLoopInputSchema.parse({
     cron: null,

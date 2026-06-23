@@ -5,9 +5,9 @@ import {
   buildConnectorToolInputSchema,
   extractConnectorActionPayload,
   summarizeConnectorInputSchema,
-} from "../../../src/services/loop-runtime/connector-tool-input-schema.js";
-import { prepareConnectorActionPayload } from "../../../src/services/loop-runtime/spec-run-write-payload.js";
-import type { RunContext } from "../../../src/services/loop-runtime/build-run-context.js";
+} from "../../../src/services/conductor/runtime/connector-tool-input-schema.js";
+import { prepareConnectorActionPayload } from "../../../src/services/conductor/runtime/spec-run-write-payload.js";
+import type { RunContext } from "../../../src/services/conductor/runtime/build-run-context.js";
 
 const gmailFetchSchema = {
   type: "object",

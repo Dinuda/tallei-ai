@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { UIMessage } from "ai";
 
-import { mergeRunChatMessages, normalizeRunMessages } from "../../../src/services/loop-runtime/run-messages.js";
+import { mergeRunChatMessages, normalizeRunMessages } from "../../../src/services/conductor/runtime/run-messages.js";
 
 test("loop run messages discard empty interrupted-stream assistant artifacts", () => {
   const messages = [

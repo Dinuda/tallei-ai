@@ -16,7 +16,7 @@ import {
   verifyComposioWebhookSignature,
 } from "../../../services/connectors/composio.js";
 import { pool } from "../../../infrastructure/db/index.js";
-import { handleComposioTriggerWebhook } from "../../../services/loop-runtime/composio-trigger.js";
+import { handleComposioTriggerWebhook } from "../../../services/conductor/runtime/composio-trigger.js";
 import { mergeToolkitCatalog } from "../../../services/connectors/platform-integrations.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { workspaceMiddleware } from "../middleware/workspace.middleware.js";

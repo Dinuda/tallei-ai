@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeDesignCron, nextCronRunAt, validateFiveFieldCron } from "../../../src/services/loop-executor/cron.js";
+import { normalizeDesignCron, nextCronRunAt, validateFiveFieldCron } from "../../../src/services/conductor/domain/schedule-cron.js";
 
 test("validateFiveFieldCron normalizes day-of-week names", () => {
   assert.equal(validateFiveFieldCron("0 9 * * FRI"), "0 9 * * 5");

@@ -14,7 +14,7 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ConnectorActionRisk } from "../loop-engine/spec-contracts.js";
+import type { ConnectorActionRisk } from "../conductor/contracts/spec-contracts.js";
 import { connectorActionToolRef } from "../tool-spec/tool-contracts.js";
 import type { ToolContract } from "../tool-spec/types.js";
 

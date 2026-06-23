@@ -5,7 +5,7 @@ import {
   buildArtifactDeliveryPayload,
   selectLatestArtifactsByKey,
   selectPreferredArtifact,
-} from "../../../src/services/loop-runtime/artifact-selection.js";
+} from "../../../src/services/conductor/runtime/artifact-selection.js";
 
 test("prefers the configured rendered artifact over later research artifacts", () => {
   const artifacts = [

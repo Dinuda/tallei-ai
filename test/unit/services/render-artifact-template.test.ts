@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderArtifactTemplate } from "../../../src/services/loop-runtime/render-artifact-template.js";
+import { renderArtifactTemplate } from "../../../src/services/conductor/runtime/render-artifact-template.js";
 
 test("renderArtifactTemplate substitutes ticket and customer variables", () => {
   const rendered = renderArtifactTemplate(

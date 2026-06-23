@@ -7,7 +7,7 @@ import {
   detectBuilderRecoveryState,
   hydrateBuilderMessagesFromCommands,
   latestUserPromptText,
-} from "../../../src/services/loop-builder/session-recovery.js";
+} from "../../../src/services/conductor/utils/session-recovery.js";
 
 test("hydrateBuilderMessagesFromCommands preserves message reference when nothing changes", () => {
   const messages = [{

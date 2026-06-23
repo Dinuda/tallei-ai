@@ -7,8 +7,8 @@ import {
   mergeStableConfigWithRuntimeInputs,
   normalizeConnectorPayloadForSchema,
   validateConnectorActionPayload,
-} from "../../../src/services/loop-runtime/connector-action-payload.js";
-import { buildPriorOutputIndex, extractStructuredOutputFromArtifact, resolveAgentHandoffBindings } from "../../../src/services/loop-runtime/typed-handoff.js";
+} from "../../../src/services/conductor/runtime/connector-action-payload.js";
+import { buildPriorOutputIndex, extractStructuredOutputFromArtifact, resolveAgentHandoffBindings } from "../../../src/services/conductor/runtime/typed-handoff.js";
 import { buildConnectorActionReadinessContract, validateConnectorReadiness } from "../../../src/services/tool-spec/action-readiness.js";
 
 test("connector action payload validation uses the exact action schema", () => {

@@ -6,7 +6,7 @@ import {
   inferActionLabelsFromToolRefs,
   resolveAgentRole,
   slugifyAgentId,
-} from "../../../src/services/loop-builder/agent-personas.js";
+} from "../../../src/services/conductor/services/personas/agent-personas.js";
 
 test("displayNameFromSeed is deterministic for the same seed", () => {
   const seed = "11111111-1111-4111-8111-111111111111";

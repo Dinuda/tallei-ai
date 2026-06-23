@@ -5,7 +5,7 @@ process.env.NODE_ENV ??= "test";
 process.env.OPENAI_API_KEY ??= "test-openai-key";
 
 test("isLoopBuilderReasoningModel detects gpt-5 and o-series models", async () => {
-  const { isLoopBuilderReasoningModel } = await import("../../../src/services/loop-builder/openai-chat.js");
+  const { isLoopBuilderReasoningModel } = await import("../../../src/services/conductor/llm/openai-chat.js");
   assert.equal(isLoopBuilderReasoningModel("gpt-5.1"), true);
   assert.equal(isLoopBuilderReasoningModel("gpt-5-mini"), true);
   assert.equal(isLoopBuilderReasoningModel("o3-mini"), true);
@@ -15,7 +15,7 @@ test("isLoopBuilderReasoningModel detects gpt-5 and o-series models", async () =
 test("loopBuilderStreamProviderOptions enables reasoning summary for reasoning models", async () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
   delete process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
-  const { loopBuilderStreamProviderOptions } = await import("../../../src/services/loop-builder/openai-chat.js");
+  const { loopBuilderStreamProviderOptions } = await import("../../../src/services/conductor/llm/openai-chat.js");
 
   try {
     assert.deepEqual(loopBuilderStreamProviderOptions("gpt-5.1"), {
@@ -37,7 +37,7 @@ test("loopBuilderStreamProviderOptions enables thinking for OpenCode chat comple
   process.env.TALLEI_LLM__PROVIDER = "opencode";
   delete process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT;
   const { loopBuilderStreamProviderOptions } = await import(
-    "../../../src/services/loop-builder/openai-chat.js?t=opencode-thinking"
+    "../../../src/services/conductor/llm/openai-chat.js?t=opencode-thinking"
   );
 
   try {
@@ -57,7 +57,7 @@ test("loopBuilderStreamProviderOptions enables thinking for OpenCode chat comple
 });
 
 test("loop builder completion token defaults are 10k with 16k retry", async () => {
-  const mod = await import("../../../src/services/loop-builder/openai-chat.js?t=token-defaults");
+  const mod = await import("../../../src/services/conductor/llm/openai-chat.js?t=token-defaults");
   assert.equal(mod.LOOP_BUILDER_DEFAULT_MAX_COMPLETION_TOKENS, 10_000);
   assert.equal(mod.LOOP_BUILDER_RETRY_MAX_COMPLETION_TOKENS, 16_000);
 });
@@ -67,15 +67,15 @@ test("loopBuilderOpenAiReasoningEffort defaults to minimal and can be disabled",
   delete process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
 
   try {
-    const mod = await import("../../../src/services/loop-builder/openai-chat.js?t=default");
+    const mod = await import("../../../src/services/conductor/llm/openai-chat.js?t=default");
     assert.equal(mod.loopBuilderOpenAiReasoningEffort(), "minimal");
 
     process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT = "high";
-    const modHigh = await import("../../../src/services/loop-builder/openai-chat.js?t=high");
+    const modHigh = await import("../../../src/services/conductor/llm/openai-chat.js?t=high");
     assert.equal(modHigh.loopBuilderOpenAiReasoningEffort(), "high");
 
     process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT = "none";
-    const modNone = await import("../../../src/services/loop-builder/openai-chat.js?t=none");
+    const modNone = await import("../../../src/services/conductor/llm/openai-chat.js?t=none");
     assert.equal(modNone.loopBuilderOpenAiReasoningEffort(), null);
   } finally {
     if (previous === undefined) delete process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT;
@@ -86,7 +86,7 @@ test("loopBuilderOpenAiReasoningEffort defaults to minimal and can be disabled",
 test("loopBuilderStreamMaxOutputTokens uses reasoning-model completion budget", async () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__GPT5_MIN_COMPLETION_TOKENS;
   process.env.TALLEI_LOOP_BUILDER__GPT5_MIN_COMPLETION_TOKENS = "16384";
-  const mod = await import("../../../src/services/loop-builder/openai-chat.js?t=stream-budget");
+  const mod = await import("../../../src/services/conductor/llm/openai-chat.js?t=stream-budget");
 
   try {
     assert.equal(mod.loopBuilderStreamMaxOutputTokens("gpt-5.1"), 16_384);
@@ -99,7 +99,7 @@ test("loopBuilderStreamMaxOutputTokens uses reasoning-model completion budget", 
 
 test("loopBuilderOpenAiTimeoutMs defaults and clamps env overrides", async () => {
   const previous = process.env.TALLEI_LOOP_BUILDER__OPENAI_TIMEOUT_MS;
-  const { loopBuilderOpenAiTimeoutMs } = await import("../../../src/services/loop-builder/openai-chat.js?t=timeout");
+  const { loopBuilderOpenAiTimeoutMs } = await import("../../../src/services/conductor/llm/openai-chat.js?t=timeout");
 
   try {
     delete process.env.TALLEI_LOOP_BUILDER__OPENAI_TIMEOUT_MS;

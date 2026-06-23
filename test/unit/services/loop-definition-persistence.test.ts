@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const intentResolverPath = new URL("../../../src/services/loop-builder/intent-resolver.ts", import.meta.url);
-const creatorPath = new URL("../../../src/services/loop-executor/creator.ts", import.meta.url);
-const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
+const intentResolverPath = new URL("../../../src/services/conductor/services/save-loop.service.ts", import.meta.url);
+const creatorPath = new URL("../../../src/services/conductor/services/loop-workflow.service.ts", import.meta.url);
+const specRunnerPath = new URL("../../../src/services/conductor/runtime/spec-runner.ts", import.meta.url);
 
 test("builder saves executable loop definitions instead of new runnable specs", async () => {
   const source = await readFile(intentResolverPath, "utf8");

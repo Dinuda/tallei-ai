@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeSpecRunProjection } from "../../../src/services/loop-runtime/spec-run-projection-merge.js";
+import { mergeSpecRunProjection } from "../../../src/services/conductor/runtime/spec-run-projection-merge.js";
 
 test("mergeSpecRunProjection preserves optimistic interaction resolution during server lag", () => {
   const local = {

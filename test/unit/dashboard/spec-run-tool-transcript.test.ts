@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergePartsForStep, mergeToolPartIntoParts } from "../../../src/services/loop-runtime/run-tool-merge.ts";
+import { mergePartsForStep, mergeToolPartIntoParts } from "../../../src/services/conductor/runtime/run-tool-merge.ts";
 
 test("mergeToolPartIntoParts updates in-flight tool rows without changing order", () => {
   const memoryPending = {

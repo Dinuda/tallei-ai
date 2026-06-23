@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { noSlopSpecDraftSchema, noSlopSpecSchema, noSlopSpecSnapshotSchema } from "../../../src/services/loop-engine/spec-contracts.js";
-import { approvedSpecSnapshot, mapLoopSpecRowForTest, normalizeBehavioralSpec, renderSpecMarkdown, specSemanticIssues } from "../../../src/services/loop-builder/specs.js";
+import { noSlopSpecDraftSchema, noSlopSpecSchema, noSlopSpecSnapshotSchema } from "../../../src/services/conductor/contracts/spec-contracts.js";
+import { approvedSpecSnapshot, mapLoopSpecRowForTest, renderSpecMarkdown, specSemanticIssues } from "../../../src/services/conductor/services/spec.service.js";
 
 const behavior = {
   purpose: "Produce a weekly reviewed report.",
@@ -27,9 +27,8 @@ test("behavioral specs can be approved before exact connector action selection",
   assert.equal(noSlopSpecSchema.safeParse(behavior).success, true);
 });
 
-test("spec layer does not rewrite or heuristically reject model-owned semantics", () => {
+test("spec layer does not heuristically reject model-owned semantics", () => {
   const parsed = noSlopSpecDraftSchema.parse(behavior);
-  assert.deepEqual(normalizeBehavioralSpec(parsed), parsed);
   assert.deepEqual(specSemanticIssues(parsed), []);
 });
 

@@ -4,11 +4,11 @@ import test from "node:test";
 import {
   stripToSchema,
   validateContractData,
-} from "../../../src/services/loop-engine/data-contract.js";
+} from "../../../src/services/conductor/contracts/data-contract.js";
 import {
   fallbackSourceEvidenceOutput,
   normalizeAgentStepOutput,
-} from "../../../src/services/loop-runtime/spec-run-agent-runner.js";
+} from "../../../src/services/conductor/runtime/spec-run-agent-runner.js";
 
 const evidenceSchema = {
   type: "object",

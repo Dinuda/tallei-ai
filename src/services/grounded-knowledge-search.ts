@@ -1,6 +1,6 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
-import { runCuratedMemorySearch } from "./loop-runtime/curated-memory-search.js";
+import { runCuratedMemorySearch } from "./conductor/runtime/curated-memory-search.js";
 import { searchKnowledgeBaseEntries } from "./knowledge-base.js";
 import { searchWorkspaceMemories } from "./workspace-memory.js";
 

@@ -1,4 +1,4 @@
-import type { SpecRunTrigger } from "../services/loop-runtime/spec-runner.js";
+import type { SpecRunTrigger } from "../services/conductor/runtime/spec-runner.js";
 
 export type LoopRunWorkflowInput = {
   tenantId: string;

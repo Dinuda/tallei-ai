@@ -18,7 +18,7 @@ import developerTemporalRouter from "./routes/developerTemporal.js";
 import agentToolsRouter from "./routes/agentTools.js";
 import connectorsRouter from "./routes/connectors.js";
 import channelsRouter from "./routes/channels.js";
-import loopBuilderRouter from "./routes/loopBuilder.js";
+import conductorRouter from "./routes/conductor.js";
 import workflowsRouter from "./routes/workflows.js";
 import workspacesRouter from "./routes/workspaces.js";
 import knowledgeBasesRouter from "./routes/knowledge-bases.js";
@@ -115,7 +115,7 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/integration-updates", integrationUpdatesRouter);
   app.use("/api/connectors", deps.memoryRateLimit, connectorsRouter);
   app.use("/api/channels", deps.memoryRateLimit, channelsRouter);
-  app.use("/api/loop-builder", deps.memoryRateLimit, loopBuilderRouter);
+  app.use("/api/conductor", deps.memoryRateLimit, conductorRouter);
   app.use("/api/workflows", deps.memoryRateLimit, workflowsRouter);
   app.use("/api/workspaces", deps.memoryRateLimit, workspacesRouter);
   app.use("/api/knowledge-bases", deps.memoryRateLimit, knowledgeBasesRouter);

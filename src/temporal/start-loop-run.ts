@@ -6,8 +6,8 @@ import type { LoopRunWorkflowInput } from "./types.js";
 
 export async function startLoopRunWorkflow(input: LoopRunWorkflowInput & { runId: string }): Promise<void> {
   if (!isTemporalEnabled()) {
-    const { resolveLoopRunAuth } = await import("../services/loop-runtime/resolve-loop-run-auth.js");
-    const { drainLoopRunCommands } = await import("../services/loop-runtime/spec-run-commands.js");
+    const { resolveLoopRunAuth } = await import("../services/conductor/runtime/resolve-loop-run-auth.js");
+    const { drainLoopRunCommands } = await import("../services/conductor/runtime/spec-run-commands.js");
     const auth = await resolveLoopRunAuth({
       tenantId: input.tenantId,
       userId: input.userId,

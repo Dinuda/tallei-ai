@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { evaluateAgentHandoff } from "../../../src/services/loop-runtime/spec-run-handoff-eval.js";
+import { evaluateAgentHandoff } from "../../../src/services/conductor/runtime/spec-run-handoff-eval.js";
 
 const plan = {
   agents: [],

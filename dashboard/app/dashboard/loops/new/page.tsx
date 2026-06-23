@@ -202,7 +202,7 @@ export default function NewLoopBuilderPage() {
   const syncSessionAfterTurnRef = useRef<(sessionId: string) => Promise<void>>(async () => undefined);
 
   const transport = useMemo(() => new DefaultChatTransport({
-    api: "/api/loop-builder/chat",
+    api: "/api/conductor/chat",
     body: () => ({ sessionId: sessionIdRef.current ?? undefined }),
   }), []);
 
@@ -218,7 +218,7 @@ export default function NewLoopBuilderPage() {
 
 
   const fetchSessionPayload = useCallback(async (sessionId: string) => {
-    const response = await fetch(`/api/loop-builder/sessions/${sessionId}`, { cache: "no-store" });
+    const response = await fetch(`/api/conductor/sessions/${sessionId}`, { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error ?? "Failed to load builder session");
     return payload;
@@ -495,6 +495,34 @@ export default function NewLoopBuilderPage() {
     () => findRunningBuilderCommand(commands),
     [commands],
   );
+
+  useEffect(() => {
+    if (!sessionId || !runningBackendCommand?.id) return;
+
+    let cancelled = false;
+    const refreshCommands = async () => {
+      try {
+        const payload = await fetchSessionPayload(sessionId);
+        if (cancelled) return;
+        const nextCommands = (payload.commands ?? []) as BuilderCommandUiSnapshot[];
+        setCommands(nextCommands);
+        applyChatMessages((prev) => hydrateBuilderMessagesFromCommands(prev, nextCommands));
+      } catch {
+        // Ignore transient poll failures while the backend command is still running.
+      }
+    };
+
+    void refreshCommands();
+    const interval = window.setInterval(() => {
+      void refreshCommands();
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [applyChatMessages, fetchSessionPayload, runningBackendCommand?.id, sessionId]);
+
   const backendCommandRunning = recoveryState.kind === "running" || Boolean(runningBackendCommand);
   const backendBusyLabel = builderRunningCommandLabel(runningBackendCommand);
   const chatTurnInFlight = status === "streaming" || status === "submitted";

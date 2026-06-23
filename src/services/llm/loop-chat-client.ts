@@ -9,7 +9,7 @@ import {
   isOpenCodeZenChatCompletionsModel,
   resolveChatModelForCompatibleProvider,
 } from "./chat-model-routing.js";
-import { isLoopBuilderReasoningModel } from "../loop-builder/openai-chat.js";
+import { isLoopBuilderReasoningModel } from "../conductor/llm/openai-chat.js";
 
 export function isLocalLoopChatMode(): boolean {
   return config.localModelMode;

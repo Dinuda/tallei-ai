@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { repairArtifactSetupToolInput } from "../../../src/services/loop-builder/artifact-setup-input.js";
+import { repairArtifactSetupToolInput } from "../../../src/services/conductor/inputs/artifact-setup-input.js";
 import {
   repairPrematureStringTermination,
   repairToolInputJsonString,
   repairUnquotedJsonKeys,
   tryParseToolInputJson,
-} from "../../../src/services/loop-builder/tool-input-json-repair.js";
-import { createLoopBuilderToolCallRepair } from "../../../src/services/loop-builder/tool-call-repair.js";
+} from "../../../src/services/conductor/repair/tool-input-json-repair.js";
+import { createLoopBuilderToolCallRepair } from "../../../src/services/conductor/repair/tool-call-repair.js";
 import { InvalidToolInputError } from "ai";
 
 const BROKEN_ARTIFACT_SETUP = "{\"requirementId\": \"artifact_contract\", \"draftTemplates\": [{\"templateId\":\"acknowledgment\",\"name\":\"Acknowledgment Reply\",\"props\":{\"subject\":\"Re: {{customer_subject}}\",\"previewText\":\"Thanks for reaching out — we've received your request\",\"greeting\":\"Hi {{customer_name}},\" body\":\"Thanks for contactingour support team. We've received your message and will get back to you shortly.\\n\\nYour request hasbeen logged and we'll prioritize it accordingly.\",\"signOff\":\"Best regards,\\n{{agent_name}}\"}},{\"templateId\":\"troubleshooting\",\"name\":\"Troubleshooting / Info Request\",\"props\":{\"subject\":\"Re: {{customer_subject}}\",\"previewText\":\"A few details to help resolve your issue\",\"greeting\":\"Hi {{customer_name}},\" body\":\"Thanks for reaching out.\",\"signOff\":\"Looking forward to your reply,\\n{{agent_name}}\"}}]}";

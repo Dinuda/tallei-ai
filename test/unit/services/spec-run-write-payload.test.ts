@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { enrichDraftPayload, prepareConnectorActionPayload } from "../../../src/services/loop-runtime/spec-run-write-payload.js";
-import type { RunContext } from "../../../src/services/loop-runtime/build-run-context.js";
+import { enrichDraftPayload, prepareConnectorActionPayload } from "../../../src/services/conductor/runtime/spec-run-write-payload.js";
+import type { RunContext } from "../../../src/services/conductor/runtime/build-run-context.js";
 
 const runContext: RunContext = {
   workflowId: "workflow-1",

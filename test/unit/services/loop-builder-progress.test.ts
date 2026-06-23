@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 test("mergeLoopBuilderUsageTotals derives total from prompt and completion", async () => {
-  const { mergeLoopBuilderUsageTotals } = await import("../../../src/services/loop-builder/progress.js");
+  const { mergeLoopBuilderUsageTotals } = await import("../../../src/services/conductor/utils/progress.js");
 
   const merged = mergeLoopBuilderUsageTotals(
     {
@@ -30,7 +30,7 @@ test("mergeLoopBuilderUsageTotals derives total from prompt and completion", asy
 });
 
 test("usageFromLanguageModelStep ignores inflated provider totalTokens", async () => {
-  const { usageFromLanguageModelStep } = await import("../../../src/services/loop-builder/progress.js");
+  const { usageFromLanguageModelStep } = await import("../../../src/services/conductor/utils/progress.js");
 
   const usage = usageFromLanguageModelStep(
     { promptTokens: 500, completionTokens: 250, totalTokens: 1_483_378 },

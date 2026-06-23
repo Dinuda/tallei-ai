@@ -4,9 +4,9 @@ import test from "node:test";
 import {
   deriveVerificationScope,
   selectedConnectorSlugsFromContract,
-} from "../../../src/services/loop-executor/verification-scope.js";
-import { deriveLoopBuildContract, resolveBuildRequirement } from "../../../src/services/loop-engine/build-contract.js";
-import { loopIntentContextSchema } from "../../../src/services/loop-engine/intent-context.js";
+} from "../../../src/services/conductor/services/verification-scope.js";
+import { deriveLoopBuildContract, resolveBuildRequirement } from "../../../src/services/conductor/domain/build-contract.js";
+import { loopIntentContextSchema } from "../../../src/services/conductor/contracts/intent-context.js";
 import type { ToolContract } from "../../../src/services/tool-spec/types.js";
 
 const intent = loopIntentContextSchema.parse({

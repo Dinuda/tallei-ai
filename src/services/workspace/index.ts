@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { requireLoopAdmin } from "../loop-executor/creator.js";
+import { requireLoopAdmin } from "../conductor/services/loop-workflow.service.js";
 import type { WorkspaceKind, WorkspaceView } from "./types.js";
 
 function slugifyName(name: string): string {
@@ -291,7 +291,7 @@ export async function assignLoopToWorkspace(auth: AuthContext, input: {
   const targetWorkspaceId = input.workspaceId ?? await resolveWorkspaceId(auth);
   if (input.workspaceId) await assertWorkspaceAccess(auth, input.workspaceId);
 
-  const { LOOP_DEFINITION_VERSION } = await import("../loop-executor/types.js");
+  const { LOOP_DEFINITION_VERSION } = await import("../conductor/workflow/types.js");
   const result = await pool.query<{ id: string }>(
     `UPDATE workflows
      SET workspace_id = $4,

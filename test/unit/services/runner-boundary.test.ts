@@ -6,7 +6,7 @@ import {
   normalizedHandoffFromStepOutput,
   routeBoundary,
   RUNNER_BOUNDARY_PROTOCOL_VERSION,
-} from "../../../src/services/loop-runtime/runner-boundary.js";
+} from "../../../src/services/conductor/runtime/runner-boundary.js";
 
 test("normalizedHandoffFromStepOutput prefers boundary envelope handoff", () => {
   const envelope = buildBoundaryEnvelope({

@@ -16,8 +16,8 @@ const auth = {
 
 test("memory search returns verified tool output without LLM synthesis", async () => {
   const [{ runLoopAgent }, { getToolHandler, registerToolHandler }] = await Promise.all([
-    import("../../../src/services/loop-executor/agent-runner.js"),
-    import("../../../src/services/loop-executor/tool-handlers.js"),
+    import("../../../src/services/conductor/workflow/agent-runner.js"),
+    import("../../../src/services/conductor/workflow/tool-handlers.js"),
   ]);
   const originalHandler = getToolHandler("internal.memory_search");
   assert.ok(originalHandler);
@@ -61,37 +61,10 @@ test("memory search returns verified tool output without LLM synthesis", async (
   }
 });
 
-test("memory search sources trigger confirmation gate", async () => {
-  const { evaluateAgentGoal } = await import("../../../src/services/loop-engine/goal-eval.js");
-  const result = await evaluateAgentGoal({
-    agent: {
-      id: "memory_search",
-      name: "Memory Search Agent",
-      task: "Search memories for this week's product updates.",
-      goal: "Return relevant memories with ids and excerpts.",
-      tools: [{ ref: "internal.memory_search" }],
-      gate: { type: "approval", question: "Use these memories?", approval: { surface: "review.memories" } },
-    },
-    result: {
-      text: "Memory search results:\n- [memory-1] Shipped persistent storage endpoints.",
-      data: {
-        sources: [{ id: "memory-1", text: "Shipped persistent storage endpoints.", score: 0.91 }],
-      },
-    },
-    definition: {
-      goal: "Write and send a weekly product sync email.",
-    } as never,
-  });
-
-  assert.equal(result.status, "needs_input");
-  assert.equal(result.gateType, "approval");
-});
-
-test("web search returns sources at top level for goal eval and handoff", async () => {
-  const [{ runLoopAgent }, { evaluateAgentGoal }, { getToolHandler, registerToolHandler }] = await Promise.all([
-    import("../../../src/services/loop-executor/agent-runner.js"),
-    import("../../../src/services/loop-engine/goal-eval.js"),
-    import("../../../src/services/loop-executor/tool-handlers.js"),
+test("web search returns sources at top level for handoff", async () => {
+  const [{ runLoopAgent }, { getToolHandler, registerToolHandler }] = await Promise.all([
+    import("../../../src/services/conductor/workflow/agent-runner.js"),
+    import("../../../src/services/conductor/workflow/tool-handlers.js"),
   ]);
   const originalHandler = getToolHandler("internal.web_search");
   assert.ok(originalHandler);
@@ -132,52 +105,7 @@ test("web search returns sources at top level for goal eval and handoff", async 
       url: "https://example.com/apple-ai",
       snippet: "Apple revealed a new AI architecture.",
     }]);
-
-    const goalEval = await evaluateAgentGoal({
-      agent: {
-        id: "web_research",
-        name: "Research Agent",
-        task: "Find recent AI industry news with URLs.",
-        goal: "Return recent web sources with title, url, and snippet.",
-        tools: [{ ref: "internal.web_search" }],
-      },
-      result,
-      definition: {
-        goal: "Write a weekly AI industry newsletter.",
-      } as never,
-    });
-
-    assert.equal(goalEval.status, "pass");
-    assert.match(goalEval.reason ?? "", /1 valid sources/i);
   } finally {
     registerToolHandler("internal.web_search", originalHandler);
   }
-});
-
-test("validated-empty memory search does not trigger confirmation gate", async () => {
-  const { evaluateAgentGoal } = await import("../../../src/services/loop-engine/goal-eval.js");
-  const result = await evaluateAgentGoal({
-    agent: {
-      id: "memory_search",
-      name: "Memory Search Agent",
-      task: "Search memories for this week's product updates.",
-      goal: "Return relevant memories with ids and excerpts.",
-      tools: [{ ref: "internal.memory_search" }],
-      gate: { type: "approval", question: "Use these memories?", approval: { surface: "review.memories" } },
-    },
-    result: {
-      text: "No validated memories found for this run intent.",
-      data: {
-        sources: [],
-        confidence: "none",
-        rejectedCount: 3,
-        noEvidenceReason: "No candidate directly supports the requested output.",
-      },
-    },
-    definition: {
-      goal: "Write and send a weekly product sync email.",
-    } as never,
-  });
-
-  assert.equal(result.status, "pass");
 });

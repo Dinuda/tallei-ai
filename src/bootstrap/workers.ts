@@ -13,7 +13,7 @@ import {
 import {
   startSpecLoopScheduler,
   stopSpecLoopScheduler,
-} from "../services/loop-runtime/index.js";
+} from "../services/conductor/runtime/index.js";
 import { isTemporalEnabled } from "../temporal/client.js";
 
 let workersRunning = false;

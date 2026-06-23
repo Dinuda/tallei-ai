@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { filterAndRankToolkitSearch, scoreToolkitRelevance } from "../../../src/services/loop-builder/app-search-ranking.js";
+import { filterAndRankToolkitSearch, scoreToolkitRelevance } from "../../../src/services/conductor/ranking/app-search-ranking.js";
 
 const toolkits = [
   {

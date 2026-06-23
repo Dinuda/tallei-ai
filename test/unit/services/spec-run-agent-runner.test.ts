@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { suppressAgentTextChunks } from "../../../src/services/loop-runtime/spec-run-agent-runner.js";
+import { suppressAgentTextChunks } from "../../../src/services/conductor/runtime/spec-run-agent-runner.js";
 
-const runnerPath = new URL("../../../src/services/loop-runtime/spec-run-agent-runner.ts", import.meta.url);
-const toolsPath = new URL("../../../src/services/loop-runtime/spec-run-agent-tools.ts", import.meta.url);
-const specRunnerPath = new URL("../../../src/services/loop-runtime/spec-runner.ts", import.meta.url);
-const interactionsPath = new URL("../../../src/services/loop-runtime/spec-run-interactions.ts", import.meta.url);
+const runnerPath = new URL("../../../src/services/conductor/runtime/spec-run-agent-runner.ts", import.meta.url);
+const toolsPath = new URL("../../../src/services/conductor/runtime/spec-run-agent-tools.ts", import.meta.url);
+const specRunnerPath = new URL("../../../src/services/conductor/runtime/spec-runner.ts", import.meta.url);
+const interactionsPath = new URL("../../../src/services/conductor/runtime/spec-run-interactions.ts", import.meta.url);
 
 test("spec run entry points use the agent orchestrator, streaming writer, and trigger-derived seed context", async () => {
   const source = await readFile(specRunnerPath, "utf8");
