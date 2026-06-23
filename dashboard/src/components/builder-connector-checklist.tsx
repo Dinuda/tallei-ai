@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronUp, ExternalLink, LoaderCircle, ShieldCheck } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, ExternalLink, LoaderCircle, Network, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -32,6 +32,44 @@ type Checklist = {
     selectedAccountIds: string[];
     actions: Array<{ slug: string; name: string; description: string; effect: string; available: boolean }>;
   }>;
+};
+
+type ConnectorAgentPlan = {
+  parentAgents: Array<{
+    id: string;
+    name: string;
+    goal: string;
+    toolkits: string[];
+    dependsOn: string[];
+    successCriteria: string[];
+    failurePolicy: string;
+    subAgents: Array<{
+      id: string;
+      parentAgentId: string;
+      goal: string;
+      toolkit: string;
+      accountId?: string;
+      dependsOn: string[];
+      testStatus: "not_run" | "passed" | "failed" | "skipped" | "unavailable";
+      operations: Array<{
+        id: string;
+        toolRef: string;
+        actionSlug: string;
+        name?: string;
+        inputBindings: Record<string, unknown>;
+        approvalPolicy: { required: boolean; reason?: string };
+        dependsOn: string[];
+      }>;
+    }>;
+  }>;
+};
+
+type ConnectorSetupState = {
+  requirementId: string;
+  stage: string;
+  agentPlan: ConnectorAgentPlan;
+  testRun?: { status: "not_run" | "passed" | "failed" | "skipped" | "unavailable"; errors: string[] };
+  warnings: string[];
 };
 
 type PendingAuth = {
@@ -78,9 +116,11 @@ export function BuilderConnectorChecklist({
   sessionId: string;
   requirementId: string;
   completed?: boolean;
-  onComplete?: (output: { answerText: string; requirementId: string; value: { selections: Array<{ toolkit: string; accounts: Array<{ id: string }>; actionSlugs: string[] }> } }) => void;
+  onComplete?: (output: { answerText: string; requirementId: string; value: unknown }) => void;
 }) {
   const [checklist, setChecklist] = useState<Checklist | null>(null);
+  const [setup, setSetup] = useState<ConnectorSetupState | null>(null);
+  const [setupRequired, setSetupRequired] = useState(false);
   const [busyToolkit, setBusyToolkit] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -248,18 +288,126 @@ export function BuilderConnectorChecklist({
   }
 
   useEffect(() => {
-    if (!completed && checklist?.complete) void confirmConnectedApps();
+    if (completed || !checklist?.complete || resolvingRef.current) return;
+    resolvingRef.current = true;
+    void (async () => {
+      try {
+        const response = await fetch(`/api/conductor/sessions/${sessionId}/connectors/setup/start`, { method: "POST" });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error ?? "Failed to start connector setup");
+        setSetup(payload.setup as ConnectorSetupState);
+        setSetupRequired(Boolean(payload.setupRequired));
+        if (!payload.setupRequired) {
+          resolvingRef.current = false;
+          await confirmConnectedApps();
+        }
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "We could not start connector setup.");
+      } finally {
+        resolvingRef.current = false;
+      }
+    })();
   }, [checklist?.complete, completed]);
 
+  function updateParentGoal(parentId: string, goal: string) {
+    setSetup((current) => current ? {
+      ...current,
+      agentPlan: {
+        parentAgents: current.agentPlan.parentAgents.map((parent) =>
+          parent.id === parentId ? { ...parent, goal } : parent),
+      },
+    } : current);
+  }
+
+  function updateSubAgentGoal(parentId: string, subAgentId: string, goal: string) {
+    setSetup((current) => current ? {
+      ...current,
+      agentPlan: {
+        parentAgents: current.agentPlan.parentAgents.map((parent) =>
+          parent.id === parentId
+            ? { ...parent, subAgents: parent.subAgents.map((subAgent) => subAgent.id === subAgentId ? { ...subAgent, goal } : subAgent) }
+            : parent),
+      },
+    } : current);
+  }
+
+  async function saveGraph() {
+    if (!setup) return;
+    setError(null);
+    setBusyToolkit("setup");
+    try {
+      const response = await fetch(`/api/conductor/sessions/${sessionId}/connectors/setup/update-graph`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentPlan: setup.agentPlan }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Failed to save connector graph");
+      setSetup(payload.setup as ConnectorSetupState);
+      if (Array.isArray(payload.errors) && payload.errors.length > 0) setError(payload.errors.join(" "));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "We could not save connector setup.");
+    } finally {
+      setBusyToolkit(null);
+    }
+  }
+
+  async function runSetupTest(skip = false) {
+    setError(null);
+    setBusyToolkit(skip ? "skip-test" : "test");
+    try {
+      await saveGraph();
+      const response = await fetch(`/api/conductor/sessions/${sessionId}/connectors/setup/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skip }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Failed to validate connector setup");
+      setSetup(payload.setup as ConnectorSetupState);
+      if (Array.isArray(payload.errors) && payload.errors.length > 0) setError(payload.errors.join(" "));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "We could not validate connector setup.");
+    } finally {
+      setBusyToolkit(null);
+    }
+  }
+
+  async function commitSetup() {
+    setError(null);
+    setBusyToolkit("commit");
+    try {
+      await saveGraph();
+      const response = await fetch(`/api/conductor/sessions/${sessionId}/connectors/setup/commit`, { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Failed to commit connector setup");
+      setSetup(payload.setup as ConnectorSetupState);
+      onComplete?.({
+        answerText: "Connector agent setup complete",
+        requirementId,
+        value: { agentPlan: (payload.setup as ConnectorSetupState).agentPlan },
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "We could not commit connector setup.");
+    } finally {
+      setBusyToolkit(null);
+    }
+  }
+
   if (completed) {
+    const parentGoals = setup?.agentPlan.parentAgents.map((parent) => parent.goal).filter(Boolean) ?? [];
+    const subAgentCount = setup?.agentPlan.parentAgents.reduce((total, parent) => total + parent.subAgents.length, 0) ?? 0;
     return (
       <div className="my-3 flex items-center gap-3 border border-emerald-200 bg-emerald-50 px-4 py-3">
         <span className="flex size-8 items-center justify-center bg-emerald-600 text-white">
           <Check className="size-4" />
         </span>
         <div>
-          <div className="text-sm font-semibold text-emerald-950" style={{ fontFamily: "var(--font-title)" }}>Apps connected</div>
-          <div className="text-xs text-emerald-700">The loop can use the required connected apps.</div>
+          <div className="text-sm font-semibold text-emerald-950" style={{ fontFamily: "var(--font-title)" }}>Connector setup complete</div>
+          <div className="text-xs text-emerald-700">
+            {parentGoals.length > 0 ? parentGoals.join("; ") : "The loop can use the required connected apps."}
+            {subAgentCount > 0 ? ` ${subAgentCount} connector sub-agent${subAgentCount === 1 ? "" : "s"} configured.` : ""}
+          </div>
         </div>
       </div>
     );
@@ -275,9 +423,9 @@ export function BuilderConnectorChecklist({
             </span>
             <div>
               <div className="flex items-center gap-2 text-[14px] font-bold tracking-[-0.02em] text-indigo-950" style={{ fontFamily: "var(--font-title)" }}>
-                Connect required apps
+                Connector agent setup
               </div>
-              <p className="mt-0.5 text-[13px] text-indigo-900/70">Connect the apps this loop needs to work.</p>
+              <p className="mt-0.5 text-[13px] text-indigo-900/70">Connect apps, confirm parent goals, and validate connector sub-agents.</p>
             </div>
           </div>
           <span className="border border-indigo-200 bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
@@ -374,6 +522,82 @@ export function BuilderConnectorChecklist({
             </div>
           );
         })}
+        {checklist?.complete && setupRequired && setup && (
+          <div className="mt-4 border border-indigo-200 bg-white">
+            <div className="border-b border-indigo-100 px-4 py-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-indigo-950" style={{ fontFamily: "var(--font-title)" }}>
+                <Network className="size-4" /> Parent goals and connector sub-agents
+              </div>
+              <p className="mt-1 text-xs text-indigo-900/70">Each parent goal coordinates one or more bounded connector sub-agents.</p>
+            </div>
+            <div className="space-y-4 p-4">
+              {setup.agentPlan.parentAgents.map((parent) => (
+                <div className="border border-indigo-100" key={parent.id}>
+                  <div className="border-b border-indigo-100 bg-indigo-50/50 p-3">
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-indigo-700">Parent agent goal</label>
+                    <textarea
+                      className="min-h-20 w-full border border-indigo-200 bg-white px-3 py-2 text-sm text-indigo-950"
+                      onChange={(event) => updateParentGoal(parent.id, event.target.value)}
+                      value={parent.goal}
+                    />
+                  </div>
+                  <div className="divide-y divide-indigo-100">
+                    {parent.subAgents.map((subAgent) => (
+                      <div className="p-3" key={subAgent.id}>
+                        <div className="mb-2 flex flex-wrap items-center gap-2">
+                          <span className="border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">{subAgent.toolkit}</span>
+                          <span className="text-xs text-indigo-900/60">{subAgent.operations.length} operation{subAgent.operations.length === 1 ? "" : "s"}</span>
+                          <span className="text-xs text-indigo-900/60">test: {subAgent.testStatus}</span>
+                        </div>
+                        <label className="mb-1 block text-xs font-medium text-indigo-950">Sub-agent goal</label>
+                        <input
+                          className="mb-3 w-full border border-indigo-200 px-3 py-2 text-sm"
+                          onChange={(event) => updateSubAgentGoal(parent.id, subAgent.id, event.target.value)}
+                          value={subAgent.goal}
+                        />
+                        <div className="space-y-2">
+                          {subAgent.operations.map((operation) => (
+                            <div className="border border-indigo-100 bg-indigo-50/40 px-3 py-2 text-xs" key={operation.id}>
+                              <div className="font-semibold text-indigo-950">{operation.name ?? operation.actionSlug}</div>
+                              <div className="mt-1 break-all text-indigo-900/70">{operation.toolRef}</div>
+                              <div className="mt-1 text-indigo-900/70">
+                                {Object.keys(operation.inputBindings).length} structured binding{Object.keys(operation.inputBindings).length === 1 ? "" : "s"}
+                                {operation.approvalPolicy.required ? " · approval required" : " · read/validation only"}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {setup.testRun && (
+                <div className={cn(
+                  "border px-3 py-2 text-xs",
+                  setup.testRun.status === "failed" ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                )}>
+                  Test status: {setup.testRun.status}
+                  {setup.testRun.errors.length > 0 ? ` — ${setup.testRun.errors.join(" ")}` : ""}
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button disabled={busyToolkit === "setup"} onClick={() => void saveGraph()} size="sm" style={{ borderRadius: 0 }} variant="outline">
+                  {busyToolkit === "setup" ? <LoaderCircle className="size-4 animate-spin" /> : "Save graph"}
+                </Button>
+                <Button disabled={busyToolkit === "test"} onClick={() => void runSetupTest(false)} size="sm" style={{ borderRadius: 0 }} variant="outline">
+                  {busyToolkit === "test" ? <LoaderCircle className="size-4 animate-spin" /> : "Validate setup"}
+                </Button>
+                <Button disabled={busyToolkit === "skip-test"} onClick={() => void runSetupTest(true)} size="sm" style={{ borderRadius: 0 }} variant="outline">
+                  {busyToolkit === "skip-test" ? <LoaderCircle className="size-4 animate-spin" /> : "Skip test"}
+                </Button>
+                <Button className="bg-indigo-700 text-white hover:bg-indigo-800" disabled={busyToolkit === "commit"} onClick={() => void commitSetup()} size="sm" style={{ borderRadius: 0 }}>
+                  {busyToolkit === "commit" ? <LoaderCircle className="size-4 animate-spin" /> : "Commit connector setup"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {fallbackUrl && (

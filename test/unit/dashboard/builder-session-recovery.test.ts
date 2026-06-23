@@ -14,7 +14,7 @@ test("hydrateBuilderMessagesFromCommands preserves message reference when nothin
     id: "assistant-1",
     role: "assistant",
     parts: [{
-      type: "tool-saveLoop",
+      type: "tool-previewAgentPlan",
       toolCallId: "tool-1",
       state: "output-available",
       output: { preview: true },
@@ -22,7 +22,7 @@ test("hydrateBuilderMessagesFromCommands preserves message reference when nothin
   }] as UIMessage[];
 
   const hydrated = hydrateBuilderMessagesFromCommands(messages, [{
-    toolName: "saveLoop",
+    toolName: "previewAgentPlan",
     status: "completed",
     result: { preview: true },
   }]);
@@ -35,15 +35,15 @@ test("hydrateBuilderMessagesFromCommands applies completed command output to pen
     id: "assistant-1",
     role: "assistant",
     parts: [{
-      type: "tool-saveLoop",
+      type: "tool-previewAgentPlan",
       toolCallId: "tool-1",
       state: "input-available",
-      input: { preview: true },
+      input: {},
     }],
   }] as UIMessage[];
 
   const hydrated = hydrateBuilderMessagesFromCommands(messages, [{
-    toolName: "saveLoop",
+    toolName: "previewAgentPlan",
     status: "completed",
     result: { preview: true, spec: { title: "Support loop" } },
   }]);
@@ -113,10 +113,10 @@ test("detectBuilderRecoveryState still flags pending backend command tools as in
       id: "assistant-1",
       role: "assistant",
       parts: [{
-        type: "tool-saveLoop",
+        type: "tool-previewAgentPlan",
         toolCallId: "tool-1",
         state: "input-available",
-        input: { preview: true },
+        input: {},
       }],
     }],
     commands: [],

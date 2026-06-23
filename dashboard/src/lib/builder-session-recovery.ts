@@ -1,11 +1,13 @@
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 
 import { maskBuilderIssueText } from "./builder-issue-text";
+import { isReasoningOnlyAssistantMessage } from "./loop-builder-transcript";
 
 export type BuilderCommandSnapshot = {
   id?: string;
   toolName?: string;
   status?: string;
+  input?: Record<string, unknown>;
   error?: string;
   result?: Record<string, unknown>;
   events?: Array<{
@@ -75,6 +77,7 @@ export function builderCommandFailureMessage(input: {
 }
 
 const BACKEND_COMMAND_TOOLS = new Set([
+  "resolveIntent",
   "getAvailableTools",
   "resolveBuildRequirement",
   "saveLoop",
@@ -234,6 +237,12 @@ export function detectBuilderRecoveryState(input: {
       message: "There was an issue while generating the response. Your message is ready to resend below.",
     };
   }
+  if (tail.role === "assistant" && isReasoningOnlyAssistantMessage(tail)) {
+    return {
+      kind: "interrupted",
+      message: "The builder paused before its next question. Send a short reply or resend your message to continue.",
+    };
+  }
 
   return { kind: "idle" };
 }
@@ -253,12 +262,16 @@ export function builderRunningCommandLabel(command: BuilderCommandSnapshot | nul
   if (latestEventMessage) return latestEventMessage;
 
   switch (command?.toolName) {
+    case "previewAgentPlan":
+      return "Designing specialist agents for your loop…";
     case "saveLoop":
       return "Designing specialist agents for your loop…";
     case "runBuilderTest":
       return "Running builder test...";
     case "getAvailableTools":
       return "Discovering available tools…";
+    case "resolveIntent":
+      return "Saving intent…";
     case "resolveBuildRequirement":
       return "Applying your selection…";
     case "runVerification":

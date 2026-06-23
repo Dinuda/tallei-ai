@@ -200,11 +200,6 @@
     "source": "src/routes/conductor.ts"
   },
   {
-    "method": "POST",
-    "path": "/api/conductor/intent/analyze",
-    "source": "src/routes/conductor.ts"
-  },
-  {
     "method": "GET",
     "path": "/api/conductor/jobs/:jobId",
     "source": "src/routes/conductor.ts"
@@ -250,6 +245,16 @@
     "source": "src/routes/conductor.ts"
   },
   {
+    "method": "POST",
+    "path": "/api/conductor/sessions/:sessionId/revision/confirm",
+    "source": "src/routes/conductor.ts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/conductor/sessions/:sessionId/revision/pending",
+    "source": "src/routes/conductor.ts"
+  },
+  {
     "method": "GET",
     "path": "/api/conductor/sessions/:sessionId/schedule-options",
     "source": "src/routes/conductor.ts"
@@ -262,26 +267,6 @@
   {
     "method": "GET",
     "path": "/api/conductor/specs/:specId",
-    "source": "src/routes/conductor.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/conductor/specs/:specId/approve",
-    "source": "src/routes/conductor.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/conductor/specs/:specId/archive",
-    "source": "src/routes/conductor.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/conductor/specs/:specId/refine",
-    "source": "src/routes/conductor.ts"
-  },
-  {
-    "method": "POST",
-    "path": "/api/conductor/specs/draft",
     "source": "src/routes/conductor.ts"
   },
   {

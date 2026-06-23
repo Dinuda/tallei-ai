@@ -31,7 +31,7 @@ test("loopBuilderStreamProviderOptions enables reasoning summary for reasoning m
     else process.env.TALLEI_LOOP_BUILDER__OPENAI_REASONING_EFFORT = previous;
   }
 });
-test("loopBuilderStreamProviderOptions enables thinking for OpenCode chat completions models", async () => {
+test("loopBuilderStreamProviderOptions disables OpenCode thinking by default", async () => {
   const previousProvider = process.env.TALLEI_LLM__PROVIDER;
   const previousEffort = process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT;
   process.env.TALLEI_LLM__PROVIDER = "opencode";
@@ -41,7 +41,10 @@ test("loopBuilderStreamProviderOptions enables thinking for OpenCode chat comple
   );
 
   try {
-    assert.deepEqual(loopBuilderStreamProviderOptions("deepseek-v4-flash"), {
+    assert.equal(loopBuilderStreamProviderOptions("deepseek-v4-flash"), undefined);
+    process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT = "low";
+    const withThinking = await import("../../../src/services/conductor/llm/openai-chat.js?t=opencode-thinking-on");
+    assert.deepEqual(withThinking.loopBuilderStreamProviderOptions("deepseek-v4-flash"), {
       opencode: {
         thinking: { type: "enabled" },
         reasoningEffort: "low",

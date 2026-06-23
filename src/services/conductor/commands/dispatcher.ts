@@ -14,8 +14,8 @@ import { normalizeDiscoveredToolContracts } from "../../connectors/platform-inte
 import { refreshBuilderConnectorAvailability } from "../services/connector.service.js";
 import { normalizeGetAvailableToolsInput } from "../inputs/get-available-tools-input.js";
 import {
+  createLoopIntentContext,
   loopIntentAnalysisSchema,
-  loopIntentContextSchema,
 } from "../contracts/intent-context.js";
 import {
   emptyLoopBuilderUsage,
@@ -26,11 +26,16 @@ import {
   type LoopBuilderUsage,
 } from "../utils/progress.js";
 import { compileEnrichedRuntimeSpecSnapshot } from "../services/spec.service.js";
+import { hydrateDiscoveredToolContractList } from "../runtime/definition-hydration.js";
+import { hydrateBuildContractArtifactBundle } from "../domain/build-contract.js";
+import { formatAgentPlanFromSnapshot } from "../builder/agent-plan.js";
 import { saveLoopFromSpec } from "../services/save-loop.service.js";
 import {
   assertBuildContractReady,
   deriveLoopBuildContract,
+  normalizeConnectorResolveValue,
   resolveBuildRequirement,
+  slimUnresolvedRequirements,
   unresolvedBuildRequirements,
 } from "../domain/build-contract.js";
 import {
@@ -40,6 +45,12 @@ import {
   phaseAfterRequirementsResolved,
   type WorkflowBuilderPhase,
 } from "../services/session.service.js";
+import {
+  clearCachedRuntimeSnapshot,
+  getCachedRuntimeSnapshot,
+  setCachedRuntimeSnapshot,
+} from "./snapshot-cache.js";
+import { saveScheduleFromBuildContract } from "./schedule.js";
 import {
   completeCommand,
   failCommand,
@@ -66,13 +77,10 @@ type WorkflowBuilderCommandView = {
   usage: LoopBuilderUsage;
   proposal?: unknown;
   spec?: unknown;
-  intentAnalysis?: unknown;
   composioSessionId?: string;
   result?: Record<string, unknown>;
   error?: string;
 };
-
-const commandQueues = new Map<string, Promise<void>>();
 
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
@@ -80,9 +88,11 @@ function iso(value: Date | string): string {
 
 function legacyKind(toolName: BuilderToolName): string {
   return ({
+    resolveIntent: "resolve-intent",
     getAvailableTools: "analyze-intent",
     resolveBuildRequirement: "resolve-build-requirement",
     refreshConnectorAvailability: "refresh-connector-availability",
+    previewAgentPlan: "preview-agent-plan",
     saveLoop: "save",
     runBuilderTest: "run-builder-test",
     runVerification: "run-verification",
@@ -104,7 +114,6 @@ function mapCommand(row: CommandRow): WorkflowBuilderCommandView {
     usage: row.usage_json ?? emptyLoopBuilderUsage(),
     ...(result.proposal ? { proposal: result.proposal } : {}),
     ...(result.spec ? { spec: result.spec } : {}),
-    ...(result.intentAnalysis ? { intentAnalysis: result.intentAnalysis } : {}),
     ...(typeof result.composioSessionId === "string" ? { composioSessionId: result.composioSessionId } : {}),
     ...(row.result_json ? { result } : {}),
     ...(row.error_text ? { error: row.error_text } : {}),
@@ -161,17 +170,28 @@ async function compileRuntimeSnapshotForSession(
   auth: AuthContext,
   sessionId: string,
   session: Awaited<ReturnType<typeof requireWorkflowBuilderSession>>,
+  options?: { useCache?: boolean },
 ) {
   if (!session.resolvedIntent) throw new Error("Resolved intent is required before compiling the runtime contract");
   const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
   assertBuildContractReady(buildContract);
+  const hydratedBuildContract = hydrateBuildContractArtifactBundle(buildContract, session.artifactBundleJson);
+
+  if (options?.useCache !== false) {
+    const cached = getCachedRuntimeSnapshot(sessionId, hydratedBuildContract, session.goal);
+    if (cached) return cached;
+  }
+
+  const discoveredToolContracts = await hydrateDiscoveredToolContractList(session.discoveredToolContracts);
   const snapshot = await compileEnrichedRuntimeSpecSnapshot({
     auth,
     prompt: session.goal,
     intentContext: session.resolvedIntent,
-    buildContract,
-    discoveredToolContracts: session.discoveredToolContracts,
+    buildContract: hydratedBuildContract,
+    discoveredToolContracts,
+    artifactBundle: session.artifactBundleJson,
   });
+  setCachedRuntimeSnapshot(sessionId, hydratedBuildContract, session.goal, snapshot);
   await updateWorkflowBuilderSession(auth, sessionId, { error: null });
   return snapshot;
 }
@@ -242,9 +262,61 @@ async function runSavedWorkflowTestRun(auth: AuthContext, workflowId: string): P
 async function execute(auth: AuthContext, sessionId: string, toolName: BuilderToolName, input: Record<string, unknown>) {
   let session = await requireWorkflowBuilderSession(auth, sessionId);
   switch (toolName) {
-    case "getAvailableTools": {
+    case "resolveIntent": {
       requirePhase(session.phase, ["new", "analyzing", "needs_clarification", "failed"], toolName);
       await updateWorkflowBuilderSession(auth, sessionId, { phase: "analyzing", error: null });
+      const {
+        outcome,
+        cadence,
+        approvalModel,
+        toolCategories,
+        runtimeInputs,
+        resolvedIntent: resolvedIntentText,
+        assumptions,
+      } = normalizeGetAvailableToolsInput(input, session.goal);
+      if (!resolvedIntentText) throw new Error("resolveIntent requires a normalized resolved intent");
+      const analysis = loopIntentAnalysisSchema.parse({
+        normalizedIntent: {
+          outcome,
+          toolCategories,
+          cadence,
+          approvalModel,
+          runtimeInputs,
+        },
+        questions: [],
+        assumptions,
+        connectorFeasibility: [],
+        interactivePrompts: [],
+        events: [],
+        analyzedAt: new Date().toISOString(),
+      });
+      const resolvedIntent = createLoopIntentContext({
+        analysis,
+        resolvedIntent: resolvedIntentText,
+      });
+      const buildContract = deriveLoopBuildContract({
+        intentContext: resolvedIntent,
+        discoveredToolContracts: session.discoveredToolContracts,
+      });
+      clearCachedRuntimeSnapshot(sessionId);
+      await updateWorkflowBuilderSession(auth, sessionId, {
+        phase: "resolving_requirements",
+        resolvedIntent,
+        buildContract,
+      });
+      return {
+        intentContext: resolvedIntent,
+        unresolvedRequirements: slimUnresolvedRequirements(buildContract),
+      };
+    }
+    case "getAvailableTools": {
+      requirePhase(session.phase, ["new", "analyzing", "needs_clarification", "resolving_requirements", "failed"], toolName);
+      await updateWorkflowBuilderSession(auth, sessionId, { phase: "analyzing", error: null });
+      reportLoopBuilderProgress({
+        stage: "discovery",
+        message: "Discovering connector capabilities...",
+        status: "running",
+      });
       const {
         outcome,
         cadence,
@@ -273,12 +345,9 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         events: [],
         analyzedAt: new Date().toISOString(),
       });
-      const resolvedIntent = loopIntentContextSchema.parse({
+      const resolvedIntent = createLoopIntentContext({
         analysis,
-        decisions: [],
-        assumptions: analysis.assumptions,
         resolvedIntent: resolvedIntentText,
-        resolvedAt: new Date().toISOString(),
       });
       const discovered = await discoverToolsForLoopBuild({
         auth,
@@ -290,9 +359,7 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         limit: 24,
       });
       const discoveredTriggers = await listComposioTriggerTypes(selectedToolkits).catch(() => []);
-      if (discovered.sessionId != null && discovered.sessionId !== session.composioSessionId) {
-        throw new Error("Composio discovery did not reuse the persisted builder session");
-      }
+      const composioSessionId = discovered.sessionId ?? session.composioSessionId;
       const contracts = normalizeDiscoveredToolContracts(discovered.tools.map((entry) => ({
         ...entry.contract,
         constraints: { ...entry.contract.constraints, connected: entry.connected },
@@ -302,29 +369,39 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         discoveredToolContracts: contracts,
         discoveredTriggers,
       });
+      clearCachedRuntimeSnapshot(sessionId);
       await updateWorkflowBuilderSession(auth, sessionId, {
         phase: "resolving_requirements",
-        intentAnalysis: analysis,
+        composioSessionId,
         resolvedIntent,
         discoveredToolContracts: contracts,
         buildContract,
       });
+      reportLoopBuilderProgress({
+        stage: "discovery",
+        message: `Discovered ${discovered.tools.length} connector action(s).`,
+        status: "completed",
+        details: {
+          toolCount: discovered.tools.length,
+          composioSessionId,
+        },
+      });
       return {
-        intentAnalysis: analysis,
         intentContext: resolvedIntent,
-        composioSessionId: discovered.sessionId,
+        composioSessionId,
+        toolCount: discovered.tools.length,
         tools: discovered.tools.map((entry) => ({
           name: entry.contract.name,
           description: entry.contract.description,
           connected: entry.connected,
           risk: entry.contract.constraints.risk ?? null,
         })),
-        buildContract,
-        unresolvedRequirements: unresolvedBuildRequirements(buildContract),
+        unresolvedRequirements: slimUnresolvedRequirements(buildContract),
       };
     }
     case "resolveBuildRequirement": {
       requirePhase(session.phase, ["resolving_requirements", "intent_resolved", "failed"], toolName);
+      session = await requireWorkflowBuilderSession(auth, sessionId);
       if (!session.buildContract) throw new Error("The builder session has no build contract.");
       let discoveredToolContracts = session.discoveredToolContracts;
       const target = session.buildContract.requirements.find((entry) => entry.id === String(input.requirementId ?? ""));
@@ -333,14 +410,19 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         session = await requireWorkflowBuilderSession(auth, sessionId);
         discoveredToolContracts = session.discoveredToolContracts;
       }
+      session = await requireWorkflowBuilderSession(auth, sessionId);
       if (!session.buildContract) throw new Error("The builder session has no build contract.");
+      const requirementId = String(input.requirementId ?? "");
+      const resolvedTarget = session.buildContract.requirements.find((entry) => entry.id === requirementId);
+      const normalizedValue = normalizeConnectorResolveValue(resolvedTarget?.kind ?? "", input.value);
       const buildContract = resolveBuildRequirement({
         contract: session.buildContract,
-        requirementId: String(input.requirementId ?? ""),
-        value: input.value,
+        requirementId,
+        value: normalizedValue,
         discoveredToolContracts,
       });
-      const unresolvedRequirements = unresolvedBuildRequirements(buildContract);
+      const unresolvedRequirements = slimUnresolvedRequirements(buildContract);
+      clearCachedRuntimeSnapshot(sessionId);
       await updateWorkflowBuilderSession(auth, sessionId, {
         phase: phaseAfterRequirementsResolved(session.phase, unresolvedRequirements.length),
         buildContract,
@@ -348,34 +430,28 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         error: null,
       });
       return {
-        buildContract,
-        unresolvedRequirements,
+        resolvedRequirementId: String(input.requirementId ?? ""),
         readyForSpecDraft: unresolvedRequirements.length === 0,
+        unresolvedRequirements,
       };
     }
     case "refreshConnectorAvailability": {
       requirePhase(session.phase, ["resolving_requirements", "intent_resolved", "failed"], toolName);
       return { checklist: await refreshBuilderConnectorAvailability(auth, sessionId) };
     }
+    case "previewAgentPlan": {
+      requirePhase(session.phase, ["intent_resolved", "failed"], toolName);
+      const snapshot = await compileRuntimeSnapshotForSession(auth, sessionId, session);
+      return formatAgentPlanFromSnapshot(snapshot);
+    }
     case "saveLoop": {
-      const preview = input.preview === true;
-      if (!preview) requireApproval(input, toolName);
+      requireApproval(input, toolName);
       requirePhase(session.phase, ["intent_resolved", "saved", "failed"], toolName);
-
-      if (preview) {
-        return { spec: await compileRuntimeSnapshotForSession(auth, sessionId, session), preview: true };
-      }
 
       if (session.phase === "saved" && session.workflowId) {
         const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
         if (!buildContract) throw new Error("Builder session is missing a build contract.");
-        const spec = await compileEnrichedRuntimeSpecSnapshot({
-          auth,
-          prompt: session.goal,
-          intentContext: session.resolvedIntent ?? undefined,
-          buildContract,
-          discoveredToolContracts: session.discoveredToolContracts,
-        });
+        const spec = await compileRuntimeSnapshotForSession(auth, sessionId, session);
         const verification = await getWorkflowVerification(auth, session.workflowId);
         return {
           workflowId: session.workflowId,
@@ -390,20 +466,8 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       if (!session.resolvedIntent) throw new Error("Resolved intent is required before saving");
       const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
       assertBuildContractReady(buildContract);
-      const snapshot = await compileEnrichedRuntimeSpecSnapshot({
-        auth,
-        prompt: session.goal,
-        intentContext: session.resolvedIntent,
-        buildContract,
-        discoveredToolContracts: session.discoveredToolContracts,
-      });
-      const scheduleRequirement = buildContract.requirements.find((entry) => entry.kind === "trigger_schedule");
-      const scheduleValue = scheduleRequirement?.value && typeof scheduleRequirement.value === "object" && !Array.isArray(scheduleRequirement.value)
-        ? scheduleRequirement.value as Record<string, unknown>
-        : {};
-      const eventDriven = scheduleValue.trigger === "event";
-      const approvedCron = eventDriven ? "0 9 * * *" : String(scheduleValue.cron ?? "0 9 * * 1");
-      const approvedTimezone = eventDriven ? "UTC" : String(scheduleValue.timezone ?? "UTC");
+      const snapshot = await compileRuntimeSnapshotForSession(auth, sessionId, session);
+      const { cron: approvedCron, timezone: approvedTimezone } = saveScheduleFromBuildContract(buildContract);
       const loop = await saveLoopFromSpec({
         auth,
         specSnapshot: snapshot,
@@ -447,37 +511,49 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
   }
 }
 
+export async function executeWorkflowBuilderToolNow(
+  auth: AuthContext,
+  sessionId: string,
+  toolName: BuilderToolName,
+  input: Record<string, unknown>,
+  onProgress?: (events: LoopBuilderProgressEvent[], usage: LoopBuilderUsage) => void | Promise<void>,
+): Promise<{ result: Record<string, unknown>; events: LoopBuilderProgressEvent[]; usage: LoopBuilderUsage }> {
+  const events: LoopBuilderProgressEvent[] = [];
+  const usage = emptyLoopBuilderUsage();
+  const result = await runWithLoopBuilderProgress({
+    append: (event) => {
+      const next = {
+        ...event,
+        ...(event.details !== undefined ? { details: sanitizeLoopBuilderProgressDetails(event.details) } : {}),
+        id: events.length + 1,
+        at: new Date().toISOString(),
+      };
+      events.push(next);
+      if (event.model) usage.models[event.model] = (usage.models[event.model] ?? 0) + 1;
+      if (event.promptTokens != null || event.completionTokens != null) {
+        usage.calls += 1;
+        usage.promptTokens += event.promptTokens ?? 0;
+        usage.completionTokens += event.completionTokens ?? 0;
+        usage.totalTokens = usage.promptTokens + usage.completionTokens;
+        usage.estimatedCostUsd = Number((usage.estimatedCostUsd + (event.estimatedCostUsd ?? 0)).toFixed(8));
+      }
+      void onProgress?.(events.slice(-100), usage);
+    },
+  }, () => execute(auth, sessionId, toolName, input));
+  return { result, events: events.slice(-100), usage };
+}
+
 async function runCommand(auth: AuthContext, commandId: string, sessionId: string, toolName: BuilderToolName, input: Record<string, unknown>) {
   await markCommandRunning(commandId);
   try {
-    const events: LoopBuilderProgressEvent[] = [];
-    const usage = emptyLoopBuilderUsage();
-    const result = await runWithLoopBuilderProgress({
-      append: (event) => {
-        const next = {
-          ...event,
-          ...(event.details !== undefined ? { details: sanitizeLoopBuilderProgressDetails(event.details) } : {}),
-          id: events.length + 1,
-          at: new Date().toISOString(),
-        };
-        events.push(next);
-        if (event.model) usage.models[event.model] = (usage.models[event.model] ?? 0) + 1;
-        if (event.promptTokens != null || event.completionTokens != null) {
-          usage.calls += 1;
-          usage.promptTokens += event.promptTokens ?? 0;
-          usage.completionTokens += event.completionTokens ?? 0;
-          usage.totalTokens = usage.promptTokens + usage.completionTokens;
-          usage.estimatedCostUsd = Number((usage.estimatedCostUsd + (event.estimatedCostUsd ?? 0)).toFixed(8));
-        }
-        void updateCommandProgress(commandId, events.slice(-100), usage);
-      },
-    }, () => execute(auth, sessionId, toolName, input));
-    await completeCommand(commandId, result, events.slice(-100), usage);
+    const completed = await executeWorkflowBuilderToolNow(auth, sessionId, toolName, input, (events, usage) =>
+      updateCommandProgress(commandId, events, usage));
+    await completeCommand(commandId, completed.result, completed.events, completed.usage);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await failCommand(commandId, message);
     if (!isRecoverableBuilderError(message)) {
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "failed", error: { message } }).catch(() => undefined);
+      await updateWorkflowBuilderSession(auth, sessionId, { phase: "failed", builderState: "failed", error: { message } }).catch(() => undefined);
     }
   }
 }
@@ -499,11 +575,7 @@ export async function dispatchWorkflowBuilderCommand(input: {
     inputJson: input.input,
     usage: emptyLoopBuilderUsage(),
   });
-  const previous = commandQueues.get(session.id) ?? Promise.resolve();
-  const queued = previous.then(() => runCommand(input.auth, commandId, session.id, input.toolName, input.input));
-  commandQueues.set(session.id, queued.finally(() => {
-    if (commandQueues.get(session.id) === queued) commandQueues.delete(session.id);
-  }));
+  void runCommand(input.auth, commandId, session.id, input.toolName, input.input);
   return mapCommand(row);
 }
 

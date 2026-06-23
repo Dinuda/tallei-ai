@@ -1,6 +1,7 @@
 import { InvalidToolInputError, type ModelMessage, type ToolCallRepairFunction, type ToolSet } from "ai";
 
 import { repairArtifactSetupToolInput } from "../inputs/artifact-setup-input.js";
+import { repairRenderTypeToolInput } from "../builder/render-type.js";
 import {
   extractAppSelectionSlugsFromUnknown,
   normalizeGetAvailableToolsInput,
@@ -9,12 +10,14 @@ import { repairToolInputJsonString, tryParseToolInputJson } from "./tool-input-j
 
 const JSON_REPAIR_TOOLS = new Set([
   "artifactSetup",
+  "renderType",
   "requirementSetup",
   "interactivePrompt",
   "scheduleSetup",
   "connectorSetup",
   "knowledgeBaseSetup",
   "appSelection",
+  "resolveIntent",
 ]);
 
 export function createLoopBuilderToolCallRepair(sessionGoal: string): ToolCallRepairFunction<ToolSet> {
@@ -27,6 +30,11 @@ export function createLoopBuilderToolCallRepair(sessionGoal: string): ToolCallRe
 
     if (toolCall.toolName === "artifactSetup") {
       const repaired = repairArtifactSetupToolInput(toolCall.input);
+      return repaired ? { ...toolCall, input: repaired } : null;
+    }
+
+    if (toolCall.toolName === "renderType") {
+      const repaired = repairRenderTypeToolInput(toolCall.input);
       return repaired ? { ...toolCall, input: repaired } : null;
     }
 

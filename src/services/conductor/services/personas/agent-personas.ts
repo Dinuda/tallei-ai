@@ -122,6 +122,11 @@ export function resolveAgentRole(name: string, goal: string): AgentRoleDefinitio
   return best;
 }
 
+export function roleDefinitionForKey(roleKey: AgentPersonaRoleKey): AgentRoleDefinition {
+  return AGENT_ROLE_CATALOG.find((role) => role.roleKey === roleKey)
+    ?? AGENT_ROLE_CATALOG.find((role) => role.roleKey === "generalist")!;
+}
+
 export function roleBadgeClass(roleKey: AgentPersonaRoleKey): string {
   const map: Record<AgentPersonaRoleKey, string> = {
     researcher: "bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]",

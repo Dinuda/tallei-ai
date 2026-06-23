@@ -5,6 +5,7 @@ import { nextCronRunAt, validateFiveFieldCron } from "./schedule-cron.js";
 import { isPlatformManagedToolkit } from "../../connectors/platform-integrations.js";
 import type { LoopIntentContext } from "../contracts/intent-context.js";
 import type { ToolContract } from "../../tool-spec/types.js";
+import { connectorAgentPlanSchema, type ConnectorAgentPlan } from "../contracts/connector-setup.js";
 
 export const buildRequirementKindSchema = z.enum([
   "connector",
@@ -19,11 +20,11 @@ export const buildRequirementStatusSchema = z.enum(["unresolved", "resolved", "i
 const buildRequirementSchema = z.object({
   id: z.string().min(1),
   kind: buildRequirementKindSchema,
-  question: z.string().min(1),
-  reason: z.string().min(1),
+  question: z.string().min(1).optional(),
+  reason: z.string().min(1).optional(),
   required: z.boolean().default(true),
   allowNone: z.boolean().default(false),
-  valueSchema: z.record(z.unknown()),
+  valueSchema: z.record(z.unknown()).optional(),
   status: buildRequirementStatusSchema.default("unresolved"),
   value: z.unknown().optional(),
   provenance: z.object({
@@ -117,6 +118,20 @@ const objectSchema = (properties: Record<string, unknown>, required: string[]) =
   required,
 });
 
+function connectorSelectionRecords(contract: AnyLoopBuildContract | null | undefined): Record<string, unknown>[] {
+  if (!contract) return [];
+  const requirement = contract.requirements.find((entry) => entry.kind === "connector" && entry.status === "resolved");
+  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+    ? requirement.value as Record<string, unknown>
+    : {};
+  return Array.isArray(value.selections)
+    ? value.selections.flatMap((selection) => {
+      if (!selection || typeof selection !== "object" || Array.isArray(selection)) return [];
+      return [selection as Record<string, unknown>];
+    })
+    : [];
+}
+
 function toolkitFor(contract: ToolContract): string {
   const configured = contract.constraints.toolkit;
   if (typeof configured === "string" && configured.trim()) return configured.trim().toLowerCase();
@@ -197,6 +212,9 @@ export function deriveLoopBuildContract(input: {
             },
           }, ["toolkit", "accounts", "actionSlugs"]),
         },
+        agentPlan: { type: "object" },
+        testRun: { type: "object" },
+        warnings: { type: "array", items: { type: "string" } },
       }, ["selections"]),
     }));
   }
@@ -294,6 +312,7 @@ export function deriveLoopBuildContract(input: {
       valueSchema: objectSchema({
         mode: { type: "string", enum: ["supplied_template", "approved_generated_structure", "none"] },
         template: { type: "string", minLength: 1 },
+        bundleRef: { type: "string", minLength: 1 },
         structure: { type: "string", minLength: 1 },
       }, ["mode"]),
     }));
@@ -376,6 +395,9 @@ function semanticErrors(requirement: BuildRequirement, value: unknown, contracts
     }
   }
   if (requirement.kind === "artifact_contract" && record.mode === "supplied_template") {
+    if (typeof record.bundleRef === "string" && record.bundleRef.trim().length > 0) {
+      return [];
+    }
     if (typeof record.template !== "string") {
       return ["A supplied template decision requires template content or a template reference."];
     }
@@ -395,12 +417,30 @@ function semanticErrors(requirement: BuildRequirement, value: unknown, contracts
   return [];
 }
 
+export function normalizeConnectorResolveValue(requirementKind: string, value: unknown): unknown {
+  if (requirementKind !== "connector") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (Array.isArray(record.selections)) return value;
+  if (typeof record.toolkit !== "string") return value;
+  return {
+    selections: [{
+      toolkit: record.toolkit,
+      accounts: Array.isArray(record.accounts) ? record.accounts : [],
+      actionSlugs: Array.isArray(record.actionSlugs) ? record.actionSlugs.map(String) : [],
+    }],
+  };
+}
+
 export function artifactContractValueIsComplete(value: unknown): boolean {
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const mode = record.mode;
   if (mode === "none") return true;
   if (mode === "approved_generated_structure") {
     return typeof record.structure === "string" && record.structure.trim().length > 0;
+  }
+  if (mode === "supplied_template" && typeof record.bundleRef === "string" && record.bundleRef.trim().length > 0) {
+    return true;
   }
   if (mode !== "supplied_template" || typeof record.template !== "string" || record.template.trim().length === 0) {
     return false;
@@ -436,7 +476,7 @@ export function resolveBuildRequirement(input: {
   }
 
   const ajv = new Ajv({ allErrors: true, strict: false });
-  const validator = ajv.compile(target.valueSchema);
+  const validator = ajv.compile(target.valueSchema ?? { type: "object" });
   const valid = validator(input.value);
   const errors = [
     ...(valid ? [] : (ajv.errorsText(validator.errors, { separator: "; " }) ? [ajv.errorsText(validator.errors, { separator: "; " })] : ["Value does not match the required schema."])),
@@ -447,8 +487,9 @@ export function resolveBuildRequirement(input: {
     if (errors.length > 0) return { ...entry, status: "invalid", value: input.value, validationErrors: errors };
     const record = input.value && typeof input.value === "object" && !Array.isArray(input.value) ? input.value as Record<string, unknown> : {};
     const explicitNone = record.mode === "none";
+    const { valueSchema: _valueSchema, triggerCapabilities: _triggerCapabilities, question: _question, reason: _reason, ...resolvedFields } = entry;
     return {
-      ...entry,
+      ...resolvedFields,
       status: "resolved",
       value: input.value,
       provenance: { source: explicitNone ? "explicit_none" : "user", resolvedAt: now },
@@ -482,6 +523,36 @@ export function unresolvedBuildRequirements(contract: LoopBuildContract): BuildR
   return loopBuildContractSchema.parse(contract).requirements.filter((entry) => entry.required && entry.status !== "resolved");
 }
 
+export function slimUnresolvedRequirements(
+  contract: LoopBuildContract,
+): Array<{ id: string; kind: string; question: string }> {
+  return unresolvedBuildRequirements(contract).map(({ id, kind, question }) => ({
+    id,
+    kind,
+    question: question ?? `Resolve ${kind}`,
+  }));
+}
+
+export function hydrateBuildContractArtifactBundle(
+  contract: LoopBuildContract,
+  artifactBundle: unknown,
+): LoopBuildContract {
+  if (artifactBundle == null) return contract;
+  const template = typeof artifactBundle === "string" ? artifactBundle : JSON.stringify(artifactBundle);
+  const requirements = contract.requirements.map((requirement) => {
+    if (requirement.id !== "artifact_contract" || requirement.status !== "resolved") return requirement;
+    const value = requirement.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
+      ? requirement.value as Record<string, unknown>
+      : {};
+    if (value.mode !== "supplied_template" || typeof value.bundleRef !== "string") return requirement;
+    return {
+      ...requirement,
+      value: { mode: "supplied_template", template },
+    };
+  });
+  return loopBuildContractSchema.parse({ ...contract, requirements });
+}
+
 export function assertBuildContractReady(contract: AnyLoopBuildContract | null | undefined): asserts contract is AnyLoopBuildContract {
   if (!contract) throw new Error("A build contract is required before drafting the spec.");
   if (isPersistedBuildContract(contract)) {
@@ -503,21 +574,9 @@ export function selectedConnectorAccountIds(
 ): string[] {
   if (!contract) return [];
   const normalizedToolkit = toolkit.trim().toLowerCase();
-  const requirement = contract.requirements.find((entry) => entry.kind === "connector" && entry.status === "resolved");
-  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
-    ? requirement.value as Record<string, unknown>
-    : {};
-  const selections = Array.isArray(value.selections) ? value.selections : [];
-  const selection = selections.find((candidate) => {
-    const record = candidate && typeof candidate === "object" && !Array.isArray(candidate)
-      ? candidate as Record<string, unknown>
-      : {};
-    return String(record.toolkit ?? "").trim().toLowerCase() === normalizedToolkit;
-  });
-  const record = selection && typeof selection === "object" && !Array.isArray(selection)
-    ? selection as Record<string, unknown>
-    : {};
-  return Array.isArray(record.accounts) ? record.accounts.flatMap((account) => {
+  const selection = connectorSelectionRecords(contract).find((candidate) => String(candidate.toolkit ?? "").trim().toLowerCase() === normalizedToolkit);
+  if (!selection) return [];
+  return Array.isArray(selection.accounts) ? selection.accounts.flatMap((account) => {
     const accountRecord = account && typeof account === "object" && !Array.isArray(account)
       ? account as Record<string, unknown>
       : {};
@@ -551,24 +610,39 @@ export function selectedStableInputs(contract: AnyLoopBuildContract | null | und
   return inputs;
 }
 
+export function selectedConnectorSelections(
+  contract: AnyLoopBuildContract | null | undefined,
+): Array<{ toolkit: string; actionSlugs: string[] }> {
+  return connectorSelectionRecords(contract).map((selection) => {
+    const record = selection && typeof selection === "object" && !Array.isArray(selection)
+      ? selection as Record<string, unknown>
+      : {};
+    const toolkit = typeof record.toolkit === "string" ? record.toolkit.trim().toLowerCase() : "";
+    const actionSlugs = Array.isArray(record.actionSlugs) ? record.actionSlugs.map(String).filter(Boolean) : [];
+    return { toolkit, actionSlugs };
+  }).filter((entry) => entry.toolkit && entry.actionSlugs.length > 0);
+}
+
 export function selectedConnectorActionSlugs(contract: AnyLoopBuildContract | null | undefined): string[] {
   if (!contract) return [];
+  const slugs = new Set<string>();
+  for (const selection of selectedConnectorSelections(contract)) {
+    for (const actionSlug of selection.actionSlugs) {
+      if (actionSlug.trim()) slugs.add(actionSlug);
+    }
+  }
+  return [...slugs];
+}
+
+export function selectedConnectorAgentPlan(contract: AnyLoopBuildContract | null | undefined): ConnectorAgentPlan | null {
+  if (!contract) return null;
   const requirement = contract.requirements.find((entry) => entry.kind === "connector" && entry.status === "resolved");
   const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
     ? requirement.value as Record<string, unknown>
     : {};
-  const selections = Array.isArray(value.selections) ? value.selections : [];
-  const slugs = new Set<string>();
-  for (const selection of selections) {
-    const record = selection && typeof selection === "object" && !Array.isArray(selection)
-      ? selection as Record<string, unknown>
-      : {};
-    const actionSlugs = Array.isArray(record.actionSlugs) ? record.actionSlugs.map(String) : [];
-    for (const slug of actionSlugs) {
-      if (slug.trim()) slugs.add(slug);
-    }
-  }
-  return [...slugs];
+  const agentPlan = value.agentPlan;
+  if (!agentPlan) return null;
+  return connectorAgentPlanSchema.parse(agentPlan);
 }
 
 export type GroundingSourceRef =

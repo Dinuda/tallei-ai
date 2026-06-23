@@ -9,7 +9,8 @@ import {
   normalizeEmailTemplateProps,
   templateTypeLabel,
 } from "@/lib/email-artifacts/templates";
-import type { EmailArtifactTemplate, EmailTemplateProps } from "@/lib/email-artifacts/types";
+import type { EmailArtifactTemplate } from "@/lib/email-artifacts/types";
+import { renderEmailArtifactOnServer } from "@/lib/email-artifacts/render-email-action";
 
 const renderCache = new Map<string, { html: string; text: string }>();
 const renderInflight = new Map<string, Promise<{ html: string; text: string }>>();
@@ -41,21 +42,10 @@ export async function renderEmailArtifactTemplate(template: {
   if (inflight) return inflight;
 
   const promise = (async () => {
-    const props = JSON.parse(template.reactEmailSource) as EmailTemplateProps;
-    const response = await fetch("/api/conductor/render-email-artifact", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        designId: BUILDER_ARTIFACT_DESIGN_ID,
-        ...props,
-        editorContent: template.editorContent,
-      }),
+    const result = await renderEmailArtifactOnServer({
+      reactEmailSource: template.reactEmailSource,
+      editorContent: template.editorContent,
     });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(typeof payload.error === "string" ? payload.error : "Could not render template");
-    }
-    const result = payload as { html: string; text: string };
     renderCache.set(cacheKey, result);
     return result;
   })();

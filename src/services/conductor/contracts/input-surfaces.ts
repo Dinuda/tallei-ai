@@ -88,6 +88,7 @@ export const inputRequirementSchema = z.preprocess(
     surface: inputSurfaceSchema,
     label: z.string().min(1).trim().optional(),
     description: z.string().min(1).trim().optional(),
+    value: z.unknown().optional(),
     required: z.boolean().default(true),
     when: inputRequirementWhenSchema.default("run_start"),
   }),

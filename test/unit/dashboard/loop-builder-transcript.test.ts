@@ -368,6 +368,29 @@ test("shouldShowBuilderThinking is false when assistant already has visible tool
   );
 });
 
+test("shouldShowBuilderThinking stays true after reasoning-only assistant output settles", async () => {
+  const { shouldShowBuilderThinking } = await import(
+    "../../../dashboard/src/lib/loop-builder-transcript.ts"
+  );
+
+  assert.equal(
+    shouldShowBuilderThinking({
+      status: "streaming",
+      messages: [{
+        id: "a1",
+        role: "assistant",
+        parts: [{
+          type: "reasoning",
+          text: "The user wants support ticket monitoring. I'm in the Intent Analyst phase.",
+          state: "done",
+        }],
+      }],
+      hasComposerGate: false,
+    }),
+    true,
+  );
+});
+
 test("shouldShowBuilderThinking is true while streaming with no visible assistant content", async () => {
   const { shouldShowBuilderThinking } = await import(
     "../../../dashboard/src/lib/loop-builder-transcript.ts"
@@ -390,5 +413,31 @@ test("shouldShowBuilderThinking is true while streaming with no visible assistan
       hasComposerGate: false,
     }),
     true,
+  );
+});
+
+test("isReasoningOnlyAssistantMessage detects reasoning-only assistant turns", async () => {
+  const { isReasoningOnlyAssistantMessage } = await import(
+    "../../../dashboard/src/lib/loop-builder-transcript.ts"
+  );
+
+  assert.equal(
+    isReasoningOnlyAssistantMessage({
+      id: "a1",
+      role: "assistant",
+      parts: [{ type: "reasoning", text: "Planning next step.", state: "done" }],
+    }),
+    true,
+  );
+  assert.equal(
+    isReasoningOnlyAssistantMessage({
+      id: "a2",
+      role: "assistant",
+      parts: [
+        { type: "reasoning", text: "Planning next step.", state: "done" },
+        { type: "text", text: "How often should this run?" },
+      ],
+    }),
+    false,
   );
 });

@@ -5,35 +5,34 @@ import {
 } from "../domain/build-contract.js";
 import type { NoSlopSpec } from "../contracts/spec-contracts.js";
 import type { ToolContract } from "../../tool-spec/types.js";
-import { canonicalToolRef, connectorActionToolRef, normalizeToolRef } from "../../tool-spec/tool-contracts.js";
+import { canonicalToolRef, normalizeToolRef } from "../../tool-spec/tool-contracts.js";
 
 export type SpecAvailableTool = {
   toolRef: string;
   name: string;
   effect: ToolContract["effect"] | "internal";
   description: string;
+  plannerRole?: "read" | "draft" | "publish";
 };
 
 function contractActionSlug(contract: ToolContract): string {
   const configured = contract.constraints.actionSlug;
   if (typeof configured === "string" && configured.trim()) return configured.trim();
-  return contract.toolRef.split(".").pop() ?? contract.name;
+  return contract.toolRef.split(".").pop() ?? contract.name ?? "action";
 }
 
-function connectorSelections(buildContract: LoopBuildContract): Array<{ toolkit: string; actionSlugs: string[] }> {
-  const requirement = buildContract.requirements.find((entry) => entry.kind === "connector" && entry.status === "resolved");
-  const value = requirement?.value && typeof requirement.value === "object" && !Array.isArray(requirement.value)
-    ? requirement.value as Record<string, unknown>
-    : {};
-  const selections = Array.isArray(value.selections) ? value.selections : [];
-  return selections.map((selection) => {
-    const record = selection && typeof selection === "object" && !Array.isArray(selection)
-      ? selection as Record<string, unknown>
-      : {};
-    const toolkit = typeof record.toolkit === "string" ? record.toolkit.trim().toLowerCase() : "";
-    const actionSlugs = Array.isArray(record.actionSlugs) ? record.actionSlugs.map(String).filter(Boolean) : [];
-    return { toolkit, actionSlugs };
-  }).filter((entry) => entry.toolkit && entry.actionSlugs.length > 0);
+function contractDisplayName(contract: ToolContract): string {
+  if (typeof contract.name === "string" && contract.name.trim()) return contract.name.trim();
+  return contractActionSlug(contract).replace(/_/g, " ");
+}
+
+function contractDisplayDescription(contract: ToolContract): string {
+  if (typeof contract.description === "string" && contract.description.trim()) {
+    return contract.description.slice(0, 240);
+  }
+  const slug = contractActionSlug(contract);
+  const toolkit = typeof contract.constraints.toolkit === "string" ? contract.constraints.toolkit : "";
+  return toolkit ? `Selected ${toolkit} action ${slug}.` : `Action ${slug}.`;
 }
 
 export function availableToolsForSpecDraft(
@@ -73,26 +72,10 @@ export function availableToolsForSpecDraft(
     if (tools.some((entry) => entry.toolRef === contract.toolRef)) continue;
     tools.push({
       toolRef: contract.toolRef,
-      name: contract.name,
+      name: contractDisplayName(contract),
       effect: contract.effect,
-      description: contract.description.slice(0, 240),
+      description: contractDisplayDescription(contract),
     });
-  }
-
-  if (discoveredToolContracts.length === 0) {
-    for (const selection of connectorSelections(buildContract)) {
-      for (const actionSlug of selection.actionSlugs) {
-        const toolRef = connectorActionToolRef({ toolkit: selection.toolkit, actionSlug });
-        if (tools.some((entry) => normalizeToolRef(entry.toolRef) === normalizeToolRef(toolRef))) continue;
-        const isRead = /read|search|list|get|fetch|retrieve/i.test(actionSlug);
-        tools.push({
-          toolRef,
-          name: actionSlug.replace(/_/g, " "),
-          effect: isRead ? "read_external" : "write_external",
-          description: `Selected ${selection.toolkit} action ${actionSlug}.`,
-        });
-      }
-    }
   }
 
   return tools;

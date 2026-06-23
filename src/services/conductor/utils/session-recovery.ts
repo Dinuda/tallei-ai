@@ -67,8 +67,10 @@ export function builderCommandFailureMessage(input: {
 }
 
 const BACKEND_COMMAND_TOOLS = new Set([
+  "resolveIntent",
   "getAvailableTools",
   "resolveBuildRequirement",
+  "previewAgentPlan",
   "saveLoop",
   "runVerification",
   "confirmActivation",

@@ -61,6 +61,16 @@ export const agentPersonaRoleKeySchema = z.enum([
   "generalist",
 ]);
 
+export const agentToolDomainSchema = z.enum([
+  "read",
+  "write",
+  "classify",
+  "draft",
+  "deliver",
+  "coordinate",
+  "review",
+]);
+
 export const agentPersonaSchema = z.object({
   displayName: z.string().min(1).trim(),
   roleKey: agentPersonaRoleKeySchema,
@@ -203,6 +213,9 @@ function normalizeLegacyArtifactRole(value: unknown): unknown {
 export const noSlopSpecAgentSchema = z.preprocess(normalizeLegacyArtifactRole, z.object({
   nodeKind: z.enum(["agent", "transform", "operator_input", "action", "checkpoint"]).optional(),
   name: z.string().min(1).trim(),
+  roleKey: agentPersonaRoleKeySchema.optional(),
+  toolDomain: agentToolDomainSchema.optional(),
+  allocationReason: z.string().min(1).trim().optional(),
   goal: z.string().min(1).trim(),
   tools: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
   guardrails: z.preprocess(filterEmptyStrings, z.array(z.string().min(1))).default([]),
@@ -354,6 +367,7 @@ export const noSlopSpecSnapshotSchema = z.object({
 });
 
 export type AgentPersonaRoleKey = z.infer<typeof agentPersonaRoleKeySchema>;
+export type AgentToolDomain = z.infer<typeof agentToolDomainSchema>;
 export type AgentPersona = z.infer<typeof agentPersonaSchema>;
 export type NoSlopSpec = z.infer<typeof noSlopSpecSchema>;
 export type NoSlopSpecAgent = z.infer<typeof noSlopSpecAgentSchema>;

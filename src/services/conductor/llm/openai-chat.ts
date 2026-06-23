@@ -94,7 +94,9 @@ export function loopBuilderOpenAiModel(): string {
 }
 
 function loopBuilderOpenCodeThinkingEffort(): string | null {
-  const raw = (process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT ?? "low").trim().toLowerCase();
+  // Builder prompts forbid chain-of-thought; thinking models often emit reasoning-only
+  // turns with no tool calls. Opt in via env when debugging model behavior.
+  const raw = (process.env.TALLEI_LOOP_BUILDER__OPENCODE_THINKING_EFFORT ?? "off").trim().toLowerCase();
   if (!raw || raw === "false" || raw === "0" || raw === "off" || raw === "none" || raw === "disabled") {
     return null;
   }

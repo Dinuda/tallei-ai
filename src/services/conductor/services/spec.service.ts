@@ -25,7 +25,7 @@ import {
   specSemanticIssues,
   buildRunnerSpecFromBuildContract,
 } from "./compile.service.js";
-import { specAtomicityIssues } from "./conductor.service.js";
+import { atomicityIssues } from "../plan/spec-compiler.js";
 
 export type LoopSpecView = {
   id: string;
@@ -48,9 +48,9 @@ export {
   compileRuntimeSpecSnapshotAsync,
   persistApprovedLoopSpecSnapshot,
   renderSpecMarkdown,
+  atomicityIssues,
   specSemanticIssues,
   buildRunnerSpecFromBuildContract,
-  specAtomicityIssues,
 };
 
 function normalizeSpecJson(input: unknown): unknown {

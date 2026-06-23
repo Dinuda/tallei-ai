@@ -28,8 +28,10 @@ export const BUILDER_TRANSCRIPT_TOOLS = new Set([
   "getAvailableTools",
   "interactivePrompt",
   "knowledgeBaseSetup",
-  "outputReviewGatesSetup",
+  "previewAgentPlan",
+  "renderType",
   "requirementSetup",
+  "resolveIntent",
   "runBuilderTest",
   "saveLoop",
   "scheduleSetup",
@@ -180,6 +182,7 @@ const PENDING_TOOL_NARRATION: Record<string, string> = {
   connectorSetup: "Connect the apps this loop needs to work.",
   knowledgeBaseSetup: "Choose which knowledge sources this loop should use.",
   outputReviewGatesSetup: "Choose when this loop should pause for your review.",
+  renderType: "Preparing support reply templates for this loop.",
   scheduleSetup: "Choose when this loop should run.",
 };
 
@@ -261,11 +264,35 @@ function builderToolPartIsVisible(part: UIMessage["parts"][number]): boolean {
   return false;
 }
 
+export function isReasoningOnlyAssistantMessage(message: UIMessage): boolean {
+  if (message.role !== "assistant") return false;
+
+  let hasReasoning = false;
+  let hasUserFacingContent = false;
+
+  for (const part of message.parts) {
+    if (part.type === "text" && part.text?.trim()) {
+      hasUserFacingContent = true;
+      break;
+    }
+    if (isToolUIPart(part)) {
+      hasUserFacingContent = true;
+      break;
+    }
+    if (isReasoningUIPart(part) && (part.text?.trim() || part.state === "streaming")) {
+      hasReasoning = true;
+    }
+  }
+
+  return hasReasoning && !hasUserFacingContent;
+}
+
 export function assistantMessageHasVisibleContent(
   message: UIMessage,
   options?: { isStreaming?: boolean },
 ): boolean {
   if (message.role !== "assistant") return false;
+  if (isReasoningOnlyAssistantMessage(message)) return false;
 
   const parts = coalesceAdjacentTextParts(message.parts);
   for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {

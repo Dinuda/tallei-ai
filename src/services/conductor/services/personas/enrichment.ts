@@ -5,6 +5,7 @@ import { allocateAgentAvatars, bindAgentAvatar, loopSpecExists } from "../avatar
 import {
   inferActionLabelsFromToolRefs,
   pickUniqueDisplayName,
+  roleDefinitionForKey,
   resolveAgentRole,
   slugifyAgentId,
 } from "./agent-personas.js";
@@ -44,16 +45,20 @@ export async function enrichSpecAgentsWithPersonas(input: {
     const existingPersona = previousById.get(agentId);
 
     if (existingPersona) {
+      const role = agent.roleKey ? roleDefinitionForKey(agent.roleKey) : undefined;
+      const persona = role
+        ? { ...existingPersona, roleKey: role.roleKey, roleLabel: role.roleLabel }
+        : existingPersona;
       usedDisplayNames.add(existingPersona.displayName);
-      enrichedAgents[index] = { ...agent, persona: existingPersona };
+      enrichedAgents[index] = { ...agent, persona };
       reportLoopBuilderProgress({
         stage: "agent_spawn",
-        message: `Spawning ${existingPersona.displayName} — ${existingPersona.roleLabel}`,
+        message: `Spawning ${persona.displayName} — ${persona.roleLabel}`,
         status: "completed",
         details: {
           agentIndex: index,
           agentId,
-          persona: existingPersona,
+          persona,
           inferredActions: inferActionLabelsFromToolRefs(agentToolRefsForDisplay(agent)),
         },
       });
@@ -69,7 +74,9 @@ export async function enrichSpecAgentsWithPersonas(input: {
     await Promise.all(pendingNew.map(async ({ index, agent, agentId }, avatarIndex) => {
       const avatar = avatars[avatarIndex];
       if (!avatar) return;
-      const role = resolveAgentRole(agent.name, agent.goal);
+      const role = agent.roleKey
+        ? roleDefinitionForKey(agent.roleKey)
+        : resolveAgentRole(agent.name, agent.goal);
       const displayName = pickUniqueDisplayName(avatar.seed, avatarIndex, usedDisplayNames);
       const persona: AgentPersona = {
         displayName,

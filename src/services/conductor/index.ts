@@ -1,5 +1,6 @@
 export {
   dispatchWorkflowBuilderCommand,
+  executeWorkflowBuilderToolNow,
   getWorkflowBuilderCommand,
   retryFailedBuilderCommand,
   type BuilderToolName,
@@ -9,11 +10,19 @@ export {
   requireWorkflowBuilderSession,
   findWorkflowBuilderSessionBySpec,
   updateWorkflowBuilderSession,
+  updateWorkflowBuilderSessionState,
   saveWorkflowBuilderAnalyzerUsage,
   replaceWorkflowBuilderMessages,
+  persistLoopBuilderChatMessages,
   listWorkflowBuilderMessages,
   sanitizeLoopBuilderChatMessages,
   normalizeWorkflowBuilderMessages,
+  recordWorkflowBuilderAnalyzerPhaseTrace,
+  recordWorkflowBuilderChatTurnTrace,
+  appendWorkflowBuilderTrace,
+  appendWorkflowBuilderPhaseHistory,
+  setPendingPhaseRevision,
+  clearPendingPhaseRevision,
   phaseAfterRequirementsResolved,
   type WorkflowBuilderPhase,
   type WorkflowBuilderSession,
@@ -32,7 +41,7 @@ export {
   type LoopSpecView,
   type LoopSpecRow,
 } from "./services/spec.service.js";
-export { specAtomicityIssues } from "./services/conductor.service.js";
+export { planAgents, atomicityIssues } from "./plan/spec-compiler.js";
 export { saveLoopFromSpec, type LoopBuilderProposal } from "./services/save-loop.service.js";
 export {
   allocateAgentAvatars,
@@ -41,8 +50,14 @@ export {
   type AgentAvatarView,
 } from "./services/avatar.service.js";
 export {
+  commitBuilderConnectorSetup,
+  getBuilderConnectorSetup,
   refreshBuilderConnectorAvailability,
   resolveBuilderConnectorRequirement,
+  startBuilderConnectorSetup,
+  testBuilderConnectorSetup,
+  updateBuilderConnectorSetupGoals,
+  updateBuilderConnectorSetupGraph,
   type BuilderConnectorChecklist,
 } from "./services/connector.service.js";
 export { saveBuilderArtifactBundle } from "./services/artifacts.service.js";
@@ -87,6 +102,8 @@ export {
   resolveBuildRequirement,
   assertBuildContractReady,
   unresolvedBuildRequirements,
+  slimUnresolvedRequirements,
+  hydrateBuildContractArtifactBundle,
   selectedConnectorActionSlugs,
   selectedArtifactContract,
   selectedLoopTrigger,

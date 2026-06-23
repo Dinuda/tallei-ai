@@ -993,14 +993,20 @@ export async function initDb() {
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS composio_session_id TEXT;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS workflow_run_id TEXT;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS spec_id UUID;
-      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS intent_analysis_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS resolved_intent_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS discovered_tool_contracts_json JSONB NOT NULL DEFAULT '[]'::jsonb;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS build_contract_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS connector_setup_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS artifact_bundle_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS builder_trace_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+      ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS intent_analysis_json;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS current_proposal_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS error_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS analyzer_usage_json JSONB NOT NULL DEFAULT '{"calls":0,"promptTokens":0,"completionTokens":0,"totalTokens":0,"estimatedCostUsd":0,"models":{}}'::jsonb;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS phase_history_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS pending_revision_json JSONB;
+      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS builder_state TEXT NOT NULL DEFAULT 'intent.collecting';
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS transcript_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS draft_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS debate_json;
@@ -1013,6 +1019,23 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_spec
         ON workflow_builder_sessions(tenant_id, user_id, spec_id, updated_at DESC);
+
+      ALTER TABLE workflow_builder_sessions DROP CONSTRAINT IF EXISTS workflow_builder_sessions_builder_state_check;
+      ALTER TABLE workflow_builder_sessions
+        ADD CONSTRAINT workflow_builder_sessions_builder_state_check
+        CHECK (builder_state IN (
+          'intent.collecting',
+          'intent.resolving',
+          'requirements.selecting_apps',
+          'requirements.discovering_tools',
+          'requirements.resolving',
+          'compile.previewing',
+          'compile.awaiting_approval',
+          'verification.testing',
+          'verification.awaiting_activation',
+          'complete',
+          'failed'
+        ));
 
       CREATE TABLE IF NOT EXISTS workflow_builder_messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1045,6 +1068,47 @@ export async function initDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_commands_scope
         ON workflow_builder_commands(tenant_id, user_id, session_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS workflow_builder_turns (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id UUID NOT NULL REFERENCES workflow_builder_sessions(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        session_revision INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running'
+          CHECK (status IN ('running', 'completed', 'failed', 'aborted')),
+        events_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        error_text TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_turns_scope
+        ON workflow_builder_turns(tenant_id, user_id, session_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS workflow_builder_actions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        turn_id UUID NOT NULL REFERENCES workflow_builder_turns(id) ON DELETE CASCADE,
+        session_id UUID NOT NULL REFERENCES workflow_builder_sessions(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        action_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        action_name TEXT NOT NULL,
+        action_kind TEXT NOT NULL CHECK (action_kind IN ('server_action', 'client_action', 'assistant_message')),
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'running'
+          CHECK (status IN ('running', 'completed', 'failed')),
+        input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        output_json JSONB,
+        error_text TEXT,
+        expected_revision INTEGER NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(turn_id, action_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_builder_actions_session
+        ON workflow_builder_actions(tenant_id, user_id, session_id, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS workflow_verification_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

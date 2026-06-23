@@ -5,6 +5,7 @@ import { motion } from "motion/react";
 import { CalendarClock, Loader2, Send, Users } from "lucide-react";
 
 import type { ToolPart } from "@/components/ai-elements/tool";
+import { getToolName } from "ai";
 import { IssueNotice } from "@/components/ai-elements/tool";
 import { maskBuilderIssueText } from "@/lib/builder-issue-text";
 import { cn } from "@/lib/utils";
@@ -57,16 +58,16 @@ type SaveLoopOutput = {
   preview?: boolean;
 };
 
-function readLatestSaveLoopCommand(commands: BuilderCommand[]): BuilderCommand | null {
+function readLatestPlanCommand(commands: BuilderCommand[]): BuilderCommand | null {
   for (let index = commands.length - 1; index >= 0; index -= 1) {
     const command = commands[index];
-    if (command?.toolName === "saveLoop") return command;
+    if (command?.toolName === "previewAgentPlan" || command?.toolName === "saveLoop") return command;
   }
   return null;
 }
 
 function readSpawnEvents(commands: BuilderCommand[]): SpawnAgentDetails[] {
-  const command = readLatestSaveLoopCommand(commands);
+  const command = readLatestPlanCommand(commands);
   if (!command?.events) return [];
 
   const byIndex = new Map<number, SpawnAgentDetails>();
@@ -94,7 +95,7 @@ function readSaveLoopPayload(part: ToolPart, commands: BuilderCommand[]): SaveLo
   const output = part.output as SaveLoopOutput | undefined;
   if (output?.spec?.specJson) return output;
 
-  const command = readLatestSaveLoopCommand(commands);
+  const command = readLatestPlanCommand(commands);
   const result = command?.result as SaveLoopOutput | undefined;
   if (result?.spec?.specJson) return result;
   return output ?? null;
@@ -133,26 +134,13 @@ type BuilderAgentSpawnPanelProps = {
   commands: BuilderCommand[];
 };
 
-function readToolRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
-
-/** Runtime agent compilation for save/test. */
-export function isSpecDraftSpawnTool(toolName: string, part: ToolPart): boolean {
-  if (toolName !== "saveLoop") return false;
-
-  const input = readToolRecord(part.input);
-  if (input.preview === true) return false;
-
-  const output = readToolRecord(part.output);
-  if (output.spec) return true;
-
-  return part.state !== "output-available";
+/** Agent plan preview or post-save compile. */
+export function isSpecDraftSpawnTool(toolName: string, _part: ToolPart): boolean {
+  return toolName === "previewAgentPlan" || toolName === "saveLoop";
 }
 
 export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPanelProps) {
+  const toolName = getToolName(part);
   const isComplete = part.state === "output-available";
   const saveLoopPayload = useMemo(
     () => (isComplete ? readSaveLoopPayload(part, commands) : null),
@@ -163,7 +151,8 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
     [saveLoopPayload],
   );
   const liveSpawnEvents = useMemo(() => readSpawnEvents(commands), [commands]);
-  const latestCommand = useMemo(() => readLatestSaveLoopCommand(commands), [commands]);
+  const latestCommand = useMemo(() => readLatestPlanCommand(commands), [commands]);
+  const isPreview = toolName === "previewAgentPlan" || saveLoopPayload?.preview === true;
   const isFailed = !isComplete && (
     part.state === "output-error" || latestCommand?.status === "failed" || latestCommand?.status === "rejected"
   );
@@ -217,7 +206,9 @@ export function BuilderAgentSpawnPanel({ part, commands }: BuilderAgentSpawnPane
         <Users size={16} className="text-[#7eb71b]" />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-[#182506]" style={{ fontFamily: "var(--font-title)" }}>
-            {isComplete ? "Specialist agents ready" : "Designing specialist agents"}
+            {isComplete
+              ? (isPreview ? "Proposed specialist agents" : "Specialist agents ready")
+              : "Designing specialist agents"}
           </div>
           {isComplete && outputData?.title ? (
             <div className="truncate text-xs text-[#7a9a4a]">{outputData.title}</div>

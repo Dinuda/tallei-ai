@@ -128,6 +128,8 @@ function buildContract(
 function summarizeAgents(spec: NoSlopSpec) {
   return spec.agents.map((agent) => ({
     name: agent.name,
+    roleKey: agent.roleKey,
+    toolDomain: agent.toolDomain,
     tools: agent.tools,
     gate: agent.gate ?? null,
     renderer: agent.outputContract.renderer ?? null,
@@ -142,19 +144,36 @@ const gmailContracts = [
 
 const conductorGolden = [
   {
-    name: "Context Reader",
+    name: "Coordinator",
+    roleKey: "coordinator",
+    toolDomain: "coordinate",
+    tools: [],
+    gate: null,
+    renderer: null,
+  },
+  {
+    name: "Researcher",
+    roleKey: "researcher",
+    toolDomain: "read",
     tools: ["composio.gmail.action.GMAIL_FETCH_EMAILS"],
     gate: null,
     renderer: null,
   },
   {
-    name: "Draft Writer",
-    tools: [
-      "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
-      "composio.gmail.action.GMAIL_SEND_EMAIL",
-    ],
+    name: "Writer",
+    roleKey: "writer",
+    toolDomain: "draft",
+    tools: ["composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT"],
     gate: null,
     renderer: "canvas.email",
+  },
+  {
+    name: "Publisher",
+    roleKey: "publisher",
+    toolDomain: "deliver",
+    tools: ["composio.gmail.action.GMAIL_SEND_EMAIL"],
+    gate: null,
+    renderer: null,
   },
 ];
 
@@ -175,7 +194,7 @@ test("golden: async draft_only still uses conductor split agents", async () => {
     discoveredToolContracts: gmailContracts,
   });
 
-  assert.equal(spec.agents.length, 2);
+  assert.equal(spec.agents.length, 4);
   assert.deepEqual(summarizeAgents(spec), conductorGolden);
 });
 
@@ -186,7 +205,7 @@ test("golden: async review_drafts_and_send does not add compiler-owned gates", a
     discoveredToolContracts: gmailContracts,
   });
 
-  assert.equal(spec.agents.length, 2);
+  assert.equal(spec.agents.length, 4);
   assert.ok(spec.agents.every((agent) => agent.gate === undefined));
 });
 
@@ -240,16 +259,23 @@ test("compiler to plan async parity preserves tool role decisions", async () => 
     })),
     [
       {
-        name: "Context Reader",
+        name: "Coordinator",
+        toolRefs: [],
+        gate: null,
+      },
+      {
+        name: "Researcher",
         toolRefs: ["composio.gmail.action.GMAIL_FETCH_EMAILS"],
         gate: null,
       },
       {
-        name: "Draft Writer",
-        toolRefs: [
-          "composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT",
-          "composio.gmail.action.GMAIL_SEND_EMAIL",
-        ],
+        name: "Writer",
+        toolRefs: ["composio.gmail.action.GMAIL_CREATE_EMAIL_DRAFT"],
+        gate: null,
+      },
+      {
+        name: "Publisher",
+        toolRefs: ["composio.gmail.action.GMAIL_SEND_EMAIL"],
         gate: null,
       },
     ],

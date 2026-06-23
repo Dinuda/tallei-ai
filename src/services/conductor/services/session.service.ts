@@ -3,24 +3,43 @@ import { getToolName, isToolUIPart, type UIMessage } from "ai";
 
 import type { AuthContext } from "../../../domain/auth/index.js";
 import { createComposioSession } from "../../connectors/composio-session.js";
-import type { LoopIntentAnalysis, LoopIntentContext } from "../contracts/intent-context.js";
+import type { LoopIntentContext } from "../contracts/intent-context.js";
+import { loopIntentContextSchema, normalizeLoopIntentContext } from "../contracts/intent-context.js";
 import type { ToolContract } from "../../tool-spec/types.js";
+import { slimDiscoveredToolContracts } from "../../tool-spec/tool-contracts.js";
 import type { LoopBuilderProposal } from "./save-loop.service.js";
 import type { LoopSpecView } from "./spec.service.js";
 import type { LoopBuildContract } from "../domain/build-contract.js";
 import type { LoopBuilderUsage } from "../utils/progress.js";
 import { emptyLoopBuilderUsage } from "../utils/progress.js";
+import { normalizeConnectorSetupState, type ConnectorSetupState } from "../contracts/connector-setup.js";
 import {
+  appendWorkflowBuilderTraceRows,
+  appendPhaseHistoryRows,
+  clearPendingRevisionRow,
   findWorkflowBuilderSessionRow,
   findWorkflowBuilderSessionRowBySpec,
   insertWorkflowBuilderSession,
   listWorkflowBuilderMessageRows,
   replaceWorkflowBuilderMessageRows,
+  setPendingRevisionRow,
+  updateWorkflowBuilderSessionStateRow,
   updateWorkflowBuilderAnalyzerUsageRow,
   updateWorkflowBuilderSessionRow,
   type SessionRow,
 } from "../data/session.repository.js";
-import type { WorkflowBuilderPhase } from "../contracts/builder-types.js";
+import type { BuilderState, WorkflowBuilderPhase } from "../contracts/builder-types.js";
+import {
+  normalizeBuilderTrace,
+  usageToTraceUsage,
+  type BuilderTraceEntry,
+} from "../contracts/builder-trace.js";
+import {
+  normalizePendingRevision,
+  normalizePhaseHistory,
+  type PendingPhaseRevision,
+  type PhaseTransitionEvent,
+} from "../contracts/phase-history.js";
 
 export type { WorkflowBuilderPhase } from "../contracts/builder-types.js";
 
@@ -44,23 +63,45 @@ export function phaseAfterRequirementsResolved(
 export type WorkflowBuilderSession = {
   id: string;
   phase: WorkflowBuilderPhase;
+  builderState: BuilderState;
   title: string;
   goal: string;
   composioSessionId: string;
   workflowRunId: string | null;
   specId: string | null;
   workflowId: string | null;
-  intentAnalysis: LoopIntentAnalysis | null;
   resolvedIntent: LoopIntentContext | null;
   discoveredToolContracts: ToolContract[];
   buildContract: LoopBuildContract | null;
+  connectorSetup: ConnectorSetupState | null;
+  artifactBundleJson: unknown | null;
   currentProposal: LoopBuilderProposal | null;
   error: { message: string } | null;
   revision: number;
   analyzerUsage: LoopBuilderUsage;
+  builderTrace: BuilderTraceEntry[];
+  phaseHistory: PhaseTransitionEvent[];
+  pendingRevision: PendingPhaseRevision | null;
   createdAt: string;
   updatedAt: string;
 };
+
+function inferBuilderState(row: SessionRow): BuilderState {
+  if (row.builder_state) return row.builder_state;
+  if (row.error_json || row.phase === "failed") return "failed";
+  if (row.phase === "saved") return "verification.testing";
+  if (row.phase === "intent_resolved" || row.phase === "spec_drafted" || row.phase === "spec_approved") {
+    return "compile.previewing";
+  }
+  if (row.phase === "resolving_requirements") {
+    if (!row.build_contract_json) return "requirements.selecting_apps";
+    const unresolved = row.build_contract_json.requirements?.filter((entry) => entry?.status !== "resolved") ?? [];
+    if (unresolved.length === 0) return "compile.previewing";
+    const hasDiscovered = (row.discovered_tool_contracts_json ?? []).length > 0;
+    return hasDiscovered ? "requirements.resolving" : "requirements.selecting_apps";
+  }
+  return "intent.collecting";
+}
 
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
@@ -71,20 +112,27 @@ function mapSession(row: SessionRow): WorkflowBuilderSession {
   return {
     id: row.id,
     phase: row.phase,
+    builderState: inferBuilderState(row),
     title: row.title,
     goal: row.goal,
     composioSessionId: row.composio_session_id,
     workflowRunId: row.workflow_run_id,
     specId: row.spec_id,
     workflowId: row.workflow_id,
-    intentAnalysis: row.intent_analysis_json,
-    resolvedIntent: row.resolved_intent_json,
+    resolvedIntent: row.resolved_intent_json
+      ? normalizeLoopIntentContext(loopIntentContextSchema.parse(row.resolved_intent_json))
+      : null,
     discoveredToolContracts: row.discovered_tool_contracts_json ?? [],
     buildContract: row.build_contract_json,
+    connectorSetup: normalizeConnectorSetupState(row.connector_setup_json),
+    artifactBundleJson: row.artifact_bundle_json ?? null,
     currentProposal: row.current_proposal_json,
     error: row.error_json,
     revision: row.revision,
     analyzerUsage: row.analyzer_usage_json ?? emptyLoopBuilderUsage(),
+    builderTrace: normalizeBuilderTrace(row.builder_trace_json),
+    phaseHistory: normalizePhaseHistory(row.phase_history_json),
+    pendingRevision: normalizePendingRevision(row.pending_revision_json),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -120,6 +168,75 @@ export async function findWorkflowBuilderSessionBySpec(auth: AuthContext, specId
   return row ? mapSession(row) : null;
 }
 
+export async function appendWorkflowBuilderTrace(
+  auth: AuthContext,
+  sessionId: string,
+  entries: BuilderTraceEntry[],
+): Promise<BuilderTraceEntry[]> {
+  const trace = await appendWorkflowBuilderTraceRows(auth, sessionId, entries);
+  return normalizeBuilderTrace(trace);
+}
+
+export async function recordWorkflowBuilderAnalyzerPhaseTrace(
+  auth: AuthContext,
+  sessionId: string,
+  input: {
+    phase: string;
+    agentLabel: string;
+    systemPrompt: string;
+    handoff?: BuilderTraceEntry["handoff"];
+  },
+): Promise<void> {
+  await appendWorkflowBuilderTrace(auth, sessionId, [{
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    kind: "analyzer_phase",
+    phase: input.phase,
+    agentLabel: input.agentLabel,
+    systemPrompt: input.systemPrompt,
+    ...(input.handoff ? { handoff: input.handoff } : {}),
+  }]);
+}
+
+export async function recordWorkflowBuilderChatTurnTrace(
+  auth: AuthContext,
+  sessionId: string,
+  input: { messageCount: number; usage: LoopBuilderUsage },
+): Promise<void> {
+  await appendWorkflowBuilderTrace(auth, sessionId, [{
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    kind: "chat_turn",
+    messageCount: input.messageCount,
+    usage: usageToTraceUsage(input.usage),
+  }]);
+}
+
+export async function appendWorkflowBuilderPhaseHistory(
+  auth: AuthContext,
+  sessionId: string,
+  entries: PhaseTransitionEvent[],
+): Promise<PhaseTransitionEvent[]> {
+  const history = await appendPhaseHistoryRows(auth, sessionId, entries);
+  return normalizePhaseHistory(history);
+}
+
+export async function setPendingPhaseRevision(
+  auth: AuthContext,
+  sessionId: string,
+  revision: PendingPhaseRevision,
+): Promise<PendingPhaseRevision | null> {
+  const pending = await setPendingRevisionRow(auth, sessionId, revision);
+  return pending ? normalizePendingRevision(pending) : null;
+}
+
+export async function clearPendingPhaseRevision(
+  auth: AuthContext,
+  sessionId: string,
+): Promise<void> {
+  await clearPendingRevisionRow(auth, sessionId);
+}
+
 export async function updateWorkflowBuilderSession(
   auth: AuthContext,
   sessionId: string,
@@ -127,14 +244,16 @@ export async function updateWorkflowBuilderSession(
     phase?: WorkflowBuilderPhase;
     title?: string;
     goal?: string;
+    builderState?: BuilderState;
     composioSessionId?: string;
     workflowRunId?: string | null;
     spec?: LoopSpecView | null;
     workflowId?: string | null;
-    intentAnalysis?: LoopIntentAnalysis | null;
     resolvedIntent?: LoopIntentContext | null;
     discoveredToolContracts?: ToolContract[];
     buildContract?: LoopBuildContract | null;
+    connectorSetup?: ConnectorSetupState | null;
+    artifactBundleJson?: unknown | null;
     currentProposal?: LoopBuilderProposal | null;
     error?: { message: string } | null;
   },
@@ -152,22 +271,41 @@ export async function updateWorkflowBuilderSession(
     patch.spec?.id ?? null,
     "workflowId" in patch,
     patch.workflowId ?? null,
-    "intentAnalysis" in patch,
-    patch.intentAnalysis ? JSON.stringify(patch.intentAnalysis) : null,
     "resolvedIntent" in patch,
     patch.resolvedIntent ? JSON.stringify(patch.resolvedIntent) : null,
     "discoveredToolContracts" in patch,
-    JSON.stringify(patch.discoveredToolContracts ?? []),
+    JSON.stringify(
+      patch.discoveredToolContracts
+        ? slimDiscoveredToolContracts(patch.discoveredToolContracts)
+        : [],
+    ),
     "buildContract" in patch,
     patch.buildContract ? JSON.stringify(patch.buildContract) : null,
+    "connectorSetup" in patch,
+    patch.connectorSetup ? JSON.stringify(patch.connectorSetup) : null,
+    "artifactBundleJson" in patch,
+    patch.artifactBundleJson != null ? JSON.stringify(patch.artifactBundleJson) : null,
     "currentProposal" in patch,
     patch.currentProposal ? JSON.stringify(patch.currentProposal) : null,
     "error" in patch,
     patch.error ? JSON.stringify(patch.error) : null,
     patch.title ?? null,
     patch.goal ?? null,
+    patch.builderState ?? null,
   ]);
   if (!row) throw new Error("Workflow builder session not found");
+  return mapSession(row);
+}
+
+export async function updateWorkflowBuilderSessionState(
+  auth: AuthContext,
+  sessionId: string,
+  expectedRevision: number,
+  builderState: BuilderState,
+  phase?: WorkflowBuilderPhase,
+): Promise<WorkflowBuilderSession> {
+  const row = await updateWorkflowBuilderSessionStateRow(auth, sessionId, expectedRevision, builderState, phase);
+  if (!row) throw new Error("Builder session changed while this turn was running");
   return mapSession(row);
 }
 
@@ -185,7 +323,7 @@ export async function replaceWorkflowBuilderMessages(
   sessionId: string,
   messages: UIMessage[],
 ): Promise<void> {
-  const normalizedMessages = normalizeWorkflowBuilderMessages(messages);
+  const normalizedMessages = persistLoopBuilderChatMessages(normalizeWorkflowBuilderMessages(messages));
   await replaceWorkflowBuilderMessageRows(auth, sessionId, normalizedMessages);
 }
 
@@ -266,13 +404,20 @@ function slimArtifactToolParts(part: UIMessage["parts"][number]): UIMessage["par
   };
 }
 
-/** Remove OpenAI Responses item ids before replaying history to a fresh request. */
-export function sanitizeLoopBuilderChatMessages(messages: UIMessage[]): UIMessage[] {
+/** Persist chat history with reasoning and tool I/O; slim artifacts and strip OpenAI item ids. */
+export function persistLoopBuilderChatMessages(messages: UIMessage[]): UIMessage[] {
   return messages.map((message) => ({
     ...message,
     parts: message.parts
       .map(stripOpenAiStoredItemIds)
-      .map(slimArtifactToolParts)
-      .filter((part) => part.type !== "reasoning" || part.text.trim().length > 0),
+      .map(slimArtifactToolParts),
+  }));
+}
+
+/** Remove OpenAI Responses item ids before replaying history to a fresh request. */
+export function sanitizeLoopBuilderChatMessages(messages: UIMessage[]): UIMessage[] {
+  return persistLoopBuilderChatMessages(messages).map((message) => ({
+    ...message,
+    parts: message.parts.filter((part) => part.type !== "reasoning" || part.text.trim().length > 0),
   }));
 }

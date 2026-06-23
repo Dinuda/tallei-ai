@@ -21,40 +21,51 @@ export function resolveDiscoveredToolContracts(definition: LoopDefinition): Tool
   return discoveredContractsFromDefinition(definition);
 }
 
-export async function hydrateDiscoveredToolContracts(definition: LoopDefinition): Promise<LoopDefinition> {
-  const contracts = definition.builderMeta?.discoveredToolContracts;
-  if (!contracts?.length) return definition;
+export async function hydrateDiscoveredToolContractList(
+  contracts: Array<ToolContract | Record<string, unknown>>,
+): Promise<ToolContract[]> {
+  if (!contracts.length) return [];
 
-  const needsHydration = contracts.some((contract) => isSlimPersistedToolContract(contract));
-  if (!needsHydration) return definition;
+  const needsHydration = contracts.some((contract) =>
+    isSlimPersistedToolContract(contract as Record<string, unknown>));
+  if (!needsHydration) return contracts as ToolContract[];
 
   const slimRefs: Record<string, unknown>[] = [];
-  const fullContracts: Record<string, unknown>[] = [];
+  const fullContracts: ToolContract[] = [];
   const slugs: string[] = [];
 
   for (const raw of contracts) {
-    if (isSlimPersistedToolContract(raw)) {
-      slimRefs.push(raw);
+    if (isSlimPersistedToolContract(raw as Record<string, unknown>)) {
+      slimRefs.push(raw as Record<string, unknown>);
       const parsed = parseConnectorActionToolRef(String(raw.toolRef ?? ""));
       if (parsed) slugs.push(parsed.actionSlug);
     } else {
-      fullContracts.push(raw);
+      fullContracts.push(raw as ToolContract);
     }
   }
 
   const catalogContracts = slugs.length > 0 ? await getCatalogContracts({ slugs }) : [];
   const catalogByRef = new Map(catalogContracts.map((contract) => [normalizeToolRef(contract.toolRef), contract]));
 
-  const hydrated: Record<string, unknown>[] = [...fullContracts];
+  const hydrated: ToolContract[] = [...fullContracts];
   for (const slim of slimRefs) {
     const toolRef = String(slim.toolRef ?? "");
     const catalog = catalogByRef.get(normalizeToolRef(toolRef));
     if (!catalog) {
       throw new Error(`Unable to hydrate slim tool contract from catalog: ${toolRef}`);
     }
-    hydrated.push(mergePersistedToolContractOverrides(catalog, slim) as unknown as Record<string, unknown>);
+    hydrated.push(mergePersistedToolContractOverrides(catalog, slim));
   }
 
+  return hydrated;
+}
+
+export async function hydrateDiscoveredToolContracts(definition: LoopDefinition): Promise<LoopDefinition> {
+  const contracts = definition.builderMeta?.discoveredToolContracts;
+  if (!contracts?.length) return definition;
+  if (!contracts.some((contract) => isSlimPersistedToolContract(contract))) return definition;
+
+  const hydrated = await hydrateDiscoveredToolContractList(contracts);
   const builderMeta = definition.builderMeta;
   if (!builderMeta) return definition;
 
@@ -62,7 +73,7 @@ export async function hydrateDiscoveredToolContracts(definition: LoopDefinition)
     ...definition,
     builderMeta: {
       ...builderMeta,
-      discoveredToolContracts: hydrated,
+      discoveredToolContracts: hydrated as unknown as Record<string, unknown>[],
     },
   };
 }
