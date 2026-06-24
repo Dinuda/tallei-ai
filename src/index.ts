@@ -1,8 +1,6 @@
 import "./patch.js";
 
-import { composeAppServices } from "./bootstrap/composition-root.js";
 
-const appServices = composeAppServices();
 
 let stopping = false;
 
@@ -26,7 +24,3 @@ process.once("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
-void appServices.start().catch((error) => {
-  console.error("Failed to initialize database:", error);
-  process.exit(1);
-});

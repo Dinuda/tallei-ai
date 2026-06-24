@@ -10,11 +10,7 @@ import {
   startVertexDocumentBackfillWorker,
   stopVertexDocumentBackfillWorker,
 } from "../services/vertex-document-backfill.js";
-import {
-  startSpecLoopScheduler,
-  stopSpecLoopScheduler,
-} from "../services/conductor/runtime/index.js";
-import { isTemporalEnabled } from "../temporal/client.js";
+
 
 let workersRunning = false;
 
@@ -24,9 +20,6 @@ export function startWorkers(): void {
   startChatGptImportWorker();
   startUploadedFileIngestWorker();
   startVertexDocumentBackfillWorker();
-  if (!isTemporalEnabled()) {
-    startSpecLoopScheduler();
-  }
 }
 
 export function stopWorkers(): void {
@@ -35,5 +28,4 @@ export function stopWorkers(): void {
   stopChatGptImportWorker();
   stopUploadedFileIngestWorker();
   stopVertexDocumentBackfillWorker();
-  stopSpecLoopScheduler();
 }
