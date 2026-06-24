@@ -114,7 +114,6 @@ function buildPromptOptions(
 }
 
 export function BuilderScheduleSelector({
-  allowOther = true,
   completedOutput,
   onComplete,
   options: configuredOptions = [],
@@ -122,9 +121,7 @@ export function BuilderScheduleSelector({
   recommendedOptionIds = [],
   requirementId,
   sessionId,
-  subtitle,
 }: {
-  allowOther?: boolean;
   completedOutput?: ScheduleSelectionOutput | null;
   onComplete?: (output: ScheduleSelectionOutput) => void;
   options?: ScheduleSetupOption[];
@@ -132,7 +129,6 @@ export function BuilderScheduleSelector({
   recommendedOptionIds?: string[];
   requirementId: string;
   sessionId: string;
-  subtitle?: string;
 }) {
   const [events, setEvents] = useState<Array<{ toolkit: string; slug: string; name: string; description: string }>>([]);
   const [loading, setLoading] = useState(!completedOutput);
@@ -183,13 +179,8 @@ export function BuilderScheduleSelector({
 
   return (
     <div className="w-full overflow-hidden border border-[#d1d5db] bg-white">
-      {subtitle && (
-        <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-2 text-[13px] text-[#6b7280]">
-          {subtitle}
-        </div>
-      )}
       <InteractivePromptMenu
-        allowOther={allowOther}
+        allowOther={false}
         onSubmit={(answer) => {
           const selectedId = answer.selectedOptionIds[0];
           const value = selectedId ? valuesById.get(selectedId) : undefined;

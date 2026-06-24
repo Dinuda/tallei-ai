@@ -980,7 +980,7 @@ export async function initDb() {
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         workflow_id UUID REFERENCES workflows(id) ON DELETE SET NULL,
         phase TEXT NOT NULL DEFAULT 'new'
-          CHECK (phase IN ('new', 'analyzing', 'needs_clarification', 'intent_resolved', 'spec_drafted', 'spec_approved', 'graph_generated', 'saved', 'archived', 'failed')),
+          CHECK (phase IN ('new', 'analyzing', 'needs_clarification', 'intent_resolved', 'saved', 'archived', 'failed')),
         title TEXT NOT NULL,
         goal TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1004,18 +1004,14 @@ export async function initDb() {
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS error_json JSONB;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS analyzer_usage_json JSONB NOT NULL DEFAULT '{"calls":0,"promptTokens":0,"completionTokens":0,"totalTokens":0,"estimatedCostUsd":0,"models":{}}'::jsonb;
-      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS phase_history_json JSONB NOT NULL DEFAULT '[]'::jsonb;
-      ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS pending_revision_json JSONB;
+      ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS phase_history_json;
+      ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS pending_revision_json;
       ALTER TABLE workflow_builder_sessions ADD COLUMN IF NOT EXISTS builder_state TEXT NOT NULL DEFAULT 'intent.collecting';
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS transcript_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS draft_json;
       ALTER TABLE workflow_builder_sessions DROP COLUMN IF EXISTS debate_json;
       ALTER TABLE workflow_builder_sessions
         DROP CONSTRAINT IF EXISTS workflow_builder_sessions_spec_id_fkey;
-      ALTER TABLE workflow_builder_sessions DROP CONSTRAINT IF EXISTS workflow_builder_sessions_phase_check;
-      ALTER TABLE workflow_builder_sessions
-        ADD CONSTRAINT workflow_builder_sessions_phase_check
-        CHECK (phase IN ('new', 'analyzing', 'needs_clarification', 'resolving_requirements', 'intent_resolved', 'spec_drafted', 'spec_approved', 'graph_generated', 'saved', 'archived', 'failed'));
 
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_sessions_spec
         ON workflow_builder_sessions(tenant_id, user_id, spec_id, updated_at DESC);
@@ -1079,10 +1075,12 @@ export async function initDb() {
         status TEXT NOT NULL DEFAULT 'running'
           CHECK (status IN ('running', 'completed', 'failed', 'aborted')),
         events_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        repair_json JSONB,
         error_text TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      ALTER TABLE workflow_builder_turns ADD COLUMN IF NOT EXISTS repair_json JSONB;
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_turns_scope
         ON workflow_builder_turns(tenant_id, user_id, session_id, created_at DESC);
 
@@ -1101,12 +1099,14 @@ export async function initDb() {
           CHECK (status IN ('running', 'completed', 'failed')),
         input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         output_json JSONB,
+        repair_json JSONB,
         error_text TEXT,
         expected_revision INTEGER NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(turn_id, action_id)
       );
+      ALTER TABLE workflow_builder_actions ADD COLUMN IF NOT EXISTS repair_json JSONB;
       CREATE INDEX IF NOT EXISTS idx_workflow_builder_actions_session
         ON workflow_builder_actions(tenant_id, user_id, session_id, created_at DESC);
 

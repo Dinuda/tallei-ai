@@ -245,16 +245,6 @@
     "source": "src/routes/conductor.ts"
   },
   {
-    "method": "POST",
-    "path": "/api/conductor/sessions/:sessionId/revision/confirm",
-    "source": "src/routes/conductor.ts"
-  },
-  {
-    "method": "GET",
-    "path": "/api/conductor/sessions/:sessionId/revision/pending",
-    "source": "src/routes/conductor.ts"
-  },
-  {
     "method": "GET",
     "path": "/api/conductor/sessions/:sessionId/schedule-options",
     "source": "src/routes/conductor.ts"

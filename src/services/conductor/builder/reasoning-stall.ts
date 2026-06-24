@@ -10,18 +10,20 @@ const CLIENT_UI_TOOL_NAMES = new Set([
   "knowledgeBaseSetup",
   "artifactSetup",
   "requirementSetup",
-  "interactivePrompt",
+  "intentClarification",
+  "saveApproval",
+  "activationApproval",
   "renderType",
 ]);
 
-const ACTIVE_BUILDER_PHASES = new Set([
-  "new",
-  "analyzing",
-  "needs_clarification",
-  "resolving_requirements",
-  "intent_resolved",
-  "spec_drafted",
-  "spec_approved",
+const ACTIVE_BUILDER_STATES = new Set([
+  "intent.collecting",
+  "intent.resolving",
+  "requirements.selecting_apps",
+  "requirements.discovering_tools",
+  "requirements.resolving",
+  "compile.previewing",
+  "compile.awaiting_approval",
 ]);
 
 export function isReasoningOnlyAssistantMessage(message: UIMessage): boolean {
@@ -113,7 +115,7 @@ function buildRequirementsFallbackToolPart(
 
   if (!session.resolvedIntent) {
     return {
-      type: "tool-interactivePrompt",
+      type: "tool-intentClarification",
       toolCallId,
       state: "input-available",
       input: buildDiscoveryFallbackInteractivePrompt(session.goal),
@@ -193,14 +195,14 @@ function buildRequirementsFallbackToolPart(
   }
 
   return {
-    type: "tool-interactivePrompt",
+    type: "tool-saveApproval",
     toolCallId,
     state: "input-available",
     input: {
       question: "Ready to continue building this loop?",
       options: [
-        { id: "continue", label: "Continue", value: "continue" },
-        { id: "revise", label: "Revise an earlier step", value: "revise" },
+        { id: "continue", label: "Save and test the loop", value: "continue" },
+        { id: "not_yet", label: "Not yet", value: "not_yet" },
       ],
       recommendedOptionIds: ["continue"],
       allowOther: true,
@@ -229,7 +231,7 @@ function buildAssistantWithFallbackTool(session: WorkflowBuilderSession): UIMess
 }
 
 function discoveryNeedsFallbackPrompt(messages: UIMessage[], session: WorkflowBuilderSession): boolean {
-  if (session.resolvedIntent || session.phase !== "new") return false;
+  if (session.resolvedIntent || session.builderState !== "intent.collecting") return false;
   const last = messages.at(-1);
   if (!last) return false;
   if (last.role === "user") return true;
@@ -239,7 +241,7 @@ function discoveryNeedsFallbackPrompt(messages: UIMessage[], session: WorkflowBu
 }
 
 function builderNeedsProgressRepair(messages: UIMessage[], session: WorkflowBuilderSession): boolean {
-  if (!ACTIVE_BUILDER_PHASES.has(session.phase)) return false;
+  if (!ACTIVE_BUILDER_STATES.has(session.builderState)) return false;
   const last = messages.at(-1);
   if (!last) return false;
   if (last.role === "user") return true;

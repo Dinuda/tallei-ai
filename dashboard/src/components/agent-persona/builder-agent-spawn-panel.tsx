@@ -135,7 +135,7 @@ type BuilderAgentSpawnPanelProps = {
 };
 
 /** Agent plan preview or post-save compile. */
-export function isSpecDraftSpawnTool(toolName: string, _part: ToolPart): boolean {
+export function isPreviewAgentPlanTool(toolName: string, _part: ToolPart): boolean {
   return toolName === "previewAgentPlan" || toolName === "saveLoop";
 }
 

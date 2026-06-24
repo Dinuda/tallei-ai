@@ -12,6 +12,7 @@ import { discoverToolsForLoopBuild } from "../../connectors/composio-discovery.j
 import { listComposioTriggerTypes } from "../../connectors/composio.js";
 import { normalizeDiscoveredToolContracts } from "../../connectors/platform-integrations.js";
 import { refreshBuilderConnectorAvailability } from "../services/connector.service.js";
+import { recoverBuilderState } from "../builder/state-machine.js";
 import { normalizeGetAvailableToolsInput } from "../inputs/get-available-tools-input.js";
 import {
   createLoopIntentContext,
@@ -42,8 +43,6 @@ import {
   createWorkflowBuilderSession,
   requireWorkflowBuilderSession,
   updateWorkflowBuilderSession,
-  phaseAfterRequirementsResolved,
-  type WorkflowBuilderPhase,
 } from "../services/session.service.js";
 import {
   clearCachedRuntimeSnapshot,
@@ -61,7 +60,7 @@ import {
   updateCommandProgress,
   type CommandRow,
 } from "../data/command.repository.js";
-import type { BuilderToolName } from "../contracts/builder-types.js";
+import type { BuilderState, BuilderToolName } from "../contracts/builder-types.js";
 
 export type { BuilderToolName } from "../contracts/builder-types.js";
 
@@ -120,9 +119,9 @@ function mapCommand(row: CommandRow): WorkflowBuilderCommandView {
   };
 }
 
-function requirePhase(actual: WorkflowBuilderPhase, allowed: WorkflowBuilderPhase[], tool: BuilderToolName): void {
+function requireBuilderState(actual: BuilderState, allowed: BuilderState[], tool: BuilderToolName): void {
   if (!allowed.includes(actual)) {
-    throw new Error(`${tool} is not available while the builder session is in phase ${actual}`);
+    throw new Error(`${tool} is not available while the builder session is in state ${actual}`);
   }
 }
 
@@ -162,7 +161,7 @@ async function deriveUnresolvedLegacyBuildContract(
     intentContext: session.resolvedIntent,
     discoveredToolContracts: session.discoveredToolContracts,
   });
-  await updateWorkflowBuilderSession(auth, session.id, { phase: "resolving_requirements", buildContract });
+  await updateWorkflowBuilderSession(auth, session.id, { builderState: "requirements.resolving", buildContract });
   return buildContract;
 }
 
@@ -263,8 +262,8 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
   let session = await requireWorkflowBuilderSession(auth, sessionId);
   switch (toolName) {
     case "resolveIntent": {
-      requirePhase(session.phase, ["new", "analyzing", "needs_clarification", "failed"], toolName);
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "analyzing", error: null });
+      requireBuilderState(session.builderState, ["intent.collecting", "intent.resolving", "failed"], toolName);
+      await updateWorkflowBuilderSession(auth, sessionId, { builderState: "intent.resolving", error: null });
       const {
         outcome,
         cadence,
@@ -300,7 +299,7 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       });
       clearCachedRuntimeSnapshot(sessionId);
       await updateWorkflowBuilderSession(auth, sessionId, {
-        phase: "resolving_requirements",
+        builderState: "requirements.selecting_apps",
         resolvedIntent,
         buildContract,
       });
@@ -310,8 +309,15 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       };
     }
     case "getAvailableTools": {
-      requirePhase(session.phase, ["new", "analyzing", "needs_clarification", "resolving_requirements", "failed"], toolName);
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "analyzing", error: null });
+      requireBuilderState(session.builderState, [
+        "intent.collecting",
+        "intent.resolving",
+        "requirements.selecting_apps",
+        "requirements.discovering_tools",
+        "requirements.resolving",
+        "failed",
+      ], toolName);
+      await updateWorkflowBuilderSession(auth, sessionId, { builderState: "requirements.discovering_tools", error: null });
       reportLoopBuilderProgress({
         stage: "discovery",
         message: "Discovering connector capabilities...",
@@ -371,7 +377,7 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       });
       clearCachedRuntimeSnapshot(sessionId);
       await updateWorkflowBuilderSession(auth, sessionId, {
-        phase: "resolving_requirements",
+        builderState: "requirements.resolving",
         composioSessionId,
         resolvedIntent,
         discoveredToolContracts: contracts,
@@ -400,7 +406,14 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       };
     }
     case "resolveBuildRequirement": {
-      requirePhase(session.phase, ["resolving_requirements", "intent_resolved", "failed"], toolName);
+      requireBuilderState(session.builderState, [
+        "requirements.selecting_apps",
+        "requirements.discovering_tools",
+        "requirements.resolving",
+        "compile.previewing",
+        "compile.awaiting_approval",
+        "failed",
+      ], toolName);
       session = await requireWorkflowBuilderSession(auth, sessionId);
       if (!session.buildContract) throw new Error("The builder session has no build contract.");
       let discoveredToolContracts = session.discoveredToolContracts;
@@ -422,33 +435,49 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         discoveredToolContracts,
       });
       const unresolvedRequirements = slimUnresolvedRequirements(buildContract);
+      const nextBuilderState: BuilderState = unresolvedRequirements.length === 0
+        ? "compile.previewing"
+        : "requirements.resolving";
       clearCachedRuntimeSnapshot(sessionId);
       await updateWorkflowBuilderSession(auth, sessionId, {
-        phase: phaseAfterRequirementsResolved(session.phase, unresolvedRequirements.length),
+        builderState: nextBuilderState,
         buildContract,
         discoveredToolContracts,
         error: null,
       });
       return {
         resolvedRequirementId: String(input.requirementId ?? ""),
-        readyForSpecDraft: unresolvedRequirements.length === 0,
+        readyForCompile: unresolvedRequirements.length === 0,
         unresolvedRequirements,
       };
     }
     case "refreshConnectorAvailability": {
-      requirePhase(session.phase, ["resolving_requirements", "intent_resolved", "failed"], toolName);
+      requireBuilderState(session.builderState, [
+        "requirements.selecting_apps",
+        "requirements.discovering_tools",
+        "requirements.resolving",
+        "compile.previewing",
+        "compile.awaiting_approval",
+        "failed",
+      ], toolName);
       return { checklist: await refreshBuilderConnectorAvailability(auth, sessionId) };
     }
     case "previewAgentPlan": {
-      requirePhase(session.phase, ["intent_resolved", "failed"], toolName);
+      requireBuilderState(session.builderState, ["compile.previewing", "compile.awaiting_approval", "failed"], toolName);
       const snapshot = await compileRuntimeSnapshotForSession(auth, sessionId, session);
       return formatAgentPlanFromSnapshot(snapshot);
     }
     case "saveLoop": {
       requireApproval(input, toolName);
-      requirePhase(session.phase, ["intent_resolved", "saved", "failed"], toolName);
+      requireBuilderState(session.builderState, [
+        "compile.awaiting_approval",
+        "verification.testing",
+        "verification.awaiting_activation",
+        "complete",
+        "failed",
+      ], toolName);
 
-      if (session.phase === "saved" && session.workflowId) {
+      if (session.workflowId) {
         const buildContract = session.buildContract ?? await deriveUnresolvedLegacyBuildContract(auth, session);
         if (!buildContract) throw new Error("Builder session is missing a build contract.");
         const spec = await compileRuntimeSnapshotForSession(auth, sessionId, session);
@@ -480,7 +509,7 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
         initialStatus: "verifying",
       });
       const workflowId = String((loop as { id?: unknown }).id ?? "");
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", workflowId, error: null });
+      await updateWorkflowBuilderSession(auth, sessionId, { builderState: "verification.testing", workflowId, error: null });
       const verification = await initializeWorkflowVerification(auth, workflowId);
       void runWorkflowVerification(auth, workflowId).catch((error) => {
         console.error("[saveLoop] background verification failed:", error instanceof Error ? error.message : String(error));
@@ -488,24 +517,29 @@ async function execute(auth: AuthContext, sessionId: string, toolName: BuilderTo
       return { loop, verification, workflowId, spec: snapshot };
     }
     case "runBuilderTest": {
-      requirePhase(session.phase, ["saved", "failed"], toolName);
+      requireBuilderState(session.builderState, [
+        "verification.testing",
+        "verification.awaiting_activation",
+        "complete",
+        "failed",
+      ], toolName);
       if (!session.workflowId) throw new Error("Session has no saved workflow.");
       const testRun = await runSavedWorkflowTestRun(auth, session.workflowId);
       return { workflowId: session.workflowId, testRun };
     }
     case "runVerification": {
       if (!session.workflowId) {
-        requirePhase(session.phase, ["saved"], toolName);
+        requireBuilderState(session.builderState, ["verification.testing"], toolName);
         throw new Error("Session has no saved workflow.");
       }
       return { verification: await runWorkflowVerification(auth, session.workflowId) };
     }
     case "confirmActivation": {
       requireApproval(input, toolName);
-      requirePhase(session.phase, ["saved", "failed"], toolName);
+      requireBuilderState(session.builderState, ["verification.awaiting_activation", "failed"], toolName);
       if (!session.workflowId) throw new Error("Session has no saved workflow.");
       const verification = await confirmWorkflowVerification(auth, session.workflowId);
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "saved", error: null });
+      await updateWorkflowBuilderSession(auth, sessionId, { builderState: "complete", error: null });
       return { verification };
     }
   }
@@ -553,7 +587,7 @@ async function runCommand(auth: AuthContext, commandId: string, sessionId: strin
     const message = error instanceof Error ? error.message : String(error);
     await failCommand(commandId, message);
     if (!isRecoverableBuilderError(message)) {
-      await updateWorkflowBuilderSession(auth, sessionId, { phase: "failed", builderState: "failed", error: { message } }).catch(() => undefined);
+      await updateWorkflowBuilderSession(auth, sessionId, { builderState: "failed", error: { message } }).catch(() => undefined);
     }
   }
 }
@@ -593,9 +627,10 @@ export async function retryFailedBuilderCommand(
   const row = await findRetryableCommandRow(auth, sessionId, commandId);
   if (!row) throw new Error("No failed builder command is available to retry");
 
-  if (session.phase === "failed") {
+  if (session.builderState === "failed" || session.error) {
+    const recoveredState = session.builderState === "failed" ? "intent.collecting" : recoverBuilderState(session);
     await updateWorkflowBuilderSession(auth, sessionId, {
-      phase: "intent_resolved",
+      builderState: recoveredState,
       error: null,
     });
   }

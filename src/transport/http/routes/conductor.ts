@@ -10,11 +10,9 @@ import {
 import {
   allocateAgentAvatars,
   bindAgentAvatar,
-  commitBuilderConnectorSetup,
   createWorkflowBuilderSession,
   dispatchWorkflowBuilderCommand,
   emptyLoopBuilderUsage,
-  getBuilderConnectorSetup,
   getLoopSpec,
   getWorkflowBuilderCommand,
   listLoopSpecs,
@@ -32,20 +30,9 @@ import {
   saveBuilderArtifactBundle,
   saveLoopRequestSchema,
   saveWorkflowBuilderAnalyzerUsage,
-  setPendingPhaseRevision,
-  startBuilderConnectorSetup,
-  testBuilderConnectorSetup,
-  clearPendingPhaseRevision,
-  updateBuilderConnectorSetupGoals,
-  updateBuilderConnectorSetupGraph,
   updateWorkflowBuilderSession,
   type LoopBuilderUsage,
 } from "../../../services/conductor/index.js";
-import { connectorAgentPlanSchema } from "../../../services/conductor/contracts/connector-setup.js";
-import { invalidationPlan, requiresRegressionConfirmation } from "../../../services/conductor/builder/artifacts.js";
-import { regressToPhase } from "../../../services/conductor/builder/regress.js";
-import { classifyRevisionIntent } from "../../../services/conductor/contracts/intent-context.js";
-import type { PendingPhaseRevision, PhaseTransitionEvent } from "../../../services/conductor/contracts/phase-history.js";
 import { ensureBuilderProgressMessages } from "../../../services/conductor/builder/reasoning-stall.js";
 import { loadSessionCommandUsage } from "../../../services/conductor/builder/turn-usage.js";
 import { runBuilderTurn } from "../../../services/conductor/builder/turn-engine.js";
@@ -91,43 +78,6 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
 
     await replaceWorkflowBuilderMessages(req.authContext!, sessionId, messages);
 
-    let activeSession = session;
-    let revisionProposal: PendingPhaseRevision | null = null;
-    let regressEvent: PhaseTransitionEvent | null = null;
-
-    const lastUserMessage = last?.role === "user" ? last : undefined;
-    if (lastUserMessage && text) {
-      const revision = await classifyRevisionIntent({
-        session: activeSession,
-        userMessage: text,
-        userMessageId: lastUserMessage.id,
-      });
-      if (revision.targetPhase) {
-        const plan = invalidationPlan(revision.targetPhase);
-        if (requiresRegressionConfirmation(plan)) {
-          revisionProposal = {
-            targetPhase: revision.targetPhase,
-            revisedArtifact: revision.revisedArtifact,
-            invalidated: plan.invalidated,
-            preserved: plan.preserved,
-            reason: revision.reason,
-            userMessageId: lastUserMessage.id,
-            proposedAt: new Date().toISOString(),
-          };
-          await setPendingPhaseRevision(req.authContext!, sessionId, revisionProposal);
-        } else {
-          const result = await regressToPhase(req.authContext!, sessionId, {
-            targetPhase: revision.targetPhase,
-            reason: "user_revision",
-            userMessageId: lastUserMessage.id,
-            revisedArtifact: revision.revisedArtifact ?? undefined,
-          });
-          activeSession = result.session;
-          regressEvent = result.event;
-        }
-      }
-    }
-
     const modelId = loopBuilderOpenAiModel();
     const model = resolveLoopChatLanguageModel(modelId);
     let completedTurnUsage = emptyLoopBuilderUsage();
@@ -139,13 +89,6 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
       originalMessages: messages,
       execute: async ({ writer }) => {
         writer.write({ type: "data-session", data: { sessionId }, transient: true });
-        if (revisionProposal) {
-          writer.write({ type: "data-phase-revision-proposal", data: revisionProposal, transient: true });
-          return;
-        }
-        if (regressEvent) {
-          writer.write({ type: "data-phase-regressed", data: regressEvent, transient: true });
-        }
         const emitLiveUsage = async (runningTurnUsage: LoopBuilderUsage) => {
           const commandUsage = await loadSessionCommandUsage(req.authContext!, sessionId);
           writer.write({
@@ -156,7 +99,7 @@ router.post("/chat", requireScopes(["memory:read"]), async (req: AuthRequest, re
         };
         completedTurnUsage = await runBuilderTurn({
           auth: req.authContext!,
-          session: activeSession,
+          session,
           model,
           modelId,
           uiMessages: messages,
@@ -231,50 +174,6 @@ router.put("/sessions/:sessionId/messages", requireScopes(["memory:write"]), asy
   }
 });
 
-router.post("/sessions/:sessionId/revision/confirm", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    const body = z.object({ approved: z.boolean() }).parse(req.body ?? {});
-    const session = await requireWorkflowBuilderSession(req.authContext!, sessionId);
-    if (!session.pendingRevision) {
-      res.status(409).json({ error: "No pending phase revision proposal" });
-      return;
-    }
-    if (!body.approved) {
-      await clearPendingPhaseRevision(req.authContext!, sessionId);
-      res.json({ ok: true, approved: false });
-      return;
-    }
-    const pending = session.pendingRevision;
-    const result = await regressToPhase(req.authContext!, sessionId, {
-      targetPhase: pending.targetPhase,
-      reason: "user_revision_confirmed",
-      userMessageId: pending.userMessageId,
-      revisedArtifact: pending.revisedArtifact ?? undefined,
-    });
-    await clearPendingPhaseRevision(req.authContext!, sessionId);
-    res.json({
-      ok: true,
-      approved: true,
-      session: result.session,
-      event: result.event,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to confirm phase revision";
-    res.status(error instanceof z.ZodError ? 400 : /not found|no pending/i.test(message) ? 404 : 409).json({ error: message });
-  }
-});
-
-router.get("/sessions/:sessionId/revision/pending", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    const session = await requireWorkflowBuilderSession(req.authContext!, sessionId);
-    res.json({ pending: session.pendingRevision });
-  } catch (error) {
-    res.status(error instanceof z.ZodError ? 400 : 404).json({ error: error instanceof Error ? error.message : "Builder session not found" });
-  }
-});
-
 router.post("/sessions/:sessionId/retry-command", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = z.string().uuid().parse(req.params.sessionId);
@@ -318,7 +217,7 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
       updatedAt: row.updated_at,
     }));
     const turnsResult = await pool.query(
-      `SELECT id, session_revision, state, status, events_json, error_text, created_at, updated_at
+      `SELECT id, session_revision, state, status, events_json, repair_json, error_text, created_at, updated_at
        FROM workflow_builder_turns
        WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3
        ORDER BY created_at ASC`,
@@ -326,7 +225,7 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
     );
     const actionsResult = await pool.query(
       `SELECT id, turn_id, action_id, state, action_name, action_kind, schema_version,
-              status, input_json, output_json, error_text, expected_revision, created_at, updated_at
+              status, input_json, output_json, repair_json, error_text, expected_revision, created_at, updated_at
        FROM workflow_builder_actions
        WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3
        ORDER BY created_at ASC`,
@@ -338,6 +237,7 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
       state: row.state,
       status: row.status,
       events: row.events_json ?? [],
+      repair: row.repair_json ?? undefined,
       error: row.error_text,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -353,6 +253,7 @@ router.get("/sessions/:sessionId", requireScopes(["memory:read"]), async (req: A
       status: row.status,
       input: row.input_json ?? {},
       output: row.output_json ?? undefined,
+      repair: row.repair_json ?? undefined,
       error: row.error_text,
       expectedRevision: row.expected_revision,
       createdAt: row.created_at,
@@ -387,69 +288,6 @@ router.post("/sessions/:sessionId/connectors/resolve", requireScopes(["memory:wr
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to resolve connector requirement";
     res.status(error instanceof z.ZodError ? 400 : /not found|no connector requirement/i.test(message) ? 404 : 409).json({ error: message });
-  }
-});
-
-router.post("/sessions/:sessionId/connectors/setup/start", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    res.json(await startBuilderConnectorSetup(req.authContext!, sessionId));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to start connector setup";
-    res.status(error instanceof z.ZodError ? 400 : /not found|no connector requirement/i.test(message) ? 404 : 409).json({ error: message });
-  }
-});
-
-router.get("/sessions/:sessionId/connectors/setup", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    res.json(await getBuilderConnectorSetup(req.authContext!, sessionId));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to load connector setup";
-    res.status(error instanceof z.ZodError ? 400 : /not found|no connector requirement/i.test(message) ? 404 : 409).json({ error: message });
-  }
-});
-
-router.post("/sessions/:sessionId/connectors/setup/update-goals", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    const body = z.object({ agentPlan: connectorAgentPlanSchema }).parse(req.body ?? {});
-    res.json(await updateBuilderConnectorSetupGoals(req.authContext!, sessionId, body.agentPlan));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to update connector goals";
-    res.status(error instanceof z.ZodError ? 400 : /not found|not been started/i.test(message) ? 404 : 409).json({ error: message });
-  }
-});
-
-router.post("/sessions/:sessionId/connectors/setup/update-graph", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    const body = z.object({ agentPlan: connectorAgentPlanSchema }).parse(req.body ?? {});
-    res.json(await updateBuilderConnectorSetupGraph(req.authContext!, sessionId, body.agentPlan));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to update connector graph";
-    res.status(error instanceof z.ZodError ? 400 : /not found|not been started/i.test(message) ? 404 : 409).json({ error: message });
-  }
-});
-
-router.post("/sessions/:sessionId/connectors/setup/test", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    const body = z.object({ skip: z.boolean().optional() }).parse(req.body ?? {});
-    res.json(await testBuilderConnectorSetup(req.authContext!, sessionId, body));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to test connector setup";
-    res.status(error instanceof z.ZodError ? 400 : /not found|not been started/i.test(message) ? 404 : 409).json({ error: message });
-  }
-});
-
-router.post("/sessions/:sessionId/connectors/setup/commit", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const sessionId = z.string().uuid().parse(req.params.sessionId);
-    res.json(await commitBuilderConnectorSetup(req.authContext!, sessionId));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to commit connector setup";
-    res.status(error instanceof z.ZodError ? 400 : /not found|not been started/i.test(message) ? 404 : 409).json({ error: message });
   }
 });
 

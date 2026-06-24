@@ -15,54 +15,25 @@ import { emptyLoopBuilderUsage } from "../utils/progress.js";
 import { normalizeConnectorSetupState, type ConnectorSetupState } from "../contracts/connector-setup.js";
 import {
   appendWorkflowBuilderTraceRows,
-  appendPhaseHistoryRows,
-  clearPendingRevisionRow,
   findWorkflowBuilderSessionRow,
   findWorkflowBuilderSessionRowBySpec,
   insertWorkflowBuilderSession,
   listWorkflowBuilderMessageRows,
   replaceWorkflowBuilderMessageRows,
-  setPendingRevisionRow,
   updateWorkflowBuilderSessionStateRow,
   updateWorkflowBuilderAnalyzerUsageRow,
   updateWorkflowBuilderSessionRow,
   type SessionRow,
 } from "../data/session.repository.js";
-import type { BuilderState, WorkflowBuilderPhase } from "../contracts/builder-types.js";
+import type { BuilderState } from "../contracts/builder-types.js";
 import {
   normalizeBuilderTrace,
   usageToTraceUsage,
   type BuilderTraceEntry,
 } from "../contracts/builder-trace.js";
-import {
-  normalizePendingRevision,
-  normalizePhaseHistory,
-  type PendingPhaseRevision,
-  type PhaseTransitionEvent,
-} from "../contracts/phase-history.js";
-
-export type { WorkflowBuilderPhase } from "../contracts/builder-types.js";
-
-const POST_INTENT_PHASES = new Set<WorkflowBuilderPhase>([
-  "spec_drafted",
-  "spec_approved",
-  "graph_generated",
-  "saved",
-]);
-
-/** Keep later phases when reconnecting a connector after spec save/approval. */
-export function phaseAfterRequirementsResolved(
-  currentPhase: WorkflowBuilderPhase,
-  unresolvedCount: number,
-): WorkflowBuilderPhase {
-  if (unresolvedCount > 0) return "resolving_requirements";
-  if (POST_INTENT_PHASES.has(currentPhase)) return currentPhase;
-  return "intent_resolved";
-}
 
 export type WorkflowBuilderSession = {
   id: string;
-  phase: WorkflowBuilderPhase;
   builderState: BuilderState;
   title: string;
   goal: string;
@@ -80,26 +51,13 @@ export type WorkflowBuilderSession = {
   revision: number;
   analyzerUsage: LoopBuilderUsage;
   builderTrace: BuilderTraceEntry[];
-  phaseHistory: PhaseTransitionEvent[];
-  pendingRevision: PendingPhaseRevision | null;
   createdAt: string;
   updatedAt: string;
 };
 
 function inferBuilderState(row: SessionRow): BuilderState {
   if (row.builder_state) return row.builder_state;
-  if (row.error_json || row.phase === "failed") return "failed";
-  if (row.phase === "saved") return "verification.testing";
-  if (row.phase === "intent_resolved" || row.phase === "spec_drafted" || row.phase === "spec_approved") {
-    return "compile.previewing";
-  }
-  if (row.phase === "resolving_requirements") {
-    if (!row.build_contract_json) return "requirements.selecting_apps";
-    const unresolved = row.build_contract_json.requirements?.filter((entry) => entry?.status !== "resolved") ?? [];
-    if (unresolved.length === 0) return "compile.previewing";
-    const hasDiscovered = (row.discovered_tool_contracts_json ?? []).length > 0;
-    return hasDiscovered ? "requirements.resolving" : "requirements.selecting_apps";
-  }
+  if (row.error_json) return "failed";
   return "intent.collecting";
 }
 
@@ -111,7 +69,6 @@ function mapSession(row: SessionRow): WorkflowBuilderSession {
   if (!row.composio_session_id) throw new Error(`Builder session ${row.id} has no Composio session`);
   return {
     id: row.id,
-    phase: row.phase,
     builderState: inferBuilderState(row),
     title: row.title,
     goal: row.goal,
@@ -131,8 +88,6 @@ function mapSession(row: SessionRow): WorkflowBuilderSession {
     revision: row.revision,
     analyzerUsage: row.analyzer_usage_json ?? emptyLoopBuilderUsage(),
     builderTrace: normalizeBuilderTrace(row.builder_trace_json),
-    phaseHistory: normalizePhaseHistory(row.phase_history_json),
-    pendingRevision: normalizePendingRevision(row.pending_revision_json),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -177,27 +132,6 @@ export async function appendWorkflowBuilderTrace(
   return normalizeBuilderTrace(trace);
 }
 
-export async function recordWorkflowBuilderAnalyzerPhaseTrace(
-  auth: AuthContext,
-  sessionId: string,
-  input: {
-    phase: string;
-    agentLabel: string;
-    systemPrompt: string;
-    handoff?: BuilderTraceEntry["handoff"];
-  },
-): Promise<void> {
-  await appendWorkflowBuilderTrace(auth, sessionId, [{
-    id: randomUUID(),
-    at: new Date().toISOString(),
-    kind: "analyzer_phase",
-    phase: input.phase,
-    agentLabel: input.agentLabel,
-    systemPrompt: input.systemPrompt,
-    ...(input.handoff ? { handoff: input.handoff } : {}),
-  }]);
-}
-
 export async function recordWorkflowBuilderChatTurnTrace(
   auth: AuthContext,
   sessionId: string,
@@ -212,36 +146,10 @@ export async function recordWorkflowBuilderChatTurnTrace(
   }]);
 }
 
-export async function appendWorkflowBuilderPhaseHistory(
-  auth: AuthContext,
-  sessionId: string,
-  entries: PhaseTransitionEvent[],
-): Promise<PhaseTransitionEvent[]> {
-  const history = await appendPhaseHistoryRows(auth, sessionId, entries);
-  return normalizePhaseHistory(history);
-}
-
-export async function setPendingPhaseRevision(
-  auth: AuthContext,
-  sessionId: string,
-  revision: PendingPhaseRevision,
-): Promise<PendingPhaseRevision | null> {
-  const pending = await setPendingRevisionRow(auth, sessionId, revision);
-  return pending ? normalizePendingRevision(pending) : null;
-}
-
-export async function clearPendingPhaseRevision(
-  auth: AuthContext,
-  sessionId: string,
-): Promise<void> {
-  await clearPendingRevisionRow(auth, sessionId);
-}
-
 export async function updateWorkflowBuilderSession(
   auth: AuthContext,
   sessionId: string,
   patch: {
-    phase?: WorkflowBuilderPhase;
     title?: string;
     goal?: string;
     builderState?: BuilderState;
@@ -262,7 +170,6 @@ export async function updateWorkflowBuilderSession(
     sessionId,
     auth.tenantId,
     auth.userId,
-    patch.phase ?? null,
     "composioSessionId" in patch,
     patch.composioSessionId ?? null,
     "workflowRunId" in patch,
@@ -302,9 +209,8 @@ export async function updateWorkflowBuilderSessionState(
   sessionId: string,
   expectedRevision: number,
   builderState: BuilderState,
-  phase?: WorkflowBuilderPhase,
 ): Promise<WorkflowBuilderSession> {
-  const row = await updateWorkflowBuilderSessionStateRow(auth, sessionId, expectedRevision, builderState, phase);
+  const row = await updateWorkflowBuilderSessionStateRow(auth, sessionId, expectedRevision, builderState);
   if (!row) throw new Error("Builder session changed while this turn was running");
   return mapSession(row);
 }

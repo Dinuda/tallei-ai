@@ -23,14 +23,14 @@ test("patchReasoningOnlyAssistantMessages injects discovery fallback prompt", as
   assert.equal(isReasoningOnlyAssistantMessage(messages[1]!), true);
 
   const patched = patchReasoningOnlyAssistantMessages(messages, {
-    phase: "new",
+    builderState: "intent.collecting",
     goal: "Monitor support tickets and draft replies.",
     resolvedIntent: null,
   } as never);
 
   const tail = patched.at(-1);
   assert.equal(tail?.role, "assistant");
-  const toolPart = tail?.parts.find((part) => part.type === "tool-interactivePrompt");
+  const toolPart = tail?.parts.find((part) => part.type === "tool-intentClarification");
   assert.ok(toolPart);
   assert.equal(toolPart?.state, "input-available");
   assert.match(String((toolPart as { input?: { question?: string } }).input?.question ?? ""), /How should this loop run/i);
@@ -55,7 +55,7 @@ test("ensureBuilderProgressMessages injects schedule setup during requirements s
   ] as never[];
 
   const patched = ensureBuilderProgressMessages(messages, {
-    phase: "resolving_requirements",
+    builderState: "requirements.resolving",
     goal: "Monitor support tickets",
     resolvedIntent: { resolvedIntent: "Monitor tickets" },
     discoveredToolContracts: [{ toolRef: "composio.gmail.search" }],
@@ -90,13 +90,13 @@ test("ensureBuilderProgressMessages appends assistant prompt after failed user-o
   ] as never[];
 
   const patched = ensureBuilderProgressMessages(messages, {
-    phase: "new",
+    builderState: "intent.collecting",
     goal: "Monitor support tickets and draft replies.",
     resolvedIntent: null,
   } as never);
 
   assert.equal(patched.length, 2);
   assert.equal(patched[1]?.role, "assistant");
-  const toolPart = patched[1]?.parts.find((part) => part.type === "tool-interactivePrompt");
+  const toolPart = patched[1]?.parts.find((part) => part.type === "tool-intentClarification");
   assert.ok(toolPart);
 });

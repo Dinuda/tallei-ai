@@ -4,7 +4,6 @@ import type { WorkflowBuilderSession } from "../services/session.service.js";
 import { listKnowledgeBindings } from "../../knowledge-base.js";
 import { loadWorkflowUserProfile } from "../domain/workflow-user-profile.js";
 import { connectedSearchToolkits } from "./connected-search.js";
-import type { BuilderAnalyzerPhase } from "./phases/types.js";
 
 export type BuilderGroundingContext = {
   builtinSources: string[];
@@ -17,11 +16,8 @@ export type BuilderGroundingContext = {
 export const ANALYZER_MEMORY_HINT =
   "If the user references prior preferences, past loops, or workspace facts not in this session, note that the saved loop can search memory at runtime — do not invent recalled facts.";
 
-export function builderGroundingNeeded(
-  session: WorkflowBuilderSession,
-  phase: BuilderAnalyzerPhase,
-): boolean {
-  if (phase !== "requirements" || !session.buildContract) return false;
+export function builderGroundingNeeded(session: WorkflowBuilderSession): boolean {
+  if (!session.buildContract) return false;
   return unresolvedBuildRequirements(session.buildContract).some((req) => req.kind === "grounding");
 }
 

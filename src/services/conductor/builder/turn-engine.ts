@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   convertToModelMessages,
+  getToolName,
+  isToolUIPart,
   stepCountIs,
   streamText,
   tool,
@@ -34,9 +36,9 @@ import { normalizeSaveLoopInput, saveLoopInputSchema } from "../inputs/save-loop
 import { isInternalAiDependencyText, isInternalAiToolkitSlug } from "../inputs/get-available-tools-input.js";
 import type { BuilderToolName } from "../contracts/builder-types.js";
 import type { BuilderState } from "../contracts/builder-types.js";
+import { buildBuilderSystemPrompt } from "./state-policy.js";
 import {
   allowedActionsForState,
-  legacyPhaseForState,
   reduceBuilderState,
   stateFromSession,
   type BuilderActionKind,
@@ -49,8 +51,10 @@ import {
   failBuilderAction,
   insertBuilderTurn,
   insertOrGetBuilderAction,
+  updateBuilderTurnRepair,
   type BuilderTurnEvent,
 } from "../data/turn.repository.js";
+import type { BuilderRepairMetadata } from "./repair-protocol.js";
 
 type BuilderEventWriter = (event: BuilderTurnEvent) => void | Promise<void>;
 
@@ -66,12 +70,28 @@ const SERVER_TOOL_NAMES = new Set<BuilderActionName>([
 ]);
 
 const CLIENT_TOOL_NAMES = new Set<BuilderActionName>([
-  "interactivePrompt",
+  "repairPrompt",
+  "intentClarification",
+  "saveApproval",
+  "activationApproval",
   "appSelection",
   "connectorSetup",
   "scheduleSetup",
   "knowledgeBaseSetup",
   "renderType",
+  "artifactSetup",
+  "requirementSetup",
+]);
+
+const MODEL_REPLAY_CLIENT_TOOLS = new Set([
+  "intentClarification",
+  "saveApproval",
+  "activationApproval",
+  "repairPrompt",
+  "appSelection",
+  "connectorSetup",
+  "scheduleSetup",
+  "knowledgeBaseSetup",
   "artifactSetup",
   "requirementSetup",
 ]);
@@ -82,88 +102,6 @@ function stableActionId(state: BuilderState, name: BuilderActionName, input: Rec
 
 function event(type: string, data?: unknown): BuilderTurnEvent {
   return { type, at: new Date().toISOString(), ...(data !== undefined ? { data } : {}) };
-}
-
-function sessionSummary(session: WorkflowBuilderSession): Record<string, unknown> {
-  return {
-    id: session.id,
-    revision: session.revision,
-    phase: session.phase,
-    builderState: session.builderState,
-    goal: session.goal,
-    resolvedIntent: session.resolvedIntent?.resolvedIntent ?? null,
-    discoveredToolCount: session.discoveredToolContracts.length,
-    unresolvedRequirements: session.buildContract?.requirements
-      .filter((entry) => entry.status !== "resolved")
-      .map((entry) => ({
-        id: entry.id,
-        kind: entry.kind,
-        question: entry.question,
-      })) ?? [],
-    workflowId: session.workflowId,
-  };
-}
-
-function stateInstructions(state: BuilderState): string {
-  switch (state) {
-    case "intent.collecting":
-      return [
-        "Intent Analyst rules:",
-        "Your only job in this state is to understand what the user wants done and what end result they expect.",
-        "Clarify outcome, business trigger or cadence, approval expectation, and final output or deliverable.",
-        "Do not ask which apps, services, connectors, ticket platforms, email tools, data sources, files, or records the loop should use.",
-        "Do not ask where data lives. Tool and app selection happens later in requirements.",
-        "Tallei performs reasoning, classification, drafting, routing, and orchestration itself. Never assume or ask for an AI provider, model provider, or classification model.",
-        "Assumptions must be business-level only, such as cadence and approval expectations. Do not put unresolved app/tool choices in assumptions.",
-        "If the desired outcome and end result are clear enough, call resolveIntent even if apps and data sources are unknown.",
-        "Use interactivePrompt only for outcome-level clarification, one question at a time.",
-      ].join("\n");
-    case "intent.resolving":
-      return [
-        "Intent Resolver rules:",
-        "Resolve the business intent into a concise draft of trigger, actions, and output.",
-        "Do not introduce app or connector selection in this state.",
-      ].join("\n");
-    case "requirements.selecting_apps":
-      return [
-        "Requirements app selection rules:",
-        "This state identifies external systems Tallei must read from or write to.",
-        "Ask for app selection in a concrete order based on the intent. For support-ticket workflows, ask where customers send support requests first; then mention reply/delivery channels only if they may be separate.",
-        "Do not ask broad catalogue questions like which applications the user wants to use.",
-        "Do not ask for or recommend AI providers, model providers, classification models, or LLM tools. Tallei handles classification, drafting, and orchestration internally.",
-        "Recommended app slugs must be only external business systems: ticketing/support inboxes, email/chat delivery channels, CRM/customer-data systems, or knowledge sources explicitly needed by the workflow.",
-        "Ask for app selection only when appSelection is allowed, and stop after that client action.",
-      ].join("\n");
-    case "requirements.discovering_tools":
-      return [
-        "Discovery rules:",
-        "Run connector/tool discovery once for the selected apps and stop after the server result.",
-      ].join("\n");
-    case "requirements.resolving":
-      return [
-        "Setup Coordinator rules:",
-        "Resolve exactly one remaining requirement or ask exactly one setup UI question.",
-        "Prefer runtime inputs for values that change per run.",
-      ].join("\n");
-    case "compile.previewing":
-    case "compile.awaiting_approval":
-      return [
-        "Compile rules:",
-        "Preview the runtime plan before save.",
-        "Never save without explicit user approval.",
-      ].join("\n");
-    case "verification.testing":
-    case "verification.awaiting_activation":
-      return [
-        "Verification rules:",
-        "Test before activation.",
-        "Never activate without explicit user approval.",
-      ].join("\n");
-    case "complete":
-      return "The builder flow is complete. Provide a concise status update.";
-    case "failed":
-      return "The builder flow failed. Explain the blocking issue concisely and ask for the next corrective input.";
-  }
 }
 
 function sanitizeAppSelectionInput(value: unknown): unknown {
@@ -183,32 +121,21 @@ function sanitizeAppSelectionInput(value: unknown): unknown {
   return record;
 }
 
-function systemPrompt(input: {
-  state: BuilderState;
-  allowedActions: BuilderActionName[];
-  session: WorkflowBuilderSession;
-}): string {
-  return [
-    "You are Tallei's deterministic loop builder.",
-    "The backend owns state transitions. Use only one allowed action this turn.",
-    "If user input is needed, call exactly one client action and stop.",
-    "If backend work is needed, call exactly one server action and stop after the tool result.",
-    "Do not call tools that are not listed in allowedActions.",
-    "If no tool is needed, answer normally in plain text.",
-    "Keep visible text concise. Do not expose internal state names, schema errors, or tool ids.",
-    stateInstructions(input.state),
-    `Current state: ${input.state}`,
-    `Allowed actions: ${input.allowedActions.join(", ")}`,
-    `Session snapshot:\n${JSON.stringify(sessionSummary(input.session))}`,
-  ].join("\n\n");
-}
-
 function clientTool(name: BuilderActionName, inputSchema: z.ZodTypeAny) {
   return tool({
     description: `Request the ${name} client interaction and end this turn.`,
     inputSchema: inputSchema as never,
   });
 }
+
+const repairPromptInputSchema = z.object({
+  blockedAction: z.string().min(1),
+  question: z.string().min(1),
+  issue: z.string().min(1),
+  fieldErrors: z.array(z.string().min(1)).max(8).default([]),
+  attemptedFixes: z.array(z.string().min(1)).max(8).default([]),
+  repairContext: z.string().optional(),
+});
 
 function createActionTools(input: {
   auth: AuthContext;
@@ -294,7 +221,10 @@ function createActionTools(input: {
   maybeAddServer("runVerification", "runVerification", z.object({}));
   maybeAddServer("confirmActivation", "confirmActivation", z.object({}), (value) => ({ ...value, approved: true }));
 
-  if (input.allowedActions.includes("interactivePrompt")) tools.interactivePrompt = clientTool("interactivePrompt", interactivePromptSchema) as ToolSet[string];
+  if (input.allowedActions.includes("intentClarification")) tools.intentClarification = clientTool("intentClarification", interactivePromptSchema) as ToolSet[string];
+  if (input.allowedActions.includes("saveApproval")) tools.saveApproval = clientTool("saveApproval", interactivePromptSchema) as ToolSet[string];
+  if (input.allowedActions.includes("activationApproval")) tools.activationApproval = clientTool("activationApproval", interactivePromptSchema) as ToolSet[string];
+  tools.repairPrompt = clientTool("repairPrompt", repairPromptInputSchema) as ToolSet[string];
   if (input.allowedActions.includes("appSelection")) {
     tools.appSelection = clientTool("appSelection", z.preprocess(sanitizeAppSelectionInput, z.object({
       question: z.string().min(1).default("Where do your customers send support requests? Select the support inbox or ticketing app first. If replies are sent from a separate channel, select that too.").describe("A concrete ordered question about external business systems. Never mention AI providers, model providers, or classification models."),
@@ -307,7 +237,6 @@ function createActionTools(input: {
     tools.scheduleSetup = clientTool("scheduleSetup", z.object({
       requirementId: z.string().min(1),
       question: z.string().min(1).default("How often should this loop run?"),
-      subtitle: z.string().optional(),
       options: z.array(z.object({
         id: z.string().min(1),
         label: z.string().min(1),
@@ -368,6 +297,29 @@ function extractLastAction(messages: ModelMessage[]): {
   return null;
 }
 
+function compactMessagesForModel(messages: UIMessage[]): UIMessage[] {
+  const sanitized = sanitizeLoopBuilderChatMessages(messages);
+  const compact: UIMessage[] = [];
+  const recent = sanitized.slice(-12);
+
+  for (const message of recent) {
+    if (message.role === "user") {
+      const textParts = message.parts.filter((part) => part.type === "text" && part.text?.trim());
+      if (textParts.length > 0) compact.push({ ...message, parts: textParts });
+      continue;
+    }
+
+    if (message.role !== "assistant") continue;
+    const replayParts = message.parts.filter((part) =>
+      isToolUIPart(part)
+      && MODEL_REPLAY_CLIENT_TOOLS.has(getToolName(part))
+      && part.state === "output-available");
+    if (replayParts.length > 0) compact.push({ ...message, parts: replayParts });
+  }
+
+  return compact.slice(-6);
+}
+
 export async function runBuilderTurn(input: {
   auth: AuthContext;
   session: WorkflowBuilderSession;
@@ -382,6 +334,7 @@ export async function runBuilderTurn(input: {
   const allowedActions = allowedActionsForState(state);
   const turnId = randomUUID();
   let turnUsage = emptyLoopBuilderUsage();
+  let latestRepair: BuilderRepairMetadata | null = null;
 
   const writeEvent = async (builderEvent: BuilderTurnEvent) => {
     await appendBuilderTurnEvent(input.auth, turnId, builderEvent);
@@ -416,15 +369,33 @@ export async function runBuilderTurn(input: {
     },
   });
 
+  const repairToolCall = createLoopBuilderToolCallRepair(input.session.goal, {
+    onRepairAttempt: async (repair) => {
+      latestRepair = repair;
+      await updateBuilderTurnRepair(input.auth, turnId, repair);
+      await writeEvent(event("builder.repair.attempted", repair));
+    },
+    onRepairExhausted: async (repair) => {
+      latestRepair = repair;
+      await updateBuilderTurnRepair(input.auth, turnId, repair);
+      await writeEvent(event("builder.repair.exhausted", repair));
+    },
+    onRepairRequired: async (repair) => {
+      latestRepair = repair;
+      await updateBuilderTurnRepair(input.auth, turnId, repair);
+      await writeEvent(event("builder.repair.required", repair));
+    },
+  });
+
   const result = streamText({
     model: input.model,
-    system: systemPrompt({ state, allowedActions, session: input.session }),
-    messages: await convertToModelMessages(sanitizeLoopBuilderChatMessages(input.uiMessages)),
+    system: buildBuilderSystemPrompt({ state, allowedActions, session: input.session, messages: input.uiMessages }),
+    messages: await convertToModelMessages(compactMessagesForModel(input.uiMessages)),
     tools,
     stopWhen: stepCountIs(1),
     maxOutputTokens: loopBuilderStreamMaxOutputTokens(input.modelId),
     providerOptions: loopBuilderStreamProviderOptions(input.modelId) as never,
-    experimental_repairToolCall: createLoopBuilderToolCallRepair(input.session.goal),
+    experimental_repairToolCall: repairToolCall,
     abortSignal: input.abortSignal,
     onStepFinish: ({ usage }) => {
       turnUsage = mergeLoopBuilderUsageTotals(turnUsage, usageFromLanguageModelStep(usage, input.modelId));
@@ -454,10 +425,18 @@ export async function runBuilderTurn(input: {
         actionName: action.name,
         actionKind: "client_action",
         inputJson: action.input,
+        repairJson: action.name === "repairPrompt" && latestRepair ? latestRepair : null,
         expectedRevision: input.session.revision,
       });
       const output = { actionName: action.name, actionKind: "client_action", input: action.input };
-      if (record.status !== "completed") await completeBuilderAction(input.auth, record.id, output);
+      if (record.status !== "completed") {
+        await completeBuilderAction(
+          input.auth,
+          record.id,
+          output,
+          action.name === "repairPrompt" && latestRepair ? latestRepair : null,
+        );
+      }
       await writeEvent(event("builder.client_action.required", output));
     } else if (!action) {
       const record = await insertOrGetBuilderAction({
@@ -483,7 +462,6 @@ export async function runBuilderTurn(input: {
           input.session.id,
           refreshed.revision,
           nextState,
-          legacyPhaseForState(nextState),
         );
         await writeEvent(event("builder.state.transitioned", {
           from: state,

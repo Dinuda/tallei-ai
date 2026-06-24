@@ -1,10 +1,13 @@
-import type { BuilderState, WorkflowBuilderPhase } from "../contracts/builder-types.js";
+import type { BuilderState } from "../contracts/builder-types.js";
 import { unresolvedBuildRequirements } from "../domain/build-contract.js";
 import type { WorkflowBuilderSession } from "../services/session.service.js";
 
 export type BuilderActionName =
   | "assistantMessage"
-  | "interactivePrompt"
+  | "repairPrompt"
+  | "intentClarification"
+  | "saveApproval"
+  | "activationApproval"
   | "resolveIntent"
   | "appSelection"
   | "getAvailableTools"
@@ -30,35 +33,19 @@ export type BuilderActionResult = {
 };
 
 export function stateFromSession(session: WorkflowBuilderSession): BuilderState {
-  if (session.error || session.phase === "failed" || session.builderState === "failed") return "failed";
-  if (session.builderState && session.builderState !== "intent.collecting") return session.builderState;
-  if (session.phase === "saved") return "verification.testing";
-  if (session.phase === "intent_resolved" || session.phase === "spec_drafted" || session.phase === "spec_approved") {
-    return "compile.previewing";
-  }
-  if (session.phase === "resolving_requirements") {
-    if (!session.buildContract) return "requirements.selecting_apps";
-    const unresolved = unresolvedBuildRequirements(session.buildContract);
-    if (unresolved.length === 0) return "compile.previewing";
-    return session.discoveredToolContracts.length > 0 ? "requirements.resolving" : "requirements.selecting_apps";
-  }
-  return "intent.collecting";
+  if (session.error || session.builderState === "failed") return "failed";
+  return session.builderState;
 }
 
-export function legacyPhaseForState(state: BuilderState): WorkflowBuilderPhase | undefined {
-  if (state === "failed") return "failed";
-  if (state === "complete" || state === "verification.testing" || state === "verification.awaiting_activation") return "saved";
-  if (state === "compile.previewing" || state === "compile.awaiting_approval") return "intent_resolved";
-  if (state.startsWith("requirements.")) return "resolving_requirements";
-  if (state === "intent.resolving") return "analyzing";
-  if (state === "intent.collecting") return "new";
-  return undefined;
+export function recoverBuilderState(session: WorkflowBuilderSession): BuilderState {
+  if (session.error || session.builderState === "failed") return "failed";
+  return session.builderState;
 }
 
 export function allowedActionsForState(state: BuilderState): BuilderActionName[] {
   switch (state) {
     case "intent.collecting":
-      return ["interactivePrompt", "resolveIntent"];
+      return ["intentClarification", "resolveIntent"];
     case "intent.resolving":
       return ["resolveIntent"];
     case "requirements.selecting_apps":
@@ -76,13 +63,13 @@ export function allowedActionsForState(state: BuilderState): BuilderActionName[]
         "requirementSetup",
       ];
     case "compile.previewing":
-      return ["previewAgentPlan", "interactivePrompt"];
+      return ["previewAgentPlan"];
     case "compile.awaiting_approval":
-      return ["saveLoop", "interactivePrompt"];
+      return ["saveApproval", "saveLoop"];
     case "verification.testing":
-      return ["runBuilderTest", "runVerification", "interactivePrompt"];
+      return ["runBuilderTest", "runVerification"];
     case "verification.awaiting_activation":
-      return ["confirmActivation", "interactivePrompt"];
+      return ["activationApproval", "confirmActivation"];
     case "complete":
     case "failed":
       return [];

@@ -26,9 +26,12 @@ export const BUILDER_TRANSCRIPT_TOOLS = new Set([
   "confirmActivation",
   "connectorSetup",
   "getAvailableTools",
-  "interactivePrompt",
+  "intentClarification",
+  "saveApproval",
+  "activationApproval",
   "knowledgeBaseSetup",
   "previewAgentPlan",
+  "repairPrompt",
   "renderType",
   "requirementSetup",
   "resolveIntent",
@@ -179,10 +182,14 @@ function touchesCompletedBuilderTool(part: UIMessage["parts"][number] | undefine
 const PENDING_TOOL_NARRATION: Record<string, string> = {
   appSelection: "Which app do your customers use to reach out for support?",
   artifactSetup: "Review and confirm the reply templates for this loop.",
+  activationApproval: "Confirm whether this loop should be activated.",
   connectorSetup: "Connect the apps this loop needs to work.",
+  intentClarification: "Clarify the outcome this loop should produce.",
   knowledgeBaseSetup: "Choose which knowledge sources this loop should use.",
   outputReviewGatesSetup: "Choose when this loop should pause for your review.",
+  repairPrompt: "I need one correction before I can continue.",
   renderType: "Preparing support reply templates for this loop.",
+  saveApproval: "Confirm whether this loop should be saved and tested.",
   scheduleSetup: "Choose when this loop should run.",
 };
 
@@ -247,10 +254,19 @@ export function isBuilderToolInputReady(part: UIMessage["parts"][number]): boole
     : null;
   if (!input) return false;
 
-  if (toolName === "requirementSetup" || toolName === "interactivePrompt") {
+  if (
+    toolName === "requirementSetup"
+    || toolName === "intentClarification"
+    || toolName === "saveApproval"
+    || toolName === "activationApproval"
+  ) {
     return typeof input.question === "string"
       && Array.isArray(input.options)
       && input.options.length > 0;
+  }
+
+  if (toolName === "repairPrompt") {
+    return typeof input.question === "string" && typeof input.issue === "string";
   }
 
   return true;

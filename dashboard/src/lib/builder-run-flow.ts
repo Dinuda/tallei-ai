@@ -59,17 +59,6 @@ export type BuilderRunTimelineEntry =
       role: string;
       parts: Array<Record<string, unknown>>;
       metadata?: unknown;
-    }
-  | {
-      kind: "phase_transition";
-      at: string;
-      id: string;
-      from: string;
-      to: string;
-      reason: string;
-      invalidated?: string[];
-      preserved?: string[];
-      revisedArtifact?: string;
     };
 
 export type BuilderRunFlow = {
@@ -112,34 +101,10 @@ function timelineSortKey(entry: BuilderRunTimelineEntry): string {
 
 export function buildBuilderRunFlow(input: {
   trace?: BuilderTraceSnapshot[];
-  phaseHistory?: Array<{
-    id: string;
-    at: string;
-    from: string;
-    to: string;
-    reason: string;
-    invalidated?: string[];
-    preserved?: string[];
-    revisedArtifact?: string;
-  }>;
   commands?: Array<Record<string, unknown>>;
   messages?: UIMessage[];
 }): BuilderRunFlow {
   const timeline: BuilderRunTimelineEntry[] = [];
-
-  for (const entry of input.phaseHistory ?? []) {
-    timeline.push({
-      kind: "phase_transition",
-      at: entry.at,
-      id: entry.id,
-      from: entry.from,
-      to: entry.to,
-      reason: entry.reason,
-      invalidated: entry.invalidated,
-      preserved: entry.preserved,
-      revisedArtifact: entry.revisedArtifact,
-    });
-  }
 
   for (const entry of input.trace ?? []) {
     if (entry.kind === "analyzer_phase") {

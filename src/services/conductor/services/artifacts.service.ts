@@ -38,7 +38,7 @@ export async function saveBuilderArtifactBundle(
   });
   return {
     resolvedRequirementId: input.requirementId,
-    readyForSpecDraft: unresolvedRequirements.length === 0,
+    readyForCompile: unresolvedRequirements.length === 0,
     unresolvedRequirements,
   };
 }

@@ -63,7 +63,7 @@ import { BuilderScheduleSelector, type ScheduleSelectionOutput } from "@/compone
 import { BuilderTestRunPanel } from "@/components/agent-persona/builder-test-run-panel";
 import {
   BuilderAgentSpawnPanel,
-  isSpecDraftSpawnTool,
+  isPreviewAgentPlanTool,
 } from "@/components/agent-persona/builder-agent-spawn-panel";
 import { notifyLoopBuilderSessionUpdated } from "@/components/loop-builder-header";
 import type { EmailTemplateId, EmailTemplateProps } from "@/lib/email-artifacts/types";
@@ -80,7 +80,6 @@ type BuilderSessionPayload = {
   session?: {
     id?: string;
     builderState?: string;
-    phase?: string;
     workflowId?: string | null;
     analyzerUsage?: unknown;
     buildContract?: {
@@ -130,7 +129,10 @@ const LoopSuggestionCards = dynamic(
 );
 
 const CLIENT_OUTPUT_AUTOSUBMIT_TOOLS = new Set([
-  "interactivePrompt",
+  "repairPrompt",
+  "intentClarification",
+  "saveApproval",
+  "activationApproval",
   "appSelection",
   "connectorSetup",
   "scheduleSetup",
@@ -152,7 +154,10 @@ const BACKEND_OUTPUT_AUTOCONTINUE_TOOLS = new Set([
 ]);
 
 const CLIENT_GATE_TOOLS = new Set([
-  "interactivePrompt",
+  "repairPrompt",
+  "intentClarification",
+  "saveApproval",
+  "activationApproval",
   "appSelection",
   "connectorSetup",
   "scheduleSetup",
@@ -224,10 +229,10 @@ function builderAutoSendSignature(messages: UIMessage[]): string | null {
 
 function builderStateAgentLabel(state: string | undefined): string {
   if (!state) return "Builder";
-  if (state.startsWith("intent.")) return "Intent Analyst";
-  if (state.startsWith("requirements.")) return "Setup Coordinator";
-  if (state.startsWith("compile.")) return "Flow Architect";
-  if (state.startsWith("verification.")) return "Launch Specialist";
+  if (state.startsWith("intent.")) return "Intent";
+  if (state.startsWith("requirements.")) return "Setup";
+  if (state.startsWith("compile.")) return "Plan";
+  if (state.startsWith("verification.")) return "Verification";
   if (state === "complete") return "Complete";
   if (state === "failed") return "Failed";
   return "Builder";
@@ -429,7 +434,6 @@ export default function NewLoopBuilderPage() {
     events,
     flow: buildBuilderRunFlow({
       trace: session?.builderTrace ?? [],
-      phaseHistory: [],
       commands,
       messages,
     }),
@@ -463,7 +467,7 @@ export default function NewLoopBuilderPage() {
 
           {messages.map((message) => {
             const isStreamingAssistant = busy && message.role === "assistant" && message.id === latestAssistantId;
-            const specDraftSpawnPartIndex = lastSpecDraftSpawnPartIndex(message.parts);
+            const previewAgentPlanSpawnPartIndex = lastPreviewAgentPlanSpawnPartIndex(message.parts);
             return (
               <Message from={message.role} key={message.id}>
                 <MessageContent>
@@ -478,10 +482,10 @@ export default function NewLoopBuilderPage() {
                       if (toolName === "runBuilderTest") {
                         return <BuilderTestRunPanel commands={commands} key={index} part={part} />;
                       }
-                      if (isSpecDraftSpawnTool(toolName, part) && index === specDraftSpawnPartIndex) {
+                      if (isPreviewAgentPlanTool(toolName, part) && index === previewAgentPlanSpawnPartIndex) {
                         return <BuilderAgentSpawnPanel commands={commands} key={index} part={part} />;
                       }
-                      if (isSpecDraftSpawnTool(toolName, part)) return null;
+                      if (isPreviewAgentPlanTool(toolName, part)) return null;
                       if (part.state === "approval-requested" || part.state === "approval-responded" || part.state === "output-denied") {
                         return (
                           <Confirmation approval={part.approval} key={index} state={part.state}>
@@ -704,14 +708,12 @@ function ActiveClientGate({
   if (name === "scheduleSetup" && sessionId) {
     return (
       <BuilderScheduleSelector
-        allowOther={typeof input.allowOther === "boolean" ? input.allowOther : undefined}
         onComplete={(output: ScheduleSelectionOutput) => onToolOutput("scheduleSetup", output)}
         options={Array.isArray(input.options) ? input.options as Parameters<typeof BuilderScheduleSelector>[0]["options"] : undefined}
         question={typeof input.question === "string" ? input.question : "How often should this loop run?"}
         recommendedOptionIds={Array.isArray(input.recommendedOptionIds) ? input.recommendedOptionIds.map(String) : undefined}
         requirementId={typeof input.requirementId === "string" ? input.requirementId : "trigger_schedule"}
         sessionId={sessionId}
-        subtitle={typeof input.subtitle === "string" ? input.subtitle : undefined}
       />
     );
   }
@@ -751,11 +753,21 @@ function ActiveClientGate({
     );
   }
 
-  if (name === "interactivePrompt") {
+  if (name === "intentClarification" || name === "saveApproval" || name === "activationApproval") {
     return (
       <InteractivePromptTool
         disabled={disabled}
-        onSubmit={(answer) => onToolOutput("interactivePrompt", answer)}
+        onSubmit={(answer) => onToolOutput(name, answer)}
+        part={gate}
+      />
+    );
+  }
+
+  if (name === "repairPrompt") {
+    return (
+      <RepairPromptTool
+        disabled={disabled}
+        onSubmit={(output) => onToolOutput("repairPrompt", output)}
         part={gate}
       />
     );
@@ -764,6 +776,64 @@ function ActiveClientGate({
   return (
     <div className="flex min-h-[72px] items-center px-4 py-5">
       <TranscriptThinkingIndicator />
+    </div>
+  );
+}
+
+function RepairPromptTool({
+  part,
+  disabled,
+  onSubmit,
+}: {
+  part: ToolPart;
+  disabled: boolean;
+  onSubmit: (output: { answerText: string }) => void;
+}) {
+  const input = part.input && typeof part.input === "object" && !Array.isArray(part.input)
+    ? part.input as {
+      question?: string;
+      issue?: string;
+      fieldErrors?: string[];
+      attemptedFixes?: string[];
+    }
+    : {};
+  const [answerText, setAnswerText] = useState("");
+
+  return (
+    <div className="space-y-4 p-4">
+      <div className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-900">
+          {input.question ?? "I need one correction before I can continue."}
+        </h3>
+        {typeof input.issue === "string" && input.issue.trim() ? (
+          <p className="text-sm text-slate-600">{input.issue}</p>
+        ) : null}
+        {Array.isArray(input.fieldErrors) && input.fieldErrors.length > 0 ? (
+          <ul className="list-disc space-y-1 pl-5 text-xs text-slate-500">
+            {input.fieldErrors.map((entry) => <li key={entry}>{entry}</li>)}
+          </ul>
+        ) : null}
+        {Array.isArray(input.attemptedFixes) && input.attemptedFixes.length > 0 ? (
+          <p className="text-xs text-slate-500">Tried: {input.attemptedFixes.join(", ")}</p>
+        ) : null}
+      </div>
+      <div className="flex items-end gap-3">
+        <textarea
+          className="min-h-[96px] flex-1 resize-y border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
+          disabled={disabled || part.state !== "input-available"}
+          onChange={(event) => setAnswerText(event.currentTarget.value)}
+          placeholder="Provide the missing or corrected detail..."
+          value={answerText}
+        />
+        <button
+          type="button"
+          className="h-10 shrink-0 bg-[#111827] px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={disabled || part.state !== "input-available" || !answerText.trim()}
+          onClick={() => onSubmit({ answerText: answerText.trim() })}
+        >
+          Continue
+        </button>
+      </div>
     </div>
   );
 }
@@ -859,12 +929,12 @@ function GenericBuilderTool({ part }: { part: ToolPart }) {
   );
 }
 
-function lastSpecDraftSpawnPartIndex(parts: UIMessage["parts"]): number {
+function lastPreviewAgentPlanSpawnPartIndex(parts: UIMessage["parts"]): number {
   let lastIndex = -1;
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i];
     if (!isToolUIPart(part)) continue;
-    if (isSpecDraftSpawnTool(getToolName(part), part)) lastIndex = i;
+    if (isPreviewAgentPlanTool(getToolName(part), part)) lastIndex = i;
   }
   return lastIndex;
 }

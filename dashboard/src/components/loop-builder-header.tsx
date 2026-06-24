@@ -22,9 +22,10 @@ import { cn } from "@/lib/utils";
 import { loopRunHref, triggerSourceLabel, type LoopRunSummary } from "@/lib/loop-run-navigation";
 
 type BuilderSession = {
-  phase?: string;
+  builderState?: string;
   goal?: string;
   workflowId?: string | null;
+  error?: { message: string } | null;
   currentProposal?: { title?: string } | null;
   buildContract?: {
     requirements?: Array<{
@@ -50,12 +51,12 @@ function resolveLoopStatus(
   label: string;
 } {
   if (!session?.workflowId) {
-    if (session?.phase === "failed") return { key: "failed", label: "Save failed" };
+    if (session?.builderState === "failed" || session?.error) return { key: "failed", label: "Save failed" };
     return { key: "draft", label: "Not saved" };
   }
   const status = workflow?.status;
   if (status === "active") return { key: "live", label: "Live" };
-  if (session.phase === "failed") return { key: "failed", label: "Failed" };
+  if (session.builderState === "failed" || session.error) return { key: "failed", label: "Failed" };
   if (status === "verifying") {
     const verificationStatus = workflow?.verificationStatus;
     if (verificationStatus === "failed") return { key: "failed", label: "Verification failed" };

@@ -212,9 +212,6 @@ export function deriveLoopBuildContract(input: {
             },
           }, ["toolkit", "accounts", "actionSlugs"]),
         },
-        agentPlan: { type: "object" },
-        testRun: { type: "object" },
-        warnings: { type: "array", items: { type: "string" } },
       }, ["selections"]),
     }));
   }

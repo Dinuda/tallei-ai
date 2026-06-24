@@ -35,7 +35,7 @@ function contractDisplayDescription(contract: ToolContract): string {
   return toolkit ? `Selected ${toolkit} action ${slug}.` : `Action ${slug}.`;
 }
 
-export function availableToolsForSpecDraft(
+export function availableToolsForCompile(
   buildContract: LoopBuildContract,
   discoveredToolContracts: ToolContract[] = [],
 ): SpecAvailableTool[] {
@@ -145,7 +145,7 @@ export function validateAgentToolAssignments(
   buildContract: LoopBuildContract,
   discoveredToolContracts: ToolContract[] = [],
 ): string[] {
-  const available = availableToolsForSpecDraft(buildContract, discoveredToolContracts);
+  const available = availableToolsForCompile(buildContract, discoveredToolContracts);
   return [
     ...agentToolAssignmentIssues(spec, available),
     ...agentGuardrailToolConflicts(spec),

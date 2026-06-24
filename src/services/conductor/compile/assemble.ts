@@ -4,7 +4,7 @@ import {
 } from "../contracts/spec-contracts.js";
 import type { LoopIntentContext } from "../contracts/intent-context.js";
 import type { LoopBuildContract } from "../domain/build-contract.js";
-import { availableToolsForSpecDraft } from "../services/discovery.service.js";
+import { availableToolsForCompile } from "../services/discovery.service.js";
 import {
   selectedLoopTrigger,
   selectedStableInputs,
@@ -55,7 +55,7 @@ function schedule(buildContract: LoopBuildContract): NoSlopSpec["schedule"] {
 }
 
 function delivery(buildContract: LoopBuildContract, discoveredToolContracts: import("../../tool-spec/types.js").ToolContract[] = []): NoSlopSpec["delivery"] {
-  const tools = availableToolsForSpecDraft(buildContract, discoveredToolContracts);
+  const tools = availableToolsForCompile(buildContract, discoveredToolContracts);
   const sendTool = tools.find((tool) =>
     tool.effect === "write_external" || tool.effect === "irreversible_external",
   );

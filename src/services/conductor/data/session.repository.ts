@@ -7,15 +7,12 @@ import type { ToolContract } from "../../tool-spec/types.js";
 import type { LoopBuildContract } from "../domain/build-contract.js";
 import type { LoopBuilderUsage } from "../utils/progress.js";
 import type { LoopBuilderProposal } from "../services/save-loop.service.js";
-import type { WorkflowBuilderPhase } from "../contracts/builder-types.js";
 import type { BuilderState } from "../contracts/builder-types.js";
 import type { BuilderTraceEntry } from "../contracts/builder-trace.js";
-import type { PendingPhaseRevision, PhaseTransitionEvent } from "../contracts/phase-history.js";
 import type { ConnectorSetupState } from "../contracts/connector-setup.js";
 
 export type SessionRow = {
   id: string;
-  phase: WorkflowBuilderPhase;
   title: string;
   goal: string;
   composio_session_id: string | null;
@@ -32,16 +29,14 @@ export type SessionRow = {
   revision: number;
   analyzer_usage_json: LoopBuilderUsage | null;
   builder_trace_json: BuilderTraceEntry[];
-  phase_history_json: PhaseTransitionEvent[];
-  pending_revision_json: PendingPhaseRevision | null;
   builder_state: BuilderState;
   created_at: Date | string;
   updated_at: Date | string;
 };
 
-export const SESSION_COLUMNS = `id, phase, title, goal, composio_session_id, workflow_run_id, spec_id, workflow_id,
+export const SESSION_COLUMNS = `id, title, goal, composio_session_id, workflow_run_id, spec_id, workflow_id,
   resolved_intent_json, discovered_tool_contracts_json, build_contract_json, connector_setup_json, artifact_bundle_json, current_proposal_json,
-  error_json, revision, analyzer_usage_json, builder_trace_json, phase_history_json, pending_revision_json, builder_state, created_at, updated_at`;
+  error_json, revision, analyzer_usage_json, builder_trace_json, builder_state, created_at, updated_at`;
 
 export async function insertWorkflowBuilderSession(
   auth: AuthContext,
@@ -49,8 +44,8 @@ export async function insertWorkflowBuilderSession(
 ): Promise<SessionRow> {
   const result = await pool.query<SessionRow>(
     `INSERT INTO workflow_builder_sessions
-       (id, tenant_id, user_id, phase, title, goal, composio_session_id)
-     VALUES ($1, $2, $3, 'new', $4, $5, $6)
+       (id, tenant_id, user_id, title, goal, composio_session_id, builder_state)
+     VALUES ($1, $2, $3, $4, $5, $6, 'intent.collecting')
      RETURNING ${SESSION_COLUMNS}`,
     [input.id, auth.tenantId, auth.userId, input.title, input.goal, input.composioSessionId],
   );
@@ -93,21 +88,20 @@ export async function updateWorkflowBuilderSessionRow(
 ): Promise<SessionRow | null> {
   const result = await pool.query<SessionRow>(
     `UPDATE workflow_builder_sessions
-     SET phase = COALESCE($4, phase),
-         title = COALESCE($27, title),
-         goal = COALESCE($28, goal),
-         composio_session_id = CASE WHEN $5::boolean THEN $6 ELSE composio_session_id END,
-         workflow_run_id = CASE WHEN $7::boolean THEN $8 ELSE workflow_run_id END,
-         spec_id = CASE WHEN $9::boolean THEN $10::uuid ELSE spec_id END,
-         workflow_id = CASE WHEN $11::boolean THEN $12::uuid ELSE workflow_id END,
-         resolved_intent_json = CASE WHEN $13::boolean THEN $14::jsonb ELSE resolved_intent_json END,
-         discovered_tool_contracts_json = CASE WHEN $15::boolean THEN $16::jsonb ELSE discovered_tool_contracts_json END,
-         build_contract_json = CASE WHEN $17::boolean THEN $18::jsonb ELSE build_contract_json END,
-         connector_setup_json = CASE WHEN $19::boolean THEN $20::jsonb ELSE connector_setup_json END,
-         artifact_bundle_json = CASE WHEN $21::boolean THEN $22::jsonb ELSE artifact_bundle_json END,
-         current_proposal_json = CASE WHEN $23::boolean THEN $24::jsonb ELSE current_proposal_json END,
-         error_json = CASE WHEN $25::boolean THEN $26::jsonb ELSE error_json END,
-         builder_state = COALESCE($29, builder_state),
+     SET title = COALESCE($26, title),
+         goal = COALESCE($27, goal),
+         composio_session_id = CASE WHEN $4::boolean THEN $5 ELSE composio_session_id END,
+         workflow_run_id = CASE WHEN $6::boolean THEN $7 ELSE workflow_run_id END,
+         spec_id = CASE WHEN $8::boolean THEN $9::uuid ELSE spec_id END,
+         workflow_id = CASE WHEN $10::boolean THEN $11::uuid ELSE workflow_id END,
+         resolved_intent_json = CASE WHEN $12::boolean THEN $13::jsonb ELSE resolved_intent_json END,
+         discovered_tool_contracts_json = CASE WHEN $14::boolean THEN $15::jsonb ELSE discovered_tool_contracts_json END,
+         build_contract_json = CASE WHEN $16::boolean THEN $17::jsonb ELSE build_contract_json END,
+         connector_setup_json = CASE WHEN $18::boolean THEN $19::jsonb ELSE connector_setup_json END,
+         artifact_bundle_json = CASE WHEN $20::boolean THEN $21::jsonb ELSE artifact_bundle_json END,
+         current_proposal_json = CASE WHEN $22::boolean THEN $23::jsonb ELSE current_proposal_json END,
+         error_json = CASE WHEN $24::boolean THEN $25::jsonb ELSE error_json END,
+         builder_state = COALESCE($28, builder_state),
          revision = revision + 1,
          updated_at = NOW()
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3
@@ -122,17 +116,15 @@ export async function updateWorkflowBuilderSessionStateRow(
   sessionId: string,
   expectedRevision: number,
   builderState: BuilderState,
-  phase?: WorkflowBuilderPhase,
 ): Promise<SessionRow | null> {
   const result = await pool.query<SessionRow>(
     `UPDATE workflow_builder_sessions
      SET builder_state = $5,
-         phase = COALESCE($6, phase),
          revision = revision + 1,
          updated_at = NOW()
      WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND revision = $4
      RETURNING ${SESSION_COLUMNS}`,
-    [sessionId, auth.tenantId, auth.userId, expectedRevision, builderState, phase ?? null],
+    [sessionId, auth.tenantId, auth.userId, expectedRevision, builderState],
   );
   return result.rows[0] ?? null;
 }
@@ -162,60 +154,6 @@ export async function appendWorkflowBuilderTraceRows(
     [sessionId, auth.tenantId, auth.userId, JSON.stringify(entries)],
   );
   return result.rows[0]?.builder_trace_json ?? [];
-}
-
-export async function appendPhaseHistoryRows(
-  auth: AuthContext,
-  sessionId: string,
-  entries: PhaseTransitionEvent[],
-): Promise<PhaseTransitionEvent[]> {
-  if (entries.length === 0) return [];
-  const result = await pool.query<{ phase_history_json: PhaseTransitionEvent[] }>(
-    `UPDATE workflow_builder_sessions
-     SET phase_history_json = (
-       SELECT COALESCE(jsonb_agg(value), '[]'::jsonb)
-       FROM (
-         SELECT value
-         FROM jsonb_array_elements(
-           COALESCE(phase_history_json, '[]'::jsonb) || $4::jsonb
-         ) WITH ORDINALITY AS t(value, ord)
-         ORDER BY ord
-         LIMIT 100
-       ) trimmed
-     ),
-     updated_at = NOW()
-     WHERE id = $1 AND tenant_id = $2 AND user_id = $3
-     RETURNING phase_history_json`,
-    [sessionId, auth.tenantId, auth.userId, JSON.stringify(entries)],
-  );
-  return result.rows[0]?.phase_history_json ?? [];
-}
-
-export async function setPendingRevisionRow(
-  auth: AuthContext,
-  sessionId: string,
-  revision: PendingPhaseRevision,
-): Promise<PendingPhaseRevision | null> {
-  const result = await pool.query<{ pending_revision_json: PendingPhaseRevision | null }>(
-    `UPDATE workflow_builder_sessions
-     SET pending_revision_json = $4::jsonb, updated_at = NOW()
-     WHERE id = $1 AND tenant_id = $2 AND user_id = $3
-     RETURNING pending_revision_json`,
-    [sessionId, auth.tenantId, auth.userId, JSON.stringify(revision)],
-  );
-  return result.rows[0]?.pending_revision_json ?? null;
-}
-
-export async function clearPendingRevisionRow(
-  auth: AuthContext,
-  sessionId: string,
-): Promise<void> {
-  await pool.query(
-    `UPDATE workflow_builder_sessions
-     SET pending_revision_json = NULL, updated_at = NOW()
-     WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
-    [sessionId, auth.tenantId, auth.userId],
-  );
 }
 
 export async function updateWorkflowBuilderAnalyzerUsageRow(

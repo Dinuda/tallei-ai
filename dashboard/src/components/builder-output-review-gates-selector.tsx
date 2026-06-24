@@ -40,21 +40,17 @@ function modeLabel(mode: OutputReviewGatesMode): string {
 }
 
 export function BuilderOutputReviewGatesSelector({
-  allowOther = false,
   completedOutput,
   onComplete,
   question = "Should this loop pause for operator review between agents?",
   recommendedOptionIds = ["review_drafts"],
   requirementId,
-  subtitle,
 }: {
-  allowOther?: boolean;
   completedOutput?: OutputReviewGatesSelectionOutput | null;
   onComplete?: (output: OutputReviewGatesSelectionOutput) => void;
   question?: string;
   recommendedOptionIds?: string[];
   requirementId: string;
-  subtitle?: string;
 }) {
   const options: InteractivePromptOption[] = OPTIONS.map((option) => ({
     id: option.id,
@@ -85,13 +81,8 @@ export function BuilderOutputReviewGatesSelector({
 
   return (
     <div className="w-full overflow-hidden border border-[#d1d5db] bg-white">
-      {subtitle && (
-        <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-2 text-[13px] text-[#6b7280]">
-          {subtitle}
-        </div>
-      )}
       <InteractivePromptMenu
-        allowOther={allowOther}
+        allowOther={false}
         onSubmit={(answer) => {
           const selectedId = (answer.selectedOptionIds[0] ?? "review_drafts") as OutputReviewGatesMode;
           const mode = OPTIONS.some((option) => option.id === selectedId) ? selectedId : "review_drafts";

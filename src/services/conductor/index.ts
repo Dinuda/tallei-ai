@@ -17,14 +17,8 @@ export {
   listWorkflowBuilderMessages,
   sanitizeLoopBuilderChatMessages,
   normalizeWorkflowBuilderMessages,
-  recordWorkflowBuilderAnalyzerPhaseTrace,
   recordWorkflowBuilderChatTurnTrace,
   appendWorkflowBuilderTrace,
-  appendWorkflowBuilderPhaseHistory,
-  setPendingPhaseRevision,
-  clearPendingPhaseRevision,
-  phaseAfterRequirementsResolved,
-  type WorkflowBuilderPhase,
   type WorkflowBuilderSession,
 } from "./services/session.service.js";
 export {
@@ -50,14 +44,8 @@ export {
   type AgentAvatarView,
 } from "./services/avatar.service.js";
 export {
-  commitBuilderConnectorSetup,
-  getBuilderConnectorSetup,
   refreshBuilderConnectorAvailability,
   resolveBuilderConnectorRequirement,
-  startBuilderConnectorSetup,
-  testBuilderConnectorSetup,
-  updateBuilderConnectorSetupGoals,
-  updateBuilderConnectorSetupGraph,
   type BuilderConnectorChecklist,
 } from "./services/connector.service.js";
 export { saveBuilderArtifactBundle } from "./services/artifacts.service.js";

@@ -106,10 +106,9 @@ test("spec run gate opens from pending interaction and surfaces produced artifac
 });
 
 test("builder header surfaces run navigation and status outside chat", async () => {
-  const [builderPage, header, verificationTools] = await Promise.all([
+  const [builderPage, header] = await Promise.all([
     readFile(new URL("../../../dashboard/app/dashboard/loops/new/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../../../dashboard/src/components/loop-builder-header.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../../../src/services/conductor/builder/phases/verification-tools.ts", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(builderPage, /LoopActivationCard/);
   assert.match(header, /Show runs/);
@@ -117,7 +116,6 @@ test("builder header surfaces run navigation and status outside chat", async () 
   assert.doesNotMatch(header, /Listening for/);
   assert.match(header, /rounded-none/);
   assert.match(header, /loopRunHref/);
-  assert.match(verificationTools, /header status bar for runs and agent approvals/);
 });
 
 test("loop detail and live loops surface trigger run inbox copy", async () => {
