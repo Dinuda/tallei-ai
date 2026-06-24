@@ -205,10 +205,6 @@ async function restorePoolSessionTimeouts(client: DbClient): Promise<void> {
 const REMOVED_AUTOMATION_TABLES = [
   "workspace_knowledge_base_entries",
   "workspace_knowledge_bases",
-  "workspace_memory_records",
-  "workspace_memberships",
-  "user_workspace_preferences",
-  "loop_workspaces",
   "loop_engine_events",
   "loop_engine_artifacts",
   "loop_engine_interactions",
@@ -235,7 +231,6 @@ const REMOVED_AUTOMATION_TABLES = [
   "workflow_builder_messages",
   "workflow_builder_sessions",
   "workflow_approval_tokens",
-  "loop_specs",
   "workflows",
   "workflow_suggestions",
   "episode_turns",
@@ -248,7 +243,6 @@ const REMOVED_AUTOMATION_TABLES = [
   "connector_auth_sessions",
   "connector_accounts",
   "connector_adapters",
-  "integration_asset_acknowledgements",
   "ai_activity_events",
   "daily_intelligence_runs",
   "approvals",
@@ -979,6 +973,19 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS integration_asset_acknowledgements (
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        asset_key TEXT NOT NULL,
+        acknowledged_version TEXT NOT NULL,
+        acknowledged_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, asset_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_integration_asset_acknowledgements_user
+        ON integration_asset_acknowledgements(user_id, acknowledged_at DESC);
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS claude_onboarding_sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
@@ -1455,6 +1462,9 @@ export async function initDb() {
       ALTER TABLE api_keys
         DROP COLUMN IF EXISTS pepper_version;
     `);
+
+    const { ensureLoopEngineSchema } = await import("./loop-engine-schema.js");
+    await ensureLoopEngineSchema(client);
 
     await applySupabaseRlsPolicies(client);
 

@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
 import { pool } from "../../infrastructure/db/index.js";
-import { requireLoopAdmin } from "../conductor/services/loop-workflow.service.js";
+import { requireLoopAdmin } from "./access.js";
 import type { WorkspaceKind, WorkspaceView } from "./types.js";
 
 function slugifyName(name: string): string {
@@ -95,7 +95,9 @@ export async function getDefaultWorkspaceId(auth: AuthContext): Promise<string> 
      LIMIT 1`,
     [auth.tenantId, auth.userId]
   );
-  if (!fallback.rows[0]?.id) throw new Error("No workspace available for user");
+  if (!fallback.rows[0]?.id) {
+    return ensureDefaultWorkspace(auth);
+  }
   return fallback.rows[0].id;
 }
 
@@ -284,27 +286,45 @@ export async function deleteWorkspace(auth: AuthContext, workspaceId: string): P
 }
 
 export async function assignLoopToWorkspace(auth: AuthContext, input: {
-  workflowId: string;
+  loopId: string;
   workspaceId: string | null;
-}): Promise<{ workflowId: string; workspaceId: string | null }> {
+}): Promise<{ loopId: string; workspaceId: string | null }> {
   await requireLoopAdmin(auth);
   const targetWorkspaceId = input.workspaceId ?? await resolveWorkspaceId(auth);
   if (input.workspaceId) await assertWorkspaceAccess(auth, input.workspaceId);
 
-  const { LOOP_DEFINITION_VERSION } = await import("../conductor/workflow/types.js");
   const result = await pool.query<{ id: string }>(
-    `UPDATE workflows
+    `UPDATE loops
      SET workspace_id = $4,
          updated_at = NOW()
      WHERE id = $1
        AND tenant_id = $2
        AND user_id = $3
-       AND definition_version = $5
      RETURNING id`,
-    [input.workflowId, auth.tenantId, auth.userId, targetWorkspaceId, LOOP_DEFINITION_VERSION]
+    [input.loopId, auth.tenantId, auth.userId, targetWorkspaceId]
   );
-  if (!result.rows[0]) throw new Error("Loop workflow not found");
-  return { workflowId: input.workflowId, workspaceId: targetWorkspaceId };
+  if (!result.rows[0]) throw new Error("Loop not found");
+  return { loopId: input.loopId, workspaceId: targetWorkspaceId };
+}
+
+export async function ensureDefaultWorkspace(auth: AuthContext): Promise<string> {
+  try {
+    return await getDefaultWorkspaceId(auth);
+  } catch {
+    const workspaceId = randomUUID();
+    await pool.query(
+      `INSERT INTO loop_workspaces
+         (id, tenant_id, user_id, name, slug, kind, is_default, color)
+       VALUES ($1, $2, $3, 'Personal', 'personal', 'personal', TRUE, '#7eb71b')`,
+      [workspaceId, auth.tenantId, auth.userId]
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, tenant_id, user_id, role)
+       VALUES ($1, $2, $3, 'owner')`,
+      [workspaceId, auth.tenantId, auth.userId]
+    );
+    return workspaceId;
+  }
 }
 
 export type { WorkspaceKind, WorkspaceView };

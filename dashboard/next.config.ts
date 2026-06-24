@@ -76,7 +76,7 @@ const nextConfig: NextConfig = {
           // /api/keys, /api/mcp-events).
           // Proxy all other API routes to the backend.
           source:
-            "/api/:path((?!(?:collab|tasks|developer|documents|integrations|integration-updates|orchestrate|workflows|conductor|connectors|channels|billing|memories|keys|mcp-events|workspaces|workspace-memory|knowledge-bases|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
+            "/api/:path((?!(?:collab|tasks|developer|documents|integrations|integration-updates|orchestrate|workflows|conductor|connectors|channels|billing|memories|keys|mcp-events|workspaces|workspace-memory|knowledge-bases|loops|approvals|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
           destination: `${BACKEND}/api/:path`,
         },
         {

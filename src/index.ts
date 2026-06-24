@@ -1,6 +1,12 @@
 import "./patch.js";
 
+import { buildContainer } from "./bootstrap/composition-root.js";
 
+const appServices = buildContainer();
+
+async function start(): Promise<void> {
+  await appServices.start();
+}
 
 let stopping = false;
 
@@ -24,3 +30,7 @@ process.once("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
+void start().catch((error) => {
+  console.error("Failed to start Tallei:", error);
+  process.exit(1);
+});

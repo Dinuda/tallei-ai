@@ -52,7 +52,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const qdrantTimeoutMsOverride = readOptionalIntEnv(e, "TALLEI_QDRANT__TIMEOUT_MS");
   const qdrantTimeoutSecondsLegacy = readOptionalIntEnv(e, "QDRANT_TIMEOUT_SECONDS"); // legacy only; no TALLEI_ form
   const defaultOllamaModel = readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen3:14b");
-  const defaultOpenCodeModel = readStringEnv(e, "TALLEI_LLM__OPENCODE_MODEL", "deepseek-v4-flash");
+  const defaultOpenCodeModel = readStringEnv(e, "TALLEI_LLM__OPENCODE_MODEL", "big-pickle");
   const llmProvider = readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google" | "opencode";
 
   function readResolvedChatModel(key: string, productionDefault: string): string {
@@ -91,10 +91,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ),
     publicBaseUrl,
     dashboardBaseUrl: normalizeBaseUrl(
-      e.TALLEI_HTTP__DASHBOARD_BASE_URL || e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl
+      e.TALLEI_HTTP__DASHBOARD_BASE_URL ||
+        e.TALLEI_HTTP__FRONTEND_URL ||
+        "http://localhost:3001"
     ),
     frontendUrl: normalizeBaseUrl(
-      e.TALLEI_HTTP__FRONTEND_URL || e.TALLEI_HTTP__PUBLIC_BASE_URL || "http://localhost:3001"
+      e.TALLEI_HTTP__FRONTEND_URL || "http://localhost:3001"
     ),
     internalApiSecret: requireEnv(e, "TALLEI_HTTP__INTERNAL_API_SECRET"),
     mcpPublicUrl: e.TALLEI_HTTP__MCP_URL || "",
@@ -252,6 +254,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ),
     opencodeModel: defaultOpenCodeModel,
     opencodeApiKey: readStringEnv(e, "TALLEI_LLM__OPENCODE_API_KEY") || readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
+    loopBuilderModel: readResolvedChatModel("TALLEI_LOOP_BUILDER__OPENAI_MODEL", defaultOpenCodeModel),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
     kmsKeyId: readStringEnv(e, "TALLEI_AUTH__KMS_KEY_ID", "local-dev"),
     uploadthingToken: readStringEnv(e, "TALLEI_STORAGE__UPLOADTHING_TOKEN"),

@@ -752,7 +752,7 @@ router.post("/cleanup/loop-miner/run", requireScopes(["memory:write"]), async (r
     const now = Date.now();
     const activeRun = existingRuns.find((run) => {
       if (run.status !== "running") return false;
-      const ageMs = now - Date.parse(run.createdAt);
+      const ageMs = now - Date.parse(run.createdAt ?? "");
       return Number.isFinite(ageMs) && ageMs >= 0 && ageMs < LOOP_MINER_STALE_RUNNING_MAX_AGE_MS;
     }) ?? null;
     if (activeRun) {

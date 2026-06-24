@@ -100,8 +100,12 @@ export async function listSessionToolkits(
   session: ComposioAgentSession,
   options?: { limit?: number; search?: string; isConnected?: boolean },
 ): Promise<ComposioToolkitView[]> {
+  const limit =
+    options?.limit !== undefined
+      ? Math.max(1, Math.min(options.limit, 50))
+      : undefined;
   const response = await session.client.toolkits({
-    ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+    ...(limit !== undefined ? { limit } : {}),
     ...(options?.search ? { search: options.search } : {}),
     ...(options?.isConnected !== undefined ? { isConnected: options.isConnected } : {}),
   });

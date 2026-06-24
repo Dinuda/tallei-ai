@@ -13,14 +13,11 @@ import chatgptRouter from "./routes/chatgpt.js";
 import integrationsRouter from "./routes/integrations.js";
 import integrationUpdatesRouter from "./routes/integrationUpdates.js";
 import billingRouter from "./routes/billing.js";
-import developerIntegrationsRouter from "./routes/developerIntegrations.js";
-import developerTemporalRouter from "./routes/developerTemporal.js";
-import agentToolsRouter from "./routes/agentTools.js";
-import connectorsRouter from "./routes/connectors.js";
-import channelsRouter from "./routes/channels.js";
-import conductorRouter from "./routes/conductor.js";
-import workflowsRouter from "./routes/workflows.js";
 import workspacesRouter from "./routes/workspaces.js";
+import loopsRouter from "./routes/loops.js";
+import approvalsRouter from "./routes/approvals.js";
+import connectorsRouter from "./routes/connectors.js";
+import composioWebhooksRouter, { handleComposioWebhook } from "./routes/webhooks/composio.js";
 import knowledgeBasesRouter from "./routes/knowledge-bases.js";
 import workspaceMemoryRouter from "./routes/workspace-memory.js";
 import { createMcpRouter } from "../mcp/server.js";
@@ -114,21 +111,21 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/integrations", integrationsRouter);
   app.use("/api/integration-updates", integrationUpdatesRouter);
   app.use("/api/connectors", deps.memoryRateLimit, connectorsRouter);
-  app.use("/api/channels", deps.memoryRateLimit, channelsRouter);
-  app.use("/api/conductor", deps.memoryRateLimit, conductorRouter);
-  app.use("/api/workflows", deps.memoryRateLimit, workflowsRouter);
+  app.post("/api/connectors/composio/webhook", (req, res) => {
+    void handleComposioWebhook(req, res);
+  });
   app.use("/api/workspaces", deps.memoryRateLimit, workspacesRouter);
+  app.use("/api/loops", deps.memoryRateLimit, loopsRouter);
+  app.use("/api/approvals", deps.memoryRateLimit, approvalsRouter);
+  app.use("/api/webhooks", composioWebhooksRouter);
   app.use("/api/knowledge-bases", deps.memoryRateLimit, knowledgeBasesRouter);
   app.use("/api/workspace-memory", deps.memoryRateLimit, workspaceMemoryRouter);
   // Browser automation is intentionally disabled for production rollout.
   // app.use("/api/claude-onboarding", claudeOnboardingRouter);
   // app.use("/api/browser-use", browserUseRouter);
   app.use("/api/billing", billingRouter);
-app.use("/api/developer", developerIntegrationsRouter);
-  app.use("/api/developer/temporal", developerTemporalRouter);
   app.use("/api/mcp/events", mcpEventsRouter);
   app.use("/api/mcp", mcpCodeRouter);
-  app.use("/internal/agent-tools", agentToolsRouter);
 
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(deps.mcpPublicUrl);
   app.use("/mcp", deps.mcpRateLimit, createMcpRouter(deps.oauthProvider, resourceMetadataUrl));
